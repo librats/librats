@@ -21,6 +21,8 @@ bool RatsClient::start() {
         std::cerr << "RatsClient is already running" << std::endl;
         return false;
     }
+
+    init_networking();
     
     // Create server socket
     server_socket_ = create_tcp_server(listen_port_);
@@ -72,6 +74,8 @@ void RatsClient::stop() {
         }
     }
     client_threads_.clear();
+
+    cleanup_networking();
     
     std::cout << "RatsClient stopped" << std::endl;
 }
