@@ -228,7 +228,6 @@ std::vector<uint8_t> receive_udp_data(udp_socket_t socket, size_t buffer_size, U
         int error = WSAGetLastError();
         if (error == WSAEWOULDBLOCK) {
             // No data available on non-blocking socket - this is normal
-            LOG_UDP_DEBUG("No data available on non-blocking socket");
             return std::vector<uint8_t>();
         } else {
             LOG_UDP_ERROR("Failed to receive UDP data: " << error);
@@ -238,7 +237,6 @@ std::vector<uint8_t> receive_udp_data(udp_socket_t socket, size_t buffer_size, U
         int error = errno;
         if (error == EAGAIN || error == EWOULDBLOCK) {
             // No data available on non-blocking socket - this is normal
-            LOG_UDP_DEBUG("No data available on non-blocking socket");
             return std::vector<uint8_t>();
         } else {
             LOG_UDP_ERROR("Failed to receive UDP data: " << strerror(error));
