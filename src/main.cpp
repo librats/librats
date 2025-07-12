@@ -83,15 +83,10 @@ int main(int argc, char* argv[]) {
             std::lock_guard<std::mutex> lock(peers_list_mutex);
             connected_peers.push_back({socket, peer_hash_id});
         }
-        
-        std::cout << "Type your command: ";
-        std::flush(std::cout);
     });
     
     client.set_data_callback([](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
         LOG_MAIN_INFO("Message from peer " << peer_hash_id << ": " << data);
-        std::cout << "Type your command: ";
-        std::flush(std::cout);
     });
     
     client.set_disconnect_callback([&](socket_t socket, const std::string& peer_hash_id) {
@@ -108,9 +103,6 @@ int main(int argc, char* argv[]) {
                 connected_peers.end()
             );
         }
-        
-        std::cout << "Type your command: ";
-        std::flush(std::cout);
     });
     
     // Start the client
@@ -147,12 +139,18 @@ int main(int argc, char* argv[]) {
     }
     print_help();
     
+    // Add initial prompt
+    std::cout << "\nType your command: ";
+    std::cout.flush();
+    
     // Main command loop
     std::string input;
     while (client.is_running()) {
         std::getline(std::cin, input);
         
         if (input.empty()) {
+            std::cout << "Type your command: ";
+            std::cout.flush();
             continue;
         }
         
@@ -169,7 +167,6 @@ int main(int argc, char* argv[]) {
         }
         else if (command == "peers") {
             LOG_MAIN_INFO("Connected peers: " << client.get_peer_count());
-            std::cout << "Type your command: ";
         }
         else if (command == "list") {
             std::lock_guard<std::mutex> lock(peers_list_mutex);
@@ -181,7 +178,6 @@ int main(int argc, char* argv[]) {
                     std::cout << "  Socket: " << peer.first << " | Hash ID: " << peer.second << std::endl;
                 }
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "broadcast") {
             std::string message;
@@ -193,7 +189,6 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "Usage: broadcast <message>" << std::endl;
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "send") {
             std::string hash_id, message;
@@ -209,7 +204,6 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "Usage: send <hash_id> <message>" << std::endl;
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "connect") {
             std::string host;
@@ -225,7 +219,6 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "Usage: connect <host> <port>" << std::endl;
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "connect6") {
             std::string host;
@@ -252,7 +245,6 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "Usage: connect6 <host> <port>" << std::endl;
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "connect_dual") {
             std::string host;
@@ -279,7 +271,6 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "Usage: connect_dual <host> <port>" << std::endl;
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "dht_start") {
             if (client.is_dht_running()) {
@@ -292,7 +283,6 @@ int main(int argc, char* argv[]) {
                     LOG_MAIN_ERROR("Failed to start DHT peer discovery");
                 }
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "dht_stop") {
             if (!client.is_dht_running()) {
@@ -302,7 +292,6 @@ int main(int argc, char* argv[]) {
                 client.stop_dht_discovery();
                 LOG_MAIN_INFO("DHT peer discovery stopped");
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "dht_status") {
             if (client.is_dht_running()) {
@@ -311,7 +300,6 @@ int main(int argc, char* argv[]) {
             } else {
                 LOG_MAIN_INFO("DHT Status: STOPPED");
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "dht_find") {
             std::string content_hash;
@@ -337,7 +325,6 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "Usage: dht_find <content_hash>" << std::endl;
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "dht_announce") {
             std::string content_hash;
@@ -358,7 +345,6 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "Usage: dht_announce <content_hash> [port]" << std::endl;
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "netutils") {
             std::string hostname;
@@ -368,7 +354,6 @@ int main(int argc, char* argv[]) {
             } else {
                 librats::network_utils::demo_network_utils(hostname);
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "netutils6") {
             std::string hostname;
@@ -407,7 +392,6 @@ int main(int argc, char* argv[]) {
             }
             
             LOG_MAIN_INFO("=== IPv6 Test Complete ===");
-            std::cout << "Type your command: ";
         }
         else if (command == "test_ipv6") {
             std::string host;
@@ -461,7 +445,6 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "Usage: test_ipv6 <host> <port>" << std::endl;
             }
-            std::cout << "Type your command: ";
         }
         else if (command == "dht_test") {
             std::string target_ip;
@@ -490,13 +473,15 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cout << "Usage: dht_test <ip> <port>" << std::endl;
             }
-            std::cout << "Type your command: ";
         }
         else {
             std::cout << "Unknown command: " << command << std::endl;
             std::cout << "Type 'help' for available commands." << std::endl;
-            std::cout << "Type your command: ";
         }
+        
+        // Always show prompt after each command
+        std::cout << "Type your command: ";
+        std::cout.flush();
     }
     
     // Clean shutdown
