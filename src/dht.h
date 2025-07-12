@@ -188,6 +188,7 @@ private:
     std::string get_peer_key(const UdpPeer& peer);
     PeerProtocol get_peer_protocol(const UdpPeer& peer);
     void set_peer_protocol(const UdpPeer& peer, PeerProtocol protocol);
+    bool is_known_bittorrent_bootstrap_node(const UdpPeer& peer);
     
     // Rats DHT protocol handlers
     void handle_ping(const DhtMessage& message, const UdpPeer& sender);

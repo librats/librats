@@ -100,6 +100,14 @@ bool DhtClient::bootstrap(const std::vector<UdpPeer>& bootstrap_nodes) {
         LOG_DHT_DEBUG("  - " << peer.ip << ":" << peer.port);
     }
     
+    // Pre-set protocol for known BitTorrent bootstrap nodes
+    for (const auto& peer : bootstrap_nodes) {
+        if (is_known_bittorrent_bootstrap_node(peer)) {
+            LOG_DHT_DEBUG("Setting BitTorrent protocol for known bootstrap node: " << peer.ip << ":" << peer.port);
+            set_peer_protocol(peer, PeerProtocol::BitTorrent);
+        }
+    }
+    
     // Send ping to bootstrap nodes
     LOG_DHT_DEBUG("Sending PING to all bootstrap nodes");
     for (const auto& peer : bootstrap_nodes) {
@@ -752,6 +760,33 @@ void DhtClient::set_peer_protocol(const UdpPeer& peer, PeerProtocol protocol) {
     std::lock_guard<std::mutex> lock(peer_protocols_mutex_);
     std::string key = get_peer_key(peer);
     peer_protocols_[key] = protocol;
+}
+
+bool DhtClient::is_known_bittorrent_bootstrap_node(const UdpPeer& peer) {
+    // Check if this is a known BitTorrent DHT bootstrap node
+    // These nodes are expected to use KRPC protocol only
+    static const std::vector<std::string> known_bittorrent_hosts = {
+        "router.bittorrent.com",
+        "dht.transmissionbt.com", 
+        "router.utorrent.com",
+        "dht.aelitis.com",
+        "dht.libtorrent.org",
+        "bootstrap.ring.cx"
+    };
+    
+    // Check if the peer is on a known BitTorrent DHT port
+    if (peer.port != 6881) {
+        return false;
+    }
+    
+    // Check if the hostname/IP matches known BitTorrent bootstrap nodes
+    for (const auto& host : known_bittorrent_hosts) {
+        if (peer.ip == host) {
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 // KRPC message handling
