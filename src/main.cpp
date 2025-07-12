@@ -38,6 +38,7 @@ void print_help() {
     std::cout << "  dht_status        - Show DHT status" << std::endl;
     std::cout << "  dht_find <hash>   - Find peers for content hash" << std::endl;
     std::cout << "  dht_announce <hash> [port] - Announce as peer for content hash" << std::endl;
+    std::cout << "  dht_discovery_status - Show automatic rats peer discovery status" << std::endl;
     std::cout << "  netutils [hostname] - Test network utilities" << std::endl;
     std::cout << "  netutils6 [hostname] - Test IPv6 network utilities" << std::endl;
     std::cout << "  dht_test <ip> <port> - Test DHT protocol with specific peer" << std::endl;
@@ -134,6 +135,10 @@ int main(int argc, char* argv[]) {
     LOG_MAIN_INFO("RatsClient is running. Current peers: " << client.get_peer_count());
     if (client.is_dht_running()) {
         LOG_MAIN_INFO("DHT peer discovery is active. Routing table size: " << client.get_dht_routing_table_size() << " nodes");
+        if (client.is_automatic_discovery_running()) {
+            LOG_MAIN_INFO("Automatic rats peer discovery is active using hash: " << librats::RatsClient::get_rats_peer_discovery_hash());
+            LOG_MAIN_INFO("This will automatically find and connect to other rats peers!");
+        }
     } else {
         LOG_MAIN_INFO("DHT peer discovery is inactive. Use 'dht_start' to enable it.");
     }
@@ -344,6 +349,24 @@ int main(int argc, char* argv[]) {
                 }
             } else {
                 std::cout << "Usage: dht_announce <content_hash> [port]" << std::endl;
+            }
+        }
+        else if (command == "dht_discovery_status") {
+            LOG_MAIN_INFO("=== Automatic Rats Peer Discovery Status ===");
+            if (client.is_automatic_discovery_running()) {
+                LOG_MAIN_INFO("Automatic discovery: RUNNING");
+                LOG_MAIN_INFO("Discovery hash: " << librats::RatsClient::get_rats_peer_discovery_hash());
+                LOG_MAIN_INFO("Discovery works by:");
+                LOG_MAIN_INFO("  - Announcing our presence for the rats discovery hash every 10 minutes");
+                LOG_MAIN_INFO("  - Searching for other rats peers every 5 minutes");
+                LOG_MAIN_INFO("  - Automatically connecting to discovered rats peers");
+            } else {
+                LOG_MAIN_INFO("Automatic discovery: STOPPED");
+            }
+            if (client.is_dht_running()) {
+                LOG_MAIN_INFO("DHT Status: RUNNING | Routing table size: " << client.get_dht_routing_table_size() << " nodes");
+            } else {
+                LOG_MAIN_INFO("DHT Status: STOPPED");
             }
         }
         else if (command == "netutils") {

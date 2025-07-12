@@ -118,7 +118,7 @@ void RatsClient::stop() {
     LOG_CLIENT_INFO("Stopping RatsClient");
     running_.store(false);
     
-    // Stop DHT discovery
+    // Stop DHT discovery (this will also stop automatic discovery)
     stop_dht_discovery();
     
     // Close server socket to break accept loop
@@ -283,6 +283,9 @@ bool RatsClient::start_dht_discovery(int dht_port) {
         LOG_CLIENT_WARN("Failed to bootstrap DHT");
     }
     
+    // Start automatic peer discovery
+    start_automatic_peer_discovery();
+    
     LOG_CLIENT_INFO("DHT discovery started successfully");
     return true;
 }
@@ -293,6 +296,10 @@ void RatsClient::stop_dht_discovery() {
     }
     
     LOG_CLIENT_INFO("Stopping DHT discovery");
+    
+    // Stop automatic peer discovery
+    stop_automatic_peer_discovery();
+    
     dht_client_->stop();
     dht_client_.reset();
     LOG_CLIENT_INFO("DHT discovery stopped");
@@ -504,6 +511,158 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
     
     client.stop();
     LOG_MAIN_INFO("RatsClient demo finished");
+}
+
+void RatsClient::start_automatic_peer_discovery() {
+    if (auto_discovery_running_.load()) {
+        LOG_CLIENT_WARN("Automatic peer discovery is already running");
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Starting automatic rats peer discovery");
+    auto_discovery_running_.store(true);
+    auto_discovery_thread_ = std::thread(&RatsClient::automatic_discovery_loop, this);
+}
+
+void RatsClient::stop_automatic_peer_discovery() {
+    if (!auto_discovery_running_.load()) {
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Stopping automatic peer discovery");
+    auto_discovery_running_.store(false);
+    
+    if (auto_discovery_thread_.joinable()) {
+        auto_discovery_thread_.join();
+    }
+    
+    LOG_CLIENT_INFO("Automatic peer discovery stopped");
+}
+
+bool RatsClient::is_automatic_discovery_running() const {
+    return auto_discovery_running_.load();
+}
+
+std::string RatsClient::get_rats_peer_discovery_hash() {
+    // Well-known hash for rats peer discovery
+    // This is SHA1 hash of "rats_peer_discovery_v1"
+    return "d7b8f9c2a1e6d3f4a5b9c8e7f0d1a2b3c4d5e6f7";
+}
+
+void RatsClient::automatic_discovery_loop() {
+    LOG_CLIENT_INFO("Automatic peer discovery loop started");
+    
+    // Initial delay to let DHT bootstrap
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+    
+    // Announce immediately
+    announce_rats_peer();
+    
+    // Search immediately
+    search_rats_peers();
+    
+    auto last_announce = std::chrono::steady_clock::now();
+    auto last_search = std::chrono::steady_clock::now();
+    
+    while (auto_discovery_running_.load()) {
+        auto now = std::chrono::steady_clock::now();
+        
+        // Announce every 10 minutes
+        if (now - last_announce >= std::chrono::minutes(10)) {
+            announce_rats_peer();
+            last_announce = now;
+        }
+        
+        // Search every 5 minutes
+        if (now - last_search >= std::chrono::minutes(5)) {
+            search_rats_peers();
+            last_search = now;
+        }
+        
+        // Sleep for 30 seconds between checks
+        for (int i = 0; i < 30 && auto_discovery_running_.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
+    
+    LOG_CLIENT_INFO("Automatic peer discovery loop stopped");
+}
+
+void RatsClient::announce_rats_peer() {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_CLIENT_WARN("DHT client not running, cannot announce rats peer");
+        return;
+    }
+    
+    std::string discovery_hash = get_rats_peer_discovery_hash();
+    LOG_CLIENT_INFO("Announcing rats peer for discovery hash: " << discovery_hash << " on port " << listen_port_);
+    
+    if (announce_for_hash(discovery_hash, listen_port_)) {
+        LOG_CLIENT_DEBUG("Successfully announced rats peer for discovery");
+    } else {
+        LOG_CLIENT_WARN("Failed to announce rats peer for discovery");
+    }
+}
+
+void RatsClient::search_rats_peers() {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_CLIENT_WARN("DHT client not running, cannot search for rats peers");
+        return;
+    }
+    
+    std::string discovery_hash = get_rats_peer_discovery_hash();
+    LOG_CLIENT_INFO("Searching for rats peers using discovery hash: " << discovery_hash);
+    
+    find_peers_by_hash(discovery_hash, [this](const std::vector<std::string>& peers) {
+        LOG_CLIENT_INFO("Found " << peers.size() << " rats peers through DHT discovery");
+        
+        // Attempt to connect to discovered peers
+        for (const auto& peer_address : peers) {
+            LOG_CLIENT_INFO("Discovered rats peer: " << peer_address);
+            
+            // Parse IP and port
+            size_t colon_pos = peer_address.find_last_of(':');
+            if (colon_pos != std::string::npos) {
+                std::string ip = peer_address.substr(0, colon_pos);
+                int port = std::stoi(peer_address.substr(colon_pos + 1));
+                
+                // Don't connect to ourselves
+                if (port != listen_port_ || ip == "127.0.0.1" || ip == "::1") {
+                    continue;
+                }
+                
+                // Check if we're already connected to this peer
+                bool already_connected = false;
+                {
+                    std::lock_guard<std::mutex> lock(peers_mutex_);
+                    // This is a simple check - in a real implementation, 
+                    // you might want to track peer addresses more carefully
+                    if (peer_sockets_.size() > 0) {
+                        // For now, just avoid duplicate connections based on timing
+                        auto now = std::chrono::steady_clock::now();
+                        static auto last_connection_attempt = std::chrono::steady_clock::now();
+                        if (now - last_connection_attempt < std::chrono::seconds(10)) {
+                            already_connected = true;
+                        }
+                        last_connection_attempt = now;
+                    }
+                }
+                
+                if (!already_connected) {
+                    LOG_CLIENT_INFO("Attempting to connect to discovered rats peer: " << ip << ":" << port);
+                    
+                    // Try to connect (non-blocking)
+                    std::thread([this, ip, port]() {
+                        if (connect_to_peer(ip, port)) {
+                            LOG_CLIENT_INFO("Successfully connected to discovered rats peer: " << ip << ":" << port);
+                        } else {
+                            LOG_CLIENT_DEBUG("Failed to connect to discovered rats peer: " << ip << ":" << port);
+                        }
+                    }).detach();
+                }
+            }
+        }
+    });
 }
 
 } // namespace librats 

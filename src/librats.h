@@ -190,6 +190,12 @@ public:
      */
     size_t get_dht_routing_table_size() const;
 
+    // Automatic peer discovery
+    void start_automatic_peer_discovery();
+    void stop_automatic_peer_discovery();
+    bool is_automatic_discovery_running() const;
+    static std::string get_rats_peer_discovery_hash();
+
 private:
     int listen_port_;
     socket_t server_socket_;
@@ -217,6 +223,13 @@ private:
     void add_peer_mapping(socket_t socket, const std::string& hash_id);
     void remove_peer_mapping(socket_t socket);
     void handle_dht_peer_discovery(const std::vector<UdpPeer>& peers, const InfoHash& info_hash);
+
+    // Automatic peer discovery
+    std::atomic<bool> auto_discovery_running_{false};
+    std::thread auto_discovery_thread_;
+    void automatic_discovery_loop();
+    void announce_rats_peer();
+    void search_rats_peers();
 };
 
 /**
