@@ -4,6 +4,21 @@
 #include <chrono>
 #include <memory>
 
+#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
+#define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
+#define LOG_CLIENT_WARN(message)  LOG_WARN("client", message)
+#define LOG_CLIENT_ERROR(message) LOG_ERROR("client", message)
+
+#define LOG_SERVER_DEBUG(message) LOG_DEBUG("server", message)
+#define LOG_SERVER_INFO(message)  LOG_INFO("server", message)
+#define LOG_SERVER_WARN(message)  LOG_WARN("server", message)
+#define LOG_SERVER_ERROR(message) LOG_ERROR("server", message)
+
+#define LOG_MAIN_DEBUG(message) LOG_DEBUG("main", message)
+#define LOG_MAIN_INFO(message)  LOG_INFO("main", message)
+#define LOG_MAIN_WARN(message)  LOG_WARN("main", message)
+#define LOG_MAIN_ERROR(message) LOG_ERROR("main", message)
+
 namespace librats {
 
 RatsClient::RatsClient(int listen_port) 

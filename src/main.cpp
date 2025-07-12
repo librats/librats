@@ -5,6 +5,12 @@
 #include <chrono>
 #include <sstream>
 
+// Main module logging macros
+#define LOG_MAIN_DEBUG(message) LOG_DEBUG("main", message)
+#define LOG_MAIN_INFO(message)  LOG_INFO("main", message)
+#define LOG_MAIN_WARN(message)  LOG_WARN("main", message)
+#define LOG_MAIN_ERROR(message) LOG_ERROR("main", message)
+
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " <listen_port> [peer_host] [peer_port]\n";
     std::cout << "  listen_port: Port to listen on for incoming connections\n";

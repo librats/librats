@@ -3,6 +3,12 @@
 #include <iostream>
 #include <cstring>
 
+// Network module logging macros
+#define LOG_NETWORK_DEBUG(message) LOG_DEBUG("network", message)
+#define LOG_NETWORK_INFO(message)  LOG_INFO("network", message)
+#define LOG_NETWORK_WARN(message)  LOG_WARN("network", message)
+#define LOG_NETWORK_ERROR(message) LOG_ERROR("network", message)
+
 namespace librats {
 
 bool init_networking() {

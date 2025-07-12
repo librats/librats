@@ -6,12 +6,17 @@
 #include <sstream>
 #include <chrono>
 #include <iomanip>
+#include <cstdint>
 
 #ifdef _WIN32
     #include <windows.h>
     #include <io.h>
     #define isatty _isatty
     #define fileno _fileno
+    // Undefine Windows ERROR macro to avoid conflicts with our enum
+    #ifdef ERROR
+        #undef ERROR
+    #endif
 #else
     #include <unistd.h>
 #endif
@@ -86,7 +91,7 @@ public:
         // Add colored module tag
         if (!module.empty()) {
             if (colors_enabled_ && is_terminal_) {
-                oss << " " << get_module_color() << "[" << module << "]" << get_reset_code();
+                oss << " " << get_module_color(module) << "[" << module << "]" << get_reset_code();
             } else {
                 oss << " [" << module << "]";
             }
@@ -144,9 +149,51 @@ private:
         }
     }
     
-    std::string get_module_color() {
+    std::string get_module_color(const std::string& module) {
         if (!colors_enabled_ || !is_terminal_) return "";
-        return "\033[35m";  // Magenta
+        
+        // Generate hash for module name
+        uint32_t hash = hash_string(module);
+        
+        // Map hash to a predefined set of nice, readable colors
+        const char* colors[] = {
+            "\033[35m",  // Magenta
+            "\033[36m",  // Cyan
+            "\033[94m",  // Bright Blue
+            "\033[95m",  // Bright Magenta
+            "\033[96m",  // Bright Cyan
+            "\033[93m",  // Bright Yellow
+            "\033[91m",  // Bright Red
+            "\033[92m",  // Bright Green
+            "\033[90m",  // Bright Black (Gray)
+            "\033[37m",  // White
+            "\033[34m",  // Blue
+            "\033[33m",  // Yellow
+            "\033[31m",  // Red
+            "\033[32m",  // Green
+            "\033[97m",  // Bright White
+            "\033[38;5;208m", // Orange
+            "\033[38;5;165m", // Pink
+            "\033[38;5;141m", // Purple
+            "\033[38;5;51m",  // Bright Turquoise
+            "\033[38;5;226m", // Bright Yellow
+            "\033[38;5;46m",  // Bright Green
+            "\033[38;5;196m", // Bright Red
+            "\033[38;5;21m",  // Bright Blue
+            "\033[38;5;129m"  // Bright Purple
+        };
+        
+        size_t color_count = sizeof(colors) / sizeof(colors[0]);
+        return colors[hash % color_count];
+    }
+    
+    // Simple hash function for strings
+    uint32_t hash_string(const std::string& str) {
+        uint32_t hash = 5381;
+        for (char c : str) {
+            hash = ((hash << 5) + hash) + c; // hash * 33 + c
+        }
+        return hash;
     }
     
     std::string get_reset_code() {
@@ -192,23 +239,4 @@ private:
         librats::Logger::getInstance().log(librats::LogLevel::ERROR, module, oss.str()); \
     } while(0)
 
-// Module-specific macros for common modules
-#define LOG_NETWORK_DEBUG(message) LOG_DEBUG("NETWORK", message)
-#define LOG_NETWORK_INFO(message)  LOG_INFO("NETWORK", message)
-#define LOG_NETWORK_WARN(message)  LOG_WARN("NETWORK", message)
-#define LOG_NETWORK_ERROR(message) LOG_ERROR("NETWORK", message)
-
-#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("CLIENT", message)
-#define LOG_CLIENT_INFO(message)  LOG_INFO("CLIENT", message)
-#define LOG_CLIENT_WARN(message)  LOG_WARN("CLIENT", message)
-#define LOG_CLIENT_ERROR(message) LOG_ERROR("CLIENT", message)
-
-#define LOG_SERVER_DEBUG(message) LOG_DEBUG("SERVER", message)
-#define LOG_SERVER_INFO(message)  LOG_INFO("SERVER", message)
-#define LOG_SERVER_WARN(message)  LOG_WARN("SERVER", message)
-#define LOG_SERVER_ERROR(message) LOG_ERROR("SERVER", message)
-
-#define LOG_MAIN_DEBUG(message) LOG_DEBUG("MAIN", message)
-#define LOG_MAIN_INFO(message)  LOG_INFO("MAIN", message)
-#define LOG_MAIN_WARN(message)  LOG_WARN("MAIN", message)
-#define LOG_MAIN_ERROR(message) LOG_ERROR("MAIN", message) 
+ 
