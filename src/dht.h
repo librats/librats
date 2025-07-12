@@ -174,6 +174,18 @@ private:
     std::unordered_map<std::string, std::string> krpc_transactions_;
     std::mutex krpc_transactions_mutex_;
     
+    // Pending announce tracking (for BEP 5 compliance)
+    struct PendingAnnounce {
+        InfoHash info_hash;
+        uint16_t port;
+        std::chrono::steady_clock::time_point created_at;
+        
+        PendingAnnounce(const InfoHash& hash, uint16_t p)
+            : info_hash(hash), port(p), created_at(std::chrono::steady_clock::now()) {}
+    };
+    std::unordered_map<std::string, PendingAnnounce> pending_announces_;
+    std::mutex pending_announces_mutex_;
+    
     // Network thread
     std::thread network_thread_;
     std::thread maintenance_thread_;
@@ -237,6 +249,10 @@ private:
     
     void cleanup_stale_nodes();
     void refresh_buckets();
+    
+    // Pending announce management
+    void cleanup_stale_announces();
+    void handle_get_peers_response_for_announce(const std::string& transaction_id, const UdpPeer& responder, const std::string& token);
     
     // Conversion utilities
     static KrpcNode dht_node_to_krpc_node(const DhtNode& node);
