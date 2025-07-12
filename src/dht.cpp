@@ -171,7 +171,7 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port) {
         
         {
             std::lock_guard<std::mutex> lock(pending_announces_mutex_);
-            pending_announces_[transaction_id] = PendingAnnounce(info_hash, port);
+            pending_announces_.emplace(transaction_id, PendingAnnounce(info_hash, port));
         }
         
         // Send get_peers with the transaction ID
