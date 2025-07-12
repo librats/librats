@@ -40,50 +40,50 @@ int main(int argc, char* argv[]) {
         peer_port = std::stoi(argv[3]);
     }
     
-    std::cout << "=== RatsClient Demo ===" << std::endl;
-    std::cout << "Starting RatsClient on port " << listen_port << std::endl;
+    LOG_MAIN_INFO("=== RatsClient Demo ===");
+    LOG_MAIN_INFO("Starting RatsClient on port " << listen_port);
     
     // Create and configure the RatsClient
     librats::RatsClient client(listen_port);
     
     // Set up callbacks
     client.set_connection_callback([](socket_t socket, const std::string& info) {
-        std::cout << "\n[CONNECTION] New peer connected: " << info << " (socket: " << socket << ")" << std::endl;
+        LOG_MAIN_INFO("New peer connected: " << info << " (socket: " << socket << ")");
         std::cout << "Type your command: ";
         std::flush(std::cout);
     });
     
     client.set_data_callback([](socket_t socket, const std::string& data) {
-        std::cout << "\n[MESSAGE] From socket " << socket << ": " << data << std::endl;
+        LOG_MAIN_INFO("Message from socket " << socket << ": " << data);
         std::cout << "Type your command: ";
         std::flush(std::cout);
     });
     
     client.set_disconnect_callback([](socket_t socket) {
-        std::cout << "\n[DISCONNECT] Peer disconnected (socket: " << socket << ")" << std::endl;
+        LOG_MAIN_INFO("Peer disconnected (socket: " << socket << ")");
         std::cout << "Type your command: ";
         std::flush(std::cout);
     });
     
     // Start the client
     if (!client.start()) {
-        std::cerr << "Failed to start RatsClient on port " << listen_port << std::endl;
+        LOG_MAIN_ERROR("Failed to start RatsClient on port " << listen_port);
         return 1;
     }
     
     // Connect to peer if specified
     if (!peer_host.empty() && peer_port > 0) {
-        std::cout << "Connecting to peer " << peer_host << ":" << peer_port << "..." << std::endl;
+        LOG_MAIN_INFO("Connecting to peer " << peer_host << ":" << peer_port << "...");
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         
         if (client.connect_to_peer(peer_host, peer_port)) {
-            std::cout << "Successfully connected to peer!" << std::endl;
+            LOG_MAIN_INFO("Successfully connected to peer!");
         } else {
-            std::cout << "Failed to connect to peer, but continuing..." << std::endl;
+            LOG_MAIN_WARN("Failed to connect to peer, but continuing...");
         }
     }
     
-    std::cout << "RatsClient is running. Current peers: " << client.get_peer_count() << std::endl;
+    LOG_MAIN_INFO("RatsClient is running. Current peers: " << client.get_peer_count());
     print_help();
     
     // Main command loop
@@ -100,14 +100,14 @@ int main(int argc, char* argv[]) {
         iss >> command;
         
         if (command == "quit" || command == "exit") {
-            std::cout << "Shutting down..." << std::endl;
+            LOG_MAIN_INFO("Shutting down...");
             break;
         }
         else if (command == "help") {
             print_help();
         }
         else if (command == "peers") {
-            std::cout << "Connected peers: " << client.get_peer_count() << std::endl;
+            LOG_MAIN_INFO("Connected peers: " << client.get_peer_count());
             std::cout << "Type your command: ";
         }
         else if (command == "broadcast") {
@@ -116,7 +116,7 @@ int main(int argc, char* argv[]) {
             if (!message.empty()) {
                 message = message.substr(1); // Remove leading space
                 int sent = client.broadcast_to_peers(message);
-                std::cout << "Broadcasted message to " << sent << " peers" << std::endl;
+                LOG_MAIN_INFO("Broadcasted message to " << sent << " peers");
             } else {
                 std::cout << "Usage: broadcast <message>" << std::endl;
             }
@@ -127,11 +127,11 @@ int main(int argc, char* argv[]) {
             int port;
             iss >> host >> port;
             if (!host.empty() && port > 0) {
-                std::cout << "Connecting to " << host << ":" << port << "..." << std::endl;
+                LOG_MAIN_INFO("Connecting to " << host << ":" << port << "...");
                 if (client.connect_to_peer(host, port)) {
-                    std::cout << "Successfully connected!" << std::endl;
+                    LOG_MAIN_INFO("Successfully connected!");
                 } else {
-                    std::cout << "Failed to connect to peer" << std::endl;
+                    LOG_MAIN_ERROR("Failed to connect to peer");
                 }
             } else {
                 std::cout << "Usage: connect <host> <port>" << std::endl;
@@ -147,7 +147,7 @@ int main(int argc, char* argv[]) {
     
     // Clean shutdown
     client.stop();
-    std::cout << "RatsClient stopped. Goodbye!" << std::endl;
+    LOG_MAIN_INFO("RatsClient stopped. Goodbye!");
     
     return 0;
 } 

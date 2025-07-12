@@ -1,6 +1,7 @@
 #pragma once
 
 #include "network.h"
+#include "logger.h"
 #include <string>
 #include <functional>
 #include <thread>

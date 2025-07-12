@@ -18,16 +18,17 @@ RatsClient::~RatsClient() {
 
 bool RatsClient::start() {
     if (running_.load()) {
-        std::cerr << "RatsClient is already running" << std::endl;
+        LOG_CLIENT_WARN("RatsClient is already running");
         return false;
     }
 
+    LOG_CLIENT_INFO("Starting RatsClient on port " << listen_port_);
     init_networking();
     
     // Create server socket
     server_socket_ = create_tcp_server(listen_port_);
     if (!is_valid_socket(server_socket_)) {
-        std::cerr << "Failed to create server socket on port " << listen_port_ << std::endl;
+        LOG_CLIENT_ERROR("Failed to create server socket on port " << listen_port_);
         return false;
     }
     
@@ -36,7 +37,7 @@ bool RatsClient::start() {
     // Start server thread
     server_thread_ = std::thread(&RatsClient::server_loop, this);
     
-    std::cout << "RatsClient started on port " << listen_port_ << std::endl;
+    LOG_CLIENT_INFO("RatsClient started successfully on port " << listen_port_);
     return true;
 }
 
@@ -45,6 +46,7 @@ void RatsClient::stop() {
         return;
     }
     
+    LOG_CLIENT_INFO("Stopping RatsClient");
     running_.store(false);
     
     // Close server socket to break accept loop
@@ -56,6 +58,7 @@ void RatsClient::stop() {
     // Close all peer connections
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
+        LOG_CLIENT_INFO("Closing " << peer_sockets_.size() << " peer connections");
         for (socket_t socket : peer_sockets_) {
             close_socket(socket);
         }
@@ -64,10 +67,12 @@ void RatsClient::stop() {
     
     // Wait for server thread to finish
     if (server_thread_.joinable()) {
+        LOG_CLIENT_DEBUG("Waiting for server thread to finish");
         server_thread_.join();
     }
     
     // Wait for all client threads to finish
+    LOG_CLIENT_DEBUG("Waiting for " << client_threads_.size() << " client threads to finish");
     for (auto& thread : client_threads_) {
         if (thread.joinable()) {
             thread.join();
@@ -77,18 +82,19 @@ void RatsClient::stop() {
 
     cleanup_networking();
     
-    std::cout << "RatsClient stopped" << std::endl;
+    LOG_CLIENT_INFO("RatsClient stopped successfully");
 }
 
 bool RatsClient::connect_to_peer(const std::string& host, int port) {
     if (!running_.load()) {
-        std::cerr << "RatsClient is not running" << std::endl;
+        LOG_CLIENT_ERROR("RatsClient is not running");
         return false;
     }
     
+    LOG_CLIENT_INFO("Connecting to peer " << host << ":" << port);
     socket_t peer_socket = create_tcp_client(host, port);
     if (!is_valid_socket(peer_socket)) {
-        std::cerr << "Failed to connect to peer " << host << ":" << port << std::endl;
+        LOG_CLIENT_ERROR("Failed to connect to peer " << host << ":" << port);
         return false;
     }
     
@@ -101,7 +107,7 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     std::string peer_info = host + ":" + std::to_string(port);
     client_threads_.emplace_back(&RatsClient::handle_client, this, peer_socket, peer_info);
     
-    std::cout << "Connected to peer " << peer_info << std::endl;
+    LOG_CLIENT_INFO("Successfully connected to peer " << peer_info);
     
     // Notify connection callback
     if (connection_callback_) {
@@ -164,11 +170,13 @@ void RatsClient::set_disconnect_callback(DisconnectCallback callback) {
 }
 
 void RatsClient::server_loop() {
+    LOG_SERVER_INFO("Server loop started");
+    
     while (running_.load()) {
         socket_t client_socket = accept_client(server_socket_);
         if (!is_valid_socket(client_socket)) {
             if (running_.load()) {
-                std::cerr << "Failed to accept client connection" << std::endl;
+                LOG_SERVER_ERROR("Failed to accept client connection");
             }
             break;
         }
@@ -179,9 +187,10 @@ void RatsClient::server_loop() {
         }
         
         // Get client info (this is a simplified version)
-        std::string client_info = "incoming_client";
+        std::string client_info = "incoming_client_" + std::to_string(client_socket);
         
         // Start a thread to handle this client
+        LOG_SERVER_DEBUG("Starting thread for client " << client_info);
         client_threads_.emplace_back(&RatsClient::handle_client, this, client_socket, client_info);
         
         // Notify connection callback
@@ -189,16 +198,20 @@ void RatsClient::server_loop() {
             connection_callback_(client_socket, client_info);
         }
     }
+    
+    LOG_SERVER_INFO("Server loop ended");
 }
 
 void RatsClient::handle_client(socket_t client_socket, const std::string& client_info) {
-    std::cout << "Handling client: " << client_info << std::endl;
+    LOG_CLIENT_INFO("Started handling client: " << client_info);
     
     while (running_.load()) {
         std::string data = receive_data(client_socket);
         if (data.empty()) {
             break; // Connection closed or error
         }
+        
+        LOG_CLIENT_DEBUG("Received data from " << client_info << ": " << data.substr(0, 50) << (data.length() > 50 ? "..." : ""));
         
         // Notify data callback
         if (data_callback_) {
@@ -215,7 +228,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& client
         disconnect_callback_(client_socket);
     }
     
-    std::cout << "Client disconnected: " << client_info << std::endl;
+    LOG_CLIENT_INFO("Client disconnected: " << client_info);
 }
 
 void RatsClient::remove_peer(socket_t socket) {
@@ -236,17 +249,17 @@ std::unique_ptr<RatsClient> create_rats_client(int listen_port) {
 }
 
 void run_rats_client_demo(int listen_port, const std::string& peer_host, int peer_port) {
-    std::cout << "Starting RatsClient demo on port " << listen_port << std::endl;
+    LOG_MAIN_INFO("Starting RatsClient demo on port " << listen_port);
     
     RatsClient client(listen_port);
     
     // Set up callbacks
     client.set_connection_callback([](socket_t socket, const std::string& info) {
-        std::cout << "New connection: " << info << " (socket: " << socket << ")" << std::endl;
+        LOG_MAIN_INFO("New connection: " << info << " (socket: " << socket << ")");
     });
     
     client.set_data_callback([&client](socket_t socket, const std::string& data) {
-        std::cout << "Received from socket " << socket << ": " << data << std::endl;
+        LOG_MAIN_INFO("Received from socket " << socket << ": " << data);
         
         // Echo back the data
         std::string response = "Echo: " + data;
@@ -254,12 +267,12 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
     });
     
     client.set_disconnect_callback([](socket_t socket) {
-        std::cout << "Peer disconnected (socket: " << socket << ")" << std::endl;
+        LOG_MAIN_INFO("Peer disconnected (socket: " << socket << ")");
     });
     
     // Start the client
     if (!client.start()) {
-        std::cerr << "Failed to start RatsClient" << std::endl;
+        LOG_MAIN_ERROR("Failed to start RatsClient");
         return;
     }
     
@@ -267,22 +280,22 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
     if (!peer_host.empty() && peer_port > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (client.connect_to_peer(peer_host, peer_port)) {
-            std::cout << "Connected to peer " << peer_host << ":" << peer_port << std::endl;
+            LOG_MAIN_INFO("Connected to peer " << peer_host << ":" << peer_port);
             
             // Send a test message
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             std::string test_msg = "Hello from RatsClient on port " + std::to_string(listen_port);
             int sent = client.broadcast_to_peers(test_msg);
-            std::cout << "Sent test message to " << sent << " peers" << std::endl;
+            LOG_MAIN_INFO("Sent test message to " << sent << " peers");
         }
     }
     
-    std::cout << "RatsClient demo running. Press Enter to stop..." << std::endl;
+    LOG_MAIN_INFO("RatsClient demo running. Press Enter to stop...");
     std::cin.ignore();
     std::cin.get();
     
     client.stop();
-    std::cout << "RatsClient demo finished" << std::endl;
+    LOG_MAIN_INFO("RatsClient demo finished");
 }
 
 } // namespace librats 

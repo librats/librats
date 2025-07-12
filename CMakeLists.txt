@@ -10,6 +10,7 @@ add_library(librats
     src/network.h
     src/librats.cpp
     src/librats.h
+    src/logger.h
 )
 
 # Include directories
@@ -36,4 +37,4 @@ set_target_properties(librats PROPERTIES
 
 set_target_properties(rats PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-) 
+)
