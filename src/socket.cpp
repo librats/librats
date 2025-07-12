@@ -3,6 +3,10 @@
 #include "logger.h"
 #include <iostream>
 #include <cstring>
+#ifndef _WIN32
+    #include <fcntl.h>    // for O_NONBLOCK
+    #include <errno.h>    // for errno
+#endif
 
 // Socket module logging macros
 #define LOG_SOCKET_DEBUG(message) LOG_DEBUG("socket", message)
