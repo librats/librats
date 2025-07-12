@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <random>
+#include <sstream>
+#include <iomanip>
 
 #define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
 #define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
@@ -29,6 +32,57 @@ RatsClient::RatsClient(int listen_port)
 
 RatsClient::~RatsClient() {
     stop();
+}
+
+std::string RatsClient::generate_peer_hash_id(socket_t socket, const std::string& connection_info) {
+    // Generate unique hash ID using timestamp, socket, connection info, and random component
+    auto now = std::chrono::high_resolution_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    
+    // Create a random component
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 255);
+    
+    // Build hash string
+    std::ostringstream hash_stream;
+    hash_stream << std::hex << timestamp << "_" << socket << "_";
+    
+    // Add connection info hash
+    std::hash<std::string> hasher;
+    hash_stream << hasher(connection_info) << "_";
+    
+    // Add random component
+    for (int i = 0; i < 8; ++i) {
+        hash_stream << std::setfill('0') << std::setw(2) << dis(gen);
+    }
+    
+    return hash_stream.str();
+}
+
+void RatsClient::add_peer_mapping(socket_t socket, const std::string& hash_id) {
+    socket_to_hash_[socket] = hash_id;
+    hash_to_socket_[hash_id] = socket;
+}
+
+void RatsClient::remove_peer_mapping(socket_t socket) {
+    auto it = socket_to_hash_.find(socket);
+    if (it != socket_to_hash_.end()) {
+        hash_to_socket_.erase(it->second);
+        socket_to_hash_.erase(it);
+    }
+}
+
+std::string RatsClient::get_peer_hash_id(socket_t socket) const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = socket_to_hash_.find(socket);
+    return (it != socket_to_hash_.end()) ? it->second : "";
+}
+
+socket_t RatsClient::get_peer_socket(const std::string& peer_hash_id) const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = hash_to_socket_.find(peer_hash_id);
+    return (it != hash_to_socket_.end()) ? it->second : INVALID_SOCKET_VALUE;
 }
 
 bool RatsClient::start() {
@@ -78,6 +132,8 @@ void RatsClient::stop() {
             close_socket(socket);
         }
         peer_sockets_.clear();
+        socket_to_hash_.clear();
+        hash_to_socket_.clear();
     }
     
     // Wait for server thread to finish
@@ -113,20 +169,24 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
         return false;
     }
     
+    // Generate unique hash ID for this peer
+    std::string connection_info = host + ":" + std::to_string(port);
+    std::string peer_hash_id = generate_peer_hash_id(peer_socket, connection_info);
+    
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
         peer_sockets_.push_back(peer_socket);
+        add_peer_mapping(peer_socket, peer_hash_id);
     }
     
     // Start a thread to handle this peer connection
-    std::string peer_info = host + ":" + std::to_string(port);
-    client_threads_.emplace_back(&RatsClient::handle_client, this, peer_socket, peer_info);
+    client_threads_.emplace_back(&RatsClient::handle_client, this, peer_socket, peer_hash_id);
     
-    LOG_CLIENT_INFO("Successfully connected to peer " << peer_info);
+    LOG_CLIENT_INFO("Successfully connected to peer " << connection_info << " (hash: " << peer_hash_id << ")");
     
     // Notify connection callback
     if (connection_callback_) {
-        connection_callback_(peer_socket, peer_info);
+        connection_callback_(peer_socket, peer_hash_id);
     }
     
     return true;
@@ -139,6 +199,14 @@ bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
     
     int sent = send_data(socket, data);
     return sent > 0;
+}
+
+bool RatsClient::send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
+    socket_t socket = get_peer_socket(peer_hash_id);
+    if (!is_valid_socket(socket)) {
+        return false;
+    }
+    return send_to_peer(socket, data);
 }
 
 int RatsClient::broadcast_to_peers(const std::string& data) {
@@ -161,6 +229,13 @@ int RatsClient::broadcast_to_peers(const std::string& data) {
 void RatsClient::disconnect_peer(socket_t socket) {
     remove_peer(socket);
     close_socket(socket);
+}
+
+void RatsClient::disconnect_peer_by_hash(const std::string& peer_hash_id) {
+    socket_t socket = get_peer_socket(peer_hash_id);
+    if (is_valid_socket(socket)) {
+        disconnect_peer(socket);
+    }
 }
 
 int RatsClient::get_peer_count() const {
@@ -196,29 +271,31 @@ void RatsClient::server_loop() {
             break;
         }
         
+        // Generate unique hash ID for this incoming client
+        std::string connection_info = "incoming_connection";
+        std::string peer_hash_id = generate_peer_hash_id(client_socket, connection_info);
+        
         {
             std::lock_guard<std::mutex> lock(peers_mutex_);
             peer_sockets_.push_back(client_socket);
+            add_peer_mapping(client_socket, peer_hash_id);
         }
         
-        // Get client info (this is a simplified version)
-        std::string client_info = "incoming_client_" + std::to_string(client_socket);
-        
         // Start a thread to handle this client
-        LOG_SERVER_DEBUG("Starting thread for client " << client_info);
-        client_threads_.emplace_back(&RatsClient::handle_client, this, client_socket, client_info);
+        LOG_SERVER_DEBUG("Starting thread for client " << peer_hash_id);
+        client_threads_.emplace_back(&RatsClient::handle_client, this, client_socket, peer_hash_id);
         
         // Notify connection callback
         if (connection_callback_) {
-            connection_callback_(client_socket, client_info);
+            connection_callback_(client_socket, peer_hash_id);
         }
     }
     
     LOG_SERVER_INFO("Server loop ended");
 }
 
-void RatsClient::handle_client(socket_t client_socket, const std::string& client_info) {
-    LOG_CLIENT_INFO("Started handling client: " << client_info);
+void RatsClient::handle_client(socket_t client_socket, const std::string& peer_hash_id) {
+    LOG_CLIENT_INFO("Started handling client: " << peer_hash_id);
     
     while (running_.load()) {
         std::string data = receive_data(client_socket);
@@ -226,11 +303,11 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& client
             break; // Connection closed or error
         }
         
-        LOG_CLIENT_DEBUG("Received data from " << client_info << ": " << data.substr(0, 50) << (data.length() > 50 ? "..." : ""));
+        LOG_CLIENT_DEBUG("Received data from " << peer_hash_id << ": " << data.substr(0, 50) << (data.length() > 50 ? "..." : ""));
         
         // Notify data callback
         if (data_callback_) {
-            data_callback_(client_socket, data);
+            data_callback_(client_socket, peer_hash_id, data);
         }
     }
     
@@ -240,10 +317,10 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& client
     
     // Notify disconnect callback
     if (disconnect_callback_) {
-        disconnect_callback_(client_socket);
+        disconnect_callback_(client_socket, peer_hash_id);
     }
     
-    LOG_CLIENT_INFO("Client disconnected: " << client_info);
+    LOG_CLIENT_INFO("Client disconnected: " << peer_hash_id);
 }
 
 void RatsClient::remove_peer(socket_t socket) {
@@ -252,6 +329,7 @@ void RatsClient::remove_peer(socket_t socket) {
     if (it != peer_sockets_.end()) {
         peer_sockets_.erase(it);
     }
+    remove_peer_mapping(socket);
 }
 
 // Helper functions
@@ -269,20 +347,20 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
     RatsClient client(listen_port);
     
     // Set up callbacks
-    client.set_connection_callback([](socket_t socket, const std::string& info) {
-        LOG_MAIN_INFO("New connection: " << info << " (socket: " << socket << ")");
+    client.set_connection_callback([](socket_t socket, const std::string& peer_hash_id) {
+        LOG_MAIN_INFO("New connection: " << peer_hash_id << " (socket: " << socket << ")");
     });
     
-    client.set_data_callback([&client](socket_t socket, const std::string& data) {
-        LOG_MAIN_INFO("Received from socket " << socket << ": " << data);
+    client.set_data_callback([&client](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        LOG_MAIN_INFO("Received from peer " << peer_hash_id << ": " << data);
         
         // Echo back the data
         std::string response = "Echo: " + data;
         client.send_to_peer(socket, response);
     });
     
-    client.set_disconnect_callback([](socket_t socket) {
-        LOG_MAIN_INFO("Peer disconnected (socket: " << socket << ")");
+    client.set_disconnect_callback([](socket_t socket, const std::string& peer_hash_id) {
+        LOG_MAIN_INFO("Peer disconnected: " << peer_hash_id << " (socket: " << socket << ")");
     });
     
     // Start the client

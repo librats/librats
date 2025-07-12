@@ -4,6 +4,7 @@
 #include <thread>
 #include <chrono>
 #include <sstream>
+#include <algorithm>
 
 // Main module logging macros
 #define LOG_MAIN_DEBUG(message) LOG_DEBUG("main", message)
@@ -27,6 +28,8 @@ void print_help() {
     std::cout << "  peers       - Show number of connected peers\n";
     std::cout << "  broadcast <message> - Send message to all peers\n";
     std::cout << "  connect <host> <port> - Connect to a new peer\n";
+    std::cout << "  send <hash_id> <message> - Send message to specific peer by hash ID\n";
+    std::cout << "  list        - List all connected peers with their hash IDs\n";
     std::cout << "  quit        - Exit the program\n";
     std::cout << "Type your command: ";
 }
@@ -52,21 +55,45 @@ int main(int argc, char* argv[]) {
     // Create and configure the RatsClient
     librats::RatsClient client(listen_port);
     
+    // Store connected peers for listing
+    std::vector<std::pair<socket_t, std::string>> connected_peers;
+    std::mutex peers_list_mutex;
+    
     // Set up callbacks
-    client.set_connection_callback([](socket_t socket, const std::string& info) {
-        LOG_MAIN_INFO("New peer connected: " << info << " (socket: " << socket << ")");
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        LOG_MAIN_INFO("New peer connected: " << peer_hash_id << " (socket: " << socket << ")");
+        
+        // Add to connected peers list
+        {
+            std::lock_guard<std::mutex> lock(peers_list_mutex);
+            connected_peers.push_back({socket, peer_hash_id});
+        }
+        
         std::cout << "Type your command: ";
         std::flush(std::cout);
     });
     
-    client.set_data_callback([](socket_t socket, const std::string& data) {
-        LOG_MAIN_INFO("Message from socket " << socket << ": " << data);
+    client.set_data_callback([](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        LOG_MAIN_INFO("Message from peer " << peer_hash_id << ": " << data);
         std::cout << "Type your command: ";
         std::flush(std::cout);
     });
     
-    client.set_disconnect_callback([](socket_t socket) {
-        LOG_MAIN_INFO("Peer disconnected (socket: " << socket << ")");
+    client.set_disconnect_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        LOG_MAIN_INFO("Peer disconnected: " << peer_hash_id << " (socket: " << socket << ")");
+        
+        // Remove from connected peers list
+        {
+            std::lock_guard<std::mutex> lock(peers_list_mutex);
+            connected_peers.erase(
+                std::remove_if(connected_peers.begin(), connected_peers.end(),
+                    [socket](const std::pair<socket_t, std::string>& peer) {
+                        return peer.first == socket;
+                    }),
+                connected_peers.end()
+            );
+        }
+        
         std::cout << "Type your command: ";
         std::flush(std::cout);
     });
@@ -116,6 +143,18 @@ int main(int argc, char* argv[]) {
             LOG_MAIN_INFO("Connected peers: " << client.get_peer_count());
             std::cout << "Type your command: ";
         }
+        else if (command == "list") {
+            std::lock_guard<std::mutex> lock(peers_list_mutex);
+            if (connected_peers.empty()) {
+                std::cout << "No peers connected." << std::endl;
+            } else {
+                std::cout << "Connected peers:" << std::endl;
+                for (const auto& peer : connected_peers) {
+                    std::cout << "  Socket: " << peer.first << " | Hash ID: " << peer.second << std::endl;
+                }
+            }
+            std::cout << "Type your command: ";
+        }
         else if (command == "broadcast") {
             std::string message;
             std::getline(iss, message);
@@ -125,6 +164,22 @@ int main(int argc, char* argv[]) {
                 LOG_MAIN_INFO("Broadcasted message to " << sent << " peers");
             } else {
                 std::cout << "Usage: broadcast <message>" << std::endl;
+            }
+            std::cout << "Type your command: ";
+        }
+        else if (command == "send") {
+            std::string hash_id, message;
+            iss >> hash_id;
+            std::getline(iss, message);
+            if (!hash_id.empty() && !message.empty()) {
+                message = message.substr(1); // Remove leading space
+                if (client.send_to_peer_by_hash(hash_id, message)) {
+                    LOG_MAIN_INFO("Sent message to peer " << hash_id);
+                } else {
+                    LOG_MAIN_ERROR("Failed to send message to peer " << hash_id);
+                }
+            } else {
+                std::cout << "Usage: send <hash_id> <message>" << std::endl;
             }
             std::cout << "Type your command: ";
         }

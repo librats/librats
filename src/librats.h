@@ -8,28 +8,31 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <unordered_map>
 
 namespace librats {
 
 /**
  * Callback function type for handling incoming connections
  * @param client_socket The socket handle of the connected client
- * @param client_info Information about the connected client (IP:port)
+ * @param peer_hash_id Unique hash ID for the peer
  */
-using ConnectionCallback = std::function<void(socket_t client_socket, const std::string& client_info)>;
+using ConnectionCallback = std::function<void(socket_t client_socket, const std::string& peer_hash_id)>;
 
 /**
  * Callback function type for handling received data
  * @param socket The socket handle that received data
+ * @param peer_hash_id Unique hash ID for the peer
  * @param data The received data
  */
-using DataCallback = std::function<void(socket_t socket, const std::string& data)>;
+using DataCallback = std::function<void(socket_t socket, const std::string& peer_hash_id, const std::string& data)>;
 
 /**
  * Callback function type for handling disconnections
  * @param socket The socket handle that was disconnected
+ * @param peer_hash_id Unique hash ID for the peer
  */
-using DisconnectCallback = std::function<void(socket_t socket)>;
+using DisconnectCallback = std::function<void(socket_t socket, const std::string& peer_hash_id)>;
 
 /**
  * RatsClient class - provides simultaneous client and server functionality
@@ -75,6 +78,14 @@ public:
     bool send_to_peer(socket_t socket, const std::string& data);
     
     /**
+     * Send data to a specific peer by hash ID
+     * @param peer_hash_id The hash ID of the peer to send data to
+     * @param data The data to send
+     * @return true if successful, false otherwise
+     */
+    bool send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data);
+    
+    /**
      * Send data to all connected peers
      * @param data The data to send
      * @return Number of peers the data was sent to
@@ -88,6 +99,12 @@ public:
     void disconnect_peer(socket_t socket);
     
     /**
+     * Disconnect from a specific peer by hash ID
+     * @param peer_hash_id The hash ID of the peer to disconnect
+     */
+    void disconnect_peer_by_hash(const std::string& peer_hash_id);
+    
+    /**
      * Get the number of connected peers
      * @return Number of connected peers
      */
@@ -98,6 +115,20 @@ public:
      * @return true if running, false otherwise
      */
     bool is_running() const;
+    
+    /**
+     * Get hash ID for a socket
+     * @param socket The socket handle
+     * @return Hash ID string or empty string if not found
+     */
+    std::string get_peer_hash_id(socket_t socket) const;
+    
+    /**
+     * Get socket for a hash ID
+     * @param peer_hash_id The hash ID
+     * @return Socket handle or INVALID_SOCKET_VALUE if not found
+     */
+    socket_t get_peer_socket(const std::string& peer_hash_id) const;
     
     /**
      * Set callback for new incoming connections
@@ -123,6 +154,8 @@ private:
     std::atomic<bool> running_;
     
     std::vector<socket_t> peer_sockets_;
+    std::unordered_map<socket_t, std::string> socket_to_hash_;
+    std::unordered_map<std::string, socket_t> hash_to_socket_;
     mutable std::mutex peers_mutex_;
     
     std::thread server_thread_;
@@ -133,8 +166,11 @@ private:
     DisconnectCallback disconnect_callback_;
     
     void server_loop();
-    void handle_client(socket_t client_socket, const std::string& client_info);
+    void handle_client(socket_t client_socket, const std::string& peer_hash_id);
     void remove_peer(socket_t socket);
+    std::string generate_peer_hash_id(socket_t socket, const std::string& connection_info);
+    void add_peer_mapping(socket_t socket, const std::string& hash_id);
+    void remove_peer_mapping(socket_t socket);
 };
 
 /**
