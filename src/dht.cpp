@@ -166,22 +166,33 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port) {
     // This is the proper BEP 5 flow: get_peers -> collect tokens -> announce_peer
     auto closest_nodes = find_closest_nodes(info_hash, ALPHA);
     for (const auto& node : closest_nodes) {
-        // Generate transaction ID and track this as a pending announce
-        std::string transaction_id = KrpcProtocol::generate_transaction_id();
-        
-        {
-            std::lock_guard<std::mutex> lock(pending_announces_mutex_);
-            pending_announces_.emplace(transaction_id, PendingAnnounce(info_hash, port));
-        }
-        
-        // Send get_peers with the transaction ID
         PeerProtocol protocol = get_peer_protocol(node.peer);
+        
         if (protocol == PeerProtocol::BitTorrent) {
+            // Generate transaction ID and track this as a pending announce for KRPC
+            std::string transaction_id = KrpcProtocol::generate_transaction_id();
+            
+            {
+                std::lock_guard<std::mutex> lock(pending_announces_mutex_);
+                pending_announces_.emplace(transaction_id, PendingAnnounce(info_hash, port));
+            }
+            
             auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
             send_krpc_message(message, node.peer);
         } else {
-            // For rats DHT protocol, we don't have transaction IDs, so use the old method
-            send_get_peers(node.peer, info_hash);
+            // For rats DHT protocol, also use proper transaction tracking
+            std::string transaction_id = generate_rats_dht_transaction_id();
+            
+            {
+                std::lock_guard<std::mutex> lock(pending_announces_mutex_);
+                pending_announces_.emplace(transaction_id, PendingAnnounce(info_hash, port));
+            }
+            
+            // Send get_peers with transaction ID for rats dht protocol
+            DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
+            message.target_id = info_hash;
+            track_rats_dht_transaction(transaction_id, "get_peers_for_announce:" + node.peer.ip + ":" + std::to_string(node.peer.port));
+            send_message(message, node.peer);
         }
     }
     
@@ -292,6 +303,21 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& 
                     handle_find_node(*rats_dht_message, sender);
                     break;
                 case DhtMessageType::GET_PEERS:
+                    // Check if this is a response to our own get_peers request (for announce flow)
+                    if (!rats_dht_message->token.empty()) {
+                        // Check if we have a pending announce for this transaction
+                        {
+                            std::lock_guard<std::mutex> lock(pending_announces_mutex_);
+                            auto it = pending_announces_.find(rats_dht_message->transaction_id);
+                            if (it != pending_announces_.end()) {
+                                // This is a response to our get_peers request for announce
+                                handle_get_peers_response_for_announce_rats_dht(rats_dht_message->transaction_id, sender, rats_dht_message->token);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Otherwise, handle as a new get_peers request
                     handle_get_peers(*rats_dht_message, sender);
                     break;
                 case DhtMessageType::ANNOUNCE_PEER:
@@ -1272,6 +1298,30 @@ void DhtClient::handle_get_peers_response_for_announce(const std::string& transa
         
         // Send announce_peer with the received token
         send_krpc_announce_peer(responder, pending_announce.info_hash, pending_announce.port, token);
+        
+        // Remove the pending announce since we've handled it
+        pending_announces_.erase(it);
+    }
+}
+
+void DhtClient::handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::string& token) {
+    std::lock_guard<std::mutex> lock(pending_announces_mutex_);
+    
+    auto it = pending_announces_.find(transaction_id);
+    if (it != pending_announces_.end()) {
+        const auto& pending_announce = it->second;
+        LOG_DHT_DEBUG("Found pending announce for rats DHT transaction " << transaction_id 
+                      << " - sending announce_peer for info_hash " << node_id_to_hex(pending_announce.info_hash) 
+                      << " to " << responder.ip << ":" << responder.port);
+        
+        // Send announce_peer with the received token using rats DHT protocol
+        std::string announce_transaction_id = generate_rats_dht_transaction_id();
+        DhtMessage message(DhtMessageType::ANNOUNCE_PEER, announce_transaction_id, node_id_);
+        message.target_id = pending_announce.info_hash;
+        message.announce_port = pending_announce.port;
+        message.token = token;
+        track_rats_dht_transaction(announce_transaction_id, "announce_peer:" + responder.ip + ":" + std::to_string(responder.port));
+        send_message(message, responder);
         
         // Remove the pending announce since we've handled it
         pending_announces_.erase(it);

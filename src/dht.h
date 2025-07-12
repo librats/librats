@@ -270,6 +270,7 @@ private:
     // Pending announce management
     void cleanup_stale_announces();
     void handle_get_peers_response_for_announce(const std::string& transaction_id, const UdpPeer& responder, const std::string& token);
+    void handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::string& token);
     
     // Conversion utilities
     static KrpcNode dht_node_to_krpc_node(const DhtNode& node);
