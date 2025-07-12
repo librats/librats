@@ -53,6 +53,7 @@ enum class DhtMessageType {
  */
 struct DhtMessage {
     DhtMessageType type;
+    std::string transaction_id;
     NodeId sender_id;
     NodeId target_id;
     std::vector<DhtNode> nodes;
@@ -60,6 +61,10 @@ struct DhtMessage {
     uint16_t announce_port;
     std::string token;
     
+    DhtMessage(DhtMessageType type, const std::string& transaction_id, const NodeId& sender_id) 
+        : type(type), transaction_id(transaction_id), sender_id(sender_id), announce_port(0) {}
+        
+    // Backward compatibility constructor
     DhtMessage(DhtMessageType type, const NodeId& sender_id) 
         : type(type), sender_id(sender_id), announce_port(0) {}
 };
@@ -174,6 +179,13 @@ private:
     std::unordered_map<std::string, std::string> krpc_transactions_;
     std::mutex krpc_transactions_mutex_;
     
+    // Rats DHT transaction tracking
+    std::unordered_map<std::string, std::string> rats_dht_transactions_;
+    std::mutex rats_dht_transactions_mutex_;
+    
+    // Transaction ID counters
+    static uint32_t rats_dht_transaction_counter_;
+    
     // Pending announce tracking (for BEP 5 compliance)
     struct PendingAnnounce {
         InfoHash info_hash;
@@ -246,6 +258,11 @@ private:
     
     std::string generate_token(const UdpPeer& peer);
     bool verify_token(const UdpPeer& peer, const std::string& token);
+    
+    // Transaction ID management
+    std::string generate_rats_dht_transaction_id();
+    void track_rats_dht_transaction(const std::string& transaction_id, const std::string& context);
+    void cleanup_stale_transactions();
     
     void cleanup_stale_nodes();
     void refresh_buckets();

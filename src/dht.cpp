@@ -24,6 +24,9 @@
 
 namespace librats {
 
+// Static variable initialization
+uint32_t DhtClient::rats_dht_transaction_counter_ = 0;
+
 DhtClient::DhtClient(int port) 
     : port_(port), socket_(INVALID_SOCKET_VALUE), running_(false) {
     node_id_ = generate_node_id();
@@ -232,6 +235,9 @@ void DhtClient::maintenance_loop() {
         // Cleanup stale pending announces
         cleanup_stale_announces();
         
+        // Cleanup stale transactions
+        cleanup_stale_transactions();
+        
         // Refresh buckets every 15 minutes
         refresh_buckets();
         
@@ -302,50 +308,50 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& 
 }
 
 void DhtClient::handle_ping(const DhtMessage& message, const UdpPeer& sender) {
-    LOG_DHT_DEBUG("Handling PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
-    // Respond with pong
-    DhtMessage response(DhtMessageType::PING, node_id_);
-    LOG_DHT_DEBUG("Responding to PING with PONG to " << sender.ip << ":" << sender.port);
+    LOG_DHT_DEBUG("Handling PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
+    // Respond with pong using the same transaction ID
+    DhtMessage response(DhtMessageType::PING, message.transaction_id, node_id_);
+    LOG_DHT_DEBUG("Responding to PING with PONG to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
     send_message(response, sender);
 }
 
 void DhtClient::handle_find_node(const DhtMessage& message, const UdpPeer& sender) {
-    LOG_DHT_DEBUG("Handling FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for target " << node_id_to_hex(message.target_id));
+    LOG_DHT_DEBUG("Handling FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for target " << node_id_to_hex(message.target_id) << " (transaction: " << message.transaction_id << ")");
     
     auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
     LOG_DHT_DEBUG("Found " << closest_nodes.size() << " closest nodes for target " << node_id_to_hex(message.target_id));
     
-    DhtMessage response(DhtMessageType::FIND_NODE, node_id_);
+    DhtMessage response(DhtMessageType::FIND_NODE, message.transaction_id, node_id_);
     response.nodes = closest_nodes;
     
-    LOG_DHT_DEBUG("Responding to FIND_NODE with " << response.nodes.size() << " nodes to " << sender.ip << ":" << sender.port);
+    LOG_DHT_DEBUG("Responding to FIND_NODE with " << response.nodes.size() << " nodes to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
     send_message(response, sender);
 }
 
 void DhtClient::handle_get_peers(const DhtMessage& message, const UdpPeer& sender) {
-    LOG_DHT_DEBUG("Handling GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id));
+    LOG_DHT_DEBUG("Handling GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " (transaction: " << message.transaction_id << ")");
     
     // For now, just return closest nodes
     auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
     LOG_DHT_DEBUG("Found " << closest_nodes.size() << " closest nodes for info_hash " << node_id_to_hex(message.target_id));
     
-    DhtMessage response(DhtMessageType::GET_PEERS, node_id_);
+    DhtMessage response(DhtMessageType::GET_PEERS, message.transaction_id, node_id_);
     response.nodes = closest_nodes;
     
     // Generate a token for this peer
     std::string token = generate_token(sender);
     response.token = token;
     
-    LOG_DHT_DEBUG("Responding to GET_PEERS with " << response.nodes.size() << " nodes and token '" << token << "' to " << sender.ip << ":" << sender.port);
+    LOG_DHT_DEBUG("Responding to GET_PEERS with " << response.nodes.size() << " nodes and token '" << token << "' to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
     send_message(response, sender);
 }
 
 void DhtClient::handle_announce_peer(const DhtMessage& message, const UdpPeer& sender) {
-    LOG_DHT_DEBUG("Handling ANNOUNCE_PEER from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " on port " << message.announce_port);
+    LOG_DHT_DEBUG("Handling ANNOUNCE_PEER from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " on port " << message.announce_port << " (transaction: " << message.transaction_id << ")");
     
     // Verify token
     if (!verify_token(sender, message.token)) {
-        LOG_DHT_WARN("Invalid token '" << message.token << "' from " << sender.ip << ":" << sender.port << " for ANNOUNCE_PEER");
+        LOG_DHT_WARN("Invalid token '" << message.token << "' from " << sender.ip << ":" << sender.port << " for ANNOUNCE_PEER (transaction: " << message.transaction_id << ")");
         return;
     }
     
@@ -353,8 +359,8 @@ void DhtClient::handle_announce_peer(const DhtMessage& message, const UdpPeer& s
     
     // TODO: Store the peer announcement
     
-    DhtMessage response(DhtMessageType::ANNOUNCE_PEER, node_id_);
-    LOG_DHT_DEBUG("Responding to ANNOUNCE_PEER with acknowledgment to " << sender.ip << ":" << sender.port);
+    DhtMessage response(DhtMessageType::ANNOUNCE_PEER, message.transaction_id, node_id_);
+    LOG_DHT_DEBUG("Responding to ANNOUNCE_PEER with acknowledgment to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
     send_message(response, sender);
 }
 
@@ -382,6 +388,7 @@ bool DhtClient::send_message(const DhtMessage& message, const UdpPeer& peer) {
 
 std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
     LOG_DHT_DEBUG("Encoding message: type=" << static_cast<int>(message.type) << 
+                  ", transaction_id=" << message.transaction_id <<
                   ", sender=" << node_id_to_hex(message.sender_id) << 
                   ", target=" << node_id_to_hex(message.target_id) << 
                   ", nodes=" << message.nodes.size() << 
@@ -393,6 +400,11 @@ std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
     
     // Simple binary encoding
     data.push_back(static_cast<uint8_t>(message.type));
+    
+    // Encode transaction ID
+    data.push_back(static_cast<uint8_t>(message.transaction_id.size()));
+    data.insert(data.end(), message.transaction_id.begin(), message.transaction_id.end());
+    
     data.insert(data.end(), message.sender_id.begin(), message.sender_id.end());
     data.insert(data.end(), message.target_id.begin(), message.target_id.end());
     
@@ -487,8 +499,8 @@ std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
 std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>& data) {
     LOG_DHT_DEBUG("Decoding message of " << data.size() << " bytes");
     
-    if (data.size() < 1 + NODE_ID_SIZE * 2 + 4) {  // Minimum size
-        LOG_DHT_ERROR("Message too small: " << data.size() << " bytes (minimum " << (1 + NODE_ID_SIZE * 2 + 4) << ")");
+    if (data.size() < 1 + 1 + NODE_ID_SIZE * 2 + 4) {  // Minimum size with transaction ID
+        LOG_DHT_ERROR("Message too small: " << data.size() << " bytes (minimum " << (1 + 1 + NODE_ID_SIZE * 2 + 4) << ")");
         return nullptr;
     }
     
@@ -498,13 +510,27 @@ std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>
     auto type = static_cast<DhtMessageType>(data[offset++]);
     LOG_DHT_DEBUG("Decoded message type: " << static_cast<int>(type));
     
+    // Decode transaction ID
+    uint8_t transaction_id_size = data[offset++];
+    if (offset + transaction_id_size > data.size()) {
+        LOG_DHT_ERROR("Invalid transaction ID size: " << static_cast<int>(transaction_id_size));
+        return nullptr;
+    }
+    std::string transaction_id(data.begin() + offset, data.begin() + offset + transaction_id_size);
+    offset += transaction_id_size;
+    LOG_DHT_DEBUG("Decoded transaction ID: " << transaction_id);
+    
     // Decode sender ID
     NodeId sender_id;
+    if (offset + NODE_ID_SIZE > data.size()) {
+        LOG_DHT_ERROR("Insufficient data for sender ID");
+        return nullptr;
+    }
     std::copy(data.begin() + offset, data.begin() + offset + NODE_ID_SIZE, sender_id.begin());
     offset += NODE_ID_SIZE;
     LOG_DHT_DEBUG("Decoded sender ID: " << node_id_to_hex(sender_id));
     
-    auto message = std::make_unique<DhtMessage>(type, sender_id);
+    auto message = std::make_unique<DhtMessage>(type, transaction_id, sender_id);
     
     // Decode target ID
     std::copy(data.begin() + offset, data.begin() + offset + NODE_ID_SIZE, message->target_id.begin());
@@ -760,9 +786,12 @@ DhtClient::PeerProtocol DhtClient::detect_protocol(const std::vector<uint8_t>& d
     }
     
     // Check for our rats dht protocol format
-    // Our rats dht messages have specific structure: type (1 byte) + sender_id (20 bytes) + target_id (20 bytes) + ...
-    if (data.size() >= 41 && data[0] <= 3) { // Message type 0-3
-        return PeerProtocol::RatsDht;
+    // Our rats dht messages have specific structure: type (1 byte) + transaction_id_size (1 byte) + transaction_id + sender_id (20 bytes) + target_id (20 bytes) + ...
+    if (data.size() >= 43 && data[0] <= 3) { // Message type 0-3, minimum size for transaction ID
+        // Additional check: ensure transaction ID size is reasonable
+        if (data.size() > 1 && data[1] <= 32) { // Transaction ID should be <= 32 bytes
+            return PeerProtocol::RatsDht;
+        }
     }
     
     return PeerProtocol::Unknown;
@@ -1005,8 +1034,10 @@ void DhtClient::send_ping(const UdpPeer& peer) {
         LOG_DHT_DEBUG("Sending KRPC PING to " << peer.ip << ":" << peer.port);
         send_krpc_ping(peer);
     } else {
-        LOG_DHT_DEBUG("Sending rats dht PING to " << peer.ip << ":" << peer.port);
-        DhtMessage message(DhtMessageType::PING, node_id_);
+        std::string transaction_id = generate_rats_dht_transaction_id();
+        LOG_DHT_DEBUG("Sending rats dht PING to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
+        DhtMessage message(DhtMessageType::PING, transaction_id, node_id_);
+        track_rats_dht_transaction(transaction_id, "ping:" + peer.ip + ":" + std::to_string(peer.port));
         send_message(message, peer);
     }
 }
@@ -1018,9 +1049,11 @@ void DhtClient::send_find_node(const UdpPeer& peer, const NodeId& target) {
         LOG_DHT_DEBUG("Sending KRPC FIND_NODE to " << peer.ip << ":" << peer.port);
         send_krpc_find_node(peer, target);
     } else {
-        LOG_DHT_DEBUG("Sending rats dht FIND_NODE to " << peer.ip << ":" << peer.port);
-        DhtMessage message(DhtMessageType::FIND_NODE, node_id_);
+        std::string transaction_id = generate_rats_dht_transaction_id();
+        LOG_DHT_DEBUG("Sending rats dht FIND_NODE to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
+        DhtMessage message(DhtMessageType::FIND_NODE, transaction_id, node_id_);
         message.target_id = target;
+        track_rats_dht_transaction(transaction_id, "find_node:" + peer.ip + ":" + std::to_string(peer.port));
         send_message(message, peer);
     }
 }
@@ -1032,9 +1065,11 @@ void DhtClient::send_get_peers(const UdpPeer& peer, const InfoHash& info_hash) {
         LOG_DHT_DEBUG("Sending KRPC GET_PEERS to " << peer.ip << ":" << peer.port);
         send_krpc_get_peers(peer, info_hash);
     } else {
-        LOG_DHT_DEBUG("Sending rats dht GET_PEERS to " << peer.ip << ":" << peer.port);
-        DhtMessage message(DhtMessageType::GET_PEERS, node_id_);
+        std::string transaction_id = generate_rats_dht_transaction_id();
+        LOG_DHT_DEBUG("Sending rats dht GET_PEERS to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
+        DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
         message.target_id = info_hash;
+        track_rats_dht_transaction(transaction_id, "get_peers:" + peer.ip + ":" + std::to_string(peer.port));
         send_message(message, peer);
     }
 }
@@ -1046,11 +1081,13 @@ void DhtClient::send_announce_peer(const UdpPeer& peer, const InfoHash& info_has
         LOG_DHT_DEBUG("Sending KRPC ANNOUNCE_PEER to " << peer.ip << ":" << peer.port);
         send_krpc_announce_peer(peer, info_hash, port, token);
     } else {
-        LOG_DHT_DEBUG("Sending rats dht ANNOUNCE_PEER to " << peer.ip << ":" << peer.port);
-        DhtMessage message(DhtMessageType::ANNOUNCE_PEER, node_id_);
+        std::string transaction_id = generate_rats_dht_transaction_id();
+        LOG_DHT_DEBUG("Sending rats dht ANNOUNCE_PEER to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
+        DhtMessage message(DhtMessageType::ANNOUNCE_PEER, transaction_id, node_id_);
         message.target_id = info_hash;
         message.announce_port = port;
         message.token = token;
+        track_rats_dht_transaction(transaction_id, "announce_peer:" + peer.ip + ":" + std::to_string(peer.port));
         send_message(message, peer);
     }
 }
@@ -1130,6 +1167,24 @@ std::string DhtClient::generate_token(const UdpPeer& peer) {
     }
     
     return oss.str();
+}
+
+std::string DhtClient::generate_rats_dht_transaction_id() {
+    return "r" + std::to_string(++rats_dht_transaction_counter_);
+}
+
+void DhtClient::track_rats_dht_transaction(const std::string& transaction_id, const std::string& context) {
+    std::lock_guard<std::mutex> lock(rats_dht_transactions_mutex_);
+    rats_dht_transactions_[transaction_id] = context;
+}
+
+void DhtClient::cleanup_stale_transactions() {
+    std::lock_guard<std::mutex> lock(rats_dht_transactions_mutex_);
+    // For now, keep it simple - in production, you'd want to track timestamps
+    // and remove old transactions
+    if (rats_dht_transactions_.size() > 1000) {
+        rats_dht_transactions_.clear();
+    }
 }
 
 bool DhtClient::verify_token(const UdpPeer& peer, const std::string& token) {
