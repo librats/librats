@@ -44,6 +44,9 @@ void print_help() {
 }
 
 int main(int argc, char* argv[]) {
+    // Enable debug level logging
+    librats::Logger::getInstance().set_log_level(librats::LogLevel::DEBUG);
+    
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
@@ -59,6 +62,7 @@ int main(int argc, char* argv[]) {
     }
     
     LOG_MAIN_INFO("=== RatsClient Demo ===");
+    LOG_MAIN_DEBUG("Debug logging enabled");
     LOG_MAIN_INFO("Starting RatsClient on port " << listen_port);
     
     // Create and configure the RatsClient

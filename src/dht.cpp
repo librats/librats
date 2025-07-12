@@ -94,17 +94,24 @@ bool DhtClient::bootstrap(const std::vector<UdpPeer>& bootstrap_nodes) {
     }
     
     LOG_DHT_INFO("Bootstrapping DHT with " << bootstrap_nodes.size() << " nodes");
+    LOG_DHT_DEBUG("Bootstrap nodes:");
+    for (const auto& peer : bootstrap_nodes) {
+        LOG_DHT_DEBUG("  - " << peer.ip << ":" << peer.port);
+    }
     
     // Send ping to bootstrap nodes
+    LOG_DHT_DEBUG("Sending PING to all bootstrap nodes");
     for (const auto& peer : bootstrap_nodes) {
         send_ping(peer);
     }
     
     // Start node discovery by finding our own node
+    LOG_DHT_DEBUG("Starting node discovery by finding our own node ID: " << node_id_to_hex(node_id_));
     for (const auto& peer : bootstrap_nodes) {
         send_find_node(peer, node_id_);
     }
     
+    LOG_DHT_DEBUG("Bootstrap process initiated");
     return true;
 }
 
@@ -178,6 +185,7 @@ void DhtClient::network_loop() {
         auto data = receive_udp_data(socket_, 1500, sender);  // MTU size
         
         if (!data.empty()) {
+            LOG_DHT_DEBUG("Received " << data.size() << " bytes from " << sender.ip << ":" << sender.port);
             handle_message(data, sender);
         }
         
@@ -208,16 +216,19 @@ void DhtClient::maintenance_loop() {
 }
 
 void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Processing message of " << data.size() << " bytes from " << sender.ip << ":" << sender.port);
+    
     auto message = decode_message(data);
     if (!message) {
         LOG_DHT_WARN("Failed to decode message from " << sender.ip << ":" << sender.port);
         return;
     }
     
-    LOG_DHT_DEBUG("Received message type " << static_cast<int>(message->type) << " from " << sender.ip << ":" << sender.port);
+    LOG_DHT_DEBUG("Received message type " << static_cast<int>(message->type) << " from " << node_id_to_hex(message->sender_id) << " at " << sender.ip << ":" << sender.port);
     
     // Add sender to routing table
     DhtNode sender_node(message->sender_id, sender);
+    LOG_DHT_DEBUG("Adding/updating node " << node_id_to_hex(message->sender_id) << " in routing table");
     add_node(sender_node);
     
     switch (message->type) {
@@ -233,71 +244,91 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& 
         case DhtMessageType::ANNOUNCE_PEER:
             handle_announce_peer(*message, sender);
             break;
+        default:
+            LOG_DHT_WARN("Unknown message type " << static_cast<int>(message->type) << " from " << sender.ip << ":" << sender.port);
+            break;
     }
 }
 
 void DhtClient::handle_ping(const DhtMessage& message, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Handling PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     // Respond with pong
     DhtMessage response(DhtMessageType::PING, node_id_);
+    LOG_DHT_DEBUG("Responding to PING with PONG to " << sender.ip << ":" << sender.port);
     send_message(response, sender);
 }
 
 void DhtClient::handle_find_node(const DhtMessage& message, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Handling FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for target " << node_id_to_hex(message.target_id));
+    
     auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
+    LOG_DHT_DEBUG("Found " << closest_nodes.size() << " closest nodes for target " << node_id_to_hex(message.target_id));
     
     DhtMessage response(DhtMessageType::FIND_NODE, node_id_);
     response.nodes = closest_nodes;
     
+    LOG_DHT_DEBUG("Responding to FIND_NODE with " << response.nodes.size() << " nodes to " << sender.ip << ":" << sender.port);
     send_message(response, sender);
 }
 
 void DhtClient::handle_get_peers(const DhtMessage& message, const UdpPeer& sender) {
-    // Generate token for this peer
-    std::string token = generate_token(sender);
+    LOG_DHT_DEBUG("Handling GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id));
+    
+    // For now, just return closest nodes
+    auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
+    LOG_DHT_DEBUG("Found " << closest_nodes.size() << " closest nodes for info_hash " << node_id_to_hex(message.target_id));
     
     DhtMessage response(DhtMessageType::GET_PEERS, node_id_);
+    response.nodes = closest_nodes;
+    
+    // Generate a token for this peer
+    std::string token = generate_token(sender);
     response.token = token;
     
-    // For now, we don't store actual peers, so just return closest nodes
-    response.nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
-    
+    LOG_DHT_DEBUG("Responding to GET_PEERS with " << response.nodes.size() << " nodes and token '" << token << "' to " << sender.ip << ":" << sender.port);
     send_message(response, sender);
 }
 
 void DhtClient::handle_announce_peer(const DhtMessage& message, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Handling ANNOUNCE_PEER from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " on port " << message.announce_port);
+    
     // Verify token
     if (!verify_token(sender, message.token)) {
-        LOG_DHT_WARN("Invalid token from " << sender.ip << ":" << sender.port);
+        LOG_DHT_WARN("Invalid token '" << message.token << "' from " << sender.ip << ":" << sender.port << " for ANNOUNCE_PEER");
         return;
     }
     
-    // Store the peer announcement (simplified - in real implementation would store in peer table)
-    LOG_DHT_INFO("Peer announced: " << sender.ip << ":" << message.announce_port 
-                 << " for info hash: " << node_id_to_hex(message.target_id));
+    LOG_DHT_DEBUG("Token verified, accepting announcement from " << sender.ip << ":" << sender.port);
     
-    // Respond with success
+    // TODO: Store the peer announcement
+    
     DhtMessage response(DhtMessageType::ANNOUNCE_PEER, node_id_);
+    LOG_DHT_DEBUG("Responding to ANNOUNCE_PEER with acknowledgment to " << sender.ip << ":" << sender.port);
     send_message(response, sender);
 }
 
 void DhtClient::send_ping(const UdpPeer& peer) {
+    LOG_DHT_DEBUG("Sending PING to " << peer.ip << ":" << peer.port);
     DhtMessage message(DhtMessageType::PING, node_id_);
     send_message(message, peer);
 }
 
 void DhtClient::send_find_node(const UdpPeer& peer, const NodeId& target) {
+    LOG_DHT_DEBUG("Sending FIND_NODE to " << peer.ip << ":" << peer.port << " for target " << node_id_to_hex(target));
     DhtMessage message(DhtMessageType::FIND_NODE, node_id_);
     message.target_id = target;
     send_message(message, peer);
 }
 
 void DhtClient::send_get_peers(const UdpPeer& peer, const InfoHash& info_hash) {
+    LOG_DHT_DEBUG("Sending GET_PEERS to " << peer.ip << ":" << peer.port << " for info_hash " << node_id_to_hex(info_hash));
     DhtMessage message(DhtMessageType::GET_PEERS, node_id_);
     message.target_id = info_hash;
     send_message(message, peer);
 }
 
 void DhtClient::send_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
+    LOG_DHT_DEBUG("Sending ANNOUNCE_PEER to " << peer.ip << ":" << peer.port << " for info_hash " << node_id_to_hex(info_hash) << " on port " << port);
     DhtMessage message(DhtMessageType::ANNOUNCE_PEER, node_id_);
     message.target_id = info_hash;
     message.announce_port = port;
@@ -306,17 +337,34 @@ void DhtClient::send_announce_peer(const UdpPeer& peer, const InfoHash& info_has
 }
 
 bool DhtClient::send_message(const DhtMessage& message, const UdpPeer& peer) {
+    LOG_DHT_DEBUG("Encoding message type " << static_cast<int>(message.type) << " for " << peer.ip << ":" << peer.port);
     auto data = encode_message(message);
     if (data.empty()) {
         LOG_DHT_ERROR("Failed to encode message");
         return false;
     }
     
+    LOG_DHT_DEBUG("Sending " << data.size() << " bytes to " << peer.ip << ":" << peer.port);
     int result = send_udp_data(socket_, data, peer);
+    
+    if (result > 0) {
+        LOG_DHT_DEBUG("Successfully sent message type " << static_cast<int>(message.type) << " to " << peer.ip << ":" << peer.port);
+    } else {
+        LOG_DHT_ERROR("Failed to send message type " << static_cast<int>(message.type) << " to " << peer.ip << ":" << peer.port);
+    }
+    
     return result > 0;
 }
 
 std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
+    LOG_DHT_DEBUG("Encoding message: type=" << static_cast<int>(message.type) << 
+                  ", sender=" << node_id_to_hex(message.sender_id) << 
+                  ", target=" << node_id_to_hex(message.target_id) << 
+                  ", nodes=" << message.nodes.size() << 
+                  ", peers=" << message.peers.size() << 
+                  ", announce_port=" << message.announce_port << 
+                  ", token_size=" << message.token.size());
+    
     std::vector<uint8_t> data;
     
     // Simple binary encoding
@@ -327,6 +375,7 @@ std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
     // Encode nodes
     data.push_back(static_cast<uint8_t>(message.nodes.size()));
     for (const auto& node : message.nodes) {
+        LOG_DHT_DEBUG("Encoding node: " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port);
         data.insert(data.end(), node.id.begin(), node.id.end());
         
         // Encode IP address (4 bytes for IPv4)
@@ -346,6 +395,7 @@ std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
     // Encode peers
     data.push_back(static_cast<uint8_t>(message.peers.size()));
     for (const auto& peer : message.peers) {
+        LOG_DHT_DEBUG("Encoding peer: " << peer.ip << ":" << peer.port);
         // Encode IP address (4 bytes for IPv4)
         in_addr addr;
         inet_pton(AF_INET, peer.ip.c_str(), &addr);
@@ -368,11 +418,15 @@ std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
     data.push_back(static_cast<uint8_t>(message.token.size()));
     data.insert(data.end(), message.token.begin(), message.token.end());
     
+    LOG_DHT_DEBUG("Encoded message to " << data.size() << " bytes");
     return data;
 }
 
 std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>& data) {
+    LOG_DHT_DEBUG("Decoding message of " << data.size() << " bytes");
+    
     if (data.size() < 1 + NODE_ID_SIZE * 2 + 4) {  // Minimum size
+        LOG_DHT_ERROR("Message too small: " << data.size() << " bytes (minimum " << (1 + NODE_ID_SIZE * 2 + 4) << ")");
         return nullptr;
     }
     
@@ -380,22 +434,29 @@ std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>
     
     // Decode message type
     auto type = static_cast<DhtMessageType>(data[offset++]);
+    LOG_DHT_DEBUG("Decoded message type: " << static_cast<int>(type));
     
     // Decode sender ID
     NodeId sender_id;
     std::copy(data.begin() + offset, data.begin() + offset + NODE_ID_SIZE, sender_id.begin());
     offset += NODE_ID_SIZE;
+    LOG_DHT_DEBUG("Decoded sender ID: " << node_id_to_hex(sender_id));
     
     auto message = std::make_unique<DhtMessage>(type, sender_id);
     
     // Decode target ID
     std::copy(data.begin() + offset, data.begin() + offset + NODE_ID_SIZE, message->target_id.begin());
     offset += NODE_ID_SIZE;
+    LOG_DHT_DEBUG("Decoded target ID: " << node_id_to_hex(message->target_id));
     
-    if (offset >= data.size()) return message;
+    if (offset >= data.size()) {
+        LOG_DHT_DEBUG("Message decoded successfully (minimal)");
+        return message;
+    }
     
     // Decode nodes
     uint8_t node_count = data[offset++];
+    LOG_DHT_DEBUG("Decoding " << static_cast<int>(node_count) << " nodes");
     for (int i = 0; i < node_count && offset + NODE_ID_SIZE + 6 <= data.size(); ++i) {
         NodeId node_id;
         std::copy(data.begin() + offset, data.begin() + offset + NODE_ID_SIZE, node_id.begin());
@@ -415,13 +476,18 @@ std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
         
+        LOG_DHT_DEBUG("Decoded node: " << node_id_to_hex(node_id) << " at " << ip_str << ":" << port);
         message->nodes.emplace_back(node_id, UdpPeer(ip_str, port));
     }
     
-    if (offset >= data.size()) return message;
+    if (offset >= data.size()) {
+        LOG_DHT_DEBUG("Message decoded successfully (with nodes)");
+        return message;
+    }
     
     // Decode peers
     uint8_t peer_count = data[offset++];
+    LOG_DHT_DEBUG("Decoding " << static_cast<int>(peer_count) << " peers");
     for (int i = 0; i < peer_count && offset + 6 <= data.size(); ++i) {
         // Decode IP address
         uint32_t ip = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
@@ -437,6 +503,7 @@ std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
         
+        LOG_DHT_DEBUG("Decoded peer: " << ip_str << ":" << port);
         message->peers.emplace_back(ip_str, port);
     }
     
@@ -444,15 +511,21 @@ std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>
         // Decode announce port
         message->announce_port = (data[offset] << 8) | data[offset + 1];
         offset += 2;
+        LOG_DHT_DEBUG("Decoded announce port: " << message->announce_port);
         
         if (offset < data.size()) {
             // Decode token
             uint8_t token_size = data[offset++];
             if (offset + token_size <= data.size()) {
                 message->token = std::string(data.begin() + offset, data.begin() + offset + token_size);
+                LOG_DHT_DEBUG("Decoded token: " << message->token << " (size: " << static_cast<int>(token_size) << ")");
             }
         }
     }
+    
+    LOG_DHT_DEBUG("Message decoded successfully (complete): type=" << static_cast<int>(type) << 
+                  ", nodes=" << message->nodes.size() << 
+                  ", peers=" << message->peers.size());
     
     return message;
 }
@@ -463,6 +536,8 @@ void DhtClient::add_node(const DhtNode& node) {
     int bucket_index = get_bucket_index(node.id);
     auto& bucket = routing_table_[bucket_index];
     
+    LOG_DHT_DEBUG("Adding node " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port << " to bucket " << bucket_index);
+    
     // Check if node already exists
     auto it = std::find_if(bucket.begin(), bucket.end(),
                           [&node](const DhtNode& existing) {
@@ -471,6 +546,7 @@ void DhtClient::add_node(const DhtNode& node) {
     
     if (it != bucket.end()) {
         // Update existing node
+        LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " already exists in bucket " << bucket_index << ", updating");
         it->peer = node.peer;
         it->last_seen = std::chrono::steady_clock::now();
         return;
@@ -479,25 +555,31 @@ void DhtClient::add_node(const DhtNode& node) {
     // Add new node
     if (bucket.size() < K_BUCKET_SIZE) {
         bucket.push_back(node);
-        LOG_DHT_DEBUG("Added node to bucket " << bucket_index << " (size: " << bucket.size() << ")");
+        LOG_DHT_DEBUG("Added new node " << node_id_to_hex(node.id) << " to bucket " << bucket_index << " (size: " << bucket.size() << "/" << K_BUCKET_SIZE << ")");
     } else {
         // Bucket is full, replace least recently seen node
         auto oldest_it = std::min_element(bucket.begin(), bucket.end(),
                                          [](const DhtNode& a, const DhtNode& b) {
                                              return a.last_seen < b.last_seen;
                                          });
+        LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, replacing oldest node " << node_id_to_hex(oldest_it->id) << " with " << node_id_to_hex(node.id));
         *oldest_it = node;
-        LOG_DHT_DEBUG("Replaced oldest node in bucket " << bucket_index);
     }
 }
 
 std::vector<DhtNode> DhtClient::find_closest_nodes(const NodeId& target, size_t count) {
     std::lock_guard<std::mutex> lock(routing_table_mutex_);
     
+    LOG_DHT_DEBUG("Finding closest nodes to target " << node_id_to_hex(target) << " (max " << count << " nodes)");
+    
     std::vector<DhtNode> all_nodes;
+    size_t total_nodes = 0;
     for (const auto& bucket : routing_table_) {
         all_nodes.insert(all_nodes.end(), bucket.begin(), bucket.end());
+        total_nodes += bucket.size();
     }
+    
+    LOG_DHT_DEBUG("Routing table contains " << total_nodes << " nodes across " << routing_table_.size() << " buckets");
     
     // Sort by distance to target
     std::sort(all_nodes.begin(), all_nodes.end(),
@@ -508,6 +590,11 @@ std::vector<DhtNode> DhtClient::find_closest_nodes(const NodeId& target, size_t 
     // Return up to 'count' closest nodes
     if (all_nodes.size() > count) {
         all_nodes.resize(count);
+    }
+    
+    LOG_DHT_DEBUG("Found " << all_nodes.size() << " closest nodes to target " << node_id_to_hex(target));
+    for (size_t i = 0; i < all_nodes.size(); ++i) {
+        LOG_DHT_DEBUG("  [" << i << "] " << node_id_to_hex(all_nodes[i].id) << " at " << all_nodes[i].peer.ip << ":" << all_nodes[i].peer.port);
     }
     
     return all_nodes;
