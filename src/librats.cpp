@@ -94,10 +94,10 @@ bool RatsClient::start() {
     LOG_CLIENT_INFO("Starting RatsClient on port " << listen_port_);
     init_networking();
     
-    // Create server socket
-    server_socket_ = create_tcp_server(listen_port_);
+    // Create dual-stack server socket (supports both IPv4 and IPv6)
+    server_socket_ = create_tcp_server_dual(listen_port_);
     if (!is_valid_socket(server_socket_)) {
-        LOG_CLIENT_ERROR("Failed to create server socket on port " << listen_port_);
+        LOG_CLIENT_ERROR("Failed to create dual-stack server socket on port " << listen_port_);
         return false;
     }
     
@@ -166,7 +166,7 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     }
     
     LOG_CLIENT_INFO("Connecting to peer " << host << ":" << port);
-    socket_t peer_socket = create_tcp_client(host, port);
+    socket_t peer_socket = create_tcp_client_dual(host, port);
     if (!is_valid_socket(peer_socket)) {
         LOG_CLIENT_ERROR("Failed to connect to peer " << host << ":" << port);
         return false;

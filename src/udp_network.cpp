@@ -177,24 +177,39 @@ int send_udp_data(udp_socket_t socket, const std::vector<uint8_t>& data, const U
             return -1;
         }
         
-        sockaddr_in addr;
+        // For dual-stack sockets, we need to use IPv6 address structure
+        // and convert IPv4 to IPv4-mapped IPv6 address (::ffff:x.x.x.x)
+        sockaddr_in6 addr;
         memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(peer.port);
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(peer.port);
         
-        if (inet_pton(AF_INET, resolved_ip.c_str(), &addr.sin_addr) <= 0) {
-            LOG_UDP_ERROR("Invalid IP address: " << resolved_ip);
+        // Convert IPv4 to IPv4-mapped IPv6 address
+        struct in_addr ipv4_addr;
+        if (inet_pton(AF_INET, resolved_ip.c_str(), &ipv4_addr) <= 0) {
+            LOG_UDP_ERROR("Invalid IPv4 address: " << resolved_ip);
             return -1;
         }
+        
+        // Create IPv4-mapped IPv6 address: ::ffff:x.x.x.x
+        addr.sin6_addr.s6_addr[10] = 0xff;
+        addr.sin6_addr.s6_addr[11] = 0xff;
+        memcpy(&addr.sin6_addr.s6_addr[12], &ipv4_addr.s_addr, 4);
+        
+        LOG_UDP_DEBUG("Converting IPv4 " << resolved_ip << " to IPv4-mapped IPv6 for dual-stack socket");
 
         int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0, 
                                (struct sockaddr*)&addr, sizeof(addr));
         if (bytes_sent == SOCKET_ERROR_VALUE) {
-            LOG_UDP_ERROR("Failed to send UDP data to " << resolved_ip << ":" << peer.port);
+#ifdef _WIN32
+            LOG_UDP_ERROR("Failed to send UDP data to " << resolved_ip << ":" << peer.port << " (error: " << WSAGetLastError() << ")");
+#else
+            LOG_UDP_ERROR("Failed to send UDP data to " << resolved_ip << ":" << peer.port << " (error: " << strerror(errno) << ")");
+#endif
             return -1;
         }
         
-        LOG_UDP_DEBUG("Successfully sent " << bytes_sent << " bytes to " << resolved_ip << ":" << peer.port);
+        LOG_UDP_DEBUG("Successfully sent " << bytes_sent << " bytes to " << resolved_ip << ":" << peer.port << " via IPv4-mapped IPv6");
         return bytes_sent;
     }
 }

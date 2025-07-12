@@ -1,4 +1,5 @@
 #include "dht.h"
+#include "network_utils.h"
 #include "logger.h"
 #include <random>
 #include <algorithm>
@@ -42,9 +43,9 @@ bool DhtClient::start() {
     
     LOG_DHT_INFO("Starting DHT client on port " << port_);
     
-    socket_ = create_udp_socket(port_);
+    socket_ = create_udp_socket_dual(port_);
     if (!is_valid_udp_socket(socket_)) {
-        LOG_DHT_ERROR("Failed to create UDP socket");
+        LOG_DHT_ERROR("Failed to create dual-stack UDP socket");
         return false;
     }
     
@@ -378,14 +379,33 @@ std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
         LOG_DHT_DEBUG("Encoding node: " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port);
         data.insert(data.end(), node.id.begin(), node.id.end());
         
-        // Encode IP address (4 bytes for IPv4)
-        in_addr addr;
-        inet_pton(AF_INET, node.peer.ip.c_str(), &addr);
-        uint32_t ip = ntohl(addr.s_addr);
-        data.push_back((ip >> 24) & 0xFF);
-        data.push_back((ip >> 16) & 0xFF);
-        data.push_back((ip >> 8) & 0xFF);
-        data.push_back(ip & 0xFF);
+        // Encode IP address (support both IPv4 and IPv6)
+        if (network_utils::is_valid_ipv4(node.peer.ip)) {
+            // IPv4 address
+            data.push_back(0x04);  // IPv4 flag
+            in_addr addr;
+            inet_pton(AF_INET, node.peer.ip.c_str(), &addr);
+            uint32_t ip = ntohl(addr.s_addr);
+            data.push_back((ip >> 24) & 0xFF);
+            data.push_back((ip >> 16) & 0xFF);
+            data.push_back((ip >> 8) & 0xFF);
+            data.push_back(ip & 0xFF);
+        } else if (network_utils::is_valid_ipv6(node.peer.ip)) {
+            // IPv6 address
+            data.push_back(0x06);  // IPv6 flag
+            in6_addr addr;
+            inet_pton(AF_INET6, node.peer.ip.c_str(), &addr);
+            for (int i = 0; i < 16; ++i) {
+                data.push_back(addr.s6_addr[i]);
+            }
+        } else {
+            // Invalid IP address, treat as IPv4 with 0.0.0.0
+            data.push_back(0x04);  // IPv4 flag
+            data.push_back(0x00);
+            data.push_back(0x00);
+            data.push_back(0x00);
+            data.push_back(0x00);
+        }
         
         // Encode port (2 bytes)
         data.push_back((node.peer.port >> 8) & 0xFF);
@@ -396,14 +416,33 @@ std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
     data.push_back(static_cast<uint8_t>(message.peers.size()));
     for (const auto& peer : message.peers) {
         LOG_DHT_DEBUG("Encoding peer: " << peer.ip << ":" << peer.port);
-        // Encode IP address (4 bytes for IPv4)
-        in_addr addr;
-        inet_pton(AF_INET, peer.ip.c_str(), &addr);
-        uint32_t ip = ntohl(addr.s_addr);
-        data.push_back((ip >> 24) & 0xFF);
-        data.push_back((ip >> 16) & 0xFF);
-        data.push_back((ip >> 8) & 0xFF);
-        data.push_back(ip & 0xFF);
+        // Encode IP address (support both IPv4 and IPv6)
+        if (network_utils::is_valid_ipv4(peer.ip)) {
+            // IPv4 address
+            data.push_back(0x04);  // IPv4 flag
+            in_addr addr;
+            inet_pton(AF_INET, peer.ip.c_str(), &addr);
+            uint32_t ip = ntohl(addr.s_addr);
+            data.push_back((ip >> 24) & 0xFF);
+            data.push_back((ip >> 16) & 0xFF);
+            data.push_back((ip >> 8) & 0xFF);
+            data.push_back(ip & 0xFF);
+        } else if (network_utils::is_valid_ipv6(peer.ip)) {
+            // IPv6 address
+            data.push_back(0x06);  // IPv6 flag
+            in6_addr addr;
+            inet_pton(AF_INET6, peer.ip.c_str(), &addr);
+            for (int i = 0; i < 16; ++i) {
+                data.push_back(addr.s6_addr[i]);
+            }
+        } else {
+            // Invalid IP address, treat as IPv4 with 0.0.0.0
+            data.push_back(0x04);  // IPv4 flag
+            data.push_back(0x00);
+            data.push_back(0x00);
+            data.push_back(0x00);
+            data.push_back(0x00);
+        }
         
         // Encode port (2 bytes)
         data.push_back((peer.port >> 8) & 0xFF);
@@ -457,24 +496,51 @@ std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>
     // Decode nodes
     uint8_t node_count = data[offset++];
     LOG_DHT_DEBUG("Decoding " << static_cast<int>(node_count) << " nodes");
-    for (int i = 0; i < node_count && offset + NODE_ID_SIZE + 6 <= data.size(); ++i) {
+    for (int i = 0; i < node_count && offset + NODE_ID_SIZE + 1 < data.size(); ++i) {
         NodeId node_id;
         std::copy(data.begin() + offset, data.begin() + offset + NODE_ID_SIZE, node_id.begin());
         offset += NODE_ID_SIZE;
         
-        // Decode IP address
-        uint32_t ip = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
-        offset += 4;
+        // Check if we have enough data for IP version flag
+        if (offset >= data.size()) break;
+        
+        // Decode IP address (support both IPv4 and IPv6)
+        uint8_t ip_version = data[offset++];
+        std::string ip_str;
+        
+        if (ip_version == 0x04) {
+            // IPv4 address
+            if (offset + 4 > data.size()) break;
+            uint32_t ip = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
+            offset += 4;
+            
+            struct in_addr addr;
+            addr.s_addr = htonl(ip);
+            char ip_str_buf[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &addr, ip_str_buf, INET_ADDRSTRLEN);
+            ip_str = ip_str_buf;
+        } else if (ip_version == 0x06) {
+            // IPv6 address
+            if (offset + 16 > data.size()) break;
+            struct in6_addr addr;
+            for (int j = 0; j < 16; ++j) {
+                addr.s6_addr[j] = data[offset + j];
+            }
+            offset += 16;
+            
+            char ip_str_buf[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &addr, ip_str_buf, INET6_ADDRSTRLEN);
+            ip_str = ip_str_buf;
+        } else {
+            // Unknown IP version, skip this node
+            LOG_DHT_WARN("Unknown IP version " << static_cast<int>(ip_version) << " in node data");
+            break;
+        }
         
         // Decode port
+        if (offset + 2 > data.size()) break;
         uint16_t port = (data[offset] << 8) | data[offset + 1];
         offset += 2;
-        
-        // Convert IP to string
-        struct in_addr addr;
-        addr.s_addr = htonl(ip);
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
         
         LOG_DHT_DEBUG("Decoded node: " << node_id_to_hex(node_id) << " at " << ip_str << ":" << port);
         message->nodes.emplace_back(node_id, UdpPeer(ip_str, port));
@@ -488,20 +554,47 @@ std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>
     // Decode peers
     uint8_t peer_count = data[offset++];
     LOG_DHT_DEBUG("Decoding " << static_cast<int>(peer_count) << " peers");
-    for (int i = 0; i < peer_count && offset + 6 <= data.size(); ++i) {
-        // Decode IP address
-        uint32_t ip = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
-        offset += 4;
+    for (int i = 0; i < peer_count && offset + 1 < data.size(); ++i) {
+        // Check if we have enough data for IP version flag
+        if (offset >= data.size()) break;
+        
+        // Decode IP address (support both IPv4 and IPv6)
+        uint8_t ip_version = data[offset++];
+        std::string ip_str;
+        
+        if (ip_version == 0x04) {
+            // IPv4 address
+            if (offset + 4 > data.size()) break;
+            uint32_t ip = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
+            offset += 4;
+            
+            struct in_addr addr;
+            addr.s_addr = htonl(ip);
+            char ip_str_buf[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &addr, ip_str_buf, INET_ADDRSTRLEN);
+            ip_str = ip_str_buf;
+        } else if (ip_version == 0x06) {
+            // IPv6 address
+            if (offset + 16 > data.size()) break;
+            struct in6_addr addr;
+            for (int j = 0; j < 16; ++j) {
+                addr.s6_addr[j] = data[offset + j];
+            }
+            offset += 16;
+            
+            char ip_str_buf[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &addr, ip_str_buf, INET6_ADDRSTRLEN);
+            ip_str = ip_str_buf;
+        } else {
+            // Unknown IP version, skip this peer
+            LOG_DHT_WARN("Unknown IP version " << static_cast<int>(ip_version) << " in peer data");
+            break;
+        }
         
         // Decode port
+        if (offset + 2 > data.size()) break;
         uint16_t port = (data[offset] << 8) | data[offset + 1];
         offset += 2;
-        
-        // Convert IP to string
-        struct in_addr addr;
-        addr.s_addr = htonl(ip);
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
         
         LOG_DHT_DEBUG("Decoded peer: " << ip_str << ":" << port);
         message->peers.emplace_back(ip_str, port);
