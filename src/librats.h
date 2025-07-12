@@ -1,6 +1,7 @@
 #pragma once
 
 #include "network.h"
+#include "dht.h"
 #include "logger.h"
 #include <string>
 #include <functional>
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <atomic>
 #include <unordered_map>
+#include <memory>
 
 namespace librats {
 
@@ -147,6 +149,46 @@ public:
      * @param callback The callback function
      */
     void set_disconnect_callback(DisconnectCallback callback);
+    
+    /**
+     * Start DHT-based peer discovery
+     * @param dht_port The port to use for DHT (default: 6881)
+     * @return true if successful, false otherwise
+     */
+    bool start_dht_discovery(int dht_port = 6881);
+    
+    /**
+     * Stop DHT-based peer discovery
+     */
+    void stop_dht_discovery();
+    
+    /**
+     * Find peers using DHT for a specific content hash
+     * @param content_hash The content hash to search for
+     * @param callback Callback to receive discovered peers
+     * @return true if search started successfully, false otherwise
+     */
+    bool find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback);
+    
+    /**
+     * Announce this node as a peer for a specific content hash
+     * @param content_hash The content hash to announce for
+     * @param port The port to announce (0 for listen port)
+     * @return true if announcement started successfully, false otherwise
+     */
+    bool announce_for_hash(const std::string& content_hash, uint16_t port = 0);
+    
+    /**
+     * Check if DHT is running
+     * @return true if DHT is running, false otherwise
+     */
+    bool is_dht_running() const;
+    
+    /**
+     * Get DHT routing table size
+     * @return Number of nodes in DHT routing table
+     */
+    size_t get_dht_routing_table_size() const;
 
 private:
     int listen_port_;
@@ -165,12 +207,16 @@ private:
     DataCallback data_callback_;
     DisconnectCallback disconnect_callback_;
     
+    // DHT client for peer discovery
+    std::unique_ptr<DhtClient> dht_client_;
+    
     void server_loop();
     void handle_client(socket_t client_socket, const std::string& peer_hash_id);
     void remove_peer(socket_t socket);
     std::string generate_peer_hash_id(socket_t socket, const std::string& connection_info);
     void add_peer_mapping(socket_t socket, const std::string& hash_id);
     void remove_peer_mapping(socket_t socket);
+    void handle_dht_peer_discovery(const std::vector<UdpPeer>& peers, const InfoHash& info_hash);
 };
 
 /**

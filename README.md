@@ -7,6 +7,7 @@ A simple C++ library for TCP networking with cross-platform support (Windows and
 - **TCP Client**: Connect to remote servers
 - **TCP Server**: Accept client connections and handle communication  
 - **RatsClient**: Run both client and server simultaneously for peer-to-peer communication
+- **DHT Peer Discovery**: Distributed Hash Table using Kademlia protocol based on BitTorrent network
 - **Unique Peer IDs**: Each peer gets a unique hash ID for identification
 - **Cross-platform**: Works on Windows and Unix-like systems
 - **Thread-safe**: Multi-threaded design with proper synchronization
@@ -18,11 +19,16 @@ A simple C++ library for TCP networking with cross-platform support (Windows and
 librats/
 ├── CMakeLists.txt          # Main CMake configuration
 ├── src/
-│   ├── network.h           # Low-level networking header
-│   ├── network.cpp         # Low-level networking implementation
+│   ├── network.h           # Low-level TCP networking header
+│   ├── network.cpp         # Low-level TCP networking implementation
+│   ├── udp_network.h       # UDP networking header
+│   ├── udp_network.cpp     # UDP networking implementation
+│   ├── dht.h               # DHT Kademlia implementation header
+│   ├── dht.cpp             # DHT Kademlia implementation
 │   ├── librats.h           # High-level RatsClient header
 │   ├── librats.cpp         # High-level RatsClient implementation
 │   ├── main.cpp            # Main executable with CLI interface
+│   ├── dht_demo.cpp        # DHT peer discovery demo
 │   └── logger.h            # Logging utilities
 └── README.md              # This file
 ```
@@ -53,7 +59,8 @@ librats/
 
 ### Output
 - Library: `build/lib/librats.a` (or `.lib` on Windows)
-- Main executable: `build/bin/librats` (or `librats.exe` on Windows)
+- Main executable: `build/bin/rats` (or `rats.exe` on Windows)
+- DHT Demo: `build/bin/dht_demo` (or `dht_demo.exe` on Windows)
 
 ## Usage
 
@@ -107,6 +114,51 @@ client.stop();
 cleanup_networking();
 ```
 
+### DHT Peer Discovery
+
+The library now includes DHT (Distributed Hash Table) peer discovery using the Kademlia protocol, compatible with the BitTorrent network. This allows peers to discover each other without requiring a central server.
+
+```cpp
+#include "src/librats.h"
+using namespace librats;
+
+RatsClient client(8080);
+client.start();
+
+// Start DHT discovery on port 6881 (default BitTorrent DHT port)
+client.start_dht_discovery(6881);
+
+// Generate content hash (40-character hex string for 160-bit hash)
+std::string content_hash = "1234567890abcdef1234567890abcdef12345678";
+
+// Announce this node as a peer for specific content
+client.announce_for_hash(content_hash, 8080);
+
+// Find peers sharing the same content
+client.find_peers_by_hash(content_hash, [](const std::vector<std::string>& peers) {
+    std::cout << "Found " << peers.size() << " peers:" << std::endl;
+    for (const auto& peer : peers) {
+        std::cout << "  - " << peer << std::endl;
+    }
+});
+
+// Check DHT status
+if (client.is_dht_running()) {
+    std::cout << "DHT nodes in routing table: " << client.get_dht_routing_table_size() << std::endl;
+}
+
+// Stop DHT discovery
+client.stop_dht_discovery();
+```
+
+#### DHT Features
+- **Kademlia Protocol**: Uses the same DHT protocol as BitTorrent
+- **BitTorrent Bootstrap**: Automatically bootstraps using public BitTorrent DHT nodes
+- **Content-based Discovery**: Find peers based on content hashes
+- **Automatic Peer Connection**: Discovered peers are automatically connected
+- **Routing Table Management**: Maintains a distributed routing table with 160 k-buckets
+- **Thread-safe**: All DHT operations are thread-safe
+
 ### Peer Hash ID System
 
 Each peer connection is assigned a unique hash ID that consists of:
@@ -159,17 +211,27 @@ close_socket(socket);
 cleanup_networking();
 ```
 
-### Running the Main Program
+### Running the Programs
 
+#### Main Program
 The main program provides an interactive CLI interface:
 
 ```bash
 # Run with port only (listen mode)
-./build/bin/librats 8080
+./build/bin/rats 8080
 
 # Run and connect to peer
-./build/bin/librats 8081 localhost 8080
+./build/bin/rats 8081 localhost 8080
 ```
+
+#### DHT Demo
+Run the DHT peer discovery demo:
+
+```bash
+./build/bin/dht_demo
+```
+
+This demo creates two RatsClient instances, starts DHT discovery on both, and demonstrates peer discovery through content hash announcement and search.
 
 #### Available Commands:
 - `help` - Show available commands
@@ -196,6 +258,14 @@ The main program provides an interactive CLI interface:
 - `bool is_running()`: Check if client is running
 - `std::string get_peer_hash_id(socket_t socket)`: Get hash ID for socket
 - `socket_t get_peer_socket(const std::string& peer_hash_id)`: Get socket for hash ID
+
+### DHT Functions
+- `bool start_dht_discovery(int dht_port = 6881)`: Start DHT peer discovery
+- `void stop_dht_discovery()`: Stop DHT peer discovery
+- `bool find_peers_by_hash(const std::string& content_hash, callback)`: Find peers for content hash
+- `bool announce_for_hash(const std::string& content_hash, uint16_t port = 0)`: Announce as peer for content
+- `bool is_dht_running()`: Check if DHT is running
+- `size_t get_dht_routing_table_size()`: Get number of DHT nodes in routing table
 
 ### Callback Functions
 - `ConnectionCallback`: `void(socket_t socket, const std::string& peer_hash_id)`

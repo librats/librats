@@ -118,6 +118,9 @@ void RatsClient::stop() {
     LOG_CLIENT_INFO("Stopping RatsClient");
     running_.store(false);
     
+    // Stop DHT discovery
+    stop_dht_discovery();
+    
     // Close server socket to break accept loop
     if (is_valid_socket(server_socket_)) {
         close_socket(server_socket_);
@@ -257,6 +260,118 @@ void RatsClient::set_data_callback(DataCallback callback) {
 
 void RatsClient::set_disconnect_callback(DisconnectCallback callback) {
     disconnect_callback_ = callback;
+}
+
+bool RatsClient::start_dht_discovery(int dht_port) {
+    if (dht_client_ && dht_client_->is_running()) {
+        LOG_CLIENT_WARN("DHT discovery is already running");
+        return true;
+    }
+    
+    LOG_CLIENT_INFO("Starting DHT discovery on port " << dht_port);
+    
+    dht_client_ = std::make_unique<DhtClient>(dht_port);
+    if (!dht_client_->start()) {
+        LOG_CLIENT_ERROR("Failed to start DHT client");
+        dht_client_.reset();
+        return false;
+    }
+    
+    // Bootstrap with default nodes
+    auto bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
+    if (!dht_client_->bootstrap(bootstrap_nodes)) {
+        LOG_CLIENT_WARN("Failed to bootstrap DHT");
+    }
+    
+    LOG_CLIENT_INFO("DHT discovery started successfully");
+    return true;
+}
+
+void RatsClient::stop_dht_discovery() {
+    if (!dht_client_) {
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Stopping DHT discovery");
+    dht_client_->stop();
+    dht_client_.reset();
+    LOG_CLIENT_INFO("DHT discovery stopped");
+}
+
+bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback) {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_CLIENT_ERROR("DHT client not running");
+        return false;
+    }
+    
+    if (content_hash.length() != 40) {  // 160-bit hash as hex string
+        LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected 40)");
+        return false;
+    }
+    
+    LOG_CLIENT_INFO("Finding peers for content hash: " << content_hash);
+    
+    InfoHash info_hash = hex_to_node_id(content_hash);
+    
+    return dht_client_->find_peers(info_hash, [this, callback](const std::vector<UdpPeer>& peers, const InfoHash& info_hash) {
+        handle_dht_peer_discovery(peers, info_hash);
+        
+        // Convert UdpPeer to string addresses for callback
+        std::vector<std::string> peer_addresses;
+        for (const auto& peer : peers) {
+            peer_addresses.push_back(peer.ip + ":" + std::to_string(peer.port));
+        }
+        
+        if (callback) {
+            callback(peer_addresses);
+        }
+    });
+}
+
+bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t port) {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_CLIENT_ERROR("DHT client not running");
+        return false;
+    }
+    
+    if (content_hash.length() != 40) {  // 160-bit hash as hex string
+        LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected 40)");
+        return false;
+    }
+    
+    if (port == 0) {
+        port = listen_port_;
+    }
+    
+    LOG_CLIENT_INFO("Announcing for content hash: " << content_hash << " on port " << port);
+    
+    InfoHash info_hash = hex_to_node_id(content_hash);
+    return dht_client_->announce_peer(info_hash, port);
+}
+
+bool RatsClient::is_dht_running() const {
+    return dht_client_ && dht_client_->is_running();
+}
+
+size_t RatsClient::get_dht_routing_table_size() const {
+    if (!dht_client_) {
+        return 0;
+    }
+    return dht_client_->get_routing_table_size();
+}
+
+void RatsClient::handle_dht_peer_discovery(const std::vector<UdpPeer>& peers, const InfoHash& info_hash) {
+    LOG_CLIENT_INFO("DHT discovered " << peers.size() << " peers for info hash: " << node_id_to_hex(info_hash));
+    
+    // Auto-connect to discovered peers (optional behavior)
+    for (const auto& peer : peers) {
+        if (peer.port != listen_port_ || peer.ip != "127.0.0.1") {  // Don't connect to ourselves
+            LOG_CLIENT_DEBUG("Attempting to connect to discovered peer: " << peer.ip << ":" << peer.port);
+            
+            // Try to connect to the peer
+            connect_to_peer(peer.ip, peer.port);
+        }
+    }
 }
 
 void RatsClient::server_loop() {
