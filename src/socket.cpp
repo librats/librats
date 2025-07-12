@@ -37,6 +37,28 @@ void cleanup_socket_library() {
 
 // TCP Socket Functions
 socket_t create_tcp_client(const std::string& host, int port) {
+    LOG_SOCKET_DEBUG("Creating TCP client socket (dual stack) for " << host << ":" << port);
+    
+    // Try IPv6 first
+    socket_t client_socket = create_tcp_client_v6(host, port);
+    if (client_socket != INVALID_SOCKET_VALUE) {
+        LOG_SOCKET_INFO("Successfully connected using IPv6");
+        return client_socket;
+    }
+    
+    // Fall back to IPv4
+    LOG_SOCKET_DEBUG("IPv6 connection failed, trying IPv4");
+    client_socket = create_tcp_client_v4(host, port);
+    if (client_socket != INVALID_SOCKET_VALUE) {
+        LOG_SOCKET_INFO("Successfully connected using IPv4");
+        return client_socket;
+    }
+    
+    LOG_SOCKET_ERROR("Failed to connect using both IPv6 and IPv4");
+    return INVALID_SOCKET_VALUE;
+}
+
+socket_t create_tcp_client_v4(const std::string& host, int port) {
     LOG_SOCKET_DEBUG("Creating TCP client socket for " << host << ":" << port);
     
     socket_t client_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -118,29 +140,57 @@ socket_t create_tcp_client_v6(const std::string& host, int port) {
     return client_socket;
 }
 
-socket_t create_tcp_client_dual(const std::string& host, int port) {
-    LOG_SOCKET_DEBUG("Creating TCP client socket (dual stack) for " << host << ":" << port);
+socket_t create_tcp_server(int port, int backlog) {
+    LOG_SOCKET_DEBUG("Creating TCP server socket (dual stack) on port " << port);
     
-    // Try IPv6 first
-    socket_t client_socket = create_tcp_client_v6(host, port);
-    if (client_socket != INVALID_SOCKET_VALUE) {
-        LOG_SOCKET_INFO("Successfully connected using IPv6");
-        return client_socket;
+    socket_t server_socket = socket(AF_INET6, SOCK_STREAM, 0);
+    if (server_socket == INVALID_SOCKET_VALUE) {
+        LOG_SOCKET_ERROR("Failed to create dual stack server socket");
+        return INVALID_SOCKET_VALUE;
     }
-    
-    // Fall back to IPv4
-    LOG_SOCKET_DEBUG("IPv6 connection failed, trying IPv4");
-    client_socket = create_tcp_client(host, port);
-    if (client_socket != INVALID_SOCKET_VALUE) {
-        LOG_SOCKET_INFO("Successfully connected using IPv4");
-        return client_socket;
+
+    // Set socket option to reuse address
+    int opt = 1;
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, 
+                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
+        LOG_SOCKET_ERROR("Failed to set dual stack socket options");
+        close_socket(server_socket);
+        return INVALID_SOCKET_VALUE;
     }
-    
-    LOG_SOCKET_ERROR("Failed to connect using both IPv6 and IPv4");
-    return INVALID_SOCKET_VALUE;
+
+    // Disable IPv6-only mode to allow IPv4 connections
+    int ipv6_only = 0;
+    if (setsockopt(server_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                   (char*)&ipv6_only, sizeof(ipv6_only)) == SOCKET_ERROR_VALUE) {
+        LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
+    }
+
+    sockaddr_in6 server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin6_family = AF_INET6;
+    server_addr.sin6_addr = in6addr_any;
+    server_addr.sin6_port = htons(port);
+
+    // Bind socket to address
+    LOG_SOCKET_DEBUG("Binding dual stack server socket to port " << port);
+    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
+        LOG_SOCKET_ERROR("Failed to bind dual stack server socket to port " << port);
+        close_socket(server_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Listen for connections
+    if (listen(server_socket, backlog) == SOCKET_ERROR_VALUE) {
+        LOG_SOCKET_ERROR("Failed to listen on dual stack server socket");
+        close_socket(server_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    LOG_SOCKET_INFO("Dual stack server listening on port " << port << " (backlog: " << backlog << ")");
+    return server_socket;
 }
 
-socket_t create_tcp_server(int port, int backlog) {
+socket_t create_tcp_server_v4(int port, int backlog) {
     LOG_SOCKET_DEBUG("Creating TCP server socket on port " << port);
     
     socket_t server_socket = socket(AF_INET, SOCK_STREAM, 0);
@@ -226,56 +276,6 @@ socket_t create_tcp_server_v6(int port, int backlog) {
     return server_socket;
 }
 
-socket_t create_tcp_server_dual(int port, int backlog) {
-    LOG_SOCKET_DEBUG("Creating TCP server socket (dual stack) on port " << port);
-    
-    socket_t server_socket = socket(AF_INET6, SOCK_STREAM, 0);
-    if (server_socket == INVALID_SOCKET_VALUE) {
-        LOG_SOCKET_ERROR("Failed to create dual stack server socket");
-        return INVALID_SOCKET_VALUE;
-    }
-
-    // Set socket option to reuse address
-    int opt = 1;
-    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, 
-                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_ERROR("Failed to set dual stack socket options");
-        close_socket(server_socket);
-        return INVALID_SOCKET_VALUE;
-    }
-
-    // Disable IPv6-only mode to allow IPv4 connections
-    int ipv6_only = 0;
-    if (setsockopt(server_socket, IPPROTO_IPV6, IPV6_V6ONLY,
-                   (char*)&ipv6_only, sizeof(ipv6_only)) == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
-    }
-
-    sockaddr_in6 server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin6_family = AF_INET6;
-    server_addr.sin6_addr = in6addr_any;
-    server_addr.sin6_port = htons(port);
-
-    // Bind socket to address
-    LOG_SOCKET_DEBUG("Binding dual stack server socket to port " << port);
-    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_ERROR("Failed to bind dual stack server socket to port " << port);
-        close_socket(server_socket);
-        return INVALID_SOCKET_VALUE;
-    }
-
-    // Listen for connections
-    if (listen(server_socket, backlog) == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_ERROR("Failed to listen on dual stack server socket");
-        close_socket(server_socket);
-        return INVALID_SOCKET_VALUE;
-    }
-
-    LOG_SOCKET_INFO("Dual stack server listening on port " << port << " (backlog: " << backlog << ")");
-    return server_socket;
-}
-
 socket_t accept_client(socket_t server_socket) {
     sockaddr_storage client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
@@ -343,6 +343,50 @@ std::string receive_tcp_data(socket_t socket, size_t buffer_size) {
 
 // UDP Socket Functions
 socket_t create_udp_socket(int port) {
+    LOG_SOCKET_DEBUG("Creating dual stack UDP socket on port " << port);
+    
+    socket_t udp_socket = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (udp_socket == INVALID_SOCKET_VALUE) {
+        LOG_SOCKET_ERROR("Failed to create dual stack UDP socket");
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Set socket option to reuse address
+    int opt = 1;
+    if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR, 
+                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
+        LOG_SOCKET_ERROR("Failed to set dual stack UDP socket options");
+        close_socket(udp_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Disable IPv6-only mode to allow IPv4 connections
+    int ipv6_only = 0;
+    if (setsockopt(udp_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                   (char*)&ipv6_only, sizeof(ipv6_only)) == SOCKET_ERROR_VALUE) {
+        LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
+    }
+
+    if (port > 0) {
+        sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr = in6addr_any;
+        addr.sin6_port = htons(port);
+
+        if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
+            LOG_SOCKET_ERROR("Failed to bind dual stack UDP socket to port " << port);
+            close_socket(udp_socket);
+            return INVALID_SOCKET_VALUE;
+        }
+        
+        LOG_SOCKET_INFO("Dual stack UDP socket bound to port " << port);
+    }
+
+    return udp_socket;
+}
+
+socket_t create_udp_socket_v4(int port) {
     LOG_SOCKET_DEBUG("Creating UDP socket on port " << port);
     
     socket_t udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
@@ -416,49 +460,7 @@ socket_t create_udp_socket_v6(int port) {
     return udp_socket;
 }
 
-socket_t create_udp_socket_dual(int port) {
-    LOG_SOCKET_DEBUG("Creating dual stack UDP socket on port " << port);
-    
-    socket_t udp_socket = socket(AF_INET6, SOCK_DGRAM, 0);
-    if (udp_socket == INVALID_SOCKET_VALUE) {
-        LOG_SOCKET_ERROR("Failed to create dual stack UDP socket");
-        return INVALID_SOCKET_VALUE;
-    }
 
-    // Set socket option to reuse address
-    int opt = 1;
-    if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR, 
-                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_ERROR("Failed to set dual stack UDP socket options");
-        close_socket(udp_socket);
-        return INVALID_SOCKET_VALUE;
-    }
-
-    // Disable IPv6-only mode to allow IPv4 connections
-    int ipv6_only = 0;
-    if (setsockopt(udp_socket, IPPROTO_IPV6, IPV6_V6ONLY,
-                   (char*)&ipv6_only, sizeof(ipv6_only)) == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
-    }
-
-    if (port > 0) {
-        sockaddr_in6 addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin6_family = AF_INET6;
-        addr.sin6_addr = in6addr_any;
-        addr.sin6_port = htons(port);
-
-        if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
-            LOG_SOCKET_ERROR("Failed to bind dual stack UDP socket to port " << port);
-            close_socket(udp_socket);
-            return INVALID_SOCKET_VALUE;
-        }
-        
-        LOG_SOCKET_INFO("Dual stack UDP socket bound to port " << port);
-    }
-
-    return udp_socket;
-}
 
 int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const UdpPeer& peer) {
     LOG_SOCKET_DEBUG("Sending " << data.size() << " bytes to " << peer.ip << ":" << peer.port);
@@ -627,15 +629,6 @@ bool set_socket_nonblocking(socket_t socket) {
     
     LOG_SOCKET_DEBUG("Socket set to non-blocking mode");
     return true;
-}
-
-// Legacy compatibility functions
-int send_data(socket_t socket, const std::string& data) {
-    return send_tcp_data(socket, data);
-}
-
-std::string receive_data(socket_t socket, size_t buffer_size) {
-    return receive_tcp_data(socket, buffer_size);
 }
 
 } // namespace librats 

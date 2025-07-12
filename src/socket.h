@@ -54,7 +54,7 @@ void cleanup_socket_library();
 
 // TCP Socket Functions
 /**
- * Create a TCP client socket and connect to a server
+ * Create a TCP client socket and connect to a server using dual stack (IPv6 with IPv4 fallback)
  * @param host The hostname or IP address to connect to
  * @param port The port number to connect to
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
@@ -62,7 +62,15 @@ void cleanup_socket_library();
 socket_t create_tcp_client(const std::string& host, int port);
 
 /**
- * Create a TCP client socket and connect to a server using IPv6
+ * Create a TCP client socket and connect to a server using IPv4 only
+ * @param host The hostname or IP address to connect to
+ * @param port The port number to connect to
+ * @return Socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_tcp_client_v4(const std::string& host, int port);
+
+/**
+ * Create a TCP client socket and connect to a server using IPv6 only
  * @param host The hostname or IPv6 address to connect to
  * @param port The port number to connect to
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
@@ -70,15 +78,7 @@ socket_t create_tcp_client(const std::string& host, int port);
 socket_t create_tcp_client_v6(const std::string& host, int port);
 
 /**
- * Create a TCP client socket and connect to a server using dual stack (try IPv6 first, then IPv4)
- * @param host The hostname or IP address to connect to
- * @param port The port number to connect to
- * @return Socket handle, or INVALID_SOCKET_VALUE on error
- */
-socket_t create_tcp_client_dual(const std::string& host, int port);
-
-/**
- * Create a TCP server socket and bind to a port
+ * Create a TCP server socket and bind to a port using dual stack (IPv6 with IPv4 support)
  * @param port The port number to bind to
  * @param backlog The maximum number of pending connections
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
@@ -86,20 +86,20 @@ socket_t create_tcp_client_dual(const std::string& host, int port);
 socket_t create_tcp_server(int port, int backlog = 5);
 
 /**
- * Create a TCP server socket and bind to a port using IPv6
+ * Create a TCP server socket and bind to a port using IPv4 only
+ * @param port The port number to bind to
+ * @param backlog The maximum number of pending connections
+ * @return Socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_tcp_server_v4(int port, int backlog = 5);
+
+/**
+ * Create a TCP server socket and bind to a port using IPv6 only
  * @param port The port number to bind to
  * @param backlog The maximum number of pending connections
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
  */
 socket_t create_tcp_server_v6(int port, int backlog = 5);
-
-/**
- * Create a TCP server socket and bind to a port using dual stack (IPv6 with IPv4 fallback)
- * @param port The port number to bind to
- * @param backlog The maximum number of pending connections
- * @return Socket handle, or INVALID_SOCKET_VALUE on error
- */
-socket_t create_tcp_server_dual(int port, int backlog = 5);
 
 /**
  * Accept a client connection on a server socket
@@ -126,25 +126,25 @@ std::string receive_tcp_data(socket_t socket, size_t buffer_size = 1024);
 
 // UDP Socket Functions
 /**
- * Create a UDP socket
+ * Create a UDP socket with dual stack support (IPv6 with IPv4 support)
  * @param port The port to bind to (0 for any available port)
  * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
  */
 socket_t create_udp_socket(int port = 0);
 
 /**
- * Create a UDP socket with IPv6 support
+ * Create a UDP socket with IPv4 support only
+ * @param port The port to bind to (0 for any available port)
+ * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_udp_socket_v4(int port = 0);
+
+/**
+ * Create a UDP socket with IPv6 support only
  * @param port The port to bind to (0 for any available port)
  * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
  */
 socket_t create_udp_socket_v6(int port = 0);
-
-/**
- * Create a UDP socket with dual stack support (IPv6 with IPv4 fallback)
- * @param port The port to bind to (0 for any available port)
- * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
- */
-socket_t create_udp_socket_dual(int port = 0);
 
 /**
  * Send UDP data to a peer
@@ -184,16 +184,5 @@ bool is_valid_socket(socket_t socket);
  * @return true if successful, false otherwise
  */
 bool set_socket_nonblocking(socket_t socket);
-
-// Legacy compatibility functions (deprecated - use send_tcp_data/receive_tcp_data instead)
-/**
- * @deprecated Use send_tcp_data instead
- */
-int send_data(socket_t socket, const std::string& data);
-
-/**
- * @deprecated Use receive_tcp_data instead
- */
-std::string receive_data(socket_t socket, size_t buffer_size = 1024);
 
 } // namespace librats 

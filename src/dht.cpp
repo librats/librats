@@ -43,7 +43,7 @@ bool DhtClient::start() {
     
     LOG_DHT_INFO("Starting DHT client on port " << port_);
     
-    socket_ = create_udp_socket_dual(port_);
+    socket_ = create_udp_socket(port_);
     if (!is_valid_socket(socket_)) {
         LOG_DHT_ERROR("Failed to create dual-stack UDP socket");
         return false;

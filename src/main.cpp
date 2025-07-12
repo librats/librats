@@ -259,7 +259,7 @@ int main(int argc, char* argv[]) {
                 LOG_MAIN_INFO("Connecting to " << host << ":" << port << " using dual stack...");
                 
                 // Test dual stack connection using low-level API
-                socket_t test_socket = librats::create_tcp_client_dual(host, port);
+                socket_t test_socket = librats::create_tcp_client(host, port);
                 if (test_socket != INVALID_SOCKET_VALUE) {
                     LOG_MAIN_INFO("Dual stack connection successful!");
                     librats::close_socket(test_socket);
@@ -436,7 +436,7 @@ int main(int argc, char* argv[]) {
                 
                 // Test dual stack TCP client
                 LOG_MAIN_INFO("Testing dual stack TCP client...");
-                socket_t dual_socket = librats::create_tcp_client_dual(host, port);
+                socket_t dual_socket = librats::create_tcp_client(host, port);
                 if (dual_socket != INVALID_SOCKET_VALUE) {
                     LOG_MAIN_INFO("Dual stack TCP connection successful!");
                     librats::close_socket(dual_socket);
@@ -456,7 +456,7 @@ int main(int argc, char* argv[]) {
                 
                 // Test dual stack UDP socket
                 LOG_MAIN_INFO("Testing dual stack UDP socket...");
-                socket_t dual_udp_socket = librats::create_udp_socket_dual(0);
+                socket_t dual_udp_socket = librats::create_udp_socket(0);
                 if (librats::is_valid_socket(dual_udp_socket)) {
                     LOG_MAIN_INFO("Dual stack UDP socket creation successful!");
                     librats::close_socket(dual_udp_socket);

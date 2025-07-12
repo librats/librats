@@ -95,7 +95,7 @@ bool RatsClient::start() {
     init_socket_library();
     
     // Create dual-stack server socket (supports both IPv4 and IPv6)
-    server_socket_ = create_tcp_server_dual(listen_port_);
+            server_socket_ = create_tcp_server(listen_port_);
     if (!is_valid_socket(server_socket_)) {
         LOG_CLIENT_ERROR("Failed to create dual-stack server socket on port " << listen_port_);
         return false;
@@ -166,7 +166,7 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     }
     
     LOG_CLIENT_INFO("Connecting to peer " << host << ":" << port);
-    socket_t peer_socket = create_tcp_client_dual(host, port);
+            socket_t peer_socket = create_tcp_client(host, port);
     if (!is_valid_socket(peer_socket)) {
         LOG_CLIENT_ERROR("Failed to connect to peer " << host << ":" << port);
         return false;
@@ -200,7 +200,7 @@ bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
         return false;
     }
     
-    int sent = send_data(socket, data);
+    int sent = send_tcp_data(socket, data);
     return sent > 0;
 }
 
@@ -420,7 +420,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     LOG_CLIENT_INFO("Started handling client: " << peer_hash_id);
     
     while (running_.load()) {
-        std::string data = receive_data(client_socket);
+        std::string data = receive_tcp_data(client_socket);
         if (data.empty()) {
             break; // Connection closed or error
         }
