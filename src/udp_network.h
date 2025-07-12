@@ -8,11 +8,13 @@
     #include <winsock2.h>
     #include <ws2tcpip.h>
     typedef SOCKET udp_socket_t;
+    #define INVALID_UDP_SOCKET INVALID_SOCKET
 #else
     #include <sys/socket.h>
     #include <arpa/inet.h>
     #include <netinet/in.h>
     typedef int udp_socket_t;
+    #define INVALID_UDP_SOCKET -1
 #endif
 
 namespace librats {

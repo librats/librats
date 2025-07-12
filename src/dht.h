@@ -152,12 +152,12 @@ private:
     std::vector<std::vector<DhtNode>> routing_table_;
     mutable std::mutex routing_table_mutex_;
     
-    // Active searches
-    std::unordered_map<InfoHash, PeerDiscoveryCallback> active_searches_;
+    // Active searches (use string keys instead of InfoHash to avoid hash conflicts)
+    std::unordered_map<std::string, PeerDiscoveryCallback> active_searches_;
     std::mutex active_searches_mutex_;
     
-    // Tokens for peers
-    std::unordered_map<UdpPeer, std::string> peer_tokens_;
+    // Tokens for peers (use string key instead of UdpPeer for simplicity)
+    std::unordered_map<std::string, std::string> peer_tokens_;
     std::mutex peer_tokens_mutex_;
     
     // Network thread
@@ -229,4 +229,15 @@ NodeId hex_to_node_id(const std::string& hex);
  */
 std::string node_id_to_hex(const NodeId& id);
 
-} // namespace librats 
+} // namespace librats
+
+// Hash specialization for UdpPeer only (InfoHash uses std::array's built-in hash)
+namespace std {
+    template<>
+    struct hash<librats::UdpPeer> {
+        std::size_t operator()(const librats::UdpPeer& peer) const {
+            std::hash<std::string> hasher;
+            return hasher(peer.ip + ":" + std::to_string(peer.port));
+        }
+    };
+} 

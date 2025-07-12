@@ -28,9 +28,9 @@ udp_socket_t create_udp_socket(int port) {
     LOG_UDP_DEBUG("Creating UDP socket on port " << port);
     
     udp_socket_t udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp_socket == INVALID_SOCKET_VALUE) {
+    if (udp_socket == INVALID_UDP_SOCKET) {
         LOG_UDP_ERROR("Failed to create UDP socket");
-        return INVALID_SOCKET_VALUE;
+        return INVALID_UDP_SOCKET;
     }
 
     // Set socket option to reuse address
@@ -123,7 +123,7 @@ void close_udp_socket(udp_socket_t socket) {
 }
 
 bool is_valid_udp_socket(udp_socket_t socket) {
-    return socket != INVALID_SOCKET_VALUE;
+    return socket != INVALID_UDP_SOCKET;
 }
 
 bool set_udp_socket_nonblocking(udp_socket_t socket) {

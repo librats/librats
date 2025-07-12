@@ -7,6 +7,14 @@
 #include <cstring>
 #include <cmath>
 
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+#else
+    #include <arpa/inet.h>
+    #include <netinet/in.h>
+#endif
+
 // DHT module logging macros
 #define LOG_DHT_DEBUG(message) LOG_DEBUG("dht", message)
 #define LOG_DHT_INFO(message)  LOG_INFO("dht", message)
@@ -15,48 +23,8 @@
 
 namespace librats {
 
-// Hash function for UdpPeer
-struct UdpPeerHash {
-    std::size_t operator()(const UdpPeer& peer) const {
-        std::hash<std::string> hasher;
-        return hasher(peer.ip + ":" + std::to_string(peer.port));
-    }
-};
-
-// Hash function for InfoHash
-struct InfoHashHash {
-    std::size_t operator()(const InfoHash& hash) const {
-        std::size_t result = 0;
-        for (size_t i = 0; i < NODE_ID_SIZE; ++i) {
-            result ^= std::hash<uint8_t>{}(hash[i]) + 0x9e3779b9 + (result << 6) + (result >> 2);
-        }
-        return result;
-    }
-};
-
-} // namespace librats
-
-// Specialize std::hash for UdpPeer and InfoHash
-namespace std {
-template<>
-struct hash<librats::UdpPeer> {
-    std::size_t operator()(const librats::UdpPeer& peer) const {
-        return librats::UdpPeerHash{}(peer);
-    }
-};
-
-template<>
-struct hash<librats::InfoHash> {
-    std::size_t operator()(const librats::InfoHash& hash) const {
-        return librats::InfoHashHash{}(hash);
-    }
-};
-} // namespace std
-
-namespace librats {
-
 DhtClient::DhtClient(int port) 
-    : port_(port), socket_(INVALID_SOCKET_VALUE), running_(false) {
+    : port_(port), socket_(INVALID_UDP_SOCKET), running_(false) {
     node_id_ = generate_node_id();
     routing_table_.resize(NODE_ID_SIZE * 8);  // 160 buckets for 160-bit node IDs
     
@@ -113,7 +81,7 @@ void DhtClient::stop() {
     // Close socket
     if (is_valid_udp_socket(socket_)) {
         close_udp_socket(socket_);
-        socket_ = INVALID_SOCKET_VALUE;
+        socket_ = INVALID_UDP_SOCKET;
     }
     
     LOG_DHT_INFO("DHT client stopped");
@@ -150,7 +118,8 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
     
     {
         std::lock_guard<std::mutex> lock(active_searches_mutex_);
-        active_searches_[info_hash] = callback;
+        std::string hash_key = node_id_to_hex(info_hash);
+        active_searches_[hash_key] = callback;
     }
     
     // Start search by querying closest nodes
@@ -599,11 +568,25 @@ std::string DhtClient::generate_token(const UdpPeer& peer) {
     // Convert hash to hex string
     std::ostringstream oss;
     oss << std::hex << hash;
+    
+    // Store token for this peer
+    std::string peer_key = peer.ip + ":" + std::to_string(peer.port);
+    {
+        std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
+        peer_tokens_[peer_key] = oss.str();
+    }
+    
     return oss.str();
 }
 
 bool DhtClient::verify_token(const UdpPeer& peer, const std::string& token) {
-    return token == generate_token(peer);
+    std::string peer_key = peer.ip + ":" + std::to_string(peer.port);
+    std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
+    auto it = peer_tokens_.find(peer_key);
+    if (it != peer_tokens_.end()) {
+        return it->second == token;
+    }
+    return false;
 }
 
 void DhtClient::cleanup_stale_nodes() {
