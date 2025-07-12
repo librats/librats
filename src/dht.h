@@ -1,6 +1,7 @@
 #pragma once
 
 #include "udp_network.h"
+#include "krpc.h"
 #include <string>
 #include <vector>
 #include <array>
@@ -160,6 +161,19 @@ private:
     std::unordered_map<std::string, std::string> peer_tokens_;
     std::mutex peer_tokens_mutex_;
     
+    // Protocol detection - track which protocol each peer uses
+    enum class PeerProtocol {
+        Unknown,
+        RatsDht,    // Our rats dht binary protocol
+        BitTorrent  // Standard BitTorrent DHT (KRPC)
+    };
+    std::unordered_map<std::string, PeerProtocol> peer_protocols_;
+    std::mutex peer_protocols_mutex_;
+    
+    // KRPC transaction tracking
+    std::unordered_map<std::string, std::string> krpc_transactions_;
+    std::mutex krpc_transactions_mutex_;
+    
     // Network thread
     std::thread network_thread_;
     std::thread maintenance_thread_;
@@ -168,19 +182,45 @@ private:
     void network_loop();
     void maintenance_loop();
     void handle_message(const std::vector<uint8_t>& data, const UdpPeer& sender);
+    
+    // Protocol detection
+    PeerProtocol detect_protocol(const std::vector<uint8_t>& data);
+    std::string get_peer_key(const UdpPeer& peer);
+    PeerProtocol get_peer_protocol(const UdpPeer& peer);
+    void set_peer_protocol(const UdpPeer& peer, PeerProtocol protocol);
+    
+    // Rats DHT protocol handlers
     void handle_ping(const DhtMessage& message, const UdpPeer& sender);
     void handle_find_node(const DhtMessage& message, const UdpPeer& sender);
     void handle_get_peers(const DhtMessage& message, const UdpPeer& sender);
     void handle_announce_peer(const DhtMessage& message, const UdpPeer& sender);
     
+    // KRPC protocol handlers  
+    void handle_krpc_message(const KrpcMessage& message, const UdpPeer& sender);
+    void handle_krpc_ping(const KrpcMessage& message, const UdpPeer& sender);
+    void handle_krpc_find_node(const KrpcMessage& message, const UdpPeer& sender);
+    void handle_krpc_get_peers(const KrpcMessage& message, const UdpPeer& sender);
+    void handle_krpc_announce_peer(const KrpcMessage& message, const UdpPeer& sender);
+    void handle_krpc_response(const KrpcMessage& message, const UdpPeer& sender);
+    void handle_krpc_error(const KrpcMessage& message, const UdpPeer& sender);
+    
+    // Sending functions (will auto-detect protocol)
     void send_ping(const UdpPeer& peer);
     void send_find_node(const UdpPeer& peer, const NodeId& target);
     void send_get_peers(const UdpPeer& peer, const InfoHash& info_hash);
     void send_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
     
+    // Rats DHT protocol sending
     bool send_message(const DhtMessage& message, const UdpPeer& peer);
     std::vector<uint8_t> encode_message(const DhtMessage& message);
     std::unique_ptr<DhtMessage> decode_message(const std::vector<uint8_t>& data);
+    
+    // KRPC protocol sending
+    bool send_krpc_message(const KrpcMessage& message, const UdpPeer& peer);
+    void send_krpc_ping(const UdpPeer& peer);
+    void send_krpc_find_node(const UdpPeer& peer, const NodeId& target);
+    void send_krpc_get_peers(const UdpPeer& peer, const InfoHash& info_hash);
+    void send_krpc_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
     
     void add_node(const DhtNode& node);
     std::vector<DhtNode> find_closest_nodes(const NodeId& target, size_t count = K_BUCKET_SIZE);
@@ -195,6 +235,12 @@ private:
     
     void cleanup_stale_nodes();
     void refresh_buckets();
+    
+    // Conversion utilities
+    static KrpcNode dht_node_to_krpc_node(const DhtNode& node);
+    static DhtNode krpc_node_to_dht_node(const KrpcNode& node);
+    static std::vector<KrpcNode> dht_nodes_to_krpc_nodes(const std::vector<DhtNode>& nodes);
+    static std::vector<DhtNode> krpc_nodes_to_dht_nodes(const std::vector<KrpcNode>& nodes);
 };
 
 /**

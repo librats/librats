@@ -14,6 +14,10 @@ add_library(librats
     src/network_utils.h
     src/dht.cpp
     src/dht.h
+    src/bencode.cpp
+    src/bencode.h
+    src/krpc.cpp
+    src/krpc.h
     src/librats.cpp
     src/librats.h
     src/logger.h

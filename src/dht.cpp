@@ -219,35 +219,57 @@ void DhtClient::maintenance_loop() {
 void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& sender) {
     LOG_DHT_DEBUG("Processing message of " << data.size() << " bytes from " << sender.ip << ":" << sender.port);
     
-    auto message = decode_message(data);
-    if (!message) {
-        LOG_DHT_WARN("Failed to decode message from " << sender.ip << ":" << sender.port);
-        return;
-    }
+    // Detect protocol
+    PeerProtocol protocol = detect_protocol(data);
     
-    LOG_DHT_DEBUG("Received message type " << static_cast<int>(message->type) << " from " << node_id_to_hex(message->sender_id) << " at " << sender.ip << ":" << sender.port);
-    
-    // Add sender to routing table
-    DhtNode sender_node(message->sender_id, sender);
-    LOG_DHT_DEBUG("Adding/updating node " << node_id_to_hex(message->sender_id) << " in routing table");
-    add_node(sender_node);
-    
-    switch (message->type) {
-        case DhtMessageType::PING:
-            handle_ping(*message, sender);
-            break;
-        case DhtMessageType::FIND_NODE:
-            handle_find_node(*message, sender);
-            break;
-        case DhtMessageType::GET_PEERS:
-            handle_get_peers(*message, sender);
-            break;
-        case DhtMessageType::ANNOUNCE_PEER:
-            handle_announce_peer(*message, sender);
-            break;
-        default:
-            LOG_DHT_WARN("Unknown message type " << static_cast<int>(message->type) << " from " << sender.ip << ":" << sender.port);
-            break;
+    if (protocol == PeerProtocol::BitTorrent) {
+        LOG_DHT_DEBUG("Detected BitTorrent DHT (KRPC) protocol from " << sender.ip << ":" << sender.port);
+        set_peer_protocol(sender, PeerProtocol::BitTorrent);
+        
+        // Handle KRPC message
+        auto krpc_message = KrpcProtocol::decode_message(data);
+        if (!krpc_message) {
+            LOG_DHT_WARN("Failed to decode KRPC message from " << sender.ip << ":" << sender.port);
+            return;
+        }
+        
+        handle_krpc_message(*krpc_message, sender);
+    } else {
+        LOG_DHT_DEBUG("Using rats dht protocol or attempting fallback from " << sender.ip << ":" << sender.port);
+        
+        // Try rats dht protocol first
+        auto rats_dht_message = decode_message(data);
+        if (rats_dht_message) {
+            LOG_DHT_DEBUG("Decoded rats dht protocol message from " << sender.ip << ":" << sender.port);
+            set_peer_protocol(sender, PeerProtocol::RatsDht);
+            
+            LOG_DHT_DEBUG("Received message type " << static_cast<int>(rats_dht_message->type) << " from " << node_id_to_hex(rats_dht_message->sender_id) << " at " << sender.ip << ":" << sender.port);
+            
+            // Add sender to routing table
+            DhtNode sender_node(rats_dht_message->sender_id, sender);
+            LOG_DHT_DEBUG("Adding/updating node " << node_id_to_hex(rats_dht_message->sender_id) << " in routing table");
+            add_node(sender_node);
+            
+            switch (rats_dht_message->type) {
+                case DhtMessageType::PING:
+                    handle_ping(*rats_dht_message, sender);
+                    break;
+                case DhtMessageType::FIND_NODE:
+                    handle_find_node(*rats_dht_message, sender);
+                    break;
+                case DhtMessageType::GET_PEERS:
+                    handle_get_peers(*rats_dht_message, sender);
+                    break;
+                case DhtMessageType::ANNOUNCE_PEER:
+                    handle_announce_peer(*rats_dht_message, sender);
+                    break;
+                default:
+                    LOG_DHT_WARN("Unknown message type " << static_cast<int>(rats_dht_message->type) << " from " << sender.ip << ":" << sender.port);
+                    break;
+            }
+        } else {
+            LOG_DHT_WARN("Failed to decode message from " << sender.ip << ":" << sender.port << " with any protocol");
+        }
     }
 }
 
@@ -308,34 +330,7 @@ void DhtClient::handle_announce_peer(const DhtMessage& message, const UdpPeer& s
     send_message(response, sender);
 }
 
-void DhtClient::send_ping(const UdpPeer& peer) {
-    LOG_DHT_DEBUG("Sending PING to " << peer.ip << ":" << peer.port);
-    DhtMessage message(DhtMessageType::PING, node_id_);
-    send_message(message, peer);
-}
 
-void DhtClient::send_find_node(const UdpPeer& peer, const NodeId& target) {
-    LOG_DHT_DEBUG("Sending FIND_NODE to " << peer.ip << ":" << peer.port << " for target " << node_id_to_hex(target));
-    DhtMessage message(DhtMessageType::FIND_NODE, node_id_);
-    message.target_id = target;
-    send_message(message, peer);
-}
-
-void DhtClient::send_get_peers(const UdpPeer& peer, const InfoHash& info_hash) {
-    LOG_DHT_DEBUG("Sending GET_PEERS to " << peer.ip << ":" << peer.port << " for info_hash " << node_id_to_hex(info_hash));
-    DhtMessage message(DhtMessageType::GET_PEERS, node_id_);
-    message.target_id = info_hash;
-    send_message(message, peer);
-}
-
-void DhtClient::send_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
-    LOG_DHT_DEBUG("Sending ANNOUNCE_PEER to " << peer.ip << ":" << peer.port << " for info_hash " << node_id_to_hex(info_hash) << " on port " << port);
-    DhtMessage message(DhtMessageType::ANNOUNCE_PEER, node_id_);
-    message.target_id = info_hash;
-    message.announce_port = port;
-    message.token = token;
-    send_message(message, peer);
-}
 
 bool DhtClient::send_message(const DhtMessage& message, const UdpPeer& peer) {
     LOG_DHT_DEBUG("Encoding message type " << static_cast<int>(message.type) << " for " << peer.ip << ":" << peer.port);
@@ -708,6 +703,318 @@ int DhtClient::get_bucket_index(const NodeId& id) {
     }
     
     return NODE_ID_SIZE * 8 - 1;  // All bits are 0, maximum distance
+}
+
+// Protocol detection and management
+DhtClient::PeerProtocol DhtClient::detect_protocol(const std::vector<uint8_t>& data) {
+    if (data.empty()) {
+        return PeerProtocol::Unknown;
+    }
+    
+    // Check for KRPC (bencode) format
+    // KRPC messages start with 'd' (dictionary) and contain specific keys
+    if (data[0] == 'd') {
+        try {
+            auto decoded = bencode::decode(data);
+            if (decoded.is_dict() && decoded.has_key("y") && decoded.has_key("t")) {
+                // This looks like a valid KRPC message
+                return PeerProtocol::BitTorrent;
+            }
+        } catch (const std::exception&) {
+            // Not valid bencode, fall through to custom protocol
+        }
+    }
+    
+    // Check for our rats dht protocol format
+    // Our rats dht messages have specific structure: type (1 byte) + sender_id (20 bytes) + target_id (20 bytes) + ...
+    if (data.size() >= 41 && data[0] <= 3) { // Message type 0-3
+        return PeerProtocol::RatsDht;
+    }
+    
+    return PeerProtocol::Unknown;
+}
+
+std::string DhtClient::get_peer_key(const UdpPeer& peer) {
+    return peer.ip + ":" + std::to_string(peer.port);
+}
+
+DhtClient::PeerProtocol DhtClient::get_peer_protocol(const UdpPeer& peer) {
+    std::lock_guard<std::mutex> lock(peer_protocols_mutex_);
+    std::string key = get_peer_key(peer);
+    auto it = peer_protocols_.find(key);
+    if (it != peer_protocols_.end()) {
+        return it->second;
+    }
+    return PeerProtocol::Unknown;
+}
+
+void DhtClient::set_peer_protocol(const UdpPeer& peer, PeerProtocol protocol) {
+    std::lock_guard<std::mutex> lock(peer_protocols_mutex_);
+    std::string key = get_peer_key(peer);
+    peer_protocols_[key] = protocol;
+}
+
+// KRPC message handling
+void DhtClient::handle_krpc_message(const KrpcMessage& message, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Handling KRPC message type " << static_cast<int>(message.type) << " from " << sender.ip << ":" << sender.port);
+    
+    switch (message.type) {
+        case KrpcMessageType::Query:
+            switch (message.query_type) {
+                case KrpcQueryType::Ping:
+                    handle_krpc_ping(message, sender);
+                    break;
+                case KrpcQueryType::FindNode:
+                    handle_krpc_find_node(message, sender);
+                    break;
+                case KrpcQueryType::GetPeers:
+                    handle_krpc_get_peers(message, sender);
+                    break;
+                case KrpcQueryType::AnnouncePeer:
+                    handle_krpc_announce_peer(message, sender);
+                    break;
+            }
+            break;
+        case KrpcMessageType::Response:
+            handle_krpc_response(message, sender);
+            break;
+        case KrpcMessageType::Error:
+            handle_krpc_error(message, sender);
+            break;
+    }
+}
+
+void DhtClient::handle_krpc_ping(const KrpcMessage& message, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Handling KRPC PING from " << KrpcProtocol::node_id_to_string(message.sender_id) << " at " << sender.ip << ":" << sender.port);
+    
+    // Add sender to routing table
+    KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
+    DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
+    add_node(sender_node);
+    
+    // Respond with ping response
+    auto response = KrpcProtocol::create_ping_response(message.transaction_id, node_id_);
+    send_krpc_message(response, sender);
+}
+
+void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Handling KRPC FIND_NODE from " << KrpcProtocol::node_id_to_string(message.sender_id) << " at " << sender.ip << ":" << sender.port);
+    
+    // Add sender to routing table
+    KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
+    DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
+    add_node(sender_node);
+    
+    // Find closest nodes
+    auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
+    auto krpc_nodes = dht_nodes_to_krpc_nodes(closest_nodes);
+    
+    // Respond with closest nodes
+    auto response = KrpcProtocol::create_find_node_response(message.transaction_id, node_id_, krpc_nodes);
+    send_krpc_message(response, sender);
+}
+
+void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Handling KRPC GET_PEERS from " << KrpcProtocol::node_id_to_string(message.sender_id) << " at " << sender.ip << ":" << sender.port);
+    
+    // Add sender to routing table
+    KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
+    DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
+    add_node(sender_node);
+    
+    // For now, just return closest nodes (no peer storage implemented yet)
+    auto closest_nodes = find_closest_nodes(message.info_hash, K_BUCKET_SIZE);
+    auto krpc_nodes = dht_nodes_to_krpc_nodes(closest_nodes);
+    
+    // Generate a token for this peer
+    std::string token = generate_token(sender);
+    
+    // Respond with closest nodes and token
+    auto response = KrpcProtocol::create_get_peers_response_with_nodes(message.transaction_id, node_id_, krpc_nodes, token);
+    send_krpc_message(response, sender);
+}
+
+void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Handling KRPC ANNOUNCE_PEER from " << KrpcProtocol::node_id_to_string(message.sender_id) << " at " << sender.ip << ":" << sender.port);
+    
+    // Verify token
+    if (!verify_token(sender, message.token)) {
+        LOG_DHT_WARN("Invalid token from " << sender.ip << ":" << sender.port << " for KRPC ANNOUNCE_PEER");
+        auto error = KrpcProtocol::create_error(message.transaction_id, KrpcErrorCode::ProtocolError, "Invalid token");
+        send_krpc_message(error, sender);
+        return;
+    }
+    
+    // Add sender to routing table
+    KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
+    DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
+    add_node(sender_node);
+    
+    // TODO: Store the peer announcement
+    
+    // Respond with acknowledgment
+    auto response = KrpcProtocol::create_announce_peer_response(message.transaction_id, node_id_);
+    send_krpc_message(response, sender);
+}
+
+void DhtClient::handle_krpc_response(const KrpcMessage& message, const UdpPeer& sender) {
+    LOG_DHT_DEBUG("Handling KRPC response from " << sender.ip << ":" << sender.port);
+    
+    // Add responder to routing table
+    KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
+    DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
+    add_node(sender_node);
+    
+    // Add any nodes from the response
+    for (const auto& node : message.nodes) {
+        DhtNode dht_node = krpc_node_to_dht_node(node);
+        add_node(dht_node);
+    }
+    
+    // Process any peers from get_peers response
+    if (!message.peers.empty()) {
+        // Check if this is a response to a get_peers query
+        std::lock_guard<std::mutex> lock(active_searches_mutex_);
+        // TODO: Match response to active search by transaction ID
+        // For now, just log the peers
+        LOG_DHT_DEBUG("Received " << message.peers.size() << " peers from KRPC response");
+    }
+}
+
+void DhtClient::handle_krpc_error(const KrpcMessage& message, const UdpPeer& sender) {
+    LOG_DHT_WARN("Received KRPC error from " << sender.ip << ":" << sender.port 
+                 << " - Code: " << static_cast<int>(message.error_code) 
+                 << " Message: " << message.error_message);
+}
+
+// KRPC sending functions
+bool DhtClient::send_krpc_message(const KrpcMessage& message, const UdpPeer& peer) {
+    auto data = KrpcProtocol::encode_message(message);
+    if (data.empty()) {
+        LOG_DHT_ERROR("Failed to encode KRPC message");
+        return false;
+    }
+    
+    LOG_DHT_DEBUG("Sending KRPC message (" << data.size() << " bytes) to " << peer.ip << ":" << peer.port);
+    int result = send_udp_data(socket_, data, peer);
+    
+    if (result > 0) {
+        LOG_DHT_DEBUG("Successfully sent KRPC message to " << peer.ip << ":" << peer.port);
+    } else {
+        LOG_DHT_ERROR("Failed to send KRPC message to " << peer.ip << ":" << peer.port);
+    }
+    
+    return result > 0;
+}
+
+void DhtClient::send_krpc_ping(const UdpPeer& peer) {
+    std::string transaction_id = KrpcProtocol::generate_transaction_id();
+    auto message = KrpcProtocol::create_ping_query(transaction_id, node_id_);
+    send_krpc_message(message, peer);
+}
+
+void DhtClient::send_krpc_find_node(const UdpPeer& peer, const NodeId& target) {
+    std::string transaction_id = KrpcProtocol::generate_transaction_id();
+    auto message = KrpcProtocol::create_find_node_query(transaction_id, node_id_, target);
+    send_krpc_message(message, peer);
+}
+
+void DhtClient::send_krpc_get_peers(const UdpPeer& peer, const InfoHash& info_hash) {
+    std::string transaction_id = KrpcProtocol::generate_transaction_id();
+    auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
+    send_krpc_message(message, peer);
+}
+
+void DhtClient::send_krpc_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
+    std::string transaction_id = KrpcProtocol::generate_transaction_id();
+    auto message = KrpcProtocol::create_announce_peer_query(transaction_id, node_id_, info_hash, port, token);
+    send_krpc_message(message, peer);
+}
+
+// Update sending functions to use protocol detection
+void DhtClient::send_ping(const UdpPeer& peer) {
+    PeerProtocol protocol = get_peer_protocol(peer);
+    
+    if (protocol == PeerProtocol::BitTorrent) {
+        LOG_DHT_DEBUG("Sending KRPC PING to " << peer.ip << ":" << peer.port);
+        send_krpc_ping(peer);
+    } else {
+        LOG_DHT_DEBUG("Sending rats dht PING to " << peer.ip << ":" << peer.port);
+        DhtMessage message(DhtMessageType::PING, node_id_);
+        send_message(message, peer);
+    }
+}
+
+void DhtClient::send_find_node(const UdpPeer& peer, const NodeId& target) {
+    PeerProtocol protocol = get_peer_protocol(peer);
+    
+    if (protocol == PeerProtocol::BitTorrent) {
+        LOG_DHT_DEBUG("Sending KRPC FIND_NODE to " << peer.ip << ":" << peer.port);
+        send_krpc_find_node(peer, target);
+    } else {
+        LOG_DHT_DEBUG("Sending rats dht FIND_NODE to " << peer.ip << ":" << peer.port);
+        DhtMessage message(DhtMessageType::FIND_NODE, node_id_);
+        message.target_id = target;
+        send_message(message, peer);
+    }
+}
+
+void DhtClient::send_get_peers(const UdpPeer& peer, const InfoHash& info_hash) {
+    PeerProtocol protocol = get_peer_protocol(peer);
+    
+    if (protocol == PeerProtocol::BitTorrent) {
+        LOG_DHT_DEBUG("Sending KRPC GET_PEERS to " << peer.ip << ":" << peer.port);
+        send_krpc_get_peers(peer, info_hash);
+    } else {
+        LOG_DHT_DEBUG("Sending rats dht GET_PEERS to " << peer.ip << ":" << peer.port);
+        DhtMessage message(DhtMessageType::GET_PEERS, node_id_);
+        message.target_id = info_hash;
+        send_message(message, peer);
+    }
+}
+
+void DhtClient::send_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
+    PeerProtocol protocol = get_peer_protocol(peer);
+    
+    if (protocol == PeerProtocol::BitTorrent) {
+        LOG_DHT_DEBUG("Sending KRPC ANNOUNCE_PEER to " << peer.ip << ":" << peer.port);
+        send_krpc_announce_peer(peer, info_hash, port, token);
+    } else {
+        LOG_DHT_DEBUG("Sending rats dht ANNOUNCE_PEER to " << peer.ip << ":" << peer.port);
+        DhtMessage message(DhtMessageType::ANNOUNCE_PEER, node_id_);
+        message.target_id = info_hash;
+        message.announce_port = port;
+        message.token = token;
+        send_message(message, peer);
+    }
+}
+
+// Conversion utilities
+KrpcNode DhtClient::dht_node_to_krpc_node(const DhtNode& node) {
+    return KrpcNode(node.id, node.peer.ip, node.peer.port);
+}
+
+DhtNode DhtClient::krpc_node_to_dht_node(const KrpcNode& node) {
+    UdpPeer peer(node.ip, node.port);
+    return DhtNode(node.id, peer);
+}
+
+std::vector<KrpcNode> DhtClient::dht_nodes_to_krpc_nodes(const std::vector<DhtNode>& nodes) {
+    std::vector<KrpcNode> krpc_nodes;
+    krpc_nodes.reserve(nodes.size());
+    for (const auto& node : nodes) {
+        krpc_nodes.push_back(dht_node_to_krpc_node(node));
+    }
+    return krpc_nodes;
+}
+
+std::vector<DhtNode> DhtClient::krpc_nodes_to_dht_nodes(const std::vector<KrpcNode>& nodes) {
+    std::vector<DhtNode> dht_nodes;
+    dht_nodes.reserve(nodes.size());
+    for (const auto& node : nodes) {
+        dht_nodes.push_back(krpc_node_to_dht_node(node));
+    }
+    return dht_nodes;
 }
 
 NodeId DhtClient::generate_node_id() {
