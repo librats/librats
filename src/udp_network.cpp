@@ -12,6 +12,7 @@
 #else
     #include <unistd.h>
     #include <fcntl.h>
+    #include <errno.h>
     #define INVALID_SOCKET_VALUE -1
     #define SOCKET_ERROR_VALUE -1
     #define closesocket close
@@ -102,8 +103,28 @@ std::vector<uint8_t> receive_udp_data(udp_socket_t socket, size_t buffer_size, U
                                  (struct sockaddr*)&sender_addr, &sender_addr_len);
     
     if (bytes_received == SOCKET_ERROR_VALUE) {
-        LOG_UDP_ERROR("Failed to receive UDP data");
-        return std::vector<uint8_t>();
+        // Check if this is just a non-blocking socket with no data available
+#ifdef _WIN32
+        int error = WSAGetLastError();
+        if (error == WSAEWOULDBLOCK) {
+            // No data available on non-blocking socket - this is normal
+            LOG_UDP_DEBUG("No data available on non-blocking socket");
+            return std::vector<uint8_t>();
+        } else {
+            LOG_UDP_ERROR("Failed to receive UDP data: " << error);
+            return std::vector<uint8_t>();
+        }
+#else
+        int error = errno;
+        if (error == EAGAIN || error == EWOULDBLOCK) {
+            // No data available on non-blocking socket - this is normal
+            LOG_UDP_DEBUG("No data available on non-blocking socket");
+            return std::vector<uint8_t>();
+        } else {
+            LOG_UDP_ERROR("Failed to receive UDP data: " << strerror(error));
+            return std::vector<uint8_t>();
+        }
+#endif
     }
     
     if (bytes_received == 0) {
