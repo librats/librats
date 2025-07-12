@@ -225,6 +225,7 @@ private:
     
     void add_node(const DhtNode& node);
     std::vector<DhtNode> find_closest_nodes(const NodeId& target, size_t count = K_BUCKET_SIZE);
+    std::vector<DhtNode> find_closest_nodes_unlocked(const NodeId& target, size_t count = K_BUCKET_SIZE);
     int get_bucket_index(const NodeId& id);
     
     NodeId generate_node_id();

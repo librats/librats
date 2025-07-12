@@ -666,6 +666,12 @@ void DhtClient::add_node(const DhtNode& node) {
 std::vector<DhtNode> DhtClient::find_closest_nodes(const NodeId& target, size_t count) {
     std::lock_guard<std::mutex> lock(routing_table_mutex_);
     
+    auto result = find_closest_nodes_unlocked(target, count);
+    
+    return result;
+}
+
+std::vector<DhtNode> DhtClient::find_closest_nodes_unlocked(const NodeId& target, size_t count) {
     LOG_DHT_DEBUG("Finding closest nodes to target " << node_id_to_hex(target) << " (max " << count << " nodes)");
     
     std::vector<DhtNode> all_nodes;
@@ -1148,7 +1154,7 @@ void DhtClient::refresh_buckets() {
                 random_id[byte_index] |= (1 << (7 - bit_index));
                 
                 // Find nodes to query
-                auto closest_nodes = find_closest_nodes(random_id, ALPHA);
+                auto closest_nodes = find_closest_nodes_unlocked(random_id, ALPHA);
                 for (const auto& node : closest_nodes) {
                     send_find_node(node.peer, random_id);
                 }
