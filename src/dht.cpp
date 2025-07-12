@@ -303,21 +303,6 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& 
                     handle_find_node(*rats_dht_message, sender);
                     break;
                 case DhtMessageType::GET_PEERS:
-                    // Check if this is a response to our own get_peers request (for announce flow)
-                    if (!rats_dht_message->token.empty()) {
-                        // Check if we have a pending announce for this transaction
-                        {
-                            std::lock_guard<std::mutex> lock(pending_announces_mutex_);
-                            auto it = pending_announces_.find(rats_dht_message->transaction_id);
-                            if (it != pending_announces_.end()) {
-                                // This is a response to our get_peers request for announce
-                                handle_get_peers_response_for_announce_rats_dht(rats_dht_message->transaction_id, sender, rats_dht_message->token);
-                                break;
-                            }
-                        }
-                    }
-                    
-                    // Otherwise, handle as a new get_peers request
                     handle_get_peers(*rats_dht_message, sender);
                     break;
                 case DhtMessageType::ANNOUNCE_PEER:
@@ -357,6 +342,21 @@ void DhtClient::handle_find_node(const DhtMessage& message, const UdpPeer& sende
 void DhtClient::handle_get_peers(const DhtMessage& message, const UdpPeer& sender) {
     LOG_DHT_DEBUG("Handling GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " (transaction: " << message.transaction_id << ")");
     
+    // Check if this is a response to our own get_peers request (for announce flow)
+    if (!message.token.empty()) {
+        // Check if we have a pending announce for this transaction
+        {
+            std::lock_guard<std::mutex> lock(pending_announces_mutex_);
+            auto it = pending_announces_.find(message.transaction_id);
+            if (it != pending_announces_.end()) {
+                // This is a response to our get_peers request for announce
+                handle_get_peers_response_for_announce_rats_dht(message.transaction_id, sender, message.token);
+                return;
+            }
+        }
+    }
+    
+    // Handle as a regular get_peers request
     // For now, just return closest nodes
     auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
     LOG_DHT_DEBUG("Found " << closest_nodes.size() << " closest nodes for info_hash " << node_id_to_hex(message.target_id));
