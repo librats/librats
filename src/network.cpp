@@ -1,4 +1,5 @@
 #include "network.h"
+#include "network_utils.h"
 #include "logger.h"
 #include <iostream>
 #include <cstring>
@@ -47,23 +48,94 @@ socket_t create_tcp_client(const std::string& host, int port) {
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
     
+    // Resolve hostname to IP address
+    std::string resolved_ip = network_utils::resolve_hostname(host);
+    if (resolved_ip.empty()) {
+        LOG_NETWORK_ERROR("Failed to resolve hostname: " << host);
+        close_socket(client_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+    
     // Convert IP address from string to binary form
-    if (inet_pton(AF_INET, host.c_str(), &server_addr.sin_addr) <= 0) {
-        LOG_NETWORK_ERROR("Invalid address: " << host);
+    if (inet_pton(AF_INET, resolved_ip.c_str(), &server_addr.sin_addr) <= 0) {
+        LOG_NETWORK_ERROR("Invalid address: " << resolved_ip);
         close_socket(client_socket);
         return INVALID_SOCKET_VALUE;
     }
 
     // Connect to server
-    LOG_NETWORK_DEBUG("Connecting to " << host << ":" << port);
+    LOG_NETWORK_DEBUG("Connecting to " << resolved_ip << ":" << port);
     if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
-        LOG_NETWORK_ERROR("Connection to " << host << ":" << port << " failed");
+        LOG_NETWORK_ERROR("Connection to " << resolved_ip << ":" << port << " failed");
         close_socket(client_socket);
         return INVALID_SOCKET_VALUE;
     }
 
-    LOG_NETWORK_INFO("Successfully connected to " << host << ":" << port);
+    LOG_NETWORK_INFO("Successfully connected to " << resolved_ip << ":" << port);
     return client_socket;
+}
+
+socket_t create_tcp_client_v6(const std::string& host, int port) {
+    LOG_NETWORK_DEBUG("Creating TCP client socket for IPv6 " << host << ":" << port);
+    
+    socket_t client_socket = socket(AF_INET6, SOCK_STREAM, 0);
+    if (client_socket == INVALID_SOCKET_VALUE) {
+        LOG_NETWORK_ERROR("Failed to create IPv6 client socket");
+        return INVALID_SOCKET_VALUE;
+    }
+
+    sockaddr_in6 server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin6_family = AF_INET6;
+    server_addr.sin6_port = htons(port);
+    
+    // Resolve hostname to IPv6 address
+    std::string resolved_ip = network_utils::resolve_hostname_v6(host);
+    if (resolved_ip.empty()) {
+        LOG_NETWORK_ERROR("Failed to resolve hostname to IPv6: " << host);
+        close_socket(client_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+    
+    // Convert IPv6 address from string to binary form
+    if (inet_pton(AF_INET6, resolved_ip.c_str(), &server_addr.sin6_addr) <= 0) {
+        LOG_NETWORK_ERROR("Invalid IPv6 address: " << resolved_ip);
+        close_socket(client_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Connect to server
+    LOG_NETWORK_DEBUG("Connecting to IPv6 " << resolved_ip << ":" << port);
+    if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
+        LOG_NETWORK_ERROR("Connection to IPv6 " << resolved_ip << ":" << port << " failed");
+        close_socket(client_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    LOG_NETWORK_INFO("Successfully connected to IPv6 " << resolved_ip << ":" << port);
+    return client_socket;
+}
+
+socket_t create_tcp_client_dual(const std::string& host, int port) {
+    LOG_NETWORK_DEBUG("Creating TCP client socket (dual stack) for " << host << ":" << port);
+    
+    // Try IPv6 first
+    socket_t client_socket = create_tcp_client_v6(host, port);
+    if (client_socket != INVALID_SOCKET_VALUE) {
+        LOG_NETWORK_INFO("Successfully connected using IPv6");
+        return client_socket;
+    }
+    
+    // Fall back to IPv4
+    LOG_NETWORK_DEBUG("IPv6 connection failed, trying IPv4");
+    client_socket = create_tcp_client(host, port);
+    if (client_socket != INVALID_SOCKET_VALUE) {
+        LOG_NETWORK_INFO("Successfully connected using IPv4");
+        return client_socket;
+    }
+    
+    LOG_NETWORK_ERROR("Failed to connect using both IPv6 and IPv4");
+    return INVALID_SOCKET_VALUE;
 }
 
 socket_t create_tcp_server(int port, int backlog) {
@@ -109,8 +181,101 @@ socket_t create_tcp_server(int port, int backlog) {
     return server_socket;
 }
 
+socket_t create_tcp_server_v6(int port, int backlog) {
+    LOG_NETWORK_DEBUG("Creating TCP server socket on IPv6 port " << port);
+    
+    socket_t server_socket = socket(AF_INET6, SOCK_STREAM, 0);
+    if (server_socket == INVALID_SOCKET_VALUE) {
+        LOG_NETWORK_ERROR("Failed to create IPv6 server socket");
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Set socket option to reuse address
+    int opt = 1;
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, 
+                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
+        LOG_NETWORK_ERROR("Failed to set IPv6 socket options");
+        close_socket(server_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    sockaddr_in6 server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin6_family = AF_INET6;
+    server_addr.sin6_addr = in6addr_any;
+    server_addr.sin6_port = htons(port);
+
+    // Bind socket to address
+    LOG_NETWORK_DEBUG("Binding IPv6 server socket to port " << port);
+    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
+        LOG_NETWORK_ERROR("Failed to bind IPv6 server socket to port " << port);
+        close_socket(server_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Listen for connections
+    if (listen(server_socket, backlog) == SOCKET_ERROR_VALUE) {
+        LOG_NETWORK_ERROR("Failed to listen on IPv6 server socket");
+        close_socket(server_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    LOG_NETWORK_INFO("IPv6 server listening on port " << port << " (backlog: " << backlog << ")");
+    return server_socket;
+}
+
+socket_t create_tcp_server_dual(int port, int backlog) {
+    LOG_NETWORK_DEBUG("Creating TCP server socket (dual stack) on port " << port);
+    
+    socket_t server_socket = socket(AF_INET6, SOCK_STREAM, 0);
+    if (server_socket == INVALID_SOCKET_VALUE) {
+        LOG_NETWORK_ERROR("Failed to create dual stack server socket");
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Set socket option to reuse address
+    int opt = 1;
+    if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, 
+                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
+        LOG_NETWORK_ERROR("Failed to set dual stack socket options");
+        close_socket(server_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Disable IPv6-only mode to allow IPv4 connections
+    int ipv6_only = 0;
+    if (setsockopt(server_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                   (char*)&ipv6_only, sizeof(ipv6_only)) == SOCKET_ERROR_VALUE) {
+        LOG_NETWORK_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
+    }
+
+    sockaddr_in6 server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin6_family = AF_INET6;
+    server_addr.sin6_addr = in6addr_any;
+    server_addr.sin6_port = htons(port);
+
+    // Bind socket to address
+    LOG_NETWORK_DEBUG("Binding dual stack server socket to port " << port);
+    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
+        LOG_NETWORK_ERROR("Failed to bind dual stack server socket to port " << port);
+        close_socket(server_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Listen for connections
+    if (listen(server_socket, backlog) == SOCKET_ERROR_VALUE) {
+        LOG_NETWORK_ERROR("Failed to listen on dual stack server socket");
+        close_socket(server_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    LOG_NETWORK_INFO("Dual stack server listening on port " << port << " (backlog: " << backlog << ")");
+    return server_socket;
+}
+
 socket_t accept_client(socket_t server_socket) {
-    sockaddr_in client_addr;
+    sockaddr_storage client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
     
     socket_t client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_addr_len);
@@ -119,9 +284,20 @@ socket_t accept_client(socket_t server_socket) {
         return INVALID_SOCKET_VALUE;
     }
 
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
-    LOG_NETWORK_INFO("Client connected from " << client_ip << ":" << ntohs(client_addr.sin_port));
+    // Log client information based on address family
+    if (client_addr.ss_family == AF_INET) {
+        char client_ip[INET_ADDRSTRLEN];
+        struct sockaddr_in* addr_in = (struct sockaddr_in*)&client_addr;
+        inet_ntop(AF_INET, &addr_in->sin_addr, client_ip, INET_ADDRSTRLEN);
+        LOG_NETWORK_INFO("Client connected from " << client_ip << ":" << ntohs(addr_in->sin_port));
+    } else if (client_addr.ss_family == AF_INET6) {
+        char client_ip[INET6_ADDRSTRLEN];
+        struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&client_addr;
+        inet_ntop(AF_INET6, &addr_in6->sin6_addr, client_ip, INET6_ADDRSTRLEN);
+        LOG_NETWORK_INFO("Client connected from IPv6 [" << client_ip << "]:" << ntohs(addr_in6->sin6_port));
+    } else {
+        LOG_NETWORK_INFO("Client connected from unknown address family");
+    }
     
     return client_socket;
 }

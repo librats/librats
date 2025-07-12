@@ -43,12 +43,44 @@ void cleanup_networking();
 socket_t create_tcp_client(const std::string& host, int port);
 
 /**
+ * Create a TCP client socket and connect to a server using IPv6
+ * @param host The hostname or IPv6 address to connect to
+ * @param port The port number to connect to
+ * @return Socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_tcp_client_v6(const std::string& host, int port);
+
+/**
+ * Create a TCP client socket and connect to a server using dual stack (try IPv6 first, then IPv4)
+ * @param host The hostname or IP address to connect to
+ * @param port The port number to connect to
+ * @return Socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_tcp_client_dual(const std::string& host, int port);
+
+/**
  * Create a TCP server socket and bind to a port
  * @param port The port number to bind to
  * @param backlog The maximum number of pending connections
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
  */
 socket_t create_tcp_server(int port, int backlog = 5);
+
+/**
+ * Create a TCP server socket and bind to a port using IPv6
+ * @param port The port number to bind to
+ * @param backlog The maximum number of pending connections
+ * @return Socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_tcp_server_v6(int port, int backlog = 5);
+
+/**
+ * Create a TCP server socket and bind to a port using dual stack (IPv6 with IPv4 fallback)
+ * @param port The port number to bind to
+ * @param backlog The maximum number of pending connections
+ * @return Socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_tcp_server_dual(int port, int backlog = 5);
 
 /**
  * Accept a client connection on a server socket

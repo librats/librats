@@ -63,40 +63,145 @@ udp_socket_t create_udp_socket(int port) {
     return udp_socket;
 }
 
+udp_socket_t create_udp_socket_v6(int port) {
+    LOG_UDP_DEBUG("Creating UDP socket on IPv6 port " << port);
+    
+    udp_socket_t udp_socket = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (udp_socket == INVALID_UDP_SOCKET) {
+        LOG_UDP_ERROR("Failed to create IPv6 UDP socket");
+        return INVALID_UDP_SOCKET;
+    }
+
+    // Set socket option to reuse address
+    int opt = 1;
+    if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR, 
+                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
+        LOG_UDP_ERROR("Failed to set IPv6 UDP socket options");
+        close_udp_socket(udp_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    if (port > 0) {
+        sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr = in6addr_any;
+        addr.sin6_port = htons(port);
+
+        if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
+            LOG_UDP_ERROR("Failed to bind IPv6 UDP socket to port " << port);
+            close_udp_socket(udp_socket);
+            return INVALID_SOCKET_VALUE;
+        }
+        
+        LOG_UDP_INFO("IPv6 UDP socket bound to port " << port);
+    }
+
+    return udp_socket;
+}
+
+udp_socket_t create_udp_socket_dual(int port) {
+    LOG_UDP_DEBUG("Creating dual stack UDP socket on port " << port);
+    
+    udp_socket_t udp_socket = socket(AF_INET6, SOCK_DGRAM, 0);
+    if (udp_socket == INVALID_UDP_SOCKET) {
+        LOG_UDP_ERROR("Failed to create dual stack UDP socket");
+        return INVALID_UDP_SOCKET;
+    }
+
+    // Set socket option to reuse address
+    int opt = 1;
+    if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR, 
+                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
+        LOG_UDP_ERROR("Failed to set dual stack UDP socket options");
+        close_udp_socket(udp_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    // Disable IPv6-only mode to allow IPv4 connections
+    int ipv6_only = 0;
+    if (setsockopt(udp_socket, IPPROTO_IPV6, IPV6_V6ONLY,
+                   (char*)&ipv6_only, sizeof(ipv6_only)) == SOCKET_ERROR_VALUE) {
+        LOG_UDP_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
+    }
+
+    if (port > 0) {
+        sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr = in6addr_any;
+        addr.sin6_port = htons(port);
+
+        if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
+            LOG_UDP_ERROR("Failed to bind dual stack UDP socket to port " << port);
+            close_udp_socket(udp_socket);
+            return INVALID_SOCKET_VALUE;
+        }
+        
+        LOG_UDP_INFO("Dual stack UDP socket bound to port " << port);
+    }
+
+    return udp_socket;
+}
+
 int send_udp_data(udp_socket_t socket, const std::vector<uint8_t>& data, const UdpPeer& peer) {
     LOG_UDP_DEBUG("Sending " << data.size() << " bytes to " << peer.ip << ":" << peer.port);
     
-    // Resolve hostname to IP address if needed
-    std::string resolved_ip = network_utils::resolve_hostname(peer.ip);
-    if (resolved_ip.empty()) {
-        LOG_UDP_ERROR("Failed to resolve hostname: " << peer.ip);
-        return -1;
-    }
-    
-    sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(peer.port);
-    
-    if (inet_pton(AF_INET, resolved_ip.c_str(), &addr.sin_addr) <= 0) {
-        LOG_UDP_ERROR("Invalid IP address: " << resolved_ip);
-        return -1;
-    }
+    // Check if it's an IPv6 address
+    if (network_utils::is_valid_ipv6(peer.ip)) {
+        // Handle IPv6 address
+        sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(peer.port);
+        
+        if (inet_pton(AF_INET6, peer.ip.c_str(), &addr.sin6_addr) <= 0) {
+            LOG_UDP_ERROR("Invalid IPv6 address: " << peer.ip);
+            return -1;
+        }
 
-    int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0, 
-                           (struct sockaddr*)&addr, sizeof(addr));
-    if (bytes_sent == SOCKET_ERROR_VALUE) {
-        LOG_UDP_ERROR("Failed to send UDP data to " << resolved_ip << ":" << peer.port);
-        return -1;
+        int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0, 
+                               (struct sockaddr*)&addr, sizeof(addr));
+        if (bytes_sent == SOCKET_ERROR_VALUE) {
+            LOG_UDP_ERROR("Failed to send UDP data to IPv6 " << peer.ip << ":" << peer.port);
+            return -1;
+        }
+        
+        LOG_UDP_DEBUG("Successfully sent " << bytes_sent << " bytes to IPv6 " << peer.ip << ":" << peer.port);
+        return bytes_sent;
+    } else {
+        // Handle IPv4 address or hostname
+        std::string resolved_ip = network_utils::resolve_hostname(peer.ip);
+        if (resolved_ip.empty()) {
+            LOG_UDP_ERROR("Failed to resolve hostname: " << peer.ip);
+            return -1;
+        }
+        
+        sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(peer.port);
+        
+        if (inet_pton(AF_INET, resolved_ip.c_str(), &addr.sin_addr) <= 0) {
+            LOG_UDP_ERROR("Invalid IP address: " << resolved_ip);
+            return -1;
+        }
+
+        int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0, 
+                               (struct sockaddr*)&addr, sizeof(addr));
+        if (bytes_sent == SOCKET_ERROR_VALUE) {
+            LOG_UDP_ERROR("Failed to send UDP data to " << resolved_ip << ":" << peer.port);
+            return -1;
+        }
+        
+        LOG_UDP_DEBUG("Successfully sent " << bytes_sent << " bytes to " << resolved_ip << ":" << peer.port);
+        return bytes_sent;
     }
-    
-    LOG_UDP_DEBUG("Successfully sent " << bytes_sent << " bytes to " << resolved_ip << ":" << peer.port);
-    return bytes_sent;
 }
 
 std::vector<uint8_t> receive_udp_data(udp_socket_t socket, size_t buffer_size, UdpPeer& sender_peer) {
     std::vector<uint8_t> buffer(buffer_size);
-    sockaddr_in sender_addr;
+    sockaddr_storage sender_addr;
     socklen_t sender_addr_len = sizeof(sender_addr);
     
     int bytes_received = recvfrom(socket, (char*)buffer.data(), buffer_size, 0,
@@ -132,13 +237,28 @@ std::vector<uint8_t> receive_udp_data(udp_socket_t socket, size_t buffer_size, U
         return std::vector<uint8_t>();
     }
     
-    // Extract sender information
-    char sender_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, INET_ADDRSTRLEN);
-    sender_peer.ip = sender_ip;
-    sender_peer.port = ntohs(sender_addr.sin_port);
-    
-    LOG_UDP_DEBUG("Received " << bytes_received << " bytes from " << sender_peer.ip << ":" << sender_peer.port);
+    // Extract sender information based on address family
+    if (sender_addr.ss_family == AF_INET) {
+        char sender_ip[INET_ADDRSTRLEN];
+        struct sockaddr_in* addr_in = (struct sockaddr_in*)&sender_addr;
+        inet_ntop(AF_INET, &addr_in->sin_addr, sender_ip, INET_ADDRSTRLEN);
+        sender_peer.ip = sender_ip;
+        sender_peer.port = ntohs(addr_in->sin_port);
+        
+        LOG_UDP_DEBUG("Received " << bytes_received << " bytes from " << sender_peer.ip << ":" << sender_peer.port);
+    } else if (sender_addr.ss_family == AF_INET6) {
+        char sender_ip[INET6_ADDRSTRLEN];
+        struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&sender_addr;
+        inet_ntop(AF_INET6, &addr_in6->sin6_addr, sender_ip, INET6_ADDRSTRLEN);
+        sender_peer.ip = sender_ip;
+        sender_peer.port = ntohs(addr_in6->sin6_port);
+        
+        LOG_UDP_DEBUG("Received " << bytes_received << " bytes from IPv6 [" << sender_peer.ip << "]:" << sender_peer.port);
+    } else {
+        LOG_UDP_WARN("Received UDP data from unknown address family");
+        sender_peer.ip = "unknown";
+        sender_peer.port = 0;
+    }
     
     buffer.resize(bytes_received);
     return buffer;

@@ -24,23 +24,25 @@ void print_usage(const char* program_name) {
 }
 
 void print_help() {
-    std::cout << "\nAvailable commands:\n";
-    std::cout << "  help        - Show this help message\n";
-    std::cout << "  peers       - Show number of connected peers\n";
-    std::cout << "  broadcast <message> - Send message to all peers\n";
-    std::cout << "  connect <host> <port> - Connect to a new peer\n";
-    std::cout << "  send <hash_id> <message> - Send message to specific peer by hash ID\n";
-    std::cout << "  list        - List all connected peers with their hash IDs\n";
-    std::cout << "\nDHT commands:\n";
-    std::cout << "  dht_start   - Start DHT peer discovery\n";
-    std::cout << "  dht_stop    - Stop DHT peer discovery\n";
-    std::cout << "  dht_status  - Show DHT status and routing table size\n";
-    std::cout << "  dht_find <content_hash> - Find peers for a content hash\n";
-    std::cout << "  dht_announce <content_hash> [port] - Announce as peer for content hash\n";
-    std::cout << "\nNetwork utilities:\n";
-    std::cout << "  netutils [hostname] - Test network utility functions\n";
-    std::cout << "  quit        - Exit the program\n";
-    std::cout << "Type your command: ";
+    std::cout << "Available commands:" << std::endl;
+    std::cout << "  help              - Show this help message" << std::endl;
+    std::cout << "  peers             - Show number of connected peers" << std::endl;
+    std::cout << "  list              - List all connected peers with their hash IDs" << std::endl;
+    std::cout << "  broadcast <msg>   - Send message to all connected peers" << std::endl;
+    std::cout << "  send <hash> <msg> - Send message to specific peer by hash ID" << std::endl;
+    std::cout << "  connect <host> <port> - Connect to a peer" << std::endl;
+    std::cout << "  connect6 <host> <port> - Connect to a peer using IPv6" << std::endl;
+    std::cout << "  connect_dual <host> <port> - Connect using dual stack (IPv6 first, then IPv4)" << std::endl;
+    std::cout << "  dht_start         - Start DHT peer discovery" << std::endl;
+    std::cout << "  dht_stop          - Stop DHT peer discovery" << std::endl;
+    std::cout << "  dht_status        - Show DHT status" << std::endl;
+    std::cout << "  dht_find <hash>   - Find peers for content hash" << std::endl;
+    std::cout << "  dht_announce <hash> [port] - Announce as peer for content hash" << std::endl;
+    std::cout << "  netutils [hostname] - Test network utilities" << std::endl;
+    std::cout << "  netutils6 [hostname] - Test IPv6 network utilities" << std::endl;
+    std::cout << "  dht_test <ip> <port> - Test DHT protocol with specific peer" << std::endl;
+    std::cout << "  test_ipv6 <host> <port> - Test IPv6 connectivity" << std::endl;
+    std::cout << "  quit              - Exit the program" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -225,6 +227,60 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "Type your command: ";
         }
+        else if (command == "connect6") {
+            std::string host;
+            int port;
+            iss >> host >> port;
+            if (!host.empty() && port > 0) {
+                LOG_MAIN_INFO("Connecting to " << host << ":" << port << " using IPv6...");
+                
+                // Test IPv6 connection using low-level API
+                socket_t test_socket = librats::create_tcp_client_v6(host, port);
+                if (test_socket != INVALID_SOCKET_VALUE) {
+                    LOG_MAIN_INFO("IPv6 connection successful!");
+                    librats::close_socket(test_socket);
+                    
+                    // Now try to connect using the high-level client
+                    if (client.connect_to_peer(host, port)) {
+                        LOG_MAIN_INFO("RatsClient connected successfully!");
+                    } else {
+                        LOG_MAIN_ERROR("Failed to connect RatsClient");
+                    }
+                } else {
+                    LOG_MAIN_ERROR("Failed to connect using IPv6");
+                }
+            } else {
+                std::cout << "Usage: connect6 <host> <port>" << std::endl;
+            }
+            std::cout << "Type your command: ";
+        }
+        else if (command == "connect_dual") {
+            std::string host;
+            int port;
+            iss >> host >> port;
+            if (!host.empty() && port > 0) {
+                LOG_MAIN_INFO("Connecting to " << host << ":" << port << " using dual stack...");
+                
+                // Test dual stack connection using low-level API
+                socket_t test_socket = librats::create_tcp_client_dual(host, port);
+                if (test_socket != INVALID_SOCKET_VALUE) {
+                    LOG_MAIN_INFO("Dual stack connection successful!");
+                    librats::close_socket(test_socket);
+                    
+                    // Now try to connect using the high-level client
+                    if (client.connect_to_peer(host, port)) {
+                        LOG_MAIN_INFO("RatsClient connected successfully!");
+                    } else {
+                        LOG_MAIN_ERROR("Failed to connect RatsClient");
+                    }
+                } else {
+                    LOG_MAIN_ERROR("Failed to connect using dual stack");
+                }
+            } else {
+                std::cout << "Usage: connect_dual <host> <port>" << std::endl;
+            }
+            std::cout << "Type your command: ";
+        }
         else if (command == "dht_start") {
             if (client.is_dht_running()) {
                 std::cout << "DHT is already running." << std::endl;
@@ -311,6 +367,128 @@ int main(int argc, char* argv[]) {
                 librats::network_utils::demo_network_utils();
             } else {
                 librats::network_utils::demo_network_utils(hostname);
+            }
+            std::cout << "Type your command: ";
+        }
+        else if (command == "netutils6") {
+            std::string hostname;
+            iss >> hostname;
+            if (hostname.empty()) {
+                hostname = "google.com";
+            }
+            
+            LOG_MAIN_INFO("=== IPv6 Network Utils Test ===");
+            LOG_MAIN_INFO("Testing IPv6 functionality with: " << hostname);
+            
+            // Test IPv6 validation
+            std::string test_ipv6 = "2001:db8::1";
+            LOG_MAIN_INFO("'" << test_ipv6 << "' is valid IPv6: " << (librats::network_utils::is_valid_ipv6(test_ipv6) ? "yes" : "no"));
+            
+            // Test IPv6 hostname resolution
+            std::string resolved_ipv6 = librats::network_utils::resolve_hostname_v6(hostname);
+            if (!resolved_ipv6.empty()) {
+                LOG_MAIN_INFO("Resolved '" << hostname << "' to IPv6: " << resolved_ipv6);
+            } else {
+                LOG_MAIN_ERROR("Failed to resolve '" << hostname << "' to IPv6");
+            }
+            
+            // Test getting all IPv6 addresses
+            auto all_ipv6_addresses = librats::network_utils::resolve_all_addresses_v6(hostname);
+            LOG_MAIN_INFO("Found " << all_ipv6_addresses.size() << " IPv6 addresses:");
+            for (size_t i = 0; i < all_ipv6_addresses.size(); ++i) {
+                LOG_MAIN_INFO("  [" << i << "] " << all_ipv6_addresses[i]);
+            }
+            
+            // Test dual stack resolution
+            auto dual_addresses = librats::network_utils::resolve_all_addresses_dual(hostname);
+            LOG_MAIN_INFO("Found " << dual_addresses.size() << " addresses (dual stack):");
+            for (size_t i = 0; i < dual_addresses.size(); ++i) {
+                LOG_MAIN_INFO("  [" << i << "] " << dual_addresses[i]);
+            }
+            
+            LOG_MAIN_INFO("=== IPv6 Test Complete ===");
+            std::cout << "Type your command: ";
+        }
+        else if (command == "test_ipv6") {
+            std::string host;
+            int port;
+            iss >> host >> port;
+            if (!host.empty() && port > 0) {
+                LOG_MAIN_INFO("=== IPv6 Connectivity Test ===");
+                LOG_MAIN_INFO("Testing IPv6 connectivity to " << host << ":" << port);
+                
+                // Test IPv6 TCP client
+                LOG_MAIN_INFO("Testing IPv6 TCP client...");
+                socket_t tcp_socket = librats::create_tcp_client_v6(host, port);
+                if (tcp_socket != INVALID_SOCKET_VALUE) {
+                    LOG_MAIN_INFO("IPv6 TCP connection successful!");
+                    librats::close_socket(tcp_socket);
+                } else {
+                    LOG_MAIN_ERROR("IPv6 TCP connection failed");
+                }
+                
+                // Test dual stack TCP client
+                LOG_MAIN_INFO("Testing dual stack TCP client...");
+                socket_t dual_socket = librats::create_tcp_client_dual(host, port);
+                if (dual_socket != INVALID_SOCKET_VALUE) {
+                    LOG_MAIN_INFO("Dual stack TCP connection successful!");
+                    librats::close_socket(dual_socket);
+                } else {
+                    LOG_MAIN_ERROR("Dual stack TCP connection failed");
+                }
+                
+                // Test IPv6 UDP socket
+                LOG_MAIN_INFO("Testing IPv6 UDP socket...");
+                udp_socket_t udp_socket = librats::create_udp_socket_v6(0);
+                if (librats::is_valid_udp_socket(udp_socket)) {
+                    LOG_MAIN_INFO("IPv6 UDP socket creation successful!");
+                    librats::close_udp_socket(udp_socket);
+                } else {
+                    LOG_MAIN_ERROR("IPv6 UDP socket creation failed");
+                }
+                
+                // Test dual stack UDP socket
+                LOG_MAIN_INFO("Testing dual stack UDP socket...");
+                udp_socket_t dual_udp_socket = librats::create_udp_socket_dual(0);
+                if (librats::is_valid_udp_socket(dual_udp_socket)) {
+                    LOG_MAIN_INFO("Dual stack UDP socket creation successful!");
+                    librats::close_udp_socket(dual_udp_socket);
+                } else {
+                    LOG_MAIN_ERROR("Dual stack UDP socket creation failed");
+                }
+                
+                LOG_MAIN_INFO("=== IPv6 Test Complete ===");
+            } else {
+                std::cout << "Usage: test_ipv6 <host> <port>" << std::endl;
+            }
+            std::cout << "Type your command: ";
+        }
+        else if (command == "dht_test") {
+            std::string target_ip;
+            int target_port;
+            iss >> target_ip >> target_port;
+            if (!target_ip.empty() && target_port > 0) {
+                LOG_MAIN_INFO("Testing DHT protocol with " << target_ip << ":" << target_port);
+                
+                // Create test DHT client
+                librats::DhtClient test_dht(8882);  // Use different port for testing
+                if (test_dht.start()) {
+                    LOG_MAIN_INFO("Test DHT started on port 8882");
+                    
+                    // Test bootstrap with the target
+                    std::vector<librats::UdpPeer> test_nodes = {{target_ip, static_cast<uint16_t>(target_port)}};
+                    test_dht.bootstrap(test_nodes);
+                    
+                    // Wait a bit for responses
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    
+                    LOG_MAIN_INFO("Test DHT routing table size: " << test_dht.get_routing_table_size());
+                    test_dht.stop();
+                } else {
+                    LOG_MAIN_ERROR("Failed to start test DHT");
+                }
+            } else {
+                std::cout << "Usage: dht_test <ip> <port>" << std::endl;
             }
             std::cout << "Type your command: ";
         }

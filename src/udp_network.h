@@ -42,6 +42,20 @@ struct UdpPeer {
 udp_socket_t create_udp_socket(int port = 0);
 
 /**
+ * Create a UDP socket with IPv6 support
+ * @param port The port to bind to (0 for any available port)
+ * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
+ */
+udp_socket_t create_udp_socket_v6(int port = 0);
+
+/**
+ * Create a UDP socket with dual stack support (IPv6 with IPv4 fallback)
+ * @param port The port to bind to (0 for any available port)
+ * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
+ */
+udp_socket_t create_udp_socket_dual(int port = 0);
+
+/**
  * Send UDP data to a peer
  * @param socket The UDP socket handle
  * @param data The data to send
