@@ -759,7 +759,7 @@ DhtClient::PeerProtocol DhtClient::get_peer_protocol(const UdpPeer& peer) {
     if (it != peer_protocols_.end()) {
         return it->second;
     }
-    return PeerProtocol::Unknown;
+    return PeerProtocol::BitTorrent;  // Default to BitTorrent protocol
 }
 
 void DhtClient::set_peer_protocol(const UdpPeer& peer, PeerProtocol protocol) {
