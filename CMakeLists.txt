@@ -10,6 +10,8 @@ add_library(librats
     src/network.h
     src/udp_network.cpp
     src/udp_network.h
+    src/network_utils.cpp
+    src/network_utils.h
     src/dht.cpp
     src/dht.h
     src/librats.cpp

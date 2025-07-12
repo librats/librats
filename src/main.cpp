@@ -1,4 +1,5 @@
 #include "librats.h"
+#include "network_utils.h"
 #include <iostream>
 #include <string>
 #include <thread>
@@ -30,6 +31,14 @@ void print_help() {
     std::cout << "  connect <host> <port> - Connect to a new peer\n";
     std::cout << "  send <hash_id> <message> - Send message to specific peer by hash ID\n";
     std::cout << "  list        - List all connected peers with their hash IDs\n";
+    std::cout << "\nDHT commands:\n";
+    std::cout << "  dht_start   - Start DHT peer discovery\n";
+    std::cout << "  dht_stop    - Stop DHT peer discovery\n";
+    std::cout << "  dht_status  - Show DHT status and routing table size\n";
+    std::cout << "  dht_find <content_hash> - Find peers for a content hash\n";
+    std::cout << "  dht_announce <content_hash> [port] - Announce as peer for content hash\n";
+    std::cout << "\nNetwork utilities:\n";
+    std::cout << "  netutils [hostname] - Test network utility functions\n";
     std::cout << "  quit        - Exit the program\n";
     std::cout << "Type your command: ";
 }
@@ -104,6 +113,14 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    // Start DHT discovery
+    LOG_MAIN_INFO("Starting DHT peer discovery...");
+    if (client.start_dht_discovery()) {
+        LOG_MAIN_INFO("DHT peer discovery started successfully");
+    } else {
+        LOG_MAIN_WARN("Failed to start DHT peer discovery, but continuing...");
+    }
+    
     // Connect to peer if specified
     if (!peer_host.empty() && peer_port > 0) {
         LOG_MAIN_INFO("Connecting to peer " << peer_host << ":" << peer_port << "...");
@@ -117,6 +134,11 @@ int main(int argc, char* argv[]) {
     }
     
     LOG_MAIN_INFO("RatsClient is running. Current peers: " << client.get_peer_count());
+    if (client.is_dht_running()) {
+        LOG_MAIN_INFO("DHT peer discovery is active. Routing table size: " << client.get_dht_routing_table_size() << " nodes");
+    } else {
+        LOG_MAIN_INFO("DHT peer discovery is inactive. Use 'dht_start' to enable it.");
+    }
     print_help();
     
     // Main command loop
@@ -199,6 +221,95 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "Type your command: ";
         }
+        else if (command == "dht_start") {
+            if (client.is_dht_running()) {
+                std::cout << "DHT is already running." << std::endl;
+            } else {
+                LOG_MAIN_INFO("Starting DHT peer discovery...");
+                if (client.start_dht_discovery()) {
+                    LOG_MAIN_INFO("DHT peer discovery started successfully");
+                } else {
+                    LOG_MAIN_ERROR("Failed to start DHT peer discovery");
+                }
+            }
+            std::cout << "Type your command: ";
+        }
+        else if (command == "dht_stop") {
+            if (!client.is_dht_running()) {
+                std::cout << "DHT is not running." << std::endl;
+            } else {
+                LOG_MAIN_INFO("Stopping DHT peer discovery...");
+                client.stop_dht_discovery();
+                LOG_MAIN_INFO("DHT peer discovery stopped");
+            }
+            std::cout << "Type your command: ";
+        }
+        else if (command == "dht_status") {
+            if (client.is_dht_running()) {
+                size_t routing_table_size = client.get_dht_routing_table_size();
+                LOG_MAIN_INFO("DHT Status: RUNNING | Routing table size: " << routing_table_size << " nodes");
+            } else {
+                LOG_MAIN_INFO("DHT Status: STOPPED");
+            }
+            std::cout << "Type your command: ";
+        }
+        else if (command == "dht_find") {
+            std::string content_hash;
+            iss >> content_hash;
+            if (!content_hash.empty()) {
+                if (!client.is_dht_running()) {
+                    std::cout << "DHT is not running. Start it first with 'dht_start'" << std::endl;
+                } else {
+                    LOG_MAIN_INFO("Finding peers for content hash: " << content_hash);
+                    bool success = client.find_peers_by_hash(content_hash, 
+                        [content_hash](const std::vector<std::string>& peers) {
+                            LOG_MAIN_INFO("Found " << peers.size() << " peers for hash " << content_hash);
+                            for (const auto& peer : peers) {
+                                LOG_MAIN_INFO("  Peer: " << peer);
+                            }
+                        });
+                    if (success) {
+                        LOG_MAIN_INFO("DHT peer search initiated");
+                    } else {
+                        LOG_MAIN_ERROR("Failed to initiate DHT peer search");
+                    }
+                }
+            } else {
+                std::cout << "Usage: dht_find <content_hash>" << std::endl;
+            }
+            std::cout << "Type your command: ";
+        }
+        else if (command == "dht_announce") {
+            std::string content_hash;
+            int port = 0;
+            iss >> content_hash >> port;
+            if (!content_hash.empty()) {
+                if (!client.is_dht_running()) {
+                    std::cout << "DHT is not running. Start it first with 'dht_start'" << std::endl;
+                } else {
+                    LOG_MAIN_INFO("Announcing as peer for content hash: " << content_hash 
+                                  << " (port: " << (port > 0 ? port : listen_port) << ")");
+                    if (client.announce_for_hash(content_hash, port)) {
+                        LOG_MAIN_INFO("DHT peer announcement initiated");
+                    } else {
+                        LOG_MAIN_ERROR("Failed to initiate DHT peer announcement");
+                    }
+                }
+            } else {
+                std::cout << "Usage: dht_announce <content_hash> [port]" << std::endl;
+            }
+            std::cout << "Type your command: ";
+        }
+        else if (command == "netutils") {
+            std::string hostname;
+            iss >> hostname;
+            if (hostname.empty()) {
+                librats::network_utils::demo_network_utils();
+            } else {
+                librats::network_utils::demo_network_utils(hostname);
+            }
+            std::cout << "Type your command: ";
+        }
         else {
             std::cout << "Unknown command: " << command << std::endl;
             std::cout << "Type 'help' for available commands." << std::endl;
@@ -207,6 +318,9 @@ int main(int argc, char* argv[]) {
     }
     
     // Clean shutdown
+    LOG_MAIN_INFO("Stopping DHT peer discovery...");
+    client.stop_dht_discovery();
+    
     client.stop();
     LOG_MAIN_INFO("RatsClient stopped. Goodbye!");
     

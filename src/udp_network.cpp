@@ -1,4 +1,5 @@
 #include "udp_network.h"
+#include "network_utils.h"
 #include "logger.h"
 #include <cstring>
 #include <iostream>
@@ -64,24 +65,31 @@ udp_socket_t create_udp_socket(int port) {
 int send_udp_data(udp_socket_t socket, const std::vector<uint8_t>& data, const UdpPeer& peer) {
     LOG_UDP_DEBUG("Sending " << data.size() << " bytes to " << peer.ip << ":" << peer.port);
     
+    // Resolve hostname to IP address if needed
+    std::string resolved_ip = network_utils::resolve_hostname(peer.ip);
+    if (resolved_ip.empty()) {
+        LOG_UDP_ERROR("Failed to resolve hostname: " << peer.ip);
+        return -1;
+    }
+    
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(peer.port);
     
-    if (inet_pton(AF_INET, peer.ip.c_str(), &addr.sin_addr) <= 0) {
-        LOG_UDP_ERROR("Invalid IP address: " << peer.ip);
+    if (inet_pton(AF_INET, resolved_ip.c_str(), &addr.sin_addr) <= 0) {
+        LOG_UDP_ERROR("Invalid IP address: " << resolved_ip);
         return -1;
     }
 
     int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0, 
                            (struct sockaddr*)&addr, sizeof(addr));
     if (bytes_sent == SOCKET_ERROR_VALUE) {
-        LOG_UDP_ERROR("Failed to send UDP data to " << peer.ip << ":" << peer.port);
+        LOG_UDP_ERROR("Failed to send UDP data to " << resolved_ip << ":" << peer.port);
         return -1;
     }
     
-    LOG_UDP_DEBUG("Successfully sent " << bytes_sent << " bytes to " << peer.ip << ":" << peer.port);
+    LOG_UDP_DEBUG("Successfully sent " << bytes_sent << " bytes to " << resolved_ip << ":" << peer.port);
     return bytes_sent;
 }
 
