@@ -446,20 +446,20 @@ int main(int argc, char* argv[]) {
                 
                 // Test IPv6 UDP socket
                 LOG_MAIN_INFO("Testing IPv6 UDP socket...");
-                udp_socket_t udp_socket = librats::create_udp_socket_v6(0);
-                if (librats::is_valid_udp_socket(udp_socket)) {
+                socket_t udp_socket = librats::create_udp_socket_v6(0);
+                if (librats::is_valid_socket(udp_socket)) {
                     LOG_MAIN_INFO("IPv6 UDP socket creation successful!");
-                    librats::close_udp_socket(udp_socket);
+                    librats::close_socket(udp_socket);
                 } else {
                     LOG_MAIN_ERROR("IPv6 UDP socket creation failed");
                 }
                 
                 // Test dual stack UDP socket
                 LOG_MAIN_INFO("Testing dual stack UDP socket...");
-                udp_socket_t dual_udp_socket = librats::create_udp_socket_dual(0);
-                if (librats::is_valid_udp_socket(dual_udp_socket)) {
+                socket_t dual_udp_socket = librats::create_udp_socket_dual(0);
+                if (librats::is_valid_socket(dual_udp_socket)) {
                     LOG_MAIN_INFO("Dual stack UDP socket creation successful!");
-                    librats::close_udp_socket(dual_udp_socket);
+                    librats::close_socket(dual_udp_socket);
                 } else {
                     LOG_MAIN_ERROR("Dual stack UDP socket creation failed");
                 }

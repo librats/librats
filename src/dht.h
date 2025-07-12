@@ -1,6 +1,6 @@
 #pragma once
 
-#include "udp_network.h"
+#include "socket.h"
 #include "krpc.h"
 #include <string>
 #include <vector>
@@ -146,7 +146,7 @@ public:
 private:
     int port_;
     NodeId node_id_;
-    udp_socket_t socket_;
+    socket_t socket_;
     std::atomic<bool> running_;
     
     // Routing table (k-buckets)

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "network.h"
+#include "socket.h"
 #include "dht.h"
 #include "logger.h"
 #include <string>

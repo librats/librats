@@ -1,7 +1,7 @@
 #pragma once
 
 #include "bencode.h"
-#include "udp_network.h"
+#include "socket.h"
 #include <string>
 #include <vector>
 #include <array>

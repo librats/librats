@@ -92,7 +92,7 @@ bool RatsClient::start() {
     }
 
     LOG_CLIENT_INFO("Starting RatsClient on port " << listen_port_);
-    init_networking();
+    init_socket_library();
     
     // Create dual-stack server socket (supports both IPv4 and IPv6)
     server_socket_ = create_tcp_server_dual(listen_port_);
@@ -154,7 +154,7 @@ void RatsClient::stop() {
     }
     client_threads_.clear();
 
-    cleanup_networking();
+    cleanup_socket_library();
     
     LOG_CLIENT_INFO("RatsClient stopped successfully");
 }

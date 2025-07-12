@@ -2,6 +2,8 @@
 
 #include <string>
 #include <functional>
+#include <vector>
+#include <cstdint>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -24,16 +26,33 @@
 namespace librats {
 
 /**
- * Initialize the networking library
+ * UDP peer information
+ */
+struct UdpPeer {
+    std::string ip;
+    uint16_t port;
+    
+    UdpPeer() : port(0) {}
+    UdpPeer(const std::string& ip, uint16_t port) : ip(ip), port(port) {}
+    
+    bool operator==(const UdpPeer& other) const {
+        return ip == other.ip && port == other.port;
+    }
+};
+
+// Socket Library Initialization
+/**
+ * Initialize the socket library
  * @return true if successful, false otherwise
  */
-bool init_networking();
+bool init_socket_library();
 
 /**
- * Cleanup the networking library
+ * Cleanup the socket library
  */
-void cleanup_networking();
+void cleanup_socket_library();
 
+// TCP Socket Functions
 /**
  * Create a TCP client socket and connect to a server
  * @param host The hostname or IP address to connect to
@@ -90,21 +109,62 @@ socket_t create_tcp_server_dual(int port, int backlog = 5);
 socket_t accept_client(socket_t server_socket);
 
 /**
- * Send data through a socket
+ * Send data through a TCP socket
  * @param socket The socket handle
  * @param data The data to send
  * @return Number of bytes sent, or -1 on error
  */
-int send_data(socket_t socket, const std::string& data);
+int send_tcp_data(socket_t socket, const std::string& data);
 
 /**
- * Receive data from a socket
+ * Receive data from a TCP socket
  * @param socket The socket handle
  * @param buffer_size Maximum number of bytes to receive
  * @return Received data as string, empty string on error
  */
-std::string receive_data(socket_t socket, size_t buffer_size = 1024);
+std::string receive_tcp_data(socket_t socket, size_t buffer_size = 1024);
 
+// UDP Socket Functions
+/**
+ * Create a UDP socket
+ * @param port The port to bind to (0 for any available port)
+ * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_udp_socket(int port = 0);
+
+/**
+ * Create a UDP socket with IPv6 support
+ * @param port The port to bind to (0 for any available port)
+ * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_udp_socket_v6(int port = 0);
+
+/**
+ * Create a UDP socket with dual stack support (IPv6 with IPv4 fallback)
+ * @param port The port to bind to (0 for any available port)
+ * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
+ */
+socket_t create_udp_socket_dual(int port = 0);
+
+/**
+ * Send UDP data to a peer
+ * @param socket The UDP socket handle
+ * @param data The data to send
+ * @param peer The destination peer
+ * @return Number of bytes sent, or -1 on error
+ */
+int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const UdpPeer& peer);
+
+/**
+ * Receive UDP data from a peer
+ * @param socket The UDP socket handle
+ * @param buffer_size Maximum number of bytes to receive
+ * @param sender_peer Output parameter for the sender's peer info
+ * @return Received data, empty vector on error
+ */
+std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, UdpPeer& sender_peer);
+
+// Common Socket Functions
 /**
  * Close a socket
  * @param socket The socket handle to close
@@ -117,5 +177,23 @@ void close_socket(socket_t socket);
  * @return true if valid, false otherwise
  */
 bool is_valid_socket(socket_t socket);
+
+/**
+ * Set socket to non-blocking mode
+ * @param socket The socket handle
+ * @return true if successful, false otherwise
+ */
+bool set_socket_nonblocking(socket_t socket);
+
+// Legacy compatibility functions (deprecated - use send_tcp_data/receive_tcp_data instead)
+/**
+ * @deprecated Use send_tcp_data instead
+ */
+int send_data(socket_t socket, const std::string& data);
+
+/**
+ * @deprecated Use receive_tcp_data instead
+ */
+std::string receive_data(socket_t socket, size_t buffer_size = 1024);
 
 } // namespace librats 

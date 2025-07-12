@@ -25,7 +25,7 @@
 namespace librats {
 
 DhtClient::DhtClient(int port) 
-    : port_(port), socket_(INVALID_UDP_SOCKET), running_(false) {
+    : port_(port), socket_(INVALID_SOCKET_VALUE), running_(false) {
     node_id_ = generate_node_id();
     routing_table_.resize(NODE_ID_SIZE * 8);  // 160 buckets for 160-bit node IDs
     
@@ -44,12 +44,12 @@ bool DhtClient::start() {
     LOG_DHT_INFO("Starting DHT client on port " << port_);
     
     socket_ = create_udp_socket_dual(port_);
-    if (!is_valid_udp_socket(socket_)) {
+    if (!is_valid_socket(socket_)) {
         LOG_DHT_ERROR("Failed to create dual-stack UDP socket");
         return false;
     }
     
-    if (!set_udp_socket_nonblocking(socket_)) {
+    if (!set_socket_nonblocking(socket_)) {
         LOG_DHT_WARN("Failed to set socket to non-blocking mode");
     }
     
@@ -80,9 +80,9 @@ void DhtClient::stop() {
     }
     
     // Close socket
-    if (is_valid_udp_socket(socket_)) {
-        close_udp_socket(socket_);
-        socket_ = INVALID_UDP_SOCKET;
+    if (is_valid_socket(socket_)) {
+        close_socket(socket_);
+        socket_ = INVALID_SOCKET_VALUE;
     }
     
     LOG_DHT_INFO("DHT client stopped");

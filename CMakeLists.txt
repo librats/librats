@@ -6,10 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Create the library
 add_library(librats
-    src/network.cpp
-    src/network.h
-    src/udp_network.cpp
-    src/udp_network.h
+    src/socket.cpp
+    src/socket.h
     src/network_utils.cpp
     src/network_utils.h
     src/dht.cpp
