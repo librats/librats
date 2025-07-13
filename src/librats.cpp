@@ -560,6 +560,16 @@ void RatsClient::automatic_discovery_loop() {
     
     // Search immediately
     search_rats_peers();
+
+    std::this_thread::sleep_for(std::chrono::seconds(15));
+
+    // Search again
+    search_rats_peers();
+
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+
+    // Announce again
+    announce_rats_peer();
     
     auto last_announce = std::chrono::steady_clock::now();
     auto last_search = std::chrono::steady_clock::now();
