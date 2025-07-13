@@ -18,6 +18,8 @@ add_library(librats
     src/krpc.h
     src/librats.cpp
     src/librats.h
+    src/sha1.cpp
+    src/sha1.h
     src/logger.h
 )
 

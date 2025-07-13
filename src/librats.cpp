@@ -1,4 +1,5 @@
 #include "librats.h"
+#include "sha1.h"
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -666,8 +667,8 @@ bool RatsClient::is_automatic_discovery_running() const {
 
 std::string RatsClient::get_rats_peer_discovery_hash() {
     // Well-known hash for rats peer discovery
-    // This is SHA1 hash of "rats_peer_discovery_v1"
-    return "d7b8f9c2a1e6d3f4a5b9c8e7f0d1a2b3c4d5e6f7";
+    // Compute SHA1 hash of "rats_peer_discovery_v1"
+    return SHA1::hash("rats_peer_discovery_v1");
 }
 
 void RatsClient::automatic_discovery_loop() {
