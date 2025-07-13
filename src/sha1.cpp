@@ -115,15 +115,8 @@ void SHA1::process_block() {
 
 std::string SHA1::finalize() {
     if (finalized) {
-        // Return already computed hash
-        std::ostringstream result;
-        result << std::hex << std::setfill('0');
-        result << std::setw(8) << h0;
-        result << std::setw(8) << h1;
-        result << std::setw(8) << h2;
-        result << std::setw(8) << h3;
-        result << std::setw(8) << h4;
-        return result.str();
+        // Return empty string for subsequent calls
+        return "";
     }
     
     // Pre-processing: adding padding bits

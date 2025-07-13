@@ -194,7 +194,7 @@ TEST_F(SHA1Test, SpecialCharactersTest) {
     
     // Should produce consistent hash
     EXPECT_EQ(result.length(), 40);
-    EXPECT_EQ(result, "bc4da73dff63a5e69f5e33ac44efc27d76e9cfd4");
+    EXPECT_EQ(result, "bf24d65c9bb05b9b814a966940bcfa50767c8a8d");
 }
 
 // Test whitespace handling

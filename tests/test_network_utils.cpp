@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include "network_utils.h"
+#include "socket.h"
 #include <string>
 
 using namespace librats;
@@ -8,11 +9,13 @@ using namespace librats;
 class NetworkUtilsTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Setup if needed
+        // Initialize socket library for Windows
+        init_socket_library();
     }
     
     void TearDown() override {
-        // Cleanup if needed
+        // Cleanup socket library
+        cleanup_socket_library();
     }
 };
 
