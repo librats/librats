@@ -1299,8 +1299,8 @@ void DhtClient::handle_get_peers_response_for_announce(const std::string& transa
                       << " - sending announce_peer for info_hash " << node_id_to_hex(pending_announce.info_hash) 
                       << " to " << responder.ip << ":" << responder.port);
         
-        // Send announce_peer with the received token
-        send_krpc_announce_peer(responder, pending_announce.info_hash, pending_announce.port, token);
+        // Send announce_peer with the received token using unified function
+        send_announce_peer(responder, pending_announce.info_hash, pending_announce.port, token);
         
         // Remove the pending announce since we've handled it
         pending_announces_.erase(it);
@@ -1317,14 +1317,8 @@ void DhtClient::handle_get_peers_response_for_announce_rats_dht(const std::strin
                       << " - sending announce_peer for info_hash " << node_id_to_hex(pending_announce.info_hash) 
                       << " to " << responder.ip << ":" << responder.port);
         
-        // Send announce_peer with the received token using rats DHT protocol
-        std::string announce_transaction_id = generate_rats_dht_transaction_id();
-        DhtMessage message(DhtMessageType::ANNOUNCE_PEER, announce_transaction_id, node_id_);
-        message.target_id = pending_announce.info_hash;
-        message.announce_port = pending_announce.port;
-        message.token = token;
-        track_rats_dht_transaction(announce_transaction_id, "announce_peer:" + responder.ip + ":" + std::to_string(responder.port));
-        send_message(message, responder);
+        // Send announce_peer with the received token using unified function
+        send_announce_peer(responder, pending_announce.info_hash, pending_announce.port, token);
         
         // Remove the pending announce since we've handled it
         pending_announces_.erase(it);
