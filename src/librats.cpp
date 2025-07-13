@@ -637,7 +637,7 @@ void RatsClient::search_rats_peers() {
                 int port = std::stoi(peer_address.substr(colon_pos + 1));
                 
                 // Don't connect to ourselves
-                if (port != listen_port_ || ip == "127.0.0.1" || ip == "::1") {
+                if (port == listen_port_ && (ip == "127.0.0.1" || ip == "::1")) {
                     continue;
                 }
                 
