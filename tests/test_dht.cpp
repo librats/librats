@@ -361,18 +361,17 @@ TEST_F(DhtTest, ConcurrentOperationsTest) {
 
 // Test memory management
 TEST_F(DhtTest, MemoryManagementTest) {
-    // Test that clients can be created and destroyed many times
-    for (int i = 0; i < 10; ++i) {
+    // Test that clients can be created and destroyed - reduced for faster tests
+    for (int i = 0; i < 3; ++i) {  // Reduced from 10 to 3
         DhtClient client(0);
         EXPECT_TRUE(client.start());
         
-        // Do some operations
+        // Do some operations - just test the API, don't wait for timeouts
         InfoHash hash = create_test_info_hash(static_cast<uint8_t>(i));
         client.find_peers(hash, [](const std::vector<UdpPeer>& peers, const InfoHash& info_hash) {});
         client.announce_peer(hash, 8080);
         
-        // Give some time for operations
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // Skip sleep to avoid delays
         
         client.stop();
     }

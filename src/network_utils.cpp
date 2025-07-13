@@ -28,6 +28,12 @@ namespace network_utils {
 std::string resolve_hostname(const std::string& hostname) {
     LOG_NETUTILS_DEBUG("Resolving hostname: " << hostname);
     
+    // Handle empty string
+    if (hostname.empty()) {
+        LOG_NETUTILS_DEBUG("Empty hostname provided");
+        return "";
+    }
+    
     // Check if it's already an IP address
     if (is_valid_ipv4(hostname)) {
         LOG_NETUTILS_DEBUG("Already an IP address: " << hostname);
@@ -106,7 +112,47 @@ bool is_valid_ipv6(const std::string& ip_str) {
 }
 
 bool is_hostname(const std::string& str) {
-    return !is_valid_ipv4(str) && !is_valid_ipv6(str);
+    // First check if it's an IP address - if so, it's not a hostname
+    if (is_valid_ipv4(str) || is_valid_ipv6(str)) {
+        return false;
+    }
+    
+    // Check basic validation rules
+    if (str.empty() || str.length() > 253) {
+        return false;
+    }
+    
+    // Check for invalid characters at start/end
+    if (str.front() == '.' || str.back() == '.') {
+        return false;
+    }
+    
+    if (str.front() == '-' || str.back() == '-') {
+        return false;
+    }
+    
+    // Check for invalid patterns
+    if (str.find("..") != std::string::npos) {
+        return false;
+    }
+    
+    if (str == ".") {
+        return false;
+    }
+    
+    // Check for invalid characters
+    for (char c : str) {
+        if (c == ' ' || c == '@' || c == '#' || c == '$' || c == '%' || 
+            c == '^' || c == '&' || c == '*' || c == '(' || c == ')' || 
+            c == '+' || c == '=' || c == '[' || c == ']' || c == '{' || 
+            c == '}' || c == '|' || c == '\\' || c == '/' || c == '?' || 
+            c == '<' || c == '>' || c == ',' || c == ';' || c == ':' || 
+            c == '"' || c == '\'' || c == '`' || c == '~' || c == '!') {
+            return false;
+        }
+    }
+    
+    return true;
 }
 
 std::string to_ip_address(const std::string& host) {

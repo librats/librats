@@ -65,6 +65,12 @@ socket_t create_tcp_client(const std::string& host, int port) {
 socket_t create_tcp_client_v4(const std::string& host, int port) {
     LOG_SOCKET_DEBUG("Creating TCP client socket for " << host << ":" << port);
     
+    // Validate port number
+    if (port < 0 || port > 65535) {
+        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
+        return INVALID_SOCKET_VALUE;
+    }
+    
     socket_t client_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (client_socket == INVALID_SOCKET_VALUE) {
         LOG_SOCKET_ERROR("Failed to create client socket");
@@ -106,6 +112,12 @@ socket_t create_tcp_client_v4(const std::string& host, int port) {
 socket_t create_tcp_client_v6(const std::string& host, int port) {
     LOG_SOCKET_DEBUG("Creating TCP client socket for IPv6 " << host << ":" << port);
     
+    // Validate port number
+    if (port < 0 || port > 65535) {
+        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
+        return INVALID_SOCKET_VALUE;
+    }
+    
     socket_t client_socket = socket(AF_INET6, SOCK_STREAM, 0);
     if (client_socket == INVALID_SOCKET_VALUE) {
         LOG_SOCKET_ERROR("Failed to create IPv6 client socket");
@@ -146,6 +158,12 @@ socket_t create_tcp_client_v6(const std::string& host, int port) {
 
 socket_t create_tcp_server(int port, int backlog) {
     LOG_SOCKET_DEBUG("Creating TCP server socket (dual stack) on port " << port);
+    
+    // Validate port number
+    if (port < 0 || port > 65535) {
+        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
+        return INVALID_SOCKET_VALUE;
+    }
     
     socket_t server_socket = socket(AF_INET6, SOCK_STREAM, 0);
     if (server_socket == INVALID_SOCKET_VALUE) {
@@ -197,6 +215,12 @@ socket_t create_tcp_server(int port, int backlog) {
 socket_t create_tcp_server_v4(int port, int backlog) {
     LOG_SOCKET_DEBUG("Creating TCP server socket on port " << port);
     
+    // Validate port number
+    if (port < 0 || port > 65535) {
+        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
+        return INVALID_SOCKET_VALUE;
+    }
+    
     socket_t server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == INVALID_SOCKET_VALUE) {
         LOG_SOCKET_ERROR("Failed to create server socket");
@@ -239,6 +263,12 @@ socket_t create_tcp_server_v4(int port, int backlog) {
 
 socket_t create_tcp_server_v6(int port, int backlog) {
     LOG_SOCKET_DEBUG("Creating TCP server socket on IPv6 port " << port);
+    
+    // Validate port number
+    if (port < 0 || port > 65535) {
+        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
+        return INVALID_SOCKET_VALUE;
+    }
     
     socket_t server_socket = socket(AF_INET6, SOCK_STREAM, 0);
     if (server_socket == INVALID_SOCKET_VALUE) {
@@ -381,6 +411,12 @@ std::string receive_tcp_data(socket_t socket, size_t buffer_size) {
 socket_t create_udp_socket(int port) {
     LOG_SOCKET_DEBUG("Creating dual stack UDP socket on port " << port);
     
+    // Validate port number
+    if (port < 0 || port > 65535) {
+        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
+        return INVALID_SOCKET_VALUE;
+    }
+    
     socket_t udp_socket = socket(AF_INET6, SOCK_DGRAM, 0);
     if (udp_socket == INVALID_SOCKET_VALUE) {
         LOG_SOCKET_ERROR("Failed to create dual stack UDP socket");
@@ -425,6 +461,12 @@ socket_t create_udp_socket(int port) {
 socket_t create_udp_socket_v4(int port) {
     LOG_SOCKET_DEBUG("Creating UDP socket on port " << port);
     
+    // Validate port number
+    if (port < 0 || port > 65535) {
+        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
+        return INVALID_SOCKET_VALUE;
+    }
+    
     socket_t udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp_socket == INVALID_SOCKET_VALUE) {
         LOG_SOCKET_ERROR("Failed to create UDP socket");
@@ -461,6 +503,12 @@ socket_t create_udp_socket_v4(int port) {
 
 socket_t create_udp_socket_v6(int port) {
     LOG_SOCKET_DEBUG("Creating UDP socket on IPv6 port " << port);
+    
+    // Validate port number
+    if (port < 0 || port > 65535) {
+        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
+        return INVALID_SOCKET_VALUE;
+    }
     
     socket_t udp_socket = socket(AF_INET6, SOCK_DGRAM, 0);
     if (udp_socket == INVALID_SOCKET_VALUE) {
