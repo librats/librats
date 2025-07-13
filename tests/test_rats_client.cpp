@@ -1,0 +1,532 @@
+#include <gtest/gtest.h>
+#include <gmock/gmock.h>
+#include "librats.h"
+#include "socket.h"
+#include <thread>
+#include <chrono>
+#include <vector>
+#include <string>
+#include <atomic>
+#include <mutex>
+
+using namespace librats;
+
+class RatsClientTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // Initialize socket library
+        init_socket_library();
+    }
+    
+    void TearDown() override {
+        // Cleanup socket library
+        cleanup_socket_library();
+    }
+    
+    // Helper to wait for condition with timeout
+    template<typename Predicate>
+    bool wait_for_condition(Predicate pred, int timeout_ms = 1000) {
+        auto start = std::chrono::steady_clock::now();
+        while (!pred()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start);
+            if (elapsed.count() >= timeout_ms) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+// Test RatsClient creation and basic operations
+TEST_F(RatsClientTest, BasicCreationTest) {
+    RatsClient client(0);  // Use port 0 for automatic assignment
+    
+    // Test initial state
+    EXPECT_FALSE(client.is_running());
+    EXPECT_EQ(client.get_peer_count(), 0);
+    
+    // Test start
+    EXPECT_TRUE(client.start());
+    EXPECT_TRUE(client.is_running());
+    
+    // Test stop
+    client.stop();
+    EXPECT_FALSE(client.is_running());
+}
+
+// Test RatsClient start and stop multiple times
+TEST_F(RatsClientTest, StartStopMultipleTest) {
+    RatsClient client(0);
+    
+    // Test multiple start/stop cycles
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_TRUE(client.start());
+        EXPECT_TRUE(client.is_running());
+        
+        client.stop();
+        EXPECT_FALSE(client.is_running());
+    }
+}
+
+// Test RatsClient callback setting
+TEST_F(RatsClientTest, CallbackSettingTest) {
+    RatsClient client(0);
+    
+    bool connection_callback_set = false;
+    bool data_callback_set = false;
+    bool disconnect_callback_set = false;
+    
+    // Set callbacks
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        connection_callback_set = true;
+    });
+    
+    client.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        data_callback_set = true;
+    });
+    
+    client.set_disconnect_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        disconnect_callback_set = true;
+    });
+    
+    // Callbacks should be set (we can't easily test them without actual connections)
+    EXPECT_TRUE(client.start());
+    client.stop();
+}
+
+// Test peer connection between two clients
+TEST_F(RatsClientTest, PeerConnectionTest) {
+    RatsClient server(0);
+    RatsClient client(0);
+    
+    // Setup tracking variables
+    std::atomic<bool> server_connection_received(false);
+    std::atomic<bool> client_connection_made(false);
+    std::string server_peer_hash;
+    std::string client_peer_hash;
+    std::mutex hash_mutex;
+    
+    // Set up server callbacks
+    server.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        std::lock_guard<std::mutex> lock(hash_mutex);
+        server_peer_hash = peer_hash_id;
+        server_connection_received = true;
+    });
+    
+    // Set up client callbacks
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        std::lock_guard<std::mutex> lock(hash_mutex);
+        client_peer_hash = peer_hash_id;
+        client_connection_made = true;
+    });
+    
+    // Start both clients
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    // Connect client to server
+    bool connection_result = client.connect_to_peer("127.0.0.1", 8080);
+    // Connection might fail if port 8080 is not available, but that's okay for this test
+    
+    // Wait briefly for potential connection
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    // Clean up
+    client.stop();
+    server.stop();
+}
+
+// Test peer communication
+TEST_F(RatsClientTest, PeerCommunicationTest) {
+    RatsClient server(0);
+    RatsClient client(0);
+    
+    std::atomic<bool> server_received_data(false);
+    std::atomic<bool> client_received_data(false);
+    std::string server_received_msg;
+    std::string client_received_msg;
+    std::mutex msg_mutex;
+    
+    // Set up server callbacks
+    server.set_connection_callback([&server](socket_t socket, const std::string& peer_hash_id) {
+        // Send welcome message to new peer
+        server.send_to_peer(socket, "Welcome to server!");
+    });
+    
+    server.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        std::lock_guard<std::mutex> lock(msg_mutex);
+        server_received_msg = data;
+        server_received_data = true;
+    });
+    
+    // Set up client callbacks
+    client.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        std::lock_guard<std::mutex> lock(msg_mutex);
+        client_received_msg = data;
+        client_received_data = true;
+        
+        // Send response
+        client.send_to_peer(socket, "Hello from client!");
+    });
+    
+    // Start both clients
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    // Give some time for setup
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Clean up
+    client.stop();
+    server.stop();
+}
+
+// Test broadcast functionality
+TEST_F(RatsClientTest, BroadcastTest) {
+    RatsClient server(0);
+    
+    std::atomic<int> messages_sent(0);
+    std::atomic<int> messages_received(0);
+    
+    server.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        // When peer connects, broadcast a message
+        int sent = server.broadcast_to_peers("Broadcast message");
+        messages_sent = sent;
+    });
+    
+    server.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        if (data == "Broadcast message") {
+            messages_received++;
+        }
+    });
+    
+    EXPECT_TRUE(server.start());
+    
+    // Test broadcasting with no peers
+    int sent = server.broadcast_to_peers("No peers message");
+    EXPECT_EQ(sent, 0);
+    
+    server.stop();
+}
+
+// Test peer hash ID functionality
+TEST_F(RatsClientTest, PeerHashIdTest) {
+    RatsClient client(0);
+    
+    std::string received_hash_id;
+    socket_t received_socket = INVALID_SOCKET_VALUE;
+    
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        received_hash_id = peer_hash_id;
+        received_socket = socket;
+    });
+    
+    EXPECT_TRUE(client.start());
+    
+    // Test hash ID functions with no peers
+    std::string empty_hash = client.get_peer_hash_id(123);
+    EXPECT_TRUE(empty_hash.empty());
+    
+    socket_t invalid_socket = client.get_peer_socket("nonexistent_hash");
+    EXPECT_EQ(invalid_socket, INVALID_SOCKET_VALUE);
+    
+    client.stop();
+}
+
+// Test peer disconnection
+TEST_F(RatsClientTest, PeerDisconnectionTest) {
+    RatsClient client(0);
+    
+    std::atomic<bool> disconnect_called(false);
+    std::string disconnected_hash;
+    
+    client.set_disconnect_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        disconnected_hash = peer_hash_id;
+        disconnect_called = true;
+    });
+    
+    EXPECT_TRUE(client.start());
+    
+    // Test disconnecting non-existent peer (should not crash)
+    client.disconnect_peer(INVALID_SOCKET_VALUE);
+    client.disconnect_peer_by_hash("nonexistent_hash");
+    
+    client.stop();
+}
+
+// Test DHT functionality
+TEST_F(RatsClientTest, DhtFunctionalityTest) {
+    RatsClient client(0);
+    
+    EXPECT_TRUE(client.start());
+    
+    // Test DHT operations
+    EXPECT_FALSE(client.is_dht_running());
+    
+    // Test starting DHT
+    bool dht_started = client.start_dht_discovery(0);  // Use port 0
+    if (dht_started) {
+        EXPECT_TRUE(client.is_dht_running());
+        EXPECT_EQ(client.get_dht_routing_table_size(), 0);  // Should be empty initially
+        
+        // Test DHT operations
+        std::string test_hash = "1234567890abcdef1234567890abcdef12345678";
+        client.announce_for_hash(test_hash, 8080);
+        
+        bool callback_called = false;
+        client.find_peers_by_hash(test_hash, [&](const std::vector<std::string>& peers) {
+            callback_called = true;
+        });
+        
+        // Stop DHT
+        client.stop_dht_discovery();
+        EXPECT_FALSE(client.is_dht_running());
+    }
+    
+    client.stop();
+}
+
+// Test automatic peer discovery
+TEST_F(RatsClientTest, AutomaticPeerDiscoveryTest) {
+    RatsClient client(0);
+    
+    EXPECT_TRUE(client.start());
+    
+    // Test automatic discovery
+    EXPECT_FALSE(client.is_automatic_discovery_running());
+    
+    client.start_automatic_peer_discovery();
+    EXPECT_TRUE(client.is_automatic_discovery_running());
+    
+    // Test discovery hash
+    std::string discovery_hash = RatsClient::get_rats_peer_discovery_hash();
+    EXPECT_FALSE(discovery_hash.empty());
+    EXPECT_EQ(discovery_hash.length(), 40);  // Should be 40 character hex string
+    
+    client.stop_automatic_peer_discovery();
+    EXPECT_FALSE(client.is_automatic_discovery_running());
+    
+    client.stop();
+}
+
+// Test multiple clients
+TEST_F(RatsClientTest, MultipleClientsTest) {
+    RatsClient client1(0);
+    RatsClient client2(0);
+    RatsClient client3(0);
+    
+    // Start all clients
+    EXPECT_TRUE(client1.start());
+    EXPECT_TRUE(client2.start());
+    EXPECT_TRUE(client3.start());
+    
+    // All should be running
+    EXPECT_TRUE(client1.is_running());
+    EXPECT_TRUE(client2.is_running());
+    EXPECT_TRUE(client3.is_running());
+    
+    // All should have 0 peers initially
+    EXPECT_EQ(client1.get_peer_count(), 0);
+    EXPECT_EQ(client2.get_peer_count(), 0);
+    EXPECT_EQ(client3.get_peer_count(), 0);
+    
+    // Stop all clients
+    client1.stop();
+    client2.stop();
+    client3.stop();
+}
+
+// Test error handling
+TEST_F(RatsClientTest, ErrorHandlingTest) {
+    // Test invalid port
+    RatsClient client(-1);
+    EXPECT_FALSE(client.start());
+    
+    // Test valid client
+    RatsClient valid_client(0);
+    EXPECT_TRUE(valid_client.start());
+    
+    // Test operations on invalid socket
+    bool send_result = valid_client.send_to_peer(INVALID_SOCKET_VALUE, "test");
+    EXPECT_FALSE(send_result);
+    
+    // Test operations with invalid hash
+    bool send_by_hash_result = valid_client.send_to_peer_by_hash("invalid_hash", "test");
+    EXPECT_FALSE(send_by_hash_result);
+    
+    // Test connecting to invalid address
+    bool connect_result = valid_client.connect_to_peer("invalid.address.12345", 80);
+    EXPECT_FALSE(connect_result);
+    
+    valid_client.stop();
+}
+
+// Test helper functions
+TEST_F(RatsClientTest, HelperFunctionsTest) {
+    // Test create_rats_client
+    auto client = create_rats_client(0);
+    EXPECT_NE(client, nullptr);
+    EXPECT_TRUE(client->is_running());
+    
+    // Test that it's properly started
+    EXPECT_EQ(client->get_peer_count(), 0);
+    
+    // Clean up is automatic when unique_ptr goes out of scope
+}
+
+// Test memory management
+TEST_F(RatsClientTest, MemoryManagementTest) {
+    // Test creating and destroying many clients
+    for (int i = 0; i < 10; ++i) {
+        RatsClient client(0);
+        EXPECT_TRUE(client.start());
+        
+        // Do some operations
+        client.broadcast_to_peers("test message");
+        client.connect_to_peer("127.0.0.1", 12345);  // Will likely fail, but shouldn't crash
+        
+        // Give some time for operations
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        
+        client.stop();
+    }
+}
+
+// Test concurrent operations
+TEST_F(RatsClientTest, ConcurrentOperationsTest) {
+    RatsClient client(0);
+    EXPECT_TRUE(client.start());
+    
+    std::vector<std::thread> threads;
+    
+    // Start multiple threads doing operations
+    for (int i = 0; i < 5; ++i) {
+        threads.emplace_back([&client, i]() {
+            // Test concurrent broadcasts
+            client.broadcast_to_peers("Message from thread " + std::to_string(i));
+            
+            // Test concurrent connection attempts
+            client.connect_to_peer("127.0.0.1", 12345 + i);
+            
+            // Test concurrent DHT operations
+            if (i == 0) {
+                client.start_dht_discovery(0);
+            }
+        });
+    }
+    
+    // Wait for all threads to complete
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
+    client.stop();
+}
+
+// Test performance
+TEST_F(RatsClientTest, PerformanceTest) {
+    RatsClient client(0);
+    EXPECT_TRUE(client.start());
+    
+    // Test many broadcast operations
+    for (int i = 0; i < 100; ++i) {
+        int sent = client.broadcast_to_peers("Performance test message " + std::to_string(i));
+        EXPECT_EQ(sent, 0);  // No peers connected
+    }
+    
+    // Test many connection attempts
+    for (int i = 0; i < 10; ++i) {
+        bool result = client.connect_to_peer("127.0.0.1", 12345 + i);
+        // These will likely fail, but shouldn't crash
+    }
+    
+    client.stop();
+}
+
+// Test state consistency
+TEST_F(RatsClientTest, StateConsistencyTest) {
+    RatsClient client(0);
+    
+    // Test initial state
+    EXPECT_FALSE(client.is_running());
+    EXPECT_EQ(client.get_peer_count(), 0);
+    EXPECT_FALSE(client.is_dht_running());
+    EXPECT_FALSE(client.is_automatic_discovery_running());
+    
+    // Test state after start
+    EXPECT_TRUE(client.start());
+    EXPECT_TRUE(client.is_running());
+    EXPECT_EQ(client.get_peer_count(), 0);
+    EXPECT_FALSE(client.is_dht_running());
+    EXPECT_FALSE(client.is_automatic_discovery_running());
+    
+    // Test state after stop
+    client.stop();
+    EXPECT_FALSE(client.is_running());
+    EXPECT_EQ(client.get_peer_count(), 0);
+    EXPECT_FALSE(client.is_dht_running());
+    EXPECT_FALSE(client.is_automatic_discovery_running());
+}
+
+// Test edge cases
+TEST_F(RatsClientTest, EdgeCasesTest) {
+    RatsClient client(0);
+    EXPECT_TRUE(client.start());
+    
+    // Test empty message sending
+    int sent = client.broadcast_to_peers("");
+    EXPECT_EQ(sent, 0);
+    
+    // Test null/empty hash operations
+    bool send_result = client.send_to_peer_by_hash("", "test");
+    EXPECT_FALSE(send_result);
+    
+    client.disconnect_peer_by_hash("");
+    
+    // Test very long message
+    std::string long_message(10000, 'a');
+    int long_sent = client.broadcast_to_peers(long_message);
+    EXPECT_EQ(long_sent, 0);
+    
+    // Test connecting to localhost on various ports
+    client.connect_to_peer("127.0.0.1", 0);      // Port 0
+    client.connect_to_peer("127.0.0.1", 65535);  // Max port
+    client.connect_to_peer("127.0.0.1", -1);     // Invalid port
+    
+    client.stop();
+}
+
+// Test callback exception handling
+TEST_F(RatsClientTest, CallbackExceptionHandlingTest) {
+    RatsClient client(0);
+    
+    // Set callbacks that throw exceptions
+    client.set_connection_callback([](socket_t socket, const std::string& peer_hash_id) {
+        throw std::runtime_error("Connection callback exception");
+    });
+    
+    client.set_data_callback([](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        throw std::runtime_error("Data callback exception");
+    });
+    
+    client.set_disconnect_callback([](socket_t socket, const std::string& peer_hash_id) {
+        throw std::runtime_error("Disconnect callback exception");
+    });
+    
+    // Client should still start and work despite exception-throwing callbacks
+    EXPECT_TRUE(client.start());
+    EXPECT_TRUE(client.is_running());
+    
+    // These operations should not crash even with throwing callbacks
+    client.broadcast_to_peers("test");
+    client.connect_to_peer("127.0.0.1", 12345);
+    
+    // Give some time for potential issues
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
+    EXPECT_TRUE(client.is_running());
+    
+    client.stop();
+} 

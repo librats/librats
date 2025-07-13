@@ -60,9 +60,11 @@ struct DhtMessage {
     std::vector<UdpPeer> peers;
     uint16_t announce_port;
     std::string token;
+    bool is_response;
     
+    DhtMessage() : type(DhtMessageType::PING), announce_port(0), is_response(false) {}
     DhtMessage(DhtMessageType type, const std::string& transaction_id, const NodeId& sender_id) 
-        : type(type), transaction_id(transaction_id), sender_id(sender_id), announce_port(0) {}
+        : type(type), transaction_id(transaction_id), sender_id(sender_id), announce_port(0), is_response(false) {}
 };
 
 /**

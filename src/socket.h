@@ -38,6 +38,10 @@ struct UdpPeer {
     bool operator==(const UdpPeer& other) const {
         return ip == other.ip && port == other.port;
     }
+    
+    bool operator!=(const UdpPeer& other) const {
+        return !(*this == other);
+    }
 };
 
 // Socket Library Initialization

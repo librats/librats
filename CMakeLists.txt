@@ -48,3 +48,58 @@ set_target_properties(librats PROPERTIES
 set_target_properties(rats PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
+
+# Testing setup
+option(BUILD_TESTS "Build unit tests" ON)
+
+if(BUILD_TESTS)
+    # Enable testing
+    enable_testing()
+    
+    # Find GoogleTest
+    find_package(GTest QUIET)
+    
+    if(NOT GTest_FOUND)
+        # Download GoogleTest
+        include(FetchContent)
+        FetchContent_Declare(
+            googletest
+            URL https://github.com/google/googletest/archive/refs/tags/v1.17.0.zip
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        
+        # For Windows: Prevent overriding the parent project's compiler/linker settings
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+        
+        FetchContent_MakeAvailable(googletest)
+    endif()
+    
+    # Create test executable
+    add_executable(librats_tests
+        tests/test_socket.cpp
+        tests/test_bencode.cpp
+        tests/test_sha1.cpp
+        tests/test_network_utils.cpp
+        tests/test_dht.cpp
+        tests/test_rats_client.cpp
+        tests/test_main.cpp
+    )
+    
+    # Link with GoogleTest and our library
+    target_link_libraries(librats_tests 
+        librats 
+        gtest 
+        gtest_main
+        gmock
+        gmock_main
+    )
+    
+    # Add test discovery
+    include(GoogleTest)
+    gtest_discover_tests(librats_tests)
+    
+    # Set test output directory
+    set_target_properties(librats_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+endif()
