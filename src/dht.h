@@ -222,8 +222,9 @@ private:
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
               found_peers(false), iteration_count(0) {}
     };
-    std::unordered_map<std::string, PendingSearch> pending_searches_;
+    std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
     std::mutex pending_searches_mutex_;
+    std::unordered_map<std::string, std::string> transaction_to_search_; // transaction_id -> info_hash (hex)
     
     // Peer announcement storage (BEP 5 compliant)
     struct AnnouncedPeer {
@@ -316,7 +317,7 @@ private:
     void handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
     void handle_get_peers_response_with_nodes_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<DhtNode>& nodes);
-    void continue_search_iteration(const PendingSearch& search);
+    void continue_search_iteration(PendingSearch& search);
     
     // Peer announcement storage management
     void store_announced_peer(const InfoHash& info_hash, const Peer& peer);
