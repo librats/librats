@@ -14,6 +14,17 @@
 #include <chrono>
 #include <memory>
 
+// Hash specialization for Peer (must be defined before use in unordered_map)
+namespace std {
+    template<>
+    struct hash<librats::Peer> {
+        std::size_t operator()(const librats::Peer& peer) const noexcept {
+            std::hash<std::string> hasher;
+            return hasher(peer.ip + ":" + std::to_string(peer.port));
+        }
+    };
+}
+
 namespace librats {
 
 // Constants for Kademlia DHT
@@ -160,8 +171,8 @@ private:
     std::unordered_map<std::string, PeerDiscoveryCallback> active_searches_;
     std::mutex active_searches_mutex_;
     
-    // Tokens for peers (use string key instead of Peer for simplicity)
-    std::unordered_map<std::string, std::string> peer_tokens_;
+    // Tokens for peers (use Peer directly as key for efficiency)
+    std::unordered_map<Peer, std::string> peer_tokens_;
     std::mutex peer_tokens_mutex_;
     
     // Protocol detection - track which protocol each peer uses
@@ -170,7 +181,7 @@ private:
         RatsDht,    // Our rats dht binary protocol
         BitTorrent  // Standard BitTorrent DHT (KRPC)
     };
-    std::unordered_map<std::string, PeerProtocol> peer_protocols_;
+    std::unordered_map<Peer, PeerProtocol> peer_protocols_;
     std::mutex peer_protocols_mutex_;
     
     // KRPC transaction tracking
@@ -230,7 +241,6 @@ private:
     
     // Protocol detection
     PeerProtocol detect_protocol(const std::vector<uint8_t>& data);
-    std::string get_peer_key(const Peer& peer);
     PeerProtocol get_peer_protocol(const Peer& peer);
     void set_peer_protocol(const Peer& peer, PeerProtocol protocol);
     bool is_known_bittorrent_bootstrap_node(const Peer& peer);
@@ -343,14 +353,3 @@ NodeId hex_to_node_id(const std::string& hex);
 std::string node_id_to_hex(const NodeId& id);
 
 } // namespace librats
-
-// Hash specialization for Peer only (InfoHash uses std::array's built-in hash)
-namespace std {
-    template<>
-    struct hash<librats::Peer> {
-        std::size_t operator()(const librats::Peer& peer) const {
-            std::hash<std::string> hasher;
-            return hasher(peer.ip + ":" + std::to_string(peer.port));
-        }
-    };
-} 

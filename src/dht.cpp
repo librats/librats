@@ -888,14 +888,9 @@ DhtClient::PeerProtocol DhtClient::detect_protocol(const std::vector<uint8_t>& d
     return PeerProtocol::Unknown;
 }
 
-std::string DhtClient::get_peer_key(const Peer& peer) {
-    return peer.ip + ":" + std::to_string(peer.port);
-}
-
 DhtClient::PeerProtocol DhtClient::get_peer_protocol(const Peer& peer) {
     std::lock_guard<std::mutex> lock(peer_protocols_mutex_);
-    std::string key = get_peer_key(peer);
-    auto it = peer_protocols_.find(key);
+    auto it = peer_protocols_.find(peer);
     if (it != peer_protocols_.end()) {
         return it->second;
     }
@@ -904,8 +899,7 @@ DhtClient::PeerProtocol DhtClient::get_peer_protocol(const Peer& peer) {
 
 void DhtClient::set_peer_protocol(const Peer& peer, PeerProtocol protocol) {
     std::lock_guard<std::mutex> lock(peer_protocols_mutex_);
-    std::string key = get_peer_key(peer);
-    peer_protocols_[key] = protocol;
+    peer_protocols_[peer] = protocol;
 }
 
 bool DhtClient::is_known_bittorrent_bootstrap_node(const Peer& peer) {
@@ -1259,10 +1253,9 @@ std::string DhtClient::generate_token(const Peer& peer) {
     oss << std::hex << hash;
     
     // Store token for this peer
-    std::string peer_key = peer.ip + ":" + std::to_string(peer.port);
     {
         std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
-        peer_tokens_[peer_key] = oss.str();
+        peer_tokens_[peer] = oss.str();
     }
     
     return oss.str();
@@ -1287,9 +1280,8 @@ void DhtClient::cleanup_stale_transactions() {
 }
 
 bool DhtClient::verify_token(const Peer& peer, const std::string& token) {
-    std::string peer_key = peer.ip + ":" + std::to_string(peer.port);
     std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
-    auto it = peer_tokens_.find(peer_key);
+    auto it = peer_tokens_.find(peer);
     if (it != peer_tokens_.end()) {
         return it->second == token;
     }
