@@ -966,7 +966,7 @@ void DhtClient::handle_krpc_message(const KrpcMessage& message, const UdpPeer& s
 }
 
 void DhtClient::handle_krpc_ping(const KrpcMessage& message, const UdpPeer& sender) {
-    LOG_DHT_DEBUG("Handling KRPC PING from " << KrpcProtocol::node_id_to_string(message.sender_id) << " at " << sender.ip << ":" << sender.port);
+    LOG_DHT_DEBUG("Handling KRPC PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
     // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
@@ -979,7 +979,7 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const UdpPeer& send
 }
 
 void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const UdpPeer& sender) {
-    LOG_DHT_DEBUG("Handling KRPC FIND_NODE from " << KrpcProtocol::node_id_to_string(message.sender_id) << " at " << sender.ip << ":" << sender.port);
+    LOG_DHT_DEBUG("Handling KRPC FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
     // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
@@ -996,7 +996,7 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const UdpPeer&
 }
 
 void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const UdpPeer& sender) {
-    LOG_DHT_DEBUG("Handling KRPC GET_PEERS from " << KrpcProtocol::node_id_to_string(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.info_hash));
+    LOG_DHT_DEBUG("Handling KRPC GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.info_hash));
     
     // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
@@ -1026,7 +1026,7 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const UdpPeer&
 }
 
 void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const UdpPeer& sender) {
-    LOG_DHT_DEBUG("Handling KRPC ANNOUNCE_PEER from " << KrpcProtocol::node_id_to_string(message.sender_id) << " at " << sender.ip << ":" << sender.port);
+    LOG_DHT_DEBUG("Handling KRPC ANNOUNCE_PEER from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
     // Verify token
     if (!verify_token(sender, message.token)) {
