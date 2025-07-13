@@ -316,7 +316,7 @@ private:
     void handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
     void handle_get_peers_response_with_nodes_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<DhtNode>& nodes);
-    void continue_search_iteration(const InfoHash& info_hash);
+    void continue_search_iteration(const PendingSearch& search);
     
     // Peer announcement storage management
     void store_announced_peer(const InfoHash& info_hash, const Peer& peer);
