@@ -546,7 +546,7 @@ socket_t create_udp_socket_v6(int port) {
 
 
 
-int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const UdpPeer& peer) {
+int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Peer& peer) {
     LOG_SOCKET_DEBUG("Sending " << data.size() << " bytes to " << peer.ip << ":" << peer.port);
     
     // Check if it's an IPv6 address
@@ -616,7 +616,7 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const UdpPe
     }
 }
 
-std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, UdpPeer& sender_peer) {
+std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer& sender_peer) {
     std::vector<uint8_t> buffer(buffer_size);
     sockaddr_storage sender_addr;
     socklen_t sender_addr_len = sizeof(sender_addr);

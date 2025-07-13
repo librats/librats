@@ -30,11 +30,11 @@ using InfoHash = std::array<uint8_t, NODE_ID_SIZE>;
  */
 struct DhtNode {
     NodeId id;
-    UdpPeer peer;
+    Peer peer;
     std::chrono::steady_clock::time_point last_seen;
     
     DhtNode() = default;
-    DhtNode(const NodeId& id, const UdpPeer& peer)
+    DhtNode(const NodeId& id, const Peer& peer)
         : id(id), peer(peer), last_seen(std::chrono::steady_clock::now()) {}
 };
 
@@ -57,7 +57,7 @@ struct DhtMessage {
     NodeId sender_id;
     NodeId target_id;
     std::vector<DhtNode> nodes;
-    std::vector<UdpPeer> peers;
+    std::vector<Peer> peers;
     uint16_t announce_port;
     std::string token;
     bool is_response;
@@ -70,7 +70,7 @@ struct DhtMessage {
 /**
  * Peer discovery callback
  */
-using PeerDiscoveryCallback = std::function<void(const std::vector<UdpPeer>& peers, const InfoHash& info_hash)>;
+using PeerDiscoveryCallback = std::function<void(const std::vector<Peer>& peers, const InfoHash& info_hash)>;
 
 /**
  * DHT Kademlia implementation
@@ -104,7 +104,7 @@ public:
      * @param bootstrap_nodes Vector of bootstrap nodes
      * @return true if successful, false otherwise
      */
-    bool bootstrap(const std::vector<UdpPeer>& bootstrap_nodes);
+    bool bootstrap(const std::vector<Peer>& bootstrap_nodes);
     
     /**
      * Find peers for a specific info hash
@@ -144,7 +144,7 @@ public:
      * Get default BitTorrent DHT bootstrap nodes
      * @return Vector of bootstrap nodes
      */
-    static std::vector<UdpPeer> get_default_bootstrap_nodes();
+    static std::vector<Peer> get_default_bootstrap_nodes();
 
 private:
     int port_;
@@ -160,7 +160,7 @@ private:
     std::unordered_map<std::string, PeerDiscoveryCallback> active_searches_;
     std::mutex active_searches_mutex_;
     
-    // Tokens for peers (use string key instead of UdpPeer for simplicity)
+    // Tokens for peers (use string key instead of Peer for simplicity)
     std::unordered_map<std::string, std::string> peer_tokens_;
     std::mutex peer_tokens_mutex_;
     
@@ -209,10 +209,10 @@ private:
     
     // Peer announcement storage (BEP 5 compliant)
     struct AnnouncedPeer {
-        UdpPeer peer;
+        Peer peer;
         std::chrono::steady_clock::time_point announced_at;
         
-        AnnouncedPeer(const UdpPeer& p) 
+        AnnouncedPeer(const Peer& p) 
             : peer(p), announced_at(std::chrono::steady_clock::now()) {}
     };
     // Map from info_hash (as hex string) to list of announced peers
@@ -226,47 +226,47 @@ private:
     // Helper functions
     void network_loop();
     void maintenance_loop();
-    void handle_message(const std::vector<uint8_t>& data, const UdpPeer& sender);
+    void handle_message(const std::vector<uint8_t>& data, const Peer& sender);
     
     // Protocol detection
     PeerProtocol detect_protocol(const std::vector<uint8_t>& data);
-    std::string get_peer_key(const UdpPeer& peer);
-    PeerProtocol get_peer_protocol(const UdpPeer& peer);
-    void set_peer_protocol(const UdpPeer& peer, PeerProtocol protocol);
-    bool is_known_bittorrent_bootstrap_node(const UdpPeer& peer);
+    std::string get_peer_key(const Peer& peer);
+    PeerProtocol get_peer_protocol(const Peer& peer);
+    void set_peer_protocol(const Peer& peer, PeerProtocol protocol);
+    bool is_known_bittorrent_bootstrap_node(const Peer& peer);
     
     // Rats DHT protocol handlers
-    void handle_ping(const DhtMessage& message, const UdpPeer& sender);
-    void handle_find_node(const DhtMessage& message, const UdpPeer& sender);
-    void handle_get_peers(const DhtMessage& message, const UdpPeer& sender);
-    void handle_announce_peer(const DhtMessage& message, const UdpPeer& sender);
+    void handle_ping(const DhtMessage& message, const Peer& sender);
+    void handle_find_node(const DhtMessage& message, const Peer& sender);
+    void handle_get_peers(const DhtMessage& message, const Peer& sender);
+    void handle_announce_peer(const DhtMessage& message, const Peer& sender);
     
     // KRPC protocol handlers  
-    void handle_krpc_message(const KrpcMessage& message, const UdpPeer& sender);
-    void handle_krpc_ping(const KrpcMessage& message, const UdpPeer& sender);
-    void handle_krpc_find_node(const KrpcMessage& message, const UdpPeer& sender);
-    void handle_krpc_get_peers(const KrpcMessage& message, const UdpPeer& sender);
-    void handle_krpc_announce_peer(const KrpcMessage& message, const UdpPeer& sender);
-    void handle_krpc_response(const KrpcMessage& message, const UdpPeer& sender);
-    void handle_krpc_error(const KrpcMessage& message, const UdpPeer& sender);
+    void handle_krpc_message(const KrpcMessage& message, const Peer& sender);
+    void handle_krpc_ping(const KrpcMessage& message, const Peer& sender);
+    void handle_krpc_find_node(const KrpcMessage& message, const Peer& sender);
+    void handle_krpc_get_peers(const KrpcMessage& message, const Peer& sender);
+    void handle_krpc_announce_peer(const KrpcMessage& message, const Peer& sender);
+    void handle_krpc_response(const KrpcMessage& message, const Peer& sender);
+    void handle_krpc_error(const KrpcMessage& message, const Peer& sender);
     
     // Sending functions (will auto-detect protocol)
-    void send_ping(const UdpPeer& peer);
-    void send_find_node(const UdpPeer& peer, const NodeId& target);
-    void send_get_peers(const UdpPeer& peer, const InfoHash& info_hash);
-    void send_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
+    void send_ping(const Peer& peer);
+    void send_find_node(const Peer& peer, const NodeId& target);
+    void send_get_peers(const Peer& peer, const InfoHash& info_hash);
+    void send_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
     
     // Rats DHT protocol sending
-    bool send_message(const DhtMessage& message, const UdpPeer& peer);
+    bool send_message(const DhtMessage& message, const Peer& peer);
     std::vector<uint8_t> encode_message(const DhtMessage& message);
     std::unique_ptr<DhtMessage> decode_message(const std::vector<uint8_t>& data);
     
     // KRPC protocol sending
-    bool send_krpc_message(const KrpcMessage& message, const UdpPeer& peer);
-    void send_krpc_ping(const UdpPeer& peer);
-    void send_krpc_find_node(const UdpPeer& peer, const NodeId& target);
-    void send_krpc_get_peers(const UdpPeer& peer, const InfoHash& info_hash);
-    void send_krpc_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
+    bool send_krpc_message(const KrpcMessage& message, const Peer& peer);
+    void send_krpc_ping(const Peer& peer);
+    void send_krpc_find_node(const Peer& peer, const NodeId& target);
+    void send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash);
+    void send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
     
     void add_node(const DhtNode& node);
     std::vector<DhtNode> find_closest_nodes(const NodeId& target, size_t count = K_BUCKET_SIZE);
@@ -277,8 +277,8 @@ private:
     NodeId xor_distance(const NodeId& a, const NodeId& b);
     bool is_closer(const NodeId& a, const NodeId& b, const NodeId& target);
     
-    std::string generate_token(const UdpPeer& peer);
-    bool verify_token(const UdpPeer& peer, const std::string& token);
+    std::string generate_token(const Peer& peer);
+    bool verify_token(const Peer& peer, const std::string& token);
     
     // Transaction ID management
     std::string generate_rats_dht_transaction_id();
@@ -290,17 +290,17 @@ private:
     
     // Pending announce management
     void cleanup_stale_announces();
-    void handle_get_peers_response_for_announce(const std::string& transaction_id, const UdpPeer& responder, const std::string& token);
-    void handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::string& token);
+    void handle_get_peers_response_for_announce(const std::string& transaction_id, const Peer& responder, const std::string& token);
+    void handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const Peer& responder, const std::string& token);
     
     // Pending search management
     void cleanup_stale_searches();
-    void handle_get_peers_response_for_search(const std::string& transaction_id, const UdpPeer& responder, const std::vector<UdpPeer>& peers);
-    void handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::vector<UdpPeer>& peers);
+    void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
+    void handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     
     // Peer announcement storage management
-    void store_announced_peer(const InfoHash& info_hash, const UdpPeer& peer);
-    std::vector<UdpPeer> get_announced_peers(const InfoHash& info_hash);
+    void store_announced_peer(const InfoHash& info_hash, const Peer& peer);
+    std::vector<Peer> get_announced_peers(const InfoHash& info_hash);
     void cleanup_stale_announced_peers();
     
     // Conversion utilities
@@ -344,11 +344,11 @@ std::string node_id_to_hex(const NodeId& id);
 
 } // namespace librats
 
-// Hash specialization for UdpPeer only (InfoHash uses std::array's built-in hash)
+// Hash specialization for Peer only (InfoHash uses std::array's built-in hash)
 namespace std {
     template<>
-    struct hash<librats::UdpPeer> {
-        std::size_t operator()(const librats::UdpPeer& peer) const {
+    struct hash<librats::Peer> {
+        std::size_t operator()(const librats::Peer& peer) const {
             std::hash<std::string> hasher;
             return hasher(peer.ip + ":" + std::to_string(peer.port));
         }

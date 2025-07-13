@@ -90,7 +90,7 @@ KrpcMessage KrpcProtocol::create_find_node_response(const std::string& transacti
     return message;
 }
 
-KrpcMessage KrpcProtocol::create_get_peers_response(const std::string& transaction_id, const NodeId& response_id, const std::vector<UdpPeer>& peers, const std::string& token) {
+KrpcMessage KrpcProtocol::create_get_peers_response(const std::string& transaction_id, const NodeId& response_id, const std::vector<Peer>& peers, const std::string& token) {
     KrpcMessage message;
     message.type = KrpcMessageType::Response;
     message.transaction_id = transaction_id;
@@ -408,7 +408,7 @@ NodeId KrpcProtocol::string_to_node_id(const std::string& str) {
     return id;
 }
 
-std::string KrpcProtocol::compact_peer_info(const UdpPeer& peer) {
+std::string KrpcProtocol::compact_peer_info(const Peer& peer) {
     std::string result;
     result.reserve(6);
     
@@ -469,8 +469,8 @@ std::string KrpcProtocol::compact_node_info(const KrpcNode& node) {
     return result;
 }
 
-std::vector<UdpPeer> KrpcProtocol::parse_compact_peer_info(const std::string& compact_info) {
-    std::vector<UdpPeer> peers;
+std::vector<Peer> KrpcProtocol::parse_compact_peer_info(const std::string& compact_info) {
+    std::vector<Peer> peers;
     
     if (compact_info.size() % 6 != 0) {
         LOG_KRPC_WARN("Invalid compact peer info size: " << compact_info.size());

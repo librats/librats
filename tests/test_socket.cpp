@@ -23,16 +23,16 @@ TEST_F(SocketTest, InitializationTest) {
     EXPECT_TRUE(true);
 }
 
-// Test UdpPeer structure
-TEST_F(SocketTest, UdpPeerTest) {
-    UdpPeer peer1("127.0.0.1", 8080);
+// Test Peer structure
+TEST_F(SocketTest, PeerTest) {
+    Peer peer1("127.0.0.1", 8080);
     EXPECT_EQ(peer1.ip, "127.0.0.1");
     EXPECT_EQ(peer1.port, 8080);
     
-    UdpPeer peer2("127.0.0.1", 8080);
+    Peer peer2("127.0.0.1", 8080);
     EXPECT_EQ(peer1, peer2);
     
-    UdpPeer peer3("127.0.0.1", 8081);
+    Peer peer3("127.0.0.1", 8081);
     EXPECT_NE(peer1, peer3);
 }
 

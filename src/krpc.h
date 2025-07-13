@@ -72,7 +72,7 @@ struct KrpcMessage {
     // For responses
     NodeId response_id;
     std::vector<KrpcNode> nodes;
-    std::vector<UdpPeer> peers;
+    std::vector<Peer> peers;
     
     // For errors
     KrpcErrorCode error_code;
@@ -99,7 +99,7 @@ public:
     
     static KrpcMessage create_ping_response(const std::string& transaction_id, const NodeId& response_id);
     static KrpcMessage create_find_node_response(const std::string& transaction_id, const NodeId& response_id, const std::vector<KrpcNode>& nodes);
-    static KrpcMessage create_get_peers_response(const std::string& transaction_id, const NodeId& response_id, const std::vector<UdpPeer>& peers, const std::string& token);
+    static KrpcMessage create_get_peers_response(const std::string& transaction_id, const NodeId& response_id, const std::vector<Peer>& peers, const std::string& token);
     static KrpcMessage create_get_peers_response_with_nodes(const std::string& transaction_id, const NodeId& response_id, const std::vector<KrpcNode>& nodes, const std::string& token);
     static KrpcMessage create_announce_peer_response(const std::string& transaction_id, const NodeId& response_id);
     
@@ -121,9 +121,9 @@ public:
      */
     static std::string node_id_to_string(const NodeId& id);
     static NodeId string_to_node_id(const std::string& str);
-    static std::string compact_peer_info(const UdpPeer& peer);
+    static std::string compact_peer_info(const Peer& peer);
     static std::string compact_node_info(const KrpcNode& node);
-    static std::vector<UdpPeer> parse_compact_peer_info(const std::string& compact_info);
+    static std::vector<Peer> parse_compact_peer_info(const std::string& compact_info);
     static std::vector<KrpcNode> parse_compact_node_info(const std::string& compact_info);
 
 private:

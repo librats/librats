@@ -482,7 +482,7 @@ int main(int argc, char* argv[]) {
                     LOG_MAIN_INFO("Test DHT started on port 8882");
                     
                     // Test bootstrap with the target
-                    std::vector<librats::UdpPeer> test_nodes = {{target_ip, static_cast<uint16_t>(target_port)}};
+                    std::vector<librats::Peer> test_nodes = {{target_ip, static_cast<uint16_t>(target_port)}};
                     test_dht.bootstrap(test_nodes);
                     
                     // Wait a bit for responses

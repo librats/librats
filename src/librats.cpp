@@ -374,10 +374,10 @@ bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::functi
     
     InfoHash info_hash = hex_to_node_id(content_hash);
     
-    return dht_client_->find_peers(info_hash, [this, callback](const std::vector<UdpPeer>& peers, const InfoHash& info_hash) {
+    return dht_client_->find_peers(info_hash, [this, callback](const std::vector<Peer>& peers, const InfoHash& info_hash) {
         handle_dht_peer_discovery(peers, info_hash);
         
-        // Convert UdpPeer to string addresses for callback
+        // Convert Peer to string addresses for callback
         std::vector<std::string> peer_addresses;
         for (const auto& peer : peers) {
             peer_addresses.push_back(peer.ip + ":" + std::to_string(peer.port));
@@ -421,7 +421,7 @@ size_t RatsClient::get_dht_routing_table_size() const {
     return dht_client_->get_routing_table_size();
 }
 
-void RatsClient::handle_dht_peer_discovery(const std::vector<UdpPeer>& peers, const InfoHash& info_hash) {
+void RatsClient::handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash) {
     LOG_CLIENT_INFO("DHT discovered " << peers.size() << " peers for info hash: " << node_id_to_hex(info_hash));
     
     // Auto-connect to discovered peers (optional behavior)

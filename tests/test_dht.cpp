@@ -63,7 +63,7 @@ TEST_F(DhtTest, NodeIdInfoHashTest) {
 // Test DhtNode structure
 TEST_F(DhtTest, DhtNodeTest) {
     NodeId id = create_test_node_id(0x12);
-    UdpPeer peer("127.0.0.1", 8080);
+    Peer peer("127.0.0.1", 8080);
     
     DhtNode node(id, peer);
     
@@ -151,7 +151,7 @@ TEST_F(DhtTest, DhtClientPortBindingTest) {
 
 // Test bootstrap nodes
 TEST_F(DhtTest, BootstrapNodesTest) {
-    std::vector<UdpPeer> bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
+    std::vector<Peer> bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
     
     // Should have at least a few bootstrap nodes
     EXPECT_GT(bootstrap_nodes.size(), 0);
@@ -173,7 +173,7 @@ TEST_F(DhtTest, PeerDiscoveryBasicTest) {
     
     // Test find_peers - should not crash
     bool callback_called = false;
-    client.find_peers(test_hash, [&](const std::vector<UdpPeer>& peers, const InfoHash& info_hash) {
+    client.find_peers(test_hash, [&](const std::vector<Peer>& peers, const InfoHash& info_hash) {
         callback_called = true;
         // For basic test, we don't expect to find peers immediately
         // This is mainly testing that the function doesn't crash
@@ -293,12 +293,12 @@ TEST_F(DhtTest, MessageTypesTest) {
     EXPECT_EQ(static_cast<int>(announce), 3);
 }
 
-// Test UdpPeer equality
-TEST_F(DhtTest, UdpPeerEqualityTest) {
-    UdpPeer peer1("127.0.0.1", 8080);
-    UdpPeer peer2("127.0.0.1", 8080);
-    UdpPeer peer3("127.0.0.1", 8081);
-    UdpPeer peer4("192.168.1.1", 8080);
+// Test Peer equality
+TEST_F(DhtTest, PeerEqualityTest) {
+    Peer peer1("127.0.0.1", 8080);
+    Peer peer2("127.0.0.1", 8080);
+    Peer peer3("127.0.0.1", 8081);
+    Peer peer4("192.168.1.1", 8080);
     
     EXPECT_EQ(peer1, peer2);
     EXPECT_NE(peer1, peer3);
@@ -342,7 +342,7 @@ TEST_F(DhtTest, ConcurrentOperationsTest) {
             hash.fill(static_cast<uint8_t>(i));
             
             // Test find_peers from multiple threads
-            client.find_peers(hash, [](const std::vector<UdpPeer>& peers, const InfoHash& info_hash) {
+            client.find_peers(hash, [](const std::vector<Peer>& peers, const InfoHash& info_hash) {
                 // Just a dummy callback
             });
             
@@ -368,7 +368,7 @@ TEST_F(DhtTest, MemoryManagementTest) {
         
         // Do some operations - just test the API, don't wait for timeouts
         InfoHash hash = create_test_info_hash(static_cast<uint8_t>(i));
-        client.find_peers(hash, [](const std::vector<UdpPeer>& peers, const InfoHash& info_hash) {});
+        client.find_peers(hash, [](const std::vector<Peer>& peers, const InfoHash& info_hash) {});
         client.announce_peer(hash, 8080);
         
         // Skip sleep to avoid delays
@@ -389,7 +389,7 @@ TEST_F(DhtTest, EdgeCasesTest) {
     client.find_peers(hash, nullptr);
     
     // Test with callback that throws (should not crash the client)
-    client.find_peers(hash, [](const std::vector<UdpPeer>& peers, const InfoHash& info_hash) {
+    client.find_peers(hash, [](const std::vector<Peer>& peers, const InfoHash& info_hash) {
         throw std::runtime_error("Test exception");
     });
     

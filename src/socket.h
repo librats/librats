@@ -28,18 +28,18 @@ namespace librats {
 /**
  * UDP peer information
  */
-struct UdpPeer {
+struct Peer {
     std::string ip;
     uint16_t port;
     
-    UdpPeer() : port(0) {}
-    UdpPeer(const std::string& ip, uint16_t port) : ip(ip), port(port) {}
+    Peer() : port(0) {}
+    Peer(const std::string& ip, uint16_t port) : ip(ip), port(port) {}
     
-    bool operator==(const UdpPeer& other) const {
+    bool operator==(const Peer& other) const {
         return ip == other.ip && port == other.port;
     }
     
-    bool operator!=(const UdpPeer& other) const {
+    bool operator!=(const Peer& other) const {
         return !(*this == other);
     }
 };
@@ -164,7 +164,7 @@ socket_t create_udp_socket_v6(int port = 0);
  * @param peer The destination peer
  * @return Number of bytes sent, or -1 on error
  */
-int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const UdpPeer& peer);
+int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Peer& peer);
 
 /**
  * Receive UDP data from a peer
@@ -173,7 +173,7 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const UdpPe
  * @param sender_peer Output parameter for the sender's peer info
  * @return Received data, empty vector on error
  */
-std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, UdpPeer& sender_peer);
+std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer& sender_peer);
 
 // Common Socket Functions
 /**

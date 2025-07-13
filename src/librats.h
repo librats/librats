@@ -227,7 +227,7 @@ private:
     std::string generate_peer_hash_id(socket_t socket, const std::string& connection_info);
     void add_peer_mapping(socket_t socket, const std::string& hash_id);
     void remove_peer_mapping(socket_t socket);
-    void handle_dht_peer_discovery(const std::vector<UdpPeer>& peers, const InfoHash& info_hash);
+    void handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash);
     
     // Peer address tracking methods
     void add_peer_address_mapping(socket_t socket, const std::string& peer_address);

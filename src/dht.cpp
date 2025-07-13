@@ -91,7 +91,7 @@ void DhtClient::stop() {
     LOG_DHT_INFO("DHT client stopped");
 }
 
-bool DhtClient::bootstrap(const std::vector<UdpPeer>& bootstrap_nodes) {
+bool DhtClient::bootstrap(const std::vector<Peer>& bootstrap_nodes) {
     if (!running_) {
         LOG_DHT_ERROR("DHT client not running");
         return false;
@@ -235,7 +235,7 @@ size_t DhtClient::get_routing_table_size() const {
     return total;
 }
 
-std::vector<UdpPeer> DhtClient::get_default_bootstrap_nodes() {
+std::vector<Peer> DhtClient::get_default_bootstrap_nodes() {
     return {
         {"router.bittorrent.com", 6881},
         {"dht.transmissionbt.com", 6881},
@@ -248,7 +248,7 @@ void DhtClient::network_loop() {
     LOG_DHT_DEBUG("Network loop started");
     
     while (running_) {
-        UdpPeer sender;
+        Peer sender;
         auto data = receive_udp_data(socket_, 1500, sender);  // MTU size
         
         if (!data.empty()) {
@@ -301,7 +301,7 @@ void DhtClient::maintenance_loop() {
     LOG_DHT_DEBUG("Maintenance loop stopped");
 }
 
-void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& sender) {
+void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sender) {
     LOG_DHT_DEBUG("Processing message of " << data.size() << " bytes from " << sender.ip << ":" << sender.port);
     
     // First, try to detect the protocol
@@ -361,7 +361,7 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& 
     }
 }
 
-void DhtClient::handle_ping(const DhtMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_ping(const DhtMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
     // Respond with pong using the same transaction ID
     DhtMessage response(DhtMessageType::PING, message.transaction_id, node_id_);
@@ -369,7 +369,7 @@ void DhtClient::handle_ping(const DhtMessage& message, const UdpPeer& sender) {
     send_message(response, sender);
 }
 
-void DhtClient::handle_find_node(const DhtMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_find_node(const DhtMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for target " << node_id_to_hex(message.target_id) << " (transaction: " << message.transaction_id << ")");
     
     auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
@@ -382,7 +382,7 @@ void DhtClient::handle_find_node(const DhtMessage& message, const UdpPeer& sende
     send_message(response, sender);
 }
 
-void DhtClient::handle_get_peers(const DhtMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_get_peers(const DhtMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " (transaction: " << message.transaction_id << ")");
     
     // Check if this is a response to our own get_peers request
@@ -435,7 +435,7 @@ void DhtClient::handle_get_peers(const DhtMessage& message, const UdpPeer& sende
     send_message(response, sender);
 }
 
-void DhtClient::handle_announce_peer(const DhtMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_announce_peer(const DhtMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling ANNOUNCE_PEER from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " on port " << message.announce_port << " (transaction: " << message.transaction_id << ")");
     
     // Verify token
@@ -447,7 +447,7 @@ void DhtClient::handle_announce_peer(const DhtMessage& message, const UdpPeer& s
     LOG_DHT_DEBUG("Token verified, accepting announcement from " << sender.ip << ":" << sender.port);
     
     // Store the peer announcement
-    UdpPeer announcing_peer(sender.ip, message.announce_port);
+    Peer announcing_peer(sender.ip, message.announce_port);
     store_announced_peer(message.target_id, announcing_peer);
     
     DhtMessage response(DhtMessageType::ANNOUNCE_PEER, message.transaction_id, node_id_);
@@ -457,7 +457,7 @@ void DhtClient::handle_announce_peer(const DhtMessage& message, const UdpPeer& s
 
 
 
-bool DhtClient::send_message(const DhtMessage& message, const UdpPeer& peer) {
+bool DhtClient::send_message(const DhtMessage& message, const Peer& peer) {
     LOG_DHT_DEBUG("Encoding message type " << static_cast<int>(message.type) << " for " << peer.ip << ":" << peer.port);
     auto data = encode_message(message);
     if (data.empty()) {
@@ -683,7 +683,7 @@ std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>
         offset += 2;
         
         LOG_DHT_DEBUG("Decoded node: " << node_id_to_hex(node_id) << " at " << ip_str << ":" << port);
-        message->nodes.emplace_back(node_id, UdpPeer(ip_str, port));
+        message->nodes.emplace_back(node_id, Peer(ip_str, port));
     }
     
     if (offset >= data.size()) {
@@ -888,11 +888,11 @@ DhtClient::PeerProtocol DhtClient::detect_protocol(const std::vector<uint8_t>& d
     return PeerProtocol::Unknown;
 }
 
-std::string DhtClient::get_peer_key(const UdpPeer& peer) {
+std::string DhtClient::get_peer_key(const Peer& peer) {
     return peer.ip + ":" + std::to_string(peer.port);
 }
 
-DhtClient::PeerProtocol DhtClient::get_peer_protocol(const UdpPeer& peer) {
+DhtClient::PeerProtocol DhtClient::get_peer_protocol(const Peer& peer) {
     std::lock_guard<std::mutex> lock(peer_protocols_mutex_);
     std::string key = get_peer_key(peer);
     auto it = peer_protocols_.find(key);
@@ -902,13 +902,13 @@ DhtClient::PeerProtocol DhtClient::get_peer_protocol(const UdpPeer& peer) {
     return PeerProtocol::BitTorrent;  // Default to BitTorrent protocol
 }
 
-void DhtClient::set_peer_protocol(const UdpPeer& peer, PeerProtocol protocol) {
+void DhtClient::set_peer_protocol(const Peer& peer, PeerProtocol protocol) {
     std::lock_guard<std::mutex> lock(peer_protocols_mutex_);
     std::string key = get_peer_key(peer);
     peer_protocols_[key] = protocol;
 }
 
-bool DhtClient::is_known_bittorrent_bootstrap_node(const UdpPeer& peer) {
+bool DhtClient::is_known_bittorrent_bootstrap_node(const Peer& peer) {
     // Check if this is a known BitTorrent DHT bootstrap node
     // These nodes are expected to use KRPC protocol only
     static const std::vector<std::string> known_bittorrent_hosts = {
@@ -936,7 +936,7 @@ bool DhtClient::is_known_bittorrent_bootstrap_node(const UdpPeer& peer) {
 }
 
 // KRPC message handling
-void DhtClient::handle_krpc_message(const KrpcMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_krpc_message(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC message type " << static_cast<int>(message.type) << " from " << sender.ip << ":" << sender.port);
     
     switch (message.type) {
@@ -965,7 +965,7 @@ void DhtClient::handle_krpc_message(const KrpcMessage& message, const UdpPeer& s
     }
 }
 
-void DhtClient::handle_krpc_ping(const KrpcMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
     // Add sender to routing table
@@ -978,7 +978,7 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const UdpPeer& send
     send_krpc_message(response, sender);
 }
 
-void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
     // Add sender to routing table
@@ -995,7 +995,7 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const UdpPeer&
     send_krpc_message(response, sender);
 }
 
-void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.info_hash));
     
     // Add sender to routing table
@@ -1025,7 +1025,7 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const UdpPeer&
     send_krpc_message(response, sender);
 }
 
-void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC ANNOUNCE_PEER from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
     // Verify token
@@ -1042,7 +1042,7 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const UdpP
     add_node(sender_node);
     
     // Store the peer announcement
-    UdpPeer announcing_peer(sender.ip, message.port);
+    Peer announcing_peer(sender.ip, message.port);
     store_announced_peer(message.info_hash, announcing_peer);
     
     // Respond with acknowledgment
@@ -1050,7 +1050,7 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const UdpP
     send_krpc_message(response, sender);
 }
 
-void DhtClient::handle_krpc_response(const KrpcMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC response from " << sender.ip << ":" << sender.port);
     
     // Add responder to routing table
@@ -1075,14 +1075,14 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const UdpPeer& 
     }
 }
 
-void DhtClient::handle_krpc_error(const KrpcMessage& message, const UdpPeer& sender) {
+void DhtClient::handle_krpc_error(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_WARN("Received KRPC error from " << sender.ip << ":" << sender.port 
                  << " - Code: " << static_cast<int>(message.error_code) 
                  << " Message: " << message.error_message);
 }
 
 // KRPC sending functions
-bool DhtClient::send_krpc_message(const KrpcMessage& message, const UdpPeer& peer) {
+bool DhtClient::send_krpc_message(const KrpcMessage& message, const Peer& peer) {
     auto data = KrpcProtocol::encode_message(message);
     if (data.empty()) {
         LOG_DHT_ERROR("Failed to encode KRPC message");
@@ -1101,32 +1101,32 @@ bool DhtClient::send_krpc_message(const KrpcMessage& message, const UdpPeer& pee
     return result > 0;
 }
 
-void DhtClient::send_krpc_ping(const UdpPeer& peer) {
+void DhtClient::send_krpc_ping(const Peer& peer) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_ping_query(transaction_id, node_id_);
     send_krpc_message(message, peer);
 }
 
-void DhtClient::send_krpc_find_node(const UdpPeer& peer, const NodeId& target) {
+void DhtClient::send_krpc_find_node(const Peer& peer, const NodeId& target) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_find_node_query(transaction_id, node_id_, target);
     send_krpc_message(message, peer);
 }
 
-void DhtClient::send_krpc_get_peers(const UdpPeer& peer, const InfoHash& info_hash) {
+void DhtClient::send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
     send_krpc_message(message, peer);
 }
 
-void DhtClient::send_krpc_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
+void DhtClient::send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_announce_peer_query(transaction_id, node_id_, info_hash, port, token);
     send_krpc_message(message, peer);
 }
 
 // Update sending functions to use protocol detection
-void DhtClient::send_ping(const UdpPeer& peer) {
+void DhtClient::send_ping(const Peer& peer) {
     PeerProtocol protocol = get_peer_protocol(peer);
     
     if (protocol == PeerProtocol::BitTorrent) {
@@ -1141,7 +1141,7 @@ void DhtClient::send_ping(const UdpPeer& peer) {
     }
 }
 
-void DhtClient::send_find_node(const UdpPeer& peer, const NodeId& target) {
+void DhtClient::send_find_node(const Peer& peer, const NodeId& target) {
     PeerProtocol protocol = get_peer_protocol(peer);
     
     if (protocol == PeerProtocol::BitTorrent) {
@@ -1157,7 +1157,7 @@ void DhtClient::send_find_node(const UdpPeer& peer, const NodeId& target) {
     }
 }
 
-void DhtClient::send_get_peers(const UdpPeer& peer, const InfoHash& info_hash) {
+void DhtClient::send_get_peers(const Peer& peer, const InfoHash& info_hash) {
     PeerProtocol protocol = get_peer_protocol(peer);
     
     if (protocol == PeerProtocol::BitTorrent) {
@@ -1173,7 +1173,7 @@ void DhtClient::send_get_peers(const UdpPeer& peer, const InfoHash& info_hash) {
     }
 }
 
-void DhtClient::send_announce_peer(const UdpPeer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
+void DhtClient::send_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
     PeerProtocol protocol = get_peer_protocol(peer);
     
     if (protocol == PeerProtocol::BitTorrent) {
@@ -1197,7 +1197,7 @@ KrpcNode DhtClient::dht_node_to_krpc_node(const DhtNode& node) {
 }
 
 DhtNode DhtClient::krpc_node_to_dht_node(const KrpcNode& node) {
-    UdpPeer peer(node.ip, node.port);
+    Peer peer(node.ip, node.port);
     return DhtNode(node.id, peer);
 }
 
@@ -1248,7 +1248,7 @@ bool DhtClient::is_closer(const NodeId& a, const NodeId& b, const NodeId& target
                                        dist_b.begin(), dist_b.end());
 }
 
-std::string DhtClient::generate_token(const UdpPeer& peer) {
+std::string DhtClient::generate_token(const Peer& peer) {
     // Simple token generation (in real implementation, use proper cryptographic hash)
     std::string data = peer.ip + ":" + std::to_string(peer.port);
     std::hash<std::string> hasher;
@@ -1286,7 +1286,7 @@ void DhtClient::cleanup_stale_transactions() {
     }
 }
 
-bool DhtClient::verify_token(const UdpPeer& peer, const std::string& token) {
+bool DhtClient::verify_token(const Peer& peer, const std::string& token) {
     std::string peer_key = peer.ip + ":" + std::to_string(peer.port);
     std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
     auto it = peer_tokens_.find(peer_key);
@@ -1376,7 +1376,7 @@ void DhtClient::cleanup_stale_searches() {
     }
 }
 
-void DhtClient::handle_get_peers_response_for_announce(const std::string& transaction_id, const UdpPeer& responder, const std::string& token) {
+void DhtClient::handle_get_peers_response_for_announce(const std::string& transaction_id, const Peer& responder, const std::string& token) {
     std::lock_guard<std::mutex> lock(pending_announces_mutex_);
     
     auto it = pending_announces_.find(transaction_id);
@@ -1394,7 +1394,7 @@ void DhtClient::handle_get_peers_response_for_announce(const std::string& transa
     }
 }
 
-void DhtClient::handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::string& token) {
+void DhtClient::handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const Peer& responder, const std::string& token) {
     std::lock_guard<std::mutex> lock(pending_announces_mutex_);
     
     auto it = pending_announces_.find(transaction_id);
@@ -1412,7 +1412,7 @@ void DhtClient::handle_get_peers_response_for_announce_rats_dht(const std::strin
     }
 }
 
-void DhtClient::handle_get_peers_response_for_search(const std::string& transaction_id, const UdpPeer& responder, const std::vector<UdpPeer>& peers) {
+void DhtClient::handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers) {
     std::lock_guard<std::mutex> lock(pending_searches_mutex_);
     
     auto it = pending_searches_.find(transaction_id);
@@ -1437,7 +1437,7 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
     }
 }
 
-void DhtClient::handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::vector<UdpPeer>& peers) {
+void DhtClient::handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers) {
     std::lock_guard<std::mutex> lock(pending_searches_mutex_);
     
     auto it = pending_searches_.find(transaction_id);
@@ -1463,7 +1463,7 @@ void DhtClient::handle_get_peers_response_for_search_rats_dht(const std::string&
 }
 
 // Peer announcement storage management
-void DhtClient::store_announced_peer(const InfoHash& info_hash, const UdpPeer& peer) {
+void DhtClient::store_announced_peer(const InfoHash& info_hash, const Peer& peer) {
     std::lock_guard<std::mutex> lock(announced_peers_mutex_);
     
     std::string hash_key = node_id_to_hex(info_hash);
@@ -1488,13 +1488,13 @@ void DhtClient::store_announced_peer(const InfoHash& info_hash, const UdpPeer& p
     }
 }
 
-std::vector<UdpPeer> DhtClient::get_announced_peers(const InfoHash& info_hash) {
+std::vector<Peer> DhtClient::get_announced_peers(const InfoHash& info_hash) {
     std::lock_guard<std::mutex> lock(announced_peers_mutex_);
     
     std::string hash_key = node_id_to_hex(info_hash);
     auto it = announced_peers_.find(hash_key);
     
-    std::vector<UdpPeer> peers;
+    std::vector<Peer> peers;
     if (it != announced_peers_.end()) {
         peers.reserve(it->second.size());
         for (const auto& announced : it->second) {
