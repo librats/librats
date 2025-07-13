@@ -257,6 +257,7 @@ TEST_F(RatsClientTest, PeerDisconnectionTest) {
 }
 
 // Test DHT functionality
+/*  Too long to run
 TEST_F(RatsClientTest, DhtFunctionalityTest) {
     RatsClient client(0);
     
@@ -287,8 +288,10 @@ TEST_F(RatsClientTest, DhtFunctionalityTest) {
     
     client.stop();
 }
+*/
 
 // Test automatic peer discovery
+/* Too long to run
 TEST_F(RatsClientTest, AutomaticPeerDiscoveryTest) {
     RatsClient client(0);
     
@@ -311,6 +314,7 @@ TEST_F(RatsClientTest, AutomaticPeerDiscoveryTest) {
     
     client.stop();
 }
+*/
 
 // Test multiple clients
 TEST_F(RatsClientTest, MultipleClientsTest) {

@@ -69,6 +69,12 @@ std::string resolve_hostname(const std::string& hostname) {
 std::string resolve_hostname_v6(const std::string& hostname) {
     LOG_NETUTILS_DEBUG("Resolving hostname to IPv6: " << hostname);
     
+    // Handle empty string
+    if (hostname.empty()) {
+        LOG_NETUTILS_DEBUG("Empty hostname provided");
+        return "";
+    }
+    
     // Check if it's already an IPv6 address
     if (is_valid_ipv6(hostname)) {
         LOG_NETUTILS_DEBUG("Already an IPv6 address: " << hostname);
