@@ -152,7 +152,9 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
             
             {
                 std::lock_guard<std::mutex> lock(pending_searches_mutex_);
-                pending_searches_.emplace(transaction_id, PendingSearch(info_hash));
+                auto search = PendingSearch(info_hash);
+                search.queried_nodes.insert(node_id_to_hex(node.id));
+                pending_searches_.emplace(transaction_id, std::move(search));
             }
             
             auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
@@ -163,7 +165,9 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
             
             {
                 std::lock_guard<std::mutex> lock(pending_searches_mutex_);
-                pending_searches_.emplace(transaction_id, PendingSearch(info_hash));
+                auto search = PendingSearch(info_hash);
+                search.queried_nodes.insert(node_id_to_hex(node.id));
+                pending_searches_.emplace(transaction_id, std::move(search));
             }
             
             // Send get_peers with transaction ID for rats dht protocol
@@ -393,7 +397,11 @@ void DhtClient::handle_get_peers(const DhtMessage& message, const Peer& sender) 
             auto it = pending_searches_.find(message.transaction_id);
             if (it != pending_searches_.end()) {
                 // This is a response to our get_peers request for search
-                handle_get_peers_response_for_search_rats_dht(message.transaction_id, sender, message.peers);
+                if (!message.peers.empty()) {
+                    handle_get_peers_response_for_search_rats_dht(message.transaction_id, sender, message.peers);
+                } else {
+                    handle_get_peers_response_with_nodes_rats_dht(message.transaction_id, sender, message.nodes);
+                }
                 return;
             }
         }
@@ -1062,6 +1070,10 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     if (!message.peers.empty()) {
         handle_get_peers_response_for_search(message.transaction_id, sender, message.peers);
     }
+    // Check if this is a response to a pending search (get_peers with nodes)
+    else if (!message.nodes.empty()) {
+        handle_get_peers_response_with_nodes(message.transaction_id, sender, message.nodes);
+    }
     
     // Check if this is a response to a pending announce (get_peers with token)
     if (!message.token.empty()) {
@@ -1409,18 +1421,21 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
     
     auto it = pending_searches_.find(transaction_id);
     if (it != pending_searches_.end()) {
-        const auto& pending_search = it->second;
+        auto& pending_search = it->second;
         LOG_DHT_DEBUG("Found pending search for KRPC transaction " << transaction_id 
                       << " - received " << peers.size() << " peers for info_hash " << node_id_to_hex(pending_search.info_hash) 
                       << " from " << responder.ip << ":" << responder.port);
         
-        // Call the callback with the received peers and correct info_hash
-        std::string hash_key = node_id_to_hex(pending_search.info_hash);
-        {
-            std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
-            auto search_it = active_searches_.find(hash_key);
-            if (search_it != active_searches_.end() && search_it->second) {
-                search_it->second(peers, pending_search.info_hash);
+        if (!peers.empty()) {
+            // We found actual peers - call callback and mark search as complete
+            pending_search.found_peers = true;
+            std::string hash_key = node_id_to_hex(pending_search.info_hash);
+            {
+                std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
+                auto search_it = active_searches_.find(hash_key);
+                if (search_it != active_searches_.end() && search_it->second) {
+                    search_it->second(peers, pending_search.info_hash);
+                }
             }
         }
         
@@ -1434,23 +1449,182 @@ void DhtClient::handle_get_peers_response_for_search_rats_dht(const std::string&
     
     auto it = pending_searches_.find(transaction_id);
     if (it != pending_searches_.end()) {
-        const auto& pending_search = it->second;
+        auto& pending_search = it->second;
         LOG_DHT_DEBUG("Found pending search for rats DHT transaction " << transaction_id 
                       << " - received " << peers.size() << " peers for info_hash " << node_id_to_hex(pending_search.info_hash) 
                       << " from " << responder.ip << ":" << responder.port);
         
-        // Call the callback with the received peers and correct info_hash
-        std::string hash_key = node_id_to_hex(pending_search.info_hash);
-        {
-            std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
-            auto search_it = active_searches_.find(hash_key);
-            if (search_it != active_searches_.end() && search_it->second) {
-                search_it->second(peers, pending_search.info_hash);
+        if (!peers.empty()) {
+            // We found actual peers - call callback and mark search as complete
+            pending_search.found_peers = true;
+            std::string hash_key = node_id_to_hex(pending_search.info_hash);
+            {
+                std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
+                auto search_it = active_searches_.find(hash_key);
+                if (search_it != active_searches_.end() && search_it->second) {
+                    search_it->second(peers, pending_search.info_hash);
+                }
             }
         }
         
         // Remove the pending search since we've handled it
         pending_searches_.erase(it);
+    }
+}
+
+void DhtClient::handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes) {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    
+    auto it = pending_searches_.find(transaction_id);
+    if (it != pending_searches_.end()) {
+        auto& pending_search = it->second;
+        LOG_DHT_DEBUG("Found pending search for KRPC transaction " << transaction_id 
+                      << " - received " << nodes.size() << " nodes for info_hash " << node_id_to_hex(pending_search.info_hash) 
+                      << " from " << responder.ip << ":" << responder.port);
+        
+        // Convert KrpcNodes to DhtNodes and add to discovered_nodes
+        for (const auto& node : nodes) {
+            DhtNode dht_node = krpc_node_to_dht_node(node);
+            std::string node_hex = node_id_to_hex(dht_node.id);
+            
+            // Only add if we haven't queried this node before
+            if (pending_search.queried_nodes.find(node_hex) == pending_search.queried_nodes.end()) {
+                pending_search.discovered_nodes.push_back(dht_node);
+            }
+        }
+        
+        // Remove the pending search since we've handled it
+        pending_searches_.erase(it);
+        
+        // Continue search iteration
+        continue_search_iteration(pending_search.info_hash);
+    }
+}
+
+void DhtClient::handle_get_peers_response_with_nodes_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<DhtNode>& nodes) {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    
+    auto it = pending_searches_.find(transaction_id);
+    if (it != pending_searches_.end()) {
+        auto& pending_search = it->second;
+        LOG_DHT_DEBUG("Found pending search for rats DHT transaction " << transaction_id 
+                      << " - received " << nodes.size() << " nodes for info_hash " << node_id_to_hex(pending_search.info_hash) 
+                      << " from " << responder.ip << ":" << responder.port);
+        
+        // Add nodes to discovered_nodes
+        for (const auto& node : nodes) {
+            std::string node_hex = node_id_to_hex(node.id);
+            
+            // Only add if we haven't queried this node before
+            if (pending_search.queried_nodes.find(node_hex) == pending_search.queried_nodes.end()) {
+                pending_search.discovered_nodes.push_back(node);
+            }
+        }
+        
+        // Remove the pending search since we've handled it
+        pending_searches_.erase(it);
+        
+        // Continue search iteration
+        continue_search_iteration(pending_search.info_hash);
+    }
+}
+
+void DhtClient::continue_search_iteration(const InfoHash& info_hash) {
+    std::string hash_key = node_id_to_hex(info_hash);
+    
+    // Get all pending searches for this info_hash
+    std::vector<std::string> search_transactions;
+    {
+        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+        for (const auto& pair : pending_searches_) {
+            if (pair.second.info_hash == info_hash) {
+                search_transactions.push_back(pair.first);
+            }
+        }
+    }
+    
+    // If no pending searches, nothing to continue
+    if (search_transactions.empty()) {
+        return;
+    }
+    
+    // Collect all discovered nodes from all searches for this info_hash
+    std::vector<DhtNode> all_discovered_nodes;
+    std::unordered_set<std::string> all_queried_nodes;
+    int max_iterations = 0;
+    
+    {
+        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+        for (const auto& transaction_id : search_transactions) {
+            auto it = pending_searches_.find(transaction_id);
+            if (it != pending_searches_.end()) {
+                const auto& search = it->second;
+                all_discovered_nodes.insert(all_discovered_nodes.end(), 
+                                           search.discovered_nodes.begin(), 
+                                           search.discovered_nodes.end());
+                all_queried_nodes.insert(search.queried_nodes.begin(), search.queried_nodes.end());
+                max_iterations = std::max(max_iterations, search.iteration_count);
+            }
+        }
+    }
+    
+    // Stop if we've reached max iterations (simple limit)
+    if (max_iterations >= 4) {
+        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations");
+        return;
+    }
+    
+    // Sort discovered nodes by distance to target
+    std::sort(all_discovered_nodes.begin(), all_discovered_nodes.end(),
+              [&info_hash, this](const DhtNode& a, const DhtNode& b) {
+                  return is_closer(a.id, b.id, info_hash);
+              });
+    
+    // Query up to ALPHA closest unqueried nodes
+    int nodes_queried = 0;
+    for (const auto& node : all_discovered_nodes) {
+        if (nodes_queried >= ALPHA) break;
+        
+        std::string node_hex = node_id_to_hex(node.id);
+        if (all_queried_nodes.find(node_hex) == all_queried_nodes.end()) {
+            PeerProtocol protocol = get_peer_protocol(node.peer);
+            
+            if (protocol == PeerProtocol::BitTorrent) {
+                std::string transaction_id = KrpcProtocol::generate_transaction_id();
+                {
+                    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+                    auto search = PendingSearch(info_hash);
+                    search.queried_nodes.insert(node_hex);
+                    search.iteration_count = max_iterations + 1;
+                    pending_searches_.emplace(transaction_id, std::move(search));
+                }
+                
+                auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
+                send_krpc_message(message, node.peer);
+            } else {
+                std::string transaction_id = generate_rats_dht_transaction_id();
+                {
+                    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+                    auto search = PendingSearch(info_hash);
+                    search.queried_nodes.insert(node_hex);
+                    search.iteration_count = max_iterations + 1;
+                    pending_searches_.emplace(transaction_id, std::move(search));
+                }
+                
+                DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
+                message.target_id = info_hash;
+                track_rats_dht_transaction(transaction_id, "get_peers_for_search_iter:" + node.peer.ip + ":" + std::to_string(node.peer.port));
+                send_message(message, node.peer);
+            }
+            
+            nodes_queried++;
+        }
+    }
+    
+    if (nodes_queried > 0) {
+        LOG_DHT_DEBUG("Continuing search iteration for " << hash_key << " - queried " << nodes_queried << " more nodes");
+    } else {
+        LOG_DHT_DEBUG("Search converged for " << hash_key << " - no more nodes to query");
     }
 }
 

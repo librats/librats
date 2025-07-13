@@ -212,8 +212,15 @@ private:
         InfoHash info_hash;
         std::chrono::steady_clock::time_point created_at;
         
+        // Iterative search state
+        std::unordered_set<std::string> queried_nodes;  // node_id as hex string
+        std::vector<DhtNode> discovered_nodes;          // nodes to query next
+        bool found_peers;                               // whether we found actual peers
+        int iteration_count;                            // current iteration number
+        
         PendingSearch(const InfoHash& hash)
-            : info_hash(hash), created_at(std::chrono::steady_clock::now()) {}
+            : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
+              found_peers(false), iteration_count(0) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_;
     std::mutex pending_searches_mutex_;
@@ -307,6 +314,9 @@ private:
     void cleanup_stale_searches();
     void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
+    void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
+    void handle_get_peers_response_with_nodes_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<DhtNode>& nodes);
+    void continue_search_iteration(const InfoHash& info_hash);
     
     // Peer announcement storage management
     void store_announced_peer(const InfoHash& info_hash, const Peer& peer);
