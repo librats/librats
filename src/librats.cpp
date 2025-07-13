@@ -685,11 +685,6 @@ void RatsClient::automatic_discovery_loop() {
 
     std::this_thread::sleep_for(std::chrono::seconds(15));
 
-    // Search again
-    search_rats_peers();
-
-    std::this_thread::sleep_for(std::chrono::seconds(10));
-
     // Announce again
     announce_rats_peer();
     
