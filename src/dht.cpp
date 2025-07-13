@@ -264,13 +264,19 @@ void DhtClient::maintenance_loop() {
 void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& sender) {
     LOG_DHT_DEBUG("Processing message of " << data.size() << " bytes from " << sender.ip << ":" << sender.port);
     
-    // Detect protocol
-    PeerProtocol protocol = detect_protocol(data);
+    // First, try to detect the protocol
+    PeerProtocol protocol = get_peer_protocol(sender);
+    if (protocol == PeerProtocol::Unknown) {
+        protocol = detect_protocol(data);
+        if (protocol != PeerProtocol::Unknown) {
+            LOG_DHT_DEBUG("Detected protocol " << (protocol == PeerProtocol::BitTorrent ? "BitTorrent" : "RatsDht") << " for peer " << sender.ip << ":" << sender.port);
+            set_peer_protocol(sender, protocol);
+        }
+    }
     
     if (protocol == PeerProtocol::BitTorrent) {
         LOG_DHT_DEBUG("Detected BitTorrent DHT (KRPC) protocol from " << sender.ip << ":" << sender.port);
-        set_peer_protocol(sender, PeerProtocol::BitTorrent);
-        
+
         // Handle KRPC message
         auto krpc_message = KrpcProtocol::decode_message(data);
         if (!krpc_message) {
@@ -280,14 +286,11 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const UdpPeer& 
         
         handle_krpc_message(*krpc_message, sender);
     } else {
-        LOG_DHT_DEBUG("Using rats dht protocol or attempting fallback from " << sender.ip << ":" << sender.port);
-        
         // Try rats dht protocol first
         auto rats_dht_message = decode_message(data);
         if (rats_dht_message) {
             LOG_DHT_DEBUG("Decoded rats dht protocol message from " << sender.ip << ":" << sender.port);
-            set_peer_protocol(sender, PeerProtocol::RatsDht);
-            
+
             LOG_DHT_DEBUG("Received message type " << static_cast<int>(rats_dht_message->type) << " from " << node_id_to_hex(rats_dht_message->sender_id) << " at " << sender.ip << ":" << sender.port);
             
             // Add sender to routing table

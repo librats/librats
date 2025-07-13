@@ -63,10 +63,6 @@ struct DhtMessage {
     
     DhtMessage(DhtMessageType type, const std::string& transaction_id, const NodeId& sender_id) 
         : type(type), transaction_id(transaction_id), sender_id(sender_id), announce_port(0) {}
-        
-    // Backward compatibility constructor
-    DhtMessage(DhtMessageType type, const NodeId& sender_id) 
-        : type(type), sender_id(sender_id), announce_port(0) {}
 };
 
 /**
