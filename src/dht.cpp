@@ -266,7 +266,11 @@ void DhtClient::network_loop() {
 void DhtClient::maintenance_loop() {
     LOG_DHT_DEBUG("Maintenance loop started");
     
+    auto last_bucket_refresh = std::chrono::steady_clock::now();
+    
     while (running_) {
+        auto now = std::chrono::steady_clock::now();
+
         // Cleanup stale nodes every 5 minutes
         cleanup_stale_nodes();
         
@@ -282,8 +286,11 @@ void DhtClient::maintenance_loop() {
         // Cleanup stale announced peers
         cleanup_stale_announced_peers();
         
-        // Refresh buckets every 15 minutes
-        refresh_buckets();
+        // Refresh buckets every 30 minutes
+        if (now - last_bucket_refresh >= std::chrono::minutes(30)) {
+            refresh_buckets();
+            last_bucket_refresh = now;
+        }
         
         // Sleep for 1 minute between maintenance cycles
         for (int i = 0; i < 60 && running_; ++i) {
