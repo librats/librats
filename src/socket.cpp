@@ -308,6 +308,38 @@ socket_t accept_client(socket_t server_socket) {
     return client_socket;
 }
 
+std::string get_peer_address(socket_t socket) {
+    sockaddr_storage peer_addr;
+    socklen_t peer_addr_len = sizeof(peer_addr);
+    
+    if (getpeername(socket, (struct sockaddr*)&peer_addr, &peer_addr_len) == SOCKET_ERROR_VALUE) {
+        LOG_SOCKET_ERROR("Failed to get peer address for socket " << socket);
+        return "";
+    }
+    
+    std::string peer_ip;
+    uint16_t peer_port = 0;
+    
+    if (peer_addr.ss_family == AF_INET) {
+        char ip_str[INET_ADDRSTRLEN];
+        struct sockaddr_in* addr_in = (struct sockaddr_in*)&peer_addr;
+        inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
+        peer_ip = ip_str;
+        peer_port = ntohs(addr_in->sin_port);
+    } else if (peer_addr.ss_family == AF_INET6) {
+        char ip_str[INET6_ADDRSTRLEN];
+        struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&peer_addr;
+        inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, INET6_ADDRSTRLEN);
+        peer_ip = ip_str;
+        peer_port = ntohs(addr_in6->sin6_port);
+    } else {
+        LOG_SOCKET_ERROR("Unknown address family for socket " << socket);
+        return "";
+    }
+    
+    return peer_ip + ":" + std::to_string(peer_port);
+}
+
 int send_tcp_data(socket_t socket, const std::string& data) {
     LOG_SOCKET_DEBUG("Sending " << data.length() << " bytes to TCP socket " << socket);
     

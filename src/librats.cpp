@@ -73,6 +73,46 @@ void RatsClient::remove_peer_mapping(socket_t socket) {
     }
 }
 
+void RatsClient::add_peer_address_mapping(socket_t socket, const std::string& peer_address) {
+    peer_address_to_socket_[peer_address] = socket;
+    socket_to_peer_address_[socket] = peer_address;
+}
+
+void RatsClient::remove_peer_address_mapping(socket_t socket) {
+    auto it = socket_to_peer_address_.find(socket);
+    if (it != socket_to_peer_address_.end()) {
+        peer_address_to_socket_.erase(it->second);
+        socket_to_peer_address_.erase(it);
+    }
+}
+
+bool RatsClient::is_already_connected_to_peer(const std::string& peer_address) const {
+    return peer_address_to_socket_.find(peer_address) != peer_address_to_socket_.end();
+}
+
+std::string RatsClient::normalize_peer_address(const std::string& ip, int port) const {
+    // Normalize IPv6 addresses and create consistent format
+    std::string normalized_ip = ip;
+    
+    // Remove brackets from IPv6 addresses if present
+    if (!normalized_ip.empty() && normalized_ip.front() == '[' && normalized_ip.back() == ']') {
+        normalized_ip = normalized_ip.substr(1, normalized_ip.length() - 2);
+    }
+    
+    // Handle localhost variations
+    if (normalized_ip == "localhost" || normalized_ip == "::1") {
+        normalized_ip = "127.0.0.1";
+    }
+    
+    // For IPv6 addresses, add brackets for consistency
+    if (normalized_ip.find(':') != std::string::npos && normalized_ip.find('.') == std::string::npos) {
+        // This is likely an IPv6 address (contains colons but no dots)
+        return "[" + normalized_ip + "]:" + std::to_string(port);
+    }
+    
+    return normalized_ip + ":" + std::to_string(port);
+}
+
 std::string RatsClient::get_peer_hash_id(socket_t socket) const {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     auto it = socket_to_hash_.find(socket);
@@ -137,6 +177,8 @@ void RatsClient::stop() {
         peer_sockets_.clear();
         socket_to_hash_.clear();
         hash_to_socket_.clear();
+        peer_address_to_socket_.clear();
+        socket_to_peer_address_.clear();
     }
     
     // Wait for server thread to finish
@@ -165,6 +207,16 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
         return false;
     }
     
+    // Check if we're already connected to this peer
+    std::string peer_address = normalize_peer_address(host, port);
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        if (is_already_connected_to_peer(peer_address)) {
+            LOG_CLIENT_INFO("Already connected to peer " << peer_address << ", skipping connection");
+            return true; // Return true since we already have the connection
+        }
+    }
+    
     LOG_CLIENT_INFO("Connecting to peer " << host << ":" << port);
             socket_t peer_socket = create_tcp_client(host, port);
     if (!is_valid_socket(peer_socket)) {
@@ -180,6 +232,7 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
         std::lock_guard<std::mutex> lock(peers_mutex_);
         peer_sockets_.push_back(peer_socket);
         add_peer_mapping(peer_socket, peer_hash_id);
+        add_peer_address_mapping(peer_socket, peer_address);
     }
     
     // Start a thread to handle this peer connection
@@ -372,11 +425,26 @@ void RatsClient::handle_dht_peer_discovery(const std::vector<UdpPeer>& peers, co
     
     // Auto-connect to discovered peers (optional behavior)
     for (const auto& peer : peers) {
-        if (peer.port != listen_port_ || peer.ip != "127.0.0.1") {  // Don't connect to ourselves
+        // Don't connect to ourselves
+        if (peer.port == listen_port_ && (peer.ip == "127.0.0.1" || peer.ip == "::1" || peer.ip == "localhost")) {
+            continue;
+        }
+        
+        // Check if we're already connected to this peer
+        std::string normalized_peer_address = normalize_peer_address(peer.ip, peer.port);
+        bool already_connected = false;
+        {
+            std::lock_guard<std::mutex> lock(peers_mutex_);
+            already_connected = is_already_connected_to_peer(normalized_peer_address);
+        }
+        
+        if (!already_connected) {
             LOG_CLIENT_DEBUG("Attempting to connect to discovered peer: " << peer.ip << ":" << peer.port);
             
             // Try to connect to the peer
             connect_to_peer(peer.ip, peer.port);
+        } else {
+            LOG_CLIENT_DEBUG("Already connected to discovered peer: " << normalized_peer_address);
         }
     }
 }
@@ -393,18 +461,70 @@ void RatsClient::server_loop() {
             break;
         }
         
+        // Get peer address information
+        std::string peer_address = get_peer_address(client_socket);
+        if (peer_address.empty()) {
+            LOG_SERVER_ERROR("Failed to get peer address for incoming connection");
+            close_socket(client_socket);
+            continue;
+        }
+        
+        // Normalize peer address for consistency
+        std::string normalized_peer_address;
+        
+        // Parse IP and port from peer_address
+        // Handle both IPv4 (ip:port) and IPv6 ([ip]:port or ip:port) formats
+        std::string ip;
+        int port = 0;
+        
+        if (peer_address.front() == '[') {
+            // IPv6 format: [ip]:port
+            size_t bracket_end = peer_address.find(']');
+            if (bracket_end != std::string::npos) {
+                ip = peer_address.substr(1, bracket_end - 1);
+                size_t colon_pos = peer_address.find(':', bracket_end);
+                if (colon_pos != std::string::npos) {
+                    port = std::stoi(peer_address.substr(colon_pos + 1));
+                }
+            }
+        } else {
+            // IPv4 format: ip:port
+            size_t colon_pos = peer_address.find_last_of(':');
+            if (colon_pos != std::string::npos) {
+                ip = peer_address.substr(0, colon_pos);
+                port = std::stoi(peer_address.substr(colon_pos + 1));
+            }
+        }
+        
+        if (!ip.empty() && port > 0) {
+            normalized_peer_address = normalize_peer_address(ip, port);
+        } else {
+            normalized_peer_address = peer_address;
+        }
+        
+        // Check if we're already connected to this peer
+        {
+            std::lock_guard<std::mutex> lock(peers_mutex_);
+            if (is_already_connected_to_peer(normalized_peer_address)) {
+                LOG_SERVER_INFO("Already connected to peer " << normalized_peer_address << ", rejecting duplicate connection");
+                close_socket(client_socket);
+                continue;
+            }
+        }
+        
         // Generate unique hash ID for this incoming client
-        std::string connection_info = "incoming_connection";
+        std::string connection_info = "incoming_from_" + peer_address;
         std::string peer_hash_id = generate_peer_hash_id(client_socket, connection_info);
         
         {
             std::lock_guard<std::mutex> lock(peers_mutex_);
             peer_sockets_.push_back(client_socket);
             add_peer_mapping(client_socket, peer_hash_id);
+            add_peer_address_mapping(client_socket, normalized_peer_address);
         }
         
         // Start a thread to handle this client
-        LOG_SERVER_DEBUG("Starting thread for client " << peer_hash_id);
+        LOG_SERVER_DEBUG("Starting thread for client " << peer_hash_id << " from " << peer_address);
         client_threads_.emplace_back(&RatsClient::handle_client, this, client_socket, peer_hash_id);
         
         // Notify connection callback
@@ -452,6 +572,7 @@ void RatsClient::remove_peer(socket_t socket) {
         peer_sockets_.erase(it);
     }
     remove_peer_mapping(socket);
+    remove_peer_address_mapping(socket);
 }
 
 // Helper functions
@@ -642,20 +763,11 @@ void RatsClient::search_rats_peers() {
                 }
                 
                 // Check if we're already connected to this peer
+                std::string normalized_peer_address = normalize_peer_address(ip, port);
                 bool already_connected = false;
                 {
                     std::lock_guard<std::mutex> lock(peers_mutex_);
-                    // This is a simple check - in a real implementation, 
-                    // you might want to track peer addresses more carefully
-                    if (peer_sockets_.size() > 0) {
-                        // For now, just avoid duplicate connections based on timing
-                        auto now = std::chrono::steady_clock::now();
-                        static auto last_connection_attempt = std::chrono::steady_clock::now();
-                        if (now - last_connection_attempt < std::chrono::seconds(10)) {
-                            already_connected = true;
-                        }
-                        last_connection_attempt = now;
-                    }
+                    already_connected = is_already_connected_to_peer(normalized_peer_address);
                 }
                 
                 if (!already_connected) {
@@ -669,6 +781,8 @@ void RatsClient::search_rats_peers() {
                             LOG_CLIENT_DEBUG("Failed to connect to discovered rats peer: " << ip << ":" << port);
                         }
                     }).detach();
+                } else {
+                    LOG_CLIENT_DEBUG("Already connected to discovered rats peer: " << normalized_peer_address);
                 }
             }
         }

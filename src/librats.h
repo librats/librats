@@ -204,6 +204,11 @@ private:
     std::vector<socket_t> peer_sockets_;
     std::unordered_map<socket_t, std::string> socket_to_hash_;
     std::unordered_map<std::string, socket_t> hash_to_socket_;
+    
+    // Peer address tracking for duplicate connection prevention
+    std::unordered_map<std::string, socket_t> peer_address_to_socket_;
+    std::unordered_map<socket_t, std::string> socket_to_peer_address_;
+    
     mutable std::mutex peers_mutex_;
     
     std::thread server_thread_;
@@ -223,6 +228,12 @@ private:
     void add_peer_mapping(socket_t socket, const std::string& hash_id);
     void remove_peer_mapping(socket_t socket);
     void handle_dht_peer_discovery(const std::vector<UdpPeer>& peers, const InfoHash& info_hash);
+    
+    // Peer address tracking methods
+    void add_peer_address_mapping(socket_t socket, const std::string& peer_address);
+    void remove_peer_address_mapping(socket_t socket);
+    bool is_already_connected_to_peer(const std::string& peer_address) const;
+    std::string normalize_peer_address(const std::string& ip, int port) const;
 
     // Automatic peer discovery
     std::atomic<bool> auto_discovery_running_{false};

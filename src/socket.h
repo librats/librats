@@ -109,6 +109,13 @@ socket_t create_tcp_server_v6(int port, int backlog = 5);
 socket_t accept_client(socket_t server_socket);
 
 /**
+ * Get the peer address (IP:port) from a connected socket
+ * @param socket The connected socket handle
+ * @return Peer address string in format "IP:port", or empty string on error
+ */
+std::string get_peer_address(socket_t socket);
+
+/**
  * Send data through a TCP socket
  * @param socket The socket handle
  * @param data The data to send
