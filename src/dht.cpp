@@ -144,7 +144,34 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
     // Start search by querying closest nodes
     auto closest_nodes = find_closest_nodes(info_hash, ALPHA);
     for (const auto& node : closest_nodes) {
-        send_get_peers(node.peer, info_hash);
+        PeerProtocol protocol = get_peer_protocol(node.peer);
+        
+        if (protocol == PeerProtocol::BitTorrent) {
+            // Generate transaction ID and track this as a pending search for KRPC
+            std::string transaction_id = KrpcProtocol::generate_transaction_id();
+            
+            {
+                std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+                pending_searches_.emplace(transaction_id, PendingSearch(info_hash));
+            }
+            
+            auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
+            send_krpc_message(message, node.peer);
+        } else {
+            // For rats DHT protocol, also use proper transaction tracking
+            std::string transaction_id = generate_rats_dht_transaction_id();
+            
+            {
+                std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+                pending_searches_.emplace(transaction_id, PendingSearch(info_hash));
+            }
+            
+            // Send get_peers with transaction ID for rats dht protocol
+            DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
+            message.target_id = info_hash;
+            track_rats_dht_transaction(transaction_id, "get_peers_for_search:" + node.peer.ip + ":" + std::to_string(node.peer.port));
+            send_message(message, node.peer);
+        }
     }
     
     return true;
@@ -245,6 +272,9 @@ void DhtClient::maintenance_loop() {
         
         // Cleanup stale pending announces
         cleanup_stale_announces();
+        
+        // Cleanup stale pending searches
+        cleanup_stale_searches();
         
         // Cleanup stale transactions
         cleanup_stale_transactions();
@@ -348,10 +378,21 @@ void DhtClient::handle_find_node(const DhtMessage& message, const UdpPeer& sende
 void DhtClient::handle_get_peers(const DhtMessage& message, const UdpPeer& sender) {
     LOG_DHT_DEBUG("Handling GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " (transaction: " << message.transaction_id << ")");
     
-    // Check if this is a response to our own get_peers request (for announce flow)
-    if (!message.token.empty()) {
-        // Check if we have a pending announce for this transaction
+    // Check if this is a response to our own get_peers request
+    if (!message.peers.empty() || !message.nodes.empty()) {
+        // Check if we have a pending search for this transaction
         {
+            std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+            auto it = pending_searches_.find(message.transaction_id);
+            if (it != pending_searches_.end()) {
+                // This is a response to our get_peers request for search
+                handle_get_peers_response_for_search_rats_dht(message.transaction_id, sender, message.peers);
+                return;
+            }
+        }
+        
+        // Check if we have a pending announce for this transaction
+        if (!message.token.empty()) {
             std::lock_guard<std::mutex> lock(pending_announces_mutex_);
             auto it = pending_announces_.find(message.transaction_id);
             if (it != pending_announces_.end()) {
@@ -1016,30 +1057,14 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const UdpPeer& 
         add_node(dht_node);
     }
     
+    // Check if this is a response to a pending search (get_peers with peers)
+    if (!message.peers.empty()) {
+        handle_get_peers_response_for_search(message.transaction_id, sender, message.peers);
+    }
+    
     // Check if this is a response to a pending announce (get_peers with token)
     if (!message.token.empty()) {
         handle_get_peers_response_for_announce(message.transaction_id, sender, message.token);
-    }
-    
-    // Process any peers from get_peers response
-    if (!message.peers.empty()) {
-        // Check if this is a response to a get_peers query
-        std::lock_guard<std::mutex> lock(active_searches_mutex_);
-        
-        // Since we can't directly match by transaction ID, we'll try to match by context
-        // In a real implementation, we would track transaction IDs properly
-        LOG_DHT_DEBUG("Received " << message.peers.size() << " peers from KRPC response");
-        
-        // For now, we'll assume this is for any active search
-        // In production, proper transaction tracking would be implemented
-        for (auto& search : active_searches_) {
-            if (search.second) {
-                // Call the callback with the received peers
-                // We need to create a dummy info_hash since we don't have it from the response
-                InfoHash dummy_hash;  // This is a limitation of the current design
-                search.second(message.peers, dummy_hash);
-            }
-        }
     }
 }
 
@@ -1327,6 +1352,23 @@ void DhtClient::cleanup_stale_announces() {
     }
 }
 
+void DhtClient::cleanup_stale_searches() {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    
+    auto now = std::chrono::steady_clock::now();
+    auto stale_threshold = std::chrono::minutes(5);  // Remove searches older than 5 minutes
+    
+    auto it = pending_searches_.begin();
+    while (it != pending_searches_.end()) {
+        if (now - it->second.created_at > stale_threshold) {
+            LOG_DHT_DEBUG("Removing stale pending search for transaction " << it->first);
+            it = pending_searches_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 void DhtClient::handle_get_peers_response_for_announce(const std::string& transaction_id, const UdpPeer& responder, const std::string& token) {
     std::lock_guard<std::mutex> lock(pending_announces_mutex_);
     
@@ -1360,6 +1402,56 @@ void DhtClient::handle_get_peers_response_for_announce_rats_dht(const std::strin
         
         // Remove the pending announce since we've handled it
         pending_announces_.erase(it);
+    }
+}
+
+void DhtClient::handle_get_peers_response_for_search(const std::string& transaction_id, const UdpPeer& responder, const std::vector<UdpPeer>& peers) {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    
+    auto it = pending_searches_.find(transaction_id);
+    if (it != pending_searches_.end()) {
+        const auto& pending_search = it->second;
+        LOG_DHT_DEBUG("Found pending search for KRPC transaction " << transaction_id 
+                      << " - received " << peers.size() << " peers for info_hash " << node_id_to_hex(pending_search.info_hash) 
+                      << " from " << responder.ip << ":" << responder.port);
+        
+        // Call the callback with the received peers and correct info_hash
+        std::string hash_key = node_id_to_hex(pending_search.info_hash);
+        {
+            std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
+            auto search_it = active_searches_.find(hash_key);
+            if (search_it != active_searches_.end() && search_it->second) {
+                search_it->second(peers, pending_search.info_hash);
+            }
+        }
+        
+        // Remove the pending search since we've handled it
+        pending_searches_.erase(it);
+    }
+}
+
+void DhtClient::handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::vector<UdpPeer>& peers) {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    
+    auto it = pending_searches_.find(transaction_id);
+    if (it != pending_searches_.end()) {
+        const auto& pending_search = it->second;
+        LOG_DHT_DEBUG("Found pending search for rats DHT transaction " << transaction_id 
+                      << " - received " << peers.size() << " peers for info_hash " << node_id_to_hex(pending_search.info_hash) 
+                      << " from " << responder.ip << ":" << responder.port);
+        
+        // Call the callback with the received peers and correct info_hash
+        std::string hash_key = node_id_to_hex(pending_search.info_hash);
+        {
+            std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
+            auto search_it = active_searches_.find(hash_key);
+            if (search_it != active_searches_.end() && search_it->second) {
+                search_it->second(peers, pending_search.info_hash);
+            }
+        }
+        
+        // Remove the pending search since we've handled it
+        pending_searches_.erase(it);
     }
 }
 

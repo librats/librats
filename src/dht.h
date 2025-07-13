@@ -194,6 +194,17 @@ private:
     std::unordered_map<std::string, PendingAnnounce> pending_announces_;
     std::mutex pending_announces_mutex_;
     
+    // Pending find_peers tracking (to map transaction IDs to info_hash)
+    struct PendingSearch {
+        InfoHash info_hash;
+        std::chrono::steady_clock::time_point created_at;
+        
+        PendingSearch(const InfoHash& hash)
+            : info_hash(hash), created_at(std::chrono::steady_clock::now()) {}
+    };
+    std::unordered_map<std::string, PendingSearch> pending_searches_;
+    std::mutex pending_searches_mutex_;
+    
     // Peer announcement storage (BEP 5 compliant)
     struct AnnouncedPeer {
         UdpPeer peer;
@@ -279,6 +290,11 @@ private:
     void cleanup_stale_announces();
     void handle_get_peers_response_for_announce(const std::string& transaction_id, const UdpPeer& responder, const std::string& token);
     void handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::string& token);
+    
+    // Pending search management
+    void cleanup_stale_searches();
+    void handle_get_peers_response_for_search(const std::string& transaction_id, const UdpPeer& responder, const std::vector<UdpPeer>& peers);
+    void handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::vector<UdpPeer>& peers);
     
     // Peer announcement storage management
     void store_announced_peer(const InfoHash& info_hash, const UdpPeer& peer);
