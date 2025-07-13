@@ -1543,8 +1543,11 @@ void DhtClient::continue_search_iteration(const InfoHash& info_hash) {
         }
     }
     
+    LOG_DHT_DEBUG("Found " << search_transactions.size() << " pending search transactions for info_hash " << hash_key);
+    
     // If no pending searches, nothing to continue
     if (search_transactions.empty()) {
+        LOG_DHT_DEBUG("No pending searches found for info_hash " << hash_key << " - search iteration aborted");
         return;
     }
     
@@ -1559,6 +1562,9 @@ void DhtClient::continue_search_iteration(const InfoHash& info_hash) {
             auto it = pending_searches_.find(transaction_id);
             if (it != pending_searches_.end()) {
                 const auto& search = it->second;
+                LOG_DHT_DEBUG("Transaction " << transaction_id << " has " << search.discovered_nodes.size() 
+                              << " discovered nodes, " << search.queried_nodes.size() << " queried nodes, iteration " 
+                              << search.iteration_count);
                 all_discovered_nodes.insert(all_discovered_nodes.end(), 
                                            search.discovered_nodes.begin(), 
                                            search.discovered_nodes.end());
@@ -1568,9 +1574,12 @@ void DhtClient::continue_search_iteration(const InfoHash& info_hash) {
         }
     }
     
+    LOG_DHT_DEBUG("Collected " << all_discovered_nodes.size() << " discovered nodes, " 
+                  << all_queried_nodes.size() << " queried nodes, max iterations: " << max_iterations);
+    
     // Stop if we've reached max iterations (simple limit)
     if (max_iterations >= 4) {
-        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations");
+        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations (" << max_iterations << ")");
         return;
     }
     
@@ -1582,12 +1591,22 @@ void DhtClient::continue_search_iteration(const InfoHash& info_hash) {
     
     // Query up to ALPHA closest unqueried nodes
     int nodes_queried = 0;
+    int candidates_found = 0;
     for (const auto& node : all_discovered_nodes) {
-        if (nodes_queried >= ALPHA) break;
+        if (nodes_queried >= ALPHA) {
+            LOG_DHT_DEBUG("Reached ALPHA limit (" << ALPHA << ") for querying nodes");
+            break;
+        }
         
         std::string node_hex = node_id_to_hex(node.id);
+        candidates_found++;
+        
         if (all_queried_nodes.find(node_hex) == all_queried_nodes.end()) {
             PeerProtocol protocol = get_peer_protocol(node.peer);
+            
+            LOG_DHT_DEBUG("Querying node " << node_hex << " at " << node.peer.ip << ":" << node.peer.port 
+                          << " (protocol: " << (protocol == PeerProtocol::BitTorrent ? "BitTorrent" : "RatsDht") 
+                          << ", iteration: " << (max_iterations + 1) << ")");
             
             if (protocol == PeerProtocol::BitTorrent) {
                 std::string transaction_id = KrpcProtocol::generate_transaction_id();
@@ -1618,14 +1637,17 @@ void DhtClient::continue_search_iteration(const InfoHash& info_hash) {
             }
             
             nodes_queried++;
+        } else {
+            LOG_DHT_DEBUG("Skipping already queried node " << node_hex << " at " << node.peer.ip << ":" << node.peer.port);
         }
     }
     
-    if (nodes_queried > 0) {
-        LOG_DHT_DEBUG("Continuing search iteration for " << hash_key << " - queried " << nodes_queried << " more nodes");
-    } else {
-        LOG_DHT_DEBUG("Search converged for " << hash_key << " - no more nodes to query");
-    }
+    LOG_DHT_DEBUG("Search iteration summary for " << hash_key << ":");
+    LOG_DHT_DEBUG("  - Candidates evaluated: " << candidates_found);
+    LOG_DHT_DEBUG("  - Nodes queried: " << nodes_queried);
+    LOG_DHT_DEBUG("  - Already queried nodes skipped: " << (candidates_found - nodes_queried));
+    LOG_DHT_DEBUG("  - Next iteration will be: " << (max_iterations + 1));
+    
 }
 
 // Peer announcement storage management
