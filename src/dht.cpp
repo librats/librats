@@ -249,6 +249,9 @@ void DhtClient::maintenance_loop() {
         // Cleanup stale transactions
         cleanup_stale_transactions();
         
+        // Cleanup stale announced peers
+        cleanup_stale_announced_peers();
+        
         // Refresh buckets every 15 minutes
         refresh_buckets();
         
@@ -360,18 +363,27 @@ void DhtClient::handle_get_peers(const DhtMessage& message, const UdpPeer& sende
     }
     
     // Handle as a regular get_peers request
-    // For now, just return closest nodes
-    auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
-    LOG_DHT_DEBUG("Found " << closest_nodes.size() << " closest nodes for info_hash " << node_id_to_hex(message.target_id));
-    
     DhtMessage response(DhtMessageType::GET_PEERS, message.transaction_id, node_id_);
-    response.nodes = closest_nodes;
+    
+    // First check if we have announced peers for this info_hash
+    auto announced_peers = get_announced_peers(message.target_id);
+    
+    if (!announced_peers.empty()) {
+        // Return the peers we have stored
+        response.peers = announced_peers;
+        LOG_DHT_DEBUG("Responding to GET_PEERS with " << response.peers.size() << " announced peers for info_hash " << node_id_to_hex(message.target_id));
+    } else {
+        // Return closest nodes
+        auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
+        response.nodes = closest_nodes;
+        LOG_DHT_DEBUG("Responding to GET_PEERS with " << response.nodes.size() << " closest nodes for info_hash " << node_id_to_hex(message.target_id));
+    }
     
     // Generate a token for this peer
     std::string token = generate_token(sender);
     response.token = token;
     
-    LOG_DHT_DEBUG("Responding to GET_PEERS with " << response.nodes.size() << " nodes and token '" << token << "' to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
+    LOG_DHT_DEBUG("Sending GET_PEERS response with token '" << token << "' to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
     send_message(response, sender);
 }
 
@@ -386,7 +398,9 @@ void DhtClient::handle_announce_peer(const DhtMessage& message, const UdpPeer& s
     
     LOG_DHT_DEBUG("Token verified, accepting announcement from " << sender.ip << ":" << sender.port);
     
-    // TODO: Store the peer announcement
+    // Store the peer announcement
+    UdpPeer announcing_peer(sender.ip, message.announce_port);
+    store_announced_peer(message.target_id, announcing_peer);
     
     DhtMessage response(DhtMessageType::ANNOUNCE_PEER, message.transaction_id, node_id_);
     LOG_DHT_DEBUG("Responding to ANNOUNCE_PEER with acknowledgment to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
@@ -941,15 +955,25 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const UdpPeer&
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
     add_node(sender_node);
     
-    // For now, just return closest nodes (no peer storage implemented yet)
-    auto closest_nodes = find_closest_nodes(message.info_hash, K_BUCKET_SIZE);
-    auto krpc_nodes = dht_nodes_to_krpc_nodes(closest_nodes);
-    
     // Generate a token for this peer
     std::string token = generate_token(sender);
     
-    // Respond with closest nodes and token
-    auto response = KrpcProtocol::create_get_peers_response_with_nodes(message.transaction_id, node_id_, krpc_nodes, token);
+    // First check if we have announced peers for this info_hash
+    auto announced_peers = get_announced_peers(message.info_hash);
+    
+    KrpcMessage response;
+    if (!announced_peers.empty()) {
+        // Return the peers we have stored
+        response = KrpcProtocol::create_get_peers_response(message.transaction_id, node_id_, announced_peers, token);
+        LOG_DHT_DEBUG("Responding to KRPC GET_PEERS with " << announced_peers.size() << " announced peers for info_hash " << node_id_to_hex(message.info_hash));
+    } else {
+        // Return closest nodes
+        auto closest_nodes = find_closest_nodes(message.info_hash, K_BUCKET_SIZE);
+        auto krpc_nodes = dht_nodes_to_krpc_nodes(closest_nodes);
+        response = KrpcProtocol::create_get_peers_response_with_nodes(message.transaction_id, node_id_, krpc_nodes, token);
+        LOG_DHT_DEBUG("Responding to KRPC GET_PEERS with " << krpc_nodes.size() << " closest nodes for info_hash " << node_id_to_hex(message.info_hash));
+    }
+    
     send_krpc_message(response, sender);
 }
 
@@ -969,7 +993,9 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const UdpP
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
     add_node(sender_node);
     
-    // TODO: Store the peer announcement
+    // Store the peer announcement
+    UdpPeer announcing_peer(sender.ip, message.port);
+    store_announced_peer(message.info_hash, announcing_peer);
     
     // Respond with acknowledgment
     auto response = KrpcProtocol::create_announce_peer_response(message.transaction_id, node_id_);
@@ -999,9 +1025,21 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const UdpPeer& 
     if (!message.peers.empty()) {
         // Check if this is a response to a get_peers query
         std::lock_guard<std::mutex> lock(active_searches_mutex_);
-        // TODO: Match response to active search by transaction ID
-        // For now, just log the peers
+        
+        // Since we can't directly match by transaction ID, we'll try to match by context
+        // In a real implementation, we would track transaction IDs properly
         LOG_DHT_DEBUG("Received " << message.peers.size() << " peers from KRPC response");
+        
+        // For now, we'll assume this is for any active search
+        // In production, proper transaction tracking would be implemented
+        for (auto& search : active_searches_) {
+            if (search.second) {
+                // Call the callback with the received peers
+                // We need to create a dummy info_hash since we don't have it from the response
+                InfoHash dummy_hash;  // This is a limitation of the current design
+                search.second(message.peers, dummy_hash);
+            }
+        }
     }
 }
 
@@ -1322,6 +1360,88 @@ void DhtClient::handle_get_peers_response_for_announce_rats_dht(const std::strin
         
         // Remove the pending announce since we've handled it
         pending_announces_.erase(it);
+    }
+}
+
+// Peer announcement storage management
+void DhtClient::store_announced_peer(const InfoHash& info_hash, const UdpPeer& peer) {
+    std::lock_guard<std::mutex> lock(announced_peers_mutex_);
+    
+    std::string hash_key = node_id_to_hex(info_hash);
+    auto& peers = announced_peers_[hash_key];
+    
+    // Check if peer already exists
+    auto it = std::find_if(peers.begin(), peers.end(),
+                          [&peer](const AnnouncedPeer& announced) {
+                              return announced.peer.ip == peer.ip && announced.peer.port == peer.port;
+                          });
+    
+    if (it != peers.end()) {
+        // Update existing peer's timestamp
+        it->announced_at = std::chrono::steady_clock::now();
+        LOG_DHT_DEBUG("Updated existing announced peer " << peer.ip << ":" << peer.port 
+                      << " for info_hash " << hash_key);
+    } else {
+        // Add new peer
+        peers.emplace_back(peer);
+        LOG_DHT_DEBUG("Stored new announced peer " << peer.ip << ":" << peer.port 
+                      << " for info_hash " << hash_key << " (total: " << peers.size() << ")");
+    }
+}
+
+std::vector<UdpPeer> DhtClient::get_announced_peers(const InfoHash& info_hash) {
+    std::lock_guard<std::mutex> lock(announced_peers_mutex_);
+    
+    std::string hash_key = node_id_to_hex(info_hash);
+    auto it = announced_peers_.find(hash_key);
+    
+    std::vector<UdpPeer> peers;
+    if (it != announced_peers_.end()) {
+        peers.reserve(it->second.size());
+        for (const auto& announced : it->second) {
+            peers.push_back(announced.peer);
+        }
+        LOG_DHT_DEBUG("Retrieved " << peers.size() << " announced peers for info_hash " << hash_key);
+    } else {
+        LOG_DHT_DEBUG("No announced peers found for info_hash " << hash_key);
+    }
+    
+    return peers;
+}
+
+void DhtClient::cleanup_stale_announced_peers() {
+    std::lock_guard<std::mutex> lock(announced_peers_mutex_);
+    
+    auto now = std::chrono::steady_clock::now();
+    auto stale_threshold = std::chrono::minutes(30);  // BEP 5 standard: 30 minutes
+    
+    size_t total_before = 0;
+    size_t total_after = 0;
+    
+    for (auto it = announced_peers_.begin(); it != announced_peers_.end(); ) {
+        auto& peers = it->second;
+        total_before += peers.size();
+        
+        // Remove stale peers
+        peers.erase(std::remove_if(peers.begin(), peers.end(),
+                                   [now, stale_threshold](const AnnouncedPeer& announced) {
+                                       return now - announced.announced_at > stale_threshold;
+                                   }), peers.end());
+        
+        total_after += peers.size();
+        
+        // Remove empty info_hash entries
+        if (peers.empty()) {
+            LOG_DHT_DEBUG("Removing empty announced peers entry for info_hash " << it->first);
+            it = announced_peers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    
+    if (total_before > total_after) {
+        LOG_DHT_DEBUG("Cleaned up " << (total_before - total_after) << " stale announced peers "
+                      << "(from " << total_before << " to " << total_after << ")");
     }
 }
 

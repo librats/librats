@@ -194,6 +194,18 @@ private:
     std::unordered_map<std::string, PendingAnnounce> pending_announces_;
     std::mutex pending_announces_mutex_;
     
+    // Peer announcement storage (BEP 5 compliant)
+    struct AnnouncedPeer {
+        UdpPeer peer;
+        std::chrono::steady_clock::time_point announced_at;
+        
+        AnnouncedPeer(const UdpPeer& p) 
+            : peer(p), announced_at(std::chrono::steady_clock::now()) {}
+    };
+    // Map from info_hash (as hex string) to list of announced peers
+    std::unordered_map<std::string, std::vector<AnnouncedPeer>> announced_peers_;
+    std::mutex announced_peers_mutex_;
+    
     // Network thread
     std::thread network_thread_;
     std::thread maintenance_thread_;
@@ -267,6 +279,11 @@ private:
     void cleanup_stale_announces();
     void handle_get_peers_response_for_announce(const std::string& transaction_id, const UdpPeer& responder, const std::string& token);
     void handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const UdpPeer& responder, const std::string& token);
+    
+    // Peer announcement storage management
+    void store_announced_peer(const InfoHash& info_hash, const UdpPeer& peer);
+    std::vector<UdpPeer> get_announced_peers(const InfoHash& info_hash);
+    void cleanup_stale_announced_peers();
     
     // Conversion utilities
     static KrpcNode dht_node_to_krpc_node(const DhtNode& node);
