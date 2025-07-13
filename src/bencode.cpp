@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <algorithm>
+#include <cstdint>
 
 namespace librats {
 
