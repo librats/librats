@@ -300,7 +300,6 @@ private:
     mutable std::mutex peers_mutex_;
     
     std::thread server_thread_;
-    std::vector<std::thread> client_threads_;
     
     ConnectionCallback connection_callback_;
     DataCallback data_callback_;
@@ -318,19 +317,12 @@ private:
     void handle_client(socket_t client_socket, const std::string& peer_hash_id);
     void remove_peer(socket_t socket);
     std::string generate_peer_hash_id(socket_t socket, const std::string& connection_info);
-    void add_peer_mapping(socket_t socket, const std::string& hash_id);
-    void remove_peer_mapping(socket_t socket);
     void handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash);
     
     // New peer management methods using RatsPeer
     void add_peer(const RatsPeer& peer);
     void remove_peer_by_id(const std::string& peer_id);
     bool is_already_connected_to_address(const std::string& normalized_address) const;
-    
-    // Peer address tracking methods (legacy - will be replaced)
-    void add_peer_address_mapping(socket_t socket, const std::string& peer_address);
-    void remove_peer_address_mapping(socket_t socket);
-    bool is_already_connected_to_peer(const std::string& peer_address) const;
     std::string normalize_peer_address(const std::string& ip, int port) const;
 
     // Local interface address blocking (ignore list)
@@ -340,6 +332,7 @@ private:
     void refresh_local_addresses();
     bool is_blocked_address(const std::string& ip_address) const;
     bool should_ignore_peer(const std::string& ip, int port) const;
+    static bool parse_address_string(const std::string& address_str, std::string& out_ip, int& out_port);
 
     // Automatic peer discovery
     std::atomic<bool> auto_discovery_running_{false};
