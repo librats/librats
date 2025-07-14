@@ -214,13 +214,12 @@ private:
         
         // Iterative search state
         std::unordered_set<std::string> queried_nodes;  // node_id as hex string
-        bool found_peers;                               // whether we found actual peers
         int iteration_count;                            // current iteration number
         int iteration_max;                              // maximum iteration limit
         
         PendingSearch(const InfoHash& hash, int max_iterations = 4)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
-              found_peers(false), iteration_count(0), iteration_max(max_iterations) {}
+              iteration_count(0), iteration_max(max_iterations) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
     std::mutex pending_searches_mutex_;

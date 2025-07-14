@@ -1450,15 +1450,18 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
                           << " from " << responder.ip << ":" << responder.port);
             
             if (!peers.empty()) {
-                // We found actual peers - call callback and mark search as complete
-                pending_search.found_peers = true;
+                // We found actual peers - call callback and clean up search
                 {
                     std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
                     auto active_it = active_searches_.find(hash_key);
                     if (active_it != active_searches_.end() && active_it->second) {
                         active_it->second(peers, pending_search.info_hash);
                     }
+                    // Remove from active searches since we found peers
+                    active_searches_.erase(hash_key);
                 }
+                // Remove the completed search
+                pending_searches_.erase(search_it);
             }
         }
         
@@ -1481,15 +1484,18 @@ void DhtClient::handle_get_peers_response_for_search_rats_dht(const std::string&
                           << " from " << responder.ip << ":" << responder.port);
             
             if (!peers.empty()) {
-                // We found actual peers - call callback and mark search as complete
-                pending_search.found_peers = true;
+                // We found actual peers - call callback and clean up search
                 {
                     std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
                     auto active_it = active_searches_.find(hash_key);
                     if (active_it != active_searches_.end() && active_it->second) {
                         active_it->second(peers, pending_search.info_hash);
                     }
+                    // Remove from active searches since we found peers
+                    active_searches_.erase(hash_key);
                 }
+                // Remove the completed search
+                pending_searches_.erase(search_it);
             }
         }
         
