@@ -215,7 +215,6 @@ private:
         
         // Iterative search state
         std::unordered_set<std::string> queried_nodes;  // node_id as hex string
-        std::vector<DhtNode> discovered_nodes;          // nodes to query next
         bool found_peers;                               // whether we found actual peers
         int iteration_count;                            // current iteration number
         int iteration_max;                              // maximum iteration limit

@@ -1517,18 +1517,7 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
             LOG_DHT_DEBUG("Found pending search for KRPC transaction " << transaction_id 
                           << " - received " << nodes.size() << " nodes for info_hash " << hash_key 
                           << " from " << responder.ip << ":" << responder.port);
-            
-            // Convert KrpcNodes to DhtNodes and add to discovered_nodes
-            for (const auto& node : nodes) {
-                DhtNode dht_node = krpc_node_to_dht_node(node);
-                std::string node_hex = node_id_to_hex(dht_node.id);
-                
-                // Only add if we haven't queried this node before
-                if (pending_search.queried_nodes.find(node_hex) == pending_search.queried_nodes.end()) {
-                    pending_search.discovered_nodes.push_back(dht_node);
-                }
-            }
-            
+
             // Continue search iteration
             bool should_remove_search = continue_search_iteration(pending_search);
             if (should_remove_search) {
@@ -1560,17 +1549,7 @@ void DhtClient::handle_get_peers_response_with_nodes_rats_dht(const std::string&
             LOG_DHT_DEBUG("Found pending search for rats DHT transaction " << transaction_id 
                           << " - received " << nodes.size() << " nodes for info_hash " << hash_key 
                           << " from " << responder.ip << ":" << responder.port);
-            
-            // Add nodes to discovered_nodes
-            for (const auto& node : nodes) {
-                std::string node_hex = node_id_to_hex(node.id);
-                
-                // Only add if we haven't queried this node before
-                if (pending_search.queried_nodes.find(node_hex) == pending_search.queried_nodes.end()) {
-                    pending_search.discovered_nodes.push_back(node);
-                }
-            }
-            
+
             // Continue search iteration
             bool should_remove_search = continue_search_iteration(pending_search);
             if (should_remove_search) {
@@ -1594,8 +1573,7 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     std::string hash_key = node_id_to_hex(search.info_hash);
     
     LOG_DHT_DEBUG("Continuing search iteration for info_hash " << hash_key 
-                  << " with " << search.discovered_nodes.size() << " discovered nodes, " 
-                  << search.queried_nodes.size() << " queried nodes, iteration " 
+                  << " with " << search.queried_nodes.size() << " queried nodes, iteration " 
                   << search.iteration_count << "/" << search.iteration_max);
     
     // Stop if we've reached max iterations (simple limit)
@@ -1604,17 +1582,13 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
         return true;  // Return true to indicate the search should be removed
     }
     
-    // Sort discovered nodes by distance to target
-    std::vector<DhtNode> sorted_nodes = search.discovered_nodes;
-    std::sort(sorted_nodes.begin(), sorted_nodes.end(),
-              [&search, this](const DhtNode& a, const DhtNode& b) {
-                  return is_closer(a.id, b.id, search.info_hash);
-              });
+    // Get closest nodes from routing table (already sorted by distance to target)
+    std::vector<DhtNode> closest_nodes = find_closest_nodes(search.info_hash, ALPHA);
     
     // Query up to ALPHA closest unqueried nodes
     int nodes_queried = 0;
     int candidates_found = 0;
-    for (const auto& node : sorted_nodes) {
+    for (const auto& node : closest_nodes) {
         if (nodes_queried >= ALPHA) {
             LOG_DHT_DEBUG("Reached ALPHA limit (" << ALPHA << ") for querying nodes in iteration " << (search.iteration_count + 1) << "/" << search.iteration_max);
             break;
