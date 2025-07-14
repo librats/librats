@@ -121,9 +121,10 @@ public:
      * Find peers for a specific info hash
      * @param info_hash The info hash to search for
      * @param callback Callback to receive discovered peers
+     * @param iteration_max Maximum number of search iterations (default: 4)
      * @return true if search started successfully, false otherwise
      */
-    bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback);
+    bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max = 4);
     
     /**
      * Announce that this node is a peer for a specific info hash
@@ -217,10 +218,11 @@ private:
         std::vector<DhtNode> discovered_nodes;          // nodes to query next
         bool found_peers;                               // whether we found actual peers
         int iteration_count;                            // current iteration number
+        int iteration_max;                              // maximum iteration limit
         
-        PendingSearch(const InfoHash& hash)
+        PendingSearch(const InfoHash& hash, int max_iterations = 4)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
-              found_peers(false), iteration_count(0) {}
+              found_peers(false), iteration_count(0), iteration_max(max_iterations) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
     std::mutex pending_searches_mutex_;
@@ -317,7 +319,7 @@ private:
     void handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
     void handle_get_peers_response_with_nodes_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<DhtNode>& nodes);
-    void continue_search_iteration(PendingSearch& search);
+    bool continue_search_iteration(PendingSearch& search);
     
     // Peer announcement storage management
     void store_announced_peer(const InfoHash& info_hash, const Peer& peer);

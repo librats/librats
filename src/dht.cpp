@@ -127,7 +127,7 @@ bool DhtClient::bootstrap(const std::vector<Peer>& bootstrap_nodes) {
     return true;
 }
 
-bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback) {
+bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max) {
     if (!running_) {
         LOG_DHT_ERROR("DHT client not running");
         return false;
@@ -150,7 +150,7 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
         // Create or get existing PendingSearch for this info_hash
         auto search_it = pending_searches_.find(hash_key);
         if (search_it == pending_searches_.end()) {
-            pending_searches_.emplace(hash_key, PendingSearch(info_hash));
+            pending_searches_.emplace(hash_key, PendingSearch(info_hash, iteration_max));
         }
     }
     
@@ -1530,7 +1530,17 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
             }
             
             // Continue search iteration
-            continue_search_iteration(pending_search);
+            bool should_remove_search = continue_search_iteration(pending_search);
+            if (should_remove_search) {
+                LOG_DHT_DEBUG("Removing completed search for info_hash " << hash_key);
+                pending_searches_.erase(search_it);
+                
+                // Also clean up the active search callback
+                {
+                    std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
+                    active_searches_.erase(hash_key);
+                }
+            }
         }
         
         // Remove the transaction mapping since we've handled it
@@ -1562,7 +1572,17 @@ void DhtClient::handle_get_peers_response_with_nodes_rats_dht(const std::string&
             }
             
             // Continue search iteration
-            continue_search_iteration(pending_search);
+            bool should_remove_search = continue_search_iteration(pending_search);
+            if (should_remove_search) {
+                LOG_DHT_DEBUG("Removing completed search for info_hash " << hash_key);
+                pending_searches_.erase(search_it);
+                
+                // Also clean up the active search callback
+                {
+                    std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
+                    active_searches_.erase(hash_key);
+                }
+            }
         }
         
         // Remove the transaction mapping since we've handled it
@@ -1570,18 +1590,18 @@ void DhtClient::handle_get_peers_response_with_nodes_rats_dht(const std::string&
     }
 }
 
-void DhtClient::continue_search_iteration(PendingSearch& search) {
+bool DhtClient::continue_search_iteration(PendingSearch& search) {
     std::string hash_key = node_id_to_hex(search.info_hash);
     
     LOG_DHT_DEBUG("Continuing search iteration for info_hash " << hash_key 
                   << " with " << search.discovered_nodes.size() << " discovered nodes, " 
                   << search.queried_nodes.size() << " queried nodes, iteration " 
-                  << search.iteration_count);
+                  << search.iteration_count << "/" << search.iteration_max);
     
     // Stop if we've reached max iterations (simple limit)
-    if (search.iteration_count >= 4) {
-        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations (" << search.iteration_count << ")");
-        return;
+    if (search.iteration_count >= search.iteration_max) {
+        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations (" << search.iteration_count << "/" << search.iteration_max << ")");
+        return true;  // Return true to indicate the search should be removed
     }
     
     // Sort discovered nodes by distance to target
@@ -1596,7 +1616,7 @@ void DhtClient::continue_search_iteration(PendingSearch& search) {
     int candidates_found = 0;
     for (const auto& node : sorted_nodes) {
         if (nodes_queried >= ALPHA) {
-            LOG_DHT_DEBUG("Reached ALPHA limit (" << ALPHA << ") for querying nodes");
+            LOG_DHT_DEBUG("Reached ALPHA limit (" << ALPHA << ") for querying nodes in iteration " << (search.iteration_count + 1) << "/" << search.iteration_max);
             break;
         }
         
@@ -1642,7 +1662,9 @@ void DhtClient::continue_search_iteration(PendingSearch& search) {
     LOG_DHT_DEBUG("  - Candidates evaluated: " << candidates_found);
     LOG_DHT_DEBUG("  - Nodes queried: " << nodes_queried);
     LOG_DHT_DEBUG("  - Already queried nodes skipped: " << (candidates_found - nodes_queried));
-    LOG_DHT_DEBUG("  - Current iteration: " << search.iteration_count);
+    LOG_DHT_DEBUG("  - Current iteration: " << search.iteration_count << "/" << search.iteration_max);
+    
+    return false;  // Return false to indicate the search should continue
 }
 
 // Peer announcement storage management
