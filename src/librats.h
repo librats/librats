@@ -168,7 +168,7 @@ public:
      * @param callback Callback to receive discovered peers
      * @return true if search started successfully, false otherwise
      */
-    bool find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback);
+    bool find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback, int iteration_max = 1);
     
     /**
      * Announce this node as a peer for a specific content hash
@@ -240,7 +240,7 @@ private:
     std::thread auto_discovery_thread_;
     void automatic_discovery_loop();
     void announce_rats_peer();
-    void search_rats_peers();
+    void search_rats_peers(int iteration_max = 1);
 };
 
 /**

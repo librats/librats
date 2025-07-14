@@ -372,7 +372,7 @@ void RatsClient::stop_dht_discovery() {
     LOG_CLIENT_INFO("DHT discovery stopped");
 }
 
-bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback) {
+bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback, int iteration_max) {
     if (!dht_client_ || !dht_client_->is_running()) {
         LOG_CLIENT_ERROR("DHT client not running");
         return false;
@@ -383,7 +383,7 @@ bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::functi
         return false;
     }
     
-    LOG_CLIENT_INFO("Finding peers for content hash: " << content_hash);
+    LOG_CLIENT_INFO("Finding peers for content hash: " << content_hash << " with iteration max: " << iteration_max);
     
     InfoHash info_hash = hex_to_node_id(content_hash);
     
@@ -399,7 +399,7 @@ bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::functi
         if (callback) {
             callback(peer_addresses);
         }
-    });
+    }, iteration_max);
 }
 
 bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t port) {
@@ -689,18 +689,15 @@ void RatsClient::automatic_discovery_loop() {
     
     // Initial delay to let DHT bootstrap
     std::this_thread::sleep_for(std::chrono::seconds(5));
+
+    // Search immediately
+    search_rats_peers(5);
+    
+    std::this_thread::sleep_for(std::chrono::seconds(10));
     
     // Announce immediately
     announce_rats_peer();
-    
-    // Search immediately
-    search_rats_peers();
 
-    std::this_thread::sleep_for(std::chrono::seconds(15));
-
-    // Announce again
-    announce_rats_peer();
-    
     auto last_announce = std::chrono::steady_clock::now();
     auto last_search = std::chrono::steady_clock::now();
     
@@ -744,14 +741,14 @@ void RatsClient::announce_rats_peer() {
     }
 }
 
-void RatsClient::search_rats_peers() {
+void RatsClient::search_rats_peers(int iteration_max) {
     if (!dht_client_ || !dht_client_->is_running()) {
         LOG_CLIENT_WARN("DHT client not running, cannot search for rats peers");
         return;
     }
     
     std::string discovery_hash = get_rats_peer_discovery_hash();
-    LOG_CLIENT_INFO("Searching for rats peers using discovery hash: " << discovery_hash);
+    LOG_CLIENT_INFO("Searching for rats peers using discovery hash: " << discovery_hash << " with iteration max: " << iteration_max);
     
     find_peers_by_hash(discovery_hash, [this](const std::vector<std::string>& peers) {
         LOG_CLIENT_INFO("Found " << peers.size() << " rats peers through DHT discovery");
@@ -795,7 +792,7 @@ void RatsClient::search_rats_peers() {
                 }
             }
         }
-    });
+    }, iteration_max);
 }
 
 } // namespace librats 

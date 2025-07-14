@@ -122,10 +122,10 @@ public:
      * Find peers for a specific info hash
      * @param info_hash The info hash to search for
      * @param callback Callback to receive discovered peers
-     * @param iteration_max Maximum number of search iterations (default: 4)
+     * @param iteration_max Maximum number of search iterations (default: 1)
      * @return true if search started successfully, false otherwise
      */
-    bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max = 4);
+    bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max = 1);
     
     /**
      * Announce that this node is a peer for a specific info hash
@@ -211,9 +211,9 @@ private:
         int iteration_count;                            // current iteration number
         int iteration_max;                              // maximum iteration limit
         
-        PendingSearch(const InfoHash& hash, int max_iterations = 4)
+        PendingSearch(const InfoHash& hash, int max_iterations = 1)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
-              iteration_count(0), iteration_max(max_iterations) {}
+              iteration_count(1), iteration_max(max_iterations) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
     std::mutex pending_searches_mutex_;
