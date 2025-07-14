@@ -4,6 +4,7 @@
 #include "dht.h"
 #include "stun.h"
 #include "logger.h"
+#include "json.hpp" // nlohmann::json
 #include <string>
 #include <functional>
 #include <thread>
@@ -32,7 +33,6 @@ struct RatsPeer {
     enum class HandshakeState {
         PENDING,        // Handshake not started
         SENT,          // Handshake sent, waiting for response
-        RECEIVED,      // Handshake received, need to respond
         COMPLETED,     // Handshake completed successfully
         FAILED         // Handshake failed
     };
@@ -170,6 +170,14 @@ public:
     bool send_to_peer(socket_t socket, const std::string& data);
     
     /**
+     * Send JSON data to a specific peer
+     * @param socket The socket handle to send data to
+     * @param json_data The JSON data to send
+     * @return true if successful, false otherwise
+     */
+    bool send_json_to_peer(socket_t socket, const nlohmann::json& json_data);
+    
+    /**
      * Send data to a specific peer by hash ID
      * @param peer_hash_id The hash ID of the peer to send data to
      * @param data The data to send
@@ -178,11 +186,34 @@ public:
     bool send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data);
     
     /**
+     * Send JSON data to a specific peer by hash ID
+     * @param peer_hash_id The hash ID of the peer to send data to
+     * @param json_data The JSON data to send
+     * @return true if successful, false otherwise
+     */
+    bool send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& json_data);
+    
+    /**
      * Send data to all connected peers
      * @param data The data to send
      * @return Number of peers the data was sent to
      */
     int broadcast_to_peers(const std::string& data);
+    
+    /**
+     * Send JSON data to all connected peers
+     * @param json_data The JSON data to send
+     * @return Number of peers the data was sent to
+     */
+    int broadcast_json_to_peers(const nlohmann::json& json_data);
+    
+    /**
+     * Parse a JSON message from a string
+     * @param message The message string to parse
+     * @param out_json The parsed JSON object
+     * @return true if successful, false otherwise
+     */
+    bool parse_json_message(const std::string& message, nlohmann::json& out_json);
     
     /**
      * Disconnect from a specific peer
@@ -388,14 +419,13 @@ private:
         std::string protocol;           // "rats"
         std::string version;            // protocol version
         std::string peer_id;            // our peer ID
-        std::string message_type;       // "handshake_request" or "handshake_response"
+        std::string message_type;       // "handshake" (simplified from request/response)
         int64_t timestamp;              // message timestamp
     };
     
     std::string create_handshake_message(const std::string& message_type, const std::string& our_peer_id) const;
     bool parse_handshake_message(const std::string& message, HandshakeMessage& out_msg) const;
-    bool send_handshake_request(socket_t socket, const std::string& our_peer_id);
-    bool send_handshake_response(socket_t socket, const std::string& our_peer_id);
+    bool send_handshake(socket_t socket, const std::string& our_peer_id);
     bool handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::string& message);
     bool is_handshake_message(const std::string& message) const;
     void check_handshake_timeouts();
