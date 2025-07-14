@@ -704,22 +704,30 @@ void RatsClient::automatic_discovery_loop() {
     while (auto_discovery_running_.load()) {
         auto now = std::chrono::steady_clock::now();
         
-        // Announce every 10 minutes
-        if (now - last_announce >= std::chrono::minutes(10)) {
-            announce_rats_peer();
-            last_announce = now;
+        if (get_peer_count() == 0) {
+            // No peers: aggressive search and announce
+            if (now - last_search >= std::chrono::seconds(2)) {
+                search_rats_peers();
+                last_search = now;
+            }
+            if (now - last_announce >= std::chrono::seconds(10)) {
+                announce_rats_peer();
+                last_announce = now;
+            }
+        } else {
+            // Peers connected: less aggressive, similar to original logic
+            if (now - last_search >= std::chrono::minutes(5)) {
+                search_rats_peers();
+                last_search = now;
+            }
+            if (now - last_announce >= std::chrono::minutes(10)) {
+                announce_rats_peer();
+                last_announce = now;
+            }
         }
         
-        // Search every 5 minutes
-        if (now - last_search >= std::chrono::minutes(5)) {
-            search_rats_peers();
-            last_search = now;
-        }
-        
-        // Sleep for 30 seconds between checks
-        for (int i = 0; i < 30 && auto_discovery_running_.load(); ++i) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
+        // Sleep for a short duration to avoid busy-waiting
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     
     LOG_CLIENT_INFO("Automatic peer discovery loop stopped");
