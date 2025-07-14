@@ -1,5 +1,6 @@
 #include "librats.h"
 #include "sha1.h"
+#include "os.h"
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -133,6 +134,18 @@ bool RatsClient::start() {
     }
 
     LOG_CLIENT_INFO("Starting RatsClient on port " << listen_port_);
+    
+    // Print system information for debugging and log analysis
+    SystemInfo sys_info = get_system_info();
+    LOG_CLIENT_INFO("=== System Information ===");
+    LOG_CLIENT_INFO("OS: " << sys_info.os_name << " " << sys_info.os_version);
+    LOG_CLIENT_INFO("Architecture: " << sys_info.architecture);
+    LOG_CLIENT_INFO("Hostname: " << sys_info.hostname);
+    LOG_CLIENT_INFO("CPU: " << sys_info.cpu_model);
+    LOG_CLIENT_INFO("CPU Cores: " << sys_info.cpu_cores << " physical, " << sys_info.cpu_logical_cores << " logical");
+    LOG_CLIENT_INFO("Memory: " << sys_info.total_memory_mb << " MB total, " << sys_info.available_memory_mb << " MB available");
+    LOG_CLIENT_INFO("===========================");
+    
     init_socket_library();
     
     // Create dual-stack server socket (supports both IPv4 and IPv6)
