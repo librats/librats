@@ -1664,7 +1664,13 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     LOG_DHT_DEBUG("  - Already queried nodes skipped: " << (candidates_found - nodes_queried));
     LOG_DHT_DEBUG("  - Current iteration: " << search.iteration_count << "/" << search.iteration_max);
     
-    return false;  // Return false to indicate the search should continue
+    // If we are not making progress, or if we've hit the limit, stop the search.
+    if (nodes_queried == 0) {
+        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - no new nodes to query");
+        return true; // Signal to remove the search
+    }
+    
+    return false;
 }
 
 // Peer announcement storage management
