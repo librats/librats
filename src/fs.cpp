@@ -25,12 +25,7 @@ namespace librats {
 
 bool file_exists(const char* path) {
     if (!path) return false;
-    
-#ifdef _WIN32
     return access(path, F_OK) == 0;
-#else
-    return access(path, F_OK) == 0;
-#endif
 }
 
 bool directory_exists(const char* path) {
@@ -134,7 +129,7 @@ char* read_file_text(const char* path, size_t* size_out) {
     }
     
     // Allocate buffer (+1 for null terminator)
-    char* buffer = (char*)malloc(file_size + 1);
+    char* buffer = static_cast<char*>(malloc(file_size + 1));
     if (!buffer) {
         LOG_ERROR("FS", "Failed to allocate memory for file: " << path);
         fclose(file);
@@ -214,10 +209,13 @@ bool create_directories(const char* path) {
     
     // Create a copy of the path to modify
     size_t len = strlen(path);
-    char* path_copy = (char*)malloc(len + 1);
-    if (!path_copy) return false;
+    char* path_copy = static_cast<char*>(malloc(len + 1));
+    if (!path_copy) {
+        LOG_ERROR("FS", "Failed to allocate memory for path copy in create_directories");
+        return false;
+    }
     
-    strcpy(path_copy, path);
+    memcpy(path_copy, path, len + 1);
     
     // Create parent directories recursively
     for (size_t i = 1; i < len; i++) {
@@ -283,14 +281,45 @@ bool delete_directory(const char* path) {
 
 bool copy_file(const char* src_path, const char* dest_path) {
     if (!src_path || !dest_path) return false;
-    
-    size_t size;
-    void* data = read_file_binary(src_path, &size);
-    if (!data) return false;
-    
-    bool result = create_file_binary(dest_path, data, size);
-    free_file_buffer(data);
-    return result;
+
+    FILE* src_file = fopen(src_path, "rb");
+    if (!src_file) {
+        LOG_ERROR("FS", "Failed to open source file for copying: " << src_path);
+        return false;
+    }
+
+    FILE* dest_file = fopen(dest_path, "wb");
+    if (!dest_file) {
+        LOG_ERROR("FS", "Failed to open destination file for copying: " << dest_path);
+        fclose(src_file);
+        return false;
+    }
+
+    char buffer[4096];
+    size_t bytes_read;
+    bool success = true;
+
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), src_file)) > 0) {
+        if (fwrite(buffer, 1, bytes_read, dest_file) != bytes_read) {
+            LOG_ERROR("FS", "Failed to write to destination file: " << dest_path);
+            success = false;
+            break;
+        }
+    }
+
+    if (ferror(src_file)) {
+        LOG_ERROR("FS", "Error reading from source file: " << src_path);
+        success = false;
+    }
+
+    fclose(src_file);
+    fclose(dest_file);
+
+    if (!success) {
+        delete_file(dest_path);
+    }
+
+    return success;
 }
 
 bool move_file(const char* src_path, const char* dest_path) {
