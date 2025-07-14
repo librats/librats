@@ -185,13 +185,7 @@ private:
     };
     std::unordered_map<Peer, PeerProtocol> peer_protocols_;
     std::mutex peer_protocols_mutex_;
-    
-    // KRPC transaction tracking
-    std::unordered_map<std::string, std::string> krpc_transactions_;
-    std::mutex krpc_transactions_mutex_;
-    
-
-    
+        
     // Transaction ID counters
     static std::atomic<uint32_t> rats_dht_transaction_counter_;
     
