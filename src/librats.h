@@ -12,8 +12,57 @@
 #include <atomic>
 #include <unordered_map>
 #include <memory>
+#include <chrono>
 
 namespace librats {
+
+/**
+ * RatsPeer struct - comprehensive information about a connected rats peer
+ */
+struct RatsPeer {
+    std::string peer_id;                    // Unique hash ID for the peer
+    std::string ip;                         // IP address
+    uint16_t port;                          // Port number  
+    socket_t socket;                        // Socket handle
+    std::string normalized_address;         // Normalized address for duplicate detection (ip:port)
+    std::chrono::steady_clock::time_point connected_at; // Connection timestamp
+    bool is_outgoing;                       // True if we initiated the connection, false if incoming
+    
+    RatsPeer() : port(0), socket(INVALID_SOCKET_VALUE), is_outgoing(false) {
+        connected_at = std::chrono::steady_clock::now();
+    }
+    
+    RatsPeer(const std::string& peer_id, const std::string& ip, uint16_t port, 
+             socket_t socket, const std::string& normalized_address, bool is_outgoing)
+        : peer_id(peer_id), ip(ip), port(port), socket(socket), 
+          normalized_address(normalized_address), is_outgoing(is_outgoing) {
+        connected_at = std::chrono::steady_clock::now();
+    }
+    
+    /**
+     * Get connection duration in seconds
+     */
+    double get_connection_duration() const {
+        auto now = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - connected_at);
+        return duration.count();
+    }
+    
+    /**
+     * Get peer address as string (ip:port)
+     */
+    std::string get_address() const {
+        return ip + ":" + std::to_string(port);
+    }
+    
+    bool operator==(const RatsPeer& other) const {
+        return peer_id == other.peer_id;
+    }
+    
+    bool operator!=(const RatsPeer& other) const {
+        return !(*this == other);
+    }
+};
 
 /**
  * Callback function type for handling incoming connections
@@ -211,6 +260,26 @@ public:
      * @param ip_address IP address to ignore
      */
     void add_ignored_address(const std::string& ip_address);
+    
+    /**
+     * Get all connected peers
+     * @return Vector of RatsPeer objects
+     */
+    std::vector<RatsPeer> get_all_peers() const;
+    
+    /**
+     * Get peer information by peer ID
+     * @param peer_id The peer ID to look up
+     * @return Pointer to RatsPeer object, or nullptr if not found
+     */
+    const RatsPeer* get_peer_by_id(const std::string& peer_id) const;
+    
+    /**
+     * Get peer information by socket
+     * @param socket The socket handle to look up
+     * @return Pointer to RatsPeer object, or nullptr if not found  
+     */
+    const RatsPeer* get_peer_by_socket(socket_t socket) const;
 
     // Automatic peer discovery
     void start_automatic_peer_discovery();
@@ -223,13 +292,10 @@ private:
     socket_t server_socket_;
     std::atomic<bool> running_;
     
-    std::vector<socket_t> peer_sockets_;
-    std::unordered_map<socket_t, std::string> socket_to_hash_;
-    std::unordered_map<std::string, socket_t> hash_to_socket_;
-    
-    // Peer address tracking for duplicate connection prevention
-    std::unordered_map<std::string, socket_t> peer_address_to_socket_;
-    std::unordered_map<socket_t, std::string> socket_to_peer_address_;
+    // Organized peer management using RatsPeer struct
+    std::unordered_map<std::string, RatsPeer> peers_;          // keyed by peer_id
+    std::unordered_map<socket_t, std::string> socket_to_peer_id_;  // for quick socket->peer_id lookup  
+    std::unordered_map<std::string, std::string> address_to_peer_id_;  // for duplicate detection (normalized_address->peer_id)
     
     mutable std::mutex peers_mutex_;
     
@@ -256,7 +322,12 @@ private:
     void remove_peer_mapping(socket_t socket);
     void handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash);
     
-    // Peer address tracking methods
+    // New peer management methods using RatsPeer
+    void add_peer(const RatsPeer& peer);
+    void remove_peer_by_id(const std::string& peer_id);
+    bool is_already_connected_to_address(const std::string& normalized_address) const;
+    
+    // Peer address tracking methods (legacy - will be replaced)
     void add_peer_address_mapping(socket_t socket, const std::string& peer_address);
     void remove_peer_address_mapping(socket_t socket);
     bool is_already_connected_to_peer(const std::string& peer_address) const;
