@@ -858,6 +858,18 @@ std::vector<DhtNode> DhtClient::find_closest_nodes_unlocked(const NodeId& target
     for (size_t i = 0; i < all_nodes.size(); ++i) {
         LOG_DHT_DEBUG("  [" << i << "] " << node_id_to_hex(all_nodes[i].id) << " at " << all_nodes[i].peer.ip << ":" << all_nodes[i].peer.port);
     }
+    // Print the xor distance for each node
+    // for (size_t i = 0; i < all_nodes.size(); ++i) {
+    //     NodeId dist = xor_distance(all_nodes[i].id, target);
+    //     // Convert the NodeId (20 bytes) to a single uint64_t for a simple distance metric (using the first 8 bytes)
+    //     uint64_t dist_metric = 0;
+    //     for (int j = 0; j < 8 && j < dist.size(); ++j) {
+    //         dist_metric = (dist_metric << 8) | dist[j];
+    //     }
+    //     LOG_DHT_DEBUG("  [" << i << "] " << node_id_to_hex(all_nodes[i].id) 
+    //         << " at " << all_nodes[i].peer.ip << ":" << all_nodes[i].peer.port
+    //         << " xor_distance=" << dist_metric);
+    // }
     
     return all_nodes;
 }
