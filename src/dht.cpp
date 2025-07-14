@@ -188,7 +188,6 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
             // Send get_peers with transaction ID for rats dht protocol
             DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
             message.target_id = info_hash;
-            track_rats_dht_transaction(transaction_id, "get_peers_for_search:" + node.peer.ip + ":" + std::to_string(node.peer.port));
             send_message(message, node.peer);
         }
     }
@@ -237,7 +236,6 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port) {
             // Send get_peers with transaction ID for rats dht protocol
             DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
             message.target_id = info_hash;
-            track_rats_dht_transaction(transaction_id, "get_peers_for_announce:" + node.peer.ip + ":" + std::to_string(node.peer.port));
             send_message(message, node.peer);
         }
     }
@@ -299,8 +297,7 @@ void DhtClient::maintenance_loop() {
         // Cleanup stale pending searches
         cleanup_stale_searches();
         
-        // Cleanup stale transactions
-        cleanup_stale_transactions();
+
         
         // Cleanup stale announced peers
         cleanup_stale_announced_peers();
@@ -1169,7 +1166,6 @@ void DhtClient::send_ping(const Peer& peer) {
         std::string transaction_id = generate_rats_dht_transaction_id();
         LOG_DHT_DEBUG("Sending rats dht PING to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
         DhtMessage message(DhtMessageType::PING, transaction_id, node_id_);
-        track_rats_dht_transaction(transaction_id, "ping:" + peer.ip + ":" + std::to_string(peer.port));
         send_message(message, peer);
     }
 }
@@ -1185,7 +1181,6 @@ void DhtClient::send_find_node(const Peer& peer, const NodeId& target) {
         LOG_DHT_DEBUG("Sending rats dht FIND_NODE to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
         DhtMessage message(DhtMessageType::FIND_NODE, transaction_id, node_id_);
         message.target_id = target;
-        track_rats_dht_transaction(transaction_id, "find_node:" + peer.ip + ":" + std::to_string(peer.port));
         send_message(message, peer);
     }
 }
@@ -1201,7 +1196,6 @@ void DhtClient::send_get_peers(const Peer& peer, const InfoHash& info_hash) {
         LOG_DHT_DEBUG("Sending rats dht GET_PEERS to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
         DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
         message.target_id = info_hash;
-        track_rats_dht_transaction(transaction_id, "get_peers:" + peer.ip + ":" + std::to_string(peer.port));
         send_message(message, peer);
     }
 }
@@ -1219,7 +1213,6 @@ void DhtClient::send_announce_peer(const Peer& peer, const InfoHash& info_hash, 
         message.target_id = info_hash;
         message.announce_port = port;
         message.token = token;
-        track_rats_dht_transaction(transaction_id, "announce_peer:" + peer.ip + ":" + std::to_string(peer.port));
         send_message(message, peer);
     }
 }
@@ -1304,19 +1297,7 @@ std::string DhtClient::generate_rats_dht_transaction_id() {
     return "r" + std::to_string(++rats_dht_transaction_counter_);
 }
 
-void DhtClient::track_rats_dht_transaction(const std::string& transaction_id, const std::string& context) {
-    std::lock_guard<std::mutex> lock(rats_dht_transactions_mutex_);
-    rats_dht_transactions_[transaction_id] = context;
-}
 
-void DhtClient::cleanup_stale_transactions() {
-    std::lock_guard<std::mutex> lock(rats_dht_transactions_mutex_);
-    // For now, keep it simple - in production, you'd want to track timestamps
-    // and remove old transactions
-    if (rats_dht_transactions_.size() > 1000) {
-        rats_dht_transactions_.clear();
-    }
-}
 
 bool DhtClient::verify_token(const Peer& peer, const std::string& token) {
     std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
@@ -1631,7 +1612,6 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
                 
                 DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
                 message.target_id = search.info_hash;
-                track_rats_dht_transaction(transaction_id, "get_peers_for_search_iter:" + node.peer.ip + ":" + std::to_string(node.peer.port));
                 send_message(message, node.peer);
             }
             

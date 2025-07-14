@@ -190,9 +190,7 @@ private:
     std::unordered_map<std::string, std::string> krpc_transactions_;
     std::mutex krpc_transactions_mutex_;
     
-    // Rats DHT transaction tracking
-    std::unordered_map<std::string, std::string> rats_dht_transactions_;
-    std::mutex rats_dht_transactions_mutex_;
+
     
     // Transaction ID counters
     static std::atomic<uint32_t> rats_dht_transaction_counter_;
@@ -302,8 +300,6 @@ private:
     
     // Transaction ID management
     std::string generate_rats_dht_transaction_id();
-    void track_rats_dht_transaction(const std::string& transaction_id, const std::string& context);
-    void cleanup_stale_transactions();
     
     void cleanup_stale_nodes();
     void refresh_buckets();
