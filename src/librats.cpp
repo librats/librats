@@ -9,6 +9,8 @@
 #include <random>
 #include <sstream>
 #include <iomanip>
+#include <cmath>
+#include <stdexcept>
 
 #define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
 #define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
@@ -117,6 +119,19 @@ std::vector<RatsPeer> RatsClient::get_all_peers() const {
     
     for (const auto& pair : peers_) {
         result.push_back(pair.second);
+    }
+    
+    return result;
+}
+
+std::vector<RatsPeer> RatsClient::get_validated_peers() const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    std::vector<RatsPeer> result;
+    
+    for (const auto& pair : peers_) {
+        if (pair.second.is_handshake_completed()) {
+            result.push_back(pair.second);
+        }
     }
     
     return result;
@@ -280,11 +295,14 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     
     LOG_CLIENT_INFO("Successfully connected to peer " << connection_info << " (hash: " << peer_hash_id << ")");
     
-    // Notify connection callback
-    if (connection_callback_) {
-        connection_callback_(peer_socket, peer_hash_id);
+    // Initiate handshake for outgoing connections
+    if (!send_handshake_request(peer_socket, peer_hash_id)) {
+        LOG_CLIENT_ERROR("Failed to initiate handshake with peer " << peer_hash_id);
+        disconnect_peer(peer_socket);
+        return false;
     }
     
+    // Note: Connection callback will be called after handshake completion
     return true;
 }
 
@@ -298,11 +316,13 @@ bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
 }
 
 bool RatsClient::send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
-    socket_t socket = get_peer_socket(peer_hash_id);
-    if (!is_valid_socket(socket)) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    const RatsPeer* peer = get_peer_by_id(peer_hash_id);
+    if (!peer || !peer->is_handshake_completed()) {
         return false;
     }
-    return send_to_peer(socket, data);
+    
+    return send_to_peer(peer->socket, data);
 }
 
 int RatsClient::broadcast_to_peers(const std::string& data) {
@@ -315,8 +335,11 @@ int RatsClient::broadcast_to_peers(const std::string& data) {
     
     for (const auto& pair : peers_) {
         const RatsPeer& peer = pair.second;
-        if (send_to_peer(peer.socket, data)) {
-            sent_count++;
+        // Only send to peers that have completed handshake
+        if (peer.is_handshake_completed()) {
+            if (send_to_peer(peer.socket, data)) {
+                sent_count++;
+            }
         }
     }
     
@@ -337,7 +360,13 @@ void RatsClient::disconnect_peer_by_hash(const std::string& peer_hash_id) {
 
 int RatsClient::get_peer_count() const {
     std::lock_guard<std::mutex> lock(peers_mutex_);
-    return static_cast<int>(peers_.size());
+    int count = 0;
+    for (const auto& pair : peers_) {
+        if (pair.second.is_handshake_completed()) {
+            count++;
+        }
+    }
+    return count;
 }
 
 bool RatsClient::is_running() const {
@@ -593,10 +622,7 @@ void RatsClient::server_loop() {
         LOG_SERVER_DEBUG("Starting thread for client " << peer_hash_id << " from " << peer_address);
         std::thread(&RatsClient::handle_client, this, client_socket, peer_hash_id).detach();
         
-        // Notify connection callback
-        if (connection_callback_) {
-            connection_callback_(client_socket, peer_hash_id);
-        }
+        // Note: Connection callback will be called after handshake completion in handle_client
     }
     
     LOG_SERVER_INFO("Server loop ended");
@@ -605,17 +631,89 @@ void RatsClient::server_loop() {
 void RatsClient::handle_client(socket_t client_socket, const std::string& peer_hash_id) {
     LOG_CLIENT_INFO("Started handling client: " << peer_hash_id);
     
+    bool handshake_completed = false;
+    auto last_timeout_check = std::chrono::steady_clock::now();
+    
     while (running_.load()) {
         std::string data = receive_tcp_data(client_socket);
         if (data.empty()) {
+            // Check if this is a timeout or actual connection close
+            if (!handshake_completed) {
+                // Check for handshake timeout one more time before giving up
+                auto now = std::chrono::steady_clock::now();
+                if (now - last_timeout_check >= std::chrono::seconds(1)) {
+                    check_handshake_timeouts();
+                    last_timeout_check = now;
+                    
+                    // Check if handshake has failed due to timeout
+                    std::lock_guard<std::mutex> lock(peers_mutex_);
+                    auto it = socket_to_peer_id_.find(client_socket);
+                    if (it != socket_to_peer_id_.end()) {
+                        auto peer_it = peers_.find(it->second);
+                        if (peer_it != peers_.end() && peer_it->second.is_handshake_failed()) {
+                            LOG_CLIENT_ERROR("Handshake failed for peer " << peer_hash_id);
+                            break;
+                        }
+                    }
+                }
+            }
             break; // Connection closed or error
         }
         
         LOG_CLIENT_DEBUG("Received data from " << peer_hash_id << ": " << data.substr(0, 50) << (data.length() > 50 ? "..." : ""));
         
-        // Notify data callback
-        if (data_callback_) {
-            data_callback_(client_socket, peer_hash_id, data);
+        // Check if handshake is completed
+        if (!handshake_completed) {
+            // Check current handshake state
+            {
+                std::lock_guard<std::mutex> lock(peers_mutex_);
+                auto it = socket_to_peer_id_.find(client_socket);
+                if (it != socket_to_peer_id_.end()) {
+                    auto peer_it = peers_.find(it->second);
+                    if (peer_it != peers_.end()) {
+                        const RatsPeer& peer = peer_it->second;
+                        if (peer.is_handshake_completed()) {
+                            handshake_completed = true;
+                            
+                            // Notify connection callback now that handshake is complete
+                            if (connection_callback_) {
+                                connection_callback_(client_socket, peer_hash_id);
+                            }
+                            
+                            LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (remote peer_id: " << peer.remote_peer_id << ")");
+                        } else if (peer.is_handshake_failed()) {
+                            LOG_CLIENT_ERROR("Handshake failed for peer " << peer_hash_id);
+                            break; // Exit loop to disconnect
+                        }
+                    }
+                }
+            }
+            
+            // Check for handshake timeout
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_timeout_check >= std::chrono::seconds(1)) {
+                check_handshake_timeouts();
+                last_timeout_check = now;
+            }
+        }
+        
+        // Handle handshake messages
+        if (is_handshake_message(data)) {
+            if (!handle_handshake_message(client_socket, peer_hash_id, data)) {
+                LOG_CLIENT_ERROR("Failed to handle handshake message from " << peer_hash_id);
+                break; // Exit loop to disconnect
+            }
+            continue; // Don't process handshake messages as regular data
+        }
+        
+        // Only process regular data after handshake is completed
+        if (handshake_completed) {
+            // Notify data callback
+            if (data_callback_) {
+                data_callback_(client_socket, peer_hash_id, data);
+            }
+        } else {
+            LOG_CLIENT_WARN("Received non-handshake data from " << peer_hash_id << " before handshake completion - ignoring");
         }
     }
     
@@ -623,8 +721,8 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     remove_peer(client_socket);
     close_socket(client_socket);
     
-    // Notify disconnect callback
-    if (disconnect_callback_) {
+    // Notify disconnect callback only if handshake was completed
+    if (handshake_completed && disconnect_callback_) {
         disconnect_callback_(client_socket, peer_hash_id);
     }
     
@@ -729,7 +827,7 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
     
     // Set up callbacks
     client.set_connection_callback([](socket_t socket, const std::string& peer_hash_id) {
-        LOG_MAIN_INFO("New connection: " << peer_hash_id << " (socket: " << socket << ")");
+        LOG_MAIN_INFO("New validated connection (handshake completed): " << peer_hash_id << " (socket: " << socket << ")");
     });
     
     client.set_data_callback([&client](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
@@ -926,6 +1024,265 @@ void RatsClient::search_rats_peers(int iteration_max) {
             }
         }
     }, iteration_max);
+}
+
+// Handshake protocol implementation
+std::string RatsClient::create_handshake_message(const std::string& message_type, const std::string& our_peer_id) const {
+    auto now = std::chrono::high_resolution_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    
+    // Create a simple JSON-like message format
+    std::ostringstream msg;
+    msg << "{\"protocol\":\"rats\","
+        << "\"version\":\"" << RATS_PROTOCOL_VERSION << "\","
+        << "\"peer_id\":\"" << our_peer_id << "\","
+        << "\"message_type\":\"" << message_type << "\","
+        << "\"timestamp\":" << timestamp << "}";
+    
+    return msg.str();
+}
+
+bool RatsClient::parse_handshake_message(const std::string& message, HandshakeMessage& out_msg) const {
+    // Simple JSON parser for handshake messages
+    try {
+        // Clear the output structure
+        out_msg = HandshakeMessage{};
+        
+        // Check if message starts with { and ends with }
+        if (message.empty() || message.front() != '{' || message.back() != '}') {
+            return false;
+        }
+        
+        // Parse protocol field
+        size_t protocol_start = message.find("\"protocol\":\"");
+        if (protocol_start == std::string::npos) return false;
+        protocol_start += 12; // length of "protocol":\"
+        size_t protocol_end = message.find("\"", protocol_start);
+        if (protocol_end == std::string::npos) return false;
+        out_msg.protocol = message.substr(protocol_start, protocol_end - protocol_start);
+        
+        // Parse version field
+        size_t version_start = message.find("\"version\":\"");
+        if (version_start == std::string::npos) return false;
+        version_start += 11; // length of "version":"
+        size_t version_end = message.find("\"", version_start);
+        if (version_end == std::string::npos) return false;
+        out_msg.version = message.substr(version_start, version_end - version_start);
+        
+        // Parse peer_id field
+        size_t peer_id_start = message.find("\"peer_id\":\"");
+        if (peer_id_start == std::string::npos) return false;
+        peer_id_start += 11; // length of "peer_id":"
+        size_t peer_id_end = message.find("\"", peer_id_start);
+        if (peer_id_end == std::string::npos) return false;
+        out_msg.peer_id = message.substr(peer_id_start, peer_id_end - peer_id_start);
+        
+        // Parse message_type field
+        size_t msg_type_start = message.find("\"message_type\":\"");
+        if (msg_type_start == std::string::npos) return false;
+        msg_type_start += 16; // length of "message_type":"
+        size_t msg_type_end = message.find("\"", msg_type_start);
+        if (msg_type_end == std::string::npos) return false;
+        out_msg.message_type = message.substr(msg_type_start, msg_type_end - msg_type_start);
+        
+        // Parse timestamp field
+        size_t timestamp_start = message.find("\"timestamp\":");
+        if (timestamp_start == std::string::npos) return false;
+        timestamp_start += 12; // length of "timestamp":
+        size_t timestamp_end = message.find("}", timestamp_start);
+        if (timestamp_end == std::string::npos) return false;
+        std::string timestamp_str = message.substr(timestamp_start, timestamp_end - timestamp_start);
+        out_msg.timestamp = std::stoll(timestamp_str);
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to parse handshake message: " << e.what());
+        return false;
+    }
+}
+
+bool RatsClient::validate_handshake_message(const HandshakeMessage& msg) const {
+    // Validate protocol
+    if (msg.protocol != "rats") {
+        LOG_CLIENT_WARN("Invalid handshake protocol: " << msg.protocol);
+        return false;
+    }
+    
+    // Validate version (for now, only accept exact version match)
+    if (msg.version != RATS_PROTOCOL_VERSION) {
+        LOG_CLIENT_WARN("Unsupported protocol version: " << msg.version << " (expected: " << RATS_PROTOCOL_VERSION << ")");
+        return false;
+    }
+    
+    // Validate message type
+    if (msg.message_type != "handshake_request" && msg.message_type != "handshake_response") {
+        LOG_CLIENT_WARN("Invalid handshake message type: " << msg.message_type);
+        return false;
+    }
+    
+    // Validate peer_id (must not be empty)
+    if (msg.peer_id.empty()) {
+        LOG_CLIENT_WARN("Empty peer_id in handshake message");
+        return false;
+    }
+    
+    // Validate timestamp (should be recent, within 60 seconds)
+    auto now = std::chrono::high_resolution_clock::now();
+    auto current_timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    int64_t time_diff = std::abs(current_timestamp - msg.timestamp);
+    if (time_diff > 60000) { // 60 seconds in milliseconds
+        LOG_CLIENT_WARN("Handshake timestamp too old: " << time_diff << "ms");
+        return false;
+    }
+    
+    return true;
+}
+
+bool RatsClient::is_handshake_message(const std::string& message) const {
+    // Quick check to see if this looks like a handshake message
+    return message.find("\"protocol\":\"rats\"") != std::string::npos &&
+           message.find("\"message_type\":\"handshake_") != std::string::npos;
+}
+
+bool RatsClient::send_handshake_request(socket_t socket, const std::string& our_peer_id) {
+    std::string handshake_msg = create_handshake_message("handshake_request", our_peer_id);
+    LOG_CLIENT_DEBUG("Sending handshake request to socket " << socket << ": " << handshake_msg);
+    
+    if (!send_to_peer(socket, handshake_msg)) {
+        LOG_CLIENT_ERROR("Failed to send handshake request to socket " << socket);
+        return false;
+    }
+    
+    // Update peer state
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = socket_to_peer_id_.find(socket);
+    if (it != socket_to_peer_id_.end()) {
+        auto peer_it = peers_.find(it->second);
+        if (peer_it != peers_.end()) {
+            peer_it->second.handshake_state = RatsPeer::HandshakeState::SENT;
+            peer_it->second.handshake_start_time = std::chrono::steady_clock::now();
+        }
+    }
+    
+    return true;
+}
+
+bool RatsClient::send_handshake_response(socket_t socket, const std::string& our_peer_id) {
+    std::string handshake_msg = create_handshake_message("handshake_response", our_peer_id);
+    LOG_CLIENT_DEBUG("Sending handshake response to socket " << socket << ": " << handshake_msg);
+    
+    if (!send_to_peer(socket, handshake_msg)) {
+        LOG_CLIENT_ERROR("Failed to send handshake response to socket " << socket);
+        return false;
+    }
+    
+    return true;
+}
+
+bool RatsClient::handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::string& message) {
+    HandshakeMessage handshake_msg;
+    if (!parse_handshake_message(message, handshake_msg)) {
+        LOG_CLIENT_ERROR("Failed to parse handshake message from " << peer_hash_id);
+        return false;
+    }
+    
+    if (!validate_handshake_message(handshake_msg)) {
+        LOG_CLIENT_ERROR("Invalid handshake message from " << peer_hash_id);
+        return false;
+    }
+    
+    LOG_CLIENT_INFO("Received valid handshake " << handshake_msg.message_type << " from " << peer_hash_id 
+                    << " (remote peer_id: " << handshake_msg.peer_id << ")");
+    
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = socket_to_peer_id_.find(socket);
+    if (it == socket_to_peer_id_.end()) {
+        LOG_CLIENT_ERROR("Socket " << socket << " not found in peer mapping");
+        return false;
+    }
+    
+    auto peer_it = peers_.find(it->second);
+    if (peer_it == peers_.end()) {
+        LOG_CLIENT_ERROR("Peer " << peer_hash_id << " not found in peers");
+        return false;
+    }
+    
+    RatsPeer& peer = peer_it->second;
+    
+    // Store remote peer information
+    peer.remote_peer_id = handshake_msg.peer_id;
+    peer.remote_version = handshake_msg.version;
+    
+    if (handshake_msg.message_type == "handshake_request") {
+        // Incoming handshake request - send response
+        if (peer.handshake_state == RatsPeer::HandshakeState::PENDING) {
+            peer.handshake_state = RatsPeer::HandshakeState::RECEIVED;
+            
+            // Send handshake response
+            if (send_handshake_response(socket, peer.peer_id)) {
+                peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
+                LOG_CLIENT_INFO("Handshake completed with " << peer_hash_id << " (remote peer_id: " << handshake_msg.peer_id << ")");
+                return true;
+            } else {
+                peer.handshake_state = RatsPeer::HandshakeState::FAILED;
+                LOG_CLIENT_ERROR("Failed to send handshake response to " << peer_hash_id);
+                return false;
+            }
+        } else {
+            LOG_CLIENT_WARN("Received handshake request from " << peer_hash_id << " but handshake state is not PENDING");
+            return false;
+        }
+        
+    } else if (handshake_msg.message_type == "handshake_response") {
+        // Response to our handshake request
+        if (peer.handshake_state == RatsPeer::HandshakeState::SENT) {
+            peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
+            LOG_CLIENT_INFO("Handshake completed with " << peer_hash_id << " (remote peer_id: " << handshake_msg.peer_id << ")");
+            return true;
+        } else {
+            LOG_CLIENT_WARN("Received handshake response from " << peer_hash_id << " but handshake state is not SENT");
+            return false;
+        }
+    }
+    
+    return false;
+}
+
+void RatsClient::check_handshake_timeouts() {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto now = std::chrono::steady_clock::now();
+    
+    std::vector<std::string> peers_to_remove;
+    
+    for (auto& pair : peers_) {
+        RatsPeer& peer = pair.second;
+        
+        if (peer.handshake_state != RatsPeer::HandshakeState::COMPLETED && 
+            peer.handshake_state != RatsPeer::HandshakeState::FAILED) {
+            
+            auto handshake_duration = std::chrono::duration_cast<std::chrono::seconds>(now - peer.handshake_start_time);
+            
+            if (handshake_duration.count() > HANDSHAKE_TIMEOUT_SECONDS) {
+                LOG_CLIENT_WARN("Handshake timeout for peer " << peer.peer_id << " after " << handshake_duration.count() << " seconds");
+                peer.handshake_state = RatsPeer::HandshakeState::FAILED;
+                peers_to_remove.push_back(peer.peer_id);
+            }
+        }
+    }
+    
+    // Remove timed out peers
+    for (const auto& peer_id : peers_to_remove) {
+        auto peer_it = peers_.find(peer_id);
+        if (peer_it != peers_.end()) {
+            socket_t socket = peer_it->second.socket;
+            LOG_CLIENT_INFO("Disconnecting peer " << peer_id << " due to handshake timeout");
+            
+            // Clean up peer data
+            remove_peer_by_id(peer_id);
+            close_socket(socket);
+        }
+    }
 }
 
 bool RatsClient::parse_address_string(const std::string& address_str, std::string& out_ip, int& out_port) {

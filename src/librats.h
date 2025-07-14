@@ -28,15 +28,32 @@ struct RatsPeer {
     std::chrono::steady_clock::time_point connected_at; // Connection timestamp
     bool is_outgoing;                       // True if we initiated the connection, false if incoming
     
-    RatsPeer() : port(0), socket(INVALID_SOCKET_VALUE), is_outgoing(false) {
+    // Handshake-related fields
+    enum class HandshakeState {
+        PENDING,        // Handshake not started
+        SENT,          // Handshake sent, waiting for response
+        RECEIVED,      // Handshake received, need to respond
+        COMPLETED,     // Handshake completed successfully
+        FAILED         // Handshake failed
+    };
+    
+    HandshakeState handshake_state;         // Current handshake state
+    std::string remote_peer_id;             // Peer ID received from remote peer
+    std::string remote_version;             // Protocol version of remote peer
+    std::chrono::steady_clock::time_point handshake_start_time; // When handshake started
+    
+    RatsPeer() : port(0), socket(INVALID_SOCKET_VALUE), is_outgoing(false), handshake_state(HandshakeState::PENDING) {
         connected_at = std::chrono::steady_clock::now();
+        handshake_start_time = connected_at;
     }
     
     RatsPeer(const std::string& peer_id, const std::string& ip, uint16_t port, 
              socket_t socket, const std::string& normalized_address, bool is_outgoing)
         : peer_id(peer_id), ip(ip), port(port), socket(socket), 
-          normalized_address(normalized_address), is_outgoing(is_outgoing) {
+          normalized_address(normalized_address), is_outgoing(is_outgoing), 
+          handshake_state(HandshakeState::PENDING) {
         connected_at = std::chrono::steady_clock::now();
+        handshake_start_time = connected_at;
     }
     
     /**
@@ -46,6 +63,29 @@ struct RatsPeer {
         auto now = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - connected_at);
         return duration.count();
+    }
+    
+    /**
+     * Get handshake duration in seconds
+     */
+    double get_handshake_duration() const {
+        auto now = std::chrono::steady_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - handshake_start_time);
+        return duration.count();
+    }
+    
+    /**
+     * Check if handshake is completed
+     */
+    bool is_handshake_completed() const {
+        return handshake_state == HandshakeState::COMPLETED;
+    }
+    
+    /**
+     * Check if handshake has failed
+     */
+    bool is_handshake_failed() const {
+        return handshake_state == HandshakeState::FAILED;
     }
     
     /**
@@ -268,6 +308,12 @@ public:
     std::vector<RatsPeer> get_all_peers() const;
     
     /**
+     * Get all peers that have completed handshake
+     * @return Vector of RatsPeer objects with completed handshake
+     */
+    std::vector<RatsPeer> get_validated_peers() const;
+    
+    /**
      * Get peer information by peer ID
      * @param peer_id The peer ID to look up
      * @return Pointer to RatsPeer object, or nullptr if not found
@@ -333,6 +379,27 @@ private:
     bool is_blocked_address(const std::string& ip_address) const;
     bool should_ignore_peer(const std::string& ip, int port) const;
     static bool parse_address_string(const std::string& address_str, std::string& out_ip, int& out_port);
+
+    // Handshake protocol
+    static constexpr const char* RATS_PROTOCOL_VERSION = "1.0";
+    static constexpr int HANDSHAKE_TIMEOUT_SECONDS = 10;
+    
+    struct HandshakeMessage {
+        std::string protocol;           // "rats"
+        std::string version;            // protocol version
+        std::string peer_id;            // our peer ID
+        std::string message_type;       // "handshake_request" or "handshake_response"
+        int64_t timestamp;              // message timestamp
+    };
+    
+    std::string create_handshake_message(const std::string& message_type, const std::string& our_peer_id) const;
+    bool parse_handshake_message(const std::string& message, HandshakeMessage& out_msg) const;
+    bool send_handshake_request(socket_t socket, const std::string& our_peer_id);
+    bool send_handshake_response(socket_t socket, const std::string& our_peer_id);
+    bool handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::string& message);
+    bool is_handshake_message(const std::string& message) const;
+    void check_handshake_timeouts();
+    bool validate_handshake_message(const HandshakeMessage& msg) const;
 
     // Automatic peer discovery
     std::atomic<bool> auto_discovery_running_{false};
