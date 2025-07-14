@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <atomic>
 
 // Hash specialization for Peer (must be defined before use in unordered_map)
 namespace std {
@@ -194,7 +195,7 @@ private:
     std::mutex rats_dht_transactions_mutex_;
     
     // Transaction ID counters
-    static uint32_t rats_dht_transaction_counter_;
+    static std::atomic<uint32_t> rats_dht_transaction_counter_;
     
     // Pending announce tracking (for BEP 5 compliance)
     struct PendingAnnounce {

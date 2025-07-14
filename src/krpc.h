@@ -6,6 +6,7 @@
 #include <vector>
 #include <array>
 #include <memory>
+#include <atomic>
 
 namespace librats {
 
@@ -138,7 +139,7 @@ private:
     static KrpcQueryType string_to_query_type(const std::string& str);
     static std::string query_type_to_string(KrpcQueryType type);
     
-    static uint32_t transaction_counter_;
+    static std::atomic<uint32_t> transaction_counter_;
 };
 
 } // namespace librats 

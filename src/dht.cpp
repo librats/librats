@@ -25,7 +25,7 @@
 namespace librats {
 
 // Static variable initialization
-uint32_t DhtClient::rats_dht_transaction_counter_ = 0;
+std::atomic<uint32_t> DhtClient::rats_dht_transaction_counter_ = 0;
 
 DhtClient::DhtClient(int port) 
     : port_(port), socket_(INVALID_SOCKET_VALUE), running_(false) {

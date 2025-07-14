@@ -24,7 +24,7 @@
 
 namespace librats {
 
-uint32_t KrpcProtocol::transaction_counter_ = 0;
+std::atomic<uint32_t> KrpcProtocol::transaction_counter_ = 0;
 
 KrpcProtocol::KrpcProtocol() {}
 
