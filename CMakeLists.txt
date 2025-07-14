@@ -34,7 +34,7 @@ target_link_libraries(librats Threads::Threads)
 
 # Link networking libraries
 if(WIN32)
-    target_link_libraries(librats ws2_32)
+    target_link_libraries(librats ws2_32 iphlpapi)
 endif()
 
 # Create the main executable

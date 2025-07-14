@@ -1,6 +1,7 @@
 #include "librats.h"
 #include "sha1.h"
 #include "os.h"
+#include "network_utils.h"
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -146,6 +147,9 @@ bool RatsClient::start() {
     LOG_CLIENT_INFO("Memory: " << sys_info.total_memory_mb << " MB total, " << sys_info.available_memory_mb << " MB available");
     LOG_CLIENT_INFO("===========================");
     
+    // Initialize local interface addresses for connection blocking
+    initialize_local_addresses();
+    
     init_socket_library();
     
     // Create dual-stack server socket (supports both IPv4 and IPv6)
@@ -218,6 +222,12 @@ void RatsClient::stop() {
 bool RatsClient::connect_to_peer(const std::string& host, int port) {
     if (!running_.load()) {
         LOG_CLIENT_ERROR("RatsClient is not running");
+        return false;
+    }
+    
+    // Check if this peer should be ignored (local interface)
+    if (should_ignore_peer(host, port)) {
+        LOG_CLIENT_INFO("Ignoring connection to " << host << ":" << port << " - local interface address");
         return false;
     }
     
@@ -439,8 +449,9 @@ void RatsClient::handle_dht_peer_discovery(const std::vector<Peer>& peers, const
     
     // Auto-connect to discovered peers (optional behavior)
     for (const auto& peer : peers) {
-        // Don't connect to ourselves
-        if (peer.port == listen_port_ && (peer.ip == "127.0.0.1" || peer.ip == "::1" || peer.ip == "localhost")) {
+        // Check if this peer should be ignored (local interface)
+        if (should_ignore_peer(peer.ip, peer.port)) {
+            LOG_CLIENT_DEBUG("Ignoring discovered peer " << peer.ip << ":" << peer.port << " - local interface address");
             continue;
         }
         
@@ -587,6 +598,80 @@ void RatsClient::remove_peer(socket_t socket) {
     }
     remove_peer_mapping(socket);
     remove_peer_address_mapping(socket);
+}
+
+// Local interface address blocking methods
+void RatsClient::initialize_local_addresses() {
+    LOG_CLIENT_INFO("Initializing local interface addresses for connection blocking");
+    
+    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
+    
+    // Get all local interface addresses using network_utils
+    local_interface_addresses_ = network_utils::get_local_interface_addresses();
+    
+    // Add common localhost addresses if not already present
+    std::vector<std::string> localhost_addrs = {"127.0.0.1", "::1", "0.0.0.0", "::"};
+    for (const auto& addr : localhost_addrs) {
+        if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
+            local_interface_addresses_.push_back(addr);
+        }
+    }
+    
+    LOG_CLIENT_INFO("Found " << local_interface_addresses_.size() << " local addresses to block:");
+    for (const auto& addr : local_interface_addresses_) {
+        LOG_CLIENT_INFO("  - " << addr);
+    }
+}
+
+void RatsClient::refresh_local_addresses() {
+    LOG_CLIENT_DEBUG("Refreshing local interface addresses");
+    
+    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
+    
+    // Clear old addresses and get fresh ones
+    local_interface_addresses_.clear();
+    local_interface_addresses_ = network_utils::get_local_interface_addresses();
+    
+    // Add common localhost addresses if not already present
+    std::vector<std::string> localhost_addrs = {"127.0.0.1", "::1", "0.0.0.0", "::"};
+    for (const auto& addr : localhost_addrs) {
+        if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
+            local_interface_addresses_.push_back(addr);
+        }
+    }
+    
+    LOG_CLIENT_DEBUG("Refreshed " << local_interface_addresses_.size() << " local addresses");
+}
+
+bool RatsClient::is_blocked_address(const std::string& ip_address) const {
+    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
+    
+    // Check against our stored local addresses
+    for (const auto& local_addr : local_interface_addresses_) {
+        if (local_addr == ip_address) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+bool RatsClient::should_ignore_peer(const std::string& ip, int port) const {
+    // Check if the IP is a local interface address
+    if (is_blocked_address(ip)) {
+        LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - matches local interface address");
+        return true;
+    }
+    
+    // Check if it's the same port and a localhost-like address
+    if (port == listen_port_) {
+        if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost" || ip == "0.0.0.0" || ip == "::") {
+            LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - localhost with same port");
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 // Helper functions
@@ -771,8 +856,9 @@ void RatsClient::search_rats_peers(int iteration_max) {
                 std::string ip = peer_address.substr(0, colon_pos);
                 int port = std::stoi(peer_address.substr(colon_pos + 1));
                 
-                // Don't connect to ourselves
-                if (port == listen_port_ && (ip == "127.0.0.1" || ip == "::1")) {
+                // Check if this peer should be ignored (local interface)
+                if (should_ignore_peer(ip, port)) {
+                    LOG_CLIENT_DEBUG("Ignoring discovered rats peer " << ip << ":" << port << " - local interface address");
                     continue;
                 }
                 

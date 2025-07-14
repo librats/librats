@@ -235,6 +235,14 @@ private:
     bool is_already_connected_to_peer(const std::string& peer_address) const;
     std::string normalize_peer_address(const std::string& ip, int port) const;
 
+    // Local interface address blocking (ignore list)
+    std::vector<std::string> local_interface_addresses_;
+    mutable std::mutex local_addresses_mutex_;
+    void initialize_local_addresses();
+    void refresh_local_addresses();
+    bool is_blocked_address(const std::string& ip_address) const;
+    bool should_ignore_peer(const std::string& ip, int port) const;
+
     // Automatic peer discovery
     std::atomic<bool> auto_discovery_running_{false};
     std::thread auto_discovery_thread_;

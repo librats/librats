@@ -5,10 +5,12 @@
     #endif
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    #include <iphlpapi.h>
 #else
     #include <netdb.h>
     #include <arpa/inet.h>
     #include <netinet/in.h>
+    #include <ifaddrs.h>
 #endif
 
 #include "network_utils.h"
@@ -316,6 +318,220 @@ std::vector<std::string> resolve_all_addresses_dual(const std::string& hostname)
     return addresses;
 }
 
+std::vector<std::string> get_local_interface_addresses_v4() {
+    LOG_NETUTILS_DEBUG("Getting local IPv4 interface addresses");
+    
+    std::vector<std::string> addresses;
+    
+#ifdef _WIN32
+    // Windows implementation using GetAdaptersAddresses
+    DWORD dwRetVal = 0;
+    ULONG outBufLen = 15000;
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    
+    PIP_ADAPTER_ADDRESSES pAddresses = nullptr;
+    PIP_ADAPTER_ADDRESSES pCurrAddresses = nullptr;
+    PIP_ADAPTER_UNICAST_ADDRESS pUnicast = nullptr;
+    
+    do {
+        pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
+        if (pAddresses == nullptr) {
+            LOG_NETUTILS_ERROR("Memory allocation failed for GetAdaptersAddresses");
+            return addresses;
+        }
+
+        dwRetVal = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &outBufLen);
+
+        if (dwRetVal == ERROR_BUFFER_OVERFLOW) {
+            free(pAddresses);
+            pAddresses = nullptr;
+        } else {
+            break;
+        }
+    } while ((dwRetVal == ERROR_BUFFER_OVERFLOW) && (outBufLen < 65535));
+
+    if (dwRetVal == NO_ERROR) {
+        pCurrAddresses = pAddresses;
+        while (pCurrAddresses) {
+            pUnicast = pCurrAddresses->FirstUnicastAddress;
+            while (pUnicast != nullptr) {
+                if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
+                    sockaddr_in* sockaddr_ipv4 = (sockaddr_in*)pUnicast->Address.lpSockaddr;
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &sockaddr_ipv4->sin_addr, ip_str, INET_ADDRSTRLEN);
+                    std::string ip_address(ip_str);
+                    addresses.push_back(ip_address);
+                    LOG_NETUTILS_DEBUG("Found local IPv4 address: " << ip_address);
+                }
+                pUnicast = pUnicast->Next;
+            }
+            pCurrAddresses = pCurrAddresses->Next;
+        }
+    } else {
+        LOG_NETUTILS_ERROR("GetAdaptersAddresses failed with error: " << dwRetVal);
+    }
+
+    if (pAddresses) {
+        free(pAddresses);
+    }
+
+#else
+    // Linux/Unix implementation using getifaddrs
+    struct ifaddrs *ifaddr, *ifa;
+    
+    if (getifaddrs(&ifaddr) == -1) {
+        LOG_NETUTILS_ERROR("getifaddrs failed");
+        return addresses;
+    }
+
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr) continue;
+        
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            char ip_str[INET_ADDRSTRLEN];
+            struct sockaddr_in* addr_in = (struct sockaddr_in*)ifa->ifa_addr;
+            inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
+            std::string ip_address(ip_str);
+            addresses.push_back(ip_address);
+            LOG_NETUTILS_DEBUG("Found local IPv4 address: " << ip_address << " on interface " << ifa->ifa_name);
+        }
+    }
+
+    freeifaddrs(ifaddr);
+#endif
+    
+    LOG_NETUTILS_INFO("Found " << addresses.size() << " local IPv4 addresses");
+    return addresses;
+}
+
+std::vector<std::string> get_local_interface_addresses_v6() {
+    LOG_NETUTILS_DEBUG("Getting local IPv6 interface addresses");
+    
+    std::vector<std::string> addresses;
+    
+#ifdef _WIN32
+    // Windows implementation using GetAdaptersAddresses
+    DWORD dwRetVal = 0;
+    ULONG outBufLen = 15000;
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    
+    PIP_ADAPTER_ADDRESSES pAddresses = nullptr;
+    PIP_ADAPTER_ADDRESSES pCurrAddresses = nullptr;
+    PIP_ADAPTER_UNICAST_ADDRESS pUnicast = nullptr;
+    
+    do {
+        pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
+        if (pAddresses == nullptr) {
+            LOG_NETUTILS_ERROR("Memory allocation failed for GetAdaptersAddresses");
+            return addresses;
+        }
+
+        dwRetVal = GetAdaptersAddresses(AF_INET6, flags, nullptr, pAddresses, &outBufLen);
+
+        if (dwRetVal == ERROR_BUFFER_OVERFLOW) {
+            free(pAddresses);
+            pAddresses = nullptr;
+        } else {
+            break;
+        }
+    } while ((dwRetVal == ERROR_BUFFER_OVERFLOW) && (outBufLen < 65535));
+
+    if (dwRetVal == NO_ERROR) {
+        pCurrAddresses = pAddresses;
+        while (pCurrAddresses) {
+            pUnicast = pCurrAddresses->FirstUnicastAddress;
+            while (pUnicast != nullptr) {
+                if (pUnicast->Address.lpSockaddr->sa_family == AF_INET6) {
+                    sockaddr_in6* sockaddr_ipv6 = (sockaddr_in6*)pUnicast->Address.lpSockaddr;
+                    char ip_str[INET6_ADDRSTRLEN];
+                    inet_ntop(AF_INET6, &sockaddr_ipv6->sin6_addr, ip_str, INET6_ADDRSTRLEN);
+                    std::string ip_address(ip_str);
+                    addresses.push_back(ip_address);
+                    LOG_NETUTILS_DEBUG("Found local IPv6 address: " << ip_address);
+                }
+                pUnicast = pUnicast->Next;
+            }
+            pCurrAddresses = pCurrAddresses->Next;
+        }
+    } else {
+        LOG_NETUTILS_ERROR("GetAdaptersAddresses failed with error: " << dwRetVal);
+    }
+
+    if (pAddresses) {
+        free(pAddresses);
+    }
+
+#else
+    // Linux/Unix implementation using getifaddrs
+    struct ifaddrs *ifaddr, *ifa;
+    
+    if (getifaddrs(&ifaddr) == -1) {
+        LOG_NETUTILS_ERROR("getifaddrs failed");
+        return addresses;
+    }
+
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr) continue;
+        
+        if (ifa->ifa_addr->sa_family == AF_INET6) {
+            char ip_str[INET6_ADDRSTRLEN];
+            struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)ifa->ifa_addr;
+            inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, INET6_ADDRSTRLEN);
+            std::string ip_address(ip_str);
+            addresses.push_back(ip_address);
+            LOG_NETUTILS_DEBUG("Found local IPv6 address: " << ip_address << " on interface " << ifa->ifa_name);
+        }
+    }
+
+    freeifaddrs(ifaddr);
+#endif
+    
+    LOG_NETUTILS_INFO("Found " << addresses.size() << " local IPv6 addresses");
+    return addresses;
+}
+
+std::vector<std::string> get_local_interface_addresses() {
+    LOG_NETUTILS_DEBUG("Getting all local interface addresses (IPv4 and IPv6)");
+    
+    std::vector<std::string> addresses;
+    
+    // Get IPv4 addresses
+    auto ipv4_addresses = get_local_interface_addresses_v4();
+    addresses.insert(addresses.end(), ipv4_addresses.begin(), ipv4_addresses.end());
+    
+    // Get IPv6 addresses
+    auto ipv6_addresses = get_local_interface_addresses_v6();
+    addresses.insert(addresses.end(), ipv6_addresses.begin(), ipv6_addresses.end());
+    
+    LOG_NETUTILS_INFO("Found " << addresses.size() << " total local interface addresses (" 
+                      << ipv4_addresses.size() << " IPv4, " << ipv6_addresses.size() << " IPv6)");
+    
+    return addresses;
+}
+
+bool is_local_interface_address(const std::string& ip_address) {
+    LOG_NETUTILS_DEBUG("Checking if " << ip_address << " is a local interface address");
+    
+    // Get all local addresses and check if the given address is in the list
+    auto local_addresses = get_local_interface_addresses();
+    
+    for (const auto& local_addr : local_addresses) {
+        if (local_addr == ip_address) {
+            LOG_NETUTILS_DEBUG(ip_address << " is a local interface address");
+            return true;
+        }
+    }
+    
+    // Also check common localhost addresses
+    if (ip_address == "127.0.0.1" || ip_address == "::1" || ip_address == "localhost") {
+        LOG_NETUTILS_DEBUG(ip_address << " is a localhost address");
+        return true;
+    }
+    
+    LOG_NETUTILS_DEBUG(ip_address << " is not a local interface address");
+    return false;
+}
+
 void demo_network_utils(const std::string& test_hostname) {
     LOG_NETUTILS_INFO("=== Network Utils Demo ===");
     LOG_NETUTILS_INFO("Testing with hostname: " << test_hostname);
@@ -375,6 +591,34 @@ void demo_network_utils(const std::string& test_hostname) {
     // Test to_ip_address (alias function)
     std::string ip_via_alias = to_ip_address(test_hostname);
     LOG_NETUTILS_INFO("to_ip_address('" << test_hostname << "') = " << ip_via_alias);
+    
+    // Test local interface address discovery
+    LOG_NETUTILS_INFO("=== Local Interface Address Discovery ===");
+    auto local_ipv4s = get_local_interface_addresses_v4();
+    LOG_NETUTILS_INFO("Found " << local_ipv4s.size() << " local IPv4 addresses:");
+    for (size_t i = 0; i < local_ipv4s.size(); ++i) {
+        LOG_NETUTILS_INFO("  IPv4[" << i << "] " << local_ipv4s[i]);
+    }
+    
+    auto local_ipv6s = get_local_interface_addresses_v6();
+    LOG_NETUTILS_INFO("Found " << local_ipv6s.size() << " local IPv6 addresses:");
+    for (size_t i = 0; i < local_ipv6s.size(); ++i) {
+        LOG_NETUTILS_INFO("  IPv6[" << i << "] " << local_ipv6s[i]);
+    }
+    
+    auto all_local = get_local_interface_addresses();
+    LOG_NETUTILS_INFO("Found " << all_local.size() << " total local addresses:");
+    for (size_t i = 0; i < all_local.size(); ++i) {
+        LOG_NETUTILS_INFO("  ALL[" << i << "] " << all_local[i]);
+    }
+    
+    // Test local address checking
+    LOG_NETUTILS_INFO("=== Local Address Testing ===");
+    std::vector<std::string> test_addresses = {"127.0.0.1", "192.168.1.1", "10.0.0.1", "::1", "8.8.8.8"};
+    for (const auto& addr : test_addresses) {
+        bool is_local = is_local_interface_address(addr);
+        LOG_NETUTILS_INFO("Is '" << addr << "' local? " << (is_local ? "YES" : "NO"));
+    }
     
     LOG_NETUTILS_INFO("=== Demo Complete ===");
 }

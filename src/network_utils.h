@@ -113,6 +113,52 @@ std::vector<std::string> resolve_all_addresses_v6(const std::string& hostname);
 std::vector<std::string> resolve_all_addresses_dual(const std::string& hostname);
 
 /**
+ * Get all local network interface addresses (IPv4 and IPv6)
+ * @return Vector of local IP addresses from all network interfaces
+ * 
+ * Example usage:
+ *   auto local_ips = network_utils::get_local_interface_addresses();
+ *   for (const auto& ip : local_ips) {
+ *       std::cout << "Local IP: " << ip << std::endl;
+ *   }
+ */
+std::vector<std::string> get_local_interface_addresses();
+
+/**
+ * Get all local IPv4 network interface addresses
+ * @return Vector of local IPv4 addresses from all network interfaces
+ * 
+ * Example usage:
+ *   auto local_ipv4s = network_utils::get_local_interface_addresses_v4();
+ *   for (const auto& ip : local_ipv4s) {
+ *       std::cout << "Local IPv4: " << ip << std::endl;
+ *   }
+ */
+std::vector<std::string> get_local_interface_addresses_v4();
+
+/**
+ * Get all local IPv6 network interface addresses
+ * @return Vector of local IPv6 addresses from all network interfaces
+ * 
+ * Example usage:
+ *   auto local_ipv6s = network_utils::get_local_interface_addresses_v6();
+ *   for (const auto& ip : local_ipv6s) {
+ *       std::cout << "Local IPv6: " << ip << std::endl;
+ *   }
+ */
+std::vector<std::string> get_local_interface_addresses_v6();
+
+/**
+ * Check if an IP address is a local interface address
+ * @param ip_address The IP address to check
+ * @return true if the IP address belongs to a local network interface
+ * 
+ * Example usage:
+ *   bool is_local = network_utils::is_local_interface_address("192.168.1.100");
+ */
+bool is_local_interface_address(const std::string& ip_address);
+
+/**
  * Test and demonstrate network utility functions
  * This function shows how to use all the network utility functions
  * @param test_hostname A hostname to test with (default: "google.com")
