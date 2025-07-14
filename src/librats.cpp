@@ -31,6 +31,8 @@ RatsClient::RatsClient(int listen_port)
     : listen_port_(listen_port), 
       server_socket_(INVALID_SOCKET_VALUE),
       running_(false) {
+    // Initialize STUN client
+    stun_client_ = std::make_unique<StunClient>();
 }
 
 RatsClient::~RatsClient() {
@@ -147,10 +149,16 @@ bool RatsClient::start() {
     LOG_CLIENT_INFO("Memory: " << sys_info.total_memory_mb << " MB total, " << sys_info.available_memory_mb << " MB available");
     LOG_CLIENT_INFO("===========================");
     
+    // Initialize socket library first (required for all socket operations)
+    init_socket_library();
+    
     // Initialize local interface addresses for connection blocking
     initialize_local_addresses();
     
-    init_socket_library();
+    // Discover public IP address via STUN and add to ignore list
+    if (!discover_and_ignore_public_ip()) {
+        LOG_CLIENT_WARN("Failed to discover public IP via STUN - continuing without it");
+    }
     
     // Create dual-stack server socket (supports both IPv4 and IPv6)
             server_socket_ = create_tcp_server(listen_port_);
@@ -442,6 +450,52 @@ size_t RatsClient::get_dht_routing_table_size() const {
         return 0;
     }
     return dht_client_->get_routing_table_size();
+}
+
+bool RatsClient::discover_and_ignore_public_ip(const std::string& stun_server, int stun_port) {
+    if (!stun_client_) {
+        LOG_CLIENT_ERROR("STUN client not initialized");
+        return false;
+    }
+    
+    LOG_CLIENT_INFO("Discovering public IP address using STUN server: " << stun_server << ":" << stun_port);
+    
+    StunAddress public_address;
+    if (!stun_client_->get_public_address(stun_server, stun_port, public_address)) {
+        LOG_CLIENT_ERROR("Failed to discover public IP address via STUN");
+        return false;
+    }
+    
+    // Store the discovered public IP
+    {
+        std::lock_guard<std::mutex> lock(public_ip_mutex_);
+        public_ip_ = public_address.ip;
+    }
+    
+    LOG_CLIENT_INFO("Discovered public IP address: " << public_address.ip << " (port: " << public_address.port << ")");
+    
+    // Add to ignore list
+    add_ignored_address(public_address.ip);
+    
+    LOG_CLIENT_INFO("Added public IP " << public_address.ip << " to ignore list");
+    return true;
+}
+
+std::string RatsClient::get_public_ip() const {
+    std::lock_guard<std::mutex> lock(public_ip_mutex_);
+    return public_ip_;
+}
+
+void RatsClient::add_ignored_address(const std::string& ip_address) {
+    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
+    
+    // Check if already in the list
+    if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), ip_address) == local_interface_addresses_.end()) {
+        local_interface_addresses_.push_back(ip_address);
+        LOG_CLIENT_INFO("Added " << ip_address << " to ignore list");
+    } else {
+        LOG_CLIENT_DEBUG("IP address " << ip_address << " already in ignore list");
+    }
 }
 
 void RatsClient::handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash) {

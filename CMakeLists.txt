@@ -22,6 +22,8 @@ add_library(librats
     src/sha1.h
     src/os.cpp
     src/os.h
+    src/stun.cpp
+    src/stun.h
     src/logger.h
 )
 
@@ -85,6 +87,7 @@ if(BUILD_TESTS)
         tests/test_dht.cpp
         tests/test_rats_client.cpp
         tests/test_os.cpp
+        tests/test_stun.cpp
         tests/test_main.cpp
     )
     

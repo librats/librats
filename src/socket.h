@@ -167,6 +167,16 @@ socket_t create_udp_socket_v6(int port = 0);
 int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Peer& peer);
 
 /**
+ * Send UDP data to a hostname and port directly
+ * @param socket The UDP socket handle
+ * @param data The data to send
+ * @param hostname The destination hostname or IP address
+ * @param port The destination port
+ * @return Number of bytes sent, or -1 on error
+ */
+int send_udp_data_to(socket_t socket, const std::vector<uint8_t>& data, const std::string& hostname, int port);
+
+/**
  * Receive UDP data from a peer
  * @param socket The UDP socket handle
  * @param buffer_size Maximum number of bytes to receive
@@ -174,6 +184,18 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Peer&
  * @return Received data, empty vector on error
  */
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer& sender_peer);
+
+/**
+ * Receive UDP data with timeout support
+ * @param socket The UDP socket handle
+ * @param buffer_size Maximum number of bytes to receive
+ * @param timeout_ms Timeout in milliseconds (0 for non-blocking, -1 for blocking)
+ * @param sender_ip Optional output parameter for sender IP address
+ * @param sender_port Optional output parameter for sender port
+ * @return Received data, empty vector on timeout or error
+ */
+std::vector<uint8_t> receive_udp_data_with_timeout(socket_t socket, size_t buffer_size, int timeout_ms, 
+                                                   std::string* sender_ip = nullptr, int* sender_port = nullptr);
 
 // Common Socket Functions
 /**

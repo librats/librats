@@ -419,7 +419,11 @@ socket_t create_udp_socket(int port) {
     
     socket_t udp_socket = socket(AF_INET6, SOCK_DGRAM, 0);
     if (udp_socket == INVALID_SOCKET_VALUE) {
-        LOG_SOCKET_ERROR("Failed to create dual stack UDP socket");
+#ifdef _WIN32
+        LOG_SOCKET_ERROR("Failed to create dual stack UDP socket (error: " << WSAGetLastError() << ")");
+#else
+        LOG_SOCKET_ERROR("Failed to create dual stack UDP socket (error: " << strerror(errno) << ")");
+#endif
         return INVALID_SOCKET_VALUE;
     }
 
@@ -469,7 +473,11 @@ socket_t create_udp_socket_v4(int port) {
     
     socket_t udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp_socket == INVALID_SOCKET_VALUE) {
-        LOG_SOCKET_ERROR("Failed to create UDP socket");
+#ifdef _WIN32
+        LOG_SOCKET_ERROR("Failed to create UDP socket (error: " << WSAGetLastError() << ")");
+#else
+        LOG_SOCKET_ERROR("Failed to create UDP socket (error: " << strerror(errno) << ")");
+#endif
         return INVALID_SOCKET_VALUE;
     }
 
@@ -512,7 +520,11 @@ socket_t create_udp_socket_v6(int port) {
     
     socket_t udp_socket = socket(AF_INET6, SOCK_DGRAM, 0);
     if (udp_socket == INVALID_SOCKET_VALUE) {
-        LOG_SOCKET_ERROR("Failed to create IPv6 UDP socket");
+#ifdef _WIN32
+        LOG_SOCKET_ERROR("Failed to create IPv6 UDP socket (error: " << WSAGetLastError() << ")");
+#else
+        LOG_SOCKET_ERROR("Failed to create IPv6 UDP socket (error: " << strerror(errno) << ")");
+#endif
         return INVALID_SOCKET_VALUE;
     }
 
@@ -616,6 +628,68 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Peer&
     }
 }
 
+int send_udp_data_to(socket_t socket, const std::vector<uint8_t>& data, const std::string& hostname, int port) {
+    LOG_SOCKET_DEBUG("Sending " << data.size() << " bytes to " << hostname << ":" << port);
+    
+    // Validate port number
+    if (port < 0 || port > 65535) {
+        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
+        return -1;
+    }
+    
+    // Resolve hostname to IP address
+    std::string resolved_ip = network_utils::resolve_hostname(hostname);
+    if (resolved_ip.empty()) {
+        LOG_SOCKET_ERROR("Failed to resolve hostname: " << hostname);
+        return -1;
+    }
+    
+    // Check if it's an IPv6 address
+    if (network_utils::is_valid_ipv6(resolved_ip)) {
+        // Handle IPv6 address
+        sockaddr_in6 addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin6_family = AF_INET6;
+        addr.sin6_port = htons(port);
+        
+        if (inet_pton(AF_INET6, resolved_ip.c_str(), &addr.sin6_addr) <= 0) {
+            LOG_SOCKET_ERROR("Invalid IPv6 address: " << resolved_ip);
+            return -1;
+        }
+
+        int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0, 
+                               (struct sockaddr*)&addr, sizeof(addr));
+        if (bytes_sent == SOCKET_ERROR_VALUE) {
+            LOG_SOCKET_ERROR("Failed to send UDP data to IPv6 " << resolved_ip << ":" << port);
+            return -1;
+        }
+        
+        LOG_SOCKET_DEBUG("Successfully sent " << bytes_sent << " bytes to IPv6 " << resolved_ip << ":" << port);
+        return bytes_sent;
+    } else {
+        // Handle IPv4 address
+        sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        
+        if (inet_pton(AF_INET, resolved_ip.c_str(), &addr.sin_addr) <= 0) {
+            LOG_SOCKET_ERROR("Invalid IPv4 address: " << resolved_ip);
+            return -1;
+        }
+
+        int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0, 
+                               (struct sockaddr*)&addr, sizeof(addr));
+        if (bytes_sent == SOCKET_ERROR_VALUE) {
+            LOG_SOCKET_ERROR("Failed to send UDP data to " << resolved_ip << ":" << port);
+            return -1;
+        }
+        
+        LOG_SOCKET_DEBUG("Successfully sent " << bytes_sent << " bytes to " << resolved_ip << ":" << port);
+        return bytes_sent;
+    }
+}
+
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer& sender_peer) {
     std::vector<uint8_t> buffer(buffer_size);
     sockaddr_storage sender_addr;
@@ -673,6 +747,98 @@ std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer&
         LOG_SOCKET_WARN("Received UDP data from unknown address family");
         sender_peer.ip = "unknown";
         sender_peer.port = 0;
+    }
+    
+    buffer.resize(bytes_received);
+    return buffer;
+}
+
+std::vector<uint8_t> receive_udp_data_with_timeout(socket_t socket, size_t buffer_size, int timeout_ms, 
+                                                   std::string* sender_ip, int* sender_port) {
+    LOG_SOCKET_DEBUG("Receiving UDP data with timeout " << timeout_ms << "ms");
+    
+    std::vector<uint8_t> buffer(buffer_size);
+    sockaddr_storage sender_addr;
+    socklen_t sender_addr_len = sizeof(sender_addr);
+    
+    // Handle timeout if specified
+    if (timeout_ms > 0) {
+        // Set up timeout using select
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(socket, &read_fds);
+        
+        struct timeval timeout;
+        timeout.tv_sec = timeout_ms / 1000;
+        timeout.tv_usec = (timeout_ms % 1000) * 1000;
+        
+        // Wait for data with timeout
+        int result = select(socket + 1, &read_fds, nullptr, nullptr, &timeout);
+        if (result == 0) {
+            LOG_SOCKET_DEBUG("UDP receive timeout (" << timeout_ms << "ms)");
+            return std::vector<uint8_t>();
+        } else if (result < 0) {
+            LOG_SOCKET_ERROR("Select error while waiting for UDP data");
+            return std::vector<uint8_t>();
+        }
+    }
+    
+    int bytes_received = recvfrom(socket, (char*)buffer.data(), buffer_size, 0,
+                                 (struct sockaddr*)&sender_addr, &sender_addr_len);
+    
+    if (bytes_received == SOCKET_ERROR_VALUE) {
+        // Check if this is just a non-blocking socket with no data available
+#ifdef _WIN32
+        int error = WSAGetLastError();
+        if (error == WSAEWOULDBLOCK) {
+            // No data available on non-blocking socket - this is normal
+            LOG_SOCKET_DEBUG("No UDP data available (non-blocking)");
+            return std::vector<uint8_t>();
+        } else {
+            LOG_SOCKET_ERROR("Failed to receive UDP data: " << error);
+            return std::vector<uint8_t>();
+        }
+#else
+        int error = errno;
+        if (error == EAGAIN || error == EWOULDBLOCK) {
+            // No data available on non-blocking socket - this is normal
+            LOG_SOCKET_DEBUG("No UDP data available (non-blocking)");
+            return std::vector<uint8_t>();
+        } else {
+            LOG_SOCKET_ERROR("Failed to receive UDP data: " << strerror(error));
+            return std::vector<uint8_t>();
+        }
+#endif
+    }
+    
+    if (bytes_received == 0) {
+        LOG_SOCKET_DEBUG("Received empty UDP packet");
+        return std::vector<uint8_t>();
+    }
+    
+    // Extract sender information based on address family
+    if (sender_addr.ss_family == AF_INET) {
+        char ip_str[INET_ADDRSTRLEN];
+        struct sockaddr_in* addr_in = (struct sockaddr_in*)&sender_addr;
+        inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
+        
+        if (sender_ip) *sender_ip = ip_str;
+        if (sender_port) *sender_port = ntohs(addr_in->sin_port);
+        
+        LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from " << ip_str << ":" << ntohs(addr_in->sin_port));
+    } else if (sender_addr.ss_family == AF_INET6) {
+        char ip_str[INET6_ADDRSTRLEN];
+        struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&sender_addr;
+        inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, INET6_ADDRSTRLEN);
+        
+        if (sender_ip) *sender_ip = ip_str;
+        if (sender_port) *sender_port = ntohs(addr_in6->sin6_port);
+        
+        LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from IPv6 [" << ip_str << "]:" << ntohs(addr_in6->sin6_port));
+    } else {
+        LOG_SOCKET_WARN("Received UDP data from unknown address family");
+        if (sender_ip) *sender_ip = "unknown";
+        if (sender_port) *sender_port = 0;
     }
     
     buffer.resize(bytes_received);

@@ -2,6 +2,7 @@
 
 #include "socket.h"
 #include "dht.h"
+#include "stun.h"
 #include "logger.h"
 #include <string>
 #include <functional>
@@ -190,6 +191,27 @@ public:
      */
     size_t get_dht_routing_table_size() const;
 
+    // STUN functionality for public IP discovery
+    /**
+     * Discover public IP address using STUN and add to ignore list
+     * @param stun_server STUN server hostname (default: Google STUN)
+     * @param stun_port STUN server port (default: 19302)
+     * @return true if successful, false otherwise
+     */
+    bool discover_and_ignore_public_ip(const std::string& stun_server = "stun.l.google.com", int stun_port = 19302);
+    
+    /**
+     * Get the discovered public IP address
+     * @return Public IP address string or empty if not discovered
+     */
+    std::string get_public_ip() const;
+    
+    /**
+     * Add an IP address to the ignore list
+     * @param ip_address IP address to ignore
+     */
+    void add_ignored_address(const std::string& ip_address);
+
     // Automatic peer discovery
     void start_automatic_peer_discovery();
     void stop_automatic_peer_discovery();
@@ -220,6 +242,11 @@ private:
     
     // DHT client for peer discovery
     std::unique_ptr<DhtClient> dht_client_;
+    
+    // STUN client for public IP discovery
+    std::unique_ptr<StunClient> stun_client_;
+    std::string public_ip_;
+    mutable std::mutex public_ip_mutex_;
     
     void server_loop();
     void handle_client(socket_t client_socket, const std::string& peer_hash_id);
