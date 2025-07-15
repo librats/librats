@@ -38,11 +38,12 @@ struct RatsPeer {
     };
     
     HandshakeState handshake_state;         // Current handshake state
-    std::string remote_peer_id;             // Peer ID received from remote peer
-    std::string remote_version;             // Protocol version of remote peer
+    std::string version;                    // Protocol version of remote peer
+    int peer_count;                         // Number of peers connected to remote peer
     std::chrono::steady_clock::time_point handshake_start_time; // When handshake started
     
-    RatsPeer() : port(0), socket(INVALID_SOCKET_VALUE), is_outgoing(false), handshake_state(HandshakeState::PENDING) {
+    RatsPeer() : port(0), socket(INVALID_SOCKET_VALUE), is_outgoing(false), 
+                 handshake_state(HandshakeState::PENDING), peer_count(0) {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
     }
@@ -51,7 +52,7 @@ struct RatsPeer {
              socket_t socket, const std::string& normalized_address, bool is_outgoing)
         : peer_id(peer_id), ip(ip), port(port), socket(socket), 
           normalized_address(normalized_address), is_outgoing(is_outgoing), 
-          handshake_state(HandshakeState::PENDING) {
+          handshake_state(HandshakeState::PENDING), peer_count(0) {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
     }
@@ -441,6 +442,7 @@ private:
         std::string peer_id;            // our peer ID
         std::string message_type;       // "handshake" (simplified from request/response)
         int64_t timestamp;              // message timestamp
+        int peer_count;                 // Number of peers connected to this node
     };
     
     std::string create_handshake_message(const std::string& message_type, const std::string& our_peer_id) const;

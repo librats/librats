@@ -753,7 +753,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                             // Broadcast peer exchange message to other peers
                             broadcast_peer_exchange_message(peer);
                             
-                            LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (remote peer_id: " << peer.remote_peer_id << ")");
+                            LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (peer_id: " << peer.peer_id << ")");
                         } else if (peer.is_handshake_failed()) {
                             LOG_CLIENT_ERROR("Handshake failed for peer " << peer_hash_id);
                             break; // Exit loop to disconnect
@@ -1269,7 +1269,7 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     }
     
     LOG_CLIENT_INFO("Received valid handshake from " << peer_hash_id 
-                    << " (remote peer_id: " << handshake_msg.peer_id << ")");
+                    << " (peer_id: " << handshake_msg.peer_id << ")");
     
     std::lock_guard<std::mutex> lock(peers_mutex_);
     auto it = socket_to_peer_id_.find(socket);
@@ -1286,9 +1286,24 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     
     RatsPeer& peer = peer_it->second;
     
+    // Store old peer ID for mapping updates
+    std::string old_peer_id = peer.peer_id;
+    
     // Store remote peer information
-    peer.remote_peer_id = handshake_msg.peer_id;
-    peer.remote_version = handshake_msg.version;
+    peer.peer_id = handshake_msg.peer_id;  // Update to real peer ID from handshake
+    peer.version = handshake_msg.version;
+    
+    // Update peer mappings with new peer_id if it changed
+    if (old_peer_id != peer.peer_id) {
+        // Update socket mapping
+        socket_to_peer_id_[peer.socket] = peer.peer_id;
+        
+        // Create a copy of the peer with updated ID and re-insert
+        RatsPeer updated_peer = peer;
+        peers_.erase(peer_it);  // Remove using iterator
+        peers_[updated_peer.peer_id] = updated_peer;  // Insert with new ID
+        // address_to_peer_id_ stays the same since address doesn't change
+    }
     
     // Simplified handshake logic - just one message type
     if (peer.handshake_state == RatsPeer::HandshakeState::PENDING) {
@@ -1305,7 +1320,7 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     } else if (peer.handshake_state == RatsPeer::HandshakeState::SENT) {
         // This is a response to our handshake
         peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
-        LOG_CLIENT_INFO("Handshake completed with " << peer_hash_id << " (remote peer_id: " << handshake_msg.peer_id << ")");
+        LOG_CLIENT_INFO("Handshake completed with " << peer_hash_id << " (peer_id: " << handshake_msg.peer_id << ")");
         return true;
     } else {
         LOG_CLIENT_WARN("Received handshake from " << peer_hash_id << " but handshake state is " << static_cast<int>(peer.handshake_state));
