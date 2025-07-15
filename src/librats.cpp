@@ -289,7 +289,7 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     
     // Generate unique hash ID for this peer
     std::string connection_info = host + ":" + std::to_string(port);
-    std::string peer_hash_id = generate_peer_hash_id(peer_socket, connection_info);
+    std::string peer_hash_id = generate_peer_hash_id(peer_socket, connection_info); // Temporary hash ID (real hash ID will be set after handshake)
     
     // Create RatsPeer object and add to peer management
     {
@@ -679,7 +679,7 @@ void RatsClient::server_loop() {
         
         // Generate unique hash ID for this incoming client
         std::string connection_info = "incoming_from_" + peer_address;
-        std::string peer_hash_id = generate_peer_hash_id(client_socket, connection_info);
+        std::string peer_hash_id = generate_peer_hash_id(client_socket, connection_info); // Temporary hash ID (real hash ID will be set after handshake)
         
         // Create RatsPeer object for incoming connection
         {
