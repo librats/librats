@@ -272,12 +272,9 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     
     // Check if we're already connected to this peer
     std::string peer_address = normalize_peer_address(host, port);
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        if (is_already_connected_to_address(peer_address)) {
-            LOG_CLIENT_INFO("Already connected to peer " << peer_address << ", skipping connection");
-            return true; // Return true since we already have the connection
-        }
+    if (is_already_connected_to_address(peer_address)) {
+        LOG_CLIENT_INFO("Already connected to peer " << peer_address << ", skipping connection");
+        return true; // Return true since we already have the connection
     }
     
     LOG_CLIENT_INFO("Connecting to peer " << host << ":" << port);
@@ -339,12 +336,12 @@ bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& json_d
 
 bool RatsClient::send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& json_data) {
     std::lock_guard<std::mutex> lock(peers_mutex_);
-    const RatsPeer* peer = get_peer_by_id(peer_hash_id);
-    if (!peer || !peer->is_handshake_completed()) {
+    auto it = peers_.find(peer_hash_id);
+    if (it == peers_.end() || !it->second.is_handshake_completed()) {
         return false;
     }
     
-    return send_json_to_peer(peer->socket, json_data);
+    return send_json_to_peer(it->second.socket, json_data);
 }
 
 int RatsClient::broadcast_json_to_peers(const nlohmann::json& json_data) {
@@ -380,12 +377,12 @@ bool RatsClient::parse_json_message(const std::string& message, nlohmann::json& 
 
 bool RatsClient::send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
     std::lock_guard<std::mutex> lock(peers_mutex_);
-    const RatsPeer* peer = get_peer_by_id(peer_hash_id);
-    if (!peer || !peer->is_handshake_completed()) {
+    auto it = peers_.find(peer_hash_id);
+    if (it == peers_.end() || !it->second.is_handshake_completed()) {
         return false;
     }
     
-    return send_to_peer(peer->socket, data);
+    return send_to_peer(it->second.socket, data);
 }
 
 int RatsClient::broadcast_to_peers(const std::string& data) {
@@ -612,11 +609,7 @@ void RatsClient::handle_dht_peer_discovery(const std::vector<Peer>& peers, const
         
         // Check if we're already connected to this peer
         std::string normalized_peer_address = normalize_peer_address(peer.ip, peer.port);
-        bool already_connected = false;
-        {
-            std::lock_guard<std::mutex> lock(peers_mutex_);
-            already_connected = is_already_connected_to_address(normalized_peer_address);
-        }
+        bool already_connected = is_already_connected_to_address(normalized_peer_address);
         
         if (!already_connected) {
             LOG_CLIENT_DEBUG("Attempting to connect to discovered peer: " << peer.ip << ":" << peer.port);
@@ -1494,12 +1487,9 @@ void RatsClient::handle_peer_exchange_message(socket_t socket, const std::string
         
         // Check if we're already connected to this peer
         std::string normalized_peer_address = normalize_peer_address(peer_ip, peer_port);
-        {
-            std::lock_guard<std::mutex> lock(peers_mutex_);
-            if (is_already_connected_to_address(normalized_peer_address)) {
-                LOG_CLIENT_DEBUG("Already connected to exchanged peer " << normalized_peer_address);
-                return;
-            }
+        if (is_already_connected_to_address(normalized_peer_address)) {
+            LOG_CLIENT_DEBUG("Already connected to exchanged peer " << normalized_peer_address);
+            return;
         }
         
         // Check if peer limit is reached
@@ -1656,13 +1646,13 @@ bool RatsClient::send_custom_message_to_peer(const std::string& peer_id, const s
     
     // Send to specific peer
     std::lock_guard<std::mutex> lock(peers_mutex_);
-    const RatsPeer* peer = get_peer_by_id(peer_id);
-    if (!peer || !peer->is_handshake_completed()) {
+    auto it = peers_.find(peer_id);
+    if (it == peers_.end() || !it->second.is_handshake_completed()) {
         LOG_CLIENT_WARN("Cannot send custom message to peer " << peer_id << " - peer not found or handshake not completed");
         return false;
     }
     
-    bool success = send_json_to_peer(peer->socket, message);
+    bool success = send_json_to_peer(it->second.socket, message);
     if (success) {
         LOG_CLIENT_DEBUG("Sent custom message type '" << type << "' to peer " << peer_id);
     } else {
