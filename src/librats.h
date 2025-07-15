@@ -464,7 +464,39 @@ private:
     void handle_peer_exchange_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
     void broadcast_peer_exchange_message(const RatsPeer& new_peer);
     nlohmann::json create_rats_message(const std::string& type, const nlohmann::json& payload, const std::string& sender_peer_id = "");
-
+    
+    // General broadcasting functions
+    int broadcast_rats_message(const nlohmann::json& message, const std::string& exclude_peer_id = "");
+    int broadcast_rats_message_to_validated_peers(const nlohmann::json& message, const std::string& exclude_peer_id = "");
+    
+    // Specific message creation functions
+    nlohmann::json create_peer_exchange_message(const RatsPeer& peer);
+    
+    // Utility functions for custom message types
+    /**
+     * Create and broadcast a custom rats message to all validated peers
+     * @param type Message type (e.g., "status", "data", "announcement")
+     * @param payload Message payload as JSON object
+     * @param sender_peer_id Optional sender peer ID
+     * @param exclude_peer_id Optional peer ID to exclude from broadcast
+     * @return Number of peers the message was sent to
+     */
+    int broadcast_custom_message(const std::string& type, const nlohmann::json& payload, 
+                                const std::string& sender_peer_id = "", 
+                                const std::string& exclude_peer_id = "");
+    
+    /**
+     * Send a custom rats message to a specific peer by peer ID
+     * @param peer_id Target peer ID
+     * @param type Message type
+     * @param payload Message payload as JSON object
+     * @param sender_peer_id Optional sender peer ID
+     * @return true if successful, false otherwise
+     */
+    bool send_custom_message_to_peer(const std::string& peer_id, const std::string& type, 
+                                    const nlohmann::json& payload, 
+                                    const std::string& sender_peer_id = "");
+    
     // Automatic peer discovery
     std::atomic<bool> auto_discovery_running_{false};
     std::thread auto_discovery_thread_;

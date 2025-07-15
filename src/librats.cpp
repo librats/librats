@@ -1421,10 +1421,22 @@ void RatsClient::handle_rats_message(socket_t socket, const std::string& peer_ha
         
         LOG_CLIENT_DEBUG("Received rats message type '" << message_type << "' from " << peer_hash_id);
         
+        // Handle different message types
         if (message_type == "peer") {
             handle_peer_exchange_message(socket, peer_hash_id, payload);
-        } else {
-            LOG_CLIENT_WARN("Unknown rats message type: " << message_type);
+        } 
+        // Add more message types here as needed:
+        // else if (message_type == "status") {
+        //     handle_status_message(socket, peer_hash_id, payload);
+        // }
+        // else if (message_type == "data") {
+        //     handle_data_message(socket, peer_hash_id, payload);
+        // }
+        // else if (message_type == "announcement") {
+        //     handle_announcement_message(socket, peer_hash_id, payload);
+        // }
+        else {
+            LOG_CLIENT_WARN("Unknown rats message type: " << message_type << " from " << peer_hash_id);
         }
         
     } catch (const nlohmann::json::exception& e) {
@@ -1481,39 +1493,154 @@ void RatsClient::handle_peer_exchange_message(socket_t socket, const std::string
     }
 }
 
+// General broadcasting functions
+int RatsClient::broadcast_rats_message(const nlohmann::json& message, const std::string& exclude_peer_id) {
+    int sent_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        for (const auto& pair : peers_) {
+            const RatsPeer& peer = pair.second;
+            // Don't send to excluded peer
+            if (!exclude_peer_id.empty() && peer.peer_id == exclude_peer_id) {
+                continue;
+            }
+            
+            if (send_json_to_peer(peer.socket, message)) {
+                sent_count++;
+            }
+        }
+    }
+    return sent_count;
+}
+
+int RatsClient::broadcast_rats_message_to_validated_peers(const nlohmann::json& message, const std::string& exclude_peer_id) {
+    int sent_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        for (const auto& pair : peers_) {
+            const RatsPeer& peer = pair.second;
+            // Don't send to excluded peer and only send to peers with completed handshake
+            if ((!exclude_peer_id.empty() && peer.peer_id == exclude_peer_id) || 
+                !peer.is_handshake_completed()) {
+                continue;
+            }
+            
+            if (send_json_to_peer(peer.socket, message)) {
+                sent_count++;
+            }
+        }
+    }
+    return sent_count;
+}
+
+// Specific message creation functions
+nlohmann::json RatsClient::create_peer_exchange_message(const RatsPeer& peer) {
+    // Create peer exchange payload
+    nlohmann::json payload;
+    payload["ip"] = peer.ip;
+    payload["port"] = peer.port;
+    payload["peer_id"] = peer.peer_id;
+    payload["connection_type"] = peer.is_outgoing ? "outgoing" : "incoming";
+    
+    // Create rats message
+    return create_rats_message("peer", payload, peer.peer_id);
+}
+
 void RatsClient::broadcast_peer_exchange_message(const RatsPeer& new_peer) {
     // Don't broadcast exchange messages for ourselves
     if (new_peer.peer_id.empty()) {
         return;
     }
     
-    // Create peer exchange payload
-    nlohmann::json payload;
-    payload["ip"] = new_peer.ip;
-    payload["port"] = new_peer.port;
-    payload["peer_id"] = new_peer.peer_id;
-    payload["connection_type"] = new_peer.is_outgoing ? "outgoing" : "incoming";
+    // Create peer exchange message
+    nlohmann::json message = create_peer_exchange_message(new_peer);
     
-    // Create rats message
-    nlohmann::json message = create_rats_message("peer", payload, new_peer.peer_id);
-    
-    // Broadcast to all connected peers except the new peer
-    int sent_count = 0;
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        for (const auto& pair : peers_) {
-            const RatsPeer& peer = pair.second;
-            // Don't send to the new peer itself and only send to peers with completed handshake
-            if (peer.peer_id != new_peer.peer_id && peer.is_handshake_completed()) {
-                if (send_json_to_peer(peer.socket, message)) {
-                    sent_count++;
-                }
-            }
-        }
-    }
+    // Broadcast to all validated peers except the new peer
+    int sent_count = broadcast_rats_message_to_validated_peers(message, new_peer.peer_id);
     
     LOG_CLIENT_INFO("Broadcasted peer exchange message for " << new_peer.ip << ":" << new_peer.port 
                     << " to " << sent_count << " peers");
+}
+
+// Utility functions for custom message types
+int RatsClient::broadcast_custom_message(const std::string& type, const nlohmann::json& payload, 
+                                        const std::string& sender_peer_id, 
+                                        const std::string& exclude_peer_id) {
+    // Create rats message
+    nlohmann::json message = create_rats_message(type, payload, sender_peer_id);
+    
+    // Broadcast to all validated peers
+    int sent_count = broadcast_rats_message_to_validated_peers(message, exclude_peer_id);
+    
+    LOG_CLIENT_DEBUG("Broadcasted custom message type '" << type << "' to " << sent_count << " peers");
+    return sent_count;
+}
+
+/*
+ * EXAMPLE: How to add new message types using the broadcasting system
+ * 
+ * 1. Create a message creation function:
+ *    nlohmann::json create_status_message(const std::string& status, const std::string& details) {
+ *        nlohmann::json payload;
+ *        payload["status"] = status;
+ *        payload["details"] = details;
+ *        payload["node_info"] = get_node_info(); // example additional data
+ *        return payload;
+ *    }
+ * 
+ * 2. Create a handler function:
+ *    void handle_status_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
+ *        std::string status = payload.value("status", "");
+ *        std::string details = payload.value("details", "");
+ *        LOG_CLIENT_INFO("Peer " << peer_hash_id << " status: " << status << " - " << details);
+ *        // Handle the status update...
+ *    }
+ * 
+ * 3. Add the handler to handle_rats_message() function:
+ *    else if (message_type == "status") {
+ *        handle_status_message(socket, peer_hash_id, payload);
+ *    }
+ * 
+ * 4. Use the broadcasting system to send messages:
+ *    // Broadcast to all peers:
+ *    nlohmann::json status_payload = create_status_message("online", "Node is healthy");
+ *    broadcast_custom_message("status", status_payload);
+ * 
+ *    // Send to specific peer:
+ *    send_custom_message_to_peer("target_peer_id", "status", status_payload);
+ * 
+ * 5. Message format will automatically be:
+ *    {
+ *      "rats_protocol": true,
+ *      "type": "status",
+ *      "payload": { "status": "online", "details": "Node is healthy", ... },
+ *      "sender_peer_id": "your_peer_id",
+ *      "timestamp": 1234567890123
+ *    }
+ */
+
+bool RatsClient::send_custom_message_to_peer(const std::string& peer_id, const std::string& type, 
+                                            const nlohmann::json& payload, 
+                                            const std::string& sender_peer_id) {
+    // Create rats message
+    nlohmann::json message = create_rats_message(type, payload, sender_peer_id);
+    
+    // Send to specific peer
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    const RatsPeer* peer = get_peer_by_id(peer_id);
+    if (!peer || !peer->is_handshake_completed()) {
+        LOG_CLIENT_WARN("Cannot send custom message to peer " << peer_id << " - peer not found or handshake not completed");
+        return false;
+    }
+    
+    bool success = send_json_to_peer(peer->socket, message);
+    if (success) {
+        LOG_CLIENT_DEBUG("Sent custom message type '" << type << "' to peer " << peer_id);
+    } else {
+        LOG_CLIENT_ERROR("Failed to send custom message type '" << type << "' to peer " << peer_id);
+    }
+    
+    return success;
 }
 
 } // namespace librats 
