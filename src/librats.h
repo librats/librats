@@ -134,8 +134,9 @@ public:
     /**
      * Constructor
      * @param listen_port The port to listen on for incoming connections
+     * @param max_peers Maximum number of peers to maintain (default: 10)
      */
-    RatsClient(int listen_port);
+    RatsClient(int listen_port, int max_peers = 10);
     
     /**
      * Destructor
@@ -364,8 +365,27 @@ public:
     bool is_automatic_discovery_running() const;
     static std::string get_rats_peer_discovery_hash();
 
+    /**
+     * Get maximum number of peers
+     * @return Maximum peer count
+     */
+    int get_max_peers() const;
+    
+    /**
+     * Set maximum number of peers
+     * @param max_peers Maximum number of peers to maintain
+     */
+    void set_max_peers(int max_peers);
+    
+    /**
+     * Check if peer limit is reached
+     * @return true if at maximum capacity, false otherwise
+     */
+    bool is_peer_limit_reached() const;
+
 private:
     int listen_port_;
+    int max_peers_;
     socket_t server_socket_;
     std::atomic<bool> running_;
     
@@ -430,6 +450,20 @@ private:
     bool is_handshake_message(const std::string& message) const;
     void check_handshake_timeouts();
     bool validate_handshake_message(const HandshakeMessage& msg) const;
+
+    // Message handling system
+    struct RatsMessage {
+        std::string type;               // Message type (e.g., "peer", "data", etc.)
+        nlohmann::json payload;         // Message payload
+        std::string sender_peer_id;     // ID of the sending peer
+        int64_t timestamp;              // Message timestamp
+    };
+    
+    // Message type handling
+    void handle_rats_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& message);
+    void handle_peer_exchange_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
+    void broadcast_peer_exchange_message(const RatsPeer& new_peer);
+    nlohmann::json create_rats_message(const std::string& type, const nlohmann::json& payload, const std::string& sender_peer_id = "");
 
     // Automatic peer discovery
     std::atomic<bool> auto_discovery_running_{false};

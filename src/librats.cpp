@@ -30,8 +30,9 @@
 
 namespace librats {
 
-RatsClient::RatsClient(int listen_port) 
+RatsClient::RatsClient(int listen_port, int max_peers) 
     : listen_port_(listen_port), 
+      max_peers_(max_peers),
       server_socket_(INVALID_SOCKET_VALUE),
       running_(false) {
     // Initialize STUN client
@@ -254,6 +255,12 @@ void RatsClient::stop() {
 bool RatsClient::connect_to_peer(const std::string& host, int port) {
     if (!running_.load()) {
         LOG_CLIENT_ERROR("RatsClient is not running");
+        return false;
+    }
+    
+    // Check if peer limit is reached
+    if (is_peer_limit_reached()) {
+        LOG_CLIENT_WARN("Peer limit reached (" << max_peers_ << "), not connecting to " << host << ":" << port);
         return false;
     }
     
@@ -653,6 +660,13 @@ void RatsClient::server_loop() {
         
         std::string normalized_peer_address = normalize_peer_address(ip, port);
         
+        // Check if peer limit is reached
+        if (is_peer_limit_reached()) {
+            LOG_SERVER_INFO("Peer limit reached (" << max_peers_ << "), rejecting connection from " << normalized_peer_address);
+            close_socket(client_socket);
+            continue;
+        }
+        
         // Check if we're already connected to this peer
         {
             std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -736,6 +750,9 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                                 connection_callback_(client_socket, peer_hash_id);
                             }
                             
+                            // Broadcast peer exchange message to other peers
+                            broadcast_peer_exchange_message(peer);
+                            
                             LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (remote peer_id: " << peer.remote_peer_id << ")");
                         } else if (peer.is_handshake_failed()) {
                             LOG_CLIENT_ERROR("Handshake failed for peer " << peer_hash_id);
@@ -764,9 +781,23 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         
         // Only process regular data after handshake is completed
         if (handshake_completed) {
-            // Notify data callback
-            if (data_callback_) {
-                data_callback_(client_socket, peer_hash_id, data);
+            // Try to parse as JSON rats message first
+            nlohmann::json json_msg;
+            if (parse_json_message(data, json_msg)) {
+                // Check if it's a rats protocol message
+                if (json_msg.contains("rats_protocol") && json_msg["rats_protocol"] == true) {
+                    handle_rats_message(client_socket, peer_hash_id, json_msg);
+                } else {
+                    // Regular JSON data - call data callback
+                    if (data_callback_) {
+                        data_callback_(client_socket, peer_hash_id, data);
+                    }
+                }
+            } else {
+                // Regular text data - call data callback
+                if (data_callback_) {
+                    data_callback_(client_socket, peer_hash_id, data);
+                }
             }
         } else {
             LOG_CLIENT_WARN("Received non-handshake data from " << peer_hash_id << " before handshake completion - ignoring");
@@ -869,7 +900,7 @@ bool RatsClient::should_ignore_peer(const std::string& ip, int port) const {
 
 // Helper functions
 std::unique_ptr<RatsClient> create_rats_client(int listen_port) {
-    auto client = std::make_unique<RatsClient>(listen_port);
+    auto client = std::make_unique<RatsClient>(listen_port, 10); // Default 10 max peers
     if (!client->start()) {
         return nullptr;
     }
@@ -879,11 +910,12 @@ std::unique_ptr<RatsClient> create_rats_client(int listen_port) {
 void run_rats_client_demo(int listen_port, const std::string& peer_host, int peer_port) {
     LOG_MAIN_INFO("Starting RatsClient demo on port " << listen_port);
     
-    RatsClient client(listen_port);
+    RatsClient client(listen_port, 10); // Default 10 max peers
     
     // Set up callbacks
-    client.set_connection_callback([](socket_t socket, const std::string& peer_hash_id) {
+    client.set_connection_callback([&client](socket_t socket, const std::string& peer_hash_id) {
         LOG_MAIN_INFO("New validated connection (handshake completed): " << peer_hash_id << " (socket: " << socket << ")");
+        LOG_MAIN_INFO("Total connected peers: " << client.get_peer_count() << "/" << client.get_max_peers());
     });
     
     client.set_data_callback([&client](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
@@ -892,6 +924,12 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
         // Try to parse as JSON first
         nlohmann::json json_data;
         if (client.parse_json_message(data, json_data)) {
+            // Check if it's a rats protocol message (these are handled internally)
+            if (json_data.contains("rats_protocol") && json_data["rats_protocol"] == true) {
+                LOG_MAIN_INFO("Received rats protocol message of type: " << json_data.value("type", "unknown"));
+                return; // Don't echo protocol messages
+            }
+            
             LOG_MAIN_INFO("Parsed JSON message with type: " << json_data.value("type", "unknown"));
             
             // Create a JSON response
@@ -909,8 +947,9 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
         }
     });
     
-    client.set_disconnect_callback([](socket_t socket, const std::string& peer_hash_id) {
+    client.set_disconnect_callback([&client](socket_t socket, const std::string& peer_hash_id) {
         LOG_MAIN_INFO("Peer disconnected: " << peer_hash_id << " (socket: " << socket << ")");
+        LOG_MAIN_INFO("Total connected peers: " << client.get_peer_count() << "/" << client.get_max_peers());
     });
     
     // Start the client
@@ -937,6 +976,7 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
             
             int sent = client.broadcast_json_to_peers(test_msg);
             LOG_MAIN_INFO("Sent JSON test message to " << sent << " peers");
+            LOG_MAIN_INFO("Peer exchange messages will be sent automatically when new peers connect");
         }
     }
     
@@ -1343,6 +1383,137 @@ bool RatsClient::parse_address_string(const std::string& address_str, std::strin
     }
 
     return !out_ip.empty() && out_port > 0 && out_port <= 65535;
+}
+
+// Peer limit management methods
+int RatsClient::get_max_peers() const {
+    return max_peers_;
+}
+
+void RatsClient::set_max_peers(int max_peers) {
+    max_peers_ = max_peers;
+    LOG_CLIENT_INFO("Maximum peers set to " << max_peers_);
+}
+
+bool RatsClient::is_peer_limit_reached() const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    return static_cast<int>(peers_.size()) >= max_peers_;
+}
+
+// Message handling system
+nlohmann::json RatsClient::create_rats_message(const std::string& type, const nlohmann::json& payload, const std::string& sender_peer_id) {
+    nlohmann::json message;
+    message["rats_protocol"] = true;
+    message["type"] = type;
+    message["payload"] = payload;
+    message["sender_peer_id"] = sender_peer_id;
+    message["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+    
+    return message;
+}
+
+void RatsClient::handle_rats_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& message) {
+    try {
+        std::string message_type = message.value("type", "");
+        nlohmann::json payload = message.value("payload", nlohmann::json::object());
+        std::string sender_peer_id = message.value("sender_peer_id", "");
+        
+        LOG_CLIENT_DEBUG("Received rats message type '" << message_type << "' from " << peer_hash_id);
+        
+        if (message_type == "peer") {
+            handle_peer_exchange_message(socket, peer_hash_id, payload);
+        } else {
+            LOG_CLIENT_WARN("Unknown rats message type: " << message_type);
+        }
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to handle rats message: " << e.what());
+    }
+}
+
+void RatsClient::handle_peer_exchange_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
+    try {
+        std::string peer_ip = payload.value("ip", "");
+        int peer_port = payload.value("port", 0);
+        std::string peer_id = payload.value("peer_id", "");
+        
+        if (peer_ip.empty() || peer_port <= 0 || peer_id.empty()) {
+            LOG_CLIENT_WARN("Invalid peer exchange message from " << peer_hash_id);
+            return;
+        }
+        
+        LOG_CLIENT_INFO("Received peer exchange: " << peer_ip << ":" << peer_port << " (peer_id: " << peer_id << ")");
+        
+        // Check if we should ignore this peer (local interface)
+        if (should_ignore_peer(peer_ip, peer_port)) {
+            LOG_CLIENT_DEBUG("Ignoring exchanged peer " << peer_ip << ":" << peer_port << " - local interface address");
+            return;
+        }
+        
+        // Check if we're already connected to this peer
+        std::string normalized_peer_address = normalize_peer_address(peer_ip, peer_port);
+        {
+            std::lock_guard<std::mutex> lock(peers_mutex_);
+            if (is_already_connected_to_address(normalized_peer_address)) {
+                LOG_CLIENT_DEBUG("Already connected to exchanged peer " << normalized_peer_address);
+                return;
+            }
+        }
+        
+        // Check if peer limit is reached
+        if (is_peer_limit_reached()) {
+            LOG_CLIENT_DEBUG("Peer limit reached, not connecting to exchanged peer " << peer_ip << ":" << peer_port);
+            return;
+        }
+        
+        // Try to connect to the exchanged peer (non-blocking)
+        std::thread([this, peer_ip, peer_port, peer_id]() {
+            if (connect_to_peer(peer_ip, peer_port)) {
+                LOG_CLIENT_INFO("Successfully connected to exchanged peer: " << peer_ip << ":" << peer_port);
+            } else {
+                LOG_CLIENT_DEBUG("Failed to connect to exchanged peer: " << peer_ip << ":" << peer_port);
+            }
+        }).detach();
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to handle peer exchange message: " << e.what());
+    }
+}
+
+void RatsClient::broadcast_peer_exchange_message(const RatsPeer& new_peer) {
+    // Don't broadcast exchange messages for ourselves
+    if (new_peer.peer_id.empty()) {
+        return;
+    }
+    
+    // Create peer exchange payload
+    nlohmann::json payload;
+    payload["ip"] = new_peer.ip;
+    payload["port"] = new_peer.port;
+    payload["peer_id"] = new_peer.peer_id;
+    payload["connection_type"] = new_peer.is_outgoing ? "outgoing" : "incoming";
+    
+    // Create rats message
+    nlohmann::json message = create_rats_message("peer", payload, new_peer.peer_id);
+    
+    // Broadcast to all connected peers except the new peer
+    int sent_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        for (const auto& pair : peers_) {
+            const RatsPeer& peer = pair.second;
+            // Don't send to the new peer itself and only send to peers with completed handshake
+            if (peer.peer_id != new_peer.peer_id && peer.is_handshake_completed()) {
+                if (send_json_to_peer(peer.socket, message)) {
+                    sent_count++;
+                }
+            }
+        }
+    }
+    
+    LOG_CLIENT_INFO("Broadcasted peer exchange message for " << new_peer.ip << ":" << new_peer.port 
+                    << " to " << sent_count << " peers");
 }
 
 } // namespace librats 
