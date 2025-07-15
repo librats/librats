@@ -1178,7 +1178,7 @@ bool RatsClient::parse_handshake_message(const std::string& message, HandshakeMe
         out_msg.version = json_msg.value("version", "");
         out_msg.peer_id = json_msg.value("peer_id", "");
         out_msg.message_type = json_msg.value("message_type", "");
-        out_msg.timestamp = json_msg.value("timestamp", 0L);
+        out_msg.timestamp = json_msg["timestamp"].get<int64_t>();
         
         return true;
         
@@ -1315,7 +1315,7 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
         // This is an incoming handshake - send our handshake back
         if (send_handshake(socket, peer.peer_id)) {
             peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
-            LOG_CLIENT_INFO("Handshake completed with " << peer_hash_id << " (remote peer_id: " << handshake_msg.peer_id << ")");
+            log_handshake_completion(peer);
             return true;
         } else {
             peer.handshake_state = RatsPeer::HandshakeState::FAILED;
@@ -1325,7 +1325,7 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     } else if (peer.handshake_state == RatsPeer::HandshakeState::SENT) {
         // This is a response to our handshake
         peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
-        LOG_CLIENT_INFO("Handshake completed with " << peer_hash_id << " (peer_id: " << handshake_msg.peer_id << ")");
+        log_handshake_completion(peer);
         return true;
     } else {
         LOG_CLIENT_WARN("Received handshake from " << peer_hash_id << " but handshake state is " << static_cast<int>(peer.handshake_state));
@@ -1403,6 +1403,34 @@ bool RatsClient::parse_address_string(const std::string& address_str, std::strin
     }
 
     return !out_ip.empty() && out_port > 0 && out_port <= 65535;
+}
+
+void RatsClient::log_handshake_completion(const RatsPeer& peer) {
+    // Calculate connection duration
+    auto now = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - peer.connected_at);
+    
+    // Get current peer count
+    int current_peer_count = get_peer_count();
+    
+    // Create visually appealing log output
+    std::string connection_type = peer.is_outgoing ? "OUTGOING" : "INCOMING";
+    std::string separator = "════════════════════════════════════════════════════════════════════";
+    
+    LOG_CLIENT_INFO("");
+    LOG_CLIENT_INFO(separator);
+    LOG_CLIENT_INFO("✓ HANDSHAKE COMPLETED - NEW PEER CONNECTED");
+    LOG_CLIENT_INFO(separator);
+    LOG_CLIENT_INFO("│ Peer ID       : " << peer.peer_id);
+    LOG_CLIENT_INFO("│ Address       : " << peer.ip << ":" << peer.port);
+    LOG_CLIENT_INFO("│ Connection    : " << connection_type);
+    LOG_CLIENT_INFO("│ Protocol Ver. : " << peer.version);
+    LOG_CLIENT_INFO("│ Socket        : " << peer.socket);
+    LOG_CLIENT_INFO("│ Duration      : " << duration.count() << "ms");
+    LOG_CLIENT_INFO("│ Network Peers : " << current_peer_count << "/" << max_peers_);
+    
+    LOG_CLIENT_INFO(separator);
+    LOG_CLIENT_INFO("");
 }
 
 // Peer limit management methods

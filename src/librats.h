@@ -452,6 +452,7 @@ private:
     bool is_handshake_message(const std::string& message) const;
     void check_handshake_timeouts();
     bool validate_handshake_message(const HandshakeMessage& msg) const;
+    void log_handshake_completion(const RatsPeer& peer);
 
     // Message handling system
     struct RatsMessage {
