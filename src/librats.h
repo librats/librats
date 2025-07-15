@@ -431,6 +431,9 @@ private:
     bool is_blocked_address(const std::string& ip_address) const;
     bool should_ignore_peer(const std::string& ip, int port) const;
     static bool parse_address_string(const std::string& address_str, std::string& out_ip, int& out_port);
+    
+    // Helper functions that assume mutex is already locked
+    int get_peer_count_unlocked() const;  // Helper that assumes peers_mutex_ is already locked
 
     // Handshake protocol
     static constexpr const char* RATS_PROTOCOL_VERSION = "1.0";
@@ -448,11 +451,13 @@ private:
     std::string create_handshake_message(const std::string& message_type, const std::string& our_peer_id) const;
     bool parse_handshake_message(const std::string& message, HandshakeMessage& out_msg) const;
     bool send_handshake(socket_t socket, const std::string& our_peer_id);
+    bool send_handshake_unlocked(socket_t socket, const std::string& our_peer_id);  // Helper that assumes mutex is already locked
     bool handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::string& message);
     bool is_handshake_message(const std::string& message) const;
     void check_handshake_timeouts();
     bool validate_handshake_message(const HandshakeMessage& msg) const;
     void log_handshake_completion(const RatsPeer& peer);
+    void log_handshake_completion_unlocked(const RatsPeer& peer);  // Helper that assumes mutex is already locked
 
     // Message handling system
     struct RatsMessage {

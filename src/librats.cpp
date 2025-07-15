@@ -418,8 +418,8 @@ void RatsClient::disconnect_peer_by_hash(const std::string& peer_hash_id) {
     }
 }
 
-int RatsClient::get_peer_count() const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
+int RatsClient::get_peer_count_unlocked() const {
+    // Assumes peers_mutex_ is already locked
     int count = 0;
     for (const auto& pair : peers_) {
         if (pair.second.is_handshake_completed()) {
@@ -427,6 +427,11 @@ int RatsClient::get_peer_count() const {
         }
     }
     return count;
+}
+
+int RatsClient::get_peer_count() const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    return get_peer_count_unlocked();
 }
 
 bool RatsClient::is_running() const {
@@ -1238,7 +1243,8 @@ bool RatsClient::is_handshake_message(const std::string& message) const {
     }
 }
 
-bool RatsClient::send_handshake(socket_t socket, const std::string& our_peer_id) {
+// Add this private helper function before send_handshake
+bool RatsClient::send_handshake_unlocked(socket_t socket, const std::string& our_peer_id) {
     std::string handshake_msg = create_handshake_message("handshake", our_peer_id);
     LOG_CLIENT_DEBUG("Sending handshake to socket " << socket << ": " << handshake_msg);
     
@@ -1247,8 +1253,7 @@ bool RatsClient::send_handshake(socket_t socket, const std::string& our_peer_id)
         return false;
     }
     
-    // Update peer state
-    std::lock_guard<std::mutex> lock(peers_mutex_);
+    // Update peer state (assumes peers_mutex_ is already locked)
     auto it = socket_to_peer_id_.find(socket);
     if (it != socket_to_peer_id_.end()) {
         auto peer_it = peers_.find(it->second);
@@ -1259,6 +1264,11 @@ bool RatsClient::send_handshake(socket_t socket, const std::string& our_peer_id)
     }
     
     return true;
+}
+
+bool RatsClient::send_handshake(socket_t socket, const std::string& our_peer_id) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    return send_handshake_unlocked(socket, our_peer_id);
 }
 
 bool RatsClient::handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::string& message) {
@@ -1313,9 +1323,9 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     // Simplified handshake logic - just one message type
     if (peer.handshake_state == RatsPeer::HandshakeState::PENDING) {
         // This is an incoming handshake - send our handshake back
-        if (send_handshake(socket, peer.peer_id)) {
+        if (send_handshake_unlocked(socket, peer.peer_id)) {
             peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
-            log_handshake_completion(peer);
+            log_handshake_completion_unlocked(peer);
             return true;
         } else {
             peer.handshake_state = RatsPeer::HandshakeState::FAILED;
@@ -1325,7 +1335,7 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     } else if (peer.handshake_state == RatsPeer::HandshakeState::SENT) {
         // This is a response to our handshake
         peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
-        log_handshake_completion(peer);
+        log_handshake_completion_unlocked(peer);
         return true;
     } else {
         LOG_CLIENT_WARN("Received handshake from " << peer_hash_id << " but handshake state is " << static_cast<int>(peer.handshake_state));
@@ -1405,13 +1415,13 @@ bool RatsClient::parse_address_string(const std::string& address_str, std::strin
     return !out_ip.empty() && out_port > 0 && out_port <= 65535;
 }
 
-void RatsClient::log_handshake_completion(const RatsPeer& peer) {
+void RatsClient::log_handshake_completion_unlocked(const RatsPeer& peer) {
     // Calculate connection duration
     auto now = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - peer.connected_at);
     
-    // Get current peer count
-    int current_peer_count = get_peer_count();
+    // Get current peer count (assumes peers_mutex_ is already locked)
+    int current_peer_count = get_peer_count_unlocked();
     
     // Create visually appealing log output
     std::string connection_type = peer.is_outgoing ? "OUTGOING" : "INCOMING";
@@ -1431,6 +1441,11 @@ void RatsClient::log_handshake_completion(const RatsPeer& peer) {
     
     LOG_CLIENT_INFO(separator);
     LOG_CLIENT_INFO("");
+}
+
+void RatsClient::log_handshake_completion(const RatsPeer& peer) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    log_handshake_completion_unlocked(peer);
 }
 
 // Peer limit management methods
