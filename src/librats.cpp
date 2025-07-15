@@ -661,15 +661,12 @@ void RatsClient::server_loop() {
         }
         
         // Check if we're already connected to this peer
-        {
-            std::lock_guard<std::mutex> lock(peers_mutex_);
-            if (is_already_connected_to_address(normalized_peer_address)) {
-                LOG_SERVER_INFO("Already connected to peer " << normalized_peer_address << ", rejecting duplicate connection");
-                close_socket(client_socket);
-                continue;
-            }
+        if (is_already_connected_to_address(normalized_peer_address)) {
+            LOG_SERVER_INFO("Already connected to peer " << normalized_peer_address << ", rejecting duplicate connection");
+            close_socket(client_socket);
+            continue;
         }
-        
+
         // Generate unique hash ID for this incoming client
         std::string connection_info = "incoming_from_" + peer_address;
         std::string peer_hash_id = generate_peer_hash_id(client_socket, connection_info); // Temporary hash ID (real hash ID will be set after handshake)
@@ -1126,11 +1123,7 @@ void RatsClient::search_rats_peers(int iteration_max) {
                 
                 // Check if we're already connected to this peer
                 std::string normalized_peer_address = normalize_peer_address(ip, port);
-                bool already_connected = false;
-                {
-                    std::lock_guard<std::mutex> lock(peers_mutex_);
-                    already_connected = is_already_connected_to_address(normalized_peer_address);
-                }
+                bool already_connected = is_already_connected_to_address(normalized_peer_address);
                 
                 if (!already_connected) {
                     LOG_CLIENT_INFO("Attempting to connect to discovered rats peer: " << ip << ":" << port);
