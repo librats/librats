@@ -760,6 +760,11 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                 
                 // Broadcast peer exchange message to other peers
                 broadcast_peer_exchange_message(peer_copy);
+                
+                // Send peers request to the newly connected peer to discover more peers
+                if (peer_copy.is_outgoing) {
+                    send_peers_request(client_socket, peer_copy.peer_id);
+                }
             }
             
             if (should_exit) {
@@ -1440,6 +1445,12 @@ void RatsClient::handle_rats_message(socket_t socket, const std::string& peer_ha
         if (message_type == "peer") {
             handle_peer_exchange_message(socket, peer_hash_id, payload);
         } 
+        else if (message_type == "peers_request") {
+            handle_peers_request_message(socket, peer_hash_id, payload);
+        }
+        else if (message_type == "peers_response") {
+            handle_peers_response_message(socket, peer_hash_id, payload);
+        }
         // Add more message types here as needed:
         // else if (message_type == "status") {
         //     handle_status_message(socket, peer_hash_id, payload);
@@ -1572,6 +1583,158 @@ void RatsClient::broadcast_peer_exchange_message(const RatsPeer& new_peer) {
     
     LOG_CLIENT_INFO("Broadcasted peer exchange message for " << new_peer.ip << ":" << new_peer.port 
                     << " to " << sent_count << " peers");
+}
+
+// Peers request/response system implementation
+nlohmann::json RatsClient::create_peers_request_message(const std::string& sender_peer_id) {
+    nlohmann::json payload;
+    payload["max_peers"] = 5;  // Request up to 5 peers
+    payload["requester_info"] = {
+        {"listen_port", listen_port_},
+        {"peer_count", get_peer_count()}
+    };
+    
+    return create_rats_message("peers_request", payload, sender_peer_id);
+}
+
+nlohmann::json RatsClient::create_peers_response_message(const std::vector<RatsPeer>& peers, const std::string& sender_peer_id) {
+    nlohmann::json payload;
+    nlohmann::json peers_array = nlohmann::json::array();
+    
+    for (const auto& peer : peers) {
+        nlohmann::json peer_info;
+        peer_info["ip"] = peer.ip;
+        peer_info["port"] = peer.port;
+        peer_info["peer_id"] = peer.peer_id;
+        peer_info["connection_type"] = peer.is_outgoing ? "outgoing" : "incoming";
+        peers_array.push_back(peer_info);
+    }
+    
+    payload["peers"] = peers_array;
+    payload["total_peers"] = get_peer_count();
+    
+    return create_rats_message("peers_response", payload, sender_peer_id);
+}
+
+std::vector<RatsPeer> RatsClient::get_random_peers(int max_count, const std::string& exclude_peer_id) const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    
+    std::vector<RatsPeer> all_validated_peers;
+    
+    // Get all validated peers excluding the specified peer
+    for (const auto& pair : peers_) {
+        const RatsPeer& peer = pair.second;
+        if (peer.is_handshake_completed() && peer.peer_id != exclude_peer_id) {
+            all_validated_peers.push_back(peer);
+        }
+    }
+    
+    // If we have fewer peers than requested, return all
+    if (all_validated_peers.size() <= static_cast<size_t>(max_count)) {
+        return all_validated_peers;
+    }
+    
+    // Randomly select peers
+    std::vector<RatsPeer> selected_peers;
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    
+    // Use random sampling to select peers
+    std::sample(all_validated_peers.begin(), all_validated_peers.end(),
+                std::back_inserter(selected_peers), max_count, gen);
+    
+    return selected_peers;
+}
+
+void RatsClient::handle_peers_request_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
+    try {
+        int max_peers = payload.value("max_peers", 5);
+        
+        LOG_CLIENT_INFO("Received peers request from " << peer_hash_id << " for up to " << max_peers << " peers");
+        
+        // Get random peers excluding the requester
+        std::vector<RatsPeer> random_peers = get_random_peers(max_peers, peer_hash_id);
+        
+        LOG_CLIENT_DEBUG("Sending " << random_peers.size() << " peers to " << peer_hash_id);
+        
+        // Create and send peers response
+        nlohmann::json response_message = create_peers_response_message(random_peers, peer_hash_id);
+        
+        if (!send_json_to_peer(socket, response_message)) {
+            LOG_CLIENT_ERROR("Failed to send peers response to " << peer_hash_id);
+        } else {
+            LOG_CLIENT_DEBUG("Sent peers response with " << random_peers.size() << " peers to " << peer_hash_id);
+        }
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to handle peers request message: " << e.what());
+    }
+}
+
+void RatsClient::handle_peers_response_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
+    try {
+        nlohmann::json peers_array = payload.value("peers", nlohmann::json::array());
+        int total_peers = payload.value("total_peers", 0);
+        
+        LOG_CLIENT_INFO("Received peers response from " << peer_hash_id << " with " << peers_array.size() 
+                        << " peers (total: " << total_peers << ")");
+        
+        // Process each peer in the response
+        for (const auto& peer_info : peers_array) {
+            std::string peer_ip = peer_info.value("ip", "");
+            int peer_port = peer_info.value("port", 0);
+            std::string peer_id = peer_info.value("peer_id", "");
+            
+            if (peer_ip.empty() || peer_port <= 0 || peer_id.empty()) {
+                LOG_CLIENT_WARN("Invalid peer info in peers response from " << peer_hash_id);
+                continue;
+            }
+            
+            LOG_CLIENT_DEBUG("Processing peer from response: " << peer_ip << ":" << peer_port << " (peer_id: " << peer_id << ")");
+            
+            // Check if we should ignore this peer (local interface)
+            if (should_ignore_peer(peer_ip, peer_port)) {
+                LOG_CLIENT_DEBUG("Ignoring peer from response " << peer_ip << ":" << peer_port << " - local interface address");
+                continue;
+            }
+            
+            // Check if we're already connected to this peer
+            std::string normalized_peer_address = normalize_peer_address(peer_ip, peer_port);
+            if (is_already_connected_to_address(normalized_peer_address)) {
+                LOG_CLIENT_DEBUG("Already connected to peer from response " << normalized_peer_address);
+                continue;
+            }
+            
+            // Check if peer limit is reached
+            if (is_peer_limit_reached()) {
+                LOG_CLIENT_DEBUG("Peer limit reached, not connecting to peer from response " << peer_ip << ":" << peer_port);
+                continue;
+            }
+            
+            // Try to connect to the peer (non-blocking)
+            LOG_CLIENT_INFO("Attempting to connect to peer from response: " << peer_ip << ":" << peer_port);
+            std::thread([this, peer_ip, peer_port, peer_id]() {
+                if (connect_to_peer(peer_ip, peer_port)) {
+                    LOG_CLIENT_INFO("Successfully connected to peer from response: " << peer_ip << ":" << peer_port);
+                } else {
+                    LOG_CLIENT_DEBUG("Failed to connect to peer from response: " << peer_ip << ":" << peer_port);
+                }
+            }).detach();
+        }
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to handle peers response message: " << e.what());
+    }
+}
+
+void RatsClient::send_peers_request(socket_t socket, const std::string& our_peer_id) {
+    nlohmann::json request_message = create_peers_request_message(our_peer_id);
+    
+    if (send_json_to_peer(socket, request_message)) {
+        LOG_CLIENT_INFO("Sent peers request to socket " << socket);
+    } else {
+        LOG_CLIENT_ERROR("Failed to send peers request to socket " << socket);
+    }
 }
 
 // Utility functions for custom message types

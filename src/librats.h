@@ -499,6 +499,14 @@ private:
                                     const nlohmann::json& payload, 
                                     const std::string& sender_peer_id = "");
     
+    // Peers request/response system
+    void handle_peers_request_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
+    void handle_peers_response_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
+    nlohmann::json create_peers_request_message(const std::string& sender_peer_id);
+    nlohmann::json create_peers_response_message(const std::vector<RatsPeer>& peers, const std::string& sender_peer_id);
+    std::vector<RatsPeer> get_random_peers(int max_count, const std::string& exclude_peer_id = "") const;
+    void send_peers_request(socket_t socket, const std::string& our_peer_id);
+    
     // Automatic peer discovery
     std::atomic<bool> auto_discovery_running_{false};
     std::thread auto_discovery_thread_;
