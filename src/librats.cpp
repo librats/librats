@@ -727,12 +727,8 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         
         LOG_CLIENT_DEBUG("Received data from " << peer_hash_id << ": " << data.substr(0, 50) << (data.length() > 50 ? "..." : ""));
         
-        // Check if handshake is completed
+        // Check for handshake timeout and failure
         if (!handshake_completed) {
-            // Check current handshake state and copy necessary data
-            RatsPeer peer_copy;
-            bool should_notify_connection = false;
-            bool should_broadcast_exchange = false;
             bool should_exit = false;
             
             {
@@ -742,33 +738,11 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     auto peer_it = peers_.find(it->second);
                     if (peer_it != peers_.end()) {
                         const RatsPeer& peer = peer_it->second;
-                        if (peer.is_handshake_completed()) {
-                            handshake_completed = true;
-                            should_notify_connection = true;
-                            should_broadcast_exchange = true;
-                            peer_copy = peer; // Copy peer data
-                            
-                            LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (peer_id: " << peer.peer_id << ")");
-                        } else if (peer.is_handshake_failed()) {
+                        if (peer.is_handshake_failed()) {
                             LOG_CLIENT_ERROR("Handshake failed for peer " << peer_hash_id);
                             should_exit = true;
                         }
                     }
-                }
-            }
-            
-            // Call callbacks and methods outside of mutex to avoid deadlock
-            if (should_notify_connection) {
-                if (connection_callback_) {
-                    connection_callback_(client_socket, peer_hash_id);
-                }
-                
-                // Broadcast peer exchange message to other peers
-                broadcast_peer_exchange_message(peer_copy);
-                
-                // Send peers request to the newly connected peer to discover more peers
-                if (peer_copy.is_outgoing) {
-                    send_peers_request(client_socket, peer_copy.peer_id);
                 }
             }
             
@@ -790,6 +764,48 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                 LOG_CLIENT_ERROR("Failed to handle handshake message from " << peer_hash_id);
                 break; // Exit loop to disconnect
             }
+            
+            // Check if handshake just completed and trigger notifications
+            if (!handshake_completed) {
+                RatsPeer peer_copy;
+                bool should_notify_connection = false;
+                bool should_broadcast_exchange = false;
+                
+                {
+                    std::lock_guard<std::mutex> lock(peers_mutex_);
+                    auto it = socket_to_peer_id_.find(client_socket);
+                    if (it != socket_to_peer_id_.end()) {
+                        auto peer_it = peers_.find(it->second);
+                        if (peer_it != peers_.end()) {
+                            const RatsPeer& peer = peer_it->second;
+                            if (peer.is_handshake_completed()) {
+                                handshake_completed = true;
+                                should_notify_connection = true;
+                                should_broadcast_exchange = true;
+                                peer_copy = peer; // Copy peer data
+                                
+                                LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (peer_id: " << peer.peer_id << ")");
+                            }
+                        }
+                    }
+                }
+                
+                // Call callbacks and methods outside of mutex to avoid deadlock
+                if (should_notify_connection) {
+                    if (connection_callback_) {
+                        connection_callback_(client_socket, peer_hash_id);
+                    }
+                    
+                    // Broadcast peer exchange message to other peers
+                    broadcast_peer_exchange_message(peer_copy);
+                    
+                    // Send peers request to the newly connected peer to discover more peers
+                    if (peer_copy.is_outgoing) {
+                        send_peers_request(client_socket, peer_copy.peer_id);
+                    }
+                }
+            }
+            
             continue; // Don't process handshake messages as regular data
         }
         
