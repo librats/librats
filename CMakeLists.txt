@@ -91,6 +91,7 @@ if(BUILD_TESTS)
         tests/test_os.cpp
         tests/test_stun.cpp
         tests/test_fs.cpp
+        tests/test_config_persistence.cpp
         tests/test_main.cpp
     )
     

@@ -384,11 +384,41 @@ public:
      */
     bool is_peer_limit_reached() const;
 
+    /**
+     * Get our persistent peer ID
+     * @return The persistent peer ID for this client
+     */
+    std::string get_our_peer_id() const;
+
+    /**
+     * Load configuration from files
+     * @return true if successful, false otherwise
+     */
+    bool load_configuration();
+
+    /**
+     * Save configuration to files
+     * @return true if successful, false otherwise
+     */
+    bool save_configuration();
+
+    /**
+     * Load saved peers and attempt to reconnect
+     * @return Number of connection attempts made
+     */
+    int load_and_reconnect_peers();
+
 private:
     int listen_port_;
     int max_peers_;
     socket_t server_socket_;
     std::atomic<bool> running_;
+    
+    // Configuration persistence
+    std::string our_peer_id_;                               // Our persistent peer ID
+    mutable std::mutex config_mutex_;                       // Protects configuration data
+    static const std::string CONFIG_FILE_NAME;             // "config.json"
+    static const std::string PEERS_FILE_NAME;              // "peers.rats"
     
     // Organized peer management using RatsPeer struct
     std::unordered_map<std::string, RatsPeer> peers_;          // keyed by peer_id
@@ -519,6 +549,14 @@ private:
     void automatic_discovery_loop();
     void announce_rats_peer();
     void search_rats_peers(int iteration_max = 1);
+    
+    // Configuration persistence helpers
+    std::string generate_persistent_peer_id() const;
+    nlohmann::json serialize_peer_for_persistence(const RatsPeer& peer) const;
+    bool deserialize_peer_from_persistence(const nlohmann::json& json, std::string& ip, int& port, std::string& peer_id) const;
+    std::string get_config_file_path() const;
+    std::string get_peers_file_path() const;
+    bool save_peers_to_file(); // Helper method that assumes config_mutex_ is already locked
 };
 
 /**

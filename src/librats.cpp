@@ -2,6 +2,7 @@
 #include "sha1.h"
 #include "os.h"
 #include "network_utils.h"
+#include "fs.h"
 #include "json.hpp" // nlohmann::json
 #include <iostream>
 #include <algorithm>
@@ -30,6 +31,10 @@
 
 namespace librats {
 
+// Configuration file constants
+const std::string RatsClient::CONFIG_FILE_NAME = "config.json";
+const std::string RatsClient::PEERS_FILE_NAME = "peers.rats";
+
 RatsClient::RatsClient(int listen_port, int max_peers) 
     : listen_port_(listen_port), 
       max_peers_(max_peers),
@@ -37,10 +42,16 @@ RatsClient::RatsClient(int listen_port, int max_peers)
       running_(false) {
     // Initialize STUN client
     stun_client_ = std::make_unique<StunClient>();
+    
+    // Load configuration (this will generate peer ID if needed)
+    load_configuration();
 }
 
 RatsClient::~RatsClient() {
     stop();
+    
+    // Save configuration before destruction
+    save_configuration();
 }
 
 std::string RatsClient::generate_peer_hash_id(socket_t socket, const std::string& connection_info) {
@@ -165,6 +176,11 @@ socket_t RatsClient::get_peer_socket(const std::string& peer_hash_id) const {
     return peer ? peer->socket : INVALID_SOCKET_VALUE;
 }
 
+std::string RatsClient::get_our_peer_id() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    return our_peer_id_;
+}
+
 bool RatsClient::start() {
     if (running_.load()) {
         LOG_CLIENT_WARN("RatsClient is already running");
@@ -208,6 +224,17 @@ bool RatsClient::start() {
     server_thread_ = std::thread(&RatsClient::server_loop, this);
     
     LOG_CLIENT_INFO("RatsClient started successfully on port " << listen_port_);
+    
+    // Attempt to reconnect to saved peers
+    std::thread([this]() {
+        // Give the server some time to fully initialize
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        int reconnect_attempts = load_and_reconnect_peers();
+        if (reconnect_attempts > 0) {
+            LOG_CLIENT_INFO("Attempted to reconnect to " << reconnect_attempts << " saved peers");
+        }
+    }).detach();
+    
     return true;
 }
 
@@ -803,6 +830,11 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     if (peer_copy.is_outgoing) {
                         send_peers_request(client_socket, peer_copy.peer_id);
                     }
+                    
+                    // Save configuration after a new peer connects to keep peer list current
+                    std::thread([this]() {
+                        save_configuration();
+                    }).detach();
                 }
             }
             
@@ -841,6 +873,14 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     // Notify disconnect callback only if handshake was completed
     if (handshake_completed && disconnect_callback_) {
         disconnect_callback_(client_socket, peer_hash_id);
+    }
+    
+    // Save configuration after a validated peer disconnects to update the saved peer list
+    if (handshake_completed) {
+        // Save configuration in a separate thread to avoid blocking
+        std::thread([this]() {
+            save_configuration();
+        }).detach();
     }
     
     LOG_CLIENT_INFO("Client disconnected: " << peer_hash_id);
@@ -1296,6 +1336,11 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     
     if (!validate_handshake_message(handshake_msg)) {
         LOG_CLIENT_ERROR("Invalid handshake message from " << peer_hash_id);
+        return false;
+    }
+
+    if (handshake_msg.peer_id == get_our_peer_id()) {
+        LOG_CLIENT_INFO("Received handshake from ourselves, ignoring");
         return false;
     }
     
@@ -1877,4 +1922,363 @@ bool RatsClient::send_custom_message_to_peer(const std::string& peer_id, const s
     return success;
 }
 
-} // namespace librats 
+// Configuration persistence implementation
+std::string RatsClient::generate_persistent_peer_id() const {
+    // Generate a unique peer ID using SHA1 hash of timestamp, random data, and hostname
+    auto now = std::chrono::high_resolution_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    
+    // Get system information for uniqueness
+    SystemInfo sys_info = get_system_info();
+    
+    // Create random component
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 255);
+    
+    // Build unique string
+    std::ostringstream unique_stream;
+    unique_stream << timestamp << "_" << sys_info.hostname << "_" << listen_port_ << "_";
+    
+    // Add random component
+    for (int i = 0; i < 16; ++i) {
+        unique_stream << std::setfill('0') << std::setw(2) << std::hex << dis(gen);
+    }
+    
+    // Generate SHA1 hash of the unique string
+    std::string unique_string = unique_stream.str();
+    std::string peer_id = SHA1::hash(unique_string);
+    
+    LOG_CLIENT_INFO("Generated new persistent peer ID: " << peer_id);
+    return peer_id;
+}
+
+nlohmann::json RatsClient::serialize_peer_for_persistence(const RatsPeer& peer) const {
+    nlohmann::json peer_json;
+    peer_json["ip"] = peer.ip;
+    peer_json["port"] = peer.port;
+    peer_json["peer_id"] = peer.peer_id;
+    peer_json["normalized_address"] = peer.normalized_address;
+    peer_json["is_outgoing"] = peer.is_outgoing;
+    peer_json["version"] = peer.version;
+    
+    // Add timestamp for cleanup of old peers
+    auto now = std::chrono::high_resolution_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    peer_json["last_seen"] = timestamp;
+    
+    return peer_json;
+}
+
+bool RatsClient::deserialize_peer_from_persistence(const nlohmann::json& json, std::string& ip, int& port, std::string& peer_id) const {
+    try {
+        ip = json.value("ip", "");
+        port = json.value("port", 0);
+        peer_id = json.value("peer_id", "");
+        
+        // Validate required fields
+        if (ip.empty() || port <= 0 || port > 65535 || peer_id.empty()) {
+            return false;
+        }
+        
+        // Check if peer data is not too old (optional - remove peers older than 7 days)
+        if (json.contains("last_seen")) {
+            auto now = std::chrono::high_resolution_clock::now();
+            auto current_timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+            int64_t last_seen = json.value("last_seen", current_timestamp);
+            
+            const int64_t MAX_PEER_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 days
+            if (current_timestamp - last_seen > MAX_PEER_AGE_SECONDS) {
+                LOG_CLIENT_DEBUG("Skipping old peer " << ip << ":" << port << " (last seen " << (current_timestamp - last_seen) << " seconds ago)");
+                return false;
+            }
+        }
+        
+        return true;
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to deserialize peer: " << e.what());
+        return false;
+    }
+}
+
+std::string RatsClient::get_config_file_path() const {
+    return CONFIG_FILE_NAME;
+}
+
+std::string RatsClient::get_peers_file_path() const {
+    return PEERS_FILE_NAME;
+}
+
+bool RatsClient::load_configuration() {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    
+    LOG_CLIENT_INFO("Loading configuration from " << get_config_file_path());
+    
+    // Check if config file exists
+    if (!file_exists(get_config_file_path())) {
+        LOG_CLIENT_INFO("No existing configuration found, generating new peer ID");
+        our_peer_id_ = generate_persistent_peer_id();
+        
+        // Save the new configuration immediately
+        {
+            nlohmann::json config;
+            config["peer_id"] = our_peer_id_;
+            config["version"] = RATS_PROTOCOL_VERSION;
+            config["listen_port"] = listen_port_;
+            config["max_peers"] = max_peers_;
+            
+            auto now = std::chrono::high_resolution_clock::now();
+            auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+            config["created_at"] = timestamp;
+            config["last_updated"] = timestamp;
+            
+            std::string config_data = config.dump(4); // Pretty print with 4 spaces
+            if (create_file(get_config_file_path(), config_data)) {
+                LOG_CLIENT_INFO("Created new configuration file with peer ID: " << our_peer_id_);
+            } else {
+                LOG_CLIENT_ERROR("Failed to create configuration file");
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    // Load existing configuration
+    try {
+        std::string config_data = read_file_text_cpp(get_config_file_path());
+        if (config_data.empty()) {
+            LOG_CLIENT_ERROR("Configuration file is empty");
+            return false;
+        }
+        
+        nlohmann::json config = nlohmann::json::parse(config_data);
+        
+        // Load peer ID
+        our_peer_id_ = config.value("peer_id", "");
+        if (our_peer_id_.empty()) {
+            LOG_CLIENT_WARN("No peer ID in configuration, generating new one");
+            our_peer_id_ = generate_persistent_peer_id();
+            return save_configuration(); // Save the new peer ID
+        }
+        
+        LOG_CLIENT_INFO("Loaded configuration with peer ID: " << our_peer_id_);
+        
+        // Update last_updated timestamp
+        auto now = std::chrono::high_resolution_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        config["last_updated"] = timestamp;
+        
+        // Save updated config
+        std::string updated_config_data = config.dump(4);
+        create_file(get_config_file_path(), updated_config_data);
+        
+        return true;
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to parse configuration file: " << e.what());
+        return false;
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to load configuration: " << e.what());
+        return false;
+    }
+}
+
+bool RatsClient::save_configuration() {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    
+    if (our_peer_id_.empty()) {
+        LOG_CLIENT_WARN("No peer ID to save");
+        return false;
+    }
+    
+    LOG_CLIENT_DEBUG("Saving configuration to " << get_config_file_path());
+    
+    try {
+        // Create configuration JSON
+        nlohmann::json config;
+        config["peer_id"] = our_peer_id_;
+        config["version"] = RATS_PROTOCOL_VERSION;
+        config["listen_port"] = listen_port_;
+        config["max_peers"] = max_peers_;
+        
+        auto now = std::chrono::high_resolution_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        config["last_updated"] = timestamp;
+        
+        // If config file exists, preserve created_at timestamp
+        if (file_exists(get_config_file_path())) {
+            try {
+                std::string existing_config_data = read_file_text_cpp(get_config_file_path());
+                nlohmann::json existing_config = nlohmann::json::parse(existing_config_data);
+                if (existing_config.contains("created_at")) {
+                    config["created_at"] = existing_config["created_at"];
+                }
+            } catch (const std::exception&) {
+                // If we can't read existing config, just use current timestamp
+                config["created_at"] = timestamp;
+            }
+        } else {
+            config["created_at"] = timestamp;
+        }
+        
+        // Save configuration
+        std::string config_data = config.dump(4);
+        if (create_file(get_config_file_path(), config_data)) {
+            LOG_CLIENT_DEBUG("Configuration saved successfully");
+        } else {
+            LOG_CLIENT_ERROR("Failed to save configuration file");
+            return false;
+        }
+        
+        // Save peers
+        return save_peers_to_file();
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to create configuration JSON: " << e.what());
+        return false;
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to save configuration: " << e.what());
+        return false;
+    }
+}
+
+bool RatsClient::save_peers_to_file() {
+    // This method assumes config_mutex_ is already locked by save_configuration()
+    
+    LOG_CLIENT_DEBUG("Saving peers to " << get_peers_file_path());
+    
+    try {
+        nlohmann::json peers_json = nlohmann::json::array();
+        
+        // Get validated peers for saving
+        {
+            std::lock_guard<std::mutex> peers_lock(peers_mutex_);
+            for (const auto& pair : peers_) {
+                const RatsPeer& peer = pair.second;
+                // Only save peers that have completed handshake and have valid peer IDs
+                if (peer.is_handshake_completed() && !peer.peer_id.empty()) {
+                    // Don't save ourselves
+                    if (peer.peer_id != our_peer_id_) {
+                        peers_json.push_back(serialize_peer_for_persistence(peer));
+                    }
+                }
+            }
+        }
+        
+        LOG_CLIENT_INFO("Saving " << peers_json.size() << " peers to persistence file");
+        
+        // Save peers file
+        std::string peers_data = peers_json.dump(4);
+        if (create_file(get_peers_file_path(), peers_data)) {
+            LOG_CLIENT_DEBUG("Peers saved successfully");
+            return true;
+        } else {
+            LOG_CLIENT_ERROR("Failed to save peers file");
+            return false;
+        }
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to serialize peers: " << e.what());
+        return false;
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to save peers: " << e.what());
+        return false;
+    }
+}
+
+int RatsClient::load_and_reconnect_peers() {
+    if (!running_.load()) {
+        LOG_CLIENT_DEBUG("Client not running, skipping peer reconnection");
+        return 0;
+    }
+    
+    LOG_CLIENT_INFO("Loading saved peers from " << get_peers_file_path());
+    
+    // Check if peers file exists
+    if (!file_exists(get_peers_file_path())) {
+        LOG_CLIENT_INFO("No saved peers file found");
+        return 0;
+    }
+    
+    try {
+        std::string peers_data = read_file_text_cpp(get_peers_file_path());
+        if (peers_data.empty()) {
+            LOG_CLIENT_INFO("Peers file is empty");
+            return 0;
+        }
+        
+        nlohmann::json peers_json = nlohmann::json::parse(peers_data);
+        
+        if (!peers_json.is_array()) {
+            LOG_CLIENT_ERROR("Invalid peers file format - expected array");
+            return 0;
+        }
+        
+        int reconnect_attempts = 0;
+        
+        for (const auto& peer_json : peers_json) {
+            std::string ip;
+            int port;
+            std::string peer_id;
+            
+            if (!deserialize_peer_from_persistence(peer_json, ip, port, peer_id)) {
+                continue; // Skip invalid or old peers
+            }
+            
+            // Don't connect to ourselves
+            if (peer_id == get_our_peer_id()) {
+                LOG_CLIENT_DEBUG("Skipping connection to ourselves: " << peer_id);
+                continue;
+            }
+            
+            // Check if we should ignore this peer (local interface)
+            if (should_ignore_peer(ip, port)) {
+                LOG_CLIENT_DEBUG("Ignoring saved peer " << ip << ":" << port << " - local interface address");
+                continue;
+            }
+            
+            // Check if we're already connected to this peer
+            std::string normalized_peer_address = normalize_peer_address(ip, port);
+            if (is_already_connected_to_address(normalized_peer_address)) {
+                LOG_CLIENT_DEBUG("Already connected to saved peer " << normalized_peer_address);
+                continue;
+            }
+            
+            // Check if peer limit is reached
+            if (is_peer_limit_reached()) {
+                LOG_CLIENT_DEBUG("Peer limit reached, stopping reconnection attempts");
+                break;
+            }
+            
+            LOG_CLIENT_INFO("Attempting to reconnect to saved peer: " << ip << ":" << port << " (peer_id: " << peer_id << ")");
+            
+            // Attempt to connect (non-blocking)
+            std::thread([this, ip, port, peer_id]() {
+                if (connect_to_peer(ip, port)) {
+                    LOG_CLIENT_INFO("Successfully reconnected to saved peer: " << ip << ":" << port);
+                } else {
+                    LOG_CLIENT_DEBUG("Failed to reconnect to saved peer: " << ip << ":" << port);
+                }
+            }).detach();
+            
+            reconnect_attempts++;
+            
+            // Small delay between connection attempts to avoid overwhelming the network
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        
+        LOG_CLIENT_INFO("Processed " << peers_json.size() << " saved peers, attempted " << reconnect_attempts << " reconnections");
+        return reconnect_attempts;
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to parse saved peers file: " << e.what());
+        return 0;
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to load saved peers: " << e.what());
+        return 0;
+    }
+}
+
+} // namespace librats
