@@ -29,6 +29,10 @@ add_library(librats
     src/fs.cpp
     src/fs.h
     src/logger.h
+    src/noise.cpp
+    src/noise.h
+    src/encrypted_socket.cpp
+    src/encrypted_socket.h
 )
 
 # Include directories
@@ -98,6 +102,7 @@ if(BUILD_TESTS)
         tests/test_config_persistence.cpp
         tests/test_main.cpp
         tests/test_message_exchange.cpp
+        tests/test_noise.cpp
     )
     
     # Link with GoogleTest and our library

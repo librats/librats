@@ -4,6 +4,7 @@
 #include "dht.h"
 #include "stun.h"
 #include "logger.h"
+#include "encrypted_socket.h"
 #include "json.hpp" // nlohmann::json
 #include <string>
 #include <functional>
@@ -42,19 +43,28 @@ struct RatsPeer {
     int peer_count;                         // Number of peers connected to remote peer
     std::chrono::steady_clock::time_point handshake_start_time; // When handshake started
     
+    // Encryption-related fields
+    bool encryption_enabled;                // Whether encryption is enabled for this peer
+    bool noise_handshake_completed;         // Whether noise handshake is completed
+    NoiseKey remote_static_key;             // Remote peer's static public key (after handshake)
+    
     RatsPeer() : port(0), socket(INVALID_SOCKET_VALUE), is_outgoing(false), 
-                 handshake_state(HandshakeState::PENDING), peer_count(0) {
+                 handshake_state(HandshakeState::PENDING), peer_count(0),
+                 encryption_enabled(false), noise_handshake_completed(false) {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
+        remote_static_key.fill(0);
     }
     
     RatsPeer(const std::string& peer_id, const std::string& ip, uint16_t port, 
              socket_t socket, const std::string& normalized_address, bool is_outgoing)
         : peer_id(peer_id), ip(ip), port(port), socket(socket), 
           normalized_address(normalized_address), is_outgoing(is_outgoing), 
-          handshake_state(HandshakeState::PENDING), peer_count(0) {
+          handshake_state(HandshakeState::PENDING), peer_count(0),
+          encryption_enabled(false), noise_handshake_completed(false) {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
+        remote_static_key.fill(0);
     }
     
     /**
@@ -444,6 +454,53 @@ public:
      * @return The persistent peer ID for this client
      */
     std::string get_our_peer_id() const;
+    
+    // ===== ENCRYPTION METHODS =====
+    
+    /**
+     * Initialize encryption for this client
+     * @param enable Whether to enable encryption (default: true)
+     * @return true if successful, false otherwise
+     */
+    bool initialize_encryption(bool enable = true);
+    
+    /**
+     * Enable or disable encryption for new connections
+     * @param enabled Whether encryption should be enabled
+     */
+    void set_encryption_enabled(bool enabled);
+    
+    /**
+     * Check if encryption is enabled
+     * @return true if encryption is enabled, false otherwise
+     */
+    bool is_encryption_enabled() const;
+    
+    /**
+     * Get the static encryption key for this client
+     * @return The static key as hex string
+     */
+    std::string get_encryption_key() const;
+    
+    /**
+     * Set the static encryption key for this client
+     * @param key_hex The static key as hex string
+     * @return true if successful, false otherwise
+     */
+    bool set_encryption_key(const std::string& key_hex);
+    
+    /**
+     * Generate a new encryption key for this client
+     * @return The new key as hex string
+     */
+    std::string generate_new_encryption_key();
+    
+    /**
+     * Check if a peer has completed noise handshake
+     * @param peer_id The peer ID to check
+     * @return true if noise handshake is completed, false otherwise
+     */
+    bool is_peer_encrypted(const std::string& peer_id) const;
 
     /**
      * Load configuration from files
@@ -474,6 +531,11 @@ private:
     mutable std::mutex config_mutex_;                       // Protects configuration data
     static const std::string CONFIG_FILE_NAME;             // "config.json"
     static const std::string PEERS_FILE_NAME;              // "peers.rats"
+    
+    // Encryption state
+    NoiseKey static_encryption_key_;                        // Our static encryption key
+    bool encryption_enabled_;                               // Whether encryption is enabled
+    mutable std::mutex encryption_mutex_;                   // Protects encryption state
     
     // Organized peer management using RatsPeer struct
     std::unordered_map<std::string, RatsPeer> peers_;          // keyed by peer_id

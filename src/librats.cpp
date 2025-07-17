@@ -39,9 +39,13 @@ RatsClient::RatsClient(int listen_port, int max_peers)
     : listen_port_(listen_port), 
       max_peers_(max_peers),
       server_socket_(INVALID_SOCKET_VALUE),
-      running_(false) {
+      running_(false),
+      encryption_enabled_(true) {
     // Initialize STUN client
     stun_client_ = std::make_unique<StunClient>();
+    
+    // Generate encryption key
+    static_encryption_key_ = encrypted_communication::generate_node_key();
     
     // Load configuration (this will generate peer ID if needed)
     load_configuration();
@@ -203,6 +207,12 @@ bool RatsClient::start() {
     // Initialize socket library first (required for all socket operations)
     init_socket_library();
     
+    // Initialize encryption
+    if (!initialize_encryption(encryption_enabled_)) {
+        LOG_CLIENT_ERROR("Failed to initialize encryption");
+        return false;
+    }
+    
     // Initialize local interface addresses for connection blocking
     initialize_local_addresses();
     
@@ -311,6 +321,15 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
         return false;
     }
     
+    // Initialize encryption for outgoing connection
+    if (is_encryption_enabled()) {
+        if (!encrypted_communication::initialize_outgoing_connection(peer_socket)) {
+            LOG_CLIENT_ERROR("Failed to initialize encryption for outgoing connection to " << host << ":" << port);
+            close_socket(peer_socket);
+            return false;
+        }
+    }
+    
     // Generate unique hash ID for this peer
     std::string connection_info = host + ":" + std::to_string(port);
     std::string peer_hash_id = generate_peer_hash_id(peer_socket, connection_info); // Temporary hash ID (real hash ID will be set after handshake)
@@ -319,6 +338,7 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
         RatsPeer new_peer(peer_hash_id, host, port, peer_socket, peer_address, true); // true = outgoing connection
+        new_peer.encryption_enabled = is_encryption_enabled();
         add_peer(new_peer);
     }
     
@@ -343,8 +363,21 @@ bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
         return false;
     }
     
-    int sent = send_tcp_data(socket, data);
-    return sent > 0;
+    // Use encrypted communication if encryption is enabled
+    if (is_encryption_enabled()) {
+        // Check if handshake is completed before sending data
+        if (!encrypted_communication::is_handshake_completed(socket)) {
+            LOG_CLIENT_WARN("Cannot send data to socket " << socket << " - encryption handshake not completed");
+            return false;
+        }
+        
+        int sent = encrypted_communication::send_tcp_data_encrypted(socket, data);
+        return sent > 0;
+    } else {
+        // Fall back to unencrypted communication
+        int sent = send_tcp_data(socket, data);
+        return sent > 0;
+    }
 }
 
 bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& json_data) {
@@ -435,6 +468,12 @@ int RatsClient::broadcast_to_peers(const std::string& data) {
 
 void RatsClient::disconnect_peer(socket_t socket) {
     remove_peer(socket);
+    
+    // Clean up encryption state
+    if (is_encryption_enabled()) {
+        encrypted_communication::cleanup_socket(socket);
+    }
+    
     close_socket(socket);
 }
 
@@ -699,6 +738,15 @@ void RatsClient::server_loop() {
             continue;
         }
 
+        // Initialize encryption for incoming connection
+        if (is_encryption_enabled()) {
+            if (!encrypted_communication::initialize_incoming_connection(client_socket)) {
+                LOG_SERVER_ERROR("Failed to initialize encryption for incoming connection from " << normalized_peer_address);
+                close_socket(client_socket);
+                continue;
+            }
+        }
+
         // Generate unique hash ID for this incoming client
         std::string connection_info = "incoming_from_" + peer_address;
         std::string peer_hash_id = generate_peer_hash_id(client_socket, connection_info); // Temporary hash ID (real hash ID will be set after handshake)
@@ -707,6 +755,7 @@ void RatsClient::server_loop() {
         {
             std::lock_guard<std::mutex> lock(peers_mutex_);
             RatsPeer new_peer(peer_hash_id, ip, port, client_socket, normalized_peer_address, false); // false = incoming connection
+            new_peer.encryption_enabled = is_encryption_enabled();
             add_peer(new_peer);
         }
         
@@ -724,10 +773,54 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     LOG_CLIENT_INFO("Started handling client: " << peer_hash_id);
     
     bool handshake_completed = false;
+    bool noise_handshake_completed = false;
     auto last_timeout_check = std::chrono::steady_clock::now();
     
+    // Check if encryption is enabled for this connection
+    bool encryption_enabled = is_encryption_enabled();
+    
     while (running_.load()) {
-        std::string data = receive_tcp_data(client_socket);
+        std::string data;
+        
+        // Handle encryption handshake first if enabled
+        if (encryption_enabled && !noise_handshake_completed) {
+            // Check if noise handshake is completed
+            if (encrypted_communication::is_handshake_completed(client_socket)) {
+                noise_handshake_completed = true;
+                
+                // Update peer state
+                {
+                    std::lock_guard<std::mutex> lock(peers_mutex_);
+                    auto it = socket_to_peer_id_.find(client_socket);
+                    if (it != socket_to_peer_id_.end()) {
+                        auto peer_it = peers_.find(it->second);
+                        if (peer_it != peers_.end()) {
+                            peer_it->second.noise_handshake_completed = true;
+                        }
+                    }
+                }
+                
+                LOG_CLIENT_INFO("Noise handshake completed for peer " << peer_hash_id);
+            } else {
+                // Try to perform handshake step
+                if (!encrypted_communication::perform_handshake(client_socket)) {
+                    LOG_CLIENT_ERROR("Encryption handshake failed for peer " << peer_hash_id);
+                    break;
+                }
+                
+                // Continue to next iteration to check handshake status
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+        }
+        
+        // Receive data (encrypted or unencrypted based on settings)
+        if (encryption_enabled && noise_handshake_completed) {
+            data = encrypted_communication::receive_tcp_data_encrypted(client_socket);
+        } else {
+            data = receive_tcp_data(client_socket);
+        }
+        
         if (data.empty()) {
             // Check if this is a timeout or actual connection close
             if (!handshake_completed) {
@@ -841,8 +934,8 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
             continue; // Don't process handshake messages as regular data
         }
         
-        // Only process regular data after handshake is completed
-        if (handshake_completed) {
+        // Only process regular data after handshake is completed (and noise handshake if encryption is enabled)
+        if (handshake_completed && (!encryption_enabled || noise_handshake_completed)) {
             // Try to parse as JSON rats message first
             nlohmann::json json_msg;
             if (parse_json_message(data, json_msg)) {
@@ -868,6 +961,12 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     
     // Clean up
     remove_peer(client_socket);
+    
+    // Clean up encryption state
+    if (encryption_enabled) {
+        encrypted_communication::cleanup_socket(client_socket);
+    }
+    
     close_socket(client_socket);
     
     // Notify disconnect callback only if handshake was completed
@@ -990,7 +1089,9 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
     
     // Set up connection callback
     client.set_connection_callback([&client](socket_t socket, const std::string& peer_hash_id) {
+        bool is_encrypted = client.is_peer_encrypted(peer_hash_id);
         LOG_MAIN_INFO("New validated connection (handshake completed): " << peer_hash_id << " (socket: " << socket << ")");
+        LOG_MAIN_INFO("Encryption status: " << (is_encrypted ? "ENCRYPTED" : "UNENCRYPTED"));
         LOG_MAIN_INFO("Total connected peers: " << client.get_peer_count() << "/" << client.get_max_peers());
     });
     
@@ -1046,6 +1147,14 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
         LOG_MAIN_ERROR("Failed to start RatsClient");
         return;
     }
+    
+    // Print encryption information
+    LOG_MAIN_INFO("=== Encryption Information ===");
+    LOG_MAIN_INFO("Encryption enabled: " << (client.is_encryption_enabled() ? "YES" : "NO"));
+    if (client.is_encryption_enabled()) {
+        LOG_MAIN_INFO("Static encryption key: " << client.get_encryption_key());
+    }
+    LOG_MAIN_INFO("==============================");
     
     // If peer information is provided, connect to peer
     if (!peer_host.empty() && peer_port > 0) {
@@ -2113,6 +2222,32 @@ bool RatsClient::load_configuration() {
         
         LOG_CLIENT_INFO("Loaded configuration with peer ID: " << our_peer_id_);
         
+        // Load encryption settings
+        if (config.contains("encryption_enabled")) {
+            encryption_enabled_ = config.value("encryption_enabled", true);
+        }
+        
+        if (config.contains("encryption_key")) {
+            std::string key_hex = config.value("encryption_key", "");
+            if (!key_hex.empty()) {
+                NoiseKey loaded_key = EncryptedSocket::string_to_key(key_hex);
+                // Validate key
+                bool is_valid = false;
+                for (uint8_t byte : loaded_key) {
+                    if (byte != 0) {
+                        is_valid = true;
+                        break;
+                    }
+                }
+                if (is_valid) {
+                    static_encryption_key_ = loaded_key;
+                    LOG_CLIENT_INFO("Loaded encryption key from configuration");
+                } else {
+                    LOG_CLIENT_WARN("Invalid encryption key in configuration, using generated key");
+                }
+            }
+        }
+        
         // Update last_updated timestamp
         auto now = std::chrono::high_resolution_clock::now();
         auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
@@ -2150,6 +2285,8 @@ bool RatsClient::save_configuration() {
         config["version"] = RATS_PROTOCOL_VERSION;
         config["listen_port"] = listen_port_;
         config["max_peers"] = max_peers_;
+        config["encryption_enabled"] = encryption_enabled_;
+        config["encryption_key"] = get_encryption_key();
         
         auto now = std::chrono::high_resolution_clock::now();
         auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
@@ -2503,6 +2640,106 @@ void RatsClient::remove_once_handlers(const std::string& message_type) {
             message_handlers_.erase(it);
         }
     }
+}
+
+//=============================================================================
+// Encryption Methods Implementation
+//=============================================================================
+
+bool RatsClient::initialize_encryption(bool enable) {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    
+    encryption_enabled_ = enable;
+    
+    if (enable) {
+        // Initialize the encryption system with our static key
+        bool success = encrypted_communication::initialize_encryption(static_encryption_key_);
+        if (!success) {
+            LOG_CLIENT_ERROR("Failed to initialize encryption system");
+            encryption_enabled_ = false;
+            return false;
+        }
+        
+        LOG_CLIENT_INFO("Encryption initialized and enabled");
+    } else {
+        encrypted_communication::set_encryption_enabled(false);
+        LOG_CLIENT_INFO("Encryption disabled");
+    }
+    
+    return true;
+}
+
+void RatsClient::set_encryption_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    encryption_enabled_ = enabled;
+    encrypted_communication::set_encryption_enabled(enabled);
+    
+    LOG_CLIENT_INFO("Encryption " << (enabled ? "enabled" : "disabled"));
+}
+
+bool RatsClient::is_encryption_enabled() const {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    return encryption_enabled_;
+}
+
+std::string RatsClient::get_encryption_key() const {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    return EncryptedSocket::key_to_string(static_encryption_key_);
+}
+
+bool RatsClient::set_encryption_key(const std::string& key_hex) {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    
+    NoiseKey new_key = EncryptedSocket::string_to_key(key_hex);
+    
+    // Validate key (check if it's not all zeros)
+    bool is_valid = false;
+    for (uint8_t byte : new_key) {
+        if (byte != 0) {
+            is_valid = true;
+            break;
+        }
+    }
+    
+    if (!is_valid) {
+        LOG_CLIENT_ERROR("Invalid encryption key provided");
+        return false;
+    }
+    
+    static_encryption_key_ = new_key;
+    
+    // Reinitialize encryption system if it's enabled
+    if (encryption_enabled_) {
+        encrypted_communication::initialize_encryption(static_encryption_key_);
+    }
+    
+    LOG_CLIENT_INFO("Updated encryption key");
+    return true;
+}
+
+std::string RatsClient::generate_new_encryption_key() {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    
+    static_encryption_key_ = encrypted_communication::generate_node_key();
+    
+    // Reinitialize encryption system if it's enabled
+    if (encryption_enabled_) {
+        encrypted_communication::initialize_encryption(static_encryption_key_);
+    }
+    
+    std::string key_hex = EncryptedSocket::key_to_string(static_encryption_key_);
+    LOG_CLIENT_INFO("Generated new encryption key: " << key_hex);
+    
+    return key_hex;
+}
+
+bool RatsClient::is_peer_encrypted(const std::string& peer_id) const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = peers_.find(peer_id);
+    if (it != peers_.end()) {
+        return it->second.encryption_enabled && it->second.noise_handshake_completed;
+    }
+    return false;
 }
 
 } // namespace librats
