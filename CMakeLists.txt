@@ -14,6 +14,8 @@ add_library(librats
     src/dht.h
     src/bencode.cpp
     src/bencode.h
+    src/bittorrent.cpp
+    src/bittorrent.h
     src/krpc.cpp
     src/krpc.h
     src/librats.cpp
