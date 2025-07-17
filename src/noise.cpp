@@ -260,7 +260,12 @@ std::vector<uint8_t> NoiseCrypto::encrypt(const NoiseKey& key, uint64_t nonce,
     state[14] = (uint32_t)(nonce >> 32);
     state[15] = 0;
     
-    // Generate keystream and encrypt
+    // Generate Poly1305 key (use counter 0)
+    uint32_t poly_key[16];
+    ChaCha20::chacha20_block(poly_key, state);
+    
+    // Generate keystream and encrypt (start from counter 1)
+    state[12] = 1;
     for (size_t i = 0; i < plaintext.size(); i += 64) {
         uint32_t keystream[16];
         ChaCha20::chacha20_block(keystream, state);
@@ -271,13 +276,6 @@ std::vector<uint8_t> NoiseCrypto::encrypt(const NoiseKey& key, uint64_t nonce,
             ciphertext[i + j] = plaintext[i + j] ^ ((uint8_t*)keystream)[j];
         }
     }
-    
-    // Generate Poly1305 key
-    uint32_t poly_state[16];
-    std::memcpy(poly_state, state, sizeof(state));
-    poly_state[12] = 0;
-    uint32_t poly_key[16];
-    ChaCha20::chacha20_block(poly_key, poly_state);
     
     // Calculate MAC
     std::vector<uint8_t> mac_data;
@@ -839,8 +837,17 @@ std::vector<uint8_t> NoiseSession::create_handshake_message(const std::vector<ui
     
     if (handshake_state_->is_completed()) {
         auto cipher_states = handshake_state_->get_cipher_states();
-        send_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.first));
-        receive_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.second));
+        
+        // According to Noise protocol spec: initiator gets (send=first, receive=second)
+        // responder gets (send=second, receive=first)
+        if (handshake_state_->get_role() == NoiseRole::INITIATOR) {
+            send_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.first));
+            receive_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.second));
+        } else {
+            send_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.second));
+            receive_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.first));
+        }
+        
         handshake_completed_ = true;
         LOG_NOISE_INFO("Handshake completed, transport encryption enabled");
     }
@@ -858,8 +865,17 @@ std::vector<uint8_t> NoiseSession::process_handshake_message(const std::vector<u
     
     if (handshake_state_->is_completed()) {
         auto cipher_states = handshake_state_->get_cipher_states();
-        send_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.first));
-        receive_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.second));
+        
+        // According to Noise protocol spec: initiator gets (send=first, receive=second)
+        // responder gets (send=second, receive=first)
+        if (handshake_state_->get_role() == NoiseRole::INITIATOR) {
+            send_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.first));
+            receive_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.second));
+        } else {
+            send_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.second));
+            receive_cipher_ = std::make_unique<NoiseCipherState>(std::move(cipher_states.first));
+        }
+        
         handshake_completed_ = true;
         LOG_NOISE_INFO("Handshake completed, transport encryption enabled");
     }
@@ -887,6 +903,10 @@ std::vector<uint8_t> NoiseSession::decrypt_transport_message(const std::vector<u
 
 NoiseRole NoiseSession::get_role() const {
     return handshake_state_->get_role();
+}
+
+NoiseHandshakeState NoiseSession::get_handshake_state() const {
+    return handshake_state_->get_state();
 }
 
 const NoiseKey& NoiseSession::get_remote_static_public_key() const {

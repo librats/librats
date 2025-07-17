@@ -188,6 +188,7 @@ public:
     
     // Utility functions
     NoiseRole get_role() const;
+    NoiseHandshakeState get_handshake_state() const;
     const NoiseKey& get_remote_static_public_key() const;
     
 private:
