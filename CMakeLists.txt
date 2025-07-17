@@ -59,6 +59,8 @@ set_target_properties(rats PROPERTIES
 option(BUILD_TESTS "Build unit tests" ON)
 
 if(BUILD_TESTS)
+    target_compile_definitions(librats PUBLIC TESTING)
+
     # Enable testing
     enable_testing()
     

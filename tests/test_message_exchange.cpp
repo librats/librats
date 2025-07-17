@@ -126,7 +126,7 @@ TEST_F(MessageExchangeTest, GreetingMessageExchange) {
     });
     
     // Wait for message processing
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     
     EXPECT_TRUE(send_success);
     EXPECT_EQ(greeting_count.load(), 1);

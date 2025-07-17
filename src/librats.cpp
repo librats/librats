@@ -328,7 +328,7 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     LOG_CLIENT_INFO("Successfully connected to peer " << connection_info << " (hash: " << peer_hash_id << ")");
     
     // Initiate handshake for outgoing connections
-    if (!send_handshake(peer_socket, peer_hash_id)) {
+    if (!send_handshake(peer_socket, get_our_peer_id())) {
         LOG_CLIENT_ERROR("Failed to initiate handshake with peer " << peer_hash_id);
         disconnect_peer(peer_socket);
         return false;
@@ -1432,7 +1432,7 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     // Simplified handshake logic - just one message type
     if (peer.handshake_state == RatsPeer::HandshakeState::PENDING) {
         // This is an incoming handshake - send our handshake back
-        if (send_handshake_unlocked(socket, peer.peer_id)) {
+        if (send_handshake_unlocked(socket, get_our_peer_id())) {
             peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
             log_handshake_completion_unlocked(peer);
             return true;
@@ -2043,11 +2043,19 @@ bool RatsClient::deserialize_peer_from_persistence(const nlohmann::json& json, s
 }
 
 std::string RatsClient::get_config_file_path() const {
-    return CONFIG_FILE_NAME;
+    #ifdef TESTING
+        return "config_" + std::to_string(listen_port_) + ".json";
+    #else
+        return CONFIG_FILE_NAME;
+    #endif
 }
 
 std::string RatsClient::get_peers_file_path() const {
-    return PEERS_FILE_NAME;
+    #ifdef TESTING
+        return "peers_" + std::to_string(listen_port_) + ".json";
+    #else
+        return PEERS_FILE_NAME;
+    #endif
 }
 
 bool RatsClient::load_configuration() {
