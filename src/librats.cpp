@@ -951,18 +951,24 @@ bool RatsClient::is_blocked_address(const std::string& ip_address) const {
 }
 
 bool RatsClient::should_ignore_peer(const std::string& ip, int port) const {
-    // Check if the IP is a local interface address
-    if (is_blocked_address(ip)) {
-        LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - matches local interface address");
-        return true;
-    }
-    
-    // Check if it's the same port and a localhost-like address
+    // Always block connections to ourselves (same port)
     if (port == listen_port_) {
         if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost" || ip == "0.0.0.0" || ip == "::") {
             LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - localhost with same port");
             return true;
         }
+    }
+    
+    // For localhost addresses on different ports, allow the connection (for testing)
+    if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost") {
+        LOG_CLIENT_DEBUG("Allowing localhost peer " << ip << ":" << port << " on different port");
+        return false;
+    }
+    
+    // Check if the IP is a non-localhost local interface address
+    if (is_blocked_address(ip)) {
+        LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - matches local interface address");
+        return true;
     }
     
     return false;
@@ -1395,26 +1401,33 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
         return false;
     }
     
-    RatsPeer& peer = peer_it->second;
-    
     // Store old peer ID for mapping updates
-    std::string old_peer_id = peer.peer_id;
-    
-    // Store remote peer information
-    peer.peer_id = handshake_msg.peer_id;  // Update to real peer ID from handshake
-    peer.version = handshake_msg.version;
+    std::string old_peer_id = peer_it->second.peer_id;
     
     // Update peer mappings with new peer_id if it changed
-    if (old_peer_id != peer.peer_id) {
-        // Update socket mapping
-        socket_to_peer_id_[peer.socket] = peer.peer_id;
+    if (old_peer_id != handshake_msg.peer_id) {
+        // Create a copy of the peer object before erasing it.
+        RatsPeer peer_copy = peer_it->second;
         
-        // Create a copy of the peer with updated ID and re-insert
-        RatsPeer updated_peer = peer;
-        peers_.erase(peer_it);  // Remove using iterator
-        peers_[updated_peer.peer_id] = updated_peer;  // Insert with new ID
-        // address_to_peer_id_ stays the same since address doesn't change
+        // Erase the old entry from the main peers map.
+        peers_.erase(peer_it);
+        
+        // Update the peer_id within the copied object.
+        peer_copy.peer_id = handshake_msg.peer_id;
+        
+        // Insert the updated peer object back into the maps with the new peer_id.
+        peers_[peer_copy.peer_id] = peer_copy;
+        socket_to_peer_id_[socket] = peer_copy.peer_id;
+        address_to_peer_id_[peer_copy.normalized_address] = peer_copy.peer_id;
+
+        // Find the iterator for the newly inserted peer.
+        peer_it = peers_.find(peer_copy.peer_id);
     }
+
+    RatsPeer& peer = peer_it->second;
+
+    // Store remote peer information
+    peer.version = handshake_msg.version;
     
     // Simplified handshake logic - just one message type
     if (peer.handshake_state == RatsPeer::HandshakeState::PENDING) {
@@ -2312,7 +2325,7 @@ int RatsClient::load_and_reconnect_peers() {
 void RatsClient::on(const std::string& message_type, MessageCallback callback) {
     std::lock_guard<std::mutex> lock(message_handlers_mutex_);
     message_handlers_[message_type].emplace_back(callback, false); // false = not once
-    LOG_CLIENT_DEBUG("Registered persistent handler for message type: " << message_type);
+    LOG_CLIENT_INFO("Registered persistent handler for message type: " << message_type << " (total handlers: " << message_handlers_[message_type].size() << ")");
 }
 
 void RatsClient::once(const std::string& message_type, MessageCallback callback) {
@@ -2333,11 +2346,14 @@ void RatsClient::off(const std::string& message_type) {
 
 void RatsClient::send(const std::string& message_type, const nlohmann::json& data, SendCallback callback) {
     if (!running_.load()) {
+        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' - client is not running");
         if (callback) {
             callback(false, "Client is not running");
         }
         return;
     }
+    
+    LOG_CLIENT_INFO("Sending broadcast message type '" << message_type << "' with data: " << data.dump());
     
     // Create rats message
     nlohmann::json message = create_rats_message(message_type, data, get_our_peer_id());
@@ -2345,12 +2361,13 @@ void RatsClient::send(const std::string& message_type, const nlohmann::json& dat
     // Broadcast to all validated peers
     int sent_count = broadcast_rats_message_to_validated_peers(message);
     
-    LOG_CLIENT_DEBUG("Broadcasted message type '" << message_type << "' to " << sent_count << " peers");
+    LOG_CLIENT_INFO("Broadcasted message type '" << message_type << "' to " << sent_count << " peers");
     
     if (callback) {
         if (sent_count > 0) {
             callback(true, "");
         } else {
+            LOG_CLIENT_WARN("No peers to send message to");
             callback(false, "No peers to send message to");
         }
     }
@@ -2358,11 +2375,14 @@ void RatsClient::send(const std::string& message_type, const nlohmann::json& dat
 
 void RatsClient::send(const std::string& peer_id, const std::string& message_type, const nlohmann::json& data, SendCallback callback) {
     if (!running_.load()) {
+        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' to peer " << peer_id << " - client is not running");
         if (callback) {
             callback(false, "Client is not running");
         }
         return;
     }
+    
+    LOG_CLIENT_INFO("Sending targeted message type '" << message_type << "' to peer " << peer_id << " with data: " << data.dump());
     
     // Create rats message
     nlohmann::json message = create_rats_message(message_type, data, get_our_peer_id());
@@ -2385,6 +2405,7 @@ void RatsClient::send(const std::string& peer_id, const std::string& message_typ
     }
     
     if (!peer_found) {
+        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' - peer not found: " << peer_id);
         if (callback) {
             callback(false, "Peer not found: " + peer_id);
         }
@@ -2392,6 +2413,7 @@ void RatsClient::send(const std::string& peer_id, const std::string& message_typ
     }
     
     if (!handshake_completed) {
+        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' - peer handshake not completed: " << peer_id);
         if (callback) {
             callback(false, "Peer handshake not completed: " + peer_id);
         }
@@ -2400,7 +2422,7 @@ void RatsClient::send(const std::string& peer_id, const std::string& message_typ
     
     bool success = send_json_to_peer(target_socket, message);
     
-    LOG_CLIENT_DEBUG("Sent message type '" << message_type << "' to peer " << peer_id << " - " << (success ? "success" : "failed"));
+    LOG_CLIENT_INFO("Sent message type '" << message_type << "' to peer " << peer_id << " - " << (success ? "success" : "failed"));
     
     if (callback) {
         if (success) {
@@ -2415,6 +2437,8 @@ void RatsClient::send(const std::string& peer_id, const std::string& message_typ
 void RatsClient::call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data) {
     std::vector<MessageHandler> handlers_to_call;
     std::vector<MessageHandler> remaining_handlers;
+    
+    LOG_CLIENT_INFO("Calling message handlers for type '" << message_type << "' from peer " << peer_id << " with data: " << data.dump());
     
     // Get handlers to call and identify once handlers
     {
@@ -2432,13 +2456,19 @@ void RatsClient::call_message_handlers(const std::string& message_type, const st
             
             // Update the handlers list (removes once handlers)
             it->second = remaining_handlers;
+        } else {
+            LOG_CLIENT_WARN("No handlers registered for message type '" << message_type << "'");
         }
     }
+    
+    LOG_CLIENT_INFO("Found " << handlers_to_call.size() << " handlers for message type '" << message_type << "'");
     
     // Call handlers outside of mutex to avoid deadlock
     for (const auto& handler : handlers_to_call) {
         try {
+            LOG_CLIENT_INFO("Calling handler for message type '" << message_type << "'");
             handler.callback(peer_id, data);
+            LOG_CLIENT_INFO("Handler for message type '" << message_type << "' completed successfully");
         } catch (const std::exception& e) {
             LOG_CLIENT_ERROR("Exception in message handler for type '" << message_type << "': " << e.what());
         } catch (...) {
@@ -2447,7 +2477,7 @@ void RatsClient::call_message_handlers(const std::string& message_type, const st
     }
     
     if (!handlers_to_call.empty()) {
-        LOG_CLIENT_DEBUG("Called " << handlers_to_call.size() << " handlers for message type '" << message_type << "'");
+        LOG_CLIENT_INFO("Called " << handlers_to_call.size() << " handlers for message type '" << message_type << "'");
     }
 }
 
