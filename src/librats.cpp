@@ -982,34 +982,47 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
     
     RatsClient client(listen_port, 10); // Default 10 max peers
     
-    // Set up callbacks
+    // Set up connection callback
     client.set_connection_callback([&client](socket_t socket, const std::string& peer_hash_id) {
         LOG_MAIN_INFO("New validated connection (handshake completed): " << peer_hash_id << " (socket: " << socket << ")");
         LOG_MAIN_INFO("Total connected peers: " << client.get_peer_count() << "/" << client.get_max_peers());
     });
     
+    // Set up message exchange API handlers
+    client.on("greeting", [](const std::string& peer_id, const nlohmann::json& data) {
+        LOG_MAIN_INFO("Received greeting from " << peer_id << ": " << data.value("message", ""));
+    });
+    
+    client.on("status", [](const std::string& peer_id, const nlohmann::json& data) {
+        LOG_MAIN_INFO("Peer " << peer_id << " status: " << data.value("status", "unknown"));
+    });
+    
+    client.once("test_once", [](const std::string& peer_id, const nlohmann::json& data) {
+        LOG_MAIN_INFO("One-time handler triggered by " << peer_id << ": " << data.dump());
+    });
+    
+    // Set up legacy data callback for non-protocol messages
     client.set_data_callback([&client](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
-        LOG_MAIN_INFO("Received from peer " << peer_hash_id << ": " << data);
+        LOG_MAIN_INFO("Received legacy data from peer " << peer_hash_id << ": " << data);
         
         // Try to parse as JSON first
         nlohmann::json json_data;
         if (client.parse_json_message(data, json_data)) {
-            // Check if it's a rats protocol message (these are handled internally)
+            // Check if it's a rats protocol message (these are handled by message exchange API)
             if (json_data.contains("rats_protocol") && json_data["rats_protocol"] == true) {
-                LOG_MAIN_INFO("Received rats protocol message of type: " << json_data.value("type", "unknown"));
+                LOG_MAIN_INFO("Received rats protocol message (handled by API)");
                 return; // Don't echo protocol messages
             }
             
-            LOG_MAIN_INFO("Parsed JSON message with type: " << json_data.value("type", "unknown"));
+            LOG_MAIN_INFO("Parsed legacy JSON message: " << json_data.dump());
             
-            // Create a JSON response
-            nlohmann::json response;
-            response["type"] = "echo_response";
-            response["original_message"] = json_data;
-            response["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+            // Create a JSON response using new API
+            nlohmann::json response_data;
+            response_data["original_message"] = json_data;
+            response_data["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::high_resolution_clock::now().time_since_epoch()).count();
             
-            client.send_json_to_peer(socket, response);
+            client.send("echo_response", response_data);
         } else {
             // Handle as plain text
             std::string response = "Echo: " + data;
@@ -1034,18 +1047,40 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
         if (client.connect_to_peer(peer_host, peer_port)) {
             LOG_MAIN_INFO("Connected to peer " << peer_host << ":" << peer_port);
             
-            // Send a JSON test message
+            // Send test messages using the new message exchange API
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             
-            nlohmann::json test_msg;
-            test_msg["type"] = "greeting";
-            test_msg["message"] = "Hello from RatsClient on port " + std::to_string(listen_port);
-            test_msg["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+            // Send a greeting message
+            nlohmann::json greeting_data;
+            greeting_data["message"] = "Hello from RatsClient on port " + std::to_string(listen_port);
+            greeting_data["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-            test_msg["sender_port"] = listen_port;
+            greeting_data["sender_port"] = listen_port;
             
-            int sent = client.broadcast_json_to_peers(test_msg);
-            LOG_MAIN_INFO("Sent JSON test message to " << sent << " peers");
+            client.send("greeting", greeting_data, [](bool success, const std::string& error) {
+                if (success) {
+                    LOG_MAIN_INFO("Greeting message sent successfully");
+                } else {
+                    LOG_MAIN_ERROR("Failed to send greeting: " << error);
+                }
+            });
+            
+            // Send a status message
+            nlohmann::json status_data;
+            status_data["status"] = "online";
+            status_data["details"] = "Demo client running";
+            status_data["peer_count"] = client.get_peer_count();
+            
+            client.send("status", status_data);
+            
+            // Send a test_once message to demonstrate once handlers
+            nlohmann::json once_data;
+            once_data["message"] = "This should only be handled once";
+            once_data["attempt"] = 1;
+            
+            client.send("test_once", once_data);
+            
+            LOG_MAIN_INFO("Sent test messages using new message exchange API");
             LOG_MAIN_INFO("Peer exchange messages will be sent automatically when new peers connect");
         }
     }
@@ -1545,7 +1580,10 @@ void RatsClient::handle_rats_message(socket_t socket, const std::string& peer_ha
         
         LOG_CLIENT_DEBUG("Received rats message type '" << message_type << "' from " << peer_hash_id);
         
-        // Handle different message types
+        // Call registered message handlers for all message types (including custom ones)
+        call_message_handlers(message_type, sender_peer_id.empty() ? peer_hash_id : sender_peer_id, payload);
+        
+        // Handle built-in message types for internal functionality
         if (message_type == "peer") {
             handle_peer_exchange_message(socket, peer_hash_id, payload);
         } 
@@ -1555,19 +1593,8 @@ void RatsClient::handle_rats_message(socket_t socket, const std::string& peer_ha
         else if (message_type == "peers_response") {
             handle_peers_response_message(socket, peer_hash_id, payload);
         }
-        // Add more message types here as needed:
-        // else if (message_type == "status") {
-        //     handle_status_message(socket, peer_hash_id, payload);
-        // }
-        // else if (message_type == "data") {
-        //     handle_data_message(socket, peer_hash_id, payload);
-        // }
-        // else if (message_type == "announcement") {
-        //     handle_announcement_message(socket, peer_hash_id, payload);
-        // }
-        else {
-            LOG_CLIENT_WARN("Unknown rats message type: " << message_type << " from " << peer_hash_id);
-        }
+        // Custom message types are now handled by registered handlers above
+        // No need for else clause - all message types are valid if they have registered handlers
         
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to handle rats message: " << e.what());
@@ -2278,6 +2305,165 @@ int RatsClient::load_and_reconnect_peers() {
     } catch (const std::exception& e) {
         LOG_CLIENT_ERROR("Failed to load saved peers: " << e.what());
         return 0;
+    }
+}
+
+// Message exchange API implementation
+void RatsClient::on(const std::string& message_type, MessageCallback callback) {
+    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+    message_handlers_[message_type].emplace_back(callback, false); // false = not once
+    LOG_CLIENT_DEBUG("Registered persistent handler for message type: " << message_type);
+}
+
+void RatsClient::once(const std::string& message_type, MessageCallback callback) {
+    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+    message_handlers_[message_type].emplace_back(callback, true); // true = once
+    LOG_CLIENT_DEBUG("Registered one-time handler for message type: " << message_type);
+}
+
+void RatsClient::off(const std::string& message_type) {
+    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+    auto it = message_handlers_.find(message_type);
+    if (it != message_handlers_.end()) {
+        size_t removed_count = it->second.size();
+        message_handlers_.erase(it);
+        LOG_CLIENT_DEBUG("Removed " << removed_count << " handlers for message type: " << message_type);
+    }
+}
+
+void RatsClient::send(const std::string& message_type, const nlohmann::json& data, SendCallback callback) {
+    if (!running_.load()) {
+        if (callback) {
+            callback(false, "Client is not running");
+        }
+        return;
+    }
+    
+    // Create rats message
+    nlohmann::json message = create_rats_message(message_type, data, get_our_peer_id());
+    
+    // Broadcast to all validated peers
+    int sent_count = broadcast_rats_message_to_validated_peers(message);
+    
+    LOG_CLIENT_DEBUG("Broadcasted message type '" << message_type << "' to " << sent_count << " peers");
+    
+    if (callback) {
+        if (sent_count > 0) {
+            callback(true, "");
+        } else {
+            callback(false, "No peers to send message to");
+        }
+    }
+}
+
+void RatsClient::send(const std::string& peer_id, const std::string& message_type, const nlohmann::json& data, SendCallback callback) {
+    if (!running_.load()) {
+        if (callback) {
+            callback(false, "Client is not running");
+        }
+        return;
+    }
+    
+    // Create rats message
+    nlohmann::json message = create_rats_message(message_type, data, get_our_peer_id());
+    
+    // Send to specific peer
+    socket_t target_socket = INVALID_SOCKET_VALUE;
+    bool peer_found = false;
+    bool handshake_completed = false;
+    
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto it = peers_.find(peer_id);
+        if (it != peers_.end()) {
+            peer_found = true;
+            handshake_completed = it->second.is_handshake_completed();
+            if (handshake_completed) {
+                target_socket = it->second.socket;
+            }
+        }
+    }
+    
+    if (!peer_found) {
+        if (callback) {
+            callback(false, "Peer not found: " + peer_id);
+        }
+        return;
+    }
+    
+    if (!handshake_completed) {
+        if (callback) {
+            callback(false, "Peer handshake not completed: " + peer_id);
+        }
+        return;
+    }
+    
+    bool success = send_json_to_peer(target_socket, message);
+    
+    LOG_CLIENT_DEBUG("Sent message type '" << message_type << "' to peer " << peer_id << " - " << (success ? "success" : "failed"));
+    
+    if (callback) {
+        if (success) {
+            callback(true, "");
+        } else {
+            callback(false, "Failed to send message to peer: " + peer_id);
+        }
+    }
+}
+
+// Message exchange system helpers
+void RatsClient::call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data) {
+    std::vector<MessageHandler> handlers_to_call;
+    std::vector<MessageHandler> remaining_handlers;
+    
+    // Get handlers to call and identify once handlers
+    {
+        std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+        auto it = message_handlers_.find(message_type);
+        if (it != message_handlers_.end()) {
+            handlers_to_call = it->second; // Copy handlers
+            
+            // Keep only non-once handlers for the remaining list
+            for (const auto& handler : it->second) {
+                if (!handler.is_once) {
+                    remaining_handlers.push_back(handler);
+                }
+            }
+            
+            // Update the handlers list (removes once handlers)
+            it->second = remaining_handlers;
+        }
+    }
+    
+    // Call handlers outside of mutex to avoid deadlock
+    for (const auto& handler : handlers_to_call) {
+        try {
+            handler.callback(peer_id, data);
+        } catch (const std::exception& e) {
+            LOG_CLIENT_ERROR("Exception in message handler for type '" << message_type << "': " << e.what());
+        } catch (...) {
+            LOG_CLIENT_ERROR("Unknown exception in message handler for type '" << message_type << "'");
+        }
+    }
+    
+    if (!handlers_to_call.empty()) {
+        LOG_CLIENT_DEBUG("Called " << handlers_to_call.size() << " handlers for message type '" << message_type << "'");
+    }
+}
+
+void RatsClient::remove_once_handlers(const std::string& message_type) {
+    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+    auto it = message_handlers_.find(message_type);
+    if (it != message_handlers_.end()) {
+        auto& handlers = it->second;
+        auto new_end = std::remove_if(handlers.begin(), handlers.end(), 
+                                     [](const MessageHandler& handler) { return handler.is_once; });
+        handlers.erase(new_end, handlers.end());
+        
+        // Remove the entire entry if no handlers remain
+        if (handlers.empty()) {
+            message_handlers_.erase(it);
+        }
     }
 }
 

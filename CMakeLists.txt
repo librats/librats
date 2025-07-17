@@ -93,6 +93,7 @@ if(BUILD_TESTS)
         tests/test_fs.cpp
         tests/test_config_persistence.cpp
         tests/test_main.cpp
+        tests/test_message_exchange.cpp
     )
     
     # Link with GoogleTest and our library

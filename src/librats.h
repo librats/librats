@@ -128,6 +128,20 @@ using DataCallback = std::function<void(socket_t socket, const std::string& peer
 using DisconnectCallback = std::function<void(socket_t socket, const std::string& peer_hash_id)>;
 
 /**
+ * Callback function type for handling messages in the event-driven API
+ * @param peer_id The peer ID that sent the message
+ * @param data The message data as JSON
+ */
+using MessageCallback = std::function<void(const std::string& peer_id, const nlohmann::json& data)>;
+
+/**
+ * Callback function type for send operation results
+ * @param success Whether the send operation was successful
+ * @param error Error message if not successful (empty if successful)
+ */
+using SendCallback = std::function<void(bool success, const std::string& error)>;
+
+/**
  * RatsClient class - provides simultaneous client and server functionality
  */
 class RatsClient {
@@ -216,6 +230,47 @@ public:
      * @return true if successful, false otherwise
      */
     bool parse_json_message(const std::string& message, nlohmann::json& out_json);
+
+    // ===== MESSAGE EXCHANGE API =====
+    
+    /**
+     * Register a persistent message handler for a specific message type
+     * @param message_type The type of message to handle
+     * @param callback The callback function to call when this message type is received
+     */
+    void on(const std::string& message_type, MessageCallback callback);
+    
+    /**
+     * Register a one-time message handler for a specific message type
+     * @param message_type The type of message to handle  
+     * @param callback The callback function to call when this message type is received (removed after first call)
+     */
+    void once(const std::string& message_type, MessageCallback callback);
+    
+    /**
+     * Remove all handlers for a specific message type
+     * @param message_type The message type to remove handlers for
+     */
+    void off(const std::string& message_type);
+    
+    /**
+     * Broadcast a message to all validated peers
+     * @param message_type The type of message to send
+     * @param data The message data as JSON
+     * @param callback Optional callback to receive send results
+     */
+    void send(const std::string& message_type, const nlohmann::json& data, SendCallback callback = nullptr);
+    
+    /**
+     * Send a message to a specific peer
+     * @param peer_id The peer ID to send the message to
+     * @param message_type The type of message to send
+     * @param data The message data as JSON  
+     * @param callback Optional callback to receive send results
+     */
+    void send(const std::string& peer_id, const std::string& message_type, const nlohmann::json& data, SendCallback callback = nullptr);
+
+    // ===== END MESSAGE EXCHANGE API =====
     
     /**
      * Disconnect from a specific peer
@@ -557,6 +612,21 @@ private:
     std::string get_config_file_path() const;
     std::string get_peers_file_path() const;
     bool save_peers_to_file(); // Helper method that assumes config_mutex_ is already locked
+
+    // Message exchange system storage
+    struct MessageHandler {
+        MessageCallback callback;
+        bool is_once;
+        
+        MessageHandler(MessageCallback cb, bool once) : callback(cb), is_once(once) {}
+    };
+    
+    std::unordered_map<std::string, std::vector<MessageHandler>> message_handlers_;
+    mutable std::mutex message_handlers_mutex_;
+    
+    // Message exchange system helpers
+    void call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data);
+    void remove_once_handlers(const std::string& message_type);
 };
 
 /**
