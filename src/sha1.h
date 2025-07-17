@@ -24,6 +24,9 @@ public:
     
     // Convenience function to hash a string directly
     static std::string hash(const std::string& input);
+    
+    // Convenience function to hash a vector of bytes directly
+    static std::string hash_bytes(const std::vector<uint8_t>& input);
 
 private:
     void process_block();

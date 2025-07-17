@@ -154,4 +154,10 @@ std::string SHA1::hash(const std::string& input) {
     return hasher.finalize();
 }
 
+std::string SHA1::hash_bytes(const std::vector<uint8_t>& input) {
+    SHA1 hasher;
+    hasher.update(input.data(), input.size());
+    return hasher.finalize();
+}
+
 } // namespace librats 
