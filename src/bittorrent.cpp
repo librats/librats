@@ -1013,3 +1013,995 @@ bool TorrentDownload::is_piece_downloading(PieceIndex piece_index) const {
     std::lock_guard<std::mutex> lock(pieces_mutex_);
     return piece_index < piece_downloading_.size() && piece_downloading_[piece_index];
 }
+
+bool TorrentDownload::store_piece_block(PieceIndex piece_index, uint32_t offset, const std::vector<uint8_t>& data) {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    
+    if (piece_index >= pieces_.size()) {
+        LOG_BT_ERROR("Invalid piece index: " << piece_index);
+        return false;
+    }
+    
+    auto& piece = pieces_[piece_index];
+    
+    // Validate offset and data size
+    if (offset + data.size() > piece->length) {
+        LOG_BT_ERROR("Block data exceeds piece length for piece " << piece_index);
+        return false;
+    }
+    
+    // Calculate block index
+    uint32_t block_index = offset / BLOCK_SIZE;
+    if (block_index >= piece->get_num_blocks()) {
+        LOG_BT_ERROR("Invalid block index: " << block_index << " for piece " << piece_index);
+        return false;
+    }
+    
+    // Store the block data
+    std::copy(data.begin(), data.end(), piece->data.begin() + offset);
+    piece->blocks_downloaded[block_index] = true;
+    
+    LOG_BT_DEBUG("Stored block " << block_index << " for piece " << piece_index 
+                 << " (offset: " << offset << ", size: " << data.size() << ")");
+    
+    // Check if piece is complete
+    if (piece->is_complete() && !piece->verified) {
+        LOG_BT_INFO("Piece " << piece_index << " downloaded, verifying...");
+        if (verify_piece(piece_index)) {
+            piece_completed_[piece_index] = true;
+            piece_downloading_[piece_index] = false;
+            
+            // Write piece to disk
+            write_piece_to_disk(piece_index);
+            
+            // Update statistics
+            total_downloaded_ += piece->length;
+            
+            // Notify completion
+            on_piece_completed(piece_index);
+            
+            LOG_BT_INFO("Piece " << piece_index << " verified and saved");
+            return true;
+        } else {
+            LOG_BT_ERROR("Piece " << piece_index << " verification failed, requesting re-download");
+            // Reset piece for re-download
+            std::fill(piece->blocks_downloaded.begin(), piece->blocks_downloaded.end(), false);
+            piece_downloading_[piece_index] = false;
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+bool TorrentDownload::verify_piece(PieceIndex piece_index) {
+    if (piece_index >= pieces_.size()) {
+        return false;
+    }
+    
+    auto& piece = pieces_[piece_index];
+    
+    // Calculate SHA1 hash of piece data
+    std::string calculated_hash = SHA1::hash_bytes(piece->data);
+    
+    // Convert stored hash to hex string for comparison
+    std::ostringstream stored_hash_hex;
+    for (size_t i = 0; i < piece->hash.size(); ++i) {
+        stored_hash_hex << std::setfill('0') << std::setw(2) << std::hex << static_cast<int>(piece->hash[i]);
+    }
+    
+    bool verified = (calculated_hash == stored_hash_hex.str());
+    piece->verified = verified;
+    
+    LOG_BT_DEBUG("Piece " << piece_index << " verification: " << (verified ? "PASSED" : "FAILED"));
+    return verified;
+}
+
+void TorrentDownload::write_piece_to_disk(PieceIndex piece_index) {
+    std::lock_guard<std::mutex> lock(files_mutex_);
+    
+    if (piece_index >= pieces_.size()) {
+        LOG_BT_ERROR("Invalid piece index for disk write: " << piece_index);
+        return;
+    }
+    
+    auto& piece = pieces_[piece_index];
+    if (!piece->verified) {
+        LOG_BT_ERROR("Attempting to write unverified piece " << piece_index << " to disk");
+        return;
+    }
+    
+    // Calculate piece offset in the torrent
+    uint64_t piece_offset = static_cast<uint64_t>(piece_index) * torrent_info_.get_piece_length();
+    uint64_t remaining_data = piece->length;
+    uint64_t data_offset = 0;
+    
+    // Write piece data to the appropriate files
+    for (const auto& file_info : torrent_info_.get_files()) {
+        if (piece_offset >= file_info.offset + file_info.length) {
+            continue; // This piece doesn't overlap with this file
+        }
+        
+        if (piece_offset + piece->length <= file_info.offset) {
+            break; // No more files will be affected by this piece
+        }
+        
+        // Calculate overlap
+        uint64_t file_start_in_piece = (file_info.offset > piece_offset) ? 
+                                      file_info.offset - piece_offset : 0;
+        uint64_t piece_end = piece_offset + piece->length;
+        uint64_t file_end = file_info.offset + file_info.length;
+        uint64_t write_end = std::min(piece_end, file_end);
+        uint64_t write_length = write_end - (piece_offset + file_start_in_piece);
+        
+        if (write_length == 0) {
+            continue;
+        }
+        
+        // Open file for writing
+        std::string file_path = download_path_ + "/" + file_info.path;
+        std::fstream file(file_path, std::ios::binary | std::ios::in | std::ios::out);
+        
+        if (!file.is_open()) {
+            LOG_BT_ERROR("Failed to open file for writing: " << file_path);
+            continue;
+        }
+        
+        // Seek to correct position in file
+        uint64_t file_offset = (piece_offset > file_info.offset) ? 
+                              piece_offset - file_info.offset : 0;
+        file.seekp(file_offset);
+        
+        // Write data
+        file.write(reinterpret_cast<const char*>(piece->data.data() + file_start_in_piece), 
+                  write_length);
+        
+        if (!file.good()) {
+            LOG_BT_ERROR("Failed to write data to file: " << file_path);
+        }
+        
+        file.close();
+        
+        LOG_BT_DEBUG("Wrote " << write_length << " bytes to file " << file_info.path 
+                     << " at offset " << file_offset);
+    }
+}
+
+std::vector<PieceIndex> TorrentDownload::get_available_pieces() const {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    std::vector<PieceIndex> available_pieces;
+    
+    for (PieceIndex i = 0; i < piece_completed_.size(); ++i) {
+        if (piece_completed_[i]) {
+            available_pieces.push_back(i);
+        }
+    }
+    
+    return available_pieces;
+}
+
+std::vector<PieceIndex> TorrentDownload::get_needed_pieces(const std::vector<bool>& peer_bitfield) const {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    std::vector<PieceIndex> needed_pieces;
+    
+    size_t min_size = std::min(peer_bitfield.size(), piece_completed_.size());
+    for (size_t i = 0; i < min_size; ++i) {
+        if (peer_bitfield[i] && !piece_completed_[i] && !piece_downloading_[i]) {
+            needed_pieces.push_back(static_cast<PieceIndex>(i));
+        }
+    }
+    
+    return needed_pieces;
+}
+
+uint64_t TorrentDownload::get_downloaded_bytes() const {
+    return total_downloaded_.load();
+}
+
+uint64_t TorrentDownload::get_uploaded_bytes() const {
+    return total_uploaded_.load();
+}
+
+double TorrentDownload::get_progress_percentage() const {
+    if (torrent_info_.get_total_length() == 0) {
+        return 0.0;
+    }
+    
+    uint64_t downloaded = get_downloaded_bytes();
+    return (static_cast<double>(downloaded) / torrent_info_.get_total_length()) * 100.0;
+}
+
+uint32_t TorrentDownload::get_completed_pieces() const {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    return static_cast<uint32_t>(std::count(piece_completed_.begin(), piece_completed_.end(), true));
+}
+
+std::vector<bool> TorrentDownload::get_piece_bitfield() const {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    return piece_completed_;
+}
+
+void TorrentDownload::download_loop() {
+    LOG_BT_INFO("Download loop started for torrent: " << torrent_info_.get_name());
+    
+    while (running_ && !is_complete()) {
+        if (paused_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        
+        // Schedule piece requests to peers
+        schedule_piece_requests();
+        
+        // Update progress
+        update_progress();
+        
+        // Check for completion
+        check_torrent_completion();
+        
+        // Sleep for a short time to avoid busy waiting
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    
+    LOG_BT_INFO("Download loop ended for torrent: " << torrent_info_.get_name());
+}
+
+void TorrentDownload::peer_management_loop() {
+    LOG_BT_INFO("Peer management loop started for torrent: " << torrent_info_.get_name());
+    
+    while (running_) {
+        // Clean up disconnected peers
+        cleanup_disconnected_peers();
+        
+        // Sleep for a longer time as peer management is less frequent
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    
+    LOG_BT_INFO("Peer management loop ended for torrent: " << torrent_info_.get_name());
+}
+
+void TorrentDownload::schedule_piece_requests() {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    
+    for (auto& peer : peer_connections_) {
+        if (!peer->is_connected() || peer->is_choked()) {
+            continue;
+        }
+        
+        // Get pieces we need that this peer has
+        std::vector<PieceIndex> needed_pieces = get_needed_pieces(peer->get_bitfield());
+        
+        if (needed_pieces.empty()) {
+            continue;
+        }
+        
+        // Select pieces to download using our piece selection strategy
+        std::vector<PieceIndex> selected_pieces = select_pieces_for_download();
+        
+        // Request blocks from selected pieces
+        for (PieceIndex piece_index : selected_pieces) {
+            if (peer->get_pending_requests() >= MAX_REQUESTS_PER_PEER) {
+                break; // Don't overwhelm this peer
+            }
+            
+            if (!peer->has_piece(piece_index)) {
+                continue;
+            }
+            
+            // Find blocks we need for this piece
+            {
+                std::lock_guard<std::mutex> pieces_lock(pieces_mutex_);
+                if (piece_index >= pieces_.size() || piece_completed_[piece_index]) {
+                    continue;
+                }
+                
+                auto& piece = pieces_[piece_index];
+                uint32_t block_size = BLOCK_SIZE;
+                
+                for (uint32_t block_index = 0; block_index < piece->get_num_blocks(); ++block_index) {
+                    if (piece->blocks_downloaded[block_index]) {
+                        continue; // Already have this block
+                    }
+                    
+                    uint32_t offset = block_index * BLOCK_SIZE;
+                    uint32_t length = std::min(block_size, piece->length - offset);
+                    
+                    if (peer->request_piece_block(piece_index, offset, length)) {
+                        piece_downloading_[piece_index] = true;
+                        LOG_BT_DEBUG("Requested block " << block_index << " of piece " << piece_index 
+                                     << " from peer " << peer->get_peer_info().ip);
+                        break; // Request one block at a time per piece per peer
+                    }
+                }
+            }
+        }
+        
+        // Express interest if we need pieces from this peer
+        if (!needed_pieces.empty() && !peer->is_interested()) {
+            peer->set_interested(true);
+        }
+    }
+}
+
+void TorrentDownload::cleanup_disconnected_peers() {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    
+    peer_connections_.erase(
+        std::remove_if(peer_connections_.begin(), peer_connections_.end(),
+            [](const std::unique_ptr<PeerConnection>& peer) {
+                return !peer->is_connected();
+            }),
+        peer_connections_.end());
+}
+
+bool TorrentDownload::open_files() {
+    std::lock_guard<std::mutex> lock(files_mutex_);
+    
+    const auto& files = torrent_info_.get_files();
+    file_handles_.clear();
+    file_handles_.reserve(files.size());
+    
+    for (const auto& file_info : files) {
+        std::string file_path = download_path_ + "/" + file_info.path;
+        
+        // Create file with correct size
+        std::fstream file(file_path, std::ios::binary | std::ios::in | std::ios::out);
+        if (!file.is_open()) {
+            // Try to create the file
+            file.open(file_path, std::ios::binary | std::ios::out);
+            if (!file.is_open()) {
+                LOG_BT_ERROR("Failed to create file: " << file_path);
+                return false;
+            }
+            file.close();
+            
+            // Reopen for reading and writing
+            file.open(file_path, std::ios::binary | std::ios::in | std::ios::out);
+            if (!file.is_open()) {
+                LOG_BT_ERROR("Failed to reopen file: " << file_path);
+                return false;
+            }
+        }
+        
+        // Resize file to correct length
+        file.seekp(file_info.length - 1);
+        file.write("\0", 1);
+        
+        file_handles_.emplace_back(std::move(file));
+        LOG_BT_DEBUG("Opened file: " << file_path << " (size: " << file_info.length << ")");
+    }
+    
+    return true;
+}
+
+void TorrentDownload::close_files() {
+    std::lock_guard<std::mutex> lock(files_mutex_);
+    
+    for (auto& file : file_handles_) {
+        if (file.is_open()) {
+            file.close();
+        }
+    }
+    file_handles_.clear();
+}
+
+bool TorrentDownload::create_directory_structure() {
+    const auto& files = torrent_info_.get_files();
+    
+    for (const auto& file_info : files) {
+        std::string file_path = download_path_ + "/" + file_info.path;
+        
+        // Extract directory path
+        size_t last_slash = file_path.find_last_of('/');
+        if (last_slash != std::string::npos) {
+            std::string dir_path = file_path.substr(0, last_slash);
+            
+            // Create directory structure
+            if (!create_directories(dir_path.c_str())) {
+                LOG_BT_ERROR("Failed to create directory: " << dir_path);
+                return false;
+            }
+        }
+    }
+    
+    return true;
+}
+
+std::vector<PieceIndex> TorrentDownload::select_pieces_for_download() {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    
+    std::vector<PieceIndex> needed_pieces;
+    
+    // Find pieces we need
+    for (PieceIndex i = 0; i < piece_completed_.size(); ++i) {
+        if (!piece_completed_[i] && !piece_downloading_[i]) {
+            needed_pieces.push_back(i);
+        }
+    }
+    
+    // Implement rarest-first strategy (simplified)
+    std::vector<PieceIndex> selected_pieces;
+    
+    // For now, just select the first few needed pieces
+    // In a more sophisticated implementation, we would count how many peers have each piece
+    // and prioritize rarer pieces
+    size_t max_pieces = std::min(needed_pieces.size(), static_cast<size_t>(10));
+    for (size_t i = 0; i < max_pieces; ++i) {
+        selected_pieces.push_back(needed_pieces[i]);
+    }
+    
+    return selected_pieces;
+}
+
+PieceIndex TorrentDownload::select_rarest_piece(const std::vector<bool>& available_pieces) {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    
+    // Count how many peers have each piece
+    std::vector<int> piece_counts(piece_completed_.size(), 0);
+    
+    {
+        std::lock_guard<std::mutex> peers_lock(peers_mutex_);
+        for (const auto& peer : peer_connections_) {
+            if (!peer->is_connected()) {
+                continue;
+            }
+            
+            const auto& peer_bitfield = peer->get_bitfield();
+            for (size_t i = 0; i < peer_bitfield.size() && i < piece_counts.size(); ++i) {
+                if (peer_bitfield[i]) {
+                    piece_counts[i]++;
+                }
+            }
+        }
+    }
+    
+    // Find the rarest piece we need and is available
+    int min_count = INT_MAX;
+    PieceIndex rarest_piece = static_cast<PieceIndex>(-1);
+    
+    for (size_t i = 0; i < available_pieces.size() && i < piece_completed_.size(); ++i) {
+        if (available_pieces[i] && !piece_completed_[i] && !piece_downloading_[i]) {
+            if (piece_counts[i] < min_count) {
+                min_count = piece_counts[i];
+                rarest_piece = static_cast<PieceIndex>(i);
+            }
+        }
+    }
+    
+    return rarest_piece;
+}
+
+void TorrentDownload::update_progress() {
+    if (progress_callback_) {
+        uint64_t downloaded = get_downloaded_bytes();
+        uint64_t total = torrent_info_.get_total_length();
+        double percentage = get_progress_percentage();
+        
+        progress_callback_(downloaded, total, percentage);
+    }
+}
+
+void TorrentDownload::on_piece_completed(PieceIndex piece_index) {
+    if (piece_complete_callback_) {
+        piece_complete_callback_(piece_index);
+    }
+    
+    LOG_BT_INFO("Piece " << piece_index << " completed. Progress: " 
+                << get_progress_percentage() << "% (" 
+                << get_completed_pieces() << "/" << torrent_info_.get_num_pieces() << " pieces)");
+}
+
+void TorrentDownload::check_torrent_completion() {
+    if (is_complete() && torrent_complete_callback_) {
+        torrent_complete_callback_(torrent_info_.get_name());
+        LOG_BT_INFO("Torrent download completed: " << torrent_info_.get_name());
+    }
+}
+
+void TorrentDownload::announce_to_dht(DhtClient* dht_client) {
+    if (!dht_client || !dht_client->is_running()) {
+        LOG_BT_WARN("DHT client not available for torrent announcement");
+        return;
+    }
+    
+    // Convert info hash to DHT format
+    InfoHash dht_info_hash;
+    const auto& torrent_hash = torrent_info_.get_info_hash();
+    std::copy(torrent_hash.begin(), torrent_hash.end(), dht_info_hash.begin());
+    
+    // Announce with default BitTorrent port (we don't have a BitTorrent listen port yet)
+    uint16_t announce_port = 6881; // Default BitTorrent port
+    
+    if (dht_client->announce_peer(dht_info_hash, announce_port)) {
+        LOG_BT_INFO("Announced torrent to DHT: " << torrent_info_.get_name());
+    } else {
+        LOG_BT_WARN("Failed to announce torrent to DHT: " << torrent_info_.get_name());
+    }
+}
+
+void TorrentDownload::request_peers_from_dht(DhtClient* dht_client) {
+    if (!dht_client || !dht_client->is_running()) {
+        LOG_BT_WARN("DHT client not available for peer discovery");
+        return;
+    }
+    
+    // Convert info hash to DHT format
+    InfoHash dht_info_hash;
+    const auto& torrent_hash = torrent_info_.get_info_hash();
+    std::copy(torrent_hash.begin(), torrent_hash.end(), dht_info_hash.begin());
+    
+    LOG_BT_INFO("Requesting peers from DHT for torrent: " << torrent_info_.get_name());
+    
+    dht_client->find_peers(dht_info_hash, [this](const std::vector<Peer>& peers, const InfoHash& info_hash) {
+        LOG_BT_INFO("DHT discovered " << peers.size() << " peers for torrent: " << torrent_info_.get_name());
+        
+        for (const auto& peer : peers) {
+            if (get_peer_count() >= MAX_PEERS_PER_TORRENT) {
+                break; // Don't exceed peer limit
+            }
+            
+            add_peer(peer);
+        }
+    });
+}
+
+//=============================================================================
+// BitTorrentClient Implementation
+//=============================================================================
+
+BitTorrentClient::BitTorrentClient()
+    : running_(false), listen_port_(0), listen_socket_(INVALID_SOCKET_VALUE),
+      dht_client_(nullptr), max_connections_per_torrent_(MAX_PEERS_PER_TORRENT),
+      download_rate_limit_(0), upload_rate_limit_(0) {
+    
+    LOG_BT_INFO("BitTorrent client created");
+}
+
+BitTorrentClient::~BitTorrentClient() {
+    stop();
+}
+
+bool BitTorrentClient::start(int listen_port) {
+    if (running_.load()) {
+        LOG_BT_WARN("BitTorrent client is already running");
+        return false;
+    }
+    
+    listen_port_ = listen_port;
+    if (listen_port_ == 0) {
+        listen_port_ = 6881; // Default BitTorrent port
+    }
+    
+    LOG_BT_INFO("Starting BitTorrent client on port " << listen_port_);
+    
+    // Create listen socket
+    listen_socket_ = create_tcp_server(listen_port_);
+    if (!is_valid_socket(listen_socket_)) {
+        LOG_BT_ERROR("Failed to create BitTorrent listen socket on port " << listen_port_);
+        return false;
+    }
+    
+    running_.store(true);
+    
+    // Start incoming connections handler
+    incoming_connections_thread_ = std::thread(&BitTorrentClient::handle_incoming_connections, this);
+    
+    LOG_BT_INFO("BitTorrent client started successfully");
+    return true;
+}
+
+void BitTorrentClient::stop() {
+    if (!running_.load()) {
+        return;
+    }
+    
+    LOG_BT_INFO("Stopping BitTorrent client");
+    running_.store(false);
+    
+    // Stop all torrents
+    {
+        std::lock_guard<std::mutex> lock(torrents_mutex_);
+        for (auto& pair : torrents_) {
+            pair.second->stop();
+        }
+        torrents_.clear();
+    }
+    
+    // Close listen socket
+    if (is_valid_socket(listen_socket_)) {
+        close_socket(listen_socket_);
+        listen_socket_ = INVALID_SOCKET_VALUE;
+    }
+    
+    // Wait for threads
+    if (incoming_connections_thread_.joinable()) {
+        incoming_connections_thread_.join();
+    }
+    
+    LOG_BT_INFO("BitTorrent client stopped");
+}
+
+std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent(const std::string& torrent_file, 
+                                                              const std::string& download_path) {
+    TorrentInfo torrent_info;
+    if (!torrent_info.load_from_file(torrent_file)) {
+        LOG_BT_ERROR("Failed to load torrent file: " << torrent_file);
+        return nullptr;
+    }
+    
+    return add_torrent(torrent_info, download_path);
+}
+
+std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent(const TorrentInfo& torrent_info, 
+                                                              const std::string& download_path) {
+    if (!running_.load()) {
+        LOG_BT_ERROR("BitTorrent client is not running");
+        return nullptr;
+    }
+    
+    const InfoHash& info_hash = torrent_info.get_info_hash();
+    
+    {
+        std::lock_guard<std::mutex> lock(torrents_mutex_);
+        
+        // Check if torrent already exists
+        if (torrents_.find(info_hash) != torrents_.end()) {
+            LOG_BT_WARN("Torrent already exists: " << torrent_info.get_name());
+            return torrents_[info_hash];
+        }
+        
+        // Create new torrent download
+        auto torrent_download = std::make_shared<TorrentDownload>(torrent_info, download_path);
+        
+        // Set up callbacks
+        torrent_download->set_progress_callback([this, info_hash](uint64_t downloaded, uint64_t total, double percentage) {
+            LOG_BT_DEBUG("Torrent progress: " << percentage << "% (" << downloaded << "/" << total << " bytes)");
+        });
+        
+        torrent_download->set_torrent_complete_callback([this, info_hash](const std::string& torrent_name) {
+            LOG_BT_INFO("Torrent completed: " << torrent_name);
+            if (torrent_completed_callback_) {
+                torrent_completed_callback_(info_hash);
+            }
+        });
+        
+        torrents_[info_hash] = torrent_download;
+        
+        // Start the download
+        if (!torrent_download->start()) {
+            LOG_BT_ERROR("Failed to start torrent download: " << torrent_info.get_name());
+            torrents_.erase(info_hash);
+            return nullptr;
+        }
+        
+        // Announce to DHT if available
+        if (dht_client_) {
+            torrent_download->announce_to_dht(dht_client_);
+            torrent_download->request_peers_from_dht(dht_client_);
+        }
+        
+        LOG_BT_INFO("Added torrent: " << torrent_info.get_name());
+        
+        if (torrent_added_callback_) {
+            torrent_added_callback_(info_hash);
+        }
+        
+        return torrent_download;
+    }
+}
+
+bool BitTorrentClient::remove_torrent(const InfoHash& info_hash) {
+    std::lock_guard<std::mutex> lock(torrents_mutex_);
+    
+    auto it = torrents_.find(info_hash);
+    if (it == torrents_.end()) {
+        return false;
+    }
+    
+    // Stop the torrent
+    it->second->stop();
+    torrents_.erase(it);
+    
+    if (torrent_removed_callback_) {
+        torrent_removed_callback_(info_hash);
+    }
+    
+    LOG_BT_INFO("Removed torrent with info hash: " << info_hash_to_hex(info_hash));
+    return true;
+}
+
+std::shared_ptr<TorrentDownload> BitTorrentClient::get_torrent(const InfoHash& info_hash) {
+    std::lock_guard<std::mutex> lock(torrents_mutex_);
+    
+    auto it = torrents_.find(info_hash);
+    return (it != torrents_.end()) ? it->second : nullptr;
+}
+
+std::vector<std::shared_ptr<TorrentDownload>> BitTorrentClient::get_all_torrents() {
+    std::lock_guard<std::mutex> lock(torrents_mutex_);
+    
+    std::vector<std::shared_ptr<TorrentDownload>> result;
+    result.reserve(torrents_.size());
+    
+    for (const auto& pair : torrents_) {
+        result.push_back(pair.second);
+    }
+    
+    return result;
+}
+
+void BitTorrentClient::discover_peers_for_torrent(const InfoHash& info_hash) {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_BT_WARN("DHT client not available for peer discovery");
+        return;
+    }
+    
+    auto torrent = get_torrent(info_hash);
+    if (!torrent) {
+        LOG_BT_WARN("Torrent not found for peer discovery");
+        return;
+    }
+    
+    torrent->request_peers_from_dht(dht_client_);
+}
+
+void BitTorrentClient::announce_torrent_to_dht(const InfoHash& info_hash) {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_BT_WARN("DHT client not available for torrent announcement");
+        return;
+    }
+    
+    auto torrent = get_torrent(info_hash);
+    if (!torrent) {
+        LOG_BT_WARN("Torrent not found for DHT announcement");
+        return;
+    }
+    
+    torrent->announce_to_dht(dht_client_);
+}
+
+size_t BitTorrentClient::get_active_torrents_count() const {
+    std::lock_guard<std::mutex> lock(torrents_mutex_);
+    return torrents_.size();
+}
+
+uint64_t BitTorrentClient::get_total_downloaded() const {
+    std::lock_guard<std::mutex> lock(torrents_mutex_);
+    
+    uint64_t total = 0;
+    for (const auto& pair : torrents_) {
+        total += pair.second->get_downloaded_bytes();
+    }
+    
+    return total;
+}
+
+uint64_t BitTorrentClient::get_total_uploaded() const {
+    std::lock_guard<std::mutex> lock(torrents_mutex_);
+    
+    uint64_t total = 0;
+    for (const auto& pair : torrents_) {
+        total += pair.second->get_uploaded_bytes();
+    }
+    
+    return total;
+}
+
+void BitTorrentClient::handle_incoming_connections() {
+    LOG_BT_INFO("BitTorrent incoming connections handler started");
+    
+    while (running_.load()) {
+        socket_t client_socket = accept_client(listen_socket_);
+        if (!is_valid_socket(client_socket)) {
+            if (running_.load()) {
+                LOG_BT_ERROR("Failed to accept BitTorrent client connection");
+            }
+            continue;
+        }
+        
+        // Handle the connection in a separate thread
+        std::thread([this, client_socket]() {
+            handle_incoming_connection(client_socket);
+        }).detach();
+    }
+    
+    LOG_BT_INFO("BitTorrent incoming connections handler stopped");
+}
+
+void BitTorrentClient::handle_incoming_connection(socket_t client_socket) {
+    LOG_BT_DEBUG("Handling incoming BitTorrent connection");
+    
+    InfoHash info_hash;
+    PeerID peer_id;
+    
+    if (!perform_incoming_handshake(client_socket, info_hash, peer_id)) {
+        LOG_BT_WARN("Failed to perform incoming handshake");
+        close_socket(client_socket);
+        return;
+    }
+    
+    // Find the torrent for this info hash
+    auto torrent = get_torrent(info_hash);
+    if (!torrent) {
+        LOG_BT_WARN("Received connection for unknown torrent");
+        close_socket(client_socket);
+        return;
+    }
+    
+    // Get peer address
+    std::string peer_address = get_peer_address(client_socket);
+    
+    // Parse peer address to get IP and port
+    std::string ip;
+    int port = 0;
+    size_t colon_pos = peer_address.find_last_of(':');
+    if (colon_pos != std::string::npos) {
+        ip = peer_address.substr(0, colon_pos);
+        try {
+            port = std::stoi(peer_address.substr(colon_pos + 1));
+        } catch (const std::exception&) {
+            port = 0;
+        }
+    }
+    
+    if (ip.empty() || port == 0) {
+        LOG_BT_WARN("Failed to parse peer address: " << peer_address);
+        close_socket(client_socket);
+        return;
+    }
+    
+    // Create peer object and add to torrent
+    Peer peer_info{ip, static_cast<uint16_t>(port)};
+    if (torrent->add_peer(peer_info)) {
+        LOG_BT_INFO("Added incoming peer: " << peer_address);
+    } else {
+        LOG_BT_WARN("Failed to add incoming peer: " << peer_address);
+        close_socket(client_socket);
+    }
+}
+
+bool BitTorrentClient::perform_incoming_handshake(socket_t socket, InfoHash& info_hash, PeerID& peer_id) {
+    // Receive handshake
+    std::vector<uint8_t> handshake_data(68); // Fixed handshake size
+    std::string received_data = receive_tcp_data(socket, 68);
+    
+    if (received_data.length() != 68) {
+        LOG_BT_ERROR("Invalid handshake size received: " << received_data.length());
+        return false;
+    }
+    
+    std::copy(received_data.begin(), received_data.end(), handshake_data.begin());
+    
+    if (!parse_handshake_message(handshake_data, info_hash, peer_id)) {
+        LOG_BT_ERROR("Failed to parse incoming handshake");
+        return false;
+    }
+    
+    // Send our handshake response
+    PeerID our_peer_id = generate_peer_id();
+    auto response_data = create_handshake_message(info_hash, our_peer_id);
+    
+    std::string response_str(response_data.begin(), response_data.end());
+    if (send_tcp_data(socket, response_str) <= 0) {
+        LOG_BT_ERROR("Failed to send handshake response");
+        return false;
+    }
+    
+    LOG_BT_DEBUG("Incoming handshake completed successfully");
+    return true;
+}
+
+//=============================================================================
+// Utility Functions Implementation
+//=============================================================================
+
+InfoHash calculate_info_hash(const BencodeValue& info_dict) {
+    // Encode the info dictionary and calculate SHA1 hash
+    std::vector<uint8_t> encoded = info_dict.encode();
+    std::string hash_string = SHA1::hash_bytes(encoded);
+    
+    InfoHash result;
+    // Convert hex string to bytes
+    for (size_t i = 0; i < 20; ++i) {
+        std::string byte_str = hash_string.substr(i * 2, 2);
+        result[i] = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
+    }
+    
+    return result;
+}
+
+std::string info_hash_to_hex(const InfoHash& hash) {
+    std::ostringstream hex_stream;
+    for (size_t i = 0; i < hash.size(); ++i) {
+        hex_stream << std::setfill('0') << std::setw(2) << std::hex << static_cast<int>(hash[i]);
+    }
+    return hex_stream.str();
+}
+
+InfoHash hex_to_info_hash(const std::string& hex) {
+    InfoHash result;
+    result.fill(0);
+    
+    if (hex.length() != 40) { // 20 bytes * 2 hex chars per byte
+        return result;
+    }
+    
+    for (size_t i = 0; i < 20; ++i) {
+        std::string byte_str = hex.substr(i * 2, 2);
+        try {
+            result[i] = static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16));
+        } catch (const std::exception&) {
+            result.fill(0);
+            return result;
+        }
+    }
+    
+    return result;
+}
+
+PeerID generate_peer_id() {
+    PeerID peer_id;
+    
+    // Use librats- prefix to identify our client
+    std::string prefix = "-LR0001-"; // LR = LibRats, 0001 = version
+    std::copy(prefix.begin(), prefix.end(), peer_id.begin());
+    
+    // Fill the rest with random data
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 255);
+    
+    for (size_t i = prefix.length(); i < peer_id.size(); ++i) {
+        peer_id[i] = static_cast<uint8_t>(dis(gen));
+    }
+    
+    return peer_id;
+}
+
+std::vector<uint8_t> create_handshake_message(const InfoHash& info_hash, const PeerID& peer_id) {
+    std::vector<uint8_t> handshake(68);
+    
+    // Protocol identifier length
+    handshake[0] = BITTORRENT_PROTOCOL_ID_LENGTH;
+    
+    // Protocol identifier
+    std::copy_n(BITTORRENT_PROTOCOL_ID, BITTORRENT_PROTOCOL_ID_LENGTH, handshake.begin() + 1);
+    
+    // Reserved bytes (8 bytes of zeros)
+    std::fill_n(handshake.begin() + 20, 8, 0);
+    
+    // Info hash (20 bytes)
+    std::copy(info_hash.begin(), info_hash.end(), handshake.begin() + 28);
+    
+    // Peer ID (20 bytes)
+    std::copy(peer_id.begin(), peer_id.end(), handshake.begin() + 48);
+    
+    return handshake;
+}
+
+bool parse_handshake_message(const std::vector<uint8_t>& data, InfoHash& info_hash, PeerID& peer_id) {
+    if (data.size() != 68) {
+        return false;
+    }
+    
+    // Check protocol identifier length
+    if (data[0] != BITTORRENT_PROTOCOL_ID_LENGTH) {
+        return false;
+    }
+    
+    // Check protocol identifier
+    std::string protocol_id(data.begin() + 1, data.begin() + 1 + BITTORRENT_PROTOCOL_ID_LENGTH);
+    if (protocol_id != std::string(reinterpret_cast<const char*>(BITTORRENT_PROTOCOL_ID), BITTORRENT_PROTOCOL_ID_LENGTH)) {
+        return false;
+    }
+    
+    // Extract info hash
+    std::copy(data.begin() + 28, data.begin() + 48, info_hash.begin());
+    
+    // Extract peer ID
+    std::copy(data.begin() + 48, data.begin() + 68, peer_id.begin());
+    
+    return true;
+}
+
+} // namespace librats

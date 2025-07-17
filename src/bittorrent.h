@@ -18,6 +18,7 @@
 #include <chrono>
 #include <fstream>
 #include <array>
+#include <algorithm>  // Add this for std::all_of
 
 namespace librats {
 
