@@ -95,6 +95,21 @@ bool EncryptedSocket::send_handshake_message(socket_t socket, const std::vector<
         if (!handshake_data.empty()) {
             auto framed_message = frame_message(handshake_data);
             
+            LOG_ENCRYPT_DEBUG("Created framed message with " << framed_message.size() << " bytes, noise data was " << handshake_data.size() << " bytes");
+            LOG_ENCRYPT_DEBUG("First 12 bytes of framed message: " << std::hex
+                             << "0x" << std::setfill('0') << std::setw(2) << (unsigned)framed_message[0]
+                             << std::setfill('0') << std::setw(2) << (unsigned)framed_message[1]
+                             << std::setfill('0') << std::setw(2) << (unsigned)framed_message[2]
+                             << std::setfill('0') << std::setw(2) << (unsigned)framed_message[3] << " "
+                             << "0x" << std::setfill('0') << std::setw(2) << (unsigned)framed_message[4]
+                             << std::setfill('0') << std::setw(2) << (unsigned)framed_message[5]
+                             << std::setfill('0') << std::setw(2) << (unsigned)framed_message[6]
+                             << std::setfill('0') << std::setw(2) << (unsigned)framed_message[7] << " "
+                             << "0x" << std::setfill('0') << std::setw(2) << (unsigned)framed_message[8]
+                             << std::setfill('0') << std::setw(2) << (unsigned)framed_message[9]
+                             << std::setfill('0') << std::setw(2) << (unsigned)framed_message[10]
+                             << std::setfill('0') << std::setw(2) << (unsigned)framed_message[11]);
+            
             // Add handshake magic to distinguish from regular messages (convert to network byte order)
             std::vector<uint8_t> handshake_message;
             handshake_message.resize(4);
@@ -103,6 +118,24 @@ bool EncryptedSocket::send_handshake_message(socket_t socket, const std::vector<
             handshake_message.insert(handshake_message.end(), framed_message.begin(), framed_message.end());
             
             std::string data_str(handshake_message.begin(), handshake_message.end());
+            LOG_ENCRYPT_DEBUG("Sending total handshake message: " << handshake_message.size() << " bytes");
+            LOG_ENCRYPT_DEBUG("Complete message first 16 bytes: " << std::hex
+                             << "0x" << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[0]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[1]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[2]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[3] << " "
+                             << "0x" << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[4]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[5]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[6]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[7] << " "
+                             << "0x" << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[8]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[9]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[10]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[11] << " "
+                             << "0x" << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[12]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[13]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[14]
+                             << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[15]);
             int sent = send_tcp_data(socket, data_str);
             
             if (sent <= 0) {
@@ -141,6 +174,7 @@ std::vector<uint8_t> EncryptedSocket::receive_handshake_message(socket_t socket)
         // Check handshake magic
         uint32_t received_magic;
         std::memcpy(&received_magic, magic_data.data(), 4);
+        received_magic = ntohl(received_magic); // Convert from network byte order
         if (received_magic != HANDSHAKE_MESSAGE_MAGIC) {
             LOG_ENCRYPT_WARN("Received data is not a handshake message (magic: 0x" << std::hex << received_magic << ")");
             return {};
@@ -149,6 +183,7 @@ std::vector<uint8_t> EncryptedSocket::receive_handshake_message(socket_t socket)
         // Now read the noise frame header (8 bytes)
         LOG_ENCRYPT_DEBUG("Reading noise frame header on socket " << socket);
         std::string frame_header = receive_exact_bytes(socket, 8);
+        LOG_ENCRYPT_DEBUG("Received frame header: " << frame_header.size() << " bytes (expected 8)");
         if (frame_header.size() < 8) {
             LOG_ENCRYPT_ERROR("Failed to receive complete frame header, got " << frame_header.size() << " bytes");
             return {};
@@ -159,6 +194,16 @@ std::vector<uint8_t> EncryptedSocket::receive_handshake_message(socket_t socket)
         uint32_t noise_length;
         std::memcpy(&noise_magic, frame_header.data(), 4);
         std::memcpy(&noise_length, frame_header.data() + 4, 4);
+        
+        LOG_ENCRYPT_DEBUG("Raw frame header bytes: " << std::hex 
+                         << "0x" << std::setfill('0') << std::setw(2) << (unsigned)(uint8_t)frame_header[0]
+                         << std::setfill('0') << std::setw(2) << (unsigned)(uint8_t)frame_header[1]
+                         << std::setfill('0') << std::setw(2) << (unsigned)(uint8_t)frame_header[2]
+                         << std::setfill('0') << std::setw(2) << (unsigned)(uint8_t)frame_header[3] << " "
+                         << "0x" << std::setfill('0') << std::setw(2) << (unsigned)(uint8_t)frame_header[4]
+                         << std::setfill('0') << std::setw(2) << (unsigned)(uint8_t)frame_header[5]
+                         << std::setfill('0') << std::setw(2) << (unsigned)(uint8_t)frame_header[6]
+                         << std::setfill('0') << std::setw(2) << (unsigned)(uint8_t)frame_header[7]);
         
         // Convert from network byte order (big endian) to host byte order
         noise_magic = ntohl(noise_magic);
@@ -384,6 +429,17 @@ std::string EncryptedSocket::receive_exact_bytes(socket_t socket, size_t byte_co
         
         buffer.append(chunk);
         LOG_ENCRYPT_DEBUG("Read " << chunk.size() << " bytes, total: " << buffer.size() << "/" << byte_count);
+        if (chunk.size() <= 8) {  // Log small chunks in detail
+            LOG_ENCRYPT_DEBUG("Chunk content: " << std::hex
+                             << "0x" << std::setfill('0') << std::setw(2) << (chunk.size() > 0 ? (unsigned)(uint8_t)chunk[0] : 0)
+                             << std::setfill('0') << std::setw(2) << (chunk.size() > 1 ? (unsigned)(uint8_t)chunk[1] : 0)
+                             << std::setfill('0') << std::setw(2) << (chunk.size() > 2 ? (unsigned)(uint8_t)chunk[2] : 0)
+                             << std::setfill('0') << std::setw(2) << (chunk.size() > 3 ? (unsigned)(uint8_t)chunk[3] : 0) << " "
+                             << "0x" << std::setfill('0') << std::setw(2) << (chunk.size() > 4 ? (unsigned)(uint8_t)chunk[4] : 0)
+                             << std::setfill('0') << std::setw(2) << (chunk.size() > 5 ? (unsigned)(uint8_t)chunk[5] : 0)
+                             << std::setfill('0') << std::setw(2) << (chunk.size() > 6 ? (unsigned)(uint8_t)chunk[6] : 0)
+                             << std::setfill('0') << std::setw(2) << (chunk.size() > 7 ? (unsigned)(uint8_t)chunk[7] : 0));
+        }
     }
     
     return buffer;
@@ -443,6 +499,7 @@ bool EncryptedSocket::is_noise_handshake_message(const std::vector<uint8_t>& dat
     
     uint32_t magic;
     std::memcpy(&magic, data.data(), 4);
+    magic = ntohl(magic); // Convert from network byte order
     return magic == HANDSHAKE_MESSAGE_MAGIC;
 }
 
