@@ -19,6 +19,7 @@ librats now includes comprehensive NAT (Network Address Translation) traversal c
 - Role negotiation (controlling/controlled)
 - Candidate pair formation and nomination
 - Real-time connection state tracking
+- **Automatic candidate exchange via librats message protocol**
 
 ### ✅ **STUN Support**  
 - Public IP address discovery
@@ -46,6 +47,7 @@ librats now includes comprehensive NAT (Network Address Translation) traversal c
 - Mapping behavior detection  
 - Port preservation testing
 - Hairpin support detection
+- **Automatic NAT information exchange between peers**
 
 ## Quick Start
 
@@ -72,50 +74,60 @@ int main() {
     // Set connection callback to track NAT traversal results
     client.set_advanced_connection_callback([](socket_t socket, const std::string& peer_id, 
                                               const librats::ConnectionAttemptResult& result) {
-        std::cout << "Connected via: " << result.method << std::endl;
-        std::cout << "Duration: " << result.duration.count() << "ms" << std::endl;
-        std::cout << "Local NAT: " << (int)result.local_nat_type << std::endl;
-        std::cout << "Remote NAT: " << (int)result.remote_nat_type << std::endl;
+        std::cout << "✅ Connected via: " << result.method 
+                  << " in " << result.duration.count() << "ms" << std::endl;
+        std::cout << "📊 Local NAT: " << (int)result.local_nat_type 
+                  << ", Remote NAT: " << (int)result.remote_nat_type << std::endl;
     });
     
-    // Start client
+    // Set NAT traversal progress callback
+    client.set_nat_traversal_progress_callback([](const std::string& peer_id, const std::string& status) {
+        std::cout << "🔄 NAT traversal for " << peer_id << ": " << status << std::endl;
+    });
+    
+    // Set ICE candidate discovery callback
+    client.set_ice_candidate_callback([](const std::string& peer_id, const librats::IceCandidate& candidate) {
+        std::cout << "🧊 ICE candidate: " << candidate.ip << ":" << candidate.port 
+                  << " (type: " << (int)candidate.type << ")" << std::endl;
+    });
+    
+    // Start with all discovery methods
     client.start();
+    client.start_dht_discovery();           // Wide-area discovery
+    client.start_mdns_discovery();         // Local network discovery
+    client.discover_and_ignore_public_ip(); // NAT traversal setup
     
     // Connect with automatic strategy selection
     client.connect_to_peer("peer.example.com", 8081, 
                           librats::ConnectionStrategy::AUTO_ADAPTIVE);
     
-    // Keep running
-    std::this_thread::sleep_for(std::chrono::minutes(5));
     return 0;
 }
 ```
 
 ### ICE-Coordinated Connection
 
+The new implementation automatically handles ICE coordination when peers connect:
+
 ```cpp
 // Peer A (Initiator)
-librats::RatsClient clientA(8080);
+librats::NatTraversalConfig config;
+config.enable_ice = true;
+config.enable_hole_punching = true;
+
+librats::RatsClient clientA(8080, 10, config);
 clientA.start();
 
-// Create ICE offer
-auto ice_offer = clientA.create_ice_offer("peer_b");
+// ICE coordination happens automatically when connecting
+clientA.connect_to_peer("peer.example.com", 8081, librats::ConnectionStrategy::ICE_FULL);
 
-// Send offer to peer B through signaling channel (DHT, WebSocket, etc.)
-send_signaling_message("peer_b", ice_offer);
-
-// Peer B (Responder)  
-librats::RatsClient clientB(8081);
-clientB.start();
-
-// Receive ICE offer and create answer
-auto ice_answer = clientB.create_ice_answer(ice_offer);
-
-// Send answer back to peer A
-send_signaling_message("peer_a", ice_answer);
-
-// Both peers handle the ICE coordination automatically
-clientA.handle_ice_answer("peer_b", ice_answer);
+// The client will automatically:
+// 1. Detect NAT type and gather ICE candidates
+// 2. Exchange NAT information with the peer
+// 3. Send ICE offer to the peer
+// 4. Process ICE answer from the peer
+// 5. Perform connectivity checks
+// 6. Establish optimal connection
 ```
 
 ### Manual Connection Strategy Testing
@@ -135,10 +147,43 @@ std::vector<librats::ConnectionStrategy> strategies = {
 auto results = client.test_connection_strategies("target.example.com", 8081, strategies);
 
 for (const auto& result : results) {
-    std::cout << "Strategy: " << result.method 
-              << ", Success: " << result.success
-              << ", Duration: " << result.duration.count() << "ms" << std::endl;
+    std::cout << "📈 Strategy " << result.method << ": " 
+              << (result.success ? "✅ SUCCESS" : "❌ FAILED") 
+              << " (" << result.duration.count() << "ms)" << std::endl;
+              
+    if (!result.error_message.empty()) {
+        std::cout << "   Error: " << result.error_message << std::endl;
+    }
 }
+```
+
+### Monitoring NAT Traversal and Connection Statistics
+
+```cpp
+librats::RatsClient client(8080);
+client.start();
+
+// Get detailed connection statistics
+auto stats = client.get_connection_statistics();
+std::cout << "Connection Statistics: " << stats.dump(2) << std::endl;
+
+// Get NAT traversal specific statistics  
+auto nat_stats = client.get_nat_traversal_statistics();
+std::cout << "NAT Statistics: " << nat_stats.dump(2) << std::endl;
+
+// Example output:
+// {
+//   "detected_nat_type": 2,
+//   "has_nat": true,
+//   "filtering_behavior": 1,
+//   "mapping_behavior": 0,
+//   "preserves_port": false,
+//   "hairpin_support": false,
+//   "ice_available": true,
+//   "ice_running": true,
+//   "ice_state": 3,
+//   "local_ice_candidates": 4
+// }
 ```
 
 ## Configuration
@@ -229,10 +274,13 @@ std::cout << "NAT Statistics: " << nat_stats.dump(2) << std::endl;
 ```cpp
 client.set_ice_candidate_callback([](const std::string& peer_id, 
                                    const librats::IceCandidate& candidate) {
-    std::cout << "ICE Candidate discovered for " << peer_id << ":" << std::endl;
-    std::cout << "  Type: " << candidate.type << std::endl;
+    
+    std::cout << "ICE Candidate Discovered:" << std::endl;
+    std::cout << "  Peer ID: " << peer_id << std::endl;
+    std::cout << "  Type: " << (int)candidate.type << std::endl;
     std::cout << "  Address: " << candidate.ip << ":" << candidate.port << std::endl;
     std::cout << "  Priority: " << candidate.priority << std::endl;
+    std::cout << "  Foundation: " << candidate.foundation << std::endl;
 });
 
 client.set_nat_traversal_progress_callback([](const std::string& peer_id, 
@@ -251,6 +299,122 @@ coordination_data["local_candidates"] = client.get_local_ice_candidates();
 coordination_data["timing"] = "synchronized";
 
 bool success = client.coordinate_hole_punching("peer.example.com", 8081, coordination_data);
+```
+
+## Automatic Features
+
+### NAT Information Exchange
+
+The new implementation automatically exchanges NAT information between peers when they connect. This includes:
+
+- Detected NAT type
+- Public IP address  
+- NAT behavior characteristics
+- Port preservation capabilities
+- Hairpin support
+
+### ICE Coordination
+
+For outgoing connections with ICE enabled, the client automatically:
+
+1. **Detects local NAT type and characteristics**
+2. **Gathers ICE candidates** (host, server reflexive, relay)
+3. **Exchanges candidates with peer** via librats messaging protocol
+4. **Performs connectivity checks** to find best connection path
+5. **Establishes optimal connection** based on results
+
+### Automatic Strategy Selection
+
+When using `ConnectionStrategy::AUTO_ADAPTIVE`, the client automatically selects the best strategy based on detected NAT type:
+
+- **Open Internet**: Direct connection
+- **Full/Restricted Cone NAT**: ICE (if enabled) or STUN
+- **Port Restricted NAT**: ICE or hole punching
+- **Symmetric NAT**: TURN relay or ICE
+- **Unknown NAT**: ICE (if available) or STUN
+
+## Protocol Messages
+
+The NAT traversal implementation uses the existing librats message protocol for coordination:
+
+### ICE Messages
+
+```json
+// ICE Offer
+{
+  "rats_protocol": true,
+  "type": "ice_offer",
+  "payload": {
+    "peer_id": "sender_peer_id",
+    "target_peer_id": "target_peer_id", 
+    "ice_ufrag": "username_fragment",
+    "ice_pwd": "password",
+    "candidates": [
+      {
+        "ip": "192.168.1.100",
+        "port": 54321,
+        "type": 0,
+        "priority": 65535,
+        "foundation": "1"
+      }
+    ]
+  }
+}
+
+// ICE Answer (same format as offer)
+{
+  "rats_protocol": true,
+  "type": "ice_answer", 
+  "payload": { /* same as offer */ }
+}
+
+// ICE Candidate
+{
+  "rats_protocol": true,
+  "type": "ice_candidate",
+  "payload": {
+    "ip": "203.0.113.1",
+    "port": 12345,
+    "type": 1,
+    "priority": 65534,
+    "foundation": "2"
+  }
+}
+```
+
+### NAT Information Exchange
+
+```json
+{
+  "rats_protocol": true,
+  "type": "nat_info_exchange",
+  "payload": {
+    "nat_type": 2,
+    "has_nat": true,
+    "public_ip": "203.0.113.1",
+    "filtering_behavior": 1,
+    "mapping_behavior": 0,
+    "preserves_port": false,
+    "hairpin_support": false,
+    "response": false
+  }
+}
+```
+
+### Hole Punching Coordination
+
+```json
+{
+  "rats_protocol": true,
+  "type": "hole_punch_coordination",
+  "payload": {
+    "method": "udp_hole_punch",
+    "peer_ip": "peer.example.com",
+    "peer_port": 8081,
+    "timing": "synchronized",
+    "attempts": 5
+  }
+}
 ```
 
 ## Network Requirements
@@ -291,139 +455,70 @@ if (public_ip.empty()) {
 }
 
 // Verify network connectivity
-auto nat_type = client.detect_nat_type();
-if (nat_type == librats::NatType::BLOCKED) {
-    std::cout << "UDP is blocked" << std::endl;
+auto nat_stats = client.get_nat_traversal_statistics();
+if (!nat_stats.value("ice_available", false)) {
+    std::cout << "ICE agent not available" << std::endl;
 }
 ```
 
-**Connectivity checks timeout:**
+**Connection attempts fail:**
 ```cpp
-// Increase timeout in configuration
-config.ice_connectivity_timeout_ms = 60000; // 60 seconds
-
-// Check for symmetric NAT
-auto nat_info = client.get_nat_characteristics();
-if (nat_info.mapping_behavior == librats::NatBehavior::ADDRESS_PORT_DEPENDENT) {
-    std::cout << "Symmetric NAT detected - TURN relay required" << std::endl;
-}
-```
-
-**TURN allocation fails:**
-```cpp
-// Verify TURN server credentials
-config.turn_servers = {"turn.example.com:3478"};
-config.turn_usernames = {"valid_username"};
-config.turn_passwords = {"valid_password"};
-
-// Check TURN server reachability
-// (librats will log TURN errors automatically)
-```
-
-### Debug Logging
-
-```cpp
-// Enable detailed logging for NAT traversal
-LOG_LEVEL = LOG_DEBUG;  // In logger.h
-
-// Monitor ICE state changes
-client.set_ice_state_callback([](librats::IceConnectionState state) {
-    std::cout << "ICE State: " << ice_connection_state_to_string(state) << std::endl;
+// Test individual strategies
+auto results = client.test_connection_strategies(host, port, {
+    librats::ConnectionStrategy::DIRECT_ONLY,
+    librats::ConnectionStrategy::STUN_ASSISTED,
+    librats::ConnectionStrategy::ICE_FULL
 });
+
+for (const auto& result : results) {
+    if (!result.success) {
+        std::cout << "Strategy " << result.method << " failed: " 
+                  << result.error_message << std::endl;
+    }
+}
 ```
 
-### Performance Optimization
-
-**For low latency:**
+**NAT detection issues:**
 ```cpp
+// Force NAT detection refresh
+auto nat_characteristics = client.get_nat_characteristics();
+if (nat_characteristics.description.empty()) {
+    // NAT detection may have failed
+    std::cout << "NAT detection incomplete" << std::endl;
+}
+```
+
+### Performance Tuning
+
+**Optimize ICE timeouts:**
+```cpp
+librats::NatTraversalConfig config;
 config.ice_gathering_timeout_ms = 5000;    // Faster gathering
-config.host_candidate_priority = 70000;    // Prefer direct connections
-config.enable_tcp_candidates = false;      // UDP only
+config.ice_connectivity_timeout_ms = 15000; // Shorter connectivity checks
 ```
 
-**For high success rate:**
+**Reduce STUN server load:**
 ```cpp
-config.ice_connectivity_timeout_ms = 60000; // Longer timeout
-config.enable_turn_relay = true;           // Always enable TURN
-config.hole_punch_attempts = 10;           // More attempts
+config.stun_servers = {"stun.l.google.com:19302"}; // Use fewer servers
 ```
 
-**For resource constrained:**
+**Priority optimization:**
 ```cpp
-config.enable_ice = false;                 // Disable ICE
-config.enable_hole_punching = true;        // Simple hole punching only
-config.max_connectivity_checks = 50;       // Limit checks
-```
-
-## Integration Examples
-
-### With DHT Discovery
-
-```cpp
-client.start_dht_discovery();
-
-// Set DHT discovery callback to attempt NAT traversal
-client.set_dht_discovery_callback([&client](const std::vector<std::string>& peers) {
-    for (const auto& peer_addr : peers) {
-        // Parse address and connect with ICE
-        size_t colon = peer_addr.find(':');
-        std::string ip = peer_addr.substr(0, colon);
-        int port = std::stoi(peer_addr.substr(colon + 1));
-        
-        client.connect_to_peer(ip, port, librats::ConnectionStrategy::ICE_FULL);
-    }
-});
-```
-
-### With mDNS Discovery
-
-```cpp
-client.start_mdns_discovery();
-
-// mDNS peers are typically local, use direct connection
-client.set_mdns_callback([&client](const std::string& ip, int port, const std::string& name) {
-    client.connect_to_peer(ip, port, librats::ConnectionStrategy::DIRECT_ONLY);
-});
-```
-
-### Custom Signaling Channel
-
-```cpp
-class CustomSignaling {
-    librats::RatsClient& client_;
-    
-public:
-    void send_ice_offer(const std::string& peer_id, const nlohmann::json& offer) {
-        // Send through your signaling mechanism (WebSocket, HTTP, etc.)
-        send_signaling_message(peer_id, {
-            {"type", "ice_offer"},
-            {"offer", offer}
-        });
-    }
-    
-    void handle_ice_offer(const std::string& peer_id, const nlohmann::json& offer) {
-        // Create and send answer
-        auto answer = client_.create_ice_answer(offer);
-        send_signaling_message(peer_id, {
-            {"type", "ice_answer"}, 
-            {"answer", answer}
-        });
-        
-        // Set remote description to start ICE
-        client_.set_remote_ice_description(peer_id, offer);
-    }
-    
-    void handle_ice_answer(const std::string& peer_id, const nlohmann::json& answer) {
-        client_.handle_ice_answer(peer_id, answer);
-    }
-};
+config.host_candidate_priority = 65535;      // Prefer direct connections
+config.server_reflexive_priority = 65534;    // Then STUN
+config.relay_candidate_priority = 65533;     // TURN as last resort
 ```
 
 ## Security Considerations
 
-### STUN/TURN Security
-- Always use authenticated TURN servers
-- Consider STUN/TURN over TLS for sensitive applications
+### Network Security
+- Use secure STUN/TURN servers with TLS when possible
+- Monitor for excessive candidate gathering (potential DDoS)
+- Validate ICE candidates before processing
+- Rate limit connection attempts
+
+### TURN Security
+- Use authenticated TURN servers
 - Rotate TURN credentials regularly
 - Monitor TURN usage for abuse
 
@@ -473,4 +568,10 @@ client.set_advanced_connection_callback([](socket_t socket, const std::string& p
 - **`IceConfig`** - ICE-specific configuration
 - **`ConnectionAttemptResult`** - Connection attempt results
 
-This comprehensive NAT traversal implementation ensures librats can establish peer-to-peer connections across virtually any network topology, making it suitable for production P2P applications. 
+### Callback Types
+
+- **`AdvancedConnectionCallback`** - Enhanced connection callback with NAT info
+- **`NatTraversalProgressCallback`** - NAT traversal progress updates
+- **`IceCandidateDiscoveredCallback`** - ICE candidate discovery notifications
+
+This comprehensive NAT traversal implementation ensures librats can establish peer-to-peer connections across virtually any network topology, making it suitable for production P2P applications with automatic ICE coordination, NAT information exchange, and intelligent connection strategy selection. 

@@ -754,7 +754,15 @@ private:
     // ICE coordination helpers
     void handle_ice_candidate_discovered(const std::string& peer_id, const IceCandidate& candidate);
     void handle_ice_connection_state_change(const std::string& peer_id, IceConnectionState state);
-    bool initiate_ice_with_peer(const std::string& peer_id, const std::string& host, int port);
+    void initiate_ice_with_peer(const std::string& peer_id, const std::string& host, int port);
+    
+    // NAT traversal message handlers
+    void handle_ice_offer_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
+    void handle_ice_answer_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
+    void handle_ice_candidate_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
+    void handle_hole_punch_coordination_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
+    void handle_nat_info_exchange_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
+    void send_nat_info_to_peer(socket_t socket, const std::string& peer_id);
     
     // New peer management methods using RatsPeer
     void add_peer(const RatsPeer& peer);
