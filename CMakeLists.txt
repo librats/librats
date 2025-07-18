@@ -33,6 +33,8 @@ add_library(librats
     src/noise.h
     src/encrypted_socket.cpp
     src/encrypted_socket.h
+    src/mdns.cpp
+    src/mdns.h
 )
 
 # Include directories
@@ -103,6 +105,7 @@ if(BUILD_TESTS)
         tests/test_main.cpp
         tests/test_message_exchange.cpp
         tests/test_noise.cpp
+        tests/test_mdns.cpp
     )
     
     # Link with GoogleTest and our library

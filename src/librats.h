@@ -3,6 +3,7 @@
 #include "socket.h"
 #include "dht.h"
 #include "stun.h"
+#include "mdns.h"
 #include "logger.h"
 #include "encrypted_socket.h"
 #include "json.hpp" // nlohmann::json
@@ -378,6 +379,46 @@ public:
      */
     size_t get_dht_routing_table_size() const;
 
+    // ===== mDNS DISCOVERY METHODS =====
+    
+    /**
+     * Start mDNS service discovery and announcement
+     * @param service_instance_name Name for this service instance (e.g., "MyNode")
+     * @param txt_records Optional TXT record key-value pairs
+     * @return true if successful, false otherwise
+     */
+    bool start_mdns_discovery(const std::string& service_instance_name = "", 
+                             const std::map<std::string, std::string>& txt_records = {});
+    
+    /**
+     * Stop mDNS service discovery and announcement
+     */
+    void stop_mdns_discovery();
+    
+    /**
+     * Check if mDNS discovery is running
+     * @return true if mDNS is active, false otherwise
+     */
+    bool is_mdns_running() const;
+    
+    /**
+     * Set callback for mDNS service discovery
+     * @param callback Function to call when services are discovered
+     */
+    void set_mdns_callback(std::function<void(const std::string& ip, int port, const std::string& service_name)> callback);
+    
+    /**
+     * Get list of discovered mDNS services
+     * @return Vector of discovered MdnsService objects
+     */
+    std::vector<MdnsService> get_mdns_services() const;
+    
+    /**
+     * Manually query for mDNS services
+     * @return true if query was sent successfully
+     */
+    bool query_mdns_services();
+
     // STUN functionality for public IP discovery
     /**
      * Discover public IP address using STUN and add to ignore list
@@ -558,11 +599,16 @@ private:
     std::string public_ip_;
     mutable std::mutex public_ip_mutex_;
     
+    // mDNS client for local network discovery
+    std::unique_ptr<MdnsClient> mdns_client_;
+    std::function<void(const std::string&, int, const std::string&)> mdns_callback_;
+    
     void server_loop();
     void handle_client(socket_t client_socket, const std::string& peer_hash_id);
     void remove_peer(socket_t socket);
     std::string generate_peer_hash_id(socket_t socket, const std::string& connection_info);
     void handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash);
+    void handle_mdns_service_discovery(const MdnsService& service, bool is_new);
     
     // New peer management methods using RatsPeer
     void add_peer(const RatsPeer& peer);
