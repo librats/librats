@@ -940,7 +940,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
             // Check if noise handshake is completed
             if (encrypted_communication::is_handshake_completed(client_socket)) {
                 noise_handshake_completed = true;
-                
+                LOG_CLIENT_INFO("Noise handshake completed for peer " << peer_hash_id);
                 // Update peer state
                 {
                     std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -949,22 +949,12 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                         auto peer_it = peers_.find(it->second);
                         if (peer_it != peers_.end()) {
                             peer_it->second.noise_handshake_completed = true;
-                        }
-                    }
-                }
-                
-                LOG_CLIENT_INFO("Noise handshake completed for peer " << peer_hash_id);
-                
-                // For outgoing connections, send application handshake after noise handshake completes
-                {
-                    std::lock_guard<std::mutex> lock(peers_mutex_);
-                    auto it = socket_to_peer_id_.find(client_socket);
-                    if (it != socket_to_peer_id_.end()) {
-                        auto peer_it = peers_.find(it->second);
-                        if (peer_it != peers_.end() && peer_it->second.is_outgoing) {
-                            if (!send_handshake_unlocked(client_socket, get_our_peer_id())) {
-                                LOG_CLIENT_ERROR("Failed to send application handshake after noise completion for peer " << peer_hash_id);
-                                break;
+                            // For outgoing connections, send application handshake after noise handshake completes
+                            if (peer_it->second.is_outgoing) {
+                                if (!send_handshake_unlocked(client_socket, get_our_peer_id())) {
+                                    LOG_CLIENT_ERROR("Failed to send application handshake after noise completion for peer " << peer_hash_id);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -977,7 +967,6 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     break;
                 }
                 // Continue to check if handshake completed
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
         }
