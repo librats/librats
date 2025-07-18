@@ -9,6 +9,8 @@ using namespace librats;
 class MessageExchangeTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Enable debug logging
+        librats::Logger::getInstance().set_log_level(librats::LogLevel::DEBUG);
         // Create two clients for testing
         client1 = std::make_unique<RatsClient>(8001, 5);
         client2 = std::make_unique<RatsClient>(8002, 5);

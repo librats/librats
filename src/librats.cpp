@@ -347,11 +347,14 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     
     LOG_CLIENT_INFO("Successfully connected to peer " << connection_info << " (hash: " << peer_hash_id << ")");
     
-    // Initiate handshake for outgoing connections
-    if (!send_handshake(peer_socket, get_our_peer_id())) {
-        LOG_CLIENT_ERROR("Failed to initiate handshake with peer " << peer_hash_id);
-        disconnect_peer(peer_socket);
-        return false;
+    // For encrypted connections, the application handshake will be sent after noise handshake completes
+    // For unencrypted connections, send handshake immediately
+    if (!is_encryption_enabled()) {
+        if (!send_handshake(peer_socket, get_our_peer_id())) {
+            LOG_CLIENT_ERROR("Failed to initiate handshake with peer " << peer_hash_id);
+            disconnect_peer(peer_socket);
+            return false;
+        }
     }
     
     // Note: Connection callback will be called after handshake completion
@@ -931,7 +934,9 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         std::string data;
         
         // Handle encryption handshake first if enabled
+        LOG_CLIENT_DEBUG("Checking handshake state: encryption_enabled=" << encryption_enabled << ", noise_handshake_completed=" << noise_handshake_completed);
         if (encryption_enabled && !noise_handshake_completed) {
+            LOG_CLIENT_DEBUG("Entering encryption handshake handling for socket " << client_socket);
             // Check if noise handshake is completed
             if (encrypted_communication::is_handshake_completed(client_socket)) {
                 noise_handshake_completed = true;
@@ -949,23 +954,51 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                 }
                 
                 LOG_CLIENT_INFO("Noise handshake completed for peer " << peer_hash_id);
+                
+                // For outgoing connections, send application handshake after noise handshake completes
+                {
+                    std::lock_guard<std::mutex> lock(peers_mutex_);
+                    auto it = socket_to_peer_id_.find(client_socket);
+                    if (it != socket_to_peer_id_.end()) {
+                        auto peer_it = peers_.find(it->second);
+                        if (peer_it != peers_.end() && peer_it->second.is_outgoing) {
+                            if (!send_handshake(client_socket, get_our_peer_id())) {
+                                LOG_CLIENT_ERROR("Failed to send application handshake after noise completion for peer " << peer_hash_id);
+                                break;
+                            }
+                        }
+                    }
+                }
             } else {
-                // Try to perform handshake step
+                // For responders and ongoing handshake processing, try to continue the handshake
+                LOG_CLIENT_DEBUG("Attempting to process handshake for socket " << client_socket);
                 if (!encrypted_communication::perform_handshake(client_socket)) {
                     LOG_CLIENT_ERROR("Encryption handshake failed for peer " << peer_hash_id);
                     break;
                 }
-                
-                // Continue to next iteration to check handshake status
+                // Continue to check if handshake completed
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
         }
         
         // Receive data (encrypted or unencrypted based on settings)
+        LOG_CLIENT_DEBUG("Receiving data: encryption_enabled=" << encryption_enabled << ", noise_handshake_completed=" << noise_handshake_completed);
         if (encryption_enabled && noise_handshake_completed) {
+            LOG_CLIENT_DEBUG("Receiving encrypted data from socket " << client_socket);
             data = encrypted_communication::receive_tcp_data_encrypted(client_socket);
+        } else if (encryption_enabled && !noise_handshake_completed) {
+            LOG_CLIENT_DEBUG("Processing handshake for socket " << client_socket);
+            // During handshake, let the encrypted socket handle data reception and processing
+            // The perform_handshake function will internally call receive_tcp_data and process handshake messages
+            if (!encrypted_communication::perform_handshake(client_socket)) {
+                LOG_CLIENT_ERROR("Encryption handshake failed for peer " << peer_hash_id);
+                break;
+            }
+            // Continue to check if handshake completed
+            continue;
         } else {
+            LOG_CLIENT_DEBUG("Receiving unencrypted data from socket " << client_socket);
             data = receive_tcp_data(client_socket);
         }
         

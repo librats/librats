@@ -67,9 +67,15 @@ private:
     std::unordered_map<socket_t, std::unique_ptr<SocketSession>> sessions_;
     mutable std::mutex sessions_mutex_;
     
-    // Helper methods
+public:
+    // Helper methods  
     SocketSession* get_session(socket_t socket);
     const SocketSession* get_session(socket_t socket) const;
+
+private:
+    
+    // Helper to read exact number of bytes from socket
+    std::string receive_exact_bytes(socket_t socket, size_t byte_count);
     
     // Message framing for transport
     static std::vector<uint8_t> frame_message(const std::vector<uint8_t>& message);

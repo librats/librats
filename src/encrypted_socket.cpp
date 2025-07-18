@@ -2,6 +2,8 @@
 #include "logger.h"
 #include <algorithm>
 #include <cstring>
+#include <thread>
+#include <chrono>
 
 #define LOG_ENCRYPT_DEBUG(message) LOG_DEBUG("encrypt", message)
 #define LOG_ENCRYPT_INFO(message)  LOG_INFO("encrypt", message)
@@ -93,10 +95,11 @@ bool EncryptedSocket::send_handshake_message(socket_t socket, const std::vector<
         if (!handshake_data.empty()) {
             auto framed_message = frame_message(handshake_data);
             
-            // Add handshake magic to distinguish from regular messages
+            // Add handshake magic to distinguish from regular messages (convert to network byte order)
             std::vector<uint8_t> handshake_message;
             handshake_message.resize(4);
-            std::memcpy(handshake_message.data(), &HANDSHAKE_MESSAGE_MAGIC, 4);
+            uint32_t handshake_magic_be = htonl(HANDSHAKE_MESSAGE_MAGIC);
+            std::memcpy(handshake_message.data(), &handshake_magic_be, 4);
             handshake_message.insert(handshake_message.end(), framed_message.begin(), framed_message.end());
             
             std::string data_str(handshake_message.begin(), handshake_message.end());
@@ -127,31 +130,67 @@ std::vector<uint8_t> EncryptedSocket::receive_handshake_message(socket_t socket)
     }
     
     try {
-        // Receive raw data
-        std::string raw_data = receive_tcp_data(socket, 4096);
-        if (raw_data.empty()) {
+        // First, read the handshake magic (4 bytes)
+        LOG_ENCRYPT_DEBUG("Attempting to receive handshake magic on socket " << socket);
+        std::string magic_data = receive_exact_bytes(socket, 4);
+        if (magic_data.size() < 4) {
+            LOG_ENCRYPT_DEBUG("Failed to receive complete handshake magic, got " << magic_data.size() << " bytes");
             return {};
         }
         
-        std::vector<uint8_t> data(raw_data.begin(), raw_data.end());
-        
-        // Check for handshake magic
-        if (data.size() < 4) {
-            LOG_ENCRYPT_WARN("Received data too short for handshake magic");
-            return {};
-        }
-        
+        // Check handshake magic
         uint32_t received_magic;
-        std::memcpy(&received_magic, data.data(), 4);
-        
+        std::memcpy(&received_magic, magic_data.data(), 4);
         if (received_magic != HANDSHAKE_MESSAGE_MAGIC) {
             LOG_ENCRYPT_WARN("Received data is not a handshake message (magic: 0x" << std::hex << received_magic << ")");
             return {};
         }
         
-        // Remove magic and unframe message
-        std::vector<uint8_t> framed_data(data.begin() + 4, data.end());
+        // Now read the noise frame header (8 bytes)
+        LOG_ENCRYPT_DEBUG("Reading noise frame header on socket " << socket);
+        std::string frame_header = receive_exact_bytes(socket, 8);
+        if (frame_header.size() < 8) {
+            LOG_ENCRYPT_ERROR("Failed to receive complete frame header, got " << frame_header.size() << " bytes");
+            return {};
+        }
+        
+        // Parse the noise message length from the frame header
+        uint32_t noise_magic;
+        uint32_t noise_length;
+        std::memcpy(&noise_magic, frame_header.data(), 4);
+        std::memcpy(&noise_length, frame_header.data() + 4, 4);
+        
+        // Convert from network byte order (big endian) to host byte order
+        noise_magic = ntohl(noise_magic);
+        noise_length = ntohl(noise_length);
+        
+        LOG_ENCRYPT_DEBUG("Parsed noise magic: 0x" << std::hex << noise_magic << ", length: " << std::dec << noise_length);
+        
+        if (noise_magic != NOISE_MESSAGE_MAGIC) {
+            LOG_ENCRYPT_ERROR("Invalid noise message magic in frame header: 0x" << std::hex << noise_magic << " (expected 0x" << NOISE_MESSAGE_MAGIC << ")");
+            return {};
+        }
+        
+        if (noise_length > NOISE_MAX_MESSAGE_SIZE) {
+            LOG_ENCRYPT_ERROR("Noise message length too large: " << noise_length);
+            return {};
+        }
+        
+        // Read the actual noise message data
+        LOG_ENCRYPT_DEBUG("Reading " << noise_length << " bytes of noise message data on socket " << socket);
+        std::string noise_data = receive_exact_bytes(socket, noise_length);
+        if (noise_data.size() < noise_length) {
+            LOG_ENCRYPT_ERROR("Failed to receive complete noise message, got " << noise_data.size() << " of " << noise_length << " bytes");
+            return {};
+        }
+        
+        // Reconstruct the complete framed message
+        std::vector<uint8_t> framed_data;
+        framed_data.insert(framed_data.end(), frame_header.begin(), frame_header.end());
+        framed_data.insert(framed_data.end(), noise_data.begin(), noise_data.end());
+        
         auto handshake_data = unframe_message(framed_data);
+        LOG_ENCRYPT_DEBUG("Successfully received and unframed " << handshake_data.size() << " bytes of handshake data");
         
         if (handshake_data.empty()) {
             LOG_ENCRYPT_ERROR("Failed to unframe handshake message");
@@ -322,15 +361,45 @@ const EncryptedSocket::SocketSession* EncryptedSocket::get_session(socket_t sock
     return (it != sessions_.end()) ? it->second.get() : nullptr;
 }
 
+std::string EncryptedSocket::receive_exact_bytes(socket_t socket, size_t byte_count) {
+    std::string buffer;
+    buffer.reserve(byte_count);
+    
+    while (buffer.size() < byte_count) {
+        size_t remaining = byte_count - buffer.size();
+        std::string chunk = receive_tcp_data(socket, remaining);
+        
+        if (chunk.empty()) {
+            // Connection closed or error
+            LOG_ENCRYPT_DEBUG("Connection closed or error while reading " << remaining << " remaining bytes");
+            
+            // Mark the session as failed if connection is closed during handshake
+            auto* session = get_session(socket);
+            if (session && !session->session->is_handshake_completed()) {
+                LOG_ENCRYPT_DEBUG("Marking handshake as failed due to connection closure");
+                // The session will be cleaned up by the caller
+            }
+            break;
+        }
+        
+        buffer.append(chunk);
+        LOG_ENCRYPT_DEBUG("Read " << chunk.size() << " bytes, total: " << buffer.size() << "/" << byte_count);
+    }
+    
+    return buffer;
+}
+
 std::vector<uint8_t> EncryptedSocket::frame_message(const std::vector<uint8_t>& message) {
     std::vector<uint8_t> framed(MESSAGE_HEADER_SIZE + message.size());
     
-    // Add magic number
-    std::memcpy(framed.data(), &NOISE_MESSAGE_MAGIC, 4);
+    // Add magic number (convert to network byte order)
+    uint32_t magic_be = htonl(NOISE_MESSAGE_MAGIC);
+    std::memcpy(framed.data(), &magic_be, 4);
     
-    // Add message length
+    // Add message length (convert to network byte order)
     uint32_t length = static_cast<uint32_t>(message.size());
-    std::memcpy(framed.data() + 4, &length, 4);
+    uint32_t length_be = htonl(length);
+    std::memcpy(framed.data() + 4, &length_be, 4);
     
     // Add message data
     std::memcpy(framed.data() + MESSAGE_HEADER_SIZE, message.data(), message.size());
@@ -343,16 +412,18 @@ std::vector<uint8_t> EncryptedSocket::unframe_message(const std::vector<uint8_t>
         return {};
     }
     
-    // Check magic number
+    // Check magic number (convert from network byte order)
     uint32_t magic;
     std::memcpy(&magic, framed_message.data(), 4);
+    magic = ntohl(magic);
     if (magic != NOISE_MESSAGE_MAGIC) {
         return {};
     }
     
-    // Get message length
+    // Get message length (convert from network byte order)
     uint32_t length;
     std::memcpy(&length, framed_message.data() + 4, 4);
+    length = ntohl(length);
     
     if (length > NOISE_MAX_MESSAGE_SIZE || framed_message.size() < MESSAGE_HEADER_SIZE + length) {
         return {};
@@ -429,22 +500,68 @@ std::string EncryptedSocketManager::receive_data(socket_t socket) {
 }
 
 bool EncryptedSocketManager::perform_handshake_step(socket_t socket, const std::vector<uint8_t>& received_data) {
+    LOG_ENCRYPT_DEBUG("perform_handshake_step called for socket " << socket << " with " << received_data.size() << " bytes of received data");
+    
     if (!encryption_enabled_) {
+        LOG_ENCRYPT_DEBUG("Encryption not enabled, returning true");
         return true; // No handshake needed when encryption is disabled
     }
     
     if (encrypted_socket_.is_handshake_completed(socket)) {
+        LOG_ENCRYPT_DEBUG("Handshake already completed for socket " << socket);
         return true; // Already completed
     }
     
     if (encrypted_socket_.has_handshake_failed(socket)) {
+        LOG_ENCRYPT_DEBUG("Handshake already failed for socket " << socket);
         return false; // Already failed
     }
     
     try {
-        if (received_data.empty()) {
-            // This is an outgoing handshake message
-            return encrypted_socket_.send_handshake_message(socket);
+        NoiseRole role = encrypted_socket_.get_socket_role(socket);
+        
+                if (received_data.empty()) {
+            // For initiators, only send the initial handshake message if we haven't started yet
+            if (role == NoiseRole::INITIATOR) {
+                auto* session = encrypted_socket_.get_session(socket);
+                if (session && session->session->get_handshake_state() == NoiseHandshakeState::WRITE_MESSAGE_1) {
+                    LOG_ENCRYPT_DEBUG("Initiator sending initial handshake message on socket " << socket);
+                    return encrypted_socket_.send_handshake_message(socket);
+                } else {
+                    LOG_ENCRYPT_DEBUG("Initiator waiting for responder message (state: " << static_cast<int>(session ? session->session->get_handshake_state() : NoiseHandshakeState::FAILED) << ")");
+                    // Initiator should wait for responder's message, not keep sending
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    return !encrypted_socket_.has_handshake_failed(socket);
+                }
+            } else {
+                // For responders, try to receive and process incoming handshake data
+                auto* session = encrypted_socket_.get_session(socket);
+                if (session && session->session->get_handshake_state() == NoiseHandshakeState::READ_MESSAGE_1) {
+                    LOG_ENCRYPT_DEBUG("Responder trying to receive first handshake message on socket " << socket);
+                    auto payload = encrypted_socket_.receive_handshake_message(socket);
+                    
+                    // If we received a handshake message, we need to send a response
+                    if (!payload.empty()) {
+                        LOG_ENCRYPT_DEBUG("Responder received handshake message (" << payload.size() << " bytes) on socket " << socket);
+                        if (!encrypted_socket_.is_handshake_completed(socket)) {
+                            LOG_ENCRYPT_DEBUG("Responder sending handshake response on socket " << socket);
+                            return encrypted_socket_.send_handshake_message(socket);
+                        }
+                    } else {
+                        LOG_ENCRYPT_DEBUG("Responder received empty handshake message on socket " << socket);
+                        if (encrypted_socket_.has_handshake_failed(socket)) {
+                            LOG_ENCRYPT_DEBUG("Handshake failed for socket " << socket);
+                            return false;
+                        }
+                    }
+                } else {
+                    LOG_ENCRYPT_DEBUG("Responder waiting for initiator or already processed initial message (state: " << static_cast<int>(session ? session->session->get_handshake_state() : NoiseHandshakeState::FAILED) << ")");
+                    // Responder should wait for the next message or handshake completion
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                
+                return !encrypted_socket_.has_handshake_failed(socket);
+            }
         } else {
             // Process received handshake message
             auto payload = encrypted_socket_.receive_handshake_message(socket);
@@ -452,7 +569,6 @@ bool EncryptedSocketManager::perform_handshake_step(socket_t socket, const std::
             // If we received a handshake message and we're the responder, 
             // we might need to send a response
             if (!encrypted_socket_.is_handshake_completed(socket)) {
-                NoiseRole role = encrypted_socket_.get_socket_role(socket);
                 if (role == NoiseRole::RESPONDER) {
                     return encrypted_socket_.send_handshake_message(socket);
                 }
@@ -576,7 +692,10 @@ bool initialize_incoming_connection(socket_t socket) {
 
 bool perform_handshake(socket_t socket) {
     auto& manager = EncryptedSocketManager::getInstance();
-    return manager.perform_handshake_step(socket);
+    LOG_ENCRYPT_DEBUG("perform_handshake called for socket " << socket);
+    bool result = manager.perform_handshake_step(socket);
+    LOG_ENCRYPT_DEBUG("perform_handshake_step returned " << result << " for socket " << socket);
+    return result;
 }
 
 bool is_handshake_completed(socket_t socket) {
