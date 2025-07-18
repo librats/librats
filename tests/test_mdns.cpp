@@ -2,6 +2,7 @@
 #include "mdns.h"
 #include "librats.h"
 #include "logger.h"
+#include "socket.h"  // Add socket header for init/cleanup functions
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -11,11 +12,13 @@ using namespace librats;
 class MdnsTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Any setup needed before each test
+        // Initialize socket library before any socket operations
+        ASSERT_TRUE(init_socket_library()) << "Failed to initialize socket library";
     }
     
     void TearDown() override {
-        // Any cleanup needed after each test
+        // Cleanup socket library after tests
+        cleanup_socket_library();
     }
 };
 
