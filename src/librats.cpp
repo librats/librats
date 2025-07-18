@@ -962,7 +962,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     if (it != socket_to_peer_id_.end()) {
                         auto peer_it = peers_.find(it->second);
                         if (peer_it != peers_.end() && peer_it->second.is_outgoing) {
-                            if (!send_handshake(client_socket, get_our_peer_id())) {
+                            if (!send_handshake_unlocked(client_socket, get_our_peer_id())) {
                                 LOG_CLIENT_ERROR("Failed to send application handshake after noise completion for peer " << peer_hash_id);
                                 break;
                             }
