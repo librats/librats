@@ -8,11 +8,13 @@
 class IceTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Test setup
+        // Initialize socket library for network operations
+        ASSERT_TRUE(librats::init_socket_library()) << "Failed to initialize socket library";
     }
     
     void TearDown() override {
-        // Test cleanup
+        // Clean up socket library
+        librats::cleanup_socket_library();
     }
 };
 
