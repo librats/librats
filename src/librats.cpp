@@ -41,7 +41,7 @@ RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig&
       nat_config_(nat_config),
       server_socket_(INVALID_SOCKET_VALUE),
       running_(false),
-      encryption_enabled_(true) {
+      encryption_enabled_(false) {
     // Initialize STUN client
     stun_client_ = std::make_unique<StunClient>();
     
