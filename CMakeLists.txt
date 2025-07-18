@@ -26,6 +26,8 @@ add_library(librats
     src/os.h
     src/stun.cpp
     src/stun.h
+    src/ice.cpp
+    src/ice.h
     src/fs.cpp
     src/fs.h
     src/logger.h
@@ -100,6 +102,7 @@ if(BUILD_TESTS)
         tests/test_rats_client.cpp
         tests/test_os.cpp
         tests/test_stun.cpp
+        tests/test_ice.cpp
         tests/test_fs.cpp
         tests/test_config_persistence.cpp
         tests/test_main.cpp

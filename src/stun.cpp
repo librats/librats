@@ -1,4 +1,5 @@
 #include "stun.h"
+#include "ice.h"
 #include "network_utils.h"
 #include "logger.h"
 #include <random>
@@ -316,6 +317,162 @@ void StunClient::xor_address(StunAddress& address, const uint8_t* transaction_id
         }
     }
     // TODO: Implement IPv6 XOR if needed (requires XOR with magic cookie + transaction ID)
+}
+
+// ICE-specific static helper function implementation
+std::vector<uint8_t> StunClient::create_binding_request_ice(const std::string& username,
+                                                          const std::string& password,
+                                                          uint32_t priority,
+                                                          bool controlling,
+                                                          uint64_t tie_breaker,
+                                                          bool use_candidate) {
+    // Start with basic binding request
+    std::vector<uint8_t> message = create_binding_request();
+    
+    // Add ICE-specific attributes
+    size_t original_size = message.size();
+    
+    // USERNAME attribute (0x0006)
+    if (!username.empty()) {
+        uint16_t attr_type = 0x0006;
+        uint16_t attr_length = username.length();
+        
+        message.push_back((attr_type >> 8) & 0xFF);
+        message.push_back(attr_type & 0xFF);
+        message.push_back((attr_length >> 8) & 0xFF);
+        message.push_back(attr_length & 0xFF);
+        
+        for (char c : username) {
+            message.push_back(static_cast<uint8_t>(c));
+        }
+        
+        // Pad to 4-byte boundary
+        while ((message.size() - original_size) % 4 != 0) {
+            message.push_back(0);
+        }
+    }
+    
+    // PRIORITY attribute (0x0024)
+    {
+        uint16_t attr_type = 0x0024;
+        uint16_t attr_length = 4;
+        
+        message.push_back((attr_type >> 8) & 0xFF);
+        message.push_back(attr_type & 0xFF);
+        message.push_back((attr_length >> 8) & 0xFF);
+        message.push_back(attr_length & 0xFF);
+        
+        message.push_back((priority >> 24) & 0xFF);
+        message.push_back((priority >> 16) & 0xFF);
+        message.push_back((priority >> 8) & 0xFF);
+        message.push_back(priority & 0xFF);
+    }
+    
+    // ICE-CONTROLLING or ICE-CONTROLLED attribute
+    {
+        uint16_t attr_type = controlling ? 0x802A : 0x8029; // ICE-CONTROLLING : ICE-CONTROLLED
+        uint16_t attr_length = 8;
+        
+        message.push_back((attr_type >> 8) & 0xFF);
+        message.push_back(attr_type & 0xFF);
+        message.push_back((attr_length >> 8) & 0xFF);
+        message.push_back(attr_length & 0xFF);
+        
+        // Tie breaker value
+        for (int i = 7; i >= 0; i--) {
+            message.push_back((tie_breaker >> (i * 8)) & 0xFF);
+        }
+    }
+    
+    // USE-CANDIDATE attribute (0x0025) - only for controlling agent
+    if (use_candidate && controlling) {
+        uint16_t attr_type = 0x0025;
+        uint16_t attr_length = 0; // No value for this attribute
+        
+        message.push_back((attr_type >> 8) & 0xFF);
+        message.push_back(attr_type & 0xFF);
+        message.push_back((attr_length >> 8) & 0xFF);
+        message.push_back(attr_length & 0xFF);
+    }
+    
+    // Update message length
+    uint16_t total_length = message.size() - 20; // Exclude header
+    message[2] = (total_length >> 8) & 0xFF;
+    message[3] = total_length & 0xFF;
+    
+    return message;
+}
+
+// AdvancedNatDetector implementation
+AdvancedNatDetector::AdvancedNatDetector() {
+    stun_client_ = std::make_unique<StunClient>();
+    LOG_STUN_DEBUG("AdvancedNatDetector created");
+}
+
+AdvancedNatDetector::~AdvancedNatDetector() {
+    LOG_STUN_DEBUG("AdvancedNatDetector destroyed");
+}
+
+NatTypeInfo AdvancedNatDetector::detect_nat_characteristics(const std::vector<std::string>& stun_servers,
+                                                           int timeout_ms) {
+    NatTypeInfo info;
+    
+    if (stun_servers.empty()) {
+        LOG_STUN_WARN("No STUN servers provided for NAT detection");
+        info.has_nat = true; // Assume NAT if we can't test
+        info.filtering_behavior = NatBehavior::UNKNOWN;
+        info.mapping_behavior = NatBehavior::UNKNOWN;
+        info.preserves_port = false;
+        info.hairpin_support = false;
+        info.description = "No STUN servers available";
+        return info;
+    }
+    
+    // Basic implementation - test if we can reach STUN server
+    StunAddress public_address;
+    
+    if (stun_client_->get_public_address(stun_servers[0], 3478, public_address, timeout_ms)) {
+        // Simple NAT type detection - this is a minimal implementation
+        info.has_nat = true; // Assume NAT for now
+        info.filtering_behavior = NatBehavior::ENDPOINT_INDEPENDENT;
+        info.mapping_behavior = NatBehavior::ENDPOINT_INDEPENDENT;
+        info.preserves_port = false;
+        info.hairpin_support = false;
+        info.description = "NAT detected via STUN";
+    } else {
+        info.has_nat = false;
+        info.filtering_behavior = NatBehavior::ENDPOINT_INDEPENDENT;
+        info.mapping_behavior = NatBehavior::ENDPOINT_INDEPENDENT;
+        info.preserves_port = true;
+        info.hairpin_support = true;
+        info.description = "Open internet connection or STUN failure";
+    }
+    
+    return info;
+}
+
+bool AdvancedNatDetector::test_hairpin_support(const std::string& stun_server, int timeout_ms) {
+    // Simplified implementation - return false for now
+    LOG_STUN_DEBUG("Testing hairpin support (not fully implemented)");
+    return false;
+}
+
+bool AdvancedNatDetector::test_port_preservation(const std::vector<std::string>& stun_servers, int timeout_ms) {
+    // Simplified implementation - return false for now
+    LOG_STUN_DEBUG("Testing port preservation (not fully implemented)");
+    return false;
+}
+
+NatBehavior AdvancedNatDetector::test_filtering_behavior(const std::vector<std::string>& stun_servers, int timeout_ms) {
+    // Simplified implementation - return endpoint independent for now
+    LOG_STUN_DEBUG("Testing filtering behavior (not fully implemented)");
+    return NatBehavior::ENDPOINT_INDEPENDENT;
+}
+
+NatBehavior AdvancedNatDetector::test_mapping_behavior(const std::vector<std::string>& stun_servers, int timeout_ms) {
+    // Simplified implementation - return endpoint independent for now
+    LOG_STUN_DEBUG("Testing mapping behavior (not fully implemented)");
+    return NatBehavior::ENDPOINT_INDEPENDENT;
 }
 
 } // namespace librats 

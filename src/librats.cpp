@@ -35,9 +35,10 @@ namespace librats {
 const std::string RatsClient::CONFIG_FILE_NAME = "config.json";
 const std::string RatsClient::PEERS_FILE_NAME = "peers.rats";
 
-RatsClient::RatsClient(int listen_port, int max_peers) 
+RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig& nat_config) 
     : listen_port_(listen_port), 
       max_peers_(max_peers),
+      nat_config_(nat_config),
       server_socket_(INVALID_SOCKET_VALUE),
       running_(false),
       encryption_enabled_(true) {
@@ -289,7 +290,7 @@ void RatsClient::stop() {
     LOG_CLIENT_INFO("RatsClient stopped successfully");
 }
 
-bool RatsClient::connect_to_peer(const std::string& host, int port) {
+bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionStrategy strategy) {
     if (!running_.load()) {
         LOG_CLIENT_ERROR("RatsClient is not running");
         return false;
