@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <filesystem>
 #include <cstring>
+#include <climits>
 
 #define LOG_BT_DEBUG(message) LOG_DEBUG("bittorrent", message)
 #define LOG_BT_INFO(message)  LOG_INFO("bittorrent", message)
