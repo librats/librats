@@ -394,38 +394,80 @@ std::string get_peer_address(socket_t socket) {
 int send_tcp_data(socket_t socket, const std::string& data) {
     LOG_SOCKET_DEBUG("Sending " << data.length() << " bytes to TCP socket " << socket);
     
-    int bytes_sent = send(socket, data.c_str(), data.length(), 0);
-    if (bytes_sent == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_ERROR("Failed to send TCP data to socket " << socket);
-        return -1;
+    size_t total_sent = 0;
+    const char* buffer = data.c_str();
+    size_t remaining = data.length();
+    
+    while (remaining > 0) {
+        int bytes_sent = send(socket, buffer + total_sent, remaining, 0);
+        if (bytes_sent == SOCKET_ERROR_VALUE) {
+#ifdef _WIN32
+            int error = WSAGetLastError();
+            if (error == WSAEWOULDBLOCK) {
+                // Non-blocking socket would block, try again
+                continue;
+            }
+#else
+            int error = errno;
+            if (error == EAGAIN || error == EWOULDBLOCK) {
+                // Non-blocking socket would block, try again
+                continue;
+            }
+#endif
+            LOG_SOCKET_ERROR("Failed to send TCP data to socket " << socket << " (error: " << error << ")");
+            return -1;
+        }
+        
+        if (bytes_sent == 0) {
+            LOG_SOCKET_ERROR("Connection closed by peer during send on socket " << socket);
+            return -1;
+        }
+        
+        total_sent += bytes_sent;
+        remaining -= bytes_sent;
+        LOG_SOCKET_DEBUG("Sent " << bytes_sent << " bytes, " << remaining << " remaining");
     }
     
-    LOG_SOCKET_DEBUG("Successfully sent " << bytes_sent << " bytes to TCP socket " << socket);
-    return bytes_sent;
+    LOG_SOCKET_DEBUG("Successfully sent all " << total_sent << " bytes to TCP socket " << socket);
+    return static_cast<int>(total_sent);
 }
 
 std::string receive_tcp_data(socket_t socket, size_t buffer_size) {
-    char* buffer = new char[buffer_size + 1];
-    memset(buffer, 0, buffer_size + 1);
+    if (buffer_size == 0) {
+        buffer_size = 1024; // Default buffer size
+    }
     
-    int bytes_received = recv(socket, buffer, buffer_size, 0);
+    std::vector<char> buffer(buffer_size);
+    
+    int bytes_received = recv(socket, buffer.data(), buffer_size, 0);
     if (bytes_received == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_ERROR("Failed to receive TCP data from socket " << socket);
-        delete[] buffer;
+#ifdef _WIN32
+        int error = WSAGetLastError();
+        if (error == WSAEWOULDBLOCK) {
+            // No data available on non-blocking socket - this is normal
+            return "";
+        }
+        LOG_SOCKET_ERROR("Failed to receive TCP data from socket " << socket << " (error: " << error << ")");
+#else
+        int error = errno;
+        if (error == EAGAIN || error == EWOULDBLOCK) {
+            // No data available on non-blocking socket - this is normal
+            return "";
+        }
+        LOG_SOCKET_ERROR("Failed to receive TCP data from socket " << socket << " (error: " << strerror(error) << ")");
+#endif
         return "";
     }
     
     if (bytes_received == 0) {
         LOG_SOCKET_INFO("Connection closed by peer on socket " << socket);
-        delete[] buffer;
         return "";
     }
     
     LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from TCP socket " << socket);
-    buffer[bytes_received] = '\0';
-    std::string result(buffer);
-    delete[] buffer;
-    return result;
+    
+    // Safely construct string with exact size
+    return std::string(buffer.data(), bytes_received);
 }
 
 // UDP Socket Functions
