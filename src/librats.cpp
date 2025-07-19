@@ -180,6 +180,73 @@ bool RatsClient::is_already_connected_to_address(const std::string& normalized_a
     return address_to_peer_id_.find(normalized_address) != address_to_peer_id_.end();
 }
 
+// Message buffering helper methods for handling partial TCP messages
+std::vector<std::string> RatsClient::process_buffered_messages(socket_t socket, const std::string& new_data) {
+    std::vector<std::string> complete_messages;
+    
+    if (new_data.empty()) {
+        return complete_messages;
+    }
+    
+    std::lock_guard<std::mutex> lock(message_buffers_mutex_);
+    
+    // Add new data to the buffer for this socket
+    message_buffers_[socket] += new_data;
+    std::string& buffer = message_buffers_[socket];
+    
+    // Process complete messages separated by newlines
+    size_t pos = 0;
+    while ((pos = buffer.find('\n')) != std::string::npos) {
+        std::string message = buffer.substr(0, pos);
+        
+        // Remove carriage return if present (handles \r\n line endings)
+        if (!message.empty() && message.back() == '\r') {
+            message.pop_back();
+        }
+        
+        // Only add non-empty messages
+        if (!message.empty()) {
+            complete_messages.push_back(message);
+        }
+        
+        // Remove the processed message from buffer
+        buffer.erase(0, pos + 1);
+    }
+    
+    // If buffer is getting too large without finding a delimiter, try to parse it as-is
+    // This provides backward compatibility for messages without delimiters
+    if (buffer.size() > 8192) { // 8KB limit
+        LOG_CLIENT_WARN("Message buffer for socket " << socket << " exceeded 8KB, attempting to parse without delimiter");
+        
+        // Try to parse the buffer as JSON
+        nlohmann::json test_json;
+        try {
+            test_json = nlohmann::json::parse(buffer);
+            // If parsing succeeds, it's a complete message
+            complete_messages.push_back(buffer);
+            buffer.clear();
+        } catch (const nlohmann::json::exception&) {
+            // If parsing fails, keep the buffer but warn about it
+            LOG_CLIENT_WARN("Large message buffer contains incomplete JSON, keeping for next read");
+        }
+    }
+    
+    return complete_messages;
+}
+
+void RatsClient::cleanup_message_buffer(socket_t socket) {
+    std::lock_guard<std::mutex> lock(message_buffers_mutex_);
+    message_buffers_.erase(socket);
+}
+
+std::string RatsClient::prepare_message_for_sending(const std::string& message) {
+    // Add newline delimiter if not already present
+    if (!message.empty() && message.back() != '\n') {
+        return message + "\n";
+    }
+    return message;
+}
+
 std::vector<RatsPeer> RatsClient::get_all_peers() const {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     std::vector<RatsPeer> result;
@@ -490,7 +557,9 @@ bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& json_d
     
     try {
         std::string data = json_data.dump();
-        return send_to_peer(socket, data);
+        // Add newline delimiter for proper message boundaries
+        std::string prepared_data = prepare_message_for_sending(data);
+        return send_to_peer(socket, prepared_data);
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
         return false;
@@ -1129,6 +1198,17 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         
         LOG_CLIENT_DEBUG("Received data from " << peer_hash_id << ": " << data.substr(0, 50) << (data.length() > 50 ? "..." : ""));
         
+        // Process buffered messages to handle partial TCP messages
+        std::vector<std::string> complete_messages = process_buffered_messages(client_socket, data);
+        
+        // Process each complete message
+        bool should_exit_client = false;
+        for (const std::string& message : complete_messages) {
+            LOG_CLIENT_DEBUG("Processing complete message from " << peer_hash_id << ": " << message.substr(0, 50) << (message.length() > 50 ? "..." : ""));
+            
+            // Use the original message processing logic for each complete message
+            std::string current_data = message; // Use message instead of data for processing
+        
         // Check for handshake timeout and failure
         if (!handshake_completed) {
             bool should_exit = false;
@@ -1161,10 +1241,11 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         }
         
         // Handle handshake messages
-        if (is_handshake_message(data)) {
-            if (!handle_handshake_message(client_socket, peer_hash_id, data)) {
+        if (is_handshake_message(current_data)) {
+            if (!handle_handshake_message(client_socket, peer_hash_id, current_data)) {
                 LOG_CLIENT_ERROR("Failed to handle handshake message from " << peer_hash_id);
-                break; // Exit loop to disconnect
+                should_exit_client = true;
+                break; // Exit message processing loop
             }
             
             // Check if handshake just completed and trigger notifications
@@ -1272,24 +1353,31 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         if (handshake_completed && (!encryption_enabled || noise_handshake_completed)) {
             // Try to parse as JSON rats message first
             nlohmann::json json_msg;
-            if (parse_json_message(data, json_msg)) {
+            if (parse_json_message(current_data, json_msg)) {
                 // Check if it's a rats protocol message
                 if (json_msg.contains("rats_protocol") && json_msg["rats_protocol"] == true) {
                     handle_rats_message(client_socket, get_peer_hash_id(client_socket), json_msg);
                 } else {
                     // Regular JSON data - call data callback
                     if (data_callback_) {
-                        data_callback_(client_socket, get_peer_hash_id(client_socket), data);
+                        data_callback_(client_socket, get_peer_hash_id(client_socket), current_data);
                     }
                 }
             } else {
                 // Regular text data - call data callback
                 if (data_callback_) {
-                    data_callback_(client_socket, get_peer_hash_id(client_socket), data);
+                    data_callback_(client_socket, get_peer_hash_id(client_socket), current_data);
                 }
             }
         } else {
             LOG_CLIENT_WARN("Received non-handshake data from " << peer_hash_id << " before handshake completion - ignoring");
+        }
+        
+        } // End of message processing loop
+        
+        // Check if we should exit the main client loop
+        if (should_exit_client) {
+            break;
         }
     }
     
@@ -1318,6 +1406,9 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
             save_configuration();
         }).detach();
     }
+    
+    // Clean up message buffer for this socket
+    cleanup_message_buffer(client_socket);
     
     LOG_CLIENT_INFO("Client disconnected: " << peer_hash_id);
 }
@@ -1793,7 +1884,9 @@ bool RatsClient::send_handshake_unlocked(socket_t socket, const std::string& our
     std::string handshake_msg = create_handshake_message("handshake", our_peer_id);
     LOG_CLIENT_DEBUG("Sending handshake to socket " << socket << ": " << handshake_msg);
     
-    if (!send_to_peer(socket, handshake_msg)) {
+    // Add newline delimiter for proper message boundaries
+    std::string prepared_msg = prepare_message_for_sending(handshake_msg);
+    if (!send_to_peer(socket, prepared_msg)) {
         LOG_CLIENT_ERROR("Failed to send handshake to socket " << socket);
         return false;
     }

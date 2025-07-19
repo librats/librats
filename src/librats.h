@@ -748,12 +748,21 @@ private:
     std::unique_ptr<MdnsClient> mdns_client_;
     std::function<void(const std::string&, int, const std::string&)> mdns_callback_;
     
+    // Message buffering system for handling partial TCP messages
+    std::unordered_map<socket_t, std::string> message_buffers_;  // Buffer partial messages per socket
+    mutable std::mutex message_buffers_mutex_;                   // Protects message buffers
+    
     void server_loop();
     void handle_client(socket_t client_socket, const std::string& peer_hash_id);
     void remove_peer(socket_t socket);
     std::string generate_peer_hash_id(socket_t socket, const std::string& connection_info);
     void handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash);
     void handle_mdns_service_discovery(const MdnsService& service, bool is_new);
+    
+    // Message buffering helpers for handling partial TCP messages
+    std::vector<std::string> process_buffered_messages(socket_t socket, const std::string& new_data);
+    void cleanup_message_buffer(socket_t socket);
+    std::string prepare_message_for_sending(const std::string& message);
     
     // Enhanced connection establishment
     bool attempt_direct_connection(const std::string& host, int port, ConnectionAttemptResult& result);
