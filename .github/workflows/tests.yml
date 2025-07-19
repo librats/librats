@@ -41,3 +41,35 @@ jobs:
         working-directory: build
         run: |
           ctest --output-on-failure -C ${{ matrix.build-type }}
+      
+      - name: Prepare artifacts (Linux)
+        if: runner.os == 'Linux' && matrix.build-type == 'Release'
+        run: |
+          mkdir -p artifacts/linux
+          cp build/bin/rats artifacts/linux/
+          cp build/lib/liblibrats.a artifacts/linux/
+          cp -r src/*.h artifacts/linux/
+      
+      - name: Prepare artifacts (Windows)
+        if: runner.os == 'Windows' && matrix.build-type == 'Release'
+        run: |
+          mkdir -p artifacts/windows
+          cp build/bin/Release/rats.exe artifacts/windows/
+          cp build/lib/Release/librats.lib artifacts/windows/
+          cp src/*.h artifacts/windows/
+      
+      - name: Upload artifacts (Linux)
+        if: runner.os == 'Linux' && matrix.build-type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: librats-linux-${{ github.sha }}
+          path: artifacts/linux/
+          retention-days: 30
+      
+      - name: Upload artifacts (Windows)
+        if: runner.os == 'Windows' && matrix.build-type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: librats-windows-${{ github.sha }}
+          path: artifacts/windows/
+          retention-days: 30
