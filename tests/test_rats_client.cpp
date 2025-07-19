@@ -573,9 +573,6 @@ TEST_F(RatsClientTest, SimultaneousConnectionsToSamePeerTest) {
     EXPECT_TRUE(server.start());
     EXPECT_TRUE(client.start());
     
-    // Give some time for servers to be ready
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
     // Launch multiple simultaneous connection attempts to the same peer
     const int num_attempts = 3;
     std::vector<std::thread> connection_threads;
