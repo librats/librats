@@ -35,7 +35,7 @@ jobs:
       
       - name: Build
         run: |
-          cmake --build build --config ${{ matrix.build-type }}
+          cmake --build build --config ${{ matrix.build-type }} --parallel
       
       - name: Run tests
         working-directory: build
