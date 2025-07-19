@@ -774,10 +774,22 @@ void RatsClient::handle_dht_peer_discovery(const std::vector<Peer>& peers, const
         bool already_connected = is_already_connected_to_address(normalized_peer_address);
         
         if (!already_connected) {
+            // Check if peer limit is reached
+            if (is_peer_limit_reached()) {
+                LOG_CLIENT_DEBUG("Peer limit reached, not connecting to DHT discovered peer " << peer.ip << ":" << peer.port);
+                continue;
+            }
+            
             LOG_CLIENT_DEBUG("Attempting to connect to discovered peer: " << peer.ip << ":" << peer.port);
             
-            // Try to connect to the peer
-            connect_to_peer(peer.ip, peer.port);
+            // Try to connect to the peer (non-blocking)
+            std::thread([this, peer]() {
+                if (connect_to_peer(peer.ip, peer.port)) {
+                    LOG_CLIENT_INFO("Successfully connected to DHT discovered peer: " << peer.ip << ":" << peer.port);
+                } else {
+                    LOG_CLIENT_DEBUG("Failed to connect to DHT discovered peer: " << peer.ip << ":" << peer.port);
+                }
+            }).detach();
         } else {
             LOG_CLIENT_DEBUG("Already connected to discovered peer: " << normalized_peer_address);
         }
