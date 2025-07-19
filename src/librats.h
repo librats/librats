@@ -18,6 +18,7 @@
 #include <memory>
 #include <chrono>
 #include <condition_variable>
+#include <unordered_set> // Added for unordered_set
 
 namespace librats {
 
@@ -710,6 +711,10 @@ private:
     NatType detected_nat_type_;                             // Our detected NAT type
     NatTypeInfo nat_characteristics_;                       // Detailed NAT information
     mutable std::mutex nat_mutex_;                          // Protects NAT-related data
+    
+    // ICE coordination tracking to prevent duplicate attempts
+    std::unordered_set<std::string> ice_coordination_in_progress_;  // Set of peer_ids having ICE coordination
+    mutable std::mutex ice_coordination_mutex_;                     // Protects ICE coordination state
     
     // Connection attempt tracking
     std::unordered_map<std::string, std::vector<ConnectionAttemptResult>> connection_attempts_;

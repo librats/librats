@@ -166,6 +166,12 @@ void RatsClient::remove_peer_by_id(const std::string& peer_id) {
         socket_to_peer_id_.erase(peer.socket);
         address_to_peer_id_.erase(peer.normalized_address);
         peers_.erase(it);
+        
+        // Clean up ICE coordination tracking for this peer
+        {
+            std::lock_guard<std::mutex> ice_lock(ice_coordination_mutex_);
+            ice_coordination_in_progress_.erase(peer_id);
+        }
     }
 }
 
@@ -326,6 +332,12 @@ void RatsClient::stop() {
         peers_.clear();
         socket_to_peer_id_.clear();
         address_to_peer_id_.clear();
+    }
+    
+    // Clear ICE coordination tracking
+    {
+        std::lock_guard<std::mutex> ice_lock(ice_coordination_mutex_);
+        ice_coordination_in_progress_.clear();
     }
     
     // Wait for server thread to finish
@@ -1199,17 +1211,51 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     
                     // If ICE is enabled and this is an outgoing connection, initiate ICE coordination
                     if (ice_agent_ && ice_agent_->is_running() && peer_copy.is_outgoing) {
-                        // Start ICE coordination in background thread
-                        std::thread([this, peer_id = peer_copy.peer_id, host = peer_copy.ip, port = peer_copy.port]() {
-                            // Use conditional variable for responsive shutdown
-                            {
-                                std::unique_lock<std::mutex> lock(shutdown_mutex_);
-                                if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !running_.load(); })) {
-                                    return; // Exit if shutdown requested
-                                }
+                        // Check if ICE coordination is already in progress for this peer
+                        bool should_start_ice = false;
+                        {
+                            std::lock_guard<std::mutex> ice_lock(ice_coordination_mutex_);
+                            if (ice_coordination_in_progress_.find(peer_copy.peer_id) == ice_coordination_in_progress_.end()) {
+                                ice_coordination_in_progress_.insert(peer_copy.peer_id);
+                                should_start_ice = true;
                             }
-                            initiate_ice_with_peer(peer_id, host, port);
-                        }).detach();
+                        }
+                        
+                        if (should_start_ice) {
+                            // Start ICE coordination in background thread with proper exception handling
+                            std::thread([this, peer_id = peer_copy.peer_id, host = peer_copy.ip, port = peer_copy.port]() {
+                                try {
+                                    // Use conditional variable for responsive shutdown
+                                    {
+                                        std::unique_lock<std::mutex> lock(shutdown_mutex_);
+                                        if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !running_.load(); })) {
+                                            // Clean up tracking before exit
+                                            std::lock_guard<std::mutex> ice_lock(ice_coordination_mutex_);
+                                            ice_coordination_in_progress_.erase(peer_id);
+                                            return; // Exit if shutdown requested
+                                        }
+                                    }
+                                    
+                                    // Initiate ICE coordination
+                                    initiate_ice_with_peer(peer_id, host, port);
+                                    
+                                } catch (const std::exception& e) {
+                                    LOG_CLIENT_ERROR("Exception in ICE coordination thread for peer " << peer_id << ": " << e.what());
+                                } catch (...) {
+                                    LOG_CLIENT_ERROR("Unknown exception in ICE coordination thread for peer " << peer_id);
+                                }
+                                
+                                // Clean up tracking when done
+                                try {
+                                    std::lock_guard<std::mutex> ice_lock(ice_coordination_mutex_);
+                                    ice_coordination_in_progress_.erase(peer_id);
+                                } catch (...) {
+                                    // Ignore cleanup errors to prevent recursive exceptions
+                                }
+                            }).detach();
+                        } else {
+                            LOG_CLIENT_DEBUG("ICE coordination already in progress for peer " << peer_copy.peer_id << " - skipping duplicate attempt");
+                        }
                     }
                     
                     // Save configuration after a new peer connects to keep peer list current

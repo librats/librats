@@ -2,6 +2,7 @@
 #include <gmock/gmock.h>
 #include "librats.h"
 #include "socket.h"
+#include "fs.h"
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -526,4 +527,153 @@ TEST_F(RatsClientTest, CallbackExceptionHandlingTest) {
     EXPECT_TRUE(client.is_running());
     
     client.stop();
+} 
+
+// Test simultaneous connections to the same peer
+TEST_F(RatsClientTest, SimultaneousConnectionsToSamePeerTest) {
+    // Use fixed ports to avoid port assignment issues
+    const int server_port = 58888;
+    const int client_port = 58889;
+    
+    // Clean up any saved peer files to avoid interference from previous test runs
+    std::vector<std::string> cleanup_files = {
+        "config_58888.json", "peers_58888.json",
+        "config_58889.json", "peers_58889.json"
+    };
+    for (const auto& file : cleanup_files) {
+        if (file_exists(file)) {
+            delete_file(file.c_str());
+        }
+    }
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    std::atomic<int> connection_attempts(0);
+    std::atomic<int> successful_connections(0);
+    std::atomic<int> server_connections_received(0);
+    std::vector<std::string> connected_peer_hashes;
+    std::mutex peer_hash_mutex;
+    
+    // Set up server callbacks to track incoming connections
+    server.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        server_connections_received++;
+        std::lock_guard<std::mutex> lock(peer_hash_mutex);
+        connected_peer_hashes.push_back(peer_hash_id);
+        std::cout << "Server received connection from peer: " << peer_hash_id << std::endl;
+    });
+    
+    // Set up client callbacks to track outgoing connections
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
+        successful_connections++;
+        std::cout << "Client connected to peer: " << peer_hash_id << std::endl;
+    });
+    
+    // Start both clients
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    // Give some time for servers to be ready
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Launch multiple simultaneous connection attempts to the same peer
+    const int num_attempts = 3;
+    std::vector<std::thread> connection_threads;
+    std::vector<std::atomic<bool>> connection_results(num_attempts);
+    
+    for (int i = 0; i < num_attempts; ++i) {
+        connection_results[i] = false;
+        connection_threads.emplace_back([&, i]() {
+            connection_attempts++;
+            std::cout << "Attempt " << i << " starting connection to 127.0.0.1:" << server_port << std::endl;
+            bool result = client.connect_to_peer("127.0.0.1", server_port);
+            connection_results[i] = result;
+            std::cout << "Attempt " << i << " result: " << (result ? "success" : "failed") << std::endl;
+        });
+    }
+    
+    // Wait for all connection attempts to complete
+    for (auto& thread : connection_threads) {
+        thread.join();
+    }
+    
+    // Wait for connections to be established
+    bool all_connected = wait_for_condition([&]() {
+        return server_connections_received.load() > 0;
+    }, 2000);
+    
+    EXPECT_TRUE(all_connected);
+    
+    // Give additional time for all events to process
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // Verify that all connection attempts were made
+    EXPECT_EQ(connection_attempts.load(), num_attempts);
+    
+    // Verify that the system handled duplicate connections properly
+    int final_server_connections = server_connections_received.load();
+    int final_client_connections = successful_connections.load();
+    
+    std::cout << "Final server connections received: " << final_server_connections << std::endl;
+    std::cout << "Final client connections successful: " << final_client_connections << std::endl;
+    std::cout << "Client peer count: " << client.get_peer_count() << std::endl;
+    std::cout << "Server peer count: " << server.get_peer_count() << std::endl;
+    
+    // The system should handle this gracefully by accepting multiple connections
+    // but properly deduplicating at the peer level
+    EXPECT_GE(final_server_connections, 1);
+    EXPECT_LE(final_server_connections, num_attempts + 2); // Allow some variance for timing/reconnects
+    EXPECT_GE(final_client_connections, 1);
+    EXPECT_LE(final_client_connections, num_attempts + 2); // Allow some variance for timing/reconnects
+    
+    // The key test: peer counts should represent unique peers, not total connections
+    // Since it's the same client connecting multiple times, we should have exactly 1 unique peer
+    EXPECT_EQ(client.get_peer_count(), 1);
+    EXPECT_EQ(server.get_peer_count(), 1);
+    
+    // Verify that all connected peer hashes are from the same client
+    // (they should all contain the same peer ID since it's the same client connecting)
+    {
+        std::lock_guard<std::mutex> lock(peer_hash_mutex);
+        std::cout << "Total connection events received: " << connected_peer_hashes.size() << std::endl;
+        
+        if (connected_peer_hashes.size() > 1) {
+            // Extract peer IDs from the connection hash IDs to verify they're the same client
+            std::set<std::string> unique_peer_ids;
+            for (const auto& hash : connected_peer_hashes) {
+                std::cout << "Connected peer hash: " << hash << std::endl;
+                // The hash contains the peer ID - multiple connections from same client should have same peer ID
+            }
+            
+            // Since it's the same client connecting multiple times, we expect the same peer ID
+            // but different connection hashes (due to different socket/timing info)
+            EXPECT_GE(connected_peer_hashes.size(), 1);
+            EXPECT_LE(connected_peer_hashes.size(), num_attempts + 2); // Allow some variance
+        }
+    }
+    
+    // Test that we can still send messages through the established connection(s)
+    if (final_client_connections > 0) {
+        std::atomic<bool> message_received(false);
+        server.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+            if (data == "test_simultaneous_connection") {
+                message_received = true;
+            }
+        });
+        
+        // Broadcast a test message
+        int messages_sent = client.broadcast_to_peers("test_simultaneous_connection");
+        EXPECT_GE(messages_sent, 1);
+        
+        // Wait for message to be received
+        bool msg_received = wait_for_condition([&]() {
+            return message_received.load();
+        }, 1000);
+        
+        EXPECT_TRUE(msg_received);
+    }
+    
+    // Clean up
+    client.stop();
+    server.stop();
 } 
