@@ -469,6 +469,7 @@ bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
     }
     
     // Get socket-specific mutex for thread-safe sending
+    // Prevent framed messages corruption (like two-times sending the number of bytes instead number of bytes + message)
     std::mutex* socket_mutex = get_socket_send_mutex(socket);
     std::lock_guard<std::mutex> send_lock(*socket_mutex);
     
