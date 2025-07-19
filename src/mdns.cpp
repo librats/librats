@@ -96,6 +96,14 @@ void MdnsClient::stop() {
     if (receiver_thread_.joinable()) {
         receiver_thread_.join();
     }
+
+    if (announcer_thread_.joinable()) {
+        announcer_thread_.join();
+    }
+
+    if (querier_thread_.joinable()) {
+        querier_thread_.join();
+    }
     
     // Clear discovered services
     {
