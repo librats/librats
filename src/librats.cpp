@@ -1195,7 +1195,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                 // Call callbacks and methods outside of mutex to avoid deadlock
                 if (should_notify_connection) {
                     if (connection_callback_) {
-                        connection_callback_(client_socket, peer_hash_id);
+                        connection_callback_(client_socket, peer_copy.peer_id);
                     }
                     
                     // Broadcast peer exchange message to other peers
@@ -1275,23 +1275,26 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
             if (parse_json_message(data, json_msg)) {
                 // Check if it's a rats protocol message
                 if (json_msg.contains("rats_protocol") && json_msg["rats_protocol"] == true) {
-                    handle_rats_message(client_socket, peer_hash_id, json_msg);
+                    handle_rats_message(client_socket, get_peer_hash_id(client_socket), json_msg);
                 } else {
                     // Regular JSON data - call data callback
                     if (data_callback_) {
-                        data_callback_(client_socket, peer_hash_id, data);
+                        data_callback_(client_socket, get_peer_hash_id(client_socket), data);
                     }
                 }
             } else {
                 // Regular text data - call data callback
                 if (data_callback_) {
-                    data_callback_(client_socket, peer_hash_id, data);
+                    data_callback_(client_socket, get_peer_hash_id(client_socket), data);
                 }
             }
         } else {
             LOG_CLIENT_WARN("Received non-handshake data from " << peer_hash_id << " before handshake completion - ignoring");
         }
     }
+    
+    // Get current peer ID before cleanup for disconnect callback
+    std::string current_peer_id = get_peer_hash_id(client_socket);
     
     // Clean up
     remove_peer(client_socket);
@@ -1305,7 +1308,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     
     // Notify disconnect callback only if handshake was completed
     if (handshake_completed && disconnect_callback_) {
-        disconnect_callback_(client_socket, peer_hash_id);
+        disconnect_callback_(client_socket, current_peer_id);
     }
     
     // Save configuration after a validated peer disconnects to update the saved peer list
