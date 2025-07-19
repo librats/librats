@@ -135,6 +135,29 @@ int send_tcp_data(socket_t socket, const std::string& data);
  */
 std::string receive_tcp_data(socket_t socket, size_t buffer_size = 1024);
 
+/**
+ * Send a framed message with length prefix through a TCP socket
+ * @param socket The socket handle
+ * @param message The message to send
+ * @return Total bytes sent (including length prefix), or -1 on error
+ */
+int send_tcp_message_framed(socket_t socket, const std::string& message);
+
+/**
+ * Receive exact number of bytes from a TCP socket (blocking until complete)
+ * @param socket The socket handle
+ * @param num_bytes Number of bytes to receive
+ * @return Received data as string, empty string on error or connection close
+ */
+std::string receive_exact_bytes(socket_t socket, size_t num_bytes);
+
+/**
+ * Receive a complete framed message from a TCP socket
+ * @param socket The socket handle
+ * @return Complete message as string, empty string on error or connection close
+ */
+std::string receive_tcp_message_framed(socket_t socket);
+
 // UDP Socket Functions
 /**
  * Create a UDP socket with dual stack support (IPv6 with IPv4 support)

@@ -4,6 +4,8 @@
 #include <iostream>
 #include <cstring>
 #include <mutex>
+#include <thread>
+#include <chrono>
 #ifndef _WIN32
     #include <fcntl.h>    // for O_NONBLOCK
     #include <errno.h>    // for errno
@@ -468,6 +470,110 @@ std::string receive_tcp_data(socket_t socket, size_t buffer_size) {
     
     // Safely construct string with exact size
     return std::string(buffer.data(), bytes_received);
+}
+
+// Large message handling with length-prefixed framing
+int send_tcp_message_framed(socket_t socket, const std::string& message) {
+    // Create length prefix (4 bytes, network byte order)
+    uint32_t message_length = static_cast<uint32_t>(message.length());
+    uint32_t length_prefix = htonl(message_length);
+    
+    // Send length prefix first
+    int prefix_sent = send_tcp_data(socket, std::string(reinterpret_cast<const char*>(&length_prefix), 4));
+    if (prefix_sent != 4) {
+        LOG_SOCKET_ERROR("Failed to send message length prefix to socket " << socket);
+        return -1;
+    }
+    
+    // Send the actual message
+    int message_sent = send_tcp_data(socket, message);
+    if (message_sent != static_cast<int>(message.length())) {
+        LOG_SOCKET_ERROR("Failed to send complete message to socket " << socket);
+        return -1;
+    }
+    
+    LOG_SOCKET_DEBUG("Successfully sent framed message (" << message.length() << " bytes) to socket " << socket);
+    return prefix_sent + message_sent;
+}
+
+std::string receive_exact_bytes(socket_t socket, size_t num_bytes) {
+    std::string result;
+    result.reserve(num_bytes);
+    
+    size_t total_received = 0;
+    while (total_received < num_bytes) {
+        std::vector<char> buffer(num_bytes - total_received);
+        int bytes_received = recv(socket, buffer.data(), buffer.size(), 0);
+        
+        if (bytes_received == SOCKET_ERROR_VALUE) {
+#ifdef _WIN32
+            int error = WSAGetLastError();
+            if (error == WSAEWOULDBLOCK) {
+                // No data available on non-blocking socket - try again
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            LOG_SOCKET_ERROR("Failed to receive exact bytes from socket " << socket << " (error: " << error << ")");
+#else
+            int error = errno;
+            if (error == EAGAIN || error == EWOULDBLOCK) {
+                // No data available on non-blocking socket - try again
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            LOG_SOCKET_ERROR("Failed to receive exact bytes from socket " << socket << " (error: " << strerror(error) << ")");
+#endif
+            return "";
+        }
+        
+        if (bytes_received == 0) {
+            LOG_SOCKET_INFO("Connection closed by peer while receiving exact bytes on socket " << socket);
+            return "";
+        }
+        
+        result.append(buffer.data(), bytes_received);
+        total_received += bytes_received;
+    }
+    
+    LOG_SOCKET_DEBUG("Successfully received " << total_received << " exact bytes from socket " << socket);
+    return result;
+}
+
+std::string receive_tcp_message_framed(socket_t socket) {
+    // First, receive the 4-byte length prefix
+    std::string length_data = receive_exact_bytes(socket, 4);
+    if (length_data.length() != 4) {
+        if (!length_data.empty()) {
+            LOG_SOCKET_ERROR("Failed to receive complete length prefix from socket " << socket << " (got " << length_data.length() << " bytes)");
+        }
+        return "";
+    }
+    
+    // Extract message length (convert from network byte order)
+    uint32_t length_prefix;
+    memcpy(&length_prefix, length_data.data(), 4);
+    uint32_t message_length = ntohl(length_prefix);
+    
+    // Validate message length (prevent excessive memory allocation)
+    if (message_length == 0) {
+        LOG_SOCKET_DEBUG("Received keep-alive message (length 0) from socket " << socket);
+        return "";
+    }
+    
+    if (message_length > 100 * 1024 * 1024) { // 100MB limit
+        LOG_SOCKET_ERROR("Message length too large: " << message_length << " bytes from socket " << socket);
+        return "";
+    }
+    
+    // Receive the actual message
+    std::string message = receive_exact_bytes(socket, message_length);
+    if (message.length() != message_length) {
+        LOG_SOCKET_ERROR("Failed to receive complete message from socket " << socket << " (expected " << message_length << " bytes, got " << message.length() << ")");
+        return "";
+    }
+    
+    LOG_SOCKET_DEBUG("Successfully received framed message (" << message_length << " bytes) from socket " << socket);
+    return message;
 }
 
 // UDP Socket Functions

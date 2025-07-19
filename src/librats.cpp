@@ -477,8 +477,8 @@ bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
         int sent = encrypted_communication::send_tcp_data_encrypted(socket, data);
         return sent > 0;
     } else {
-        // Fall back to unencrypted communication
-        int sent = send_tcp_data(socket, data);
+        // Use framed messages for reliable large message handling
+        int sent = send_tcp_message_framed(socket, data);
         return sent > 0;
     }
 }
@@ -1100,7 +1100,8 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
             continue;
         } else {
             LOG_CLIENT_DEBUG("Receiving unencrypted data from socket " << client_socket);
-            data = receive_tcp_data(client_socket);
+            // Always use framed message reception for reliable large message handling
+            data = receive_tcp_message_framed(client_socket);
         }
         
         if (data.empty()) {
