@@ -1,6 +1,7 @@
 #include "mdns.h"
 #include "network_utils.h"
 #include "os.h"
+#include "socket.h"
 #include <algorithm>
 #include <random>
 #include <sstream>
@@ -49,6 +50,12 @@ bool MdnsClient::start() {
     }
     
     LOG_MDNS_INFO("Starting mDNS client");
+    
+    // Initialize socket library (safe to call multiple times)
+    if (!init_socket_library()) {
+        LOG_MDNS_ERROR("Failed to initialize socket library");
+        return false;
+    }
     
     // Create and configure multicast socket
     if (!create_multicast_socket()) {

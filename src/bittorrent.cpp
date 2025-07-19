@@ -1,6 +1,7 @@
 #include "bittorrent.h"
 #include "fs.h"
 #include "network_utils.h"
+#include "socket.h"
 #include <iostream>
 #include <algorithm>
 #include <random>
@@ -1574,6 +1575,12 @@ bool BitTorrentClient::start(int listen_port) {
     }
     
     LOG_BT_INFO("Starting BitTorrent client on port " << listen_port_);
+    
+    // Initialize socket library (safe to call multiple times)
+    if (!init_socket_library()) {
+        LOG_BT_ERROR("Failed to initialize socket library");
+        return false;
+    }
     
     // Create listen socket
     listen_socket_ = create_tcp_server(listen_port_);

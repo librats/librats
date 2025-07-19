@@ -1,4 +1,6 @@
 #include "ice.h"
+#include "socket.h"
+#include "stun.h"
 #include "network_utils.h"
 #include "logger.h"
 #include <random>
@@ -172,6 +174,12 @@ TurnClient::~TurnClient() {
 
 bool TurnClient::allocate_relay(std::string& allocated_ip, uint16_t& allocated_port) {
     LOG_ICE_INFO("Allocating TURN relay on " << server_ << ":" << port_);
+    
+    // Initialize socket library (safe to call multiple times)
+    if (!init_socket_library()) {
+        LOG_ICE_ERROR("Failed to initialize socket library");
+        return false;
+    }
     
     // Create UDP socket for TURN
     socket_ = create_udp_socket_v4(0);
@@ -493,6 +501,12 @@ bool IceAgent::start() {
     }
     
     LOG_ICE_INFO("Starting ICE Agent");
+    
+    // Initialize socket library (safe to call multiple times)
+    if (!init_socket_library()) {
+        LOG_ICE_ERROR("Failed to initialize socket library");
+        return false;
+    }
     
     // Create UDP socket for ICE
     udp_socket_ = create_udp_socket_v4(0);

@@ -3,6 +3,7 @@
 #include "logger.h"
 #include <iostream>
 #include <cstring>
+#include <mutex>
 #ifndef _WIN32
     #include <fcntl.h>    // for O_NONBLOCK
     #include <errno.h>    // for errno
@@ -16,8 +17,18 @@
 
 namespace librats {
 
+// Static flag to track socket library initialization
+static bool socket_library_initialized = false;
+static std::mutex socket_init_mutex;
+
 // Socket Library Initialization
 bool init_socket_library() {
+    std::lock_guard<std::mutex> lock(socket_init_mutex);
+    
+    if (socket_library_initialized) {
+        return true; // Already initialized
+    }
+    
 #ifdef _WIN32
     WSADATA wsaData;
     int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -27,15 +38,25 @@ bool init_socket_library() {
     }
     LOG_SOCKET_INFO("Windows Socket API initialized");
 #endif
+    
+    socket_library_initialized = true;
     LOG_SOCKET_INFO("Socket library initialized");
     return true;
 }
 
 void cleanup_socket_library() {
+    std::lock_guard<std::mutex> lock(socket_init_mutex);
+    
+    if (!socket_library_initialized) {
+        return; // Not initialized or already cleaned up
+    }
+    
 #ifdef _WIN32
     WSACleanup();
     LOG_SOCKET_INFO("Windows Socket API cleaned up");
 #endif
+    
+    socket_library_initialized = false;
     LOG_SOCKET_INFO("Socket library cleaned up");
 }
 

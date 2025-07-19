@@ -40,6 +40,12 @@ bool StunClient::get_public_address(const std::string& stun_server,
                                    int timeout_ms) {
     LOG_STUN_INFO("Getting public address from STUN server: " << stun_server << ":" << stun_port);
     
+    // Initialize socket library (safe to call multiple times)
+    if (!init_socket_library()) {
+        LOG_STUN_ERROR("Failed to initialize socket library");
+        return false;
+    }
+    
     // Create UDP socket for STUN
     socket_t stun_socket = create_udp_socket_v4(0); // Use ephemeral port
     if (!is_valid_socket(stun_socket)) {

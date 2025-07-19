@@ -1,6 +1,7 @@
 #include "dht.h"
 #include "network_utils.h"
 #include "logger.h"
+#include "socket.h"
 #include <random>
 #include <algorithm>
 #include <sstream>
@@ -45,6 +46,12 @@ bool DhtClient::start() {
     }
     
     LOG_DHT_INFO("Starting DHT client on port " << port_);
+    
+    // Initialize socket library (safe to call multiple times)
+    if (!init_socket_library()) {
+        LOG_DHT_ERROR("Failed to initialize socket library");
+        return false;
+    }
     
     socket_ = create_udp_socket(port_);
     if (!is_valid_socket(socket_)) {
