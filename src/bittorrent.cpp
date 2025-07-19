@@ -1139,7 +1139,7 @@ void TorrentDownload::write_piece_to_disk(PieceIndex piece_index) {
                                       file_info.offset - piece_offset : 0;
         uint64_t piece_end = piece_offset + piece->length;
         uint64_t file_end = file_info.offset + file_info.length;
-        uint64_t write_end = std::min(piece_end, file_end);
+        uint64_t write_end = (std::min)(piece_end, file_end);
         uint64_t write_length = write_end - (piece_offset + file_start_in_piece);
         
         if (write_length == 0) {
@@ -1192,7 +1192,7 @@ std::vector<PieceIndex> TorrentDownload::get_needed_pieces(const std::vector<boo
     std::lock_guard<std::mutex> lock(pieces_mutex_);
     std::vector<PieceIndex> needed_pieces;
     
-    size_t min_size = std::min(peer_bitfield.size(), piece_completed_.size());
+    size_t min_size = (std::min)(peer_bitfield.size(), piece_completed_.size());
     for (size_t i = 0; i < min_size; ++i) {
         if (peer_bitfield[i] && !piece_completed_[i] && !piece_downloading_[i]) {
             needed_pieces.push_back(static_cast<PieceIndex>(i));
@@ -1328,7 +1328,7 @@ void TorrentDownload::schedule_piece_requests() {
                     }
                     
                     uint32_t offset = block_index * BLOCK_SIZE;
-                    uint32_t length = std::min(block_size, piece->length - offset);
+                    uint32_t length = (std::min)(block_size, piece->length - offset);
                     
                     if (peer->request_piece_block(piece_index, offset, length)) {
                         piece_downloading_[piece_index] = true;
@@ -1449,7 +1449,7 @@ std::vector<PieceIndex> TorrentDownload::select_pieces_for_download() {
     // For now, just select the first few needed pieces
     // In a more sophisticated implementation, we would count how many peers have each piece
     // and prioritize rarer pieces
-    size_t max_pieces = std::min(needed_pieces.size(), static_cast<size_t>(10));
+    size_t max_pieces = (std::min)(needed_pieces.size(), static_cast<size_t>(10));
     for (size_t i = 0; i < max_pieces; ++i) {
         selected_pieces.push_back(needed_pieces[i]);
     }

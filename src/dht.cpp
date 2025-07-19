@@ -1756,7 +1756,7 @@ void DhtClient::cleanup_stale_announced_peers() {
 // Utility functions implementation
 NodeId string_to_node_id(const std::string& str) {
     NodeId id;
-    size_t copy_size = std::min(str.size(), NODE_ID_SIZE);
+    size_t copy_size = (std::min)(str.size(), NODE_ID_SIZE);
     std::copy(str.begin(), str.begin() + copy_size, id.begin());
     return id;
 }

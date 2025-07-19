@@ -271,7 +271,7 @@ std::vector<uint8_t> NoiseCrypto::encrypt(const NoiseKey& key, uint64_t nonce,
         ChaCha20::chacha20_block(keystream, state);
         state[12]++;
         
-        size_t chunk_size = std::min(size_t(64), plaintext.size() - i);
+        size_t chunk_size = (std::min)(size_t(64), plaintext.size() - i);
         for (size_t j = 0; j < chunk_size; ++j) {
             ciphertext[i + j] = plaintext[i + j] ^ ((uint8_t*)keystream)[j];
         }
@@ -337,7 +337,7 @@ std::vector<uint8_t> NoiseCrypto::decrypt(const NoiseKey& key, uint64_t nonce,
         ChaCha20::chacha20_block(keystream, state);
         state[12]++;
         
-        size_t chunk_size = std::min(size_t(64), plaintext_size - i);
+        size_t chunk_size = (std::min)(size_t(64), plaintext_size - i);
         for (size_t j = 0; j < chunk_size; ++j) {
             plaintext[i + j] = ciphertext[i + j] ^ ((uint8_t*)keystream)[j];
         }
@@ -363,7 +363,7 @@ void NoiseCrypto::hkdf(const std::vector<uint8_t>& salt, const std::vector<uint8
     okm_data.insert(okm_data.end(), prk.begin(), prk.end());
     NoiseHash result = hash(okm_data);
     
-    std::memcpy(okm, result.data(), std::min(okm_len, size_t(NOISE_HASH_SIZE)));
+    std::memcpy(okm, result.data(), (std::min)(okm_len, size_t(NOISE_HASH_SIZE)));
 }
 
 void NoiseCrypto::secure_memzero(void* ptr, size_t size) {
