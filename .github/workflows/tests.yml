@@ -28,7 +28,6 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
-          refreshenv
       
       - name: Configure CMake
         run: |
