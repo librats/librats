@@ -536,8 +536,9 @@ void IceAgent::stop() {
     }
     
     LOG_ICE_INFO("Stopping ICE Agent");
-    running_.store(false);
-    set_state(IceConnectionState::CLOSED);
+    
+    // Trigger immediate shutdown of all background threads
+    shutdown_immediate();
     
     // Close sockets
     if (is_valid_socket(udp_socket_)) {
@@ -567,6 +568,16 @@ void IceAgent::stop() {
     turn_client_.reset();
     
     LOG_ICE_INFO("ICE Agent stopped");
+}
+
+void IceAgent::shutdown_immediate() {
+    LOG_ICE_INFO("Triggering immediate shutdown of ICE background threads");
+    
+    running_.store(false);
+    set_state(IceConnectionState::CLOSED);
+    
+    // Notify all waiting threads to wake up immediately
+    shutdown_cv_.notify_all();
 }
 
 void IceAgent::set_local_credentials(const std::string& ufrag, const std::string& pwd) {
@@ -1083,7 +1094,13 @@ void IceAgent::connectivity_check_loop() {
             }
         }
         
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(100), [this] { return !running_.load(); })) {
+                break;
+            }
+        }
     }
     
     if (state_.load() == IceConnectionState::CHECKING) {
@@ -1182,9 +1199,13 @@ void IceAgent::receive_loop() {
             turn_client_->refresh_allocation();
         }
         
-        // Sleep longer to reduce CPU usage and let other threads work
-        // Non-blocking socket will return immediately if no data, so we can afford a longer sleep
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] { return !running_.load(); })) {
+                break;
+            }
+        }
     }
     
     LOG_ICE_DEBUG("ICE receive loop ended");

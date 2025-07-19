@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <memory>
 #include <chrono>
+#include <condition_variable>
 
 namespace librats {
 
@@ -202,6 +203,11 @@ public:
      * Stop the RatsClient and close all connections
      */
     void stop();
+
+    /**
+     * Trigger immediate shutdown of all background threads
+     */
+    void shutdown_immediate();
 
     /**
      * Check if the client is currently running
@@ -808,6 +814,8 @@ private:
     // Automatic discovery
     std::atomic<bool> auto_discovery_running_;
     std::thread auto_discovery_thread_;
+    std::condition_variable shutdown_cv_;
+    std::mutex shutdown_mutex_;
     void automatic_discovery_loop();
     void announce_rats_peer();
     void search_rats_peers(int iteration_max = 16);

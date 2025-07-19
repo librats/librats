@@ -86,10 +86,8 @@ void MdnsClient::stop() {
     
     LOG_MDNS_INFO("Stopping mDNS client");
     
-    // Stop all operations
-    stop_announcing();
-    stop_discovery();
-    running_.store(false);
+    // Trigger immediate shutdown of all background threads
+    shutdown_immediate();
     
     // Close socket to break receiver loop
     close_multicast_socket();
@@ -106,6 +104,18 @@ void MdnsClient::stop() {
     }
     
     LOG_MDNS_INFO("mDNS client stopped");
+}
+
+void MdnsClient::shutdown_immediate() {
+    LOG_MDNS_INFO("Triggering immediate shutdown of mDNS background threads");
+    
+    // Stop all operations
+    announcing_.store(false);
+    discovering_.store(false);
+    running_.store(false);
+    
+    // Notify all waiting threads to wake up immediately
+    shutdown_cv_.notify_all();
 }
 
 bool MdnsClient::is_running() const {
@@ -426,8 +436,13 @@ void MdnsClient::announcer_loop() {
             last_announcement = now;
         }
         
-        // Sleep for a short duration
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !announcing_.load() || !running_.load(); })) {
+                break;
+            }
+        }
     }
     
     LOG_MDNS_DEBUG("mDNS announcer loop ended");
@@ -458,8 +473,13 @@ void MdnsClient::querier_loop() {
         // Clean up old services
         clear_old_services(std::chrono::seconds(600));
         
-        // Sleep for a short duration
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(1000), [this] { return !discovering_.load() || !running_.load(); })) {
+                break;
+            }
+        }
     }
     
     LOG_MDNS_DEBUG("mDNS querier loop ended");

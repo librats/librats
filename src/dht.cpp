@@ -79,7 +79,9 @@ void DhtClient::stop() {
     }
     
     LOG_DHT_INFO("Stopping DHT client");
-    running_ = false;
+    
+    // Trigger immediate shutdown of all background threads
+    shutdown_immediate();
     
     // Wait for threads to finish
     if (network_thread_.joinable()) {
@@ -96,6 +98,15 @@ void DhtClient::stop() {
     }
     
     LOG_DHT_INFO("DHT client stopped");
+}
+
+void DhtClient::shutdown_immediate() {
+    LOG_DHT_INFO("Triggering immediate shutdown of DHT background threads");
+    
+    running_.store(false);
+    
+    // Notify all waiting threads to wake up immediately
+    shutdown_cv_.notify_all();
 }
 
 bool DhtClient::bootstrap(const std::vector<Peer>& bootstrap_nodes) {
@@ -280,8 +291,13 @@ void DhtClient::network_loop() {
             handle_message(data, sender);
         }
         
-        // Small delay to prevent busy waiting
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(10), [this] { return !running_.load(); })) {
+                break;
+            }
+        }
     }
     
     LOG_DHT_DEBUG("Network loop stopped");
@@ -315,9 +331,12 @@ void DhtClient::maintenance_loop() {
             last_bucket_refresh = now;
         }
         
-        // Sleep for 1 minute between maintenance cycles
-        for (int i = 0; i < 60 && running_; ++i) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::minutes(1), [this] { return !running_.load(); })) {
+                break;
+            }
         }
     }
     

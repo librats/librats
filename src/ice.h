@@ -13,6 +13,7 @@
 #include <thread>
 #include <mutex>
 #include <unordered_map>
+#include <condition_variable>
 
 namespace librats {
 
@@ -188,6 +189,7 @@ public:
     // Lifecycle
     bool start();
     void stop();
+    void shutdown_immediate();
     bool is_running() const { return running_.load(); }
     
     // Configuration
@@ -274,6 +276,10 @@ private:
     std::thread gather_thread_;
     std::thread check_thread_;
     std::thread receive_thread_;
+    
+    // Conditional variables for immediate shutdown
+    std::condition_variable shutdown_cv_;
+    std::mutex shutdown_mutex_;
     
     // Callbacks
     IceCandidateCallback candidate_callback_;

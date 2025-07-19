@@ -14,6 +14,7 @@
 #include <chrono>
 #include <memory>
 #include <atomic>
+#include <condition_variable>
 
 // Hash specialization for Peer (must be defined before use in unordered_map)
 namespace std {
@@ -110,6 +111,11 @@ public:
      * Stop the DHT client
      */
     void stop();
+    
+    /**
+     * Trigger immediate shutdown of all background threads
+     */
+    void shutdown_immediate();
     
     /**
      * Bootstrap the DHT with known nodes
@@ -234,6 +240,10 @@ private:
     // Network thread
     std::thread network_thread_;
     std::thread maintenance_thread_;
+    
+    // Conditional variables for immediate shutdown
+    std::condition_variable shutdown_cv_;
+    std::mutex shutdown_mutex_;
     
     // Helper functions
     void network_loop();

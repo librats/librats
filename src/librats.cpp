@@ -299,10 +299,15 @@ void RatsClient::stop() {
     }
     
     LOG_CLIENT_INFO("Stopping RatsClient");
-    running_.store(false);
+    
+    // Trigger immediate shutdown of all background threads
+    shutdown_immediate();
     
     // Stop DHT discovery (this will also stop automatic discovery)
     stop_dht_discovery();
+    
+    // Stop mDNS discovery
+    stop_mdns_discovery();
     
     // Close server socket to break accept loop
     if (is_valid_socket(server_socket_)) {
@@ -332,6 +337,16 @@ void RatsClient::stop() {
     cleanup_socket_library();
     
     LOG_CLIENT_INFO("RatsClient stopped successfully");
+}
+
+void RatsClient::shutdown_immediate() {
+    LOG_CLIENT_INFO("Triggering immediate shutdown of all background threads");
+    
+    running_.store(false);
+    auto_discovery_running_.store(false);
+    
+    // Notify all waiting threads to wake up immediately
+    shutdown_cv_.notify_all();
 }
 
 bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionStrategy strategy) {
@@ -1174,7 +1189,13 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     if (ice_agent_ && ice_agent_->is_running() && peer_copy.is_outgoing) {
                         // Start ICE coordination in background thread
                         std::thread([this, peer_id = peer_copy.peer_id, host = peer_copy.ip, port = peer_copy.port]() {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Brief delay
+                            // Use conditional variable for responsive shutdown
+                            {
+                                std::unique_lock<std::mutex> lock(shutdown_mutex_);
+                                if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !running_.load(); })) {
+                                    return; // Exit if shutdown requested
+                                }
+                            }
                             initiate_ice_with_peer(peer_id, host, port);
                         }).detach();
                     }
@@ -1520,12 +1541,24 @@ void RatsClient::automatic_discovery_loop() {
     LOG_CLIENT_INFO("Automatic peer discovery loop started");
     
     // Initial delay to let DHT bootstrap
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    {
+        std::unique_lock<std::mutex> lock(shutdown_mutex_);
+        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return !auto_discovery_running_.load(); })) {
+            LOG_CLIENT_INFO("Automatic peer discovery loop stopped during initial delay");
+            return;
+        }
+    }
 
     // Search immediately
     search_rats_peers(5);
     
-    std::this_thread::sleep_for(std::chrono::seconds(10));
+    {
+        std::unique_lock<std::mutex> lock(shutdown_mutex_);
+        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(10), [this] { return !auto_discovery_running_.load(); })) {
+            LOG_CLIENT_INFO("Automatic peer discovery loop stopped during search delay");
+            return;
+        }
+    }
     
     // Announce immediately
     announce_rats_peer();
@@ -1558,8 +1591,13 @@ void RatsClient::automatic_discovery_loop() {
             }
         }
         
-        // Sleep for a short duration to avoid busy-waiting
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !auto_discovery_running_.load(); })) {
+                break;
+            }
+        }
     }
     
     LOG_CLIENT_INFO("Automatic peer discovery loop stopped");

@@ -12,6 +12,7 @@
 #include <chrono>
 #include <map>
 #include <cstdint>
+#include <condition_variable>
 
 namespace librats {
 
@@ -125,6 +126,7 @@ public:
     // Core functionality
     bool start();
     void stop();
+    void shutdown_immediate();
     bool is_running() const;
     
     // Service announcement
@@ -169,6 +171,10 @@ private:
     std::thread receiver_thread_;
     std::thread announcer_thread_;
     std::thread querier_thread_;
+    
+    // Conditional variables for immediate shutdown
+    std::condition_variable shutdown_cv_;
+    std::mutex shutdown_mutex_;
     
     // Discovery state
     mutable std::mutex services_mutex_;

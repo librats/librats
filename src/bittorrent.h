@@ -19,6 +19,7 @@
 #include <fstream>
 #include <array>
 #include <algorithm>  // Add this for std::all_of
+#include <condition_variable>
 
 namespace librats {
 
@@ -242,6 +243,10 @@ private:
     std::thread connection_thread_;
     std::atomic<bool> should_disconnect_;
     
+    // Conditional variables for immediate shutdown
+    std::condition_variable shutdown_cv_;
+    std::mutex shutdown_mutex_;
+    
     // Peer state
     PeerID peer_id_;
     bool peer_choked_;
@@ -370,6 +375,10 @@ private:
     std::thread download_thread_;
     std::thread peer_management_thread_;
     
+    // Conditional variables for immediate shutdown
+    std::condition_variable shutdown_cv_;
+    std::mutex shutdown_mutex_;
+    
     // File handling
     std::vector<std::fstream> file_handles_;
     mutable std::mutex files_mutex_;
@@ -460,6 +469,10 @@ private:
     
     // Networking
     std::thread incoming_connections_thread_;
+    
+    // Conditional variables for immediate shutdown
+    std::condition_variable shutdown_cv_;
+    std::mutex shutdown_mutex_;
     
     // Configuration
     size_t max_connections_per_torrent_;

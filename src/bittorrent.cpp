@@ -463,7 +463,13 @@ void PeerConnection::connection_loop() {
         // Cleanup expired requests
         cleanup_expired_requests();
         
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(10), [this] { return should_disconnect_.load(); })) {
+                break;
+            }
+        }
     }
     
     LOG_BT_DEBUG("Connection loop ended for peer " << peer_info_.ip << ":" << peer_info_.port);
@@ -1228,7 +1234,13 @@ void TorrentDownload::download_loop() {
     
     while (running_ && !is_complete()) {
         if (paused_) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // Use conditional variable for responsive shutdown
+            {
+                std::unique_lock<std::mutex> lock(shutdown_mutex_);
+                if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(100), [this] { return !running_.load() || !paused_.load(); })) {
+                    if (!running_) break;
+                }
+            }
             continue;
         }
         
@@ -1241,8 +1253,13 @@ void TorrentDownload::download_loop() {
         // Check for completion
         check_torrent_completion();
         
-        // Sleep for a short time to avoid busy waiting
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(50), [this] { return !running_.load(); })) {
+                break;
+            }
+        }
     }
     
     LOG_BT_INFO("Download loop ended for torrent: " << torrent_info_.get_name());
@@ -1255,8 +1272,13 @@ void TorrentDownload::peer_management_loop() {
         // Clean up disconnected peers
         cleanup_disconnected_peers();
         
-        // Sleep for a longer time as peer management is less frequent
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return !running_.load(); })) {
+                break;
+            }
+        }
     }
     
     LOG_BT_INFO("Peer management loop ended for torrent: " << torrent_info_.get_name());
