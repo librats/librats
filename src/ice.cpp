@@ -515,6 +515,11 @@ bool IceAgent::start() {
         return false;
     }
     
+    // Set socket to non-blocking mode for receive loop
+    if (!set_socket_nonblocking(udp_socket_)) {
+        LOG_ICE_WARN("Failed to set ICE UDP socket to non-blocking mode");
+    }
+    
     running_.store(true);
     set_state(IceConnectionState::NEW);
     
@@ -874,6 +879,22 @@ void IceAgent::gather_host_candidates() {
     
     auto local_addresses = network_utils::get_local_interface_addresses();
     
+    // Get actual port from socket
+    uint16_t actual_port = 0;
+    if (is_valid_socket(udp_socket_)) {
+        sockaddr_storage addr;
+        socklen_t addr_len = sizeof(addr);
+        if (getsockname(udp_socket_, reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0) {
+            if (addr.ss_family == AF_INET) {
+                sockaddr_in* addr_in = reinterpret_cast<sockaddr_in*>(&addr);
+                actual_port = ntohs(addr_in->sin_port);
+            } else if (addr.ss_family == AF_INET6) {
+                sockaddr_in6* addr_in6 = reinterpret_cast<sockaddr_in6*>(&addr);
+                actual_port = ntohs(addr_in6->sin6_port);
+            }
+        }
+    }
+    
     for (const auto& ip : local_addresses) {
         if (ip == "127.0.0.1" || ip == "::1") {
             continue; // Skip loopback
@@ -885,25 +906,10 @@ void IceAgent::gather_host_candidates() {
         candidate.transport = IceTransport::UDP;
         candidate.priority = calculate_candidate_priority(IceCandidateType::HOST, 65535, 1);
         candidate.ip = ip;
-        candidate.port = 0; // Will be filled when socket is bound
+        candidate.port = actual_port;
         candidate.type = IceCandidateType::HOST;
         candidate.ufrag = local_ufrag_;
         candidate.pwd = local_pwd_;
-        
-        // Get actual port from socket
-        if (is_valid_socket(udp_socket_)) {
-            sockaddr_storage addr;
-            socklen_t addr_len = sizeof(addr);
-            if (getsockname(udp_socket_, reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0) {
-                if (addr.ss_family == AF_INET) {
-                    sockaddr_in* addr_in = reinterpret_cast<sockaddr_in*>(&addr);
-                    candidate.port = ntohs(addr_in->sin_port);
-                } else if (addr.ss_family == AF_INET6) {
-                    sockaddr_in6* addr_in6 = reinterpret_cast<sockaddr_in6*>(&addr);
-                    candidate.port = ntohs(addr_in6->sin6_port);
-                }
-            }
-        }
         
         local_candidates_.push_back(candidate);
         LOG_ICE_DEBUG("Added host candidate: " << candidate.ip << ":" << candidate.port);
@@ -1176,7 +1182,9 @@ void IceAgent::receive_loop() {
             turn_client_->refresh_allocation();
         }
         
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // Sleep longer to reduce CPU usage and let other threads work
+        // Non-blocking socket will return immediately if no data, so we can afford a longer sleep
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     
     LOG_ICE_DEBUG("ICE receive loop ended");

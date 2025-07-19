@@ -464,19 +464,34 @@ socket_t create_udp_socket(int port) {
         LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
     }
 
-    if (port > 0) {
-        sockaddr_in6 addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin6_family = AF_INET6;
-        addr.sin6_addr = in6addr_any;
-        addr.sin6_port = htons(port);
+    // Always bind the socket - this is required for receiving data
+    sockaddr_in6 addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(port);  // port=0 will get an ephemeral port
 
-        if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
-            LOG_SOCKET_ERROR("Failed to bind dual stack UDP socket to port " << port);
-            close_socket(udp_socket);
-            return INVALID_SOCKET_VALUE;
+    if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
+#ifdef _WIN32
+        LOG_SOCKET_ERROR("Failed to bind dual stack UDP socket to port " << port << " (error: " << WSAGetLastError() << ")");
+#else
+        LOG_SOCKET_ERROR("Failed to bind dual stack UDP socket to port " << port << " (error: " << strerror(errno) << ")");
+#endif
+        close_socket(udp_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+    
+    // Get the actual bound port if ephemeral port was requested
+    if (port == 0) {
+        sockaddr_in6 bound_addr;
+        socklen_t addr_len = sizeof(bound_addr);
+        if (getsockname(udp_socket, (struct sockaddr*)&bound_addr, &addr_len) == 0) {
+            uint16_t actual_port = ntohs(bound_addr.sin6_port);
+            LOG_SOCKET_INFO("Dual stack UDP socket bound to ephemeral port " << actual_port);
+        } else {
+            LOG_SOCKET_INFO("Dual stack UDP socket bound to ephemeral port (unknown)");
         }
-        
+    } else {
         LOG_SOCKET_INFO("Dual stack UDP socket bound to port " << port);
     }
 
@@ -511,19 +526,34 @@ socket_t create_udp_socket_v4(int port) {
         return INVALID_SOCKET_VALUE;
     }
 
-    if (port > 0) {
-        sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
-        addr.sin_port = htons(port);
+    // Always bind the socket - this is required for receiving data
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);  // port=0 will get an ephemeral port
 
-        if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
-            LOG_SOCKET_ERROR("Failed to bind UDP socket to port " << port);
-            close_socket(udp_socket);
-            return INVALID_SOCKET_VALUE;
+    if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
+#ifdef _WIN32
+        LOG_SOCKET_ERROR("Failed to bind UDP socket to port " << port << " (error: " << WSAGetLastError() << ")");
+#else
+        LOG_SOCKET_ERROR("Failed to bind UDP socket to port " << port << " (error: " << strerror(errno) << ")");
+#endif
+        close_socket(udp_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+    
+    // Get the actual bound port if ephemeral port was requested
+    if (port == 0) {
+        sockaddr_in bound_addr;
+        socklen_t addr_len = sizeof(bound_addr);
+        if (getsockname(udp_socket, (struct sockaddr*)&bound_addr, &addr_len) == 0) {
+            uint16_t actual_port = ntohs(bound_addr.sin_port);
+            LOG_SOCKET_INFO("UDP socket bound to ephemeral port " << actual_port);
+        } else {
+            LOG_SOCKET_INFO("UDP socket bound to ephemeral port (unknown)");
         }
-        
+    } else {
         LOG_SOCKET_INFO("UDP socket bound to port " << port);
     }
 
@@ -558,19 +588,34 @@ socket_t create_udp_socket_v6(int port) {
         return INVALID_SOCKET_VALUE;
     }
 
-    if (port > 0) {
-        sockaddr_in6 addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin6_family = AF_INET6;
-        addr.sin6_addr = in6addr_any;
-        addr.sin6_port = htons(port);
+    // Always bind the socket - this is required for receiving data
+    sockaddr_in6 addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(port);  // port=0 will get an ephemeral port
 
-        if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
-            LOG_SOCKET_ERROR("Failed to bind IPv6 UDP socket to port " << port);
-            close_socket(udp_socket);
-            return INVALID_SOCKET_VALUE;
+    if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
+#ifdef _WIN32
+        LOG_SOCKET_ERROR("Failed to bind IPv6 UDP socket to port " << port << " (error: " << WSAGetLastError() << ")");
+#else
+        LOG_SOCKET_ERROR("Failed to bind IPv6 UDP socket to port " << port << " (error: " << strerror(errno) << ")");
+#endif
+        close_socket(udp_socket);
+        return INVALID_SOCKET_VALUE;
+    }
+    
+    // Get the actual bound port if ephemeral port was requested
+    if (port == 0) {
+        sockaddr_in6 bound_addr;
+        socklen_t addr_len = sizeof(bound_addr);
+        if (getsockname(udp_socket, (struct sockaddr*)&bound_addr, &addr_len) == 0) {
+            uint16_t actual_port = ntohs(bound_addr.sin6_port);
+            LOG_SOCKET_INFO("IPv6 UDP socket bound to ephemeral port " << actual_port);
+        } else {
+            LOG_SOCKET_INFO("IPv6 UDP socket bound to ephemeral port (unknown)");
         }
-        
+    } else {
         LOG_SOCKET_INFO("IPv6 UDP socket bound to port " << port);
     }
 
