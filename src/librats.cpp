@@ -166,7 +166,9 @@ void RatsClient::remove_peer_by_id(const std::string& peer_id) {
         socket_to_peer_id_.erase(peer.socket);
         address_to_peer_id_.erase(peer.normalized_address);
         peers_.erase(it);
-        
+        // Clean up socket-specific mutex
+        cleanup_socket_send_mutex(peer.socket);
+
         // Clean up ICE coordination tracking for this peer
         {
             std::lock_guard<std::mutex> ice_lock(ice_coordination_mutex_);
@@ -465,6 +467,10 @@ bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
     if (!running_.load()) {
         return false;
     }
+    
+    // Get socket-specific mutex for thread-safe sending
+    std::mutex* socket_mutex = get_socket_send_mutex(socket);
+    std::lock_guard<std::mutex> send_lock(*socket_mutex);
     
     // Use encrypted communication if encryption is enabled
     if (is_encryption_enabled()) {
@@ -2426,6 +2432,23 @@ bool RatsClient::send_custom_message_to_peer(const std::string& peer_id, const s
     }
     
     return success;
+}
+
+// Per-socket synchronization helpers
+std::mutex* RatsClient::get_socket_send_mutex(socket_t socket) {
+    std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
+    auto it = socket_send_mutexes_.find(socket);
+    if (it == socket_send_mutexes_.end()) {
+        // Create new mutex for this socket
+        socket_send_mutexes_[socket] = std::make_unique<std::mutex>();
+        return socket_send_mutexes_[socket].get();
+    }
+    return it->second.get();
+}
+
+void RatsClient::cleanup_socket_send_mutex(socket_t socket) {
+    std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
+    socket_send_mutexes_.erase(socket);
 }
 
 // Configuration persistence implementation

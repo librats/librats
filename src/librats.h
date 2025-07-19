@@ -721,12 +721,16 @@ private:
     mutable std::mutex connection_attempts_mutex_;
     
     // Organized peer management using RatsPeer struct
+    mutable std::mutex peers_mutex_;
     std::unordered_map<std::string, RatsPeer> peers_;          // keyed by peer_id
     std::unordered_map<socket_t, std::string> socket_to_peer_id_;  // for quick socket->peer_id lookup  
     std::unordered_map<std::string, std::string> address_to_peer_id_;  // for duplicate detection (normalized_address->peer_id)
     
-    mutable std::mutex peers_mutex_;
+    // Per-socket synchronization for thread-safe message sending
+    mutable std::mutex socket_send_mutexes_mutex_;
+    std::unordered_map<socket_t, std::unique_ptr<std::mutex>> socket_send_mutexes_;
     
+    // Server and client management
     std::thread server_thread_;
     
     ConnectionCallback connection_callback_;
@@ -863,7 +867,12 @@ private:
     mutable std::mutex message_handlers_mutex_;
     
     void call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data);
+    void call_callback_safely(const MessageCallback& callback, const std::string& peer_id, const nlohmann::json& data);
     void remove_once_handlers(const std::string& message_type);
+
+    // Per-socket synchronization helpers
+    std::mutex* get_socket_send_mutex(socket_t socket);
+    void cleanup_socket_send_mutex(socket_t socket);
 
     // Configuration persistence helpers
     std::string generate_persistent_peer_id() const;
