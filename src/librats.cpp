@@ -1856,6 +1856,11 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
         LOG_CLIENT_ERROR("Peer " << peer_hash_id << " not found in peers");
         return false;
     }
+
+    if (peers_.find(handshake_msg.peer_id) != peers_.end()) {
+        LOG_CLIENT_ERROR("Peer " << handshake_msg.peer_id << " already connected, ignoring");
+        return false;
+    }
     
     // Store old peer ID for mapping updates
     std::string old_peer_id = peer_it->second.peer_id;
