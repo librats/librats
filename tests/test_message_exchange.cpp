@@ -399,14 +399,14 @@ TEST_F(MessageExchangeTest, LargeMessageIntegrity) {
         << ", Received: " << received_serialized.size();
     
     // Compare a few sample entries from the payload array to ensure data integrity
-    for (size_t i = 0; i < std::min(size_t(10), large_data["payload"].size()); ++i) {
+    for (size_t i = 0; i < (std::min)(size_t(10), large_data["payload"].size()); ++i) {
         EXPECT_EQ(received_data["payload"][i], large_data["payload"][i]) 
             << "Payload mismatch at index " << i;
     }
     
     // Verify the last few entries as well
     size_t payload_size = large_data["payload"].size();
-    for (size_t i = std::max(size_t(0), payload_size - 5); i < payload_size; ++i) {
+    for (size_t i = (std::max)(size_t(0), payload_size - 5); i < payload_size; ++i) {
         EXPECT_EQ(received_data["payload"][i], large_data["payload"][i]) 
             << "Payload mismatch at index " << i;
     }
