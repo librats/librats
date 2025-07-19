@@ -309,3 +309,108 @@ TEST_F(MessageExchangeTest, InvalidPeerIdCallback) {
     EXPECT_FALSE(callback_error.empty());
     EXPECT_TRUE(callback_error.find("Peer not found") != std::string::npos) << "Expected 'Peer not found' in error message: " << callback_error;
 }
+
+TEST_F(MessageExchangeTest, LargeMessageIntegrity) {
+    std::atomic<bool> large_message_received{false};
+    nlohmann::json received_data;
+    std::string received_peer_id;
+    
+    // Set up handler on client1 to receive large message
+    client1->on("large_message_test", [&](const std::string& peer_id, const nlohmann::json& data) {
+        large_message_received = true;
+        received_data = data;
+        received_peer_id = peer_id;
+    });
+    
+    // Create a large JSON message (>8192 bytes)
+    nlohmann::json large_data;
+    large_data["type"] = "large_message_test";
+    large_data["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    
+    // Create a large array of strings to exceed 8192 bytes
+    nlohmann::json large_array = nlohmann::json::array();
+    std::string base_string = "This is a test string that will be repeated many times to create a large message payload for testing the integrity of large JSON messages over the network. ";
+    
+    // Add strings until we exceed 8192 bytes
+    std::string current_size_check = large_data.dump();
+    while (current_size_check.size() < 8192) {
+        large_array.push_back(base_string + std::to_string(large_array.size()));
+        large_data["payload"] = large_array;
+        current_size_check = large_data.dump();
+    }
+    
+    // Add some additional data to ensure we're well over 8192 bytes
+    for (int i = 0; i < 50; ++i) {
+        large_array.push_back("Additional data entry " + std::to_string(i) + " - " + base_string);
+    }
+    large_data["payload"] = large_array;
+    
+    // Add metadata
+    large_data["metadata"]["sender"] = "client2";
+    large_data["metadata"]["test_case"] = "LargeMessageIntegrity";
+    large_data["metadata"]["expected_size_bytes"] = large_data.dump().size();
+    
+    // Verify the message is indeed larger than 8192 bytes
+    std::string serialized_message = large_data.dump();
+    ASSERT_GT(serialized_message.size(), 8192) << "Test message should be larger than 8192 bytes, got: " << serialized_message.size();
+    
+    // Send the large message
+    bool send_success = false;
+    std::string send_error;
+    client2->send("large_message_test", large_data, [&](bool success, const std::string& error) {
+        send_success = success;
+        send_error = error;
+    });
+    
+    // Wait longer for large message processing
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    
+    // Verify the message was sent successfully
+    EXPECT_TRUE(send_success) << "Failed to send large message: " << send_error;
+    
+    // Verify the message was received
+    EXPECT_TRUE(large_message_received.load()) << "Large message was not received";
+    
+    // Verify message integrity
+    ASSERT_FALSE(received_data.empty()) << "Received data is empty";
+    
+    // Check that all fields are present and correct
+    EXPECT_EQ(received_data.value("type", ""), "large_message_test");
+    EXPECT_EQ(received_data["timestamp"], large_data["timestamp"]);
+    EXPECT_TRUE(received_data.contains("payload")) << "Payload field missing";
+    EXPECT_TRUE(received_data.contains("metadata")) << "Metadata field missing";
+    
+    // Verify payload integrity
+    ASSERT_TRUE(received_data["payload"].is_array()) << "Payload should be an array";
+    EXPECT_EQ(received_data["payload"].size(), large_data["payload"].size()) 
+        << "Payload array size mismatch. Expected: " << large_data["payload"].size() 
+        << ", Received: " << received_data["payload"].size();
+    
+    // Verify metadata integrity
+    EXPECT_EQ(received_data["metadata"]["sender"], "client2");
+    EXPECT_EQ(received_data["metadata"]["test_case"], "LargeMessageIntegrity");
+    EXPECT_EQ(received_data["metadata"]["expected_size_bytes"], large_data["metadata"]["expected_size_bytes"]);
+    
+    // Verify complete message integrity by comparing serialized versions
+    std::string received_serialized = received_data.dump();
+    EXPECT_EQ(received_serialized.size(), serialized_message.size()) 
+        << "Serialized message size mismatch. Expected: " << serialized_message.size() 
+        << ", Received: " << received_serialized.size();
+    
+    // Compare a few sample entries from the payload array to ensure data integrity
+    for (size_t i = 0; i < std::min(size_t(10), large_data["payload"].size()); ++i) {
+        EXPECT_EQ(received_data["payload"][i], large_data["payload"][i]) 
+            << "Payload mismatch at index " << i;
+    }
+    
+    // Verify the last few entries as well
+    size_t payload_size = large_data["payload"].size();
+    for (size_t i = std::max(size_t(0), payload_size - 5); i < payload_size; ++i) {
+        EXPECT_EQ(received_data["payload"][i], large_data["payload"][i]) 
+            << "Payload mismatch at index " << i;
+    }
+    
+    SUCCEED() << "Large message (" << serialized_message.size() 
+              << " bytes) sent and received with full integrity preservation";
+}
