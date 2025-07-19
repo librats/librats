@@ -181,6 +181,123 @@ bool RatsClient::is_already_connected_to_address(const std::string& normalized_a
 }
 
 // Message buffering helper methods for handling partial TCP messages
+
+// MessageBuffer implementation
+bool RatsClient::MessageBuffer::append(const std::string& data) {
+    if (data.empty()) {
+        return true;
+    }
+    
+    if (!resize_if_needed(data.size())) {
+        return false; // Buffer overflow
+    }
+    
+    // Copy data to buffer
+    std::copy(data.begin(), data.end(), buffer_.begin() + write_pos_);
+    write_pos_ += data.size();
+    
+    return true;
+}
+
+std::vector<std::string> RatsClient::MessageBuffer::extract_messages() {
+    std::vector<std::string> complete_messages;
+    
+    if (size() == 0) {
+        return complete_messages;
+    }
+    
+    // Find all complete messages (terminated by newline)
+    size_t search_pos = read_pos_;
+    while (search_pos < write_pos_) {
+        // Search for newline
+        auto newline_it = std::find(buffer_.begin() + search_pos, buffer_.begin() + write_pos_, '\n');
+        
+        if (newline_it == buffer_.begin() + write_pos_) {
+            // No more complete messages
+            break;
+        }
+        
+        // Found a complete message
+        size_t message_end = newline_it - buffer_.begin();
+        size_t message_start = read_pos_;
+        size_t message_length = message_end - message_start;
+        
+        if (message_length > 0) {
+            // Check for and remove carriage return
+            if (buffer_[message_end - 1] == '\r') {
+                message_length--;
+            }
+            
+            if (message_length > 0) {
+                complete_messages.emplace_back(buffer_.begin() + message_start, 
+                                              buffer_.begin() + message_start + message_length);
+            }
+        }
+        
+        // Move past the newline
+        read_pos_ = message_end + 1;
+        search_pos = read_pos_;
+    }
+    
+    // Compact buffer if we've processed some messages
+    if (read_pos_ > 0) {
+        compact_if_needed();
+    }
+    
+    // Handle oversized buffer without delimiter
+    if (size() > MAX_MESSAGE_SIZE) {
+        LOG_CLIENT_WARN("Message buffer exceeded " << MAX_MESSAGE_SIZE << " bytes, attempting JSON parse");
+        
+        // Try to parse remaining buffer as JSON
+        try {
+            std::string buffer_str(buffer_.begin() + read_pos_, buffer_.begin() + write_pos_);
+            nlohmann::json test_json = nlohmann::json::parse(buffer_str);
+            // If parsing succeeds, treat as complete message
+            complete_messages.push_back(std::move(buffer_str));
+            clear();
+        } catch (const nlohmann::json::exception&) {
+            LOG_CLIENT_ERROR("Buffer overflow: message too large and not valid JSON");
+            clear(); // Discard corrupted data
+        }
+    }
+    
+    return complete_messages;
+}
+
+void RatsClient::MessageBuffer::compact_if_needed() {
+    // Only compact if we have significant fragmentation
+    if (read_pos_ > capacity_ / 4) {
+        size_t data_size = write_pos_ - read_pos_;
+        if (data_size > 0) {
+            std::memmove(buffer_.data(), buffer_.data() + read_pos_, data_size);
+        }
+        write_pos_ = data_size;
+        read_pos_ = 0;
+    }
+}
+
+bool RatsClient::MessageBuffer::resize_if_needed(size_t additional_size) {
+    if (available() >= additional_size) {
+        return true;
+    }
+    
+    compact_if_needed();
+    
+    if (available() >= additional_size) {
+        return true;
+    }
+    
+    // Calculate new capacity
+    size_t new_capacity = std::max(capacity_ * 2, capacity_ + additional_size);
+    if (new_capacity > MAX_MESSAGE_SIZE) {
+        return false; // Would exceed maximum
+    }
+    
+    buffer_.resize(new_capacity);
+    capacity_ = new_capacity;
+    return true;
+}
+
 std::vector<std::string> RatsClient::process_buffered_messages(socket_t socket, const std::string& new_data) {
     std::vector<std::string> complete_messages;
     
@@ -190,46 +307,20 @@ std::vector<std::string> RatsClient::process_buffered_messages(socket_t socket, 
     
     std::lock_guard<std::mutex> lock(message_buffers_mutex_);
     
-    // Add new data to the buffer for this socket
-    message_buffers_[socket] += new_data;
-    std::string& buffer = message_buffers_[socket];
-    
-    // Process complete messages separated by newlines
-    size_t pos = 0;
-    while ((pos = buffer.find('\n')) != std::string::npos) {
-        std::string message = buffer.substr(0, pos);
-        
-        // Remove carriage return if present (handles \r\n line endings)
-        if (!message.empty() && message.back() == '\r') {
-            message.pop_back();
-        }
-        
-        // Only add non-empty messages
-        if (!message.empty()) {
-            complete_messages.push_back(message);
-        }
-        
-        // Remove the processed message from buffer
-        buffer.erase(0, pos + 1);
+    // Create buffer if it doesn't exist
+    auto& buffer_ptr = message_buffers_[socket];
+    if (!buffer_ptr) {
+        buffer_ptr = std::make_unique<MessageBuffer>();
     }
     
-    // If buffer is getting too large without finding a delimiter, try to parse it as-is
-    // This provides backward compatibility for messages without delimiters
-    if (buffer.size() > 8192) { // 8KB limit
-        LOG_CLIENT_WARN("Message buffer for socket " << socket << " exceeded 8KB, attempting to parse without delimiter");
-        
-        // Try to parse the buffer as JSON
-        nlohmann::json test_json;
-        try {
-            test_json = nlohmann::json::parse(buffer);
-            // If parsing succeeds, it's a complete message
-            complete_messages.push_back(buffer);
-            buffer.clear();
-        } catch (const nlohmann::json::exception&) {
-            // If parsing fails, keep the buffer but warn about it
-            LOG_CLIENT_WARN("Large message buffer contains incomplete JSON, keeping for next read");
-        }
+    // Add new data to the buffer
+    if (!buffer_ptr->append(new_data)) {
+        LOG_CLIENT_ERROR("Failed to append data to message buffer for socket " << socket << " - buffer overflow");
+        return complete_messages;
     }
+    
+    // Extract and return complete messages
+    complete_messages = buffer_ptr->extract_messages();
     
     return complete_messages;
 }

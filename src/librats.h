@@ -749,7 +749,38 @@ private:
     std::function<void(const std::string&, int, const std::string&)> mdns_callback_;
     
     // Message buffering system for handling partial TCP messages
-    std::unordered_map<socket_t, std::string> message_buffers_;  // Buffer partial messages per socket
+    class MessageBuffer {
+    private:
+        std::vector<char> buffer_;
+        size_t write_pos_;
+        size_t read_pos_;
+        size_t capacity_;
+        static constexpr size_t DEFAULT_CAPACITY = 8192;
+        static constexpr size_t MAX_MESSAGE_SIZE = 1048576; // 1MB
+        
+    public:
+        MessageBuffer(size_t capacity = DEFAULT_CAPACITY) 
+            : buffer_(capacity), write_pos_(0), read_pos_(0), capacity_(capacity) {}
+        
+        // Add new data to buffer
+        bool append(const std::string& data);
+        
+        // Extract complete messages (delimited by newline)
+        std::vector<std::string> extract_messages();
+        
+        // Get current buffer usage
+        size_t size() const { return write_pos_ - read_pos_; }
+        size_t available() const { return capacity_ - size(); }
+        
+        // Clear buffer
+        void clear() { write_pos_ = read_pos_ = 0; }
+        
+    private:
+        void compact_if_needed();
+        bool resize_if_needed(size_t additional_size);
+    };
+    
+    std::unordered_map<socket_t, std::unique_ptr<MessageBuffer>> message_buffers_;  // Buffer partial messages per socket
     mutable std::mutex message_buffers_mutex_;                   // Protects message buffers
     
     void server_loop();
