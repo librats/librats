@@ -1642,42 +1642,10 @@ void RatsClient::search_rats_peers(int iteration_max) {
     
     find_peers_by_hash(discovery_hash, [this](const std::vector<std::string>& peers) {
         LOG_CLIENT_INFO("Found " << peers.size() << " rats peers through DHT discovery");
-        
-        // Attempt to connect to discovered peers
+        // Note: Connection attempts are handled by handle_dht_peer_discovery() which is called
+        // automatically by find_peers_by_hash(), so no need to duplicate connection logic here
         for (const auto& peer_address : peers) {
-            LOG_CLIENT_INFO("Discovered rats peer: " << peer_address);
-            
-            // Parse IP and port
-            size_t colon_pos = peer_address.find_last_of(':');
-            if (colon_pos != std::string::npos) {
-                std::string ip = peer_address.substr(0, colon_pos);
-                int port = std::stoi(peer_address.substr(colon_pos + 1));
-                
-                // Check if this peer should be ignored (local interface)
-                if (should_ignore_peer(ip, port)) {
-                    LOG_CLIENT_DEBUG("Ignoring discovered rats peer " << ip << ":" << port << " - local interface address");
-                    continue;
-                }
-                
-                // Check if we're already connected to this peer
-                std::string normalized_peer_address = normalize_peer_address(ip, port);
-                bool already_connected = is_already_connected_to_address(normalized_peer_address);
-                
-                if (!already_connected) {
-                    LOG_CLIENT_INFO("Attempting to connect to discovered rats peer: " << ip << ":" << port);
-                    
-                    // Try to connect (non-blocking)
-                    std::thread([this, ip, port]() {
-                        if (connect_to_peer(ip, port)) {
-                            LOG_CLIENT_INFO("Successfully connected to discovered rats peer: " << ip << ":" << port);
-                        } else {
-                            LOG_CLIENT_DEBUG("Failed to connect to discovered rats peer: " << ip << ":" << port);
-                        }
-                    }).detach();
-                } else {
-                    LOG_CLIENT_DEBUG("Already connected to discovered rats peer: " << normalized_peer_address);
-                }
-            }
+            LOG_CLIENT_DEBUG("Discovered rats peer: " << peer_address);
         }
     }, iteration_max);
 }
