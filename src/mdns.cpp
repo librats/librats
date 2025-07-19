@@ -390,8 +390,8 @@ void MdnsClient::receiver_loop() {
             break;
         }
         
-        ssize_t received = recvfrom(multicast_socket_, reinterpret_cast<char*>(buffer.data()), 
-                                   buffer.size(), 0, reinterpret_cast<sockaddr*>(&sender_addr), &addr_len);
+        int received = recvfrom(multicast_socket_, reinterpret_cast<char*>(buffer.data()), 
+                                static_cast<int>(buffer.size()), 0, reinterpret_cast<sockaddr*>(&sender_addr), &addr_len);
         
         if (received <= 0) {
             if (running_.load()) {
@@ -1129,8 +1129,8 @@ bool MdnsClient::send_multicast_packet(const std::vector<uint8_t>& packet) {
     inet_pton(AF_INET, MDNS_MULTICAST_IPv4.c_str(), &dest_addr.sin_addr);
     dest_addr.sin_port = htons(MDNS_PORT);
     
-    ssize_t sent = sendto(multicast_socket_, reinterpret_cast<const char*>(packet.data()), 
-                          packet.size(), 0, reinterpret_cast<sockaddr*>(&dest_addr), sizeof(dest_addr));
+    int sent = sendto(multicast_socket_, reinterpret_cast<const char*>(packet.data()), 
+                      static_cast<int>(packet.size()), 0, reinterpret_cast<sockaddr*>(&dest_addr), sizeof(dest_addr));
     
     if (sent < 0 || static_cast<size_t>(sent) != packet.size()) {
         LOG_MDNS_ERROR("Failed to send multicast packet");

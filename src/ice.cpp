@@ -130,8 +130,8 @@ IceCandidatePair::IceCandidatePair(const IceCandidate& local, const IceCandidate
 
 uint64_t IceCandidatePair::calculate_priority() const {
     // RFC 8445 - Use the higher priority as the controlling agent priority
-    uint32_t controlling = std::max(local.priority, remote.priority);
-    uint32_t controlled = std::min(local.priority, remote.priority);
+    uint32_t controlling = (std::max)(local.priority, remote.priority);
+    uint32_t controlled = (std::min)(local.priority, remote.priority);
     
     return (static_cast<uint64_t>(controlling) << 32) | controlled;
 }
