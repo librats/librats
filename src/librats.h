@@ -7,6 +7,7 @@
 #include "ice.h"
 #include "logger.h"
 #include "encrypted_socket.h"
+#include "threadmanager.h"
 #include "json.hpp" // nlohmann::json
 #include <string>
 #include <functional>
@@ -171,7 +172,7 @@ using IceCandidateDiscoveredCallback = std::function<void(const std::string&, co
 /**
  * Enhanced RatsClient with comprehensive NAT traversal capabilities
  */
-class RatsClient {
+class RatsClient : public ThreadManager {
 public:
     // Callback function types
     using ConnectionCallback = std::function<void(socket_t, const std::string&)>;
@@ -206,9 +207,9 @@ public:
     void stop();
 
     /**
-     * Trigger immediate shutdown of all background threads
+     * Shutdown all background threads
      */
-    void shutdown_immediate();
+    void shutdown_all_threads();
 
     /**
      * Check if the client is currently running
@@ -732,6 +733,7 @@ private:
     
     // Server and client management
     std::thread server_thread_;
+    std::thread management_thread_;
     
     ConnectionCallback connection_callback_;
     AdvancedConnectionCallback advanced_connection_callback_;
@@ -753,6 +755,7 @@ private:
     std::function<void(const std::string&, int, const std::string&)> mdns_callback_;
     
     void server_loop();
+    void management_loop();
     void handle_client(socket_t client_socket, const std::string& peer_hash_id);
     void remove_peer(socket_t socket);
     std::string generate_peer_hash_id(socket_t socket, const std::string& connection_info);
@@ -825,8 +828,6 @@ private:
     // Automatic discovery
     std::atomic<bool> auto_discovery_running_;
     std::thread auto_discovery_thread_;
-    std::condition_variable shutdown_cv_;
-    std::mutex shutdown_mutex_;
     void automatic_discovery_loop();
     void announce_rats_peer();
     void search_rats_peers(int iteration_max = 1);

@@ -306,17 +306,20 @@ bool RatsClient::start() {
     // Start server thread
     server_thread_ = std::thread(&RatsClient::server_loop, this);
     
+    // Start management thread
+    management_thread_ = std::thread(&RatsClient::management_loop, this);
+    
     LOG_CLIENT_INFO("RatsClient started successfully on port " << listen_port_);
     
     // Attempt to reconnect to saved peers
-    std::thread([this]() {
+    add_managed_thread(std::thread([this]() {
         // Give the server some time to fully initialize
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         int reconnect_attempts = load_and_reconnect_peers();
         if (reconnect_attempts > 0) {
             LOG_CLIENT_INFO("Attempted to reconnect to " << reconnect_attempts << " saved peers");
         }
-    }).detach();
+    }), "peer-reconnection");
     
     return true;
 }
@@ -329,7 +332,7 @@ void RatsClient::stop() {
     LOG_CLIENT_INFO("Stopping RatsClient");
     
     // Trigger immediate shutdown of all background threads
-    shutdown_immediate();
+    shutdown_all_threads();
     
     // Stop DHT discovery (this will also stop automatic discovery)
     stop_dht_discovery();
@@ -373,18 +376,28 @@ void RatsClient::stop() {
         server_thread_.join();
     }
     
+    // Wait for management thread to finish
+    if (management_thread_.joinable()) {
+        LOG_CLIENT_DEBUG("Waiting for management thread to finish");
+        management_thread_.join();
+    }
+    
+    // Join all managed threads for graceful cleanup
+    join_all_active_threads();
+    
     cleanup_socket_library();
     
     LOG_CLIENT_INFO("RatsClient stopped successfully");
 }
 
-void RatsClient::shutdown_immediate() {
-    LOG_CLIENT_INFO("Triggering immediate shutdown of all background threads");
+void RatsClient::shutdown_all_threads() {
+    LOG_CLIENT_INFO("Initiating shutdown of all background threads");
     
+    // Signal all threads to stop
     running_.store(false);
-    
-    // Notify all waiting threads to wake up immediately
-    shutdown_cv_.notify_all();
+
+    // Call parent class to handle thread management shutdown
+    ThreadManager::shutdown_all_threads();
 }
 
 bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionStrategy strategy) {
@@ -1055,12 +1068,34 @@ void RatsClient::server_loop() {
         
         // Start a thread to handle this client
         LOG_SERVER_DEBUG("Starting thread for client " << peer_hash_id << " from " << peer_address);
-        std::thread(&RatsClient::handle_client, this, client_socket, peer_hash_id).detach();
+        add_managed_thread(std::thread(&RatsClient::handle_client, this, client_socket, peer_hash_id), 
+                          "client-handler-" + peer_hash_id.substr(0, 8));
         
         // Note: Connection callback will be called after handshake completion in handle_client
     }
     
     LOG_SERVER_INFO("Server loop ended");
+}
+
+void RatsClient::management_loop() {
+    LOG_CLIENT_INFO("Management loop started");
+    
+    while (running_.load()) {
+        std::unique_lock<std::mutex> lock(shutdown_mutex_);
+        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(30), [this] { return !running_.load(); })) {
+            break; // Exit if shutdown requested
+        }
+        
+        // Periodically cleanup finished threads
+        try {
+            cleanup_finished_threads();
+            LOG_CLIENT_DEBUG("Periodic thread cleanup completed. Active threads: " << get_active_thread_count());
+        } catch (const std::exception& e) {
+            LOG_CLIENT_ERROR("Exception during thread cleanup: " << e.what());
+        }
+    }
+    
+    LOG_CLIENT_INFO("Management loop ended");
 }
 
 void RatsClient::handle_client(socket_t client_socket, const std::string& peer_hash_id) {
@@ -1255,7 +1290,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                         
                         if (should_start_ice) {
                             // Start ICE coordination in background thread with proper exception handling
-                            std::thread([this, peer_id = peer_copy.peer_id, host = peer_copy.ip, port = peer_copy.port]() {
+                            add_managed_thread(std::thread([this, peer_id = peer_copy.peer_id, host = peer_copy.ip, port = peer_copy.port]() {
                                 try {
                                     // Use conditional variable for responsive shutdown
                                     {
@@ -1284,16 +1319,16 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                                 } catch (...) {
                                     // Ignore cleanup errors to prevent recursive exceptions
                                 }
-                            }).detach();
+                            }), "ice-coordination-" + peer_copy.peer_id.substr(0, 8));
                         } else {
                             LOG_CLIENT_DEBUG("ICE coordination already in progress for peer " << peer_copy.peer_id << " - skipping duplicate attempt");
                         }
                     }
                     
                     // Save configuration after a new peer connects to keep peer list current
-                    std::thread([this]() {
+                    add_managed_thread(std::thread([this]() {
                         save_configuration();
-                    }).detach();
+                    }), "config-save");
                 }
             }
             
@@ -1346,9 +1381,9 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     // Save configuration after a validated peer disconnects to update the saved peer list
     if (handshake_completed) {
         // Save configuration in a separate thread to avoid blocking
-        std::thread([this]() {
+        add_managed_thread(std::thread([this]() {
             save_configuration();
-        }).detach();
+        }), "config-save-disconnect");
     }
     
     LOG_CLIENT_INFO("Client disconnected: " << peer_hash_id);
@@ -2149,13 +2184,13 @@ void RatsClient::handle_peer_exchange_message(socket_t socket, const std::string
         }
         
         // Try to connect to the exchanged peer (non-blocking)
-        std::thread([this, peer_ip, peer_port, peer_id]() {
+        add_managed_thread(std::thread([this, peer_ip, peer_port, peer_id]() {
             if (connect_to_peer(peer_ip, peer_port)) {
                 LOG_CLIENT_INFO("Successfully connected to exchanged peer: " << peer_ip << ":" << peer_port);
             } else {
                 LOG_CLIENT_DEBUG("Failed to connect to exchanged peer: " << peer_ip << ":" << peer_port);
             }
-        }).detach();
+        }), "peer-exchange-connect-" + peer_id.substr(0, 8));
         
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to handle peer exchange message: " << e.what());
@@ -2359,13 +2394,13 @@ void RatsClient::handle_peers_response_message(socket_t socket, const std::strin
             
             // Try to connect to the peer (non-blocking)
             LOG_CLIENT_INFO("Attempting to connect to peer from response: " << peer_ip << ":" << peer_port);
-            std::thread([this, peer_ip, peer_port, peer_id]() {
+            add_managed_thread(std::thread([this, peer_ip, peer_port, peer_id]() {
                 if (connect_to_peer(peer_ip, peer_port)) {
                     LOG_CLIENT_INFO("Successfully connected to peer from response: " << peer_ip << ":" << peer_port);
                 } else {
                     LOG_CLIENT_DEBUG("Failed to connect to peer from response: " << peer_ip << ":" << peer_port);
                 }
-            }).detach();
+            }), "peer-response-connect-" + peer_id.substr(0, 8));
         }
         
     } catch (const nlohmann::json::exception& e) {
@@ -2850,13 +2885,13 @@ int RatsClient::load_and_reconnect_peers() {
             LOG_CLIENT_INFO("Attempting to reconnect to saved peer: " << ip << ":" << port << " (peer_id: " << peer_id << ")");
             
             // Attempt to connect (non-blocking)
-            std::thread([this, ip, port, peer_id]() {
+            add_managed_thread(std::thread([this, ip, port, peer_id]() {
                 if (connect_to_peer(ip, port)) {
                     LOG_CLIENT_INFO("Successfully reconnected to saved peer: " << ip << ":" << port);
                 } else {
                     LOG_CLIENT_DEBUG("Failed to reconnect to saved peer: " << ip << ":" << port);
                 }
-            }).detach();
+            }), "peer-reconnect-" + peer_id.substr(0, 8));
             
             reconnect_attempts++;
             
@@ -3160,9 +3195,9 @@ void RatsClient::initialize_nat_traversal() {
     LOG_CLIENT_INFO("Initializing NAT traversal capabilities");
     
     // Detect and cache NAT type in background thread
-    std::thread([this]() {
+    add_managed_thread(std::thread([this]() {
         detect_and_cache_nat_type();
-    }).detach();
+    }), "nat-detection");
     
     // Start ICE agent if enabled
     if (ice_agent_) {
@@ -3400,7 +3435,8 @@ bool RatsClient::attempt_direct_connection(const std::string& host, int port, Co
     }
     
     // Start handling this peer
-    std::thread(&RatsClient::handle_client, this, peer_socket, peer_hash_id).detach();
+    add_managed_thread(std::thread(&RatsClient::handle_client, this, peer_socket, peer_hash_id), 
+                      "direct-connect-handler-" + peer_hash_id.substr(0, 8));
     
     // Send handshake if not encrypted
     if (!is_encryption_enabled()) {
@@ -4030,5 +4066,7 @@ void RatsClient::send_nat_info_to_peer(socket_t socket, const std::string& peer_
         LOG_CLIENT_ERROR("Failed to send NAT info: " << e.what());
     }
 }
+
+
 
 } // namespace librats
