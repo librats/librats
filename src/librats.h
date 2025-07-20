@@ -781,6 +781,7 @@ private:
     
     // New peer management methods using RatsPeer
     void add_peer(const RatsPeer& peer);
+    void add_peer_unlocked(const RatsPeer& peer);  // Assumes peers_mutex_ is already locked
     void remove_peer_by_id(const std::string& peer_id);
     void remove_peer_by_id_unlocked(const std::string& peer_id);  // Assumes peers_mutex_ is already locked
     bool is_already_connected_to_address(const std::string& normalized_address) const;

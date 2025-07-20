@@ -154,6 +154,12 @@ std::string RatsClient::normalize_peer_address(const std::string& ip, int port) 
 
 // New RatsPeer-based peer management methods
 void RatsClient::add_peer(const RatsPeer& peer) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    add_peer_unlocked(peer);
+}
+
+void RatsClient::add_peer_unlocked(const RatsPeer& peer) {
+    // Assumes peers_mutex_ is already locked
     peers_[peer.peer_id] = peer;
     socket_to_peer_id_[peer.socket] = peer.peer_id;
     address_to_peer_id_[peer.normalized_address] = peer.peer_id;
@@ -168,12 +174,16 @@ void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
     // Assumes peers_mutex_ is already locked
     auto it = peers_.find(peer_id);
     if (it != peers_.end()) {
-        const RatsPeer& peer = it->second;
-        socket_to_peer_id_.erase(peer.socket);
-        address_to_peer_id_.erase(peer.normalized_address);
+        // Copy the values we need before erasing to avoid use-after-free
+        socket_t peer_socket = it->second.socket;
+        std::string peer_normalized_address = it->second.normalized_address;
+        
+        socket_to_peer_id_.erase(peer_socket);
+        address_to_peer_id_.erase(peer_normalized_address);
         peers_.erase(it);
+        
         // Clean up socket-specific mutex
-        cleanup_socket_send_mutex(peer.socket);
+        cleanup_socket_send_mutex(peer_socket);
 
         // Clean up ICE coordination tracking for this peer
         {
@@ -1032,7 +1042,7 @@ void RatsClient::server_loop() {
             std::lock_guard<std::mutex> lock(peers_mutex_);
             RatsPeer new_peer(peer_hash_id, ip, port, client_socket, normalized_peer_address, false); // false = incoming connection
             new_peer.encryption_enabled = is_encryption_enabled();
-            add_peer(new_peer);
+            add_peer_unlocked(new_peer);
         }
         
         // Start a thread to handle this client
@@ -3378,7 +3388,7 @@ bool RatsClient::attempt_direct_connection(const std::string& host, int port, Co
         RatsPeer new_peer(peer_hash_id, host, port, peer_socket, peer_address, true);
         new_peer.encryption_enabled = is_encryption_enabled();
         new_peer.connection_method = "direct";
-        add_peer(new_peer);
+        add_peer_unlocked(new_peer);
     }
     
     // Start handling this peer
