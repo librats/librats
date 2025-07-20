@@ -1059,10 +1059,37 @@ std::vector<uint8_t> receive_udp_data_with_timeout(socket_t socket, size_t buffe
     return buffer;
 }
 
+// Helper function to determine if a socket is TCP
+bool is_tcp_socket(socket_t socket) {
+    if (!is_valid_socket(socket)) {
+        return false;
+    }
+    
+    int sock_type;
+    socklen_t opt_len = sizeof(sock_type);
+    
+    if (getsockopt(socket, SOL_SOCKET, SO_TYPE, (char*)&sock_type, &opt_len) == 0) {
+        return sock_type == SOCK_STREAM;
+    }
+    
+    return false; // Assume not TCP if we can't determine
+}
+
 // Common Socket Functions
-void close_socket(socket_t socket) {
+void close_socket(socket_t socket, bool force) {
     if (is_valid_socket(socket)) {
         LOG_SOCKET_DEBUG("Closing socket " << socket);
+        
+        // Peform force shutdown if needed
+        if (force) {
+            LOG_SOCKET_DEBUG("Performing shutdown for TCP socket " << socket);
+#ifdef _WIN32
+            shutdown(socket, SD_BOTH);
+#else
+            shutdown(socket, SHUT_RDWR);
+#endif
+        }
+        
         closesocket(socket);
     }
 }

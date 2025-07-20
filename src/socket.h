@@ -225,7 +225,7 @@ std::vector<uint8_t> receive_udp_data_with_timeout(socket_t socket, size_t buffe
  * Close a socket
  * @param socket The socket handle to close
  */
-void close_socket(socket_t socket);
+void close_socket(socket_t socket, bool force = false);
 
 /**
  * Check if a socket is valid
@@ -240,5 +240,12 @@ bool is_valid_socket(socket_t socket);
  * @return true if successful, false otherwise
  */
 bool set_socket_nonblocking(socket_t socket);
+
+/**
+ * Check if a socket is a TCP socket
+ * @param socket The socket handle to check
+ * @return true if TCP socket, false otherwise
+ */
+bool is_tcp_socket(socket_t socket);
 
 } // namespace librats 

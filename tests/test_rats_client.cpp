@@ -16,6 +16,7 @@ class RatsClientTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Initialize socket library
+        librats::Logger::getInstance().set_log_level(librats::LogLevel::DEBUG);
         init_socket_library();
     }
     

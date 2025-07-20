@@ -373,7 +373,7 @@ bool MdnsClient::leave_multicast_group() {
 void MdnsClient::close_multicast_socket() {
     if (librats::is_valid_socket(multicast_socket_)) {
         leave_multicast_group();
-        librats::close_socket(multicast_socket_);
+        librats::close_socket(multicast_socket_, true);
         multicast_socket_ = INVALID_SOCKET_VALUE;
     }
 }

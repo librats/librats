@@ -37,6 +37,8 @@ add_library(librats
     src/encrypted_socket.h
     src/mdns.cpp
     src/mdns.h
+    src/threadmanager.cpp
+    src/threadmanager.h
 )
 
 # Include directories
