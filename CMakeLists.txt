@@ -107,6 +107,8 @@ target_link_libraries(rats Threads::Threads)
 # Link networking libraries
 if(WIN32)
     target_link_libraries(rats ws2_32 iphlpapi bcrypt)
+    # Enable AddressSanitizer for Windows
+    target_compile_options(rats PRIVATE /fsanitize=address)
 endif()
 
 # Create the main executable
@@ -117,6 +119,11 @@ target_link_libraries(rats-client rats)
 if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/version.rc.in")
     set(VERSION_RC "${CMAKE_BINARY_DIR}/version.rc")
     target_sources(rats-client PRIVATE "${VERSION_RC}")
+endif()
+
+# Add AddressSanitizer for main executable on Windows
+if(WIN32)
+    target_compile_options(rats PRIVATE /fsanitize=address)
 endif()
 
 # Set output directories
@@ -153,6 +160,12 @@ if(BUILD_TESTS)
         # For Windows: Prevent overriding the parent project's compiler/linker settings
         set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
         
+        # Ensure GoogleTest is compiled with the same flags as our project
+        if(WIN32)
+            set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /fsanitize=address")
+            set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /fsanitize=address")
+        endif()
+        
         FetchContent_MakeAvailable(googletest)
     endif()
     
@@ -185,6 +198,11 @@ if(BUILD_TESTS)
         gmock
         gmock_main
     )
+    
+    # Add AddressSanitizer for tests on Windows
+    if(WIN32)
+        target_compile_options(librats_tests PRIVATE /fsanitize=address)
+    endif()
     
     # Add test discovery
     include(GoogleTest)
