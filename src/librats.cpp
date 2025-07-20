@@ -337,6 +337,11 @@ void RatsClient::stop() {
     // Stop mDNS discovery
     stop_mdns_discovery();
     
+    // Stop ICE agent
+    if (ice_agent_ && ice_agent_->is_running()) {
+        ice_agent_->stop();
+    }
+    
     // Close server socket to break accept loop
     if (is_valid_socket(server_socket_)) {
         close_socket(server_socket_);
@@ -377,7 +382,6 @@ void RatsClient::shutdown_immediate() {
     LOG_CLIENT_INFO("Triggering immediate shutdown of all background threads");
     
     running_.store(false);
-    auto_discovery_running_.store(false);
     
     // Notify all waiting threads to wake up immediately
     shutdown_cv_.notify_all();
@@ -1632,7 +1636,7 @@ void RatsClient::automatic_discovery_loop() {
     // Initial delay to let DHT bootstrap
     {
         std::unique_lock<std::mutex> lock(shutdown_mutex_);
-        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return !auto_discovery_running_.load(); })) {
+        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
             LOG_CLIENT_INFO("Automatic peer discovery loop stopped during initial delay");
             return;
         }
@@ -1643,7 +1647,7 @@ void RatsClient::automatic_discovery_loop() {
     
     {
         std::unique_lock<std::mutex> lock(shutdown_mutex_);
-        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(10), [this] { return !auto_discovery_running_.load(); })) {
+        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(10), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
             LOG_CLIENT_INFO("Automatic peer discovery loop stopped during search delay");
             return;
         }
@@ -1683,7 +1687,7 @@ void RatsClient::automatic_discovery_loop() {
         // Use conditional variable for responsive shutdown
         {
             std::unique_lock<std::mutex> lock(shutdown_mutex_);
-            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !auto_discovery_running_.load(); })) {
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
                 break;
             }
         }
