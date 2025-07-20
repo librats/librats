@@ -172,7 +172,11 @@ void RatsClient::remove_peer_by_id(const std::string& peer_id) {
 
 void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
     // Assumes peers_mutex_ is already locked
-    auto it = peers_.find(peer_id);
+    
+    // Make a copy of peer_id to avoid use-after-free if the reference points to memory that gets freed
+    std::string peer_id_copy = peer_id;
+    
+    auto it = peers_.find(peer_id_copy);
     if (it != peers_.end()) {
         // Copy the values we need before erasing to avoid use-after-free
         socket_t peer_socket = it->second.socket;
@@ -188,7 +192,7 @@ void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
         // Clean up ICE coordination tracking for this peer
         {
             std::lock_guard<std::mutex> ice_lock(ice_coordination_mutex_);
-            ice_coordination_in_progress_.erase(peer_id);
+            ice_coordination_in_progress_.erase(peer_id_copy);
         }
     }
 }
