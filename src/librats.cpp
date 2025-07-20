@@ -160,6 +160,12 @@ void RatsClient::add_peer(const RatsPeer& peer) {
 }
 
 void RatsClient::remove_peer_by_id(const std::string& peer_id) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    remove_peer_by_id_unlocked(peer_id);
+}
+
+void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
+    // Assumes peers_mutex_ is already locked
     auto it = peers_.find(peer_id);
     if (it != peers_.end()) {
         const RatsPeer& peer = it->second;
@@ -1334,7 +1340,7 @@ void RatsClient::remove_peer(socket_t socket) {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     auto it = socket_to_peer_id_.find(socket);
     if (it != socket_to_peer_id_.end()) {
-        remove_peer_by_id(it->second);
+        remove_peer_by_id_unlocked(it->second);
     }
 }
 
@@ -1943,7 +1949,7 @@ void RatsClient::check_handshake_timeouts() {
             LOG_CLIENT_INFO("Disconnecting peer " << peer_id << " due to handshake timeout");
             
             // Clean up peer data
-            remove_peer_by_id(peer_id);
+            remove_peer_by_id_unlocked(peer_id);
             close_socket(socket);
         }
     }
