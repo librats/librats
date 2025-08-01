@@ -48,16 +48,16 @@ jobs:
         if: runner.os == 'Linux' && matrix.build-type == 'Release'
         run: |
           mkdir -p artifacts/linux
-          cp build/bin/rats artifacts/linux/
-          cp build/lib/liblibrats.a artifacts/linux/
+          cp build/bin/rats-client artifacts/linux/
+          cp build/lib/librats.a artifacts/linux/
           cp -r src/*.h artifacts/linux/
       
       - name: Prepare artifacts (Windows)
         if: runner.os == 'Windows' && matrix.build-type == 'Release'
         run: |
           mkdir -p artifacts/windows
-          cp build/bin/Release/rats.exe artifacts/windows/
-          cp build/lib/Release/librats.lib artifacts/windows/
+          cp build/bin/Release/rats-client.exe artifacts/windows/
+          cp build/lib/Release/rats.lib artifacts/windows/
           cp src/*.h artifacts/windows/
       
       - name: Upload artifacts (Linux)
@@ -81,8 +81,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/linux/rats
-            artifacts/linux/liblibrats.a
+            artifacts/linux/rats-client
+            artifacts/linux/librats.a
             artifacts/linux/*.h
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -92,8 +92,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/windows/rats.exe
-            artifacts/windows/librats.lib
+            artifacts/windows/rats-client.exe
+            artifacts/windows/rats.lib
             artifacts/windows/*.h
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
