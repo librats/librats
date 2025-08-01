@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Create the library
-add_library(librats
+add_library(rats
     src/socket.cpp
     src/socket.h
     src/network_utils.cpp
@@ -42,28 +42,28 @@ add_library(librats
 )
 
 # Include directories
-target_include_directories(librats PUBLIC src)
+target_include_directories(rats PUBLIC src)
 
 # Find and link threading support
 find_package(Threads REQUIRED)
-target_link_libraries(librats Threads::Threads)
+target_link_libraries(rats Threads::Threads)
 
 # Link networking libraries
 if(WIN32)
-    target_link_libraries(librats ws2_32 iphlpapi bcrypt)
+    target_link_libraries(rats ws2_32 iphlpapi bcrypt)
 endif()
 
 # Create the main executable
-add_executable(rats src/main.cpp)
-target_link_libraries(rats librats)
+add_executable(rats-client src/main.cpp)
+target_link_libraries(rats-client rats)
 
 # Set output directories
-set_target_properties(librats PROPERTIES
+set_target_properties(rats PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
 )
 
-set_target_properties(rats PROPERTIES
+set_target_properties(rats-client PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
@@ -71,7 +71,7 @@ set_target_properties(rats PROPERTIES
 option(BUILD_TESTS "Build unit tests" ON)
 
 if(BUILD_TESTS)
-    target_compile_definitions(librats PUBLIC TESTING)
+    target_compile_definitions(rats PUBLIC TESTING)
 
     # Enable testing
     enable_testing()
@@ -115,7 +115,7 @@ if(BUILD_TESTS)
     
     # Link with GoogleTest and our library
     target_link_libraries(librats_tests 
-        librats 
+        rats 
         gtest 
         gtest_main
         gmock
