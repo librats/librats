@@ -5,6 +5,8 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  release:
+    types: [created]
 
 jobs:
   test:
@@ -59,7 +61,7 @@ jobs:
           cp src/*.h artifacts/windows/
       
       - name: Upload artifacts (Linux)
-        if: runner.os == 'Linux' && matrix.build-type == 'Release'
+        if: runner.os == 'Linux' && matrix.build-type == 'Release' && github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
           name: librats-linux-${{ github.sha }}
@@ -67,9 +69,31 @@ jobs:
           retention-days: 30
       
       - name: Upload artifacts (Windows)
-        if: runner.os == 'Windows' && matrix.build-type == 'Release'
+        if: runner.os == 'Windows' && matrix.build-type == 'Release' && github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
           name: librats-windows-${{ github.sha }}
           path: artifacts/windows/
           retention-days: 30
+
+      - name: Upload to Release (Linux)
+        if: runner.os == 'Linux' && matrix.build-type == 'Release' && github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/linux/rats
+            artifacts/linux/liblibrats.a
+            artifacts/linux/*.h
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Upload to Release (Windows)
+        if: runner.os == 'Windows' && matrix.build-type == 'Release' && github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/windows/rats.exe
+            artifacts/windows/librats.lib
+            artifacts/windows/*.h
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

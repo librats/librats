@@ -265,27 +265,3 @@ std::string new_key = client.generate_new_encryption_key();
 // Restart the client to use the new key
 // Update peer configurations with the new public key
 ```
-
-## FAQ
-
-**Q: Is encryption enabled by default?**
-A: Yes, encryption is enabled by default in librats.
-
-**Q: Can I use my own encryption keys?**
-A: Yes, you can set custom keys using `client.set_encryption_key()`.
-
-**Q: What happens if one peer has encryption enabled and another doesn't?**
-A: The connection will fail. Both peers must have the same encryption setting.
-
-**Q: Is the encryption quantum-resistant?**
-A: No, Curve25519 is not quantum-resistant. Consider post-quantum algorithms for future-proofing.
-
-**Q: Can I verify peer identity?**
-A: Yes, static public keys can be used for identity verification. Consider implementing key fingerprint verification.
-
-**Q: What's the performance impact?**
-A: Typically 5-10% throughput reduction and ~16 bytes overhead per message.
-
----
-
-**🔒 Your P2P communications are now secured with military-grade encryption!** 

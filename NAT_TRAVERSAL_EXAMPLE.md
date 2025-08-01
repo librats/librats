@@ -528,15 +528,3 @@ Enter port: 8081
 🎤 Greeting from xyz123def456ghi789: Hello from NAT traversal demo!
 💬 Response from xyz123def456ghi789: Hello back!
 ```
-
-## Features Demonstrated
-
-1. **Automatic NAT Detection** - Detects NAT type and characteristics
-2. **ICE Candidate Gathering** - Discovers local and server reflexive candidates  
-3. **Strategy Selection** - Automatically chooses best connection method
-4. **Real-time Monitoring** - Shows progress of NAT traversal process
-5. **Connection Statistics** - Detailed information about connections
-6. **Message Exchange** - Automatic exchange of NAT info and ICE candidates
-7. **Interactive Testing** - Test different strategies manually
-
-This example demonstrates how librats makes NAT traversal completely automatic while providing detailed visibility into the process for debugging and optimization. 

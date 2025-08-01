@@ -2,7 +2,7 @@
 
 ## Overview
 
-The librats library now includes comprehensive mDNS (multicast DNS) support for automatic peer discovery on local networks. This feature enables librats nodes to automatically find and connect to each other on the same local network segment without requiring external infrastructure like DHT bootstrap nodes or manual configuration.
+The librats library includes comprehensive mDNS (multicast DNS) support for automatic peer discovery on local networks. This feature enables librats nodes to automatically find and connect to each other on the same local network segment without requiring external infrastructure like DHT bootstrap nodes or manual configuration.
 
 ## Features
 
@@ -344,29 +344,3 @@ client.set_mdns_callback([](const std::string& ip, int port, const std::string& 
     }
 });
 ```
-
-## Performance Characteristics
-
-- **Discovery Time**: Typically 1-5 seconds on local networks
-- **Network Overhead**: ~200-500 bytes per announcement
-- **Memory Usage**: ~1KB per discovered service
-- **CPU Usage**: Minimal (mostly I/O bound)
-
-## Limitations
-
-- **Local Network Only**: Does not work across internet
-- **Multicast Dependency**: Requires multicast support
-- **No Authentication**: Services are publicly visible on LAN
-- **IPv4 Primary**: IPv6 support is limited
-
-## Future Enhancements
-
-- Enhanced IPv6 support
-- Service authentication/verification
-- Bandwidth usage optimization
-- Advanced service filtering
-- Integration with network discovery protocols
-
----
-
-For more information, see the librats documentation and example code in the `tests/` directory. 

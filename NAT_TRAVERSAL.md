@@ -573,5 +573,3 @@ client.set_advanced_connection_callback([](socket_t socket, const std::string& p
 - **`AdvancedConnectionCallback`** - Enhanced connection callback with NAT info
 - **`NatTraversalProgressCallback`** - NAT traversal progress updates
 - **`IceCandidateDiscoveredCallback`** - ICE candidate discovery notifications
-
-This comprehensive NAT traversal implementation ensures librats can establish peer-to-peer connections across virtually any network topology, making it suitable for production P2P applications with automatic ICE coordination, NAT information exchange, and intelligent connection strategy selection. 

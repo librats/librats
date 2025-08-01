@@ -239,14 +239,3 @@ client.send("important_message", data, [](bool success, const std::string& error
     }
 });
 ```
-
-## Integration with Existing Code
-
-The new message exchange API works alongside the existing librats functionality:
-
-- Legacy `set_data_callback()` still works for non-protocol messages
-- Built-in peer discovery and management continues to work automatically
-- DHT and STUN functionality remains unchanged
-- Configuration persistence is unaffected
-
-You can gradually migrate existing code to use the new API while maintaining backward compatibility. 

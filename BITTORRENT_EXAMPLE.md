@@ -1,7 +1,5 @@
 # BitTorrent Integration in LibRats
 
-LibRats now includes optional BitTorrent functionality that can be enabled on demand. BitTorrent is **disabled by default** and must be explicitly enabled.
-
 ## Features
 
 - Complete BitTorrent protocol implementation
@@ -203,33 +201,3 @@ int main() {
     return 0;
 }
 ```
-
-## Notes
-
-- BitTorrent functionality is **optional** and disabled by default
-- Must call `enable_bittorrent()` before using any BitTorrent features
-- BitTorrent integrates seamlessly with librats' DHT for peer discovery
-- All torrent operations are thread-safe
-- Progress callbacks are called from background threads
-- BitTorrent uses the librats logging system with "bittorrent" module tag
-
-## Building
-
-The BitTorrent functionality is automatically included when building librats. No additional dependencies are required beyond what librats already uses.
-
-```bash
-mkdir build
-cd build
-cmake ..
-make
-```
-
-The BitTorrent implementation includes:
-- Bencode parser (for .torrent files)
-- SHA1 hash verification
-- Peer wire protocol
-- DHT integration
-- File system operations
-- Network utilities
-
-All these components are part of the existing librats codebase. 
