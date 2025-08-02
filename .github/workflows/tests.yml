@@ -85,7 +85,7 @@ jobs:
             artifacts/linux/librats.a
             artifacts/linux/*.h
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
       
       - name: Upload to Release (Windows)
         if: runner.os == 'Windows' && matrix.build-type == 'Release' && github.event_name == 'release'
@@ -96,4 +96,4 @@ jobs:
             artifacts/windows/rats.lib
             artifacts/windows/*.h
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
