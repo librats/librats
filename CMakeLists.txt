@@ -4,6 +4,59 @@ project(librats VERSION 1.0.0)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Get version from git
+find_package(Git QUIET)
+if(GIT_FOUND)
+    # Get the current git tag/commit
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_DESCRIBE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    
+    # Extract version from git tag (format: v1.2.3 or 1.2.3)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_TAG
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    
+    # Parse version components
+    if(GIT_TAG MATCHES "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+        set(VERSION_MAJOR ${CMAKE_MATCH_1})
+        set(VERSION_MINOR ${CMAKE_MATCH_2})
+        set(VERSION_PATCH ${CMAKE_MATCH_3})
+    else()
+        # Fallback to project version
+        set(VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+        set(VERSION_MINOR ${PROJECT_VERSION_MINOR})
+        set(VERSION_PATCH ${PROJECT_VERSION_PATCH})
+    endif()
+else()
+    # Fallback when git is not available
+    set(VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+    set(VERSION_MINOR ${PROJECT_VERSION_MINOR})
+    set(VERSION_PATCH ${PROJECT_VERSION_PATCH})
+    set(GIT_DESCRIBE "unknown")
+endif()
+
+# Set build number (could be commit count or CI build number)
+set(VERSION_BUILD 0)
+set(VERSION_STRING "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}.${VERSION_BUILD}")
+
+# Configure version.rc from template
+if(WIN32)
+    configure_file(
+        ${CMAKE_SOURCE_DIR}/version.rc.in
+        ${CMAKE_BINARY_DIR}/version.rc
+        @ONLY
+    )
+endif()
+
 # Create the library
 add_library(rats
     src/socket.cpp
@@ -56,6 +109,12 @@ endif()
 # Create the main executable
 add_executable(rats-client src/main.cpp)
 target_link_libraries(rats-client rats)
+
+# Add version information to help reduce false positives (Windows only)
+if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/version.rc.in")
+    set(VERSION_RC "${CMAKE_BINARY_DIR}/version.rc")
+    target_sources(rats-client PRIVATE "${VERSION_RC}")
+endif()
 
 # Set output directories
 set_target_properties(rats PROPERTIES
