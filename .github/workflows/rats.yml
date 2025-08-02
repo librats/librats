@@ -47,10 +47,10 @@ jobs:
       - name: Prepare artifacts (Linux)
         if: runner.os == 'Linux' && matrix.build-type == 'Release'
         run: |
-          mkdir -p artifacts/linux
+          mkdir -p artifacts/linux/include
           cp build/bin/rats-client artifacts/linux/
           cp build/lib/librats.a artifacts/linux/
-          cp -r src/*.h artifacts/linux/
+          cp src/*.h artifacts/linux/include/
           cd artifacts
           if [ "${{ github.event_name }}" == "release" ]; then
             VERSION=${{ github.ref_name }}
@@ -62,10 +62,10 @@ jobs:
       - name: Prepare artifacts (Windows)
         if: runner.os == 'Windows' && matrix.build-type == 'Release'
         run: |
-          mkdir -p artifacts/windows
+          mkdir -p artifacts/windows/include
           cp build/bin/Release/rats-client.exe artifacts/windows/
           cp build/lib/Release/rats.lib artifacts/windows/
-          cp src/*.h artifacts/windows/
+          cp src/*.h artifacts/windows/include/
           cd artifacts
           if ("${{ github.event_name }}" -eq "release") {
             $VERSION = "${{ github.ref_name }}"
