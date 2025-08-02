@@ -69,9 +69,9 @@ jobs:
           cd artifacts
           if ("${{ github.event_name }}" -eq "release") {
             $VERSION = "${{ github.ref_name }}"
-            Compress-Archive -Path windows/* -DestinationPath "librats-windows-${VERSION}.zip"
+            7z a "librats-windows-${VERSION}.zip" windows/*
           } else {
-            Compress-Archive -Path windows/* -DestinationPath librats-windows.zip
+            7z a librats-windows.zip windows/*
           }
       
       - name: Upload artifacts (Linux)
