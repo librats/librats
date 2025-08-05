@@ -1838,7 +1838,7 @@ bool RatsClient::validate_handshake_message(const HandshakeMessage& msg) const {
     auto current_timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     int64_t time_diff = std::abs(current_timestamp - msg.timestamp);
     if (time_diff > 60000) { // 60 seconds in milliseconds
-        LOG_CLIENT_WARN("Handshake timestamp too old: " << time_diff << "ms");
+        LOG_CLIENT_WARN("Handshake timestamp too old: " << time_diff << "ms" << " (current: " << current_timestamp << ", msg: " << msg.timestamp << ")");
         return false;
     }
     
