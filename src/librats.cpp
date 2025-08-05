@@ -34,6 +34,7 @@ namespace librats {
 // Configuration file constants
 const std::string RatsClient::CONFIG_FILE_NAME = "config.json";
 const std::string RatsClient::PEERS_FILE_NAME = "peers.rats";
+const std::string RatsClient::PEERS_EVER_FILE_NAME = "peers_ever.rats";
 
 RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig& nat_config) 
     : listen_port_(listen_port), 
@@ -318,6 +319,15 @@ bool RatsClient::start() {
         int reconnect_attempts = load_and_reconnect_peers();
         if (reconnect_attempts > 0) {
             LOG_CLIENT_INFO("Attempted to reconnect to " << reconnect_attempts << " saved peers");
+        }
+        
+        // Also attempt to reconnect to historical peers if not at peer limit
+        if (!is_peer_limit_reached()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Give current peers time to connect
+            int historical_attempts = load_and_reconnect_historical_peers();
+            if (historical_attempts > 0) {
+                LOG_CLIENT_INFO("Attempted to reconnect to " << historical_attempts << " historical peers");
+            }
         }
     }), "peer-reconnection");
     
@@ -1955,6 +1965,10 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
         if (send_handshake_unlocked(socket, get_our_peer_id())) {
             peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
             log_handshake_completion_unlocked(peer);
+            
+            // Append to historical peers file after successful connection
+            append_peer_to_historical_file(peer);
+            
             return true;
         } else {
             peer.handshake_state = RatsPeer::HandshakeState::FAILED;
@@ -1965,6 +1979,10 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
         // This is a response to our handshake
         peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
         log_handshake_completion_unlocked(peer);
+        
+        // Append to historical peers file after successful connection
+        append_peer_to_historical_file(peer);
+        
         return true;
     } else {
         LOG_CLIENT_WARN("Received handshake from " << peer_hash_id << " but handshake state is " << static_cast<int>(peer.handshake_state));
@@ -2628,6 +2646,14 @@ std::string RatsClient::get_peers_file_path() const {
     #endif
 }
 
+std::string RatsClient::get_peers_ever_file_path() const {
+    #ifdef TESTING
+        return "peers_ever_" + std::to_string(listen_port_) + ".json";
+    #else
+        return PEERS_EVER_FILE_NAME;
+    #endif
+}
+
 bool RatsClient::load_configuration() {
     std::lock_guard<std::mutex> lock(config_mutex_);
     
@@ -2923,6 +2949,310 @@ int RatsClient::load_and_reconnect_peers() {
         return 0;
     } catch (const std::exception& e) {
         LOG_CLIENT_ERROR("Failed to load saved peers: " << e.what());
+        return 0;
+    }
+}
+
+bool RatsClient::append_peer_to_historical_file(const RatsPeer& peer) {
+    // Don't save ourselves
+    if (peer.peer_id == our_peer_id_) {
+        return true;
+    }
+    
+    // Only save peers that have completed handshake and have valid peer IDs
+    if (!peer.is_handshake_completed() || peer.peer_id.empty()) {
+        return true;
+    }
+    
+    try {
+        // Create historical peer entry with timestamp
+        nlohmann::json historical_peer = serialize_peer_for_persistence(peer);
+        
+        // Add current timestamp as last_seen
+        auto now = std::chrono::high_resolution_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        historical_peer["last_seen"] = timestamp;
+        
+        // Check if file exists, if not create it as an empty array
+        std::string file_path = get_peers_ever_file_path();
+        nlohmann::json historical_peers;
+        
+        if (file_exists(file_path)) {
+            try {
+                std::string existing_data = read_file_text_cpp(file_path);
+                if (!existing_data.empty()) {
+                    historical_peers = nlohmann::json::parse(existing_data);
+                    if (!historical_peers.is_array()) {
+                        LOG_CLIENT_WARN("Historical peers file format invalid, creating new array");
+                        historical_peers = nlohmann::json::array();
+                    }
+                } else {
+                    historical_peers = nlohmann::json::array();
+                }
+            } catch (const std::exception& e) {
+                LOG_CLIENT_WARN("Failed to read historical peers file, creating new array: " << e.what());
+                historical_peers = nlohmann::json::array();
+            }
+        } else {
+            historical_peers = nlohmann::json::array();
+        }
+        
+        // Check if this peer already exists in historical file
+        std::string peer_address = peer.ip + ":" + std::to_string(peer.port);
+        bool already_exists = false;
+        
+        for (auto& existing_peer : historical_peers) {
+            std::string existing_ip = existing_peer.value("ip", "");
+            int existing_port = existing_peer.value("port", 0);
+            std::string existing_address = existing_ip + ":" + std::to_string(existing_port);
+            
+            if (existing_address == peer_address || existing_peer.value("peer_id", "") == peer.peer_id) {
+                // Update timestamp for existing peer
+                existing_peer["last_seen"] = timestamp;
+                already_exists = true;
+                break;
+            }
+        }
+        
+        // If peer doesn't exist, add it
+        if (!already_exists) {
+            historical_peers.push_back(historical_peer);
+            LOG_CLIENT_DEBUG("Added new peer to historical file: " << peer.ip << ":" << peer.port << " (peer_id: " << peer.peer_id << ")");
+        } else {
+            LOG_CLIENT_DEBUG("Updated timestamp for existing historical peer: " << peer.ip << ":" << peer.port);
+        }
+        
+        // Save updated historical peers file
+        std::string historical_data = historical_peers.dump(4);
+        if (create_file(file_path, historical_data)) {
+            return true;
+        } else {
+            LOG_CLIENT_ERROR("Failed to save historical peers file");
+            return false;
+        }
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to process historical peer: " << e.what());
+        return false;
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to append peer to historical file: " << e.what());
+        return false;
+    }
+}
+
+bool RatsClient::load_historical_peers() {
+    LOG_CLIENT_INFO("Loading historical peers from " << get_peers_ever_file_path());
+    
+    // Check if historical peers file exists
+    if (!file_exists(get_peers_ever_file_path())) {
+        LOG_CLIENT_INFO("No historical peers file found");
+        return true; // Not an error
+    }
+    
+    try {
+        std::string historical_data = read_file_text_cpp(get_peers_ever_file_path());
+        if (historical_data.empty()) {
+            LOG_CLIENT_INFO("Historical peers file is empty");
+            return true;
+        }
+        
+        nlohmann::json historical_peers = nlohmann::json::parse(historical_data);
+        
+        if (!historical_peers.is_array()) {
+            LOG_CLIENT_ERROR("Invalid historical peers file format - expected array");
+            return false;
+        }
+        
+        LOG_CLIENT_INFO("Loaded " << historical_peers.size() << " historical peers from file");
+        return true;
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to parse historical peers file: " << e.what());
+        return false;
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to load historical peers file: " << e.what());
+        return false;
+    }
+}
+
+bool RatsClient::save_historical_peers() {
+    try {
+        // Get current peers and save them to historical file
+        std::vector<RatsPeer> current_peers = get_validated_peers();
+        
+        for (const auto& peer : current_peers) {
+            if (!append_peer_to_historical_file(peer)) {
+                LOG_CLIENT_WARN("Failed to save peer to historical file: " << peer.ip << ":" << peer.port);
+            }
+        }
+        
+        LOG_CLIENT_INFO("Saved " << current_peers.size() << " current peers to historical file");
+        return true;
+        
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to save historical peers: " << e.what());
+        return false;
+    }
+}
+
+void RatsClient::clear_historical_peers() {
+    std::string file_path = get_peers_ever_file_path();
+    
+    try {
+        // Create empty array and save to file
+        nlohmann::json empty_array = nlohmann::json::array();
+        std::string empty_data = empty_array.dump(4);
+        
+        if (create_file(file_path, empty_data)) {
+            LOG_CLIENT_INFO("Cleared historical peers file");
+        } else {
+            LOG_CLIENT_ERROR("Failed to clear historical peers file");
+        }
+        
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to clear historical peers: " << e.what());
+    }
+}
+
+std::vector<RatsPeer> RatsClient::get_historical_peers() const {
+    std::vector<RatsPeer> historical_peers;
+    
+    // Check if historical peers file exists
+    if (!file_exists(get_peers_ever_file_path())) {
+        return historical_peers; // Return empty vector
+    }
+    
+    try {
+        std::string historical_data = read_file_text_cpp(get_peers_ever_file_path());
+        if (historical_data.empty()) {
+            return historical_peers;
+        }
+        
+        nlohmann::json peers_json = nlohmann::json::parse(historical_data);
+        
+        if (!peers_json.is_array()) {
+            LOG_CLIENT_ERROR("Invalid historical peers file format - expected array");
+            return historical_peers;
+        }
+        
+        for (const auto& peer_json : peers_json) {
+            std::string ip;
+            int port;
+            std::string peer_id;
+            
+            if (deserialize_peer_from_persistence(peer_json, ip, port, peer_id)) {
+                // Create a RatsPeer object for the historical peer
+                // Note: This won't have all the runtime fields populated
+                RatsPeer historical_peer(peer_id, ip, static_cast<uint16_t>(port), 
+                                       INVALID_SOCKET_VALUE, ip + ":" + std::to_string(port), false);
+                
+                // Set additional fields from JSON if available
+                historical_peer.version = peer_json.value("version", "");
+                
+                historical_peers.push_back(historical_peer);
+            }
+        }
+        
+        LOG_CLIENT_DEBUG("Retrieved " << historical_peers.size() << " historical peers");
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to parse historical peers file: " << e.what());
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to read historical peers file: " << e.what());
+    }
+    
+    return historical_peers;
+}
+
+int RatsClient::load_and_reconnect_historical_peers() {
+    if (!running_.load()) {
+        LOG_CLIENT_DEBUG("Client not running, skipping historical peer reconnection");
+        return 0;
+    }
+    
+    LOG_CLIENT_INFO("Loading historical peers from " << get_peers_ever_file_path());
+    
+    // Check if historical peers file exists
+    if (!file_exists(get_peers_ever_file_path())) {
+        LOG_CLIENT_INFO("No historical peers file found");
+        return 0;
+    }
+    
+    try {
+        std::string historical_data = read_file_text_cpp(get_peers_ever_file_path());
+        if (historical_data.empty()) {
+            LOG_CLIENT_INFO("Historical peers file is empty");
+            return 0;
+        }
+        
+        nlohmann::json historical_peers = nlohmann::json::parse(historical_data);
+        
+        if (!historical_peers.is_array()) {
+            LOG_CLIENT_ERROR("Invalid historical peers file format - expected array");
+            return 0;
+        }
+        
+        int reconnect_attempts = 0;
+        
+        for (const auto& peer_json : historical_peers) {
+            std::string ip;
+            int port;
+            std::string peer_id;
+            
+            if (!deserialize_peer_from_persistence(peer_json, ip, port, peer_id)) {
+                continue; // Skip invalid or old peers
+            }
+            
+            // Don't connect to ourselves
+            if (peer_id == get_our_peer_id()) {
+                LOG_CLIENT_DEBUG("Skipping connection to ourselves: " << peer_id);
+                continue;
+            }
+            
+            // Check if we should ignore this peer (local interface)
+            if (should_ignore_peer(ip, port)) {
+                LOG_CLIENT_DEBUG("Ignoring historical peer " << ip << ":" << port << " - local interface address");
+                continue;
+            }
+            
+            // Check if we're already connected to this peer
+            std::string normalized_peer_address = normalize_peer_address(ip, port);
+            if (is_already_connected_to_address(normalized_peer_address)) {
+                LOG_CLIENT_DEBUG("Already connected to historical peer " << normalized_peer_address);
+                continue;
+            }
+            
+            // Check if peer limit is reached
+            if (is_peer_limit_reached()) {
+                LOG_CLIENT_DEBUG("Peer limit reached, stopping historical reconnection attempts");
+                break;
+            }
+            
+            LOG_CLIENT_INFO("Attempting to reconnect to historical peer: " << ip << ":" << port << " (peer_id: " << peer_id << ")");
+            
+            // Attempt to connect (non-blocking)
+            add_managed_thread(std::thread([this, ip, port, peer_id]() {
+                if (connect_to_peer(ip, port)) {
+                    LOG_CLIENT_INFO("Successfully reconnected to historical peer: " << ip << ":" << port);
+                } else {
+                    LOG_CLIENT_DEBUG("Failed to reconnect to historical peer: " << ip << ":" << port);
+                }
+            }), "historical-reconnect-" + peer_id.substr(0, 8));
+            
+            reconnect_attempts++;
+            
+            // Small delay between connection attempts to avoid overwhelming the network
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+        
+        LOG_CLIENT_INFO("Processed " << historical_peers.size() << " historical peers, attempted " << reconnect_attempts << " reconnections");
+        return reconnect_attempts;
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to parse historical peers file: " << e.what());
+        return 0;
+    } catch (const std::exception& e) {
+        LOG_CLIENT_ERROR("Failed to load historical peers: " << e.what());
         return 0;
     }
 }

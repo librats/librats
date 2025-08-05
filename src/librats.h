@@ -686,6 +686,29 @@ public:
      */
     int load_and_reconnect_peers();
 
+    /**
+     * Load historical peers from a file
+     * @return true if successful, false otherwise
+     */
+    bool load_historical_peers();
+
+    /**
+     * Save current peers to a historical file
+     * @return true if successful, false otherwise
+     */
+    bool save_historical_peers();
+
+    /**
+     * Clear all historical peers
+     */
+    void clear_historical_peers();
+
+    /**
+     * Get all historical peers
+     * @return Vector of RatsPeer objects
+     */
+    std::vector<RatsPeer> get_historical_peers() const;
+
 private:
     int listen_port_;
     int max_peers_;
@@ -700,6 +723,7 @@ private:
     mutable std::mutex config_mutex_;                       // Protects configuration data
     static const std::string CONFIG_FILE_NAME;             // "config.json"
     static const std::string PEERS_FILE_NAME;              // "peers.rats"
+    static const std::string PEERS_EVER_FILE_NAME;         // "peers_ever.rats"
     
     // Encryption state
     NoiseKey static_encryption_key_;                        // Our static encryption key
@@ -883,7 +907,10 @@ private:
     bool deserialize_peer_from_persistence(const nlohmann::json& json, std::string& ip, int& port, std::string& peer_id) const;
     std::string get_config_file_path() const;
     std::string get_peers_file_path() const;
+    std::string get_peers_ever_file_path() const;
     bool save_peers_to_file();
+    bool append_peer_to_historical_file(const RatsPeer& peer);
+    int load_and_reconnect_historical_peers();
     
     // NAT traversal helpers
     void initialize_nat_traversal();
