@@ -668,6 +668,12 @@ void IceAgent::start_connectivity_checks() {
         return;
     }
     
+    // Check if connectivity checks are already running
+    if (check_thread_.joinable()) {
+        LOG_ICE_WARN("Connectivity checks already running, skipping duplicate start");
+        return;
+    }
+    
     LOG_ICE_INFO("Starting connectivity checks");
     set_state(IceConnectionState::CHECKING);
     
