@@ -2044,6 +2044,20 @@ bool RatsClient::parse_address_string(const std::string& address_str, std::strin
     return !out_ip.empty() && out_port > 0 && out_port <= 65535;
 }
 
+std::string get_box_separator() {
+    return supports_unicode() ? 
+        "════════════════════════════════════════════════════════════════════" :
+        "=====================================================================";
+}
+
+std::string get_box_vertical() {
+    return supports_unicode() ? "│" : "|";
+}
+
+std::string get_checkmark() {
+    return supports_unicode() ? "✓" : "[*]";
+}
+
 void RatsClient::log_handshake_completion_unlocked(const RatsPeer& peer) {
     // Calculate connection duration
     auto now = std::chrono::steady_clock::now();
@@ -2054,19 +2068,21 @@ void RatsClient::log_handshake_completion_unlocked(const RatsPeer& peer) {
     
     // Create visually appealing log output
     std::string connection_type = peer.is_outgoing ? "OUTGOING" : "INCOMING";
-    std::string separator = "════════════════════════════════════════════════════════════════════";
+    std::string separator = get_box_separator();
+    std::string vertical = get_box_vertical();
+    std::string checkmark = get_checkmark();
     
     LOG_CLIENT_INFO("");
     LOG_CLIENT_INFO(separator);
-    LOG_CLIENT_INFO("✓ HANDSHAKE COMPLETED - NEW PEER CONNECTED");
+    LOG_CLIENT_INFO(checkmark << " HANDSHAKE COMPLETED - NEW PEER CONNECTED");
     LOG_CLIENT_INFO(separator);
-    LOG_CLIENT_INFO("│ Peer ID       : " << peer.peer_id);
-    LOG_CLIENT_INFO("│ Address       : " << peer.ip << ":" << peer.port);
-    LOG_CLIENT_INFO("│ Connection    : " << connection_type);
-    LOG_CLIENT_INFO("│ Protocol Ver. : " << peer.version);
-    LOG_CLIENT_INFO("│ Socket        : " << peer.socket);
-    LOG_CLIENT_INFO("│ Duration      : " << duration.count() << "ms");
-    LOG_CLIENT_INFO("│ Network Peers : " << current_peer_count << "/" << max_peers_);
+    LOG_CLIENT_INFO(vertical << " Peer ID       : " << peer.peer_id);
+    LOG_CLIENT_INFO(vertical << " Address       : " << peer.ip << ":" << peer.port);
+    LOG_CLIENT_INFO(vertical << " Connection    : " << connection_type);
+    LOG_CLIENT_INFO(vertical << " Protocol Ver. : " << peer.version);
+    LOG_CLIENT_INFO(vertical << " Socket        : " << peer.socket);
+    LOG_CLIENT_INFO(vertical << " Duration      : " << duration.count() << "ms");
+    LOG_CLIENT_INFO(vertical << " Network Peers : " << current_peer_count << "/" << max_peers_);
     
     LOG_CLIENT_INFO(separator);
     LOG_CLIENT_INFO("");

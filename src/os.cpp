@@ -4,6 +4,7 @@
 #include <sstream>
 #include <fstream>
 #include <thread>
+#include <cstdlib>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -341,6 +342,30 @@ void print_system_info() {
     std::cout << "CPU Cores: " << info.cpu_cores << " physical, " << info.cpu_logical_cores << " logical" << std::endl;
     std::cout << "Memory: " << info.total_memory_mb << " MB total, " << info.available_memory_mb << " MB available" << std::endl;
     std::cout << "=========================" << std::endl;
+}
+
+bool supports_unicode() {
+    static bool checked = false;
+    static bool unicode_supported = false;
+    
+    if (!checked) {
+        std::string os = get_os_name();
+        // Check if we're on Windows, which often has console encoding issues
+        if (os.find("Windows") != std::string::npos) {
+            // Try to detect if we're in a proper Unicode-enabled terminal
+            // For simplicity, we'll assume Windows console doesn't support Unicode well
+            // unless specific environment variables are set
+            const char* term = std::getenv("TERM");
+            const char* wt = std::getenv("WT_SESSION"); // Windows Terminal
+            unicode_supported = (term && std::string(term) != "dumb") || wt;
+        } else {
+            // On Unix-like systems, assume Unicode is supported
+            unicode_supported = true;
+        }
+        checked = true;
+    }
+    
+    return unicode_supported;
 }
 
 } // namespace librats 

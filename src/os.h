@@ -31,6 +31,9 @@ int get_cpu_logical_cores();
 uint64_t get_total_memory_mb();
 uint64_t get_available_memory_mb();
 
+// Unicode support detection
+bool supports_unicode();
+
 // Utility function to print system info
 void print_system_info();
 
