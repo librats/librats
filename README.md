@@ -6,25 +6,26 @@
 
 **A high-performance, lightweight peer-to-peer networking library written in C++17**
 
-librats is a modern alternative to libp2p, designed for **superior performance** and **simplicity**. Built from the ground up in C++, it provides enterprise-grade P2P networking capabilities with minimal overhead and maximum efficiency.
+librats is a modern P2P networking library designed for **superior performance** and **simplicity**. Built from the ground up in C++17, it provides enterprise-grade P2P networking capabilities with minimal overhead and maximum efficiency.
 
 ## ✨ Key Features
 
-### 🏗️ **Core Architecture**
+### **Core Architecture**
 - **Native C++17** implementation for maximum performance
 - **Cross-platform** support (Windows, Linux, macOS)
-- **Thread-safe** design with modern concurrency patterns
+- **Thread-safe** design with modern concurrency patterns using `ThreadManager`
 - **Zero-copy** data handling where possible
-- **Automatic configuration persistence** with JSON-based settings
+- **Automatic configuration persistence** with JSON-based settings (`config.json`)
+- **Historical peer tracking** with automatic reconnection (`peers.rats`, `peers_ever.rats`)
 
-### 🌐 **Advanced Networking**
+### **Advanced Networking**
 - **DHT Integration**: Direct access to the massive BitTorrent DHT network
 - **mDNS Discovery**: Automatic local network peer discovery with service advertisement
 - **STUN Support**: Automatic NAT traversal and public IP discovery
 - **IPv4/IPv6 Dual Stack**: Full support for modern internet protocols
 - **Multi-layer Discovery**: DHT (wide-area) + mDNS (local) + STUN (NAT traversal)
 
-### 🚀 **Comprehensive NAT Traversal** ⭐ **NEW**
+### **Comprehensive NAT Traversal**
 - **ICE (Interactive Connectivity Establishment)**: RFC 8445 compliant with full candidate gathering
 - **TURN Relay Support**: RFC 5766 compliant relay through TURN servers
 - **Advanced STUN**: Enhanced STUN client with NAT type detection and ICE support
@@ -32,39 +33,20 @@ librats is a modern alternative to libp2p, designed for **superior performance**
 - **Automatic Strategy Selection**: Choose optimal connection method based on network conditions
 - **Real-time NAT Detection**: Detailed NAT behavior analysis and adaptation
 
-### 🔐 **Enterprise Security**
+### **Enterprise Security**
 - **Noise Protocol Encryption**: End-to-end encryption with Curve25519 + ChaCha20-Poly1305
 - **Automatic Key Management**: Keys generated, persisted, and rotated automatically
 - **Mutual Authentication**: Both peers verify each other's identity
 - **Perfect Forward Secrecy**: Session keys are ephemeral and secure
-- **Configurable Encryption**: Enable/disable on demand
+- **Configurable Encryption**: Enable/disable on demand with `set_encryption_enabled()`
 
-### 🚀 **Modern Developer Experience**
+### **Modern Developer Experience**
 - **Event-Driven API**: Register message handlers with `on()`, `once()`, `off()` methods
 - **JSON Message Exchange**: Built-in structured communication with callbacks
 - **Promise-style Callbacks**: Modern async patterns for network operations
 - **Real-time Connection Tracking**: Monitor peer states, connection quality, and NAT traversal progress
 - **Comprehensive Logging**: Detailed debug information for troubleshooting
-
-## 🏆 NAT Traversal Capabilities
-
-librats now includes **industry-leading NAT traversal** that can establish P2P connections across virtually any network topology:
-
-| NAT Type | Direct | STUN | ICE | TURN | Success Rate |
-|----------|--------|------|-----|------|--------------|
-| **Open Internet** | ✅ | ✅ | ✅ | ✅ | **100%** |
-| **Full Cone NAT** | ❌ | ✅ | ✅ | ✅ | **95%** |
-| **Restricted Cone** | ❌ | ✅ | ✅ | ✅ | **90%** |
-| **Port Restricted** | ❌ | ✅ | ✅ | ✅ | **85%** |
-| **Symmetric NAT** | ❌ | ❌ | ⚠️ | ✅ | **70%** |
-| **Double NAT** | ❌ | ❌ | ❌ | ✅ | **99%** |
-
-### Connection Strategies
-- **AUTO_ADAPTIVE**: Automatically selects the best connection method
-- **ICE_FULL**: Complete ICE negotiation with candidate gathering
-- **STUN_ASSISTED**: STUN-based public IP discovery and direct connection
-- **TURN_RELAY**: Fallback relay through TURN servers
-- **HOLE_PUNCHING**: Coordinated UDP/TCP hole punching
+- **Custom Protocol Support**: Configure custom protocol names and versions
 
 ## 🚀 Quick Start
 
@@ -157,51 +139,79 @@ int main() {
 }
 ```
 
-### Advanced NAT Traversal
+### Custom Protocol Setup
 
 ```cpp
 int main() {
-    // Configure comprehensive NAT traversal
-    librats::NatTraversalConfig config;
-    config.enable_ice = true;
-    config.enable_hole_punching = true;
-    config.enable_turn_relay = true;
+    librats::RatsClient client(8080);
     
-    // Add TURN servers for maximum connectivity
-    config.turn_servers.push_back("turn.example.com:3478");
-    config.turn_usernames.push_back("username");
-    config.turn_passwords.push_back("password");
+    // Configure custom protocol for your application
+    client.set_protocol_name("my_app");      // Default: "rats"
+    client.set_protocol_version("2.1");     // Default: "1.0"
     
-    librats::RatsClient client(8080, 10, config);
+    // Get discovery hash based on your protocol
+    std::string discovery_hash = client.get_discovery_hash();
+    std::cout << "Custom discovery hash: " << discovery_hash << std::endl;
     
-    // Monitor NAT traversal progress
-    client.set_nat_traversal_progress_callback([](const std::string& peer_id, const std::string& status) {
-        std::cout << "🔄 NAT traversal for " << peer_id << ": " << status << std::endl;
+    // Start with custom protocol
+    client.start();
+    client.start_dht_discovery();
+    
+    // Announce and discover peers using your custom protocol
+    client.announce_for_hash(discovery_hash);
+    client.find_peers_by_hash(discovery_hash, [](const std::vector<std::string>& peers) {
+        std::cout << "Found " << peers.size() << " peers for custom protocol" << std::endl;
     });
     
-    client.set_ice_candidate_callback([](const std::string& peer_id, const librats::IceCandidate& candidate) {
-        std::cout << "🧊 ICE candidate for " << peer_id << ": " 
-                  << candidate.ip << ":" << candidate.port 
-                  << " (type: " << (int)candidate.type << ")" << std::endl;
-    });
+    return 0;
+}
+```
+
+### Advanced Encryption Setup
+
+```cpp
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Enable encryption
+    client.initialize_encryption(true);
+    
+    // Generate and save a new encryption key
+    std::string new_key = client.generate_new_encryption_key();
+    std::cout << "Generated encryption key: " << new_key << std::endl;
+    
+    // Or use an existing key
+    client.set_encryption_key("your_hex_encoded_key_here");
+    
+    // Check encryption status
+    std::cout << "Encryption enabled: " << client.is_encryption_enabled() << std::endl;
     
     client.start();
     
-    // Test different connection strategies
-    std::vector<librats::ConnectionStrategy> strategies = {
-        librats::ConnectionStrategy::DIRECT_ONLY,
-        librats::ConnectionStrategy::STUN_ASSISTED,
-        librats::ConnectionStrategy::ICE_FULL,
-        librats::ConnectionStrategy::TURN_RELAY
-    };
+    // All communications will now be encrypted
+    client.connect_to_peer("encrypted.peer.com", 8081);
     
-    auto results = client.test_connection_strategies("target.example.com", 8081, strategies);
+    return 0;
+}
+```
+
+### Configuration Persistence
+
+```cpp
+int main() {
+    librats::RatsClient client(8080);
     
-    for (const auto& result : results) {
-        std::cout << "📈 Strategy " << result.method << ": " 
-                  << (result.success ? "✅ SUCCESS" : "❌ FAILED") 
-                  << " (" << result.duration.count() << "ms)" << std::endl;
-    }
+    // Load saved configuration and peers
+    client.load_configuration();
+    
+    // Reconnect to historical peers
+    int reconnected = client.load_and_reconnect_peers();
+    std::cout << "Attempted to reconnect to " << reconnected << " peers" << std::endl;
+    
+    client.start();
+    
+    // Configuration and peers are automatically saved
+    // Files created: config.json, peers.rats, peers_ever.rats
     
     return 0;
 }
@@ -218,49 +228,63 @@ The main class providing comprehensive P2P networking capabilities:
 // Enhanced constructor with NAT traversal
 RatsClient(int listen_port, int max_peers = 10, const NatTraversalConfig& config = {});
 
+// Core lifecycle
+bool start();
+void stop();
+void shutdown_all_threads();
+bool is_running() const;
+
 // Advanced connection methods
 bool connect_to_peer(const std::string& host, int port, ConnectionStrategy strategy = AUTO_ADAPTIVE);
 bool connect_with_ice(const std::string& peer_id, const nlohmann::json& ice_offer);
 nlohmann::json create_ice_offer(const std::string& peer_id);
 
+// Custom protocol configuration
+void set_protocol_name(const std::string& protocol_name);
+void set_protocol_version(const std::string& protocol_version);
+std::string get_protocol_name() const;
+std::string get_protocol_version() const;
+std::string get_discovery_hash() const;
+
+// Message exchange API
+void on(const std::string& message_type, MessageCallback callback);
+void once(const std::string& message_type, MessageCallback callback);
+void off(const std::string& message_type);
+void send(const std::string& message_type, const nlohmann::json& data, SendCallback callback = nullptr);
+void send(const std::string& peer_id, const std::string& message_type, const nlohmann::json& data, SendCallback callback = nullptr);
+
+// Encryption
+bool initialize_encryption(bool enable);
+void set_encryption_enabled(bool enabled);
+bool is_encryption_enabled() const;
+std::string get_encryption_key() const;
+bool set_encryption_key(const std::string& key_hex);
+std::string generate_new_encryption_key();
+
+// Configuration persistence
+bool load_configuration();
+bool save_configuration();
+int load_and_reconnect_peers();
+bool load_historical_peers();
+bool save_historical_peers();
+
+// Peer management
+int get_peer_count() const;
+std::vector<RatsPeer> get_all_peers() const;
+std::vector<RatsPeer> get_validated_peers() const;
+const RatsPeer* get_peer_by_id(const std::string& peer_id) const;
+std::string get_our_peer_id() const;
+
 // NAT traversal utilities
 NatType detect_nat_type();
 NatTypeInfo get_nat_characteristics();
-bool coordinate_hole_punching(const std::string& peer_ip, uint16_t peer_port, const nlohmann::json& data);
+std::string get_public_ip() const;
 std::vector<ConnectionAttemptResult> test_connection_strategies(const std::string& host, int port, const std::vector<ConnectionStrategy>& strategies);
 
 // Enhanced callbacks
 void set_advanced_connection_callback(AdvancedConnectionCallback callback);
 void set_nat_traversal_progress_callback(NatTraversalProgressCallback callback);
 void set_ice_candidate_callback(IceCandidateDiscoveredCallback callback);
-```
-
-#### `IceAgent` 
-ICE implementation for NAT traversal:
-
-```cpp
-IceAgent(IceRole role, const IceConfig& config = {});
-
-// Lifecycle management
-bool start();
-void stop();
-bool is_running();
-
-// Candidate management
-void gather_candidates();
-std::vector<IceCandidate> get_local_candidates();
-void add_remote_candidate(const IceCandidate& candidate);
-
-// Connection establishment
-void start_connectivity_checks();
-bool is_connected();
-nlohmann::json get_local_description();
-bool set_remote_description(const nlohmann::json& remote_desc);
-
-// Advanced features
-NatType detect_nat_type();
-bool perform_hole_punching(const std::string& peer_ip, uint16_t peer_port);
-nlohmann::json get_statistics();
 ```
 
 ### Configuration Structures
@@ -271,8 +295,10 @@ Comprehensive NAT traversal configuration:
 ```cpp
 struct NatTraversalConfig {
     bool enable_ice = true;                    // Enable ICE
+    bool enable_upnp = false;                  // Enable UPnP port mapping
     bool enable_hole_punching = true;          // Enable hole punching
     bool enable_turn_relay = true;             // Enable TURN relay
+    bool prefer_ipv6 = false;                  // Prefer IPv6 connections
     
     std::vector<std::string> stun_servers;     // STUN servers
     std::vector<std::string> turn_servers;     // TURN servers
@@ -282,23 +308,54 @@ struct NatTraversalConfig {
     int ice_gathering_timeout_ms = 10000;      // Timeouts
     int ice_connectivity_timeout_ms = 30000;
     int hole_punch_attempts = 5;
+    int turn_allocation_timeout_ms = 10000;
+    
+    // Priority settings
+    int host_candidate_priority = 65535;
+    int server_reflexive_priority = 65534;
+    int relay_candidate_priority = 65533;
     
     // Default includes Google STUN servers
 };
 ```
 
-#### `ConnectionAttemptResult`
-Detailed connection attempt information:
+#### `RatsPeer`
+Comprehensive peer information structure:
 
 ```cpp
-struct ConnectionAttemptResult {
-    bool success;                              // Connection success
-    std::string method;                        // Method used (direct, stun, ice, turn)
-    std::chrono::milliseconds duration;        // Connection time
-    std::string error_message;                 // Error details
-    NatType local_nat_type;                    // Local NAT type
-    NatType remote_nat_type;                   // Remote NAT type
-    std::vector<IceCandidate> used_candidates; // ICE candidates used
+struct RatsPeer {
+    std::string peer_id;                       // Unique hash ID
+    std::string ip;                            // IP address
+    uint16_t port;                             // Port number
+    socket_t socket;                           // Socket handle
+    std::string normalized_address;            // For duplicate detection
+    std::chrono::steady_clock::time_point connected_at;
+    bool is_outgoing;                          // Connection direction
+    
+    // Handshake state
+    enum class HandshakeState { PENDING, SENT, COMPLETED, FAILED };
+    HandshakeState handshake_state;
+    std::string version;                       // Protocol version
+    int peer_count;                            // Remote peer count
+    
+    // Encryption state
+    bool encryption_enabled;
+    bool noise_handshake_completed;
+    NoiseKey remote_static_key;
+    
+    // NAT traversal state
+    bool ice_enabled;
+    std::string ice_ufrag;
+    std::string ice_pwd;
+    std::vector<IceCandidate> ice_candidates;
+    IceConnectionState ice_state;
+    NatType detected_nat_type;
+    std::string connection_method;
+    
+    // Connection quality metrics
+    uint32_t rtt_ms;
+    uint32_t packet_loss_percent;
+    std::string transport_protocol;
 };
 ```
 
@@ -318,7 +375,7 @@ struct ConnectionAttemptResult {
 │ │   Message API   │ │ (Noise Protocol)│ │  Persistence    │    │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
 ├─────────────────────────────────────────────────────────────────┤
-│ NAT Traversal Layer ⭐ NEW                                      │
+│ NAT Traversal Layer                                             │
 │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
 │ │ ICE Agent       │ │ STUN Client     │ │ TURN Client     │    │
 │ │ (RFC 8445)      │ │ (RFC 5389)      │ │ (RFC 5766)      │    │
@@ -345,11 +402,15 @@ struct ConnectionAttemptResult {
 ## 🛠️ Building
 
 ### Prerequisites
-- CMake 3.10+
-- C++17 compatible compiler (GCC 7+, Clang 5+, MSVC 2017+)
-- Git (for dependency management)
+- **CMake 3.10+**
+- **C++17 compatible compiler**:
+  - GCC 7+ (Linux)
+  - Clang 5+ (macOS)
+  - MSVC 2017+ (Windows)
+- **Git** (for dependency management)
 
 ### Building on Linux/macOS
+
 ```bash
 git clone https://github.com/your-org/librats.git
 cd librats
@@ -359,6 +420,7 @@ make -j$(nproc)
 ```
 
 ### Building on Windows
+
 ```powershell
 git clone https://github.com/your-org/librats.git
 cd librats
@@ -367,37 +429,134 @@ cmake .. -G "Visual Studio 16 2019"
 cmake --build . --config Release
 ```
 
+### Build Options
+
+```bash
+# Disable tests
+cmake .. -DBUILD_TESTS=OFF
+
+# Debug build with full logging
+cmake .. -DCMAKE_BUILD_TYPE=Debug
+
+# Release build optimized for performance
+cmake .. -DCMAKE_BUILD_TYPE=Release
+```
+
 ### Running Tests
+
 ```bash
 # In build directory
 ctest -j$(nproc) --output-on-failure
+
 # Or run directly
 ./bin/librats_tests
 ```
 
+### Output Files
+
+After building, you'll find:
+- **Library**: `build/lib/librats.a` (static library)
+- **Executable**: `build/bin/rats-client` (demo application)
+- **Tests**: `build/bin/librats_tests` (if `BUILD_TESTS=ON`)
+
+## 🎯 Usage Examples
+
+### Simple Chat Application
+
+```bash
+# Terminal 1: Start first node
+./build/bin/rats-client 8080
+
+# Terminal 2: Start second node and connect
+./build/bin/rats-client 8081 localhost 8080
+```
+
+### Custom Application
+
+```cpp
+#include "librats.h"
+
+class ChatApp {
+private:
+    librats::RatsClient client_;
+    
+public:
+    ChatApp(int port) : client_(port) {
+        // Set up message handlers
+        client_.on("chat_message", [this](const std::string& peer_id, const nlohmann::json& data) {
+            std::cout << "[" << peer_id.substr(0, 8) << "] " 
+                      << data["message"].get<std::string>() << std::endl;
+        });
+        
+        client_.set_connection_callback([](auto socket, const std::string& peer_id) {
+            std::cout << "User joined: " << peer_id.substr(0, 8) << std::endl;
+        });
+        
+        client_.start();
+        client_.start_dht_discovery();
+        client_.start_mdns_discovery();
+    }
+    
+    void send_message(const std::string& message) {
+        nlohmann::json msg;
+        msg["message"] = message;
+        msg["timestamp"] = std::time(nullptr);
+        client_.send("chat_message", msg);
+    }
+    
+    void connect_to(const std::string& host, int port) {
+        client_.connect_to_peer(host, port);
+    }
+};
+```
+
 ## 📚 Documentation
 
-- **[NAT Traversal Guide](NAT_TRAVERSAL.md)** - Comprehensive NAT traversal documentation
-- **[BitTorrent Example](BITTORRENT_EXAMPLE.md)** - BitTorrent protocol implementation
+Comprehensive documentation is available:
+
+- **[NAT Traversal Guide](NAT_TRAVERSAL.md)** - Complete NAT traversal documentation
+- **[Custom Protocol Setup](CUSTOM_PROTOCOL.md)** - How to configure custom protocols
 - **[Message Exchange API](MESSAGE_EXCHANGE_API.md)** - Event-driven messaging system  
 - **[mDNS Discovery](MDNS_DISCOVERY.md)** - Local network peer discovery
 - **[Noise Encryption](NOISE_ENCRYPTION.md)** - End-to-end encryption details
+- **[BitTorrent Example](BITTORRENT_EXAMPLE.md)** - BitTorrent protocol implementation
 
-## 🌟 Why Choose librats?
+## 🔧 Configuration Files
+
+librats automatically creates and manages these files:
+
+- **`config.json`**: Main configuration (protocol, encryption keys, settings)
+- **`peers.rats`**: Current active peers for reconnection
+- **`peers_ever.rats`**: Historical peers for discovery
+
+### Sample config.json
+```json
+{
+    "protocol_name": "rats",
+    "protocol_version": "1.0",
+    "peer_id": "550e8400-e29b-41d4-a716-446655440000",
+    "encryption_enabled": true,
+    "encryption_key": "a1b2c3d4e5f6...",
+    "listen_port": 8080,
+    "max_peers": 10
+}
+```
+
+## Why Choose librats?
 
 ### **Performance**
 - **Native C++17**: Maximum performance with minimal overhead
-- **Zero-copy operations**: Efficient data handling
-- **Lock-free algorithms**: Where possible for high concurrency
+- **Zero-copy operations**: Efficient data handling where possible
+- **Thread-safe design**: Modern concurrency with `ThreadManager`
 - **Optimized protocols**: Custom implementations tuned for speed
 
 ### **Reliability** 
 - **Production tested**: Used in real-world applications
-- **Comprehensive testing**: Unit tests and integration tests
+- **Comprehensive testing**: Unit tests and integration tests covering all components
 - **Memory safety**: RAII and smart pointers throughout
-- **Cross-platform**: Consistent behavior across platforms
+- **Cross-platform**: Consistent behavior across Windows, Linux, and macOS
 
-### **NAT Traversal Excellence** ⭐
+### **NAT Traversal Excellence**
 - **99%+ Success Rate**: Connect across virtually any NAT configuration
 - **RFC Compliant**: Follows established standards (ICE, STUN, TURN)
 - **Adaptive Strategy**: Automatically selects optimal connection method
@@ -408,10 +567,43 @@ ctest -j$(nproc) --output-on-failure
 - **Modern C++**: Takes advantage of C++17 features
 - **Excellent documentation**: Comprehensive guides and examples
 - **Active development**: Regular updates and improvements
+- **Configuration persistence**: Automatic saving and loading of settings
 
-## 🤝 Contributing
+## NAT Traversal Capabilities
+
+librats includes **industry-leading NAT traversal** that can establish P2P connections across virtually any network topology:
+
+| NAT Type | Direct | STUN | ICE | TURN | Success Rate |
+|----------|--------|------|-----|------|--------------|
+| **Open Internet** | ✅ | ✅ | ✅ | ✅ | **100%** |
+| **Full Cone NAT** | ❌ | ✅ | ✅ | ✅ | **95%** |
+| **Restricted Cone** | ❌ | ✅ | ✅ | ✅ | **90%** |
+| **Port Restricted** | ❌ | ✅ | ✅ | ✅ | **85%** |
+| **Symmetric NAT** | ❌ | ❌ | ⚠️ | ✅ | **70%** |
+| **Double NAT** | ❌ | ❌ | ❌ | ✅ | **99%** |
+
+### Connection Strategies
+- **AUTO_ADAPTIVE**: Automatically selects the best connection method
+- **ICE_FULL**: Complete ICE negotiation with candidate gathering
+- **STUN_ASSISTED**: STUN-based public IP discovery and direct connection
+- **TURN_RELAY**: Fallback relay through TURN servers
+- **DIRECT_ONLY**: Try direct connection only
+
+
+## Contributing
 
 We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+### Development Setup
+
+```bash
+git clone https://github.com/your-org/librats.git
+cd librats
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON
+make -j$(nproc)
+./bin/librats_tests
+```
 
 ## 📄 License
 
@@ -419,11 +611,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-- **BitTorrent DHT**: For the robust distributed hash table protocol
-- **Noise Protocol**: For providing excellent cryptographic primitives
-- **RFC Authors**: For the ICE, STUN, and TURN specifications that enable NAT traversal
+- **nlohmann/json**: For the excellent JSON library integration
 - **Contributors**: Everyone who has contributed to making librats better
-
----
-
-**Made with ❤️ for the P2P community** 
