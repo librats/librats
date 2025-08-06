@@ -3,6 +3,7 @@
 #include "librats.h"
 #include "socket.h"
 #include "fs.h"
+#include "sha1.h"
 #include <thread>
 #include <chrono>
 #include <vector>
@@ -674,4 +675,73 @@ TEST_F(RatsClientTest, SimultaneousConnectionsToSamePeerTest) {
     // Clean up
     client.stop();
     server.stop();
+} 
+
+// Test custom protocol configuration
+TEST_F(RatsClientTest, CustomProtocolConfigurationTest) {
+    RatsClient client(0);  // Use port 0 for automatic assignment
+    
+    // Test default values
+    EXPECT_EQ(client.get_protocol_name(), "rats");
+    EXPECT_EQ(client.get_protocol_version(), "1.0");
+    
+    // Test setting custom protocol name
+    client.set_protocol_name("myapp");
+    EXPECT_EQ(client.get_protocol_name(), "myapp");
+    
+    // Test setting custom protocol version
+    client.set_protocol_version("2.5");
+    EXPECT_EQ(client.get_protocol_version(), "2.5");
+    
+    // Test discovery hash generation
+    std::string custom_hash = client.get_discovery_hash();
+    std::string expected_hash = SHA1::hash("myapp_peer_discovery_v2.5");
+    EXPECT_EQ(custom_hash, expected_hash);
+    
+    // Test that default rats hash is different from custom hash
+    std::string rats_hash = RatsClient::get_rats_peer_discovery_hash();
+    EXPECT_NE(custom_hash, rats_hash);
+    
+    // Test default rats hash is consistent
+    std::string expected_rats_hash = SHA1::hash("rats_peer_discovery_v1.0");
+    EXPECT_EQ(rats_hash, expected_rats_hash);
+    
+    // Test thread safety by changing values from multiple threads
+    std::vector<std::thread> threads;
+    std::atomic<bool> all_correct{true};
+    
+    for (int i = 0; i < 10; ++i) {
+        threads.emplace_back([&client, &all_correct, i]() {
+            std::string name = "protocol_" + std::to_string(i);
+            std::string version = "v" + std::to_string(i);
+            
+            client.set_protocol_name(name);
+            client.set_protocol_version(version);
+            
+            // Small delay to allow interleaving
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            
+            // Verify we can read values without crashes (thread safety test)
+            try {
+                std::string read_name = client.get_protocol_name();
+                std::string read_version = client.get_protocol_version();
+                std::string hash = client.get_discovery_hash();
+                
+                // Values should be consistent even if not exactly what we set
+                // (due to other threads changing them)
+                if (read_name.empty() || read_version.empty() || hash.empty()) {
+                    all_correct = false;
+                }
+            } catch (...) {
+                all_correct = false;
+            }
+        });
+    }
+    
+    // Wait for all threads to complete
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
+    EXPECT_TRUE(all_correct.load());
 } 

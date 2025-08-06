@@ -43,7 +43,9 @@ RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig&
       server_socket_(INVALID_SOCKET_VALUE),
       running_(false),
       encryption_enabled_(false),
-      detected_nat_type_(NatType::UNKNOWN) {
+      detected_nat_type_(NatType::UNKNOWN),
+      custom_protocol_name_("rats"),
+      custom_protocol_version_("1.0") {
     // Initialize STUN client
     stun_client_ = std::make_unique<StunClient>();
     
@@ -1669,11 +1671,7 @@ bool RatsClient::is_automatic_discovery_running() const {
     return auto_discovery_running_.load();
 }
 
-std::string RatsClient::get_rats_peer_discovery_hash() {
-    // Well-known hash for rats peer discovery
-    // Compute SHA1 hash of "rats_peer_discovery_v1"
-    return SHA1::hash("rats_peer_discovery_v1");
-}
+// This function will be removed - implementation moved to end of file
 
 void RatsClient::automatic_discovery_loop() {
     LOG_CLIENT_INFO("Automatic peer discovery loop started");
@@ -1743,35 +1741,35 @@ void RatsClient::automatic_discovery_loop() {
 
 void RatsClient::announce_rats_peer() {
     if (!dht_client_ || !dht_client_->is_running()) {
-        LOG_CLIENT_WARN("DHT client not running, cannot announce rats peer");
+        LOG_CLIENT_WARN("DHT client not running, cannot announce peer");
         return;
     }
     
-    std::string discovery_hash = get_rats_peer_discovery_hash();
-    LOG_CLIENT_INFO("Announcing rats peer for discovery hash: " << discovery_hash << " on port " << listen_port_);
+    std::string discovery_hash = get_discovery_hash();
+    LOG_CLIENT_INFO("Announcing peer for discovery hash: " << discovery_hash << " on port " << listen_port_);
     
     if (announce_for_hash(discovery_hash, listen_port_)) {
-        LOG_CLIENT_DEBUG("Successfully announced rats peer for discovery");
+        LOG_CLIENT_DEBUG("Successfully announced peer for discovery");
     } else {
-        LOG_CLIENT_WARN("Failed to announce rats peer for discovery");
+        LOG_CLIENT_WARN("Failed to announce peer for discovery");
     }
 }
 
 void RatsClient::search_rats_peers(int iteration_max) {
     if (!dht_client_ || !dht_client_->is_running()) {
-        LOG_CLIENT_WARN("DHT client not running, cannot search for rats peers");
+        LOG_CLIENT_WARN("DHT client not running, cannot search for peers");
         return;
     }
     
-    std::string discovery_hash = get_rats_peer_discovery_hash();
-    LOG_CLIENT_INFO("Searching for rats peers using discovery hash: " << discovery_hash << " with iteration max: " << iteration_max);
+    std::string discovery_hash = get_discovery_hash();
+    LOG_CLIENT_INFO("Searching for peers using discovery hash: " << discovery_hash << " with iteration max: " << iteration_max);
     
     find_peers_by_hash(discovery_hash, [this](const std::vector<std::string>& peers) {
-        LOG_CLIENT_INFO("Found " << peers.size() << " rats peers through DHT discovery");
+        LOG_CLIENT_INFO("Found " << peers.size() << " peers through DHT discovery");
         // Note: Connection attempts are handled by handle_dht_peer_discovery() which is called
         // automatically by find_peers_by_hash(), so no need to duplicate connection logic here
         for (const auto& peer_address : peers) {
-            LOG_CLIENT_DEBUG("Discovered rats peer: " << peer_address);
+            LOG_CLIENT_DEBUG("Discovered peer: " << peer_address);
         }
     }, iteration_max);
 }
@@ -1783,8 +1781,11 @@ std::string RatsClient::create_handshake_message(const std::string& message_type
     
     // Use nlohmann::json for proper JSON serialization
     nlohmann::json handshake_msg;
-    handshake_msg["protocol"] = "rats";
-    handshake_msg["version"] = RATS_PROTOCOL_VERSION;
+    {
+        std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+        handshake_msg["protocol"] = custom_protocol_name_;
+        handshake_msg["version"] = custom_protocol_version_;
+    }
     handshake_msg["peer_id"] = our_peer_id;
     handshake_msg["message_type"] = message_type;
     handshake_msg["timestamp"] = timestamp;
@@ -1819,15 +1820,23 @@ bool RatsClient::parse_handshake_message(const std::string& message, HandshakeMe
 }
 
 bool RatsClient::validate_handshake_message(const HandshakeMessage& msg) const {
+    std::string expected_protocol;
+    std::string expected_version;
+    {
+        std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+        expected_protocol = custom_protocol_name_;
+        expected_version = custom_protocol_version_;
+    }
+    
     // Validate protocol
-    if (msg.protocol != "rats") {
-        LOG_CLIENT_WARN("Invalid handshake protocol: " << msg.protocol);
+    if (msg.protocol != expected_protocol) {
+        LOG_CLIENT_WARN("Invalid handshake protocol: " << msg.protocol << " (expected: " << expected_protocol << ")");
         return false;
     }
     
     // Validate version (for now, only accept exact version match)
-    if (msg.version != RATS_PROTOCOL_VERSION) {
-        LOG_CLIENT_WARN("Unsupported protocol version: " << msg.version << " (expected: " << RATS_PROTOCOL_VERSION << ")");
+    if (msg.version != expected_version) {
+        LOG_CLIENT_WARN("Unsupported protocol version: " << msg.version << " (expected: " << expected_version << ")");
         return false;
     }
     
@@ -1858,7 +1867,12 @@ bool RatsClient::validate_handshake_message(const HandshakeMessage& msg) const {
 bool RatsClient::is_handshake_message(const std::string& message) const {
     try {
         nlohmann::json json_msg = nlohmann::json::parse(message);
-        return json_msg.value("protocol", "") == "rats" && 
+        std::string expected_protocol;
+        {
+            std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+            expected_protocol = custom_protocol_name_;
+        }
+        return json_msg.value("protocol", "") == expected_protocol && 
                json_msg.value("message_type", "") == "handshake";
     } catch (const std::exception&) {
         return false;
@@ -4413,6 +4427,40 @@ void RatsClient::send_nat_info_to_peer(socket_t socket, const std::string& peer_
     }
 }
 
+// Protocol configuration methods
+void RatsClient::set_protocol_name(const std::string& protocol_name) {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    custom_protocol_name_ = protocol_name;
+    LOG_CLIENT_INFO("Protocol name set to: " << protocol_name);
+}
 
+void RatsClient::set_protocol_version(const std::string& protocol_version) {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    custom_protocol_version_ = protocol_version;
+    LOG_CLIENT_INFO("Protocol version set to: " << protocol_version);
+}
+
+std::string RatsClient::get_protocol_name() const {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    return custom_protocol_name_;
+}
+
+std::string RatsClient::get_protocol_version() const {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    return custom_protocol_version_;
+}
+
+std::string RatsClient::get_discovery_hash() const {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    // Generate discovery hash based on current protocol configuration
+    std::string discovery_string = custom_protocol_name_ + "_peer_discovery_v" + custom_protocol_version_;
+    return SHA1::hash(discovery_string);
+}
+
+std::string RatsClient::get_rats_peer_discovery_hash() {
+    // Well-known hash for rats peer discovery
+    // Compute SHA1 hash of "rats_peer_discovery_v1.0"
+    return SHA1::hash("rats_peer_discovery_v1.0");
+}
 
 } // namespace librats

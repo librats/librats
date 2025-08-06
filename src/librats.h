@@ -558,6 +558,36 @@ public:
     static std::string get_rats_peer_discovery_hash();
 
     /**
+     * Set custom protocol name for handshakes and DHT discovery
+     * @param protocol_name Custom protocol name (default: "rats")
+     */
+    void set_protocol_name(const std::string& protocol_name);
+
+    /**
+     * Set custom protocol version for handshakes
+     * @param protocol_version Custom protocol version (default: "1.0")
+     */
+    void set_protocol_version(const std::string& protocol_version);
+
+    /**
+     * Get current protocol name
+     * @return Current protocol name
+     */
+    std::string get_protocol_name() const;
+
+    /**
+     * Get current protocol version
+     * @return Current protocol version
+     */
+    std::string get_protocol_version() const;
+
+    /**
+     * Get discovery hash for current protocol configuration
+     * @return Discovery hash based on current protocol name and version
+     */
+    std::string get_discovery_hash() const;
+
+    /**
      * Get maximum number of peers
      * @return Maximum peer count
      */
@@ -829,6 +859,11 @@ private:
     // Handshake protocol
     static constexpr const char* RATS_PROTOCOL_VERSION = "1.0";
     static constexpr int HANDSHAKE_TIMEOUT_SECONDS = 10;
+
+    // Custom protocol configuration
+    std::string custom_protocol_name_;          // Custom protocol name (default: "rats")
+    std::string custom_protocol_version_;       // Custom protocol version (default: "1.0")
+    mutable std::mutex protocol_config_mutex_;  // Protects protocol configuration
 
     struct HandshakeMessage {
         std::string protocol;
