@@ -25,6 +25,7 @@ namespace librats {
 
 // Forward declarations
 class IceAgent;
+class GossipSub;
 
 /**
  * RatsPeer struct - comprehensive information about a connected rats peer
@@ -739,6 +740,19 @@ public:
      */
     std::vector<RatsPeer> get_historical_peers() const;
 
+    // GossipSub functionality
+    /**
+     * Get GossipSub instance for publish-subscribe messaging
+     * @return Reference to GossipSub instance
+     */
+    GossipSub& get_gossipsub();
+    
+    /**
+     * Check if GossipSub is available
+     * @return true if GossipSub is initialized
+     */
+    bool is_gossipsub_available() const;
+
 private:
     int listen_port_;
     int max_peers_;
@@ -807,6 +821,9 @@ private:
     // mDNS client for local network discovery
     std::unique_ptr<MdnsClient> mdns_client_;
     std::function<void(const std::string&, int, const std::string&)> mdns_callback_;
+    
+    // GossipSub for publish-subscribe messaging
+    std::unique_ptr<GossipSub> gossipsub_;
     
     void server_loop();
     void management_loop();

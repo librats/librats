@@ -92,6 +92,8 @@ add_library(rats
     src/mdns.h
     src/threadmanager.cpp
     src/threadmanager.h
+    src/gossipsub.cpp
+    src/gossipsub.h
 )
 
 # Include directories
@@ -170,6 +172,7 @@ if(BUILD_TESTS)
         tests/test_message_exchange.cpp
         tests/test_noise.cpp
         tests/test_mdns.cpp
+        tests/test_gossipsub.cpp
     )
     
     # Link with GoogleTest and our library

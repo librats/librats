@@ -1,4 +1,5 @@
 #include "librats.h"
+#include "gossipsub.h"
 #include "sha1.h"
 #include "os.h"
 #include "network_utils.h"
@@ -292,6 +293,9 @@ bool RatsClient::start() {
     // Initialize local interface addresses for connection blocking
     initialize_local_addresses();
     
+    // Initialize GossipSub
+    gossipsub_ = std::make_unique<GossipSub>(*this);
+    
     // Discover public IP address via STUN and add to ignore list
     if (!discover_and_ignore_public_ip()) {
         LOG_CLIENT_WARN("Failed to discover public IP via STUN - continuing without it");
@@ -311,6 +315,11 @@ bool RatsClient::start() {
     
     // Start management thread
     management_thread_ = std::thread(&RatsClient::management_loop, this);
+    
+    // Start GossipSub
+    if (gossipsub_ && !gossipsub_->start()) {
+        LOG_CLIENT_WARN("Failed to start GossipSub - continuing without it");
+    }
     
     LOG_CLIENT_INFO("RatsClient started successfully on port " << listen_port_);
     
@@ -351,6 +360,11 @@ void RatsClient::stop() {
     
     // Stop mDNS discovery
     stop_mdns_discovery();
+    
+    // Stop GossipSub
+    if (gossipsub_) {
+        gossipsub_->stop();
+    }
     
     // Stop ICE agent
     if (ice_agent_ && ice_agent_->is_running()) {
@@ -4461,6 +4475,21 @@ std::string RatsClient::get_rats_peer_discovery_hash() {
     // Well-known hash for rats peer discovery
     // Compute SHA1 hash of "rats_peer_discovery_v1.0"
     return SHA1::hash("rats_peer_discovery_v1.0");
+}
+
+//=============================================================================
+// GossipSub Integration Methods
+//=============================================================================
+
+GossipSub& RatsClient::get_gossipsub() {
+    if (!gossipsub_) {
+        throw std::runtime_error("GossipSub not initialized");
+    }
+    return *gossipsub_;
+}
+
+bool RatsClient::is_gossipsub_available() const {
+    return gossipsub_ != nullptr;
 }
 
 } // namespace librats
