@@ -164,6 +164,8 @@ using PeerLeftHandler = std::function<void(const std::string& topic, const std::
  * Main GossipSub implementation class
  */
 class GossipSub {
+    friend class RatsClient;
+    
 public:
     /**
      * Constructor

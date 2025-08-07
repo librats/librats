@@ -1290,6 +1290,10 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     if (connection_callback_) {
                         connection_callback_(client_socket, peer_copy.peer_id);
                     }
+
+                    if (gossipsub_) {
+                        gossipsub_->handle_peer_connected(peer_copy.peer_id);
+                    }
                     
                     // Broadcast peer exchange message to other peers
                     broadcast_peer_exchange_message(peer_copy);
@@ -1402,6 +1406,10 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     // Notify disconnect callback only if handshake was completed
     if (handshake_completed && disconnect_callback_) {
         disconnect_callback_(client_socket, current_peer_id);
+    }
+
+    if (handshake_completed && gossipsub_) {
+        gossipsub_->handle_peer_disconnected(current_peer_id);
     }
     
     // Save configuration after a validated peer disconnects to update the saved peer list

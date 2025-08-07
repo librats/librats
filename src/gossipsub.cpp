@@ -87,15 +87,6 @@ GossipSub::GossipSub(RatsClient& rats_client, const GossipSubConfig& config)
     rats_client_.on("gossipsub", [this](const std::string& peer_id, const nlohmann::json& message) {
         handle_gossipsub_message(peer_id, message);
     });
-    
-    // Register connection/disconnection handlers
-    rats_client_.set_connection_callback([this](socket_t socket, const std::string& peer_id) {
-        handle_peer_connected(peer_id);
-    });
-    
-    rats_client_.set_disconnect_callback([this](socket_t socket, const std::string& peer_id) {
-        handle_peer_disconnected(peer_id);
-    });
 }
 
 GossipSub::~GossipSub() {
