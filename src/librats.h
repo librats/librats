@@ -8,6 +8,7 @@
 #include "logger.h"
 #include "encrypted_socket.h"
 #include "threadmanager.h"
+#include "gossipsub.h" // For ValidationResult enum and GossipSub types
 #include "json.hpp" // nlohmann::json
 #include <string>
 #include <functional>
@@ -25,7 +26,6 @@ namespace librats {
 
 // Forward declarations
 class IceAgent;
-class GossipSub;
 
 /**
  * RatsPeer struct - comprehensive information about a connected rats peer
@@ -752,6 +752,120 @@ public:
      * @return true if GossipSub is initialized
      */
     bool is_gossipsub_available() const;
+    
+    // GossipSub convenience methods - Topic Management
+    /**
+     * Subscribe to a GossipSub topic
+     * @param topic Topic name to subscribe to
+     * @return true if subscription successful
+     */
+    bool subscribe_to_topic(const std::string& topic);
+    
+    /**
+     * Unsubscribe from a GossipSub topic
+     * @param topic Topic name to unsubscribe from
+     * @return true if unsubscription successful
+     */
+    bool unsubscribe_from_topic(const std::string& topic);
+    
+    /**
+     * Check if subscribed to a GossipSub topic
+     * @param topic Topic name to check
+     * @return true if subscribed
+     */
+    bool is_subscribed_to_topic(const std::string& topic) const;
+    
+    /**
+     * Get list of subscribed GossipSub topics
+     * @return Vector of topic names
+     */
+    std::vector<std::string> get_subscribed_topics() const;
+    
+    // GossipSub convenience methods - Publishing
+    /**
+     * Publish a message to a GossipSub topic
+     * @param topic Topic to publish to
+     * @param message Message content
+     * @return true if published successfully
+     */
+    bool publish_to_topic(const std::string& topic, const std::string& message);
+    
+    /**
+     * Publish a JSON message to a GossipSub topic
+     * @param topic Topic to publish to
+     * @param message JSON message content
+     * @return true if published successfully
+     */
+    bool publish_json_to_topic(const std::string& topic, const nlohmann::json& message);
+    
+    // GossipSub convenience methods - Event Handlers (Unified API)
+    /**
+     * Set a message handler for a GossipSub topic using unified event API pattern
+     * @param topic Topic name
+     * @param callback Function to call when messages are received (peer_id, topic, message_content)
+     */
+    void on_topic_message(const std::string& topic, std::function<void(const std::string&, const std::string&, const std::string&)> callback);
+    
+    /**
+     * Set a JSON message handler for a GossipSub topic using unified event API pattern
+     * @param topic Topic name  
+     * @param callback Function to call when JSON messages are received (peer_id, topic, json_message)
+     */
+    void on_topic_json_message(const std::string& topic, std::function<void(const std::string&, const std::string&, const nlohmann::json&)> callback);
+    
+    /**
+     * Set a peer joined handler for a GossipSub topic using unified event API pattern
+     * @param topic Topic name
+     * @param callback Function to call when peers join the topic
+     */
+    void on_topic_peer_joined(const std::string& topic, std::function<void(const std::string&, const std::string&)> callback);
+    
+    /**
+     * Set a peer left handler for a GossipSub topic using unified event API pattern  
+     * @param topic Topic name
+     * @param callback Function to call when peers leave the topic
+     */
+    void on_topic_peer_left(const std::string& topic, std::function<void(const std::string&, const std::string&)> callback);
+    
+    /**
+     * Set a message validator for a GossipSub topic
+     * @param topic Topic name (empty for global validator)
+     * @param validator Validation function returning ACCEPT, REJECT, or IGNORE_MSG
+     */
+    void set_topic_message_validator(const std::string& topic, std::function<ValidationResult(const std::string&, const std::string&, const std::string&)> validator);
+    
+    /**
+     * Remove all event handlers for a GossipSub topic
+     * @param topic Topic name
+     */
+    void off_topic(const std::string& topic);
+    
+    // GossipSub convenience methods - Information
+    /**
+     * Get peers subscribed to a GossipSub topic
+     * @param topic Topic name
+     * @return Vector of peer IDs
+     */
+    std::vector<std::string> get_topic_peers(const std::string& topic) const;
+    
+    /**
+     * Get mesh peers for a GossipSub topic
+     * @param topic Topic name  
+     * @return Vector of peer IDs in the mesh
+     */
+    std::vector<std::string> get_topic_mesh_peers(const std::string& topic) const;
+    
+    /**
+     * Get GossipSub statistics
+     * @return JSON object with comprehensive GossipSub statistics
+     */
+    nlohmann::json get_gossipsub_statistics() const;
+    
+    /**
+     * Check if GossipSub is running
+     * @return true if GossipSub service is active
+     */
+    bool is_gossipsub_running() const;
 
 private:
     int listen_port_;
