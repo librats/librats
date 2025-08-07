@@ -24,6 +24,9 @@ librats is a modern P2P networking library designed for **superior performance**
 - **STUN Support**: Automatic NAT traversal and public IP discovery
 - **IPv4/IPv6 Dual Stack**: Full support for modern internet protocols
 - **Multi-layer Discovery**: DHT (wide-area) + mDNS (local) + STUN (NAT traversal)
+- **GossipSub Protocol**: Scalable publish-subscribe messaging with mesh networking
+- **Message Validation**: Configurable message validation and filtering
+- **Topic-based Communication**: Organized messaging with topic subscriptions
 
 ### **Comprehensive NAT Traversal**
 - **ICE (Interactive Connectivity Establishment)**: RFC 8445 compliant with full candidate gathering
@@ -47,6 +50,8 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Real-time Connection Tracking**: Monitor peer states, connection quality, and NAT traversal progress
 - **Comprehensive Logging**: Detailed debug information for troubleshooting
 - **Custom Protocol Support**: Configure custom protocol names and versions
+- **Unified API Design**: Consistent patterns across P2P messaging and pub-sub
+- **Topic-based Messaging**: Subscribe to topics and publish messages with automatic routing
 
 ## 🚀 Quick Start
 
@@ -195,6 +200,51 @@ int main() {
 }
 ```
 
+### GossipSub Publish-Subscribe Messaging
+
+```cpp
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Set up topic message handlers
+    client.on_topic_message("chat", [](const std::string& peer_id, const std::string& topic, const std::string& message) {
+        std::cout << "Chat from " << peer_id << ": " << message << std::endl;
+    });
+    
+    client.on_topic_json_message("events", [](const std::string& peer_id, const std::string& topic, const nlohmann::json& data) {
+        std::cout << "Event: " << data["type"] << " from " << peer_id << std::endl;
+    });
+    
+    // Set up peer join/leave handlers
+    client.on_topic_peer_joined("chat", [](const std::string& peer_id, const std::string& topic) {
+        std::cout << peer_id << " joined " << topic << std::endl;
+    });
+    
+    // Set message validator
+    client.set_topic_message_validator("chat", [](const std::string& peer_id, const std::string& topic, const std::string& message) {
+        // Only accept messages shorter than 1000 characters
+        return message.length() <= 1000 ? librats::ValidationResult::ACCEPT : librats::ValidationResult::REJECT;
+    });
+    
+    client.start();
+    client.start_dht_discovery();
+    
+    // Subscribe to topics
+    client.subscribe_to_topic("chat");
+    client.subscribe_to_topic("events");
+    
+    // Publish messages
+    client.publish_to_topic("chat", "Hello, GossipSub world!");
+    
+    nlohmann::json event_data;
+    event_data["type"] = "user_login";
+    event_data["timestamp"] = std::time(nullptr);
+    client.publish_json_to_topic("events", event_data);
+    
+    return 0;
+}
+```
+
 ### Configuration Persistence
 
 ```cpp
@@ -267,6 +317,34 @@ bool save_configuration();
 int load_and_reconnect_peers();
 bool load_historical_peers();
 bool save_historical_peers();
+
+// GossipSub publish-subscribe messaging
+GossipSub& get_gossipsub();
+bool is_gossipsub_available() const;
+
+// GossipSub convenience methods - Topic Management
+bool subscribe_to_topic(const std::string& topic);
+bool unsubscribe_from_topic(const std::string& topic);
+bool is_subscribed_to_topic(const std::string& topic) const;
+std::vector<std::string> get_subscribed_topics() const;
+
+// GossipSub convenience methods - Publishing
+bool publish_to_topic(const std::string& topic, const std::string& message);
+bool publish_json_to_topic(const std::string& topic, const nlohmann::json& message);
+
+// GossipSub convenience methods - Event Handlers
+void on_topic_message(const std::string& topic, std::function<void(const std::string&, const std::string&, const std::string&)> callback);
+void on_topic_json_message(const std::string& topic, std::function<void(const std::string&, const std::string&, const nlohmann::json&)> callback);
+void on_topic_peer_joined(const std::string& topic, std::function<void(const std::string&, const std::string&)> callback);
+void on_topic_peer_left(const std::string& topic, std::function<void(const std::string&, const std::string&)> callback);
+void set_topic_message_validator(const std::string& topic, std::function<ValidationResult(const std::string&, const std::string&, const std::string&)> validator);
+void off_topic(const std::string& topic);
+
+// GossipSub convenience methods - Information
+std::vector<std::string> get_topic_peers(const std::string& topic) const;
+std::vector<std::string> get_topic_mesh_peers(const std::string& topic) const;
+nlohmann::json get_gossipsub_statistics() const;
+bool is_gossipsub_running() const;
 
 // Peer management
 int get_peer_count() const;
@@ -369,10 +447,14 @@ struct RatsPeer {
 │ │      API        │ │      Apps       │ │     & More      │    │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
 ├─────────────────────────────────────────────────────────────────┤
-│ librats Core (RatsClient)                                       │
+│ librats Core (RatsClient)                      │
 │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │   Event-Driven  │ │   Encryption    │ │ Config & Peer   │    │
-│ │   Message API   │ │ (Noise Protocol)│ │  Persistence    │    │
+│ │   Event-Driven  │ │   GossipSub     │ │   Encryption    │    │
+│ │   Message API   │ │  Pub-Sub Mesh   │ │ (Noise Protocol)│    │
+│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
+│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
+│ │ Config & Peer   │ │ Topic Routing   │ │ Message Validation│   │
+│ │  Persistence    │ │ & Mesh Management│ │ & Filtering     │    │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
 ├─────────────────────────────────────────────────────────────────┤
 │ NAT Traversal Layer                                             │
@@ -471,7 +553,7 @@ After building, you'll find:
 ./build/bin/rats-client 8081 localhost 8080
 ```
 
-### Custom Application
+### Custom Application with GossipSub
 
 ```cpp
 #include "librats.h"
@@ -482,26 +564,57 @@ private:
     
 public:
     ChatApp(int port) : client_(port) {
-        // Set up message handlers
+        // Set up P2P message handlers
         client_.on("chat_message", [this](const std::string& peer_id, const nlohmann::json& data) {
-            std::cout << "[" << peer_id.substr(0, 8) << "] " 
+            std::cout << "[P2P] " << peer_id.substr(0, 8) << ": " 
                       << data["message"].get<std::string>() << std::endl;
         });
         
-        client_.set_connection_callback([](auto socket, const std::string& peer_id) {
-            std::cout << "User joined: " << peer_id.substr(0, 8) << std::endl;
+        // Set up GossipSub topic handlers
+        client_.on_topic_message("global_chat", [this](const std::string& peer_id, const std::string& topic, const std::string& message) {
+            std::cout << "[" << topic << "] " << peer_id.substr(0, 8) << ": " << message << std::endl;
         });
         
+        client_.on_topic_json_message("events", [this](const std::string& peer_id, const std::string& topic, const nlohmann::json& data) {
+            std::cout << "[EVENT] " << data["type"] << " from " << peer_id.substr(0, 8) << std::endl;
+        });
+        
+        // Set up connection callbacks
+        client_.set_connection_callback([](auto socket, const std::string& peer_id) {
+            std::cout << "User connected: " << peer_id.substr(0, 8) << std::endl;
+        });
+        
+        client_.on_topic_peer_joined("global_chat", [](const std::string& peer_id, const std::string& topic) {
+            std::cout << peer_id.substr(0, 8) << " joined " << topic << std::endl;
+        });
+        
+        // Start all services
         client_.start();
         client_.start_dht_discovery();
         client_.start_mdns_discovery();
+        
+        // Subscribe to topics
+        client_.subscribe_to_topic("global_chat");
+        client_.subscribe_to_topic("events");
     }
     
-    void send_message(const std::string& message) {
+    void send_p2p_message(const std::string& message) {
         nlohmann::json msg;
         msg["message"] = message;
         msg["timestamp"] = std::time(nullptr);
         client_.send("chat_message", msg);
+    }
+    
+    void broadcast_to_topic(const std::string& message) {
+        client_.publish_to_topic("global_chat", message);
+    }
+    
+    void send_event(const std::string& event_type, const nlohmann::json& data) {
+        nlohmann::json event;
+        event["type"] = event_type;
+        event["data"] = data;
+        event["timestamp"] = std::time(nullptr);
+        client_.publish_json_to_topic("events", event);
     }
     
     void connect_to(const std::string& host, int port) {
@@ -517,6 +630,7 @@ Comprehensive documentation is available:
 - **[NAT Traversal Guide](NAT_TRAVERSAL.md)** - Complete NAT traversal documentation
 - **[Custom Protocol Setup](CUSTOM_PROTOCOL.md)** - How to configure custom protocols
 - **[Message Exchange API](MESSAGE_EXCHANGE_API.md)** - Event-driven messaging system  
+- **[GossipSub Example](GOSSIPSUB_EXAMPLE.md)** - Publish-subscribe messaging with GossipSub
 - **[mDNS Discovery](MDNS_DISCOVERY.md)** - Local network peer discovery
 - **[Noise Encryption](NOISE_ENCRYPTION.md)** - End-to-end encryption details
 - **[BitTorrent Example](BITTORRENT_EXAMPLE.md)** - BitTorrent protocol implementation

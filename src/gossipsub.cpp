@@ -6,11 +6,11 @@
 #include <sstream>
 #include <iomanip>
 
-// Client logging macros
-#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
-#define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
-#define LOG_CLIENT_WARN(message)  LOG_WARN("client", message)
-#define LOG_CLIENT_ERROR(message) LOG_ERROR("client", message)
+// GossipSub logging macros
+#define LOG_GOSSIPSUB_DEBUG(message) LOG_DEBUG("gossipsub", message)
+#define LOG_GOSSIPSUB_INFO(message)  LOG_INFO("gossipsub", message)
+#define LOG_GOSSIPSUB_WARN(message)  LOG_WARN("gossipsub", message)
+#define LOG_GOSSIPSUB_ERROR(message) LOG_ERROR("gossipsub", message)
 
 namespace librats {
 
@@ -103,7 +103,7 @@ bool GossipSub::start() {
     // Start heartbeat thread
     heartbeat_thread_ = std::thread(&GossipSub::heartbeat_loop, this);
     
-    LOG_CLIENT_INFO("GossipSub service started");
+    LOG_GOSSIPSUB_INFO("GossipSub service started");
     return true;
 }
 
@@ -127,7 +127,7 @@ void GossipSub::stop() {
         broadcast_gossipsub_message(GossipSubMessageType::UNSUBSCRIBE, payload);
     }
     
-    LOG_CLIENT_INFO("GossipSub service stopped");
+    LOG_GOSSIPSUB_INFO("GossipSub service stopped");
 }
 
 bool GossipSub::is_running() const {
@@ -162,7 +162,7 @@ bool GossipSub::subscribe(const std::string& topic) {
     // Start building mesh for this topic
     maintain_mesh(topic);
     
-    LOG_CLIENT_INFO("Subscribed to topic: " << topic);
+            LOG_GOSSIPSUB_INFO("Subscribed to topic: " << topic);
     return true;
 }
 
@@ -195,7 +195,7 @@ bool GossipSub::unsubscribe(const std::string& topic) {
         topic_sub->mesh_peers.clear();
     }
     
-    LOG_CLIENT_INFO("Unsubscribed from topic: " << topic);
+            LOG_GOSSIPSUB_INFO("Unsubscribed from topic: " << topic);
     return true;
 }
 
@@ -274,7 +274,7 @@ bool GossipSub::publish(const std::string& topic, const std::string& message) {
         }
     }
     
-    LOG_CLIENT_DEBUG("Published message to topic: " << topic << " (ID: " << message_id << ")");
+    LOG_GOSSIPSUB_DEBUG("Published message to topic: " << topic << " (ID: " << message_id << ")");
     return true;
 }
 
@@ -292,7 +292,7 @@ void GossipSub::handle_gossipsub_message(const std::string& peer_id, const nlohm
         GossipSubMessageType type = string_to_gossipsub_message_type(type_str);
         nlohmann::json payload = message.value("payload", nlohmann::json::object());
         
-        LOG_CLIENT_DEBUG("Received gossipsub " << type_str << " message from " << peer_id);
+        LOG_GOSSIPSUB_DEBUG("Received gossipsub " << type_str << " message from " << peer_id);
         
         switch (type) {
             case GossipSubMessageType::SUBSCRIBE:
@@ -325,7 +325,7 @@ void GossipSub::handle_gossipsub_message(const std::string& peer_id, const nlohm
         }
         
     } catch (const std::exception& e) {
-        LOG_CLIENT_ERROR("Failed to handle gossipsub message from " << peer_id << ": " << e.what());
+        LOG_GOSSIPSUB_ERROR("Failed to handle gossipsub message from " << peer_id << ": " << e.what());
         
         // Update peer score for invalid message
         std::lock_guard<std::mutex> scores_lock(scores_mutex_);
@@ -353,7 +353,7 @@ void GossipSub::handle_subscribe(const std::string& peer_id, const nlohmann::jso
     bool was_new = topic_sub->subscribers.insert(peer_id).second;
     
     if (was_new) {
-        LOG_CLIENT_DEBUG("Peer " << peer_id << " subscribed to topic: " << topic);
+                    LOG_GOSSIPSUB_DEBUG("Peer " << peer_id << " subscribed to topic: " << topic);
         
         // Call peer joined handler
         std::lock_guard<std::mutex> handlers_lock(handlers_mutex_);
@@ -362,7 +362,7 @@ void GossipSub::handle_subscribe(const std::string& peer_id, const nlohmann::jso
             try {
                 handler_it->second(topic, peer_id);
             } catch (const std::exception& e) {
-                LOG_CLIENT_ERROR("Exception in peer joined handler for topic '" << topic << "': " << e.what());
+                LOG_GOSSIPSUB_ERROR("Exception in peer joined handler for topic '" << topic << "': " << e.what());
             }
         }
         
@@ -393,7 +393,7 @@ void GossipSub::handle_unsubscribe(const std::string& peer_id, const nlohmann::j
     topic_sub->fanout_peers.erase(peer_id);
     
     if (was_subscribed) {
-        LOG_CLIENT_DEBUG("Peer " << peer_id << " unsubscribed from topic: " << topic);
+                    LOG_GOSSIPSUB_DEBUG("Peer " << peer_id << " unsubscribed from topic: " << topic);
         
         // Call peer left handler
         std::lock_guard<std::mutex> handlers_lock(handlers_mutex_);
@@ -402,7 +402,7 @@ void GossipSub::handle_unsubscribe(const std::string& peer_id, const nlohmann::j
             try {
                 handler_it->second(topic, peer_id);
             } catch (const std::exception& e) {
-                LOG_CLIENT_ERROR("Exception in peer left handler for topic '" << topic << "': " << e.what());
+                LOG_GOSSIPSUB_ERROR("Exception in peer left handler for topic '" << topic << "': " << e.what());
             }
         }
         
@@ -486,17 +486,17 @@ void GossipSub::handle_publish(const std::string& peer_id, const nlohmann::json&
             try {
                 handler_it->second(topic, message, sender_peer_id);
             } catch (const std::exception& e) {
-                LOG_CLIENT_ERROR("Exception in message handler for topic '" << topic << "': " << e.what());
+                LOG_GOSSIPSUB_ERROR("Exception in message handler for topic '" << topic << "': " << e.what());
             }
         }
     }
     
-    LOG_CLIENT_DEBUG("Processed published message for topic: " << topic << " (ID: " << message_id << ")");
+    LOG_GOSSIPSUB_DEBUG("Processed published message for topic: " << topic << " (ID: " << message_id << ")");
 }
 
 void GossipSub::handle_gossip(const std::string& peer_id, const nlohmann::json& payload) {
     // Handle gossip messages (IHAVE/IWANT are sent as gossip)
-    LOG_CLIENT_DEBUG("Received gossip message from " << peer_id);
+    LOG_GOSSIPSUB_DEBUG("Received gossip message from " << peer_id);
 }
 
 void GossipSub::handle_graft(const std::string& peer_id, const nlohmann::json& payload) {
@@ -524,7 +524,7 @@ void GossipSub::handle_graft(const std::string& peer_id, const nlohmann::json& p
         TopicSubscription* topic_sub = get_or_create_topic(topic);
         if (topic_sub) {
             topic_sub->mesh_peers.insert(peer_id);
-            LOG_CLIENT_DEBUG("Added peer " << peer_id << " to mesh for topic: " << topic);
+            LOG_GOSSIPSUB_DEBUG("Added peer " << peer_id << " to mesh for topic: " << topic);
         }
     } else {
         // Send PRUNE in response to reject the graft
@@ -555,7 +555,7 @@ void GossipSub::handle_prune(const std::string& peer_id, const nlohmann::json& p
     if (topic_it != topics_.end()) {
         TopicSubscription* topic_sub = topic_it->second.get();
         topic_sub->mesh_peers.erase(peer_id);
-        LOG_CLIENT_DEBUG("Removed peer " << peer_id << " from mesh for topic: " << topic);
+        LOG_GOSSIPSUB_DEBUG("Removed peer " << peer_id << " from mesh for topic: " << topic);
     }
 }
 
@@ -781,7 +781,7 @@ void GossipSub::heartbeat_loop() {
         try {
             process_heartbeat();
         } catch (const std::exception& e) {
-            LOG_CLIENT_ERROR("Exception in heartbeat loop: " << e.what());
+            LOG_GOSSIPSUB_ERROR("Exception in heartbeat loop: " << e.what());
         }
         
         std::this_thread::sleep_for(config_.heartbeat_interval);
@@ -890,7 +890,7 @@ void GossipSub::add_peer_to_mesh(const std::string& topic, const std::string& pe
         graft_payload["topic"] = topic;
         send_gossipsub_message(peer_id, GossipSubMessageType::GRAFT, graft_payload);
         
-        LOG_CLIENT_DEBUG("Added peer " << peer_id << " to mesh for topic: " << topic);
+        LOG_GOSSIPSUB_DEBUG("Added peer " << peer_id << " to mesh for topic: " << topic);
     }
 }
 
@@ -908,7 +908,7 @@ void GossipSub::remove_peer_from_mesh(const std::string& topic, const std::strin
         prune_payload["topic"] = topic;
         send_gossipsub_message(peer_id, GossipSubMessageType::PRUNE, prune_payload);
         
-        LOG_CLIENT_DEBUG("Removed peer " << peer_id << " from mesh for topic: " << topic);
+        LOG_GOSSIPSUB_DEBUG("Removed peer " << peer_id << " from mesh for topic: " << topic);
     }
 }
 
