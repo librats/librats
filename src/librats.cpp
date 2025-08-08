@@ -352,6 +352,12 @@ void RatsClient::stop() {
     
     LOG_CLIENT_INFO("Stopping RatsClient");
     
+    // Stop GossipSub (can broadcast stop message)
+    if (gossipsub_) {
+        gossipsub_->stop();
+    }
+
+
     // Trigger immediate shutdown of all background threads
     shutdown_all_threads();
     
@@ -360,11 +366,6 @@ void RatsClient::stop() {
     
     // Stop mDNS discovery
     stop_mdns_discovery();
-    
-    // Stop GossipSub
-    if (gossipsub_) {
-        gossipsub_->stop();
-    }
     
     // Stop ICE agent
     if (ice_agent_ && ice_agent_->is_running()) {

@@ -10,6 +10,7 @@
 #include <mutex>
 #include <atomic>
 #include <thread>
+#include <condition_variable>
 #include <random>
 #include "json.hpp"
 
@@ -312,6 +313,8 @@ private:
     
     // Thread management
     std::thread heartbeat_thread_;
+    mutable std::mutex heartbeat_mutex_;
+    std::condition_variable heartbeat_cv_;
     
     // Topic management
     mutable std::mutex topics_mutex_;

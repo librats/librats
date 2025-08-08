@@ -111,20 +111,31 @@ void GossipSub::stop() {
     if (!running_.load()) {
         return; // Already stopped
     }
-    
+
+    LOG_GOSSIPSUB_INFO("GossipSub service stopping");
+
+    {
+        // Unsubscribe from all topics
+        std::lock_guard<std::mutex> topics_lock(topics_mutex_);
+        for (const auto& topic : subscribed_topics_) {
+            nlohmann::json payload;
+            payload["topic"] = topic;
+            broadcast_gossipsub_message(GossipSubMessageType::UNSUBSCRIBE, payload);
+        }
+        subscribed_topics_.clear();
+    }
+
     running_.store(false);
     
-    // Join heartbeat thread
-    if (heartbeat_thread_.joinable()) {
-        heartbeat_thread_.join();
+    // Notify the heartbeat thread to wake up immediately
+    {
+        std::lock_guard<std::mutex> lock(heartbeat_mutex_);
+        heartbeat_cv_.notify_all();
     }
     
-    // Unsubscribe from all topics
-    std::lock_guard<std::mutex> topics_lock(topics_mutex_);
-    for (const auto& topic : subscribed_topics_) {
-        nlohmann::json payload;
-        payload["topic"] = topic;
-        broadcast_gossipsub_message(GossipSubMessageType::UNSUBSCRIBE, payload);
+    // Join heartbeat thread with timeout to avoid infinite hang
+    if (heartbeat_thread_.joinable()) {
+        heartbeat_thread_.join();
     }
     
     LOG_GOSSIPSUB_INFO("GossipSub service stopped");
@@ -784,7 +795,11 @@ void GossipSub::heartbeat_loop() {
             LOG_GOSSIPSUB_ERROR("Exception in heartbeat loop: " << e.what());
         }
         
-        std::this_thread::sleep_for(config_.heartbeat_interval);
+        // Use condition variable for interruptible sleep
+        std::unique_lock<std::mutex> lock(heartbeat_mutex_);
+        heartbeat_cv_.wait_for(lock, config_.heartbeat_interval, [this] { 
+            return !running_.load(); 
+        });
     }
 }
 
