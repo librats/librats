@@ -53,11 +53,11 @@ void PeerScore::update_score() {
     auto connection_duration = std::chrono::duration_cast<std::chrono::seconds>(now - connected_since).count();
     
     // Update topic score based on participation
-    topic_score = std::min(10.0, connection_duration / 60.0); // Up to 10 points for long connections
+    topic_score = (std::min)(10.0, connection_duration / 60.0); // Up to 10 points for long connections
     
     // Update delivery score
     if (messages_delivered > 0) {
-        delivery_score = std::min(20.0, static_cast<double>(messages_delivered) / 10.0);
+        delivery_score = (std::min)(20.0, static_cast<double>(messages_delivered) / 10.0);
     }
     
     // Update mesh behavior score
@@ -259,7 +259,7 @@ bool GossipSub::publish(const std::string& topic, const std::string& message) {
             // Select fanout peers if we don't have enough
             if (topic_sub->fanout_peers.size() < static_cast<size_t>(config_.fanout_size)) {
                 std::vector<std::string> candidates = select_peers_for_gossip(topic, 
-                    config_.fanout_size - topic_sub->fanout_peers.size(), topic_sub->fanout_peers);
+                    config_.fanout_size - static_cast<int>(topic_sub->fanout_peers.size()), topic_sub->fanout_peers);
                 for (const auto& peer_id : candidates) {
                     topic_sub->fanout_peers.insert(peer_id);
                 }
@@ -1089,14 +1089,14 @@ nlohmann::json GossipSub::get_statistics() const {
         stats["peers_count"] = peer_scores_.size();
         
         double total_score = 0.0;
-        double min_score = std::numeric_limits<double>::max();
-        double max_score = std::numeric_limits<double>::lowest();
+        double min_score = (std::numeric_limits<double>::max)();
+        double max_score = (std::numeric_limits<double>::lowest)();
         
         for (const auto& score_pair : peer_scores_) {
             double score = score_pair.second->score;
             total_score += score;
-            min_score = std::min(min_score, score);
-            max_score = std::max(max_score, score);
+            min_score = (std::min)(min_score, score);
+            max_score = (std::max)(max_score, score);
         }
         
         if (!peer_scores_.empty()) {
