@@ -712,6 +712,19 @@ public:
     bool save_configuration();
 
     /**
+     * Set directory where data files will be stored
+     * @param directory_path Path to directory (default: current folder)
+     * @return true if directory is accessible, false otherwise
+     */
+    bool set_data_directory(const std::string& directory_path);
+
+    /**
+     * Get current data directory path
+     * @return Current data directory path
+     */
+    std::string get_data_directory() const;
+
+    /**
      * Load saved peers and attempt to reconnect
      * @return Number of connection attempts made
      */
@@ -878,6 +891,7 @@ private:
     
     // Configuration persistence
     std::string our_peer_id_;                               // Our persistent peer ID
+    std::string data_directory_;                            // Directory where data files are stored
     mutable std::mutex config_mutex_;                       // Protects configuration data
     static const std::string CONFIG_FILE_NAME;             // "config.json"
     static const std::string PEERS_FILE_NAME;              // "peers.rats"

@@ -45,6 +45,7 @@ RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig&
       running_(false),
       encryption_enabled_(false),
       detected_nat_type_(NatType::UNKNOWN),
+      data_directory_("."),
       custom_protocol_name_("rats"),
       custom_protocol_version_("1.0") {
     // Initialize STUN client
@@ -2669,26 +2670,70 @@ bool RatsClient::deserialize_peer_from_persistence(const nlohmann::json& json, s
 
 std::string RatsClient::get_config_file_path() const {
     #ifdef TESTING
-        return "config_" + std::to_string(listen_port_) + ".json";
+        return data_directory_ + "/config_" + std::to_string(listen_port_) + ".json";
     #else
-        return CONFIG_FILE_NAME;
+        return data_directory_ + "/" + CONFIG_FILE_NAME;
     #endif
 }
 
 std::string RatsClient::get_peers_file_path() const {
     #ifdef TESTING
-        return "peers_" + std::to_string(listen_port_) + ".json";
+        return data_directory_ + "/peers_" + std::to_string(listen_port_) + ".json";
     #else
-        return PEERS_FILE_NAME;
+        return data_directory_ + "/" + PEERS_FILE_NAME;
     #endif
 }
 
 std::string RatsClient::get_peers_ever_file_path() const {
     #ifdef TESTING
-        return "peers_ever_" + std::to_string(listen_port_) + ".json";
+        return data_directory_ + "/peers_ever_" + std::to_string(listen_port_) + ".json";
     #else
-        return PEERS_EVER_FILE_NAME;
+        return data_directory_ + "/" + PEERS_EVER_FILE_NAME;
     #endif
+}
+
+bool RatsClient::set_data_directory(const std::string& directory_path) {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    
+    // Normalize the path (remove trailing slashes)
+    std::string normalized_path = directory_path;
+    while (!normalized_path.empty() && (normalized_path.back() == '/' || normalized_path.back() == '\\')) {
+        normalized_path.pop_back();
+    }
+    
+    // Use current directory if empty
+    if (normalized_path.empty()) {
+        normalized_path = ".";
+    }
+    
+    // Check if directory exists
+    if (!directory_exists(normalized_path)) {
+        // Try to create the directory
+        if (!create_directories(normalized_path.c_str())) {
+            LOG_CLIENT_ERROR("Failed to create data directory: " << normalized_path);
+            return false;
+        }
+        LOG_CLIENT_INFO("Created data directory: " << normalized_path);
+    }
+    
+    // Test if we can write to the directory by creating a temporary file
+    std::string test_file = normalized_path + "/test_write_access.tmp";
+    if (!create_file(test_file, "test")) {
+        LOG_CLIENT_ERROR("Cannot write to data directory: " << normalized_path);
+        return false;
+    }
+    
+    // Clean up test file
+    delete_file(test_file.c_str());
+    
+    data_directory_ = normalized_path;
+    LOG_CLIENT_INFO("Data directory set to: " << data_directory_);
+    return true;
+}
+
+std::string RatsClient::get_data_directory() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    return data_directory_;
 }
 
 bool RatsClient::load_configuration() {
