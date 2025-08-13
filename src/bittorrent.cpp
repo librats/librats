@@ -819,7 +819,7 @@ bool PeerConnection::read_data(std::vector<uint8_t>& buffer, size_t length) {
     }
     
     // Use existing network utilities
-    std::string data = receive_tcp_data(socket_);
+    std::string data = receive_tcp_string(socket_);
     if (data.length() >= length) {
         std::copy(data.begin(), data.begin() + length, buffer.begin());
         return true;
@@ -834,7 +834,7 @@ bool PeerConnection::write_data(const std::vector<uint8_t>& data) {
     }
     
     std::string data_str(data.begin(), data.end());
-    int sent = send_tcp_data(socket_, data_str);
+    int sent = send_tcp_string(socket_, data_str);
     return sent > 0;
 }
 
@@ -1893,7 +1893,7 @@ void BitTorrentClient::handle_incoming_connection(socket_t client_socket) {
 bool BitTorrentClient::perform_incoming_handshake(socket_t socket, InfoHash& info_hash, PeerID& peer_id) {
     // Receive handshake
     std::vector<uint8_t> handshake_data(68); // Fixed handshake size
-    std::string received_data = receive_tcp_data(socket, 68);
+    std::string received_data = receive_tcp_string(socket, 68);
     
     if (received_data.length() != 68) {
         LOG_BT_ERROR("Invalid handshake size received: " << received_data.length());
@@ -1912,7 +1912,7 @@ bool BitTorrentClient::perform_incoming_handshake(socket_t socket, InfoHash& inf
     auto response_data = create_handshake_message(info_hash, our_peer_id);
     
     std::string response_str(response_data.begin(), response_data.end());
-    if (send_tcp_data(socket, response_str) <= 0) {
+    if (send_tcp_string(socket, response_str) <= 0) {
         LOG_BT_ERROR("Failed to send handshake response");
         return false;
     }

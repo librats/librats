@@ -393,12 +393,12 @@ std::string get_peer_address(socket_t socket) {
     return peer_ip + ":" + std::to_string(peer_port);
 }
 
-int send_tcp_data(socket_t socket, const std::string& data) {
-    LOG_SOCKET_DEBUG("Sending " << data.length() << " bytes to TCP socket " << socket);
+int send_tcp_data(socket_t socket, const std::vector<uint8_t>& data) {
+    LOG_SOCKET_DEBUG("Sending " << data.size() << " bytes to TCP socket " << socket);
     
     size_t total_sent = 0;
-    const char* buffer = data.c_str();
-    size_t remaining = data.length();
+    const char* buffer = reinterpret_cast<const char*>(data.data());
+    size_t remaining = data.size();
     
     while (remaining > 0) {
         int bytes_sent = send(socket, buffer + total_sent, remaining, 0);
@@ -434,52 +434,55 @@ int send_tcp_data(socket_t socket, const std::string& data) {
     return static_cast<int>(total_sent);
 }
 
-std::string receive_tcp_data(socket_t socket, size_t buffer_size) {
+std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size) {
     if (buffer_size == 0) {
         buffer_size = 1024; // Default buffer size
     }
     
-    std::vector<char> buffer(buffer_size);
+    std::vector<uint8_t> buffer(buffer_size);
     
-    int bytes_received = recv(socket, buffer.data(), buffer_size, 0);
+    int bytes_received = recv(socket, reinterpret_cast<char*>(buffer.data()), buffer_size, 0);
     if (bytes_received == SOCKET_ERROR_VALUE) {
 #ifdef _WIN32
         int error = WSAGetLastError();
         if (error == WSAEWOULDBLOCK) {
             // No data available on non-blocking socket - this is normal
-            return "";
+            return std::vector<uint8_t>();
         }
         LOG_SOCKET_ERROR("Failed to receive TCP data from socket " << socket << " (error: " << error << ")");
 #else
         int error = errno;
         if (error == EAGAIN || error == EWOULDBLOCK) {
             // No data available on non-blocking socket - this is normal
-            return "";
+            return std::vector<uint8_t>();
         }
         LOG_SOCKET_ERROR("Failed to receive TCP data from socket " << socket << " (error: " << strerror(error) << ")");
 #endif
-        return "";
+        return std::vector<uint8_t>();
     }
     
     if (bytes_received == 0) {
         LOG_SOCKET_INFO("Connection closed by peer on socket " << socket);
-        return "";
+        return std::vector<uint8_t>();
     }
     
     LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from TCP socket " << socket);
     
-    // Safely construct string with exact size
-    return std::string(buffer.data(), bytes_received);
+    // Resize to actual received size
+    buffer.resize(bytes_received);
+    return buffer;
 }
 
 // Large message handling with length-prefixed framing
-int send_tcp_message_framed(socket_t socket, const std::string& message) {
+int send_tcp_message_framed(socket_t socket, const std::vector<uint8_t>& message) {
     // Create length prefix (4 bytes, network byte order)
-    uint32_t message_length = static_cast<uint32_t>(message.length());
+    uint32_t message_length = static_cast<uint32_t>(message.size());
     uint32_t length_prefix = htonl(message_length);
     
     // Send length prefix first
-    int prefix_sent = send_tcp_data(socket, std::string(reinterpret_cast<const char*>(&length_prefix), 4));
+    std::vector<uint8_t> prefix_data(reinterpret_cast<const uint8_t*>(&length_prefix), 
+                                     reinterpret_cast<const uint8_t*>(&length_prefix) + 4);
+    int prefix_sent = send_tcp_data(socket, prefix_data);
     if (prefix_sent != 4) {
         LOG_SOCKET_ERROR("Failed to send message length prefix to socket " << socket);
         return -1;
@@ -487,23 +490,23 @@ int send_tcp_message_framed(socket_t socket, const std::string& message) {
     
     // Send the actual message
     int message_sent = send_tcp_data(socket, message);
-    if (message_sent != static_cast<int>(message.length())) {
+    if (message_sent != static_cast<int>(message.size())) {
         LOG_SOCKET_ERROR("Failed to send complete message to socket " << socket);
         return -1;
     }
     
-    LOG_SOCKET_DEBUG("Successfully sent framed message (" << message.length() << " bytes) to socket " << socket);
+    LOG_SOCKET_DEBUG("Successfully sent framed message (" << message.size() << " bytes) to socket " << socket);
     return prefix_sent + message_sent;
 }
 
-std::string receive_exact_bytes(socket_t socket, size_t num_bytes) {
-    std::string result;
+std::vector<uint8_t> receive_exact_bytes(socket_t socket, size_t num_bytes) {
+    std::vector<uint8_t> result;
     result.reserve(num_bytes);
     
     size_t total_received = 0;
     while (total_received < num_bytes) {
-        std::vector<char> buffer(num_bytes - total_received);
-        int bytes_received = recv(socket, buffer.data(), buffer.size(), 0);
+        std::vector<uint8_t> buffer(num_bytes - total_received);
+        int bytes_received = recv(socket, reinterpret_cast<char*>(buffer.data()), buffer.size(), 0);
         
         if (bytes_received == SOCKET_ERROR_VALUE) {
 #ifdef _WIN32
@@ -523,15 +526,15 @@ std::string receive_exact_bytes(socket_t socket, size_t num_bytes) {
             }
             LOG_SOCKET_ERROR("Failed to receive exact bytes from socket " << socket << " (error: " << strerror(error) << ")");
 #endif
-            return "";
+            return std::vector<uint8_t>();
         }
         
         if (bytes_received == 0) {
             LOG_SOCKET_INFO("Connection closed by peer while receiving exact bytes on socket " << socket);
-            return "";
+            return std::vector<uint8_t>();
         }
         
-        result.append(buffer.data(), bytes_received);
+        result.insert(result.end(), buffer.begin(), buffer.begin() + bytes_received);
         total_received += bytes_received;
     }
     
@@ -539,14 +542,14 @@ std::string receive_exact_bytes(socket_t socket, size_t num_bytes) {
     return result;
 }
 
-std::string receive_tcp_message_framed(socket_t socket) {
+std::vector<uint8_t> receive_tcp_message_framed(socket_t socket) {
     // First, receive the 4-byte length prefix
-    std::string length_data = receive_exact_bytes(socket, 4);
-    if (length_data.length() != 4) {
+    std::vector<uint8_t> length_data = receive_exact_bytes(socket, 4);
+    if (length_data.size() != 4) {
         if (!length_data.empty()) {
-            LOG_SOCKET_ERROR("Failed to receive complete length prefix from socket " << socket << " (got " << length_data.length() << " bytes)");
+            LOG_SOCKET_ERROR("Failed to receive complete length prefix from socket " << socket << " (got " << length_data.size() << " bytes)");
         }
-        return "";
+        return std::vector<uint8_t>();
     }
     
     // Extract message length (convert from network byte order)
@@ -557,23 +560,50 @@ std::string receive_tcp_message_framed(socket_t socket) {
     // Validate message length (prevent excessive memory allocation)
     if (message_length == 0) {
         LOG_SOCKET_DEBUG("Received keep-alive message (length 0) from socket " << socket);
-        return "";
+        return std::vector<uint8_t>();
     }
     
     if (message_length > 100 * 1024 * 1024) { // 100MB limit
         LOG_SOCKET_ERROR("Message length too large: " << message_length << " bytes from socket " << socket);
-        return "";
+        return std::vector<uint8_t>();
     }
     
     // Receive the actual message
-    std::string message = receive_exact_bytes(socket, message_length);
-    if (message.length() != message_length) {
-        LOG_SOCKET_ERROR("Failed to receive complete message from socket " << socket << " (expected " << message_length << " bytes, got " << message.length() << ")");
-        return "";
+    std::vector<uint8_t> message = receive_exact_bytes(socket, message_length);
+    if (message.size() != message_length) {
+        LOG_SOCKET_ERROR("Failed to receive complete message from socket " << socket << " (expected " << message_length << " bytes, got " << message.size() << ")");
+        return std::vector<uint8_t>();
     }
     
     LOG_SOCKET_DEBUG("Successfully received framed message (" << message_length << " bytes) from socket " << socket);
     return message;
+}
+
+// Convenience functions for string compatibility
+int send_tcp_string(socket_t socket, const std::string& data) {
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return send_tcp_data(socket, binary_data);
+}
+
+std::string receive_tcp_string(socket_t socket, size_t buffer_size) {
+    std::vector<uint8_t> binary_data = receive_tcp_data(socket, buffer_size);
+    if (binary_data.empty()) {
+        return "";
+    }
+    return std::string(binary_data.begin(), binary_data.end());
+}
+
+int send_tcp_string_framed(socket_t socket, const std::string& message) {
+    std::vector<uint8_t> binary_message(message.begin(), message.end());
+    return send_tcp_message_framed(socket, binary_message);
+}
+
+std::string receive_tcp_string_framed(socket_t socket) {
+    std::vector<uint8_t> binary_message = receive_tcp_message_framed(socket);
+    if (binary_message.empty()) {
+        return "";
+    }
+    return std::string(binary_message.begin(), binary_message.end());
 }
 
 // UDP Socket Functions

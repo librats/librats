@@ -136,7 +136,7 @@ bool EncryptedSocket::send_handshake_message(socket_t socket, const std::vector<
                              << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[13]
                              << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[14]
                              << std::setfill('0') << std::setw(2) << (unsigned)handshake_message[15]);
-            int sent = send_tcp_data(socket, data_str);
+            int sent = send_tcp_string(socket, data_str);
             
             if (sent <= 0) {
                 LOG_ENCRYPT_ERROR("Failed to send handshake message to socket " << socket);
@@ -280,7 +280,7 @@ bool EncryptedSocket::send_encrypted_data(socket_t socket, const std::string& da
         auto framed_message = frame_message(encrypted_data);
         std::string frame_str(framed_message.begin(), framed_message.end());
         
-        int sent = send_tcp_data(socket, frame_str);
+        int sent = send_tcp_string(socket, frame_str);
         if (sent <= 0) {
             LOG_ENCRYPT_ERROR("Failed to send encrypted data to socket " << socket);
             return false;
@@ -309,7 +309,7 @@ std::string EncryptedSocket::receive_encrypted_data(socket_t socket) {
     }
     
     try {
-        std::string raw_data = receive_tcp_data(socket, 4096);
+        std::string raw_data = receive_tcp_string(socket, 4096);
         if (raw_data.empty()) {
             return "";
         }
@@ -341,12 +341,12 @@ std::string EncryptedSocket::receive_encrypted_data(socket_t socket) {
 }
 
 bool EncryptedSocket::send_unencrypted_data(socket_t socket, const std::string& data) {
-    int sent = send_tcp_data(socket, data);
+    int sent = send_tcp_string(socket, data);
     return sent > 0;
 }
 
 std::string EncryptedSocket::receive_unencrypted_data(socket_t socket) {
-    return receive_tcp_data(socket);
+    return receive_tcp_string(socket);
 }
 
 void EncryptedSocket::remove_socket(socket_t socket) {
@@ -412,7 +412,7 @@ std::string EncryptedSocket::receive_exact_bytes(socket_t socket, size_t byte_co
     
     while (buffer.size() < byte_count) {
         size_t remaining = byte_count - buffer.size();
-        std::string chunk = receive_tcp_data(socket, remaining);
+        std::string chunk = receive_tcp_string(socket, remaining);
         
         if (chunk.empty()) {
             // Connection closed or error

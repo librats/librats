@@ -122,41 +122,73 @@ std::string get_peer_address(socket_t socket);
 /**
  * Send data through a TCP socket
  * @param socket The socket handle
- * @param data The data to send
+ * @param data The binary data to send
  * @return Number of bytes sent, or -1 on error
  */
-int send_tcp_data(socket_t socket, const std::string& data);
+int send_tcp_data(socket_t socket, const std::vector<uint8_t>& data);
 
 /**
  * Receive data from a TCP socket
  * @param socket The socket handle
  * @param buffer_size Maximum number of bytes to receive
- * @return Received data as string, empty string on error
+ * @return Received binary data, empty vector on error
  */
-std::string receive_tcp_data(socket_t socket, size_t buffer_size = 1024);
+std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size = 1024);
 
 /**
  * Send a framed message with length prefix through a TCP socket
  * @param socket The socket handle
- * @param message The message to send
+ * @param message The binary message to send
  * @return Total bytes sent (including length prefix), or -1 on error
  */
-int send_tcp_message_framed(socket_t socket, const std::string& message);
+int send_tcp_message_framed(socket_t socket, const std::vector<uint8_t>& message);
 
 /**
  * Receive exact number of bytes from a TCP socket (blocking until complete)
  * @param socket The socket handle
  * @param num_bytes Number of bytes to receive
- * @return Received data as string, empty string on error or connection close
+ * @return Received binary data, empty vector on error or connection close
  */
-std::string receive_exact_bytes(socket_t socket, size_t num_bytes);
+std::vector<uint8_t> receive_exact_bytes(socket_t socket, size_t num_bytes);
 
 /**
  * Receive a complete framed message from a TCP socket
  * @param socket The socket handle
+ * @return Complete binary message, empty vector on error or connection close
+ */
+std::vector<uint8_t> receive_tcp_message_framed(socket_t socket);
+
+// Convenience functions for string compatibility
+/**
+ * Send string data through a TCP socket (converts to binary)
+ * @param socket The socket handle
+ * @param data The string data to send
+ * @return Number of bytes sent, or -1 on error
+ */
+int send_tcp_string(socket_t socket, const std::string& data);
+
+/**
+ * Receive data from a TCP socket as string
+ * @param socket The socket handle
+ * @param buffer_size Maximum number of bytes to receive
+ * @return Received data as string, empty string on error
+ */
+std::string receive_tcp_string(socket_t socket, size_t buffer_size = 1024);
+
+/**
+ * Send a framed string message through a TCP socket
+ * @param socket The socket handle
+ * @param message The string message to send
+ * @return Total bytes sent (including length prefix), or -1 on error
+ */
+int send_tcp_string_framed(socket_t socket, const std::string& message);
+
+/**
+ * Receive a complete framed string message from a TCP socket
+ * @param socket The socket handle
  * @return Complete message as string, empty string on error or connection close
  */
-std::string receive_tcp_message_framed(socket_t socket);
+std::string receive_tcp_string_framed(socket_t socket);
 
 // UDP Socket Functions
 /**

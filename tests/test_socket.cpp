@@ -109,10 +109,10 @@ TEST_F(SocketTest, TCPClientServerCommunicationTest) {
         EXPECT_TRUE(is_valid_socket(client));
         
         if (is_valid_socket(client)) {
-            std::string received = receive_tcp_data(client);
+            std::string received = receive_tcp_string(client);
             EXPECT_EQ(received, "Hello Server!");
             
-            int sent = send_tcp_data(client, "Hello Client!");
+            int sent = send_tcp_string(client, "Hello Client!");
             EXPECT_GT(sent, 0);
             
             close_socket(client);
@@ -127,11 +127,11 @@ TEST_F(SocketTest, TCPClientServerCommunicationTest) {
     ASSERT_TRUE(is_valid_socket(client));
     
     // Send data
-    int sent = send_tcp_data(client, "Hello Server!");
+    int sent = send_tcp_string(client, "Hello Server!");
     EXPECT_GT(sent, 0);
     
     // Receive response
-    std::string response = receive_tcp_data(client);
+    std::string response = receive_tcp_string(client);
     EXPECT_EQ(response, "Hello Client!");
     
     close_socket(client);
@@ -203,11 +203,11 @@ TEST_F(SocketTest, InvalidOperationsTest) {
     socket_t invalid_socket = INVALID_SOCKET_VALUE;
     
     // Test sending to invalid socket
-    int result = send_tcp_data(invalid_socket, "test");
+    int result = send_tcp_string(invalid_socket, "test");
     EXPECT_LE(result, 0);  // Should fail
     
     // Test receiving from invalid socket
-    std::string data = receive_tcp_data(invalid_socket);
+    std::string data = receive_tcp_string(invalid_socket);
     EXPECT_TRUE(data.empty());  // Should return empty string
     
     // Test getting peer address from invalid socket
