@@ -494,7 +494,7 @@ struct RatsPeer {
 ### Building on Linux/macOS
 
 ```bash
-git clone https://github.com/your-org/librats.git
+git clone https://github.com/DEgITx/librats.git
 cd librats
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
@@ -504,7 +504,7 @@ make -j$(nproc)
 ### Building on Windows
 
 ```powershell
-git clone https://github.com/your-org/librats.git
+git clone https://github.com/DEgITx/librats.git
 cd librats
 mkdir build && cd build
 cmake .. -G "Visual Studio 16 2019"
@@ -727,7 +727,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 ### Development Setup
 
 ```bash
-git clone https://github.com/your-org/librats.git
+git clone https://github.com/DEgITx/librats.git
 cd librats
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON
