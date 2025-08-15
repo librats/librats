@@ -72,6 +72,7 @@ add_library(rats
     src/krpc.cpp
     src/krpc.h
     src/librats.cpp
+    src/librats_logging.cpp
     src/librats.h
     src/sha1.cpp
     src/sha1.h
@@ -173,6 +174,7 @@ if(BUILD_TESTS)
         tests/test_noise.cpp
         tests/test_mdns.cpp
         tests/test_gossipsub.cpp
+        tests/test_logging_api_gtest.cpp
     )
     
     # Link with GoogleTest and our library

@@ -880,6 +880,94 @@ public:
      */
     bool is_gossipsub_running() const;
 
+    //=============================================================================
+    // Logging Control API
+    //=============================================================================
+    
+    /**
+     * Enable or disable file logging
+     * When enabled, logs will be written to "rats.log" by default
+     * @param enabled Whether to enable file logging
+     */
+    void set_logging_enabled(bool enabled);
+    
+    /**
+     * Check if file logging is currently enabled
+     * @return true if file logging is enabled
+     */
+    bool is_logging_enabled() const;
+    
+    /**
+     * Set the log file path
+     * @param file_path Path to the log file (default: "rats.log")
+     */
+    void set_log_file_path(const std::string& file_path);
+    
+    /**
+     * Get the current log file path
+     * @return Current log file path
+     */
+    std::string get_log_file_path() const;
+    
+    /**
+     * Set the minimum log level
+     * @param level Minimum log level (DEBUG=0, INFO=1, WARN=2, ERROR=3)
+     */
+    void set_log_level(LogLevel level);
+    
+    /**
+     * Set the minimum log level using string
+     * @param level_str Log level as string ("DEBUG", "INFO", "WARN", "ERROR")
+     */
+    void set_log_level(const std::string& level_str);
+    
+    /**
+     * Get the current log level
+     * @return Current minimum log level
+     */
+    LogLevel get_log_level() const;
+    
+    /**
+     * Enable or disable colored log output
+     * @param enabled Whether to enable colored output
+     */
+    void set_log_colors_enabled(bool enabled);
+    
+    /**
+     * Check if colored log output is enabled
+     * @return true if colors are enabled
+     */
+    bool is_log_colors_enabled() const;
+    
+    /**
+     * Enable or disable timestamps in log output
+     * @param enabled Whether to enable timestamps
+     */
+    void set_log_timestamps_enabled(bool enabled);
+    
+    /**
+     * Check if timestamps are enabled in log output
+     * @return true if timestamps are enabled
+     */
+    bool is_log_timestamps_enabled() const;
+    
+    /**
+     * Set log file rotation size
+     * @param max_size_bytes Maximum size in bytes before log rotation (default: 10MB)
+     */
+    void set_log_rotation_size(size_t max_size_bytes);
+    
+    /**
+     * Set the number of log files to retain during rotation
+     * @param count Number of old log files to keep (default: 5)
+     */
+    void set_log_retention_count(int count);
+    
+    /**
+     * Clear/reset the current log file
+     */
+    void clear_log_file();
+
 private:
     int listen_port_;
     int max_peers_;

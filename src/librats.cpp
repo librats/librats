@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <cmath>
 #include <stdexcept>
+#include <cstdio> // for std::remove
 
 #define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
 #define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
