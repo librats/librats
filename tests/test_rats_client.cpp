@@ -86,7 +86,7 @@ TEST_F(RatsClientTest, CallbackSettingTest) {
         connection_callback_set = true;
     });
     
-    client.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+    client.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
         data_callback_set = true;
     });
     
@@ -158,14 +158,14 @@ TEST_F(RatsClientTest, PeerCommunicationTest) {
         server.send_to_peer(socket, "Welcome to server!");
     });
     
-    server.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+    server.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
         std::lock_guard<std::mutex> lock(msg_mutex);
         server_received_msg = data;
         server_received_data = true;
     });
     
     // Set up client callbacks
-    client.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+    client.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
         std::lock_guard<std::mutex> lock(msg_mutex);
         client_received_msg = data;
         client_received_data = true;
@@ -199,7 +199,7 @@ TEST_F(RatsClientTest, BroadcastTest) {
         messages_sent = sent;
     });
     
-    server.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+    server.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
         if (data == "Broadcast message") {
             messages_received++;
         }
@@ -507,7 +507,7 @@ TEST_F(RatsClientTest, CallbackExceptionHandlingTest) {
         throw std::runtime_error("Connection callback exception");
     });
     
-    client.set_data_callback([](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+    client.set_string_data_callback([](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
         throw std::runtime_error("Data callback exception");
     });
     
@@ -654,14 +654,18 @@ TEST_F(RatsClientTest, SimultaneousConnectionsToSamePeerTest) {
     // Test that we can still send messages through the established connection(s)
     if (final_client_connections > 0) {
         std::atomic<bool> message_received(false);
-        server.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        server.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
             if (data == "test_simultaneous_connection") {
                 message_received = true;
             }
         });
         
+        // Give a small delay to ensure message handler is set up
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
         // Broadcast a test message
         int messages_sent = client.broadcast_to_peers("test_simultaneous_connection");
+        std::cout << "Messages sent: " << messages_sent << std::endl;
         EXPECT_GE(messages_sent, 1);
         
         // Wait for message to be received
@@ -1043,7 +1047,7 @@ TEST_F(RatsClientTest, MixedBinaryTextCallbacksTest) {
         binary_received = true;
     });
     
-    server.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+    server.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
         std::lock_guard<std::mutex> lock(data_mutex);
         received_text = data;
         text_received = true;

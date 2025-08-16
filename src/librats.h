@@ -171,6 +171,80 @@ using NatTraversalProgressCallback = std::function<void(const std::string&, cons
 using IceCandidateDiscoveredCallback = std::function<void(const std::string&, const IceCandidate&)>; // peer_id, candidate
 
 /**
+ * Message data types for librats message headers
+ */
+enum class MessageDataType : uint8_t {
+    BINARY = 0x01,      // Raw binary data
+    STRING = 0x02,      // UTF-8 string data  
+    JSON = 0x03         // JSON formatted data
+};
+
+/**
+ * Message header structure for librats messages
+ * Fixed 8-byte header format:
+ * [0-3]: Magic number "RATS" (4 bytes)
+ * [4]: Message data type (1 byte)
+ * [5-7]: Reserved for future use (3 bytes)
+ */
+struct MessageHeader {
+    static constexpr uint32_t MAGIC_NUMBER = 0x52415453; // "RATS" in ASCII
+    static constexpr size_t HEADER_SIZE = 8;
+    
+    uint32_t magic;         // Magic number for validation
+    MessageDataType type;   // Message data type
+    uint8_t reserved[3];    // Reserved bytes for future use
+    
+    MessageHeader(MessageDataType data_type) : magic(MAGIC_NUMBER), type(data_type) {
+        reserved[0] = reserved[1] = reserved[2] = 0;
+    }
+    
+    MessageHeader() : magic(MAGIC_NUMBER), type(MessageDataType::BINARY) {
+        reserved[0] = reserved[1] = reserved[2] = 0;
+    }
+    
+    // Serialize header to bytes
+    std::vector<uint8_t> serialize() const {
+        std::vector<uint8_t> data(HEADER_SIZE);
+        uint32_t network_magic = htonl(magic);
+        memcpy(data.data(), &network_magic, 4);
+        data[4] = static_cast<uint8_t>(type);
+        data[5] = reserved[0];
+        data[6] = reserved[1]; 
+        data[7] = reserved[2];
+        return data;
+    }
+    
+    // Deserialize header from bytes
+    static bool deserialize(const std::vector<uint8_t>& data, MessageHeader& header) {
+        if (data.size() < HEADER_SIZE) {
+            return false;
+        }
+        
+        uint32_t network_magic;
+        memcpy(&network_magic, data.data(), 4);
+        header.magic = ntohl(network_magic);
+        
+        if (header.magic != MAGIC_NUMBER) {
+            return false;
+        }
+        
+        header.type = static_cast<MessageDataType>(data[4]);
+        header.reserved[0] = data[5];
+        header.reserved[1] = data[6];
+        header.reserved[2] = data[7];
+        
+        return true;
+    }
+    
+    // Validate data type
+    bool is_valid_type() const {
+        return type == MessageDataType::BINARY || 
+               type == MessageDataType::STRING || 
+               type == MessageDataType::JSON;
+    }
+};
+
+/**
  * Enhanced RatsClient with comprehensive NAT traversal capabilities
  */
 class RatsClient : public ThreadManager {
@@ -178,7 +252,8 @@ public:
     // Callback function types
     using ConnectionCallback = std::function<void(socket_t, const std::string&)>;
     using BinaryDataCallback = std::function<void(socket_t, const std::string&, const std::vector<uint8_t>&)>;
-    using DataCallback = std::function<void(socket_t, const std::string&, const std::string&)>;
+    using StringDataCallback = std::function<void(socket_t, const std::string&, const std::string&)>;
+    using JsonDataCallback = std::function<void(socket_t, const std::string&, const nlohmann::json&)>;
     using DisconnectCallback = std::function<void(socket_t, const std::string&)>;
     using MessageCallback = std::function<void(const std::string&, const nlohmann::json&)>;
     using SendCallback = std::function<void(bool, const std::string&)>;
@@ -258,9 +333,10 @@ public:
      * Send binary data to a specific peer (primary method)
      * @param socket Target peer socket
      * @param data Binary data to send
+     * @param message_type Type of message data (BINARY, STRING, JSON)
      * @return true if sent successfully
      */
-    bool send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data);
+    bool send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data, MessageDataType message_type = MessageDataType::BINARY);
 
     /**
      * Send data to a specific peer (convenience wrapper for strings)
@@ -282,9 +358,10 @@ public:
      * Send binary data to a peer by peer hash ID (primary method)
      * @param peer_hash_id Target peer hash ID
      * @param data Binary data to send
+     * @param message_type Type of message data (BINARY, STRING, JSON)
      * @return true if sent successfully
      */
-    bool send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data);
+    bool send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data, MessageDataType message_type = MessageDataType::BINARY);
 
     /**
      * Send data to a peer by peer hash ID (convenience wrapper for strings)
@@ -305,9 +382,10 @@ public:
     /**
      * Broadcast binary data to all connected peers (primary method)
      * @param data Binary data to broadcast
+     * @param message_type Type of message data (BINARY, STRING, JSON)
      * @return Number of peers the data was sent to
      */
-    int broadcast_binary_to_peers(const std::vector<uint8_t>& data);
+    int broadcast_binary_to_peers(const std::vector<uint8_t>& data, MessageDataType message_type = MessageDataType::BINARY);
 
     /**
      * Broadcast data to all connected peers (convenience wrapper for strings)
@@ -383,10 +461,16 @@ public:
     void set_binary_data_callback(BinaryDataCallback callback);
 
     /**
-     * Set data callback (called when data is received - convenience wrapper for strings)
-     * @param callback Function to call when data is received
+     * Set string data callback (called when string data is received - convenience wrapper for strings)
+     * @param callback Function to call when string data is received
      */
-    void set_data_callback(DataCallback callback);
+    void set_string_data_callback(StringDataCallback callback);
+
+    /**
+     * Set JSON data callback (called when JSON data is received)
+     * @param callback Function to call when JSON data is received
+     */
+    void set_json_data_callback(JsonDataCallback callback);
 
     /**
      * Set disconnect callback (called when a peer disconnects)
@@ -1052,7 +1136,8 @@ private:
     ConnectionCallback connection_callback_;
     AdvancedConnectionCallback advanced_connection_callback_;
     BinaryDataCallback binary_data_callback_;
-    DataCallback data_callback_;
+    StringDataCallback string_data_callback_;
+    JsonDataCallback json_data_callback_;
     DisconnectCallback disconnect_callback_;
     NatTraversalProgressCallback nat_progress_callback_;
     IceCandidateDiscoveredCallback ice_candidate_callback_;
@@ -1079,6 +1164,10 @@ private:
     std::string generate_peer_hash_id(socket_t socket, const std::string& connection_info);
     void handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash);
     void handle_mdns_service_discovery(const MdnsService& service, bool is_new);
+    
+    // Message header helpers
+    std::vector<uint8_t> create_message_with_header(const std::vector<uint8_t>& payload, MessageDataType type);
+    bool parse_message_with_header(const std::vector<uint8_t>& message, MessageHeader& header, std::vector<uint8_t>& payload) const;
     
     // Enhanced connection establishment
     bool attempt_direct_connection(const std::string& host, int port, ConnectionAttemptResult& result);

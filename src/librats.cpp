@@ -529,7 +529,51 @@ bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionSt
     return success;
 }
 
-bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data) {
+// Helper method to create a message with header
+std::vector<uint8_t> RatsClient::create_message_with_header(const std::vector<uint8_t>& payload, MessageDataType type) {
+    MessageHeader header(type);
+    std::vector<uint8_t> header_bytes = header.serialize();
+    
+    // Combine header + payload
+    std::vector<uint8_t> message;
+    message.reserve(header_bytes.size() + payload.size());
+    message.insert(message.end(), header_bytes.begin(), header_bytes.end());
+    message.insert(message.end(), payload.begin(), payload.end());
+    
+    return message;
+}
+
+// Helper method to parse message header and extract payload
+bool RatsClient::parse_message_with_header(const std::vector<uint8_t>& message, MessageHeader& header, std::vector<uint8_t>& payload) const {
+    // Check if message is large enough to contain header
+    if (message.size() < MessageHeader::HEADER_SIZE) {
+        LOG_CLIENT_DEBUG("Message too small to contain header: " << message.size() << " bytes");
+        return false;
+    }
+    
+    // Extract header bytes
+    std::vector<uint8_t> header_bytes(message.begin(), message.begin() + MessageHeader::HEADER_SIZE);
+    
+    // Parse header
+    if (!MessageHeader::deserialize(header_bytes, header)) {
+        LOG_CLIENT_DEBUG("Failed to parse message header - invalid magic number or format");
+        return false;
+    }
+    
+    // Validate header
+    if (!header.is_valid_type()) {
+        LOG_CLIENT_WARN("Invalid message data type: " << static_cast<int>(header.type));
+        return false;
+    }
+    
+    // Extract payload
+    payload.assign(message.begin() + MessageHeader::HEADER_SIZE, message.end());
+    
+    LOG_CLIENT_DEBUG("Parsed message header: type=" << static_cast<int>(header.type) << ", payload_size=" << payload.size());
+    return true;
+}
+
+bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data, MessageDataType message_type) {
     if (!running_.load()) {
         return false;
     }
@@ -539,88 +583,84 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
     std::mutex* socket_mutex = get_socket_send_mutex(socket);
     std::lock_guard<std::mutex> send_lock(*socket_mutex);
     
+    // Create message with specified header type
+    std::vector<uint8_t> message_with_header = create_message_with_header(data, message_type);
+    
     // Use encrypted communication if encryption is enabled
     if (is_encryption_enabled()) {
         // Check if handshake is completed before sending data
         if (!encrypted_communication::is_handshake_completed(socket)) {
-            LOG_CLIENT_WARN("Cannot send binary data to socket " << socket << " - encryption handshake not completed");
+            std::string type_name = (message_type == MessageDataType::BINARY) ? "binary" : 
+                                   (message_type == MessageDataType::STRING) ? "string" : "JSON";
+            LOG_CLIENT_WARN("Cannot send " << type_name << " data to socket " << socket << " - encryption handshake not completed");
             return false;
         }
         
-        int sent = encrypted_communication::send_tcp_data_encrypted(socket, data);
+        int sent = encrypted_communication::send_tcp_data_encrypted(socket, message_with_header);
         return sent > 0;
     } else {
         // Use framed messages for reliable large message handling
-        int sent = send_tcp_message_framed(socket, data);
+        int sent = send_tcp_message_framed(socket, message_with_header);
         return sent > 0;
     }
 }
 
 bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
-    // Convert string to binary and use primary binary method
+    // Convert string to binary and use the primary send_binary_to_peer method
     std::vector<uint8_t> binary_data(data.begin(), data.end());
-    return send_binary_to_peer(socket, binary_data);
+    return send_binary_to_peer(socket, binary_data, MessageDataType::STRING);
 }
 
 bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& json_data) {
-    if (!running_.load()) {
-        return false;
-    }
-    
     try {
+        // Serialize JSON and convert to binary, then use the primary send_binary_to_peer method
         std::string data = json_data.dump();
-        return send_to_peer(socket, data);
+        std::vector<uint8_t> binary_data(data.begin(), data.end());
+        return send_binary_to_peer(socket, binary_data, MessageDataType::JSON);
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
         return false;
     }
 }
 
-bool RatsClient::send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+bool RatsClient::send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data, MessageDataType message_type) {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     auto it = peers_.find(peer_hash_id);
     if (it == peers_.end() || !it->second.is_handshake_completed()) {
         return false;
     }
     
-    return send_binary_to_peer(it->second.socket, data);
+    return send_binary_to_peer(it->second.socket, data, message_type);
 }
 
 bool RatsClient::send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
-    // Convert string to binary and use primary binary method
+    // Convert string to binary and use primary binary method with STRING type
     std::vector<uint8_t> binary_data(data.begin(), data.end());
-    return send_binary_to_peer_by_hash(peer_hash_id, binary_data);
+    return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::STRING);
 }
 
 bool RatsClient::send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& json_data) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    auto it = peers_.find(peer_hash_id);
-    if (it == peers_.end() || !it->second.is_handshake_completed()) {
+    try {
+        // Serialize JSON and convert to binary, then use primary binary method with JSON type
+        std::string data = json_data.dump();
+        std::vector<uint8_t> binary_data(data.begin(), data.end());
+        return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::JSON);
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
         return false;
     }
-    
-    return send_json_to_peer(it->second.socket, json_data);
 }
 
 int RatsClient::broadcast_json_to_peers(const nlohmann::json& json_data) {
-    if (!running_.load()) {
+    try {
+        // Serialize JSON and convert to binary, then use primary binary method with JSON type
+        std::string data = json_data.dump();
+        std::vector<uint8_t> binary_data(data.begin(), data.end());
+        return broadcast_binary_to_peers(binary_data, MessageDataType::JSON);
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to serialize JSON message for broadcast: " << e.what());
         return 0;
     }
-    
-    int sent_count = 0;
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    
-    for (const auto& pair : peers_) {
-        const RatsPeer& peer = pair.second;
-        // Only send to peers that have completed handshake
-        if (peer.is_handshake_completed()) {
-            if (send_json_to_peer(peer.socket, json_data)) {
-                sent_count++;
-            }
-        }
-    }
-    
-    return sent_count;
 }
 
 bool RatsClient::parse_json_message(const std::string& message, nlohmann::json& out_json) {
@@ -635,7 +675,7 @@ bool RatsClient::parse_json_message(const std::string& message, nlohmann::json& 
 
 
 
-int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data) {
+int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data, MessageDataType message_type) {
     if (!running_.load()) {
         return 0;
     }
@@ -647,7 +687,7 @@ int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data) {
         const RatsPeer& peer = pair.second;
         // Only send to peers that have completed handshake
         if (peer.is_handshake_completed()) {
-            if (send_binary_to_peer(peer.socket, data)) {
+            if (send_binary_to_peer(peer.socket, data, message_type)) {
                 sent_count++;
             }
         }
@@ -657,9 +697,9 @@ int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data) {
 }
 
 int RatsClient::broadcast_to_peers(const std::string& data) {
-    // Convert string to binary and use primary binary method
+    // Convert string to binary and use primary binary method with STRING type
     std::vector<uint8_t> binary_data(data.begin(), data.end());
-    return broadcast_binary_to_peers(binary_data);
+    return broadcast_binary_to_peers(binary_data, MessageDataType::STRING);
 }
 
 void RatsClient::disconnect_peer(socket_t socket) {
@@ -708,8 +748,12 @@ void RatsClient::set_binary_data_callback(BinaryDataCallback callback) {
     binary_data_callback_ = callback;
 }
 
-void RatsClient::set_data_callback(DataCallback callback) {
-    data_callback_ = callback;
+void RatsClient::set_string_data_callback(StringDataCallback callback) {
+    string_data_callback_ = callback;
+}
+
+void RatsClient::set_json_data_callback(JsonDataCallback callback) {
+    json_data_callback_ = callback;
 }
 
 void RatsClient::set_disconnect_callback(DisconnectCallback callback) {
@@ -1395,32 +1439,60 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         
         // Only process regular data after handshake is completed (and noise handshake if encryption is enabled)
         if (handshake_completed && (!encryption_enabled || noise_handshake_completed)) {
-            // Convert string data to binary for primary callback
-            std::vector<uint8_t> binary_data(data.begin(), data.end());
+            // Convert string data to binary for header parsing
+            std::vector<uint8_t> received_data(data.begin(), data.end());
             
-            // Try to parse as JSON rats message first
-            nlohmann::json json_msg;
-            if (parse_json_message(data, json_msg)) {
-                // Check if it's a rats protocol message
-                if (json_msg.contains("rats_protocol") && json_msg["rats_protocol"] == true) {
-                    handle_rats_message(client_socket, get_peer_hash_id(client_socket), json_msg);
-                } else {
-                    // Regular JSON data - call callbacks
-                    if (binary_data_callback_) {
-                        binary_data_callback_(client_socket, get_peer_hash_id(client_socket), binary_data);
+            // Try to parse message header first
+            MessageHeader header;
+            std::vector<uint8_t> payload;
+            if (parse_message_with_header(received_data, header, payload)) {
+                // Message has valid header - call appropriate callback based on type
+                std::string peer_id = get_peer_hash_id(client_socket);
+                
+                switch (header.type) {
+                    case MessageDataType::BINARY:
+                        LOG_CLIENT_DEBUG("Received BINARY message from " << peer_id << " (payload size: " << payload.size() << ")");
+                        if (binary_data_callback_) {
+                            binary_data_callback_(client_socket, peer_id, payload);
+                        }
+                        break;
+                        
+                    case MessageDataType::STRING:
+                        LOG_CLIENT_DEBUG("Received STRING message from " << peer_id << " (payload size: " << payload.size() << ")");
+                        if (string_data_callback_) {
+                            std::string string_data(payload.begin(), payload.end());
+                            string_data_callback_(client_socket, peer_id, string_data);
+                        }
+                        break;
+                        
+                    case MessageDataType::JSON: {
+                        LOG_CLIENT_DEBUG("Received JSON message from " << peer_id << " (payload size: " << payload.size() << ")");
+                        // Parse JSON payload
+                        std::string json_string(payload.begin(), payload.end());
+                        nlohmann::json json_msg;
+                        if (parse_json_message(json_string, json_msg)) {
+                            // Check if it's a rats protocol message
+                            if (json_msg.contains("rats_protocol") && json_msg["rats_protocol"] == true) {
+                                handle_rats_message(client_socket, peer_id, json_msg);
+                            } else {
+                                // Regular JSON data - call JSON callback
+                                if (json_data_callback_) {
+                                    json_data_callback_(client_socket, peer_id, json_msg);
+                                }
+                            }
+                        } else {
+                            LOG_CLIENT_ERROR("Received invalid JSON in JSON message from " << peer_id);
+                        }
+                        break;
                     }
-                    if (data_callback_) {
-                        data_callback_(client_socket, get_peer_hash_id(client_socket), data);
-                    }
+                        
+                    default:
+                        LOG_CLIENT_WARN("Received message with unknown data type " << static_cast<int>(header.type) << " from " << peer_id);
+                        break;
                 }
             } else {
-                // Regular data - call callbacks
-                if (binary_data_callback_) {
-                    binary_data_callback_(client_socket, get_peer_hash_id(client_socket), binary_data);
-                }
-                if (data_callback_) {
-                    data_callback_(client_socket, get_peer_hash_id(client_socket), data);
-                }
+                // No header found
+                LOG_CLIENT_WARN("No header found in message from " << peer_hash_id);
             }
         } else {
             LOG_CLIENT_WARN("Received non-handshake data from " << peer_hash_id << " before handshake completion - ignoring");
@@ -1584,7 +1656,7 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
     });
     
     // Set up legacy data callback for non-protocol messages
-    client.set_data_callback([&client](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+    client.set_string_data_callback([&client](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
         LOG_MAIN_INFO("Received legacy data from peer " << peer_hash_id << ": " << data);
         
         // Try to parse as JSON first
@@ -1925,7 +1997,28 @@ bool RatsClient::validate_handshake_message(const HandshakeMessage& msg) const {
 
 bool RatsClient::is_handshake_message(const std::string& message) const {
     try {
-        nlohmann::json json_msg = nlohmann::json::parse(message);
+        std::string json_to_parse = message;
+        
+        // Check if message has our message header (starts with "RATS" magic)
+        std::vector<uint8_t> message_data(message.begin(), message.end());
+        MessageHeader header;
+        std::vector<uint8_t> payload;
+        
+        if (parse_message_with_header(message_data, header, payload)) {
+            // Message has valid header - extract the JSON payload
+            if (header.type == MessageDataType::STRING || header.type == MessageDataType::JSON) {
+                json_to_parse = std::string(payload.begin(), payload.end());
+            } else {
+                // Handshake messages should be string/JSON type
+                return false;
+            }
+        } else {
+            // Message has no header
+            return false;
+        }
+        
+        // Parse the JSON message
+        nlohmann::json json_msg = nlohmann::json::parse(json_to_parse);
         std::string expected_protocol;
         {
             std::lock_guard<std::mutex> lock(protocol_config_mutex_);
@@ -1967,8 +2060,27 @@ bool RatsClient::send_handshake(socket_t socket, const std::string& our_peer_id)
 }
 
 bool RatsClient::handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::string& message) {
+    // Extract JSON payload from message header if present
+    std::string json_to_parse = message;
+    std::vector<uint8_t> message_data(message.begin(), message.end());
+    MessageHeader header;
+    std::vector<uint8_t> payload;
+    
+    if (parse_message_with_header(message_data, header, payload)) {
+        // Message has valid header - extract the JSON payload
+        if (header.type == MessageDataType::STRING || header.type == MessageDataType::JSON) {
+            json_to_parse = std::string(payload.begin(), payload.end());
+        } else {
+            LOG_CLIENT_ERROR("Invalid message type for handshake: " << static_cast<int>(header.type));
+            return false;
+        }
+    } else {
+        LOG_CLIENT_ERROR("Failed to parse handshake message header from " << peer_hash_id);
+        return false;
+    }
+    
     HandshakeMessage handshake_msg;
-    if (!parse_handshake_message(message, handshake_msg)) {
+    if (!parse_handshake_message(json_to_parse, handshake_msg)) {
         LOG_CLIENT_ERROR("Failed to parse handshake message from " << peer_hash_id);
         return false;
     }
@@ -2000,7 +2112,9 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     }
 
     if (peers_.find(handshake_msg.peer_id) != peers_.end()) {
-        LOG_CLIENT_ERROR("Peer " << handshake_msg.peer_id << " already connected, ignoring");
+        LOG_CLIENT_INFO("Peer " << handshake_msg.peer_id << " already connected, closing duplicate connection");
+        // This is a duplicate connection - the existing connection should remain stable
+        // Return false to close this duplicate connection, but this is expected behavior
         return false;
     }
     

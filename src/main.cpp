@@ -86,7 +86,7 @@ int main(int argc, char* argv[]) {
         }
     });
     
-    client.set_data_callback([](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+    client.set_string_data_callback([](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
         LOG_MAIN_INFO("Message from peer " << peer_hash_id << ": " << data);
     });
     

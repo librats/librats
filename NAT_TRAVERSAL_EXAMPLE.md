@@ -99,7 +99,7 @@ public:
         });
         
         // Data callback for received messages
-        client_->set_data_callback([](socket_t socket, const std::string& peer_id, const std::string& data) {
+        client_->set_string_data_callback([](socket_t socket, const std::string& peer_id, const std::string& data) {
             std::cout << "📨 Received data from " << peer_id << ": " << data.substr(0, 100) 
                      << (data.length() > 100 ? "..." : "") << std::endl;
         });
