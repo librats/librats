@@ -529,7 +529,7 @@ bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionSt
     return success;
 }
 
-bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
+bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data) {
     if (!running_.load()) {
         return false;
     }
@@ -543,7 +543,7 @@ bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
     if (is_encryption_enabled()) {
         // Check if handshake is completed before sending data
         if (!encrypted_communication::is_handshake_completed(socket)) {
-            LOG_CLIENT_WARN("Cannot send data to socket " << socket << " - encryption handshake not completed");
+            LOG_CLIENT_WARN("Cannot send binary data to socket " << socket << " - encryption handshake not completed");
             return false;
         }
         
@@ -551,9 +551,15 @@ bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
         return sent > 0;
     } else {
         // Use framed messages for reliable large message handling
-        int sent = send_tcp_string_framed(socket, data);
+        int sent = send_tcp_message_framed(socket, data);
         return sent > 0;
     }
+}
+
+bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
+    // Convert string to binary and use primary binary method
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return send_binary_to_peer(socket, binary_data);
 }
 
 bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& json_data) {
@@ -568,6 +574,22 @@ bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& json_d
         LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
         return false;
     }
+}
+
+bool RatsClient::send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = peers_.find(peer_hash_id);
+    if (it == peers_.end() || !it->second.is_handshake_completed()) {
+        return false;
+    }
+    
+    return send_binary_to_peer(it->second.socket, data);
+}
+
+bool RatsClient::send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
+    // Convert string to binary and use primary binary method
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return send_binary_to_peer_by_hash(peer_hash_id, binary_data);
 }
 
 bool RatsClient::send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& json_data) {
@@ -611,17 +633,9 @@ bool RatsClient::parse_json_message(const std::string& message, nlohmann::json& 
     }
 }
 
-bool RatsClient::send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    auto it = peers_.find(peer_hash_id);
-    if (it == peers_.end() || !it->second.is_handshake_completed()) {
-        return false;
-    }
-    
-    return send_to_peer(it->second.socket, data);
-}
 
-int RatsClient::broadcast_to_peers(const std::string& data) {
+
+int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data) {
     if (!running_.load()) {
         return 0;
     }
@@ -633,13 +647,19 @@ int RatsClient::broadcast_to_peers(const std::string& data) {
         const RatsPeer& peer = pair.second;
         // Only send to peers that have completed handshake
         if (peer.is_handshake_completed()) {
-            if (send_to_peer(peer.socket, data)) {
+            if (send_binary_to_peer(peer.socket, data)) {
                 sent_count++;
             }
         }
     }
     
     return sent_count;
+}
+
+int RatsClient::broadcast_to_peers(const std::string& data) {
+    // Convert string to binary and use primary binary method
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return broadcast_binary_to_peers(binary_data);
 }
 
 void RatsClient::disconnect_peer(socket_t socket) {
@@ -682,6 +702,10 @@ bool RatsClient::is_running() const {
 
 void RatsClient::set_connection_callback(ConnectionCallback callback) {
     connection_callback_ = callback;
+}
+
+void RatsClient::set_binary_data_callback(BinaryDataCallback callback) {
+    binary_data_callback_ = callback;
 }
 
 void RatsClient::set_data_callback(DataCallback callback) {
@@ -1182,7 +1206,8 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         LOG_CLIENT_DEBUG("Receiving data: encryption_enabled=" << encryption_enabled << ", noise_handshake_completed=" << noise_handshake_completed);
         if (encryption_enabled && noise_handshake_completed) {
             LOG_CLIENT_DEBUG("Receiving encrypted data from socket " << client_socket);
-            data = encrypted_communication::receive_tcp_data_encrypted(client_socket);
+            auto binary_data = encrypted_communication::receive_tcp_data_encrypted(client_socket);
+            data = std::string(binary_data.begin(), binary_data.end());
         } else if (encryption_enabled && !noise_handshake_completed) {
             LOG_CLIENT_DEBUG("Processing handshake for socket " << client_socket);
             // During handshake, let the encrypted socket handle data reception and processing
@@ -1370,6 +1395,9 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         
         // Only process regular data after handshake is completed (and noise handshake if encryption is enabled)
         if (handshake_completed && (!encryption_enabled || noise_handshake_completed)) {
+            // Convert string data to binary for primary callback
+            std::vector<uint8_t> binary_data(data.begin(), data.end());
+            
             // Try to parse as JSON rats message first
             nlohmann::json json_msg;
             if (parse_json_message(data, json_msg)) {
@@ -1377,13 +1405,19 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                 if (json_msg.contains("rats_protocol") && json_msg["rats_protocol"] == true) {
                     handle_rats_message(client_socket, get_peer_hash_id(client_socket), json_msg);
                 } else {
-                    // Regular JSON data - call data callback
+                    // Regular JSON data - call callbacks
+                    if (binary_data_callback_) {
+                        binary_data_callback_(client_socket, get_peer_hash_id(client_socket), binary_data);
+                    }
                     if (data_callback_) {
                         data_callback_(client_socket, get_peer_hash_id(client_socket), data);
                     }
                 }
             } else {
-                // Regular text data - call data callback
+                // Regular data - call callbacks
+                if (binary_data_callback_) {
+                    binary_data_callback_(client_socket, get_peer_hash_id(client_socket), binary_data);
+                }
                 if (data_callback_) {
                     data_callback_(client_socket, get_peer_hash_id(client_socket), data);
                 }

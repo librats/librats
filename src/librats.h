@@ -177,6 +177,7 @@ class RatsClient : public ThreadManager {
 public:
     // Callback function types
     using ConnectionCallback = std::function<void(socket_t, const std::string&)>;
+    using BinaryDataCallback = std::function<void(socket_t, const std::string&, const std::vector<uint8_t>&)>;
     using DataCallback = std::function<void(socket_t, const std::string&, const std::string&)>;
     using DisconnectCallback = std::function<void(socket_t, const std::string&)>;
     using MessageCallback = std::function<void(const std::string&, const nlohmann::json&)>;
@@ -254,7 +255,15 @@ public:
 
     // Data transmission methods
     /**
-     * Send data to a specific peer
+     * Send binary data to a specific peer (primary method)
+     * @param socket Target peer socket
+     * @param data Binary data to send
+     * @return true if sent successfully
+     */
+    bool send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data);
+
+    /**
+     * Send data to a specific peer (convenience wrapper for strings)
      * @param socket Target peer socket
      * @param data Data to send
      * @return true if sent successfully
@@ -262,7 +271,7 @@ public:
     bool send_to_peer(socket_t socket, const std::string& data);
 
     /**
-     * Send JSON data to a specific peer
+     * Send JSON data to a specific peer (convenience wrapper)
      * @param socket Target peer socket
      * @param json_data JSON data to send
      * @return true if sent successfully
@@ -270,7 +279,15 @@ public:
     bool send_json_to_peer(socket_t socket, const nlohmann::json& json_data);
 
     /**
-     * Send data to a peer by peer hash ID
+     * Send binary data to a peer by peer hash ID (primary method)
+     * @param peer_hash_id Target peer hash ID
+     * @param data Binary data to send
+     * @return true if sent successfully
+     */
+    bool send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data);
+
+    /**
+     * Send data to a peer by peer hash ID (convenience wrapper for strings)
      * @param peer_hash_id Target peer hash ID
      * @param data Data to send
      * @return true if sent successfully
@@ -278,7 +295,7 @@ public:
     bool send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data);
 
     /**
-     * Send JSON data to a peer by peer hash ID
+     * Send JSON data to a peer by peer hash ID (convenience wrapper)
      * @param peer_hash_id Target peer hash ID
      * @param json_data JSON data to send
      * @return true if sent successfully
@@ -286,14 +303,21 @@ public:
     bool send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& json_data);
 
     /**
-     * Broadcast data to all connected peers
+     * Broadcast binary data to all connected peers (primary method)
+     * @param data Binary data to broadcast
+     * @return Number of peers the data was sent to
+     */
+    int broadcast_binary_to_peers(const std::vector<uint8_t>& data);
+
+    /**
+     * Broadcast data to all connected peers (convenience wrapper for strings)
      * @param data Data to broadcast
      * @return Number of peers the data was sent to
      */
     int broadcast_to_peers(const std::string& data);
 
     /**
-     * Broadcast JSON data to all connected peers
+     * Broadcast JSON data to all connected peers (convenience wrapper)
      * @param json_data JSON data to broadcast
      * @return Number of peers the data was sent to
      */
@@ -353,7 +377,13 @@ public:
     void set_advanced_connection_callback(AdvancedConnectionCallback callback);
 
     /**
-     * Set data callback (called when data is received)
+     * Set binary data callback (called when binary data is received - primary method)
+     * @param callback Function to call when binary data is received
+     */
+    void set_binary_data_callback(BinaryDataCallback callback);
+
+    /**
+     * Set data callback (called when data is received - convenience wrapper for strings)
      * @param callback Function to call when data is received
      */
     void set_data_callback(DataCallback callback);
@@ -1021,6 +1051,7 @@ private:
     
     ConnectionCallback connection_callback_;
     AdvancedConnectionCallback advanced_connection_callback_;
+    BinaryDataCallback binary_data_callback_;
     DataCallback data_callback_;
     DisconnectCallback disconnect_callback_;
     NatTraversalProgressCallback nat_progress_callback_;

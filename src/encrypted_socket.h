@@ -32,13 +32,21 @@ public:
     bool send_handshake_message(socket_t socket, const std::vector<uint8_t>& payload = {});
     std::vector<uint8_t> receive_handshake_message(socket_t socket);
     
-    // Encrypted communication (available after handshake completion)
-    bool send_encrypted_data(socket_t socket, const std::string& data);
-    std::string receive_encrypted_data(socket_t socket);
+    // Encrypted communication (available after handshake completion) - binary primary
+    bool send_encrypted_data(socket_t socket, const std::vector<uint8_t>& data);
+    std::vector<uint8_t> receive_encrypted_data(socket_t socket);
     
-    // Fallback to unencrypted communication
+    // Encrypted communication - string convenience wrappers
+    bool send_encrypted_data(socket_t socket, const std::string& data);
+    std::string receive_encrypted_data_string(socket_t socket);
+    
+    // Fallback to unencrypted communication - binary primary
+    bool send_unencrypted_data(socket_t socket, const std::vector<uint8_t>& data);
+    std::vector<uint8_t> receive_unencrypted_data(socket_t socket);
+    
+    // Fallback to unencrypted communication - string convenience wrappers
     bool send_unencrypted_data(socket_t socket, const std::string& data);
-    std::string receive_unencrypted_data(socket_t socket);
+    std::string receive_unencrypted_data_string(socket_t socket);
     
     // Socket management
     void remove_socket(socket_t socket);
@@ -94,9 +102,13 @@ public:
     bool initialize_socket_as_initiator(socket_t socket, const NoiseKey& static_private_key);
     bool initialize_socket_as_responder(socket_t socket, const NoiseKey& static_private_key);
     
-    // Communication methods
+    // Communication methods (binary - primary)
+    bool send_data(socket_t socket, const std::vector<uint8_t>& data);
+    std::vector<uint8_t> receive_data(socket_t socket);
+    
+    // Communication methods (string - convenience wrappers)
     bool send_data(socket_t socket, const std::string& data);
-    std::string receive_data(socket_t socket);
+    std::string receive_data_string(socket_t socket);
     
     // Handshake management
     bool perform_handshake_step(socket_t socket, const std::vector<uint8_t>& received_data = {});
@@ -158,7 +170,15 @@ namespace encrypted_communication {
     bool is_encryption_enabled();
     
     /**
-     * Send data through an encrypted socket (replaces send_tcp_data)
+     * Send binary data through an encrypted socket (primary method)
+     * @param socket The socket handle
+     * @param data The binary data to send
+     * @return Number of bytes sent, or -1 on error
+     */
+    int send_tcp_data_encrypted(socket_t socket, const std::vector<uint8_t>& data);
+
+    /**
+     * Send data through an encrypted socket (convenience wrapper for strings)
      * @param socket The socket handle
      * @param data The data to send
      * @return Number of bytes sent, or -1 on error
@@ -166,12 +186,20 @@ namespace encrypted_communication {
     int send_tcp_data_encrypted(socket_t socket, const std::string& data);
     
     /**
-     * Receive data from an encrypted socket (replaces receive_tcp_data)
+     * Receive binary data from an encrypted socket (primary method)
+     * @param socket The socket handle
+     * @param buffer_size Maximum number of bytes to receive
+     * @return Received binary data, empty vector on error
+     */
+    std::vector<uint8_t> receive_tcp_data_encrypted(socket_t socket, size_t buffer_size = 1024);
+
+    /**
+     * Receive data from an encrypted socket (convenience wrapper for strings)
      * @param socket The socket handle
      * @param buffer_size Maximum number of bytes to receive
      * @return Received data as string, empty string on error
      */
-    std::string receive_tcp_data_encrypted(socket_t socket, size_t buffer_size = 1024);
+    std::string receive_tcp_data_encrypted_string(socket_t socket, size_t buffer_size = 1024);
     
     /**
      * Initialize encryption for an outgoing connection

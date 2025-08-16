@@ -255,7 +255,7 @@ std::vector<uint8_t> EncryptedSocket::receive_handshake_message(socket_t socket)
     }
 }
 
-bool EncryptedSocket::send_encrypted_data(socket_t socket, const std::string& data) {
+bool EncryptedSocket::send_encrypted_data(socket_t socket, const std::vector<uint8_t>& data) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     auto* session = get_session(socket);
     if (!session) {
@@ -269,8 +269,7 @@ bool EncryptedSocket::send_encrypted_data(socket_t socket, const std::string& da
     }
     
     try {
-        std::vector<uint8_t> plaintext(data.begin(), data.end());
-        auto encrypted_data = session->session->encrypt_transport_message(plaintext);
+        auto encrypted_data = session->session->encrypt_transport_message(data);
         
         if (encrypted_data.empty()) {
             LOG_ENCRYPT_ERROR("Failed to encrypt data for socket " << socket);
@@ -278,9 +277,8 @@ bool EncryptedSocket::send_encrypted_data(socket_t socket, const std::string& da
         }
         
         auto framed_message = frame_message(encrypted_data);
-        std::string frame_str(framed_message.begin(), framed_message.end());
         
-        int sent = send_tcp_string(socket, frame_str);
+        int sent = send_tcp_data(socket, framed_message);
         if (sent <= 0) {
             LOG_ENCRYPT_ERROR("Failed to send encrypted data to socket " << socket);
             return false;
@@ -295,57 +293,77 @@ bool EncryptedSocket::send_encrypted_data(socket_t socket, const std::string& da
     }
 }
 
-std::string EncryptedSocket::receive_encrypted_data(socket_t socket) {
+bool EncryptedSocket::send_encrypted_data(socket_t socket, const std::string& data) {
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return send_encrypted_data(socket, binary_data);
+}
+
+std::vector<uint8_t> EncryptedSocket::receive_encrypted_data(socket_t socket) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     auto* session = get_session(socket);
     if (!session) {
         LOG_ENCRYPT_ERROR("No session found for socket " << socket);
-        return "";
+        return std::vector<uint8_t>();
     }
     
     if (!session->session->is_handshake_completed()) {
         LOG_ENCRYPT_ERROR("Cannot receive encrypted data: handshake not completed for socket " << socket);
-        return "";
+        return std::vector<uint8_t>();
     }
     
     try {
-        std::string raw_data = receive_tcp_string(socket, 4096);
+        std::vector<uint8_t> raw_data = receive_tcp_data(socket, 4096);
         if (raw_data.empty()) {
-            return "";
+            return std::vector<uint8_t>();
         }
         
-        std::vector<uint8_t> framed_data(raw_data.begin(), raw_data.end());
-        auto encrypted_data = unframe_message(framed_data);
+        auto encrypted_data = unframe_message(raw_data);
         
         if (encrypted_data.empty()) {
             LOG_ENCRYPT_ERROR("Failed to unframe encrypted message");
-            return "";
+            return std::vector<uint8_t>();
         }
         
         auto decrypted_data = session->session->decrypt_transport_message(encrypted_data);
         
         if (decrypted_data.empty()) {
             LOG_ENCRYPT_ERROR("Failed to decrypt data from socket " << socket);
-            return "";
+            return std::vector<uint8_t>();
         }
         
-        std::string result(decrypted_data.begin(), decrypted_data.end());
-        LOG_ENCRYPT_DEBUG("Received encrypted data (" << encrypted_data.size() << " bytes encrypted, " << result.size() << " bytes plaintext) from socket " << socket);
+        LOG_ENCRYPT_DEBUG("Received encrypted data (" << encrypted_data.size() << " bytes encrypted, " << decrypted_data.size() << " bytes plaintext) from socket " << socket);
         
-        return result;
+        return decrypted_data;
         
     } catch (const std::exception& e) {
         LOG_ENCRYPT_ERROR("Exception in receive_encrypted_data: " << e.what());
-        return "";
+        return std::vector<uint8_t>();
     }
 }
 
-bool EncryptedSocket::send_unencrypted_data(socket_t socket, const std::string& data) {
-    int sent = send_tcp_string(socket, data);
+std::string EncryptedSocket::receive_encrypted_data_string(socket_t socket) {
+    std::vector<uint8_t> binary_data = receive_encrypted_data(socket);
+    if (binary_data.empty()) {
+        return "";
+    }
+    return std::string(binary_data.begin(), binary_data.end());
+}
+
+bool EncryptedSocket::send_unencrypted_data(socket_t socket, const std::vector<uint8_t>& data) {
+    int sent = send_tcp_data(socket, data);
     return sent > 0;
 }
 
-std::string EncryptedSocket::receive_unencrypted_data(socket_t socket) {
+bool EncryptedSocket::send_unencrypted_data(socket_t socket, const std::string& data) {
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return send_unencrypted_data(socket, binary_data);
+}
+
+std::vector<uint8_t> EncryptedSocket::receive_unencrypted_data(socket_t socket) {
+    return receive_tcp_data(socket);
+}
+
+std::string EncryptedSocket::receive_unencrypted_data_string(socket_t socket) {
     return receive_tcp_string(socket);
 }
 
@@ -530,7 +548,7 @@ bool EncryptedSocketManager::initialize_socket_as_responder(socket_t socket, con
     return encrypted_socket_.initialize_as_responder(socket, static_private_key);
 }
 
-bool EncryptedSocketManager::send_data(socket_t socket, const std::string& data) {
+bool EncryptedSocketManager::send_data(socket_t socket, const std::vector<uint8_t>& data) {
     if (!encryption_enabled_) {
         return encrypted_socket_.send_unencrypted_data(socket, data);
     }
@@ -538,12 +556,18 @@ bool EncryptedSocketManager::send_data(socket_t socket, const std::string& data)
     if (encrypted_socket_.is_handshake_completed(socket)) {
         return encrypted_socket_.send_encrypted_data(socket, data);
     } else {
-        LOG_ENCRYPT_WARN("Attempting to send data on socket " << socket << " before handshake completion");
+        LOG_ENCRYPT_WARN("Attempting to send binary data on socket " << socket << " before handshake completion");
         return false;
     }
 }
 
-std::string EncryptedSocketManager::receive_data(socket_t socket) {
+bool EncryptedSocketManager::send_data(socket_t socket, const std::string& data) {
+    // Convert string to binary and use primary binary method
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return send_data(socket, binary_data);
+}
+
+std::vector<uint8_t> EncryptedSocketManager::receive_data(socket_t socket) {
     if (!encryption_enabled_) {
         return encrypted_socket_.receive_unencrypted_data(socket);
     }
@@ -551,9 +575,18 @@ std::string EncryptedSocketManager::receive_data(socket_t socket) {
     if (encrypted_socket_.is_handshake_completed(socket)) {
         return encrypted_socket_.receive_encrypted_data(socket);
     } else {
-        LOG_ENCRYPT_WARN("Attempting to receive data on socket " << socket << " before handshake completion");
+        LOG_ENCRYPT_WARN("Attempting to receive binary data on socket " << socket << " before handshake completion");
+        return std::vector<uint8_t>();
+    }
+}
+
+std::string EncryptedSocketManager::receive_data_string(socket_t socket) {
+    // Use primary binary method and convert to string
+    std::vector<uint8_t> binary_data = receive_data(socket);
+    if (binary_data.empty()) {
         return "";
     }
+    return std::string(binary_data.begin(), binary_data.end());
 }
 
 bool EncryptedSocketManager::perform_handshake_step(socket_t socket, const std::vector<uint8_t>& received_data) {
@@ -697,6 +730,15 @@ bool is_encryption_enabled() {
     return manager.is_encryption_enabled();
 }
 
+int send_tcp_data_encrypted(socket_t socket, const std::vector<uint8_t>& data) {
+    auto& manager = EncryptedSocketManager::getInstance();
+    
+    if (manager.send_data(socket, data)) {
+        return static_cast<int>(data.size());
+    }
+    return -1;
+}
+
 int send_tcp_data_encrypted(socket_t socket, const std::string& data) {
     auto& manager = EncryptedSocketManager::getInstance();
     
@@ -706,9 +748,14 @@ int send_tcp_data_encrypted(socket_t socket, const std::string& data) {
     return -1;
 }
 
-std::string receive_tcp_data_encrypted(socket_t socket, size_t buffer_size) {
+std::vector<uint8_t> receive_tcp_data_encrypted(socket_t socket, size_t buffer_size) {
     auto& manager = EncryptedSocketManager::getInstance();
     return manager.receive_data(socket);
+}
+
+std::string receive_tcp_data_encrypted_string(socket_t socket, size_t buffer_size) {
+    auto& manager = EncryptedSocketManager::getInstance();
+    return manager.receive_data_string(socket);
 }
 
 bool initialize_outgoing_connection(socket_t socket) {
