@@ -745,3 +745,426 @@ TEST_F(RatsClientTest, CustomProtocolConfigurationTest) {
     
     EXPECT_TRUE(all_correct.load());
 } 
+
+// Test binary data transfer functionality
+TEST_F(RatsClientTest, BinaryDataTransferTest) {
+    const int server_port = 59000;
+    const int client_port = 59001;
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    // Test data: binary data with null bytes and various byte values
+    std::vector<uint8_t> test_binary_data = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0xFF, 0xFE, 0xFD, 0xFC,
+        0x7F, 0x80, 0x81, 0x00, 0x00, 0xFF, 0xFF, 0x55, 0xAA, 0xCC,
+        // Add some pattern data
+        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0
+    };
+    
+    std::atomic<bool> binary_data_received(false);
+    std::vector<uint8_t> received_binary_data;
+    std::mutex data_mutex;
+    
+    // Set up binary data callback on server
+    server.set_binary_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        received_binary_data = data;
+        binary_data_received = true;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    // Wait for startup
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Connect client to server
+    EXPECT_TRUE(client.connect_to_peer("127.0.0.1", server_port));
+    
+    // Wait for connection
+    bool connected = wait_for_condition([&]() {
+        return server.get_peer_count() > 0 && client.get_peer_count() > 0;
+    }, 2000);
+    EXPECT_TRUE(connected);
+    
+    // Send binary data from client to server
+    auto peers = client.get_validated_peers();
+    EXPECT_GT(peers.size(), 0);
+    
+    if (peers.size() > 0) {
+        bool sent = client.send_binary_to_peer(peers[0].socket, test_binary_data);
+        EXPECT_TRUE(sent);
+        
+        // Wait for binary data to be received
+        bool data_received = wait_for_condition([&]() {
+            return binary_data_received.load();
+        }, 2000);
+        EXPECT_TRUE(data_received);
+        
+        // Verify the received binary data matches exactly
+        {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            EXPECT_EQ(received_binary_data.size(), test_binary_data.size());
+            EXPECT_EQ(received_binary_data, test_binary_data);
+        }
+    }
+    
+    server.stop();
+    client.stop();
+}
+
+// Test binary data transfer by hash ID
+TEST_F(RatsClientTest, BinaryDataTransferByHashTest) {
+    const int server_port = 59002;
+    const int client_port = 59003;
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    // Create a larger binary data array with specific patterns
+    std::vector<uint8_t> test_data(1024);
+    for (size_t i = 0; i < test_data.size(); ++i) {
+        test_data[i] = static_cast<uint8_t>(i % 256);
+    }
+    
+    std::atomic<bool> data_received(false);
+    std::vector<uint8_t> received_data;
+    std::string received_peer_hash;
+    std::mutex data_mutex;
+    
+    server.set_binary_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        received_data = data;
+        received_peer_hash = peer_hash_id;
+        data_received = true;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    EXPECT_TRUE(client.connect_to_peer("127.0.0.1", server_port));
+    
+    bool connected = wait_for_condition([&]() {
+        return server.get_peer_count() > 0 && client.get_peer_count() > 0;
+    }, 2000);
+    EXPECT_TRUE(connected);
+    
+    // Get peer hash ID for client on server side
+    auto server_peers = server.get_validated_peers();
+    EXPECT_GT(server_peers.size(), 0);
+    
+    std::string client_hash_on_server = server_peers[0].peer_id;
+    
+    // Send binary data using hash ID from client
+    auto client_peers = client.get_validated_peers();
+    EXPECT_GT(client_peers.size(), 0);
+    
+    std::string server_hash_on_client = client_peers[0].peer_id;
+    bool sent = client.send_binary_to_peer_by_hash(server_hash_on_client, test_data);
+    EXPECT_TRUE(sent);
+    
+    bool received = wait_for_condition([&]() {
+        return data_received.load();
+    }, 2000);
+    EXPECT_TRUE(received);
+    
+    {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        EXPECT_EQ(received_data.size(), test_data.size());
+        EXPECT_EQ(received_data, test_data);
+        EXPECT_EQ(received_peer_hash, client_hash_on_server);
+    }
+    
+    server.stop();
+    client.stop();
+}
+
+// Test binary data broadcasting
+TEST_F(RatsClientTest, BinaryDataBroadcastTest) {
+    const int server_port = 59004;
+    const int client1_port = 59005;
+    const int client2_port = 59006;
+    
+    RatsClient server(server_port);
+    RatsClient client1(client1_port);
+    RatsClient client2(client2_port);
+    
+    // Binary data with embedded nulls and high bytes
+    std::vector<uint8_t> broadcast_data = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        0x00, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0xFF
+    };
+    
+    std::atomic<int> messages_received(0);
+    std::vector<std::vector<uint8_t>> received_messages(2);
+    std::mutex msgs_mutex;
+    
+    auto binary_callback = [&](int client_idx) {
+        return [&, client_idx](socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+            std::lock_guard<std::mutex> lock(msgs_mutex);
+            received_messages[client_idx] = data;
+            messages_received++;
+        };
+    };
+    
+    client1.set_binary_data_callback(binary_callback(0));
+    client2.set_binary_data_callback(binary_callback(1));
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client1.start());
+    EXPECT_TRUE(client2.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Connect both clients to server
+    EXPECT_TRUE(client1.connect_to_peer("127.0.0.1", server_port));
+    EXPECT_TRUE(client2.connect_to_peer("127.0.0.1", server_port));
+    
+    bool all_connected = wait_for_condition([&]() {
+        return server.get_peer_count() >= 2 && 
+               client1.get_peer_count() >= 1 && 
+               client2.get_peer_count() >= 1;
+    }, 3000);
+    EXPECT_TRUE(all_connected);
+    
+    // Broadcast binary data from server
+    int broadcast_count = server.broadcast_binary_to_peers(broadcast_data);
+    EXPECT_EQ(broadcast_count, 2);
+    
+    // Wait for both clients to receive the broadcast
+    bool all_received = wait_for_condition([&]() {
+        return messages_received.load() >= 2;
+    }, 2000);
+    EXPECT_TRUE(all_received);
+    
+    // Verify both clients received identical binary data
+    {
+        std::lock_guard<std::mutex> lock(msgs_mutex);
+        EXPECT_EQ(received_messages[0].size(), broadcast_data.size());
+        EXPECT_EQ(received_messages[1].size(), broadcast_data.size());
+        EXPECT_EQ(received_messages[0], broadcast_data);
+        EXPECT_EQ(received_messages[1], broadcast_data);
+    }
+    
+    server.stop();
+    client1.stop();
+    client2.stop();
+}
+
+// Test large binary data transfer
+TEST_F(RatsClientTest, LargeBinaryDataTransferTest) {
+    const int server_port = 59007;
+    const int client_port = 59008;
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    // Create large binary data (1MB) with specific patterns
+    const size_t large_size = 1024 * 1024; // 1MB
+    std::vector<uint8_t> large_data(large_size);
+    
+    // Fill with a repeating pattern that includes all byte values
+    for (size_t i = 0; i < large_size; ++i) {
+        large_data[i] = static_cast<uint8_t>((i * 7 + i / 256) % 256);
+    }
+    
+    std::atomic<bool> large_data_received(false);
+    std::vector<uint8_t> received_large_data;
+    std::mutex large_data_mutex;
+    
+    server.set_binary_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+        std::lock_guard<std::mutex> lock(large_data_mutex);
+        received_large_data = data;
+        large_data_received = true;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    EXPECT_TRUE(client.connect_to_peer("127.0.0.1", server_port));
+    
+    bool connected = wait_for_condition([&]() {
+        return server.get_peer_count() > 0 && client.get_peer_count() > 0;
+    }, 2000);
+    EXPECT_TRUE(connected);
+    
+    auto peers = client.get_validated_peers();
+    EXPECT_GT(peers.size(), 0);
+    
+    if (peers.size() > 0) {
+        bool sent = client.send_binary_to_peer(peers[0].socket, large_data);
+        EXPECT_TRUE(sent);
+        
+        // Wait longer for large data transfer
+        bool data_received = wait_for_condition([&]() {
+            return large_data_received.load();
+        }, 10000); // 10 seconds timeout for large data
+        EXPECT_TRUE(data_received);
+        
+        // Verify the large data was received correctly
+        {
+            std::lock_guard<std::mutex> lock(large_data_mutex);
+            EXPECT_EQ(received_large_data.size(), large_data.size());
+            EXPECT_EQ(received_large_data, large_data);
+        }
+    }
+    
+    server.stop();
+    client.stop();
+}
+
+// Test mixed binary and text data callbacks
+TEST_F(RatsClientTest, MixedBinaryTextCallbacksTest) {
+    const int server_port = 59009;
+    const int client_port = 59010;
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    std::vector<uint8_t> binary_data = {0x01, 0x02, 0x03, 0x00, 0xFF, 0xFE};
+    std::string text_data = "Hello, World!";
+    
+    std::atomic<bool> binary_received(false);
+    std::atomic<bool> text_received(false);
+    std::vector<uint8_t> received_binary;
+    std::string received_text;
+    std::mutex data_mutex;
+    
+    // Set both binary and text callbacks
+    server.set_binary_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        received_binary = data;
+        binary_received = true;
+    });
+    
+    server.set_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        received_text = data;
+        text_received = true;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    EXPECT_TRUE(client.connect_to_peer("127.0.0.1", server_port));
+    
+    bool connected = wait_for_condition([&]() {
+        return server.get_peer_count() > 0 && client.get_peer_count() > 0;
+    }, 2000);
+    EXPECT_TRUE(connected);
+    
+    auto peers = client.get_validated_peers();
+    EXPECT_GT(peers.size(), 0);
+    
+    if (peers.size() > 0) {
+        // Send binary data
+        bool binary_sent = client.send_binary_to_peer(peers[0].socket, binary_data);
+        EXPECT_TRUE(binary_sent);
+        
+        // Send text data
+        bool text_sent = client.send_to_peer(peers[0].socket, text_data);
+        EXPECT_TRUE(text_sent);
+        
+        // Wait for both to be received
+        bool both_received = wait_for_condition([&]() {
+            return binary_received.load() && text_received.load();
+        }, 3000);
+        EXPECT_TRUE(both_received);
+        
+        // Verify both were received correctly
+        {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            EXPECT_EQ(received_binary, binary_data);
+            EXPECT_EQ(received_text, text_data);
+        }
+    }
+    
+    server.stop();
+    client.stop();
+}
+
+// Test binary data edge cases
+TEST_F(RatsClientTest, BinaryDataEdgeCasesTest) {
+    const int server_port = 59011;
+    const int client_port = 59012;
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    std::atomic<int> messages_received(0);
+    std::vector<std::vector<uint8_t>> received_messages;
+    std::mutex msgs_mutex;
+    
+    server.set_binary_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+        std::lock_guard<std::mutex> lock(msgs_mutex);
+        received_messages.push_back(data);
+        messages_received++;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    EXPECT_TRUE(client.connect_to_peer("127.0.0.1", server_port));
+    
+    bool connected = wait_for_condition([&]() {
+        return server.get_peer_count() > 0 && client.get_peer_count() > 0;
+    }, 2000);
+    EXPECT_TRUE(connected);
+    
+    auto peers = client.get_validated_peers();
+    EXPECT_GT(peers.size(), 0);
+    
+    if (peers.size() > 0) {
+        // Test 1: Empty binary data
+        std::vector<uint8_t> empty_data;
+        bool sent1 = client.send_binary_to_peer(peers[0].socket, empty_data);
+        EXPECT_TRUE(sent1);
+        
+        // Test 2: Single byte
+        std::vector<uint8_t> single_byte = {0xFF};
+        bool sent2 = client.send_binary_to_peer(peers[0].socket, single_byte);
+        EXPECT_TRUE(sent2);
+        
+        // Test 3: All zeros
+        std::vector<uint8_t> all_zeros(100, 0x00);
+        bool sent3 = client.send_binary_to_peer(peers[0].socket, all_zeros);
+        EXPECT_TRUE(sent3);
+        
+        // Test 4: All 0xFF
+        std::vector<uint8_t> all_ff(50, 0xFF);
+        bool sent4 = client.send_binary_to_peer(peers[0].socket, all_ff);
+        EXPECT_TRUE(sent4);
+        
+        // Wait for all messages to be received
+        bool all_received = wait_for_condition([&]() {
+            return messages_received.load() >= 4;
+        }, 3000);
+        EXPECT_TRUE(all_received);
+        
+        // Verify all edge case messages were received correctly
+        {
+            std::lock_guard<std::mutex> lock(msgs_mutex);
+            EXPECT_GE(received_messages.size(), 4);
+            
+            if (received_messages.size() >= 4) {
+                EXPECT_EQ(received_messages[0], empty_data);
+                EXPECT_EQ(received_messages[1], single_byte);
+                EXPECT_EQ(received_messages[2], all_zeros);
+                EXPECT_EQ(received_messages[3], all_ff);
+            }
+        }
+    }
+    
+    server.stop();
+    client.stop();
+} 
