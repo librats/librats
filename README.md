@@ -48,10 +48,11 @@ librats is a modern P2P networking library designed for **superior performance**
 - **JSON Message Exchange**: Built-in structured communication with callbacks
 - **Promise-style Callbacks**: Modern async patterns for network operations
 - **Real-time Connection Tracking**: Monitor peer states, connection quality, and NAT traversal progress
-- **Comprehensive Logging**: Detailed debug information for troubleshooting
+- **Comprehensive Logging API**: Full control over logging levels, file rotation, and output formatting
 - **Custom Protocol Support**: Configure custom protocol names and versions
 - **Unified API Design**: Consistent patterns across P2P messaging and pub-sub
 - **Topic-based Messaging**: Subscribe to topics and publish messages with automatic routing
+- **Enhanced Peer Management**: Detailed peer information with encryption and NAT traversal status
 
 ## 🚀 Quick Start
 
@@ -220,8 +221,12 @@ int main() {
         std::cout << peer_id << " joined " << topic << std::endl;
     });
     
+    client.on_topic_peer_left("chat", [](const std::string& peer_id, const std::string& topic) {
+        std::cout << peer_id << " left " << topic << std::endl;
+    });
+    
     // Set message validator
-    client.set_topic_message_validator("chat", [](const std::string& peer_id, const std::string& topic, const std::string& message) {
+    client.set_topic_message_validator("chat", [](const std::string& topic, const std::string& message, const std::string& peer_id) {
         // Only accept messages shorter than 1000 characters
         return message.length() <= 1000 ? librats::ValidationResult::ACCEPT : librats::ValidationResult::REJECT;
     });
@@ -241,6 +246,10 @@ int main() {
     event_data["timestamp"] = std::time(nullptr);
     client.publish_json_to_topic("events", event_data);
     
+    // Get topic statistics
+    auto stats = client.get_gossipsub_statistics();
+    std::cout << "GossipSub peers: " << client.get_topic_peers("chat").size() << std::endl;
+    
     return 0;
 }
 ```
@@ -251,6 +260,9 @@ int main() {
 int main() {
     librats::RatsClient client(8080);
     
+    // Set custom data directory
+    client.set_data_directory("./my_app_data");
+    
     // Load saved configuration and peers
     client.load_configuration();
     
@@ -258,10 +270,48 @@ int main() {
     int reconnected = client.load_and_reconnect_peers();
     std::cout << "Attempted to reconnect to " << reconnected << " peers" << std::endl;
     
+    // Get our persistent peer ID
+    std::cout << "Our peer ID: " << client.get_our_peer_id() << std::endl;
+    
     client.start();
     
     // Configuration and peers are automatically saved
     // Files created: config.json, peers.rats, peers_ever.rats
+    
+    // Manual save if needed
+    client.save_configuration();
+    client.save_historical_peers();
+    
+    return 0;
+}
+```
+
+### Comprehensive Logging Configuration
+
+```cpp
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Configure logging before starting
+    client.set_logging_enabled(true);
+    client.set_log_file_path("my_app.log");
+    client.set_log_level("DEBUG");  // DEBUG, INFO, WARN, ERROR
+    client.set_log_colors_enabled(true);
+    client.set_log_timestamps_enabled(true);
+    
+    // Configure log rotation
+    client.set_log_rotation_size(10 * 1024 * 1024);  // 10MB
+    client.set_log_retention_count(5);  // Keep 5 old log files
+    
+    // Check logging status
+    std::cout << "Logging enabled: " << client.is_logging_enabled() << std::endl;
+    std::cout << "Log file: " << client.get_log_file_path() << std::endl;
+    std::cout << "Log level: " << static_cast<int>(client.get_log_level()) << std::endl;
+    
+    client.start();
+    
+    // Clear log file if needed
+    // client.clear_log_file();
     
     return 0;
 }
@@ -310,13 +360,18 @@ bool is_encryption_enabled() const;
 std::string get_encryption_key() const;
 bool set_encryption_key(const std::string& key_hex);
 std::string generate_new_encryption_key();
+bool is_peer_encrypted(const std::string& peer_id) const;
 
 // Configuration persistence
 bool load_configuration();
 bool save_configuration();
+bool set_data_directory(const std::string& directory_path);
+std::string get_data_directory() const;
 int load_and_reconnect_peers();
 bool load_historical_peers();
 bool save_historical_peers();
+void clear_historical_peers();
+std::vector<RatsPeer> get_historical_peers() const;
 
 // GossipSub publish-subscribe messaging
 GossipSub& get_gossipsub();
@@ -363,6 +418,22 @@ std::vector<ConnectionAttemptResult> test_connection_strategies(const std::strin
 void set_advanced_connection_callback(AdvancedConnectionCallback callback);
 void set_nat_traversal_progress_callback(NatTraversalProgressCallback callback);
 void set_ice_candidate_callback(IceCandidateDiscoveredCallback callback);
+
+// Logging Control API
+void set_logging_enabled(bool enabled);
+bool is_logging_enabled() const;
+void set_log_file_path(const std::string& file_path);
+std::string get_log_file_path() const;
+void set_log_level(LogLevel level);
+void set_log_level(const std::string& level_str);
+LogLevel get_log_level() const;
+void set_log_colors_enabled(bool enabled);
+bool is_log_colors_enabled() const;
+void set_log_timestamps_enabled(bool enabled);
+bool is_log_timestamps_enabled() const;
+void set_log_rotation_size(size_t max_size_bytes);
+void set_log_retention_count(int count);
+void clear_log_file();
 ```
 
 ### Configuration Structures
@@ -434,6 +505,12 @@ struct RatsPeer {
     uint32_t rtt_ms;
     uint32_t packet_loss_percent;
     std::string transport_protocol;
+    
+    // Helper methods
+    bool is_handshake_completed() const;
+    bool is_handshake_failed() const;
+    bool is_ice_connected() const;
+    bool is_fully_connected() const;
 };
 ```
 
