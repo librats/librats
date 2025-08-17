@@ -2830,7 +2830,7 @@ bool RatsClient::deserialize_peer_from_persistence(const nlohmann::json& json, s
 
 std::string RatsClient::get_config_file_path() const {
     #ifdef TESTING
-        return data_directory_ + "/config_" + std::to_string(listen_port_) + ".json";
+        return "config_" + std::to_string(listen_port_) + ".json";
     #else
         return data_directory_ + "/" + CONFIG_FILE_NAME;
     #endif
@@ -2838,7 +2838,7 @@ std::string RatsClient::get_config_file_path() const {
 
 std::string RatsClient::get_peers_file_path() const {
     #ifdef TESTING
-        return data_directory_ + "/peers_" + std::to_string(listen_port_) + ".json";
+        return "peers_" + std::to_string(listen_port_) + ".json";
     #else
         return data_directory_ + "/" + PEERS_FILE_NAME;
     #endif
@@ -2846,7 +2846,7 @@ std::string RatsClient::get_peers_file_path() const {
 
 std::string RatsClient::get_peers_ever_file_path() const {
     #ifdef TESTING
-        return data_directory_ + "/peers_ever_" + std::to_string(listen_port_) + ".json";
+        return "peers_ever_" + std::to_string(listen_port_) + ".json";
     #else
         return data_directory_ + "/" + PEERS_EVER_FILE_NAME;
     #endif
@@ -3108,16 +3108,22 @@ int RatsClient::load_and_reconnect_peers() {
         return 0;
     }
     
-    LOG_CLIENT_INFO("Loading saved peers from " << get_peers_file_path());
+    std::string peers_file_path;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        peers_file_path = get_peers_file_path();
+    }
+
+    LOG_CLIENT_INFO("Loading saved peers from " << peers_file_path);
     
     // Check if peers file exists
-    if (!file_exists(get_peers_file_path())) {
+    if (!file_exists(peers_file_path)) {
         LOG_CLIENT_INFO("No saved peers file found");
         return 0;
     }
     
     try {
-        std::string peers_data = read_file_text_cpp(get_peers_file_path());
+        std::string peers_data = read_file_text_cpp(peers_file_path);
         if (peers_data.empty()) {
             LOG_CLIENT_INFO("Peers file is empty");
             return 0;
