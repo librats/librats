@@ -605,17 +605,17 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
     }
 }
 
-bool RatsClient::send_to_peer(socket_t socket, const std::string& data) {
+bool RatsClient::send_string_to_peer(socket_t socket, const std::string& data) {
     // Convert string to binary and use the primary send_binary_to_peer method
     std::vector<uint8_t> binary_data(data.begin(), data.end());
     return send_binary_to_peer(socket, binary_data, MessageDataType::STRING);
 }
 
-bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& json_data) {
+bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& data) {
     try {
         // Serialize JSON and convert to binary, then use the primary send_binary_to_peer method
-        std::string data = json_data.dump();
-        std::vector<uint8_t> binary_data(data.begin(), data.end());
+        std::string json_string = data.dump();
+        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
         return send_binary_to_peer(socket, binary_data, MessageDataType::JSON);
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
@@ -633,17 +633,17 @@ bool RatsClient::send_binary_to_peer_by_hash(const std::string& peer_hash_id, co
     return send_binary_to_peer(it->second.socket, data, message_type);
 }
 
-bool RatsClient::send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
+bool RatsClient::send_string_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
     // Convert string to binary and use primary binary method with STRING type
     std::vector<uint8_t> binary_data(data.begin(), data.end());
     return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::STRING);
 }
 
-bool RatsClient::send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& json_data) {
+bool RatsClient::send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& data) {
     try {
         // Serialize JSON and convert to binary, then use primary binary method with JSON type
-        std::string data = json_data.dump();
-        std::vector<uint8_t> binary_data(data.begin(), data.end());
+        std::string json_string = data.dump();
+        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
         return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::JSON);
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
@@ -651,11 +651,11 @@ bool RatsClient::send_json_to_peer_by_hash(const std::string& peer_hash_id, cons
     }
 }
 
-int RatsClient::broadcast_json_to_peers(const nlohmann::json& json_data) {
+int RatsClient::broadcast_json_to_peers(const nlohmann::json& data) {
     try {
         // Serialize JSON and convert to binary, then use primary binary method with JSON type
-        std::string data = json_data.dump();
-        std::vector<uint8_t> binary_data(data.begin(), data.end());
+        std::string json_string = data.dump();
+        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
         return broadcast_binary_to_peers(binary_data, MessageDataType::JSON);
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to serialize JSON message for broadcast: " << e.what());
@@ -696,7 +696,7 @@ int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data, Mess
     return sent_count;
 }
 
-int RatsClient::broadcast_to_peers(const std::string& data) {
+int RatsClient::broadcast_string_to_peers(const std::string& data) {
     // Convert string to binary and use primary binary method with STRING type
     std::vector<uint8_t> binary_data(data.begin(), data.end());
     return broadcast_binary_to_peers(binary_data, MessageDataType::STRING);
@@ -1680,7 +1680,7 @@ void run_rats_client_demo(int listen_port, const std::string& peer_host, int pee
         } else {
             // Handle as plain text
             std::string response = "Echo: " + data;
-            client.send_to_peer(socket, response);
+            client.send_string_to_peer(socket, response);
         }
     });
     
@@ -2036,7 +2036,7 @@ bool RatsClient::send_handshake_unlocked(socket_t socket, const std::string& our
     std::string handshake_msg = create_handshake_message("handshake", our_peer_id);
     LOG_CLIENT_DEBUG("Sending handshake to socket " << socket << ": " << handshake_msg);
     
-    if (!send_to_peer(socket, handshake_msg)) {
+    if (!send_string_to_peer(socket, handshake_msg)) {
         LOG_CLIENT_ERROR("Failed to send handshake to socket " << socket);
         return false;
     }

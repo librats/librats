@@ -339,20 +339,20 @@ public:
     bool send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data, MessageDataType message_type = MessageDataType::BINARY);
 
     /**
-     * Send data to a specific peer (convenience wrapper for strings)
+     * Send string data to a specific peer
      * @param socket Target peer socket
-     * @param data Data to send
+     * @param data String data to send
      * @return true if sent successfully
      */
-    bool send_to_peer(socket_t socket, const std::string& data);
+    bool send_string_to_peer(socket_t socket, const std::string& data);
 
     /**
-     * Send JSON data to a specific peer (convenience wrapper)
+     * Send JSON data to a specific peer
      * @param socket Target peer socket
-     * @param json_data JSON data to send
+     * @param data JSON data to send
      * @return true if sent successfully
      */
-    bool send_json_to_peer(socket_t socket, const nlohmann::json& json_data);
+    bool send_json_to_peer(socket_t socket, const nlohmann::json& data);
 
     /**
      * Send binary data to a peer by peer hash ID (primary method)
@@ -364,20 +364,20 @@ public:
     bool send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data, MessageDataType message_type = MessageDataType::BINARY);
 
     /**
-     * Send data to a peer by peer hash ID (convenience wrapper for strings)
+     * Send string data to a peer by peer hash ID
      * @param peer_hash_id Target peer hash ID
-     * @param data Data to send
+     * @param data String data to send
      * @return true if sent successfully
      */
-    bool send_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data);
+    bool send_string_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data);
 
     /**
-     * Send JSON data to a peer by peer hash ID (convenience wrapper)
+     * Send JSON data to a peer by peer hash ID
      * @param peer_hash_id Target peer hash ID
-     * @param json_data JSON data to send
+     * @param data JSON data to send
      * @return true if sent successfully
      */
-    bool send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& json_data);
+    bool send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& data);
 
     /**
      * Broadcast binary data to all connected peers (primary method)
@@ -388,18 +388,18 @@ public:
     int broadcast_binary_to_peers(const std::vector<uint8_t>& data, MessageDataType message_type = MessageDataType::BINARY);
 
     /**
-     * Broadcast data to all connected peers (convenience wrapper for strings)
-     * @param data Data to broadcast
+     * Broadcast string data to all connected peers
+     * @param data String data to broadcast
      * @return Number of peers the data was sent to
      */
-    int broadcast_to_peers(const std::string& data);
+    int broadcast_string_to_peers(const std::string& data);
 
     /**
-     * Broadcast JSON data to all connected peers (convenience wrapper)
-     * @param json_data JSON data to broadcast
+     * Broadcast JSON data to all connected peers
+     * @param data JSON data to broadcast
      * @return Number of peers the data was sent to
      */
-    int broadcast_json_to_peers(const nlohmann::json& json_data);
+    int broadcast_json_to_peers(const nlohmann::json& data);
 
     // Connection management
     /**
@@ -455,13 +455,13 @@ public:
     void set_advanced_connection_callback(AdvancedConnectionCallback callback);
 
     /**
-     * Set binary data callback (called when binary data is received - primary method)
+     * Set binary data callback (called when binary data is received)
      * @param callback Function to call when binary data is received
      */
     void set_binary_data_callback(BinaryDataCallback callback);
 
     /**
-     * Set string data callback (called when string data is received - convenience wrapper for strings)
+     * Set string data callback (called when string data is received)
      * @param callback Function to call when string data is received
      */
     void set_string_data_callback(StringDataCallback callback);

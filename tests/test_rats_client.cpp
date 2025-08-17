@@ -155,7 +155,7 @@ TEST_F(RatsClientTest, PeerCommunicationTest) {
     // Set up server callbacks
     server.set_connection_callback([&server](socket_t socket, const std::string& peer_hash_id) {
         // Send welcome message to new peer
-        server.send_to_peer(socket, "Welcome to server!");
+        server.send_string_to_peer(socket, "Welcome to server!");
     });
     
     server.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
@@ -171,7 +171,7 @@ TEST_F(RatsClientTest, PeerCommunicationTest) {
         client_received_data = true;
         
         // Send response
-        client.send_to_peer(socket, "Hello from client!");
+        client.send_string_to_peer(socket, "Hello from client!");
     });
     
     // Start both clients
@@ -195,7 +195,7 @@ TEST_F(RatsClientTest, BroadcastTest) {
     
     server.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
         // When peer connects, broadcast a message
-        int sent = server.broadcast_to_peers("Broadcast message");
+        int sent = server.broadcast_string_to_peers("Broadcast message");
         messages_sent = sent;
     });
     
@@ -208,7 +208,7 @@ TEST_F(RatsClientTest, BroadcastTest) {
     EXPECT_TRUE(server.start());
     
     // Test broadcasting with no peers
-    int sent = server.broadcast_to_peers("No peers message");
+    int sent = server.broadcast_string_to_peers("No peers message");
     EXPECT_EQ(sent, 0);
     
     server.stop();
@@ -357,11 +357,11 @@ TEST_F(RatsClientTest, ErrorHandlingTest) {
     EXPECT_TRUE(valid_client.start());
     
     // Test operations on invalid socket
-    bool send_result = valid_client.send_to_peer(INVALID_SOCKET_VALUE, "test");
+    bool send_result = valid_client.send_string_to_peer(INVALID_SOCKET_VALUE, "test");
     EXPECT_FALSE(send_result);
     
     // Test operations with invalid hash
-    bool send_by_hash_result = valid_client.send_to_peer_by_hash("invalid_hash", "test");
+    bool send_by_hash_result = valid_client.send_string_to_peer_by_hash("invalid_hash", "test");
     EXPECT_FALSE(send_by_hash_result);
     
     // Test connecting to invalid address
@@ -392,7 +392,7 @@ TEST_F(RatsClientTest, MemoryManagementTest) {
         EXPECT_TRUE(client.start());
         
         // Do some operations but don't wait for timeouts
-        client.broadcast_to_peers("test message");
+        client.broadcast_string_to_peers("test message");
         // Skip connection attempts that will timeout
         
         client.stop();
@@ -410,7 +410,7 @@ TEST_F(RatsClientTest, ConcurrentOperationsTest) {
     for (int i = 0; i < 3; ++i) {  // Reduced from 5 to 3
         threads.emplace_back([&client, i]() {
             // Test concurrent broadcasts
-            client.broadcast_to_peers("Message from thread " + std::to_string(i));
+            client.broadcast_string_to_peers("Message from thread " + std::to_string(i));
             
             // Skip connection attempts that will timeout
             
@@ -436,7 +436,7 @@ TEST_F(RatsClientTest, PerformanceTest) {
     
     // Test fewer broadcast operations
     for (int i = 0; i < 10; ++i) {  // Reduced from 100 to 10
-        int sent = client.broadcast_to_peers("Performance test message " + std::to_string(i));
+        int sent = client.broadcast_string_to_peers("Performance test message " + std::to_string(i));
         EXPECT_EQ(sent, 0);  // No peers connected
     }
     
@@ -476,18 +476,18 @@ TEST_F(RatsClientTest, EdgeCasesTest) {
     EXPECT_TRUE(client.start());
     
     // Test empty message sending
-    int sent = client.broadcast_to_peers("");
+    int sent = client.broadcast_string_to_peers("");
     EXPECT_EQ(sent, 0);
     
     // Test null/empty hash operations
-    bool send_result = client.send_to_peer_by_hash("", "test");
+    bool send_result = client.send_string_to_peer_by_hash("", "test");
     EXPECT_FALSE(send_result);
     
     client.disconnect_peer_by_hash("");
     
     // Test very long message
     std::string long_message(10000, 'a');
-    int long_sent = client.broadcast_to_peers(long_message);
+    int long_sent = client.broadcast_string_to_peers(long_message);
     EXPECT_EQ(long_sent, 0);
     
     // Test connecting to localhost on various ports
@@ -520,7 +520,7 @@ TEST_F(RatsClientTest, CallbackExceptionHandlingTest) {
     EXPECT_TRUE(client.is_running());
     
     // These operations should not crash even with throwing callbacks
-    client.broadcast_to_peers("test");
+    client.broadcast_string_to_peers("test");
     client.connect_to_peer("127.0.0.1", 12345);
     
     // Give some time for potential issues
@@ -664,7 +664,7 @@ TEST_F(RatsClientTest, SimultaneousConnectionsToSamePeerTest) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         
         // Broadcast a test message
-        int messages_sent = client.broadcast_to_peers("test_simultaneous_connection");
+        int messages_sent = client.broadcast_string_to_peers("test_simultaneous_connection");
         std::cout << "Messages sent: " << messages_sent << std::endl;
         EXPECT_GE(messages_sent, 1);
         
@@ -1074,7 +1074,7 @@ TEST_F(RatsClientTest, MixedBinaryTextCallbacksTest) {
         EXPECT_TRUE(binary_sent);
         
         // Send text data
-        bool text_sent = client.send_to_peer(peers[0].socket, text_data);
+        bool text_sent = client.send_string_to_peer(peers[0].socket, text_data);
         EXPECT_TRUE(text_sent);
         
         // Wait for both to be received
