@@ -401,7 +401,12 @@ int send_tcp_data(socket_t socket, const std::vector<uint8_t>& data) {
     size_t remaining = data.size();
     
     while (remaining > 0) {
+#ifdef _WIN32
         int bytes_sent = send(socket, buffer + total_sent, remaining, 0);
+#else
+        // Use MSG_NOSIGNAL to prevent SIGPIPE on broken connections
+        int bytes_sent = send(socket, buffer + total_sent, remaining, MSG_NOSIGNAL);
+#endif
         if (bytes_sent == SOCKET_ERROR_VALUE) {
 #ifdef _WIN32
             int error = WSAGetLastError();
@@ -414,6 +419,11 @@ int send_tcp_data(socket_t socket, const std::vector<uint8_t>& data) {
             if (error == EAGAIN || error == EWOULDBLOCK) {
                 // Non-blocking socket would block, try again
                 continue;
+            }
+            if (error == EPIPE || error == ECONNRESET || error == ENOTCONN) {
+                // Connection closed by peer - this is expected during shutdown
+                LOG_SOCKET_DEBUG("Connection closed during send to socket " << socket << " (error: " << strerror(error) << ")");
+                return -1;
             }
 #endif
             LOG_SOCKET_ERROR("Failed to send TCP data to socket " << socket << " (error: " << error << ")");

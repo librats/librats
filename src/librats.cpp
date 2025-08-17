@@ -16,6 +16,17 @@
 #include <stdexcept>
 #include <cstdio> // for std::remove
 
+#ifdef TESTING
+#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", "[pointer: " << this << "] " << message)
+#define LOG_CLIENT_INFO(message)  LOG_INFO("client", "[pointer: " << this << "] " << message)
+#define LOG_CLIENT_WARN(message)  LOG_WARN("client", "[pointer: " << this << "] " << message)
+#define LOG_CLIENT_ERROR(message) LOG_ERROR("client", "[pointer: " << this << "] " << message)
+
+#define LOG_SERVER_DEBUG(message) LOG_DEBUG("server", "[pointer: " << this << "] " << message)
+#define LOG_SERVER_INFO(message)  LOG_INFO("server", "[pointer: " << this << "] " << message)
+#define LOG_SERVER_WARN(message)  LOG_WARN("server", "[pointer: " << this << "] " << message)
+#define LOG_SERVER_ERROR(message) LOG_ERROR("server", "[pointer: " << this << "] " << message)
+#else
 #define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
 #define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
 #define LOG_CLIENT_WARN(message)  LOG_WARN("client", message)
@@ -25,6 +36,7 @@
 #define LOG_SERVER_INFO(message)  LOG_INFO("server", message)
 #define LOG_SERVER_WARN(message)  LOG_WARN("server", message)
 #define LOG_SERVER_ERROR(message) LOG_ERROR("server", message)
+#endif
 
 #define LOG_MAIN_DEBUG(message) LOG_DEBUG("main", message)
 #define LOG_MAIN_INFO(message)  LOG_INFO("main", message)
@@ -260,7 +272,6 @@ socket_t RatsClient::get_peer_socket(const std::string& peer_hash_id) const {
 }
 
 std::string RatsClient::get_our_peer_id() const {
-    std::lock_guard<std::mutex> lock(config_mutex_);
     return our_peer_id_;
 }
 
@@ -4819,7 +4830,7 @@ void RatsClient::on_topic_json_message(const std::string& topic, std::function<v
                 nlohmann::json json_message = nlohmann::json::parse(message);
                 callback(sender_peer_id, topic, json_message);
             } catch (const nlohmann::json::exception& e) {
-                LOG_CLIENT_WARN("Failed to parse JSON message on topic '" << topic << "': " << e.what());
+                LOG_WARN("client", "Failed to parse JSON message on topic '" << topic << "': " << e.what());
                 // Still call callback with empty JSON object to maintain consistency
                 callback(sender_peer_id, topic, nlohmann::json{});
             }
