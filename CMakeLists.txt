@@ -95,6 +95,8 @@ add_library(rats
     src/threadmanager.h
     src/gossipsub.cpp
     src/gossipsub.h
+    src/file_transfer.cpp
+    src/file_transfer.h
 )
 
 # Include directories
@@ -175,6 +177,7 @@ if(BUILD_TESTS)
         tests/test_mdns.cpp
         tests/test_gossipsub.cpp
         tests/test_logging_api_gtest.cpp
+        tests/test_file_transfer.cpp
     )
     
     # Link with GoogleTest and our library

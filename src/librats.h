@@ -9,6 +9,7 @@
 #include "encrypted_socket.h"
 #include "threadmanager.h"
 #include "gossipsub.h" // For ValidationResult enum and GossipSub types
+#include "file_transfer.h" // File transfer functionality
 #include "json.hpp" // nlohmann::json
 #include <string>
 #include <functional>
@@ -1082,6 +1083,170 @@ public:
      */
     void clear_log_file();
 
+    //=============================================================================
+    // File Transfer API
+    //=============================================================================
+    
+    /**
+     * Get the file transfer manager instance
+     * @return Reference to the file transfer manager
+     */
+    FileTransferManager& get_file_transfer_manager();
+    
+    /**
+     * Check if file transfer is available
+     * @return true if file transfer manager is initialized
+     */
+    bool is_file_transfer_available() const;
+    
+    // File Transfer convenience methods
+    /**
+     * Send a file to a peer
+     * @param peer_id Target peer ID
+     * @param file_path Local file path to send
+     * @param remote_filename Optional remote filename (default: use local name)
+     * @return Transfer ID if successful, empty string if failed
+     */
+    std::string send_file(const std::string& peer_id, const std::string& file_path, 
+                         const std::string& remote_filename = "");
+    
+    /**
+     * Send an entire directory to a peer
+     * @param peer_id Target peer ID
+     * @param directory_path Local directory path to send
+     * @param remote_directory_name Optional remote directory name
+     * @param recursive Whether to include subdirectories (default: true)
+     * @return Transfer ID if successful, empty string if failed
+     */
+    std::string send_directory(const std::string& peer_id, const std::string& directory_path,
+                              const std::string& remote_directory_name = "", bool recursive = true);
+    
+    /**
+     * Request a file from a remote peer
+     * @param peer_id Target peer ID
+     * @param remote_file_path Path to file on remote peer
+     * @param local_path Local path where file should be saved
+     * @return Transfer ID if successful, empty string if failed
+     */
+    std::string request_file(const std::string& peer_id, const std::string& remote_file_path,
+                            const std::string& local_path);
+    
+    /**
+     * Request a directory from a remote peer
+     * @param peer_id Target peer ID
+     * @param remote_directory_path Path to directory on remote peer
+     * @param local_directory_path Local path where directory should be saved
+     * @param recursive Whether to include subdirectories (default: true)
+     * @return Transfer ID if successful, empty string if failed
+     */
+    std::string request_directory(const std::string& peer_id, const std::string& remote_directory_path,
+                                 const std::string& local_directory_path, bool recursive = true);
+    
+    /**
+     * Accept an incoming file transfer
+     * @param transfer_id Transfer identifier from request
+     * @param local_path Local path where file should be saved
+     * @return true if accepted successfully
+     */
+    bool accept_file_transfer(const std::string& transfer_id, const std::string& local_path);
+    
+    /**
+     * Reject an incoming file transfer
+     * @param transfer_id Transfer identifier from request
+     * @param reason Optional reason for rejection
+     * @return true if rejected successfully
+     */
+    bool reject_file_transfer(const std::string& transfer_id, const std::string& reason = "");
+    
+    /**
+     * Pause an active file transfer
+     * @param transfer_id Transfer to pause
+     * @return true if paused successfully
+     */
+    bool pause_file_transfer(const std::string& transfer_id);
+    
+    /**
+     * Resume a paused file transfer
+     * @param transfer_id Transfer to resume
+     * @return true if resumed successfully
+     */
+    bool resume_file_transfer(const std::string& transfer_id);
+    
+    /**
+     * Cancel an active or paused file transfer
+     * @param transfer_id Transfer to cancel
+     * @return true if cancelled successfully
+     */
+    bool cancel_file_transfer(const std::string& transfer_id);
+    
+    /**
+     * Get file transfer progress information
+     * @param transfer_id Transfer to query
+     * @return Progress information or nullptr if not found
+     */
+    std::shared_ptr<FileTransferProgress> get_file_transfer_progress(const std::string& transfer_id) const;
+    
+    /**
+     * Get all active file transfers
+     * @return Vector of transfer progress objects
+     */
+    std::vector<std::shared_ptr<FileTransferProgress>> get_active_file_transfers() const;
+    
+    /**
+     * Get file transfer statistics
+     * @return JSON object with transfer statistics
+     */
+    nlohmann::json get_file_transfer_statistics() const;
+    
+    /**
+     * Set file transfer configuration
+     * @param config Transfer configuration settings
+     */
+    void set_file_transfer_config(const FileTransferConfig& config);
+    
+    /**
+     * Get current file transfer configuration
+     * @return Current configuration settings
+     */
+    const FileTransferConfig& get_file_transfer_config() const;
+    
+    // File Transfer Event Handlers
+    /**
+     * Set file transfer progress callback
+     * @param callback Function to call with progress updates
+     */
+    void on_file_transfer_progress(FileTransferProgressCallback callback);
+    
+    /**
+     * Set file transfer completion callback
+     * @param callback Function to call when transfers complete
+     */
+    void on_file_transfer_completed(FileTransferCompletedCallback callback);
+    
+    /**
+     * Set incoming file transfer request callback
+     * @param callback Function to call when receiving transfer requests
+     */
+    void on_file_transfer_request(FileTransferRequestCallback callback);
+    
+    /**
+     * Set directory transfer progress callback
+     * @param callback Function to call with directory transfer progress
+     */
+    void on_directory_transfer_progress(DirectoryTransferProgressCallback callback);
+    
+    /**
+     * Set file request callback (called when receiving file requests)
+     * @param callback Function to call when receiving file requests
+     */
+    void on_file_request(FileRequestCallback callback);
+    
+    /**
+     * Set directory request callback (called when receiving directory requests)
+     * @param callback Function to call when receiving directory requests
+     */
+    void on_directory_request(DirectoryRequestCallback callback);
+
 private:
     int listen_port_;
     int max_peers_;
@@ -1156,6 +1321,9 @@ private:
     
     // GossipSub for publish-subscribe messaging
     std::unique_ptr<GossipSub> gossipsub_;
+    
+    // File transfer manager
+    std::unique_ptr<FileTransferManager> file_transfer_manager_;
     
     void server_loop();
     void management_loop();

@@ -355,4 +355,259 @@ bool set_current_directory(const char* path) {
     return chdir(path) == 0;
 }
 
+// File metadata operations
+uint64_t get_file_modified_time(const char* path) {
+    if (!path) return 0;
+    
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return static_cast<uint64_t>(st.st_mtime);
+    }
+    return 0;
+}
+
+std::string get_file_extension(const char* path) {
+    if (!path) return "";
+    
+    const char* dot = strrchr(path, '.');
+    if (dot && dot != path) {
+        return std::string(dot);
+    }
+    return "";
+}
+
+std::string get_filename_from_path(const char* path) {
+    if (!path) return "";
+    
+    const char* filename = strrchr(path, '/');
+    if (!filename) {
+        filename = strrchr(path, '\\');
+    }
+    
+    if (filename) {
+        return std::string(filename + 1);
+    } else {
+        return std::string(path);
+    }
+}
+
+std::string get_parent_directory(const char* path) {
+    if (!path) return "";
+    
+    std::string str_path(path);
+    size_t pos = str_path.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        return str_path.substr(0, pos);
+    }
+    return "";
+}
+
+// File chunk operations
+bool write_file_chunk(const char* path, uint64_t offset, const void* data, size_t size) {
+    if (!path || !data) return false;
+    
+    FILE* file = fopen(path, "r+b");
+    if (!file) {
+        // Try to create the file if it doesn't exist
+        file = fopen(path, "w+b");
+        if (!file) {
+            LOG_ERROR("FS", "Failed to open file for chunk writing: " << path);
+            return false;
+        }
+    }
+    
+    if (fseek(file, offset, SEEK_SET) != 0) {
+        LOG_ERROR("FS", "Failed to seek to offset " << offset << " in file: " << path);
+        fclose(file);
+        return false;
+    }
+    
+    size_t written = fwrite(data, 1, size, file);
+    fclose(file);
+    
+    if (written != size) {
+        LOG_ERROR("FS", "Failed to write complete chunk to file: " << path);
+        return false;
+    }
+    
+    return true;
+}
+
+bool read_file_chunk(const char* path, uint64_t offset, void* buffer, size_t size) {
+    if (!path || !buffer) return false;
+    
+    FILE* file = fopen(path, "rb");
+    if (!file) {
+        LOG_ERROR("FS", "Failed to open file for chunk reading: " << path);
+        return false;
+    }
+    
+    if (fseek(file, offset, SEEK_SET) != 0) {
+        LOG_ERROR("FS", "Failed to seek to offset " << offset << " in file: " << path);
+        fclose(file);
+        return false;
+    }
+    
+    size_t bytes_read = fread(buffer, 1, size, file);
+    fclose(file);
+    
+    if (bytes_read != size) {
+        LOG_ERROR("FS", "Failed to read complete chunk from file: " << path);
+        return false;
+    }
+    
+    return true;
+}
+
+// Advanced file operations
+bool create_file_with_size(const char* path, uint64_t size) {
+    if (!path) return false;
+    
+    FILE* file = fopen(path, "wb");
+    if (!file) {
+        LOG_ERROR("FS", "Failed to create file with size: " << path);
+        return false;
+    }
+    
+    if (size > 0) {
+        // Pre-allocate file space by seeking to size-1 and writing a byte
+        if (fseek(file, size - 1, SEEK_SET) == 0) {
+            fputc(0, file);
+        }
+    }
+    
+    fclose(file);
+    return true;
+}
+
+bool rename_file(const char* old_path, const char* new_path) {
+    if (!old_path || !new_path) return false;
+    
+    return rename(old_path, new_path) == 0;
+}
+
+// Path utilities
+std::string combine_paths(const std::string& base, const std::string& relative) {
+    if (base.empty()) return relative;
+    if (relative.empty()) return base;
+    
+    std::string result = base;
+    
+    // Ensure base path ends with separator
+    if (result.back() != '/' && result.back() != '\\') {
+        result += '/';
+    }
+    
+    // Remove leading separator from relative path
+    std::string rel = relative;
+    if (rel.front() == '/' || rel.front() == '\\') {
+        rel = rel.substr(1);
+    }
+    
+    return result + rel;
+}
+
+bool validate_path(const char* path, bool check_write_access) {
+    if (!path) return false;
+    
+    if (check_write_access) {
+        // Check if we can write to the parent directory
+        std::string parent = get_parent_directory(path);
+        if (!parent.empty() && !directory_exists(parent.c_str())) {
+            return false;
+        }
+        // Additional write permission checks could be added here
+    } else {
+        // Check if file exists and is readable
+        if (!file_exists(path)) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+// Directory listing
+bool list_directory(const char* path, std::vector<DirectoryEntry>& entries) {
+    if (!path || !directory_exists(path)) return false;
+    
+    entries.clear();
+    
+#ifdef _WIN32
+    WIN32_FIND_DATAA find_data;
+    std::string search_path = std::string(path) + "\\*";
+    HANDLE find_handle = FindFirstFileA(search_path.c_str(), &find_data);
+    
+    if (find_handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    
+    do {
+        // Skip "." and ".." entries
+        if (strcmp(find_data.cFileName, ".") == 0 || strcmp(find_data.cFileName, "..") == 0) {
+            continue;
+        }
+        
+        DirectoryEntry entry;
+        entry.name = find_data.cFileName;
+        entry.path = combine_paths(path, entry.name);
+        entry.is_directory = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        
+        if (!entry.is_directory) {
+            entry.size = (static_cast<uint64_t>(find_data.nFileSizeHigh) << 32) | find_data.nFileSizeLow;
+        } else {
+            entry.size = 0;
+        }
+        
+        // Convert Windows FILETIME to Unix timestamp
+        FILETIME ft = find_data.ftLastWriteTime;
+        LARGE_INTEGER li;
+        li.LowPart = ft.dwLowDateTime;
+        li.HighPart = ft.dwHighDateTime;
+        // Convert from 100ns intervals since 1601 to seconds since 1970
+        entry.modified_time = (li.QuadPart - 116444736000000000LL) / 10000000LL;
+        
+        entries.push_back(entry);
+        
+    } while (FindNextFileA(find_handle, &find_data));
+    
+    FindClose(find_handle);
+    
+#else
+    DIR* dir = opendir(path);
+    if (!dir) {
+        return false;
+    }
+    
+    struct dirent* entry_ptr;
+    while ((entry_ptr = readdir(dir)) != nullptr) {
+        // Skip "." and ".." entries
+        if (strcmp(entry_ptr->d_name, ".") == 0 || strcmp(entry_ptr->d_name, "..") == 0) {
+            continue;
+        }
+        
+        DirectoryEntry entry;
+        entry.name = entry_ptr->d_name;
+        entry.path = combine_paths(path, entry.name);
+        
+        struct stat st;
+        if (stat(entry.path.c_str(), &st) == 0) {
+            entry.is_directory = S_ISDIR(st.st_mode);
+            entry.size = entry.is_directory ? 0 : static_cast<uint64_t>(st.st_size);
+            entry.modified_time = static_cast<uint64_t>(st.st_mtime);
+        } else {
+            entry.is_directory = false;
+            entry.size = 0;
+            entry.modified_time = 0;
+        }
+        
+        entries.push_back(entry);
+    }
+    
+    closedir(dir);
+#endif
+    
+    return true;
+}
+
 } // namespace librats 
