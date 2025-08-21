@@ -28,6 +28,16 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Message Validation**: Configurable message validation and filtering
 - **Topic-based Communication**: Organized messaging with topic subscriptions
 
+### **High-Performance File Transfer**
+- **Chunked Transfers**: Efficient file splitting with parallel chunk transmission
+- **Resume Capability**: Automatic resume of interrupted transfers with checksum validation
+- **Directory Transfer**: Complete directory trees with recursive subdirectory support
+- **Transfer Control**: Pause, resume, cancel operations with real-time progress tracking
+- **Security Validation**: SHA256 checksums for data integrity verification
+- **Configurable Performance**: Adjustable chunk size, concurrency, and timeout settings
+- **Request/Response Model**: Secure file requests with acceptance/rejection callbacks
+- **Transfer Statistics**: Comprehensive metrics including speed, ETA, and completion rates
+
 ### **Comprehensive NAT Traversal**
 - **ICE (Interactive Connectivity Establishment)**: RFC 8445 compliant with full candidate gathering
 - **TURN Relay Support**: RFC 5766 compliant relay through TURN servers
@@ -254,6 +264,94 @@ int main() {
 }
 ```
 
+### File and Directory Transfer
+
+```cpp
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Set up file transfer callbacks
+    client.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
+        std::cout << "Transfer " << progress.transfer_id.substr(0, 8) 
+                  << ": " << progress.get_completion_percentage() << "% complete" << std::endl;
+        std::cout << "Rate: " << (progress.transfer_rate_bps / 1024) << " KB/s" << std::endl;
+    });
+    
+    client.on_file_transfer_completed([](const std::string& transfer_id, bool success, const std::string& error) {
+        if (success) {
+            std::cout << "✅ Transfer completed: " << transfer_id.substr(0, 8) << std::endl;
+        } else {
+            std::cout << "❌ Transfer failed: " << error << std::endl;
+        }
+    });
+    
+    client.on_file_transfer_request([](const std::string& peer_id, const librats::FileMetadata& metadata, const std::string& transfer_id) {
+        std::cout << "📥 File transfer request from " << peer_id.substr(0, 8) << std::endl;
+        std::cout << "File: " << metadata.filename << " (" << metadata.file_size << " bytes)" << std::endl;
+        
+        // Auto-accept files smaller than 10MB
+        return metadata.file_size < 10 * 1024 * 1024;
+    });
+    
+    client.on_file_request([](const std::string& peer_id, const std::string& file_path, const std::string& transfer_id) {
+        std::cout << "📤 File request from " << peer_id.substr(0, 8) << ": " << file_path << std::endl;
+        
+        // Allow access to files in "shared" directory
+        return file_path.find("../") == std::string::npos && 
+               file_path.substr(0, 7) == "shared/";
+    });
+    
+    // Configure file transfer settings
+    librats::FileTransferConfig config;
+    config.chunk_size = 128 * 1024;          // 128KB chunks
+    config.max_concurrent_chunks = 8;        // 8 chunks in parallel
+    config.verify_checksums = true;          // Verify data integrity
+    config.allow_resume = true;              // Enable resume capability
+    config.temp_directory = "./temp_files";  // Temporary file storage
+    client.set_file_transfer_config(config);
+    
+    client.start();
+    client.start_dht_discovery();
+    
+    // Send a file to a peer
+    std::string transfer_id = client.send_file("peer_id_here", "document.pdf", "shared_document.pdf");
+    if (!transfer_id.empty()) {
+        std::cout << "File transfer started: " << transfer_id << std::endl;
+    }
+    
+    // Send entire directory
+    std::string dir_transfer = client.send_directory("peer_id_here", "./project_files", "backup", true);
+    if (!dir_transfer.empty()) {
+        std::cout << "Directory transfer started: " << dir_transfer << std::endl;
+    }
+    
+    // Request a file from remote peer
+    std::string request_id = client.request_file("peer_id_here", "shared/report.docx", "./downloads/report.docx");
+    
+    // Get transfer progress
+    auto progress = client.get_file_transfer_progress(transfer_id);
+    if (progress) {
+        std::cout << "Progress: " << progress->get_completion_percentage() << "%" << std::endl;
+        std::cout << "ETA: " << progress->estimated_time_remaining.count() << "ms" << std::endl;
+    }
+    
+    // Pause/resume/cancel transfers
+    client.pause_file_transfer(transfer_id);
+    client.resume_file_transfer(transfer_id);
+    // client.cancel_file_transfer(transfer_id);
+    
+    // Get all active transfers
+    auto active_transfers = client.get_active_file_transfers();
+    std::cout << "Active transfers: " << active_transfers.size() << std::endl;
+    
+    // Get transfer statistics
+    auto stats = client.get_file_transfer_statistics();
+    std::cout << "Total bytes transferred: " << stats["total_bytes_transferred"] << std::endl;
+    
+    return 0;
+}
+```
+
 ### Configuration Persistence
 
 ```cpp
@@ -434,6 +532,38 @@ bool is_log_timestamps_enabled() const;
 void set_log_rotation_size(size_t max_size_bytes);
 void set_log_retention_count(int count);
 void clear_log_file();
+
+// File Transfer API
+FileTransferManager& get_file_transfer_manager();
+bool is_file_transfer_available() const;
+
+// File Transfer Operations
+std::string send_file(const std::string& peer_id, const std::string& file_path, const std::string& remote_filename = "");
+std::string send_directory(const std::string& peer_id, const std::string& directory_path, const std::string& remote_directory_name = "", bool recursive = true);
+std::string request_file(const std::string& peer_id, const std::string& remote_file_path, const std::string& local_path);
+std::string request_directory(const std::string& peer_id, const std::string& remote_directory_path, const std::string& local_directory_path, bool recursive = true);
+
+// Transfer Control
+bool accept_file_transfer(const std::string& transfer_id, const std::string& local_path);
+bool reject_file_transfer(const std::string& transfer_id, const std::string& reason = "");
+bool pause_file_transfer(const std::string& transfer_id);
+bool resume_file_transfer(const std::string& transfer_id);
+bool cancel_file_transfer(const std::string& transfer_id);
+
+// Transfer Information
+std::shared_ptr<FileTransferProgress> get_file_transfer_progress(const std::string& transfer_id) const;
+std::vector<std::shared_ptr<FileTransferProgress>> get_active_file_transfers() const;
+nlohmann::json get_file_transfer_statistics() const;
+void set_file_transfer_config(const FileTransferConfig& config);
+const FileTransferConfig& get_file_transfer_config() const;
+
+// Transfer Event Handlers
+void on_file_transfer_progress(FileTransferProgressCallback callback);
+void on_file_transfer_completed(FileTransferCompletedCallback callback);
+void on_file_transfer_request(FileTransferRequestCallback callback);
+void on_directory_transfer_progress(DirectoryTransferProgressCallback callback);
+void on_file_request(FileRequestCallback callback);
+void on_directory_request(DirectoryRequestCallback callback);
 ```
 
 ### Configuration Structures
@@ -511,6 +641,83 @@ struct RatsPeer {
     bool is_handshake_failed() const;
     bool is_ice_connected() const;
     bool is_fully_connected() const;
+};
+```
+
+#### `FileTransferConfig`
+File transfer configuration structure:
+
+```cpp
+struct FileTransferConfig {
+    uint32_t chunk_size;            // Size of each chunk (default: 64KB)
+    uint32_t max_concurrent_chunks; // Max chunks in flight (default: 4)
+    uint32_t max_retries;           // Max retry attempts per chunk (default: 3)
+    uint32_t timeout_seconds;       // Timeout per chunk (default: 30)
+    bool verify_checksums;          // Verify chunk checksums (default: true)
+    bool allow_resume;              // Allow resuming interrupted transfers (default: true)
+    std::string temp_directory;     // Temporary directory for incomplete files
+    
+    FileTransferConfig() 
+        : chunk_size(65536),        // 64KB chunks
+          max_concurrent_chunks(4), 
+          max_retries(3),
+          timeout_seconds(30),
+          verify_checksums(true),
+          allow_resume(true),
+          temp_directory("./temp_transfers") {}
+};
+```
+
+#### `FileTransferProgress`
+Transfer progress tracking structure:
+
+```cpp
+struct FileTransferProgress {
+    std::string transfer_id;        // Transfer identifier
+    std::string peer_id;            // Peer we're transferring with
+    FileTransferDirection direction; // Send or receive
+    FileTransferStatus status;      // Current status
+    
+    // File information
+    std::string filename;           // File being transferred
+    std::string local_path;         // Local file path
+    uint64_t file_size;             // Total file size
+    
+    // Progress tracking
+    uint64_t bytes_transferred;     // Bytes completed
+    uint64_t total_bytes;           // Total bytes to transfer
+    uint32_t chunks_completed;      // Chunks successfully transferred
+    uint32_t total_chunks;          // Total chunks in transfer
+    
+    // Performance metrics
+    std::chrono::steady_clock::time_point start_time;    // Transfer start time
+    std::chrono::steady_clock::time_point last_update;   // Last progress update
+    double transfer_rate_bps;       // Current transfer rate (bytes/second)
+    double average_rate_bps;        // Average transfer rate since start
+    std::chrono::milliseconds estimated_time_remaining; // ETA
+    
+    // Error information
+    std::string error_message;      // Error details if failed
+    uint32_t retry_count;           // Number of retries attempted
+    
+    // Helper methods
+    double get_completion_percentage() const;  // 0.0 to 100.0
+    std::chrono::milliseconds get_elapsed_time() const;
+    void update_transfer_rates(uint64_t new_bytes_transferred);
+};
+```
+
+#### `FileMetadata`
+File information structure:
+
+```cpp
+struct FileMetadata {
+    std::string filename;           // Original filename
+    std::string relative_path;      // Relative path within directory structure
+    uint64_t file_size;             // Total file size in bytes
+    uint64_t last_modified;         // Last modification timestamp
+    std::string mime_type;          // MIME type of the file
+    std::string checksum;           // Full file checksum
 };
 ```
 
@@ -630,68 +837,91 @@ After building, you'll find:
 ./build/bin/rats-client 8081 localhost 8080
 ```
 
-### Custom Application with GossipSub
+### File Sharing Application
 
 ```cpp
 #include "librats.h"
 
-class ChatApp {
+class FileShareApp {
 private:
     librats::RatsClient client_;
     
 public:
-    ChatApp(int port) : client_(port) {
-        // Set up P2P message handlers
-        client_.on("chat_message", [this](const std::string& peer_id, const nlohmann::json& data) {
-            std::cout << "[P2P] " << peer_id.substr(0, 8) << ": " 
-                      << data["message"].get<std::string>() << std::endl;
+    FileShareApp(int port) : client_(port) {
+        // Set up file transfer callbacks
+        client_.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
+            std::cout << "📊 " << progress.filename << ": " 
+                      << progress.get_completion_percentage() << "% complete" << std::endl;
+            std::cout << "Rate: " << (progress.transfer_rate_bps / 1024 / 1024) << " MB/s" << std::endl;
         });
         
-        // Set up GossipSub topic handlers
-        client_.on_topic_message("global_chat", [this](const std::string& peer_id, const std::string& topic, const std::string& message) {
-            std::cout << "[" << topic << "] " << peer_id.substr(0, 8) << ": " << message << std::endl;
+        client_.on_file_transfer_completed([](const std::string& transfer_id, bool success, const std::string& error) {
+            if (success) {
+                std::cout << "✅ Transfer completed: " << transfer_id.substr(0, 8) << std::endl;
+            } else {
+                std::cout << "❌ Transfer failed: " << error << std::endl;
+            }
         });
         
-        client_.on_topic_json_message("events", [this](const std::string& peer_id, const std::string& topic, const nlohmann::json& data) {
-            std::cout << "[EVENT] " << data["type"] << " from " << peer_id.substr(0, 8) << std::endl;
+        client_.on_file_transfer_request([](const std::string& peer_id, const librats::FileMetadata& metadata, const std::string& transfer_id) {
+            std::cout << "📥 File request from " << peer_id.substr(0, 8) << std::endl;
+            std::cout << "File: " << metadata.filename << " (" << metadata.file_size << " bytes)" << std::endl;
+            
+            // Auto-accept files smaller than 100MB
+            return metadata.file_size < 100 * 1024 * 1024;
+        });
+        
+        client_.on_file_request([](const std::string& peer_id, const std::string& file_path, const std::string& transfer_id) {
+            std::cout << "📤 File request from " << peer_id.substr(0, 8) << ": " << file_path << std::endl;
+            
+            // Allow access to files in "shared" directory only
+            return file_path.find("../") == std::string::npos && 
+                   file_path.substr(0, 7) == "shared/";
         });
         
         // Set up connection callbacks
         client_.set_connection_callback([](auto socket, const std::string& peer_id) {
-            std::cout << "User connected: " << peer_id.substr(0, 8) << std::endl;
+            std::cout << "Peer connected: " << peer_id.substr(0, 8) << std::endl;
         });
         
-        client_.on_topic_peer_joined("global_chat", [](const std::string& peer_id, const std::string& topic) {
-            std::cout << peer_id.substr(0, 8) << " joined " << topic << std::endl;
-        });
+        // Configure optimized file transfer settings
+        librats::FileTransferConfig config;
+        config.chunk_size = 256 * 1024;         // 256KB chunks for better performance
+        config.max_concurrent_chunks = 8;       // 8 parallel chunks
+        config.verify_checksums = true;         // Ensure data integrity
+        config.allow_resume = true;             // Enable resume capability
+        client_.set_file_transfer_config(config);
         
         // Start all services
         client_.start();
         client_.start_dht_discovery();
-        client_.start_mdns_discovery();
-        
-        // Subscribe to topics
-        client_.subscribe_to_topic("global_chat");
-        client_.subscribe_to_topic("events");
+        client_.start_mdns_discovery("file-share");
     }
     
-    void send_p2p_message(const std::string& message) {
-        nlohmann::json msg;
-        msg["message"] = message;
-        msg["timestamp"] = std::time(nullptr);
-        client_.send("chat_message", msg);
+    std::string share_file(const std::string& peer_id, const std::string& file_path) {
+        return client_.send_file(peer_id, file_path);
     }
     
-    void broadcast_to_topic(const std::string& message) {
-        client_.publish_to_topic("global_chat", message);
+    std::string share_directory(const std::string& peer_id, const std::string& directory_path) {
+        return client_.send_directory(peer_id, directory_path, "", true);
     }
     
-    void send_event(const std::string& event_type, const nlohmann::json& data) {
-        nlohmann::json event;
-        event["type"] = event_type;
-        event["data"] = data;
-        event["timestamp"] = std::time(nullptr);
-        client_.publish_json_to_topic("events", event);
+    std::string request_file(const std::string& peer_id, const std::string& remote_file, const std::string& local_path) {
+        return client_.request_file(peer_id, remote_file, local_path);
+    }
+    
+    void pause_transfer(const std::string& transfer_id) {
+        client_.pause_file_transfer(transfer_id);
+    }
+    
+    void resume_transfer(const std::string& transfer_id) {
+        client_.resume_file_transfer(transfer_id);
+    }
+    
+    void get_transfer_stats() {
+        auto stats = client_.get_file_transfer_statistics();
+        std::cout << "Total bytes transferred: " << stats["total_bytes_transferred"] << std::endl;
+        std::cout << "Active transfers: " << stats["active_transfers"] << std::endl;
     }
     
     void connect_to(const std::string& host, int port) {
@@ -705,6 +935,7 @@ public:
 Comprehensive documentation is available:
 
 - **[NAT Traversal Guide](NAT_TRAVERSAL.md)** - Complete NAT traversal documentation
+- **[File Transfer Example](FILE_TRANSFER_EXAMPLE.md)** - Efficient P2P file and directory transfer
 - **[Custom Protocol Setup](CUSTOM_PROTOCOL.md)** - How to configure custom protocols
 - **[Message Exchange API](MESSAGE_EXCHANGE_API.md)** - Event-driven messaging system  
 - **[GossipSub Example](GOSSIPSUB_EXAMPLE.md)** - Publish-subscribe messaging with GossipSub
