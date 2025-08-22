@@ -17,6 +17,7 @@
 #include "logger.h"
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 // Network utilities module logging macros
 #define LOG_NETUTILS_DEBUG(message) LOG_DEBUG("network_utils", message)
@@ -110,6 +111,60 @@ std::string resolve_hostname_v6(const std::string& hostname) {
 }
 
 bool is_valid_ipv4(const std::string& ip_str) {
+#ifdef __APPLE__
+    // macOS-specific validation to handle inet_pton() accepting leading zeros
+    // inet_pton() behaves differently on macOS vs Linux/Windows for leading zeros
+    
+    // Split the IP string into octets
+    std::vector<std::string> octets;
+    std::string current_octet;
+    
+    for (char c : ip_str) {
+        if (c == '.') {
+            octets.push_back(current_octet);
+            current_octet.clear();
+        } else {
+            current_octet += c;
+        }
+    }
+    
+    // Add the last octet
+    if (!current_octet.empty()) {
+        octets.push_back(current_octet);
+    }
+    
+    // Must have exactly 4 octets
+    if (octets.size() != 4) {
+        return false;
+    }
+    
+    // Check each octet for validity
+    for (const std::string& octet : octets) {
+        // Empty octet is invalid
+        if (octet.empty()) {
+            return false;
+        }
+        
+        // Check for leading zeros (invalid except for "0")
+        if (octet.length() > 1 && octet[0] == '0') {
+            return false;
+        }
+        
+        // Check that all characters are digits
+        for (char c : octet) {
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        
+        // Check range (0-255)
+        int value = std::stoi(octet);
+        if (value < 0 || value > 255) {
+            return false;
+        }
+    }
+#endif
+    // Linux/Windows: inet_pton() already rejects leading zeros correctly
     struct sockaddr_in sa;
     return inet_pton(AF_INET, ip_str.c_str(), &sa.sin_addr) == 1;
 }
