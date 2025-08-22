@@ -543,7 +543,7 @@ TEST_F(RatsClientTest, SimultaneousConnectionsToSamePeerTest) {
         "config_58889.json", "peers_58889.json"
     };
     for (const auto& file : cleanup_files) {
-        if (file_exists(file)) {
+        if (file_or_directory_exists(file)) {
             delete_file(file.c_str());
         }
     }

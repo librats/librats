@@ -134,7 +134,7 @@ client.on("file_request", [&client](const std::string& peer_id, const nlohmann::
     nlohmann::json response;
     response["filename"] = filename;
     
-    if (file_exists(filename)) {
+    if (file_or_directory_exists(filename)) {
         response["status"] = "found";
         response["size"] = get_file_size(filename);
         response["content"] = read_file_content(filename);

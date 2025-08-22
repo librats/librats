@@ -11,16 +11,16 @@ class ConfigPersistenceTest : public ::testing::Test {
 protected:
     void clean_test_files() {
         // Old files
-        if (file_exists("config.json")) delete_file("config.json");
-        if (file_exists("peers.rats")) delete_file("peers.rats");
+        if (file_or_directory_exists("config.json")) delete_file("config.json");
+        if (file_or_directory_exists("peers.rats")) delete_file("peers.rats");
 
         // New port-specific files used in tests
         std::vector<int> ports = {8888, 8889, 8890, 8891, 8892};
         for (int port : ports) {
             std::string config_file = "config_" + std::to_string(port) + ".json";
             std::string peers_file = "peers_" + std::to_string(port) + ".json";
-            if (file_exists(config_file)) delete_file(config_file.c_str());
-            if (file_exists(peers_file)) delete_file(peers_file.c_str());
+            if (file_or_directory_exists(config_file)) delete_file(config_file.c_str());
+            if (file_or_directory_exists(peers_file)) delete_file(peers_file.c_str());
         }
     }
 
@@ -56,7 +56,7 @@ TEST_F(ConfigPersistenceTest, PeerIdGenerationAndPersistence) {
     }
     
     // Verify config file was created
-    EXPECT_TRUE(file_exists(config_file));
+    EXPECT_TRUE(file_or_directory_exists(config_file));
     
     // Parse and verify config file content
     std::string config_data = read_file_text_cpp(config_file);
@@ -102,12 +102,12 @@ TEST_F(ConfigPersistenceTest, PeerSerialization) {
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     
     // Verify peers.rats file was created
-    EXPECT_TRUE(file_exists("peers_8889.json") || file_exists("peers_8890.json"));
+    EXPECT_TRUE(file_or_directory_exists("peers_8889.json") || file_or_directory_exists("peers_8890.json"));
     
     // For this test, we just check one of them.
     // In a real scenario, both clients would save their peer lists.
     std::string peers_file_to_check;
-    if (file_exists("peers_8889.json")) {
+    if (file_or_directory_exists("peers_8889.json")) {
         peers_file_to_check = "peers_8889.json";
     } else {
         peers_file_to_check = "peers_8890.json";

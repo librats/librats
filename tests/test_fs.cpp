@@ -20,11 +20,23 @@ protected:
         delete_file("test_chunks.bin");
         delete_file("test_sized.bin");
         delete_file("validation_test.txt");
+        delete_file("test_copy.txt");
+        delete_file("test_file_exists.txt");
+        delete_file("test_null_content.txt");
+        delete_file("test_null_binary.bin");
+        delete_file("test_chunk_edge_cases.bin");
+        delete_file("validate_path_test.txt");
+        delete_file("buffer_test.txt");
+        delete_file("large_file_test.bin");
+        delete_file("zero_size.bin");
         delete_file("test_listing/file1.txt");
         delete_file("test_listing/file2.bin");
         delete_directory("test_listing/subdir");
         delete_directory("test_listing");
         delete_directory("test_change_directory");
+        delete_directory("test_dir_exists");
+        delete_directory("validate_dir");
+        delete_directory("empty_test_dir");
         delete_directory("test_directory/nested/deep");
         delete_directory("test_directory/nested");
         delete_directory("test_directory");
@@ -43,11 +55,23 @@ protected:
         delete_file("test_chunks.bin");
         delete_file("test_sized.bin");
         delete_file("validation_test.txt");
+        delete_file("test_copy.txt");
+        delete_file("test_file_exists.txt");
+        delete_file("test_null_content.txt");
+        delete_file("test_null_binary.bin");
+        delete_file("test_chunk_edge_cases.bin");
+        delete_file("validate_path_test.txt");
+        delete_file("buffer_test.txt");
+        delete_file("large_file_test.bin");
+        delete_file("zero_size.bin");
         delete_file("test_listing/file1.txt");
         delete_file("test_listing/file2.bin");
         delete_directory("test_listing/subdir");
         delete_directory("test_listing");
         delete_directory("test_change_directory");
+        delete_directory("test_dir_exists");
+        delete_directory("validate_dir");
+        delete_directory("empty_test_dir");
         delete_directory("test_directory/nested/deep");
         delete_directory("test_directory/nested");
         delete_directory("test_directory");
@@ -64,7 +88,7 @@ TEST_F(FSTest, BasicFileOperations) {
     std::cout << "✓ File created successfully" << std::endl;
     
     // Test file existence
-    bool exists = file_exists(test_file);
+    bool exists = file_or_directory_exists(test_file);
     EXPECT_TRUE(exists) << "File should exist after creation";
     std::cout << "✓ File existence check passed" << std::endl;
     
@@ -90,7 +114,7 @@ TEST_F(FSTest, BasicFileOperations) {
     // Clean up
     bool deleted = delete_file(test_file);
     EXPECT_TRUE(deleted) << "Failed to delete test file";
-    EXPECT_FALSE(file_exists(test_file)) << "File should not exist after deletion";
+    EXPECT_FALSE(file_or_directory_exists(test_file)) << "File should not exist after deletion";
     std::cout << "✓ File deletion passed" << std::endl;
 }
 
@@ -164,7 +188,7 @@ TEST_F(FSTest, CppWrapperFunctions) {
     EXPECT_TRUE(created) << "Failed to create file using C++ wrapper";
     std::cout << "✓ C++ wrapper file creation passed" << std::endl;
     
-    bool exists = file_exists(test_file);
+    bool exists = file_or_directory_exists(test_file);
     EXPECT_TRUE(exists) << "File existence check failed with C++ wrapper";
     std::cout << "✓ C++ wrapper existence check passed" << std::endl;
     
@@ -208,8 +232,8 @@ TEST_F(FSTest, FileCopyOperation) {
     EXPECT_TRUE(copy_file(src_file, dest_file));
     
     // Verify both files exist and have same content
-    EXPECT_TRUE(file_exists(src_file));
-    EXPECT_TRUE(file_exists(dest_file));
+    EXPECT_TRUE(file_or_directory_exists(src_file));
+    EXPECT_TRUE(file_or_directory_exists(dest_file));
     
     std::string src_content = read_file_text_cpp(src_file);
     std::string dest_content = read_file_text_cpp(dest_file);
@@ -225,7 +249,7 @@ TEST_F(FSTest, NonExistentFileOperations) {
     const char* non_existent = "non_existent_file.txt";
     
     // Test operations on non-existent file
-    EXPECT_FALSE(file_exists(non_existent));
+    EXPECT_FALSE(file_or_directory_exists(non_existent));
     EXPECT_FALSE(is_file(non_existent));
     EXPECT_EQ(get_file_size(non_existent), -1);
     EXPECT_EQ(read_file_text(non_existent), nullptr);
@@ -248,8 +272,8 @@ TEST_F(FSTest, MoveFileOperation) {
     EXPECT_TRUE(move_file(src_file, dest_file));
     
     // Verify source doesn't exist and destination exists with correct content
-    EXPECT_FALSE(file_exists(src_file));
-    EXPECT_TRUE(file_exists(dest_file));
+    EXPECT_FALSE(file_or_directory_exists(src_file));
+    EXPECT_TRUE(file_or_directory_exists(dest_file));
     
     std::string dest_content = read_file_text_cpp(dest_file);
     EXPECT_EQ(dest_content, test_content) << "Moved file content mismatch";
@@ -272,8 +296,8 @@ TEST_F(FSTest, RenameFileOperation) {
     EXPECT_TRUE(rename_file(old_name, new_name));
     
     // Verify old name doesn't exist and new name exists with correct content
-    EXPECT_FALSE(file_exists(old_name));
-    EXPECT_TRUE(file_exists(new_name));
+    EXPECT_FALSE(file_or_directory_exists(old_name));
+    EXPECT_TRUE(file_or_directory_exists(new_name));
     
     std::string content = read_file_text_cpp(new_name);
     EXPECT_EQ(content, test_content) << "Renamed file content mismatch";
@@ -354,7 +378,7 @@ TEST_F(FSTest, CreateFileWithSize) {
     EXPECT_TRUE(create_file_with_size(sized_file, file_size));
     
     // Verify file exists and has correct size
-    EXPECT_TRUE(file_exists(sized_file));
+    EXPECT_TRUE(file_or_directory_exists(sized_file));
     EXPECT_EQ(get_file_size(sized_file), (int64_t)file_size) << "File size should match";
     
     // Clean up
@@ -464,4 +488,265 @@ TEST_F(FSTest, DirectoryOperationsAdvanced) {
     delete_directory(test_change_dir);
     
     std::cout << "✓ Directory operations advanced passed" << std::endl;
+}
+
+TEST_F(FSTest, FileExistsFunction) {
+    const char* test_file = "test_file_exists.txt";
+    const char* test_dir = "test_dir_exists";
+    
+    // Test file_exists function specifically (different from file_or_directory_exists)
+    EXPECT_FALSE(file_exists(test_file)) << "Non-existent file should return false";
+    EXPECT_FALSE(file_exists(nullptr)) << "Null path should return false";
+    
+    // Create a file and test
+    EXPECT_TRUE(create_file(test_file, "test content"));
+    EXPECT_TRUE(file_exists(test_file)) << "Existing file should return true";
+    
+    // Create a directory and verify file_exists returns false for directories
+    EXPECT_TRUE(create_directory(test_dir));
+    EXPECT_FALSE(file_exists(test_dir)) << "Directory should not be identified as file";
+    EXPECT_TRUE(directory_exists(test_dir)) << "Directory should be identified as directory";
+    
+    // Clean up
+    delete_file(test_file);
+    delete_directory(test_dir);
+    
+    std::cout << "✓ file_exists function test passed" << std::endl;
+}
+
+TEST_F(FSTest, ErrorHandlingAndEdgeCases) {
+    // Test null pointer handling
+    EXPECT_FALSE(file_or_directory_exists(nullptr));
+    EXPECT_FALSE(file_exists(nullptr));
+    EXPECT_FALSE(directory_exists(nullptr));
+    EXPECT_FALSE(create_file(nullptr, "content"));
+    EXPECT_TRUE(create_file("test.txt", nullptr)); // null content should create empty file
+    EXPECT_EQ(read_file_text(nullptr), nullptr);
+    EXPECT_EQ(read_file_binary(nullptr, nullptr), nullptr);
+    EXPECT_FALSE(create_directory(nullptr));
+    EXPECT_FALSE(create_directories(nullptr));
+    EXPECT_EQ(get_file_size(nullptr), -1);
+    EXPECT_FALSE(delete_file(nullptr));
+    EXPECT_FALSE(delete_directory(nullptr));
+    EXPECT_FALSE(copy_file(nullptr, "dest"));
+    EXPECT_FALSE(copy_file("src", nullptr));
+    EXPECT_FALSE(move_file(nullptr, "dest"));
+    EXPECT_FALSE(move_file("src", nullptr));
+    EXPECT_FALSE(rename_file(nullptr, "new"));
+    EXPECT_FALSE(rename_file("old", nullptr));
+    EXPECT_EQ(get_file_modified_time(nullptr), 0);
+    EXPECT_EQ(get_file_extension(nullptr), "");
+    EXPECT_EQ(get_filename_from_path(nullptr), "");
+    EXPECT_EQ(get_parent_directory(nullptr), "");
+    EXPECT_FALSE(write_file_chunk(nullptr, 0, "data", 4));
+    EXPECT_FALSE(read_file_chunk(nullptr, 0, nullptr, 4));
+    EXPECT_FALSE(create_file_with_size(nullptr, 100));
+    EXPECT_FALSE(validate_path(nullptr, false));
+    EXPECT_FALSE(get_current_directory(nullptr, 1024));
+    EXPECT_FALSE(set_current_directory(nullptr));
+    
+    // Test with empty paths
+    EXPECT_FALSE(file_or_directory_exists(""));
+    EXPECT_FALSE(create_file("", "content"));
+    EXPECT_FALSE(create_directory(""));
+    
+    // Clean up test file created during null content test
+    delete_file("test.txt");
+    
+    std::cout << "✓ Error handling and edge cases passed" << std::endl;
+}
+
+TEST_F(FSTest, CreateFileNullContent) {
+    const char* test_file = "test_null_content.txt";
+    
+    // Test creating file with null content (should create empty file)
+    EXPECT_TRUE(create_file(test_file, nullptr));
+    EXPECT_TRUE(file_exists(test_file));
+    EXPECT_EQ(get_file_size(test_file), 0) << "File with null content should be empty";
+    
+    // Clean up
+    delete_file(test_file);
+    
+    std::cout << "✓ Create file with null content test passed" << std::endl;
+}
+
+TEST_F(FSTest, BinaryFileWithNullData) {
+    const char* binary_file = "test_null_binary.bin";
+    
+    // Test creating binary file with null data (should create empty file)
+    EXPECT_TRUE(create_file_binary(binary_file, nullptr, 0));
+    EXPECT_TRUE(file_exists(binary_file));
+    EXPECT_EQ(get_file_size(binary_file), 0) << "Binary file with null data should be empty";
+    
+    // Test with null data but non-zero size (should create empty file)
+    EXPECT_TRUE(create_file_binary(binary_file, nullptr, 100));
+    EXPECT_EQ(get_file_size(binary_file), 0) << "Binary file with null data should be empty regardless of size parameter";
+    
+    // Clean up
+    delete_file(binary_file);
+    
+    std::cout << "✓ Binary file with null data test passed" << std::endl;
+}
+
+TEST_F(FSTest, FileChunkEdgeCases) {
+    const char* chunk_file = "test_chunk_edge_cases.bin";
+    const char test_data[] = "Test chunk data";
+    const size_t data_size = strlen(test_data);
+    
+    // Test writing chunk to non-existent file (should create file)
+    EXPECT_TRUE(write_file_chunk(chunk_file, 0, test_data, data_size));
+    EXPECT_TRUE(file_exists(chunk_file));
+    
+    // Test reading from chunk with null buffer
+    EXPECT_FALSE(read_file_chunk(chunk_file, 0, nullptr, data_size));
+    
+    // Test writing chunk with null data
+    EXPECT_FALSE(write_file_chunk(chunk_file, 0, nullptr, data_size));
+    
+    // Test reading/writing chunk beyond file size
+    char buffer[32] = {0};
+    uint64_t large_offset = 10000;
+    EXPECT_FALSE(read_file_chunk(chunk_file, large_offset, buffer, sizeof(buffer))) 
+        << "Reading beyond file size should fail";
+    
+    // Clean up
+    delete_file(chunk_file);
+    
+    std::cout << "✓ File chunk edge cases test passed" << std::endl;
+}
+
+TEST_F(FSTest, PathUtilitiesAdvanced) {
+    // Test get_file_extension edge cases
+    EXPECT_EQ(get_file_extension("file.txt"), ".txt");
+    EXPECT_EQ(get_file_extension("file.tar.gz"), ".gz");
+    EXPECT_EQ(get_file_extension("file"), "");
+    EXPECT_EQ(get_file_extension(".hidden"), "");
+    EXPECT_EQ(get_file_extension("path/to/file.ext"), ".ext");
+    EXPECT_EQ(get_file_extension(""), "");
+    
+    // Test get_filename_from_path edge cases
+    EXPECT_EQ(get_filename_from_path("path/to/file.txt"), "file.txt");
+    EXPECT_EQ(get_filename_from_path("path\\to\\file.txt"), "file.txt");
+    EXPECT_EQ(get_filename_from_path("file.txt"), "file.txt");
+    EXPECT_EQ(get_filename_from_path(""), "");
+    EXPECT_EQ(get_filename_from_path("/"), "");
+    EXPECT_EQ(get_filename_from_path("\\"), "");
+    
+    // Test get_parent_directory edge cases
+    EXPECT_EQ(get_parent_directory("path/to/file.txt"), "path/to");
+    EXPECT_EQ(get_parent_directory("path\\to\\file.txt"), "path\\to");
+    EXPECT_EQ(get_parent_directory("file.txt"), "");
+    EXPECT_EQ(get_parent_directory(""), "");
+    
+    // Test combine_paths edge cases
+    EXPECT_EQ(combine_paths("", ""), "");
+    EXPECT_EQ(combine_paths("base", ""), "base");
+    EXPECT_EQ(combine_paths("", "relative"), "relative");
+    EXPECT_EQ(combine_paths("base/", "relative"), "base/relative");
+    EXPECT_EQ(combine_paths("base", "/relative"), "base/relative");
+    EXPECT_EQ(combine_paths("base\\", "\\relative"), "base/relative");
+    
+    std::cout << "✓ Advanced path utilities test passed" << std::endl;
+}
+
+TEST_F(FSTest, ValidatePathAdvanced) {
+    const char* test_file = "validate_path_test.txt";
+    const char* test_dir = "validate_dir";
+    
+    // Create test file and directory
+    EXPECT_TRUE(create_file(test_file, "test content"));
+    EXPECT_TRUE(create_directory(test_dir));
+    
+    // Test validate_path with check_write_access = false (default)
+    EXPECT_TRUE(validate_path(test_file, false)) << "Existing file should be valid";
+    EXPECT_FALSE(validate_path(test_dir, false)) << "Directory should not be valid as file";
+    EXPECT_FALSE(validate_path("non_existent.txt", false)) << "Non-existent file should not be valid";
+    
+    // Test validate_path with check_write_access = true
+    EXPECT_TRUE(validate_path("new_file_in_current_dir.txt", true)) 
+        << "New file in existing directory should be valid for writing";
+    EXPECT_FALSE(validate_path("nonexistent_dir/new_file.txt", true)) 
+        << "New file in non-existent directory should not be valid for writing";
+    
+    // Clean up
+    delete_file(test_file);
+    delete_directory(test_dir);
+    
+    std::cout << "✓ Advanced validate_path test passed" << std::endl;
+}
+
+TEST_F(FSTest, DirectoryListingEdgeCases) {
+    const char* empty_dir = "empty_test_dir";
+    const char* non_existent_dir = "non_existent_dir";
+    
+    // Test listing empty directory
+    EXPECT_TRUE(create_directory(empty_dir));
+    std::vector<DirectoryEntry> entries;
+    EXPECT_TRUE(list_directory(empty_dir, entries));
+    EXPECT_EQ(entries.size(), 0) << "Empty directory should have no entries";
+    
+    // Test listing non-existent directory
+    EXPECT_FALSE(list_directory(non_existent_dir, entries)) 
+        << "Listing non-existent directory should fail";
+    
+    // Test with null path
+    EXPECT_FALSE(list_directory(nullptr, entries)) 
+        << "Listing null path should fail";
+    
+    // Clean up
+    delete_directory(empty_dir);
+    
+    std::cout << "✓ Directory listing edge cases test passed" << std::endl;
+}
+
+TEST_F(FSTest, FileBufferManagement) {
+    const char* test_file = "buffer_test.txt";
+    const char* test_content = "Buffer management test content";
+    
+    // Create test file
+    EXPECT_TRUE(create_file(test_file, test_content));
+    
+    // Test reading and proper buffer cleanup
+    size_t size;
+    char* buffer1 = read_file_text(test_file, &size);
+    EXPECT_NE(buffer1, nullptr);
+    EXPECT_EQ(size, strlen(test_content));
+    
+    void* buffer2 = read_file_binary(test_file, &size);
+    EXPECT_NE(buffer2, nullptr);
+    EXPECT_EQ(size, strlen(test_content));
+    
+    // Test free_file_buffer with valid pointers
+    free_file_buffer(buffer1);
+    free_file_buffer(buffer2);
+    
+    // Test free_file_buffer with null pointer (should not crash)
+    free_file_buffer(nullptr);
+    
+    // Clean up
+    delete_file(test_file);
+    
+    std::cout << "✓ File buffer management test passed" << std::endl;
+}
+
+TEST_F(FSTest, LargeFileOperations) {
+    const char* large_file = "large_file_test.bin";
+    const uint64_t large_size = 10240; // 10KB
+    
+    // Test creating large file
+    EXPECT_TRUE(create_file_with_size(large_file, large_size));
+    EXPECT_TRUE(file_exists(large_file));
+    EXPECT_EQ(get_file_size(large_file), (int64_t)large_size);
+    
+    // Test creating zero-size file
+    const char* zero_file = "zero_size.bin";
+    EXPECT_TRUE(create_file_with_size(zero_file, 0));
+    EXPECT_TRUE(file_exists(zero_file));
+    EXPECT_EQ(get_file_size(zero_file), 0);
+    
+    // Clean up
+    delete_file(large_file);
+    delete_file(zero_file);
+    
+    std::cout << "✓ Large file operations test passed" << std::endl;
 } 

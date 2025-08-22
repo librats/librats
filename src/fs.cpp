@@ -23,9 +23,19 @@
 
 namespace librats {
 
-bool file_exists(const char* path) {
+bool file_or_directory_exists(const char* path) {
     if (!path) return false;
     return access(path, F_OK) == 0;
+}
+
+bool file_exists(const char* path) {
+    if (!path) return false;
+
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return (st.st_mode & S_IFREG) != 0;
+    }
+    return false;
 }
 
 bool directory_exists(const char* path) {
@@ -250,13 +260,7 @@ int64_t get_file_size(const char* path) {
 }
 
 bool is_file(const char* path) {
-    if (!path) return false;
-    
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        return (st.st_mode & S_IFREG) != 0;
-    }
-    return false;
+    return file_exists(path);
 }
 
 bool is_directory(const char* path) {
@@ -493,15 +497,25 @@ std::string combine_paths(const std::string& base, const std::string& relative) 
     
     std::string result = base;
     
+    // Normalize all backslashes to forward slashes in result
+    for (char& c : result) {
+        if (c == '\\') c = '/';
+    }
+    
     // Ensure base path ends with separator
-    if (result.back() != '/' && result.back() != '\\') {
+    if (result.back() != '/') {
         result += '/';
     }
     
-    // Remove leading separator from relative path
+    // Remove leading separator from relative path and normalize
     std::string rel = relative;
-    if (rel.front() == '/' || rel.front() == '\\') {
+    if (!rel.empty() && (rel.front() == '/' || rel.front() == '\\')) {
         rel = rel.substr(1);
+    }
+    
+    // Normalize backslashes to forward slashes in relative path
+    for (char& c : rel) {
+        if (c == '\\') c = '/';
     }
     
     return result + rel;
@@ -518,8 +532,8 @@ bool validate_path(const char* path, bool check_write_access) {
         }
         // Additional write permission checks could be added here
     } else {
-        // Check if file exists and is readable
-        if (!file_exists(path)) {
+        // Check if path exists and is a regular file (not a directory)
+        if (!is_file(path)) {
             return false;
         }
     }

@@ -429,14 +429,6 @@ std::string FileTransferManager::request_directory(const std::string& peer_id, c
     return transfer_id;
 }
 
-bool FileTransferManager::file_exists(const std::string& file_path) const {
-    return librats::file_exists(file_path) && is_file(file_path.c_str());
-}
-
-bool FileTransferManager::directory_exists(const std::string& directory_path) const {
-    return librats::directory_exists(directory_path);
-}
-
 bool FileTransferManager::accept_file_transfer(const std::string& transfer_id, const std::string& local_path) {
     std::lock_guard<std::mutex> lock(pending_mutex_);
     
@@ -730,7 +722,7 @@ FileMetadata FileTransferManager::get_file_metadata(const std::string& file_path
     FileMetadata metadata;
     
     try {
-        if (!librats::file_exists(file_path)) {
+        if (!librats::file_or_directory_exists(file_path)) {
             return metadata;
         }
         
@@ -1465,7 +1457,7 @@ void FileTransferManager::handle_file_request(const std::string& peer_id, const 
         std::string remote_path = message["remote_path"];
         
         // Check if file exists and is accessible
-        if (!file_exists(remote_path)) {
+        if (!file_or_directory_exists(remote_path)) {
             LOG_FILE_TRANSFER_WARN("File request denied - file not found: " << remote_path);
             nlohmann::json response;
             response["transfer_id"] = transfer_id;

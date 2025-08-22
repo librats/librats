@@ -49,12 +49,12 @@ protected:
         }
     }
     
-    bool file_exists_test(const std::string& filename) {
-        return librats::file_exists(filename);
+    bool file_or_directory_exists_test(const std::string& filename) {
+        return librats::file_or_directory_exists(filename);
     }
     
     size_t get_file_size_test(const std::string& filename) {
-        if (!file_exists_test(filename)) return 0;
+        if (!file_or_directory_exists_test(filename)) return 0;
         int64_t size = librats::get_file_size(filename.c_str());
         return size > 0 ? static_cast<size_t>(size) : 0;
     }

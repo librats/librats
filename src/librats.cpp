@@ -2913,7 +2913,7 @@ bool RatsClient::load_configuration() {
     LOG_CLIENT_INFO("Loading configuration from " << get_config_file_path());
     
     // Check if config file exists
-    if (!file_exists(get_config_file_path())) {
+    if (!file_or_directory_exists(get_config_file_path())) {
         LOG_CLIENT_INFO("No existing configuration found, generating new peer ID");
         our_peer_id_ = generate_persistent_peer_id();
         
@@ -3033,7 +3033,7 @@ bool RatsClient::save_configuration() {
         config["last_updated"] = timestamp;
         
         // If config file exists, preserve created_at timestamp
-        if (file_exists(get_config_file_path())) {
+        if (file_or_directory_exists(get_config_file_path())) {
             try {
                 std::string existing_config_data = read_file_text_cpp(get_config_file_path());
                 nlohmann::json existing_config = nlohmann::json::parse(existing_config_data);
@@ -3128,7 +3128,7 @@ int RatsClient::load_and_reconnect_peers() {
     LOG_CLIENT_INFO("Loading saved peers from " << peers_file_path);
     
     // Check if peers file exists
-    if (!file_exists(peers_file_path)) {
+    if (!file_or_directory_exists(peers_file_path)) {
         LOG_CLIENT_INFO("No saved peers file found");
         return 0;
     }
@@ -3236,7 +3236,7 @@ bool RatsClient::append_peer_to_historical_file(const RatsPeer& peer) {
         std::string file_path = get_peers_ever_file_path();
         nlohmann::json historical_peers;
         
-        if (file_exists(file_path)) {
+        if (file_or_directory_exists(file_path)) {
             try {
                 std::string existing_data = read_file_text_cpp(file_path);
                 if (!existing_data.empty()) {
@@ -3303,7 +3303,7 @@ bool RatsClient::load_historical_peers() {
     LOG_CLIENT_INFO("Loading historical peers from " << get_peers_ever_file_path());
     
     // Check if historical peers file exists
-    if (!file_exists(get_peers_ever_file_path())) {
+    if (!file_or_directory_exists(get_peers_ever_file_path())) {
         LOG_CLIENT_INFO("No historical peers file found");
         return true; // Not an error
     }
@@ -3377,7 +3377,7 @@ std::vector<RatsPeer> RatsClient::get_historical_peers() const {
     std::vector<RatsPeer> historical_peers;
     
     // Check if historical peers file exists
-    if (!file_exists(get_peers_ever_file_path())) {
+    if (!file_or_directory_exists(get_peers_ever_file_path())) {
         return historical_peers; // Return empty vector
     }
     
@@ -3432,7 +3432,7 @@ int RatsClient::load_and_reconnect_historical_peers() {
     LOG_CLIENT_INFO("Loading historical peers from " << get_peers_ever_file_path());
     
     // Check if historical peers file exists
-    if (!file_exists(get_peers_ever_file_path())) {
+    if (!file_or_directory_exists(get_peers_ever_file_path())) {
         LOG_CLIENT_INFO("No historical peers file found");
         return 0;
     }

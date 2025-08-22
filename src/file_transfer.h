@@ -308,20 +308,6 @@ public:
                                  const std::string& local_directory_path, bool recursive = true);
     
     /**
-     * Check if a file exists on the local system (for responding to requests)
-     * @param file_path Path to check
-     * @return true if file exists and is accessible
-     */
-    bool file_exists(const std::string& file_path) const;
-    
-    /**
-     * Check if a directory exists on the local system (for responding to requests)
-     * @param directory_path Path to check
-     * @return true if directory exists and is accessible
-     */
-    bool directory_exists(const std::string& directory_path) const;
-    
-    /**
      * Accept an incoming file transfer
      * @param transfer_id Transfer identifier from request
      * @param local_path Local path where file should be saved

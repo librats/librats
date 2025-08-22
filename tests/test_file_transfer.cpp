@@ -278,11 +278,11 @@ TEST_F(FileTransferTest, DirectoryMetadataExtraction) {
 }
 
 TEST_F(FileTransferTest, FileExistenceChecks) {
-    EXPECT_TRUE(transfer_manager1_->file_exists("test_data/small_file.txt"));
-    EXPECT_FALSE(transfer_manager1_->file_exists("non_existent_file.txt"));
+    EXPECT_TRUE(file_exists("test_data/small_file.txt"));
+    EXPECT_FALSE(file_exists("non_existent_file.txt"));
     
-    EXPECT_TRUE(transfer_manager1_->directory_exists("test_data"));
-    EXPECT_FALSE(transfer_manager1_->directory_exists("non_existent_directory"));
+    EXPECT_TRUE(directory_exists("test_data"));
+    EXPECT_FALSE(directory_exists("non_existent_directory"));
 }
 
 TEST_F(FileTransferTest, PathValidation) {
@@ -442,8 +442,8 @@ TEST_F(FileTransferTest, FileRequestAndDirectoryRequest) {
 
 TEST_F(FileTransferTest, UtilityFunctions) {
     // Test file size validation
-    EXPECT_TRUE(transfer_manager1_->file_exists("test_data/small_file.txt"));
-    EXPECT_TRUE(transfer_manager1_->directory_exists("test_data"));
+    EXPECT_TRUE(file_or_directory_exists("test_data/small_file.txt"));
+    EXPECT_TRUE(directory_exists("test_data"));
     
     // Test static utility functions
     FileMetadata metadata = FileTransferManager::get_file_metadata("test_data/small_file.txt");

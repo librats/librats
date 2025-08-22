@@ -8,8 +8,9 @@
 namespace librats {
 
 // File/Directory existence check
-bool file_exists(const char* path);
+bool file_or_directory_exists(const char* path);
 bool directory_exists(const char* path);
+bool file_exists(const char* path);
 
 // File creation and writing
 bool create_file(const char* path, const char* content);
@@ -69,6 +70,7 @@ bool get_current_directory(char* buffer, size_t buffer_size);
 bool set_current_directory(const char* path);
 
 // C++ convenience wrappers
+inline bool file_or_directory_exists(const std::string& path) { return file_or_directory_exists(path.c_str()); }
 inline bool file_exists(const std::string& path) { return file_exists(path.c_str()); }
 inline bool directory_exists(const std::string& path) { return directory_exists(path.c_str()); }
 inline bool create_file(const std::string& path, const std::string& content) { 
