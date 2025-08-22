@@ -12,6 +12,19 @@ protected:
         delete_file("test_file.txt");
         delete_file("test_binary.bin");
         delete_file("test_cpp_wrapper.txt");
+        delete_file("test_move_src.txt");
+        delete_file("test_move_dest.txt");
+        delete_file("test_old_name.txt");
+        delete_file("test_new_name.txt");
+        delete_file("test_metadata.txt");
+        delete_file("test_chunks.bin");
+        delete_file("test_sized.bin");
+        delete_file("validation_test.txt");
+        delete_file("test_listing/file1.txt");
+        delete_file("test_listing/file2.bin");
+        delete_directory("test_listing/subdir");
+        delete_directory("test_listing");
+        delete_directory("test_change_directory");
         delete_directory("test_directory/nested/deep");
         delete_directory("test_directory/nested");
         delete_directory("test_directory");
@@ -22,6 +35,19 @@ protected:
         delete_file("test_file.txt");
         delete_file("test_binary.bin");
         delete_file("test_cpp_wrapper.txt");
+        delete_file("test_move_src.txt");
+        delete_file("test_move_dest.txt");
+        delete_file("test_old_name.txt");
+        delete_file("test_new_name.txt");
+        delete_file("test_metadata.txt");
+        delete_file("test_chunks.bin");
+        delete_file("test_sized.bin");
+        delete_file("validation_test.txt");
+        delete_file("test_listing/file1.txt");
+        delete_file("test_listing/file2.bin");
+        delete_directory("test_listing/subdir");
+        delete_directory("test_listing");
+        delete_directory("test_change_directory");
         delete_directory("test_directory/nested/deep");
         delete_directory("test_directory/nested");
         delete_directory("test_directory");
@@ -208,4 +234,234 @@ TEST_F(FSTest, NonExistentFileOperations) {
     EXPECT_EQ(read_file_binary(non_existent, &size), nullptr);
     
     std::cout << "✓ Non-existent file operations handled correctly" << std::endl;
+}
+
+TEST_F(FSTest, MoveFileOperation) {
+    const char* src_file = "test_move_src.txt";
+    const char* dest_file = "test_move_dest.txt";
+    const char* test_content = "Content to move";
+    
+    // Create source file
+    EXPECT_TRUE(create_file(src_file, test_content));
+    
+    // Move file
+    EXPECT_TRUE(move_file(src_file, dest_file));
+    
+    // Verify source doesn't exist and destination exists with correct content
+    EXPECT_FALSE(file_exists(src_file));
+    EXPECT_TRUE(file_exists(dest_file));
+    
+    std::string dest_content = read_file_text_cpp(dest_file);
+    EXPECT_EQ(dest_content, test_content) << "Moved file content mismatch";
+    
+    // Clean up
+    delete_file(dest_file);
+    
+    std::cout << "✓ File move operation passed" << std::endl;
+}
+
+TEST_F(FSTest, RenameFileOperation) {
+    const char* old_name = "test_old_name.txt";
+    const char* new_name = "test_new_name.txt";
+    const char* test_content = "Content to rename";
+    
+    // Create file with old name
+    EXPECT_TRUE(create_file(old_name, test_content));
+    
+    // Rename file
+    EXPECT_TRUE(rename_file(old_name, new_name));
+    
+    // Verify old name doesn't exist and new name exists with correct content
+    EXPECT_FALSE(file_exists(old_name));
+    EXPECT_TRUE(file_exists(new_name));
+    
+    std::string content = read_file_text_cpp(new_name);
+    EXPECT_EQ(content, test_content) << "Renamed file content mismatch";
+    
+    // Clean up
+    delete_file(new_name);
+    
+    std::cout << "✓ File rename operation passed" << std::endl;
+}
+
+TEST_F(FSTest, FileMetadataOperations) {
+    const char* test_file = "test_metadata.txt";
+    const char* test_content = "Metadata test content";
+    
+    // Create test file
+    EXPECT_TRUE(create_file(test_file, test_content));
+    
+    // Test file modified time
+    uint64_t mod_time = get_file_modified_time(test_file);
+    EXPECT_GT(mod_time, 0) << "File modified time should be greater than 0";
+    std::cout << "✓ File modified time: " << mod_time << std::endl;
+    
+    // Test file extension
+    std::string ext = get_file_extension(test_file);
+    EXPECT_EQ(ext, ".txt") << "File extension should be .txt";
+    std::cout << "✓ File extension: " << ext << std::endl;
+    
+    // Test filename extraction
+    std::string filename = get_filename_from_path(test_file);
+    EXPECT_EQ(filename, "test_metadata.txt") << "Filename should match";
+    std::cout << "✓ Filename from path: " << filename << std::endl;
+    
+    // Test parent directory
+    std::string parent = get_parent_directory("dir/subdir/file.txt");
+    EXPECT_EQ(parent, "dir/subdir") << "Parent directory should be correct";
+    std::cout << "✓ Parent directory: " << parent << std::endl;
+    
+    // Clean up
+    delete_file(test_file);
+    
+    std::cout << "✓ File metadata operations passed" << std::endl;
+}
+
+TEST_F(FSTest, FileChunkOperations) {
+    const char* chunk_file = "test_chunks.bin";
+    const char data1[] = "First chunk data";
+    const char data2[] = "Second chunk";
+    const size_t chunk1_size = strlen(data1);
+    const size_t chunk2_size = strlen(data2);
+    
+    // Write first chunk at offset 0
+    EXPECT_TRUE(write_file_chunk(chunk_file, 0, data1, chunk1_size));
+    
+    // Write second chunk at offset 20
+    EXPECT_TRUE(write_file_chunk(chunk_file, 20, data2, chunk2_size));
+    
+    // Read first chunk
+    char buffer1[32] = {0};
+    EXPECT_TRUE(read_file_chunk(chunk_file, 0, buffer1, chunk1_size));
+    EXPECT_STREQ(buffer1, data1) << "First chunk data mismatch";
+    
+    // Read second chunk
+    char buffer2[32] = {0};
+    EXPECT_TRUE(read_file_chunk(chunk_file, 20, buffer2, chunk2_size));
+    EXPECT_STREQ(buffer2, data2) << "Second chunk data mismatch";
+    
+    // Clean up
+    delete_file(chunk_file);
+    
+    std::cout << "✓ File chunk operations passed" << std::endl;
+}
+
+TEST_F(FSTest, CreateFileWithSize) {
+    const char* sized_file = "test_sized.bin";
+    const uint64_t file_size = 1024;
+    
+    // Create file with specific size
+    EXPECT_TRUE(create_file_with_size(sized_file, file_size));
+    
+    // Verify file exists and has correct size
+    EXPECT_TRUE(file_exists(sized_file));
+    EXPECT_EQ(get_file_size(sized_file), (int64_t)file_size) << "File size should match";
+    
+    // Clean up
+    delete_file(sized_file);
+    
+    std::cout << "✓ Create file with size operation passed" << std::endl;
+}
+
+TEST_F(FSTest, DirectoryListingOperations) {
+    const char* test_dir = "test_listing";
+    const char* sub_dir = "test_listing/subdir";
+    const char* test_file1 = "test_listing/file1.txt";
+    const char* test_file2 = "test_listing/file2.bin";
+    
+    // Create test directory structure
+    EXPECT_TRUE(create_directory(test_dir));
+    EXPECT_TRUE(create_directory(sub_dir));
+    EXPECT_TRUE(create_file(test_file1, "File 1 content"));
+    EXPECT_TRUE(create_file(test_file2, "File 2 content"));
+    
+    // List directory contents
+    std::vector<DirectoryEntry> entries;
+    EXPECT_TRUE(list_directory(test_dir, entries));
+    
+    // Should have 3 entries: subdir, file1.txt, file2.bin
+    EXPECT_EQ(entries.size(), 3) << "Should have 3 directory entries";
+    
+    // Verify entries (order may vary)
+    bool found_subdir = false, found_file1 = false, found_file2 = false;
+    for (const auto& entry : entries) {
+        if (entry.name == "subdir" && entry.is_directory) {
+            found_subdir = true;
+        } else if (entry.name == "file1.txt" && !entry.is_directory) {
+            found_file1 = true;
+            EXPECT_GT(entry.size, 0) << "File1 should have size > 0";
+        } else if (entry.name == "file2.bin" && !entry.is_directory) {
+            found_file2 = true;
+            EXPECT_GT(entry.size, 0) << "File2 should have size > 0";
+        }
+    }
+    
+    EXPECT_TRUE(found_subdir) << "Should find subdirectory";
+    EXPECT_TRUE(found_file1) << "Should find file1.txt";
+    EXPECT_TRUE(found_file2) << "Should find file2.bin";
+    
+    // Clean up
+    delete_file(test_file1);
+    delete_file(test_file2);
+    delete_directory(sub_dir);
+    delete_directory(test_dir);
+    
+    std::cout << "✓ Directory listing operations passed" << std::endl;
+}
+
+TEST_F(FSTest, PathUtilities) {
+    // Test path combination
+    std::string combined1 = combine_paths("base/path", "relative/file.txt");
+    EXPECT_EQ(combined1, "base/path/relative/file.txt") << "Path combination failed";
+    
+    std::string combined2 = combine_paths("base/path/", "/relative/file.txt");
+    EXPECT_EQ(combined2, "base/path/relative/file.txt") << "Path combination with separators failed";
+    
+    std::string combined3 = combine_paths("", "relative/file.txt");
+    EXPECT_EQ(combined3, "relative/file.txt") << "Empty base path combination failed";
+    
+    std::string combined4 = combine_paths("base/path", "");
+    EXPECT_EQ(combined4, "base/path") << "Empty relative path combination failed";
+    
+    // Test path validation
+    const char* test_file = "validation_test.txt";
+    EXPECT_TRUE(create_file(test_file, "test"));
+    
+    EXPECT_TRUE(validate_path(test_file, false)) << "Valid existing file should pass validation";
+    EXPECT_FALSE(validate_path("non_existent_file.txt", false)) << "Non-existent file should fail validation";
+    
+    delete_file(test_file);
+    
+    std::cout << "✓ Path utilities passed" << std::endl;
+}
+
+TEST_F(FSTest, DirectoryOperationsAdvanced) {
+    char current_dir[1024];
+    const char* test_change_dir = "test_change_directory";
+    
+    // Get current directory
+    EXPECT_TRUE(get_current_directory(current_dir, sizeof(current_dir)));
+    EXPECT_GT(strlen(current_dir), 0) << "Current directory should not be empty";
+    std::cout << "✓ Current directory: " << current_dir << std::endl;
+    
+    // Create test directory for changing to
+    EXPECT_TRUE(create_directory(test_change_dir));
+    
+    // Change to test directory
+    EXPECT_TRUE(set_current_directory(test_change_dir));
+    
+    // Verify we're in the new directory
+    char new_dir[1024];
+    EXPECT_TRUE(get_current_directory(new_dir, sizeof(new_dir)));
+    std::string new_dir_str(new_dir);
+    EXPECT_NE(new_dir_str.find(test_change_dir), std::string::npos) 
+        << "Should be in test directory";
+    
+    // Change back to original directory
+    EXPECT_TRUE(set_current_directory(current_dir));
+    
+    // Clean up
+    delete_directory(test_change_dir);
+    
+    std::cout << "✓ Directory operations advanced passed" << std::endl;
 } 
