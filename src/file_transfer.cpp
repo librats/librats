@@ -851,7 +851,7 @@ void FileTransferManager::start_file_send(const std::string& transfer_id) {
             return;
         }
         
-        uint32_t chunk_size = std::min(static_cast<uint64_t>(config_.chunk_size), 
+        uint32_t chunk_size = (std::min)(static_cast<uint64_t>(config_.chunk_size), 
                                       progress->file_size - file_offset);
         
         FileChunk chunk;
