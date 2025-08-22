@@ -14,7 +14,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         build-type: [Debug, Release]
 
     steps:
@@ -30,6 +30,11 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+      
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake
       
       - name: Configure CMake
         run: |
@@ -74,6 +79,21 @@ jobs:
             7z a librats-windows.zip windows/*
           }
       
+      - name: Prepare artifacts (macOS)
+        if: runner.os == 'macOS' && matrix.build-type == 'Release'
+        run: |
+          mkdir -p artifacts/macos/include
+          cp build/bin/rats-client artifacts/macos/
+          cp build/lib/librats.a artifacts/macos/
+          cp src/*.h artifacts/macos/include/
+          cd artifacts
+          if [ "${{ github.event_name }}" == "release" ]; then
+            VERSION=${{ github.ref_name }}
+            zip -r librats-macos-${VERSION}.zip macos/
+          else
+            zip -r librats-macos.zip macos/
+          fi
+      
       - name: Upload artifacts (Linux)
         if: runner.os == 'Linux' && matrix.build-type == 'Release' && github.event_name != 'release'
         uses: actions/upload-artifact@v4
@@ -90,6 +110,14 @@ jobs:
           path: artifacts/windows/
           retention-days: 30
 
+      - name: Upload artifacts (macOS)
+        if: runner.os == 'macOS' && matrix.build-type == 'Release' && github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: librats-macos-${{ github.sha }}
+          path: artifacts/macos/
+          retention-days: 30
+
       - name: Upload to Release (Linux)
         if: runner.os == 'Linux' && matrix.build-type == 'Release' && github.event_name == 'release'
         uses: softprops/action-gh-release@v2
@@ -103,5 +131,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/librats-windows-${{ github.ref_name }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      
+      - name: Upload to Release (macOS)
+        if: runner.os == 'macOS' && matrix.build-type == 'Release' && github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/librats-macos-${{ github.ref_name }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
