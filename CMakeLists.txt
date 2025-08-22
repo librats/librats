@@ -133,6 +133,27 @@ set_target_properties(rats-client PROPERTIES
 
 # Testing setup
 option(BUILD_TESTS "Build unit tests" ON)
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+
+# AddressSanitizer configuration
+if(ENABLE_ASAN)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set(ASAN_FLAGS "-fsanitize=address -fno-omit-frame-pointer -g")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ASAN_FLAGS}")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ASAN_FLAGS}")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${ASAN_FLAGS}")
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${ASAN_FLAGS}")
+        
+        message(STATUS "AddressSanitizer enabled (GCC/Clang)")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fsanitize=address")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /fsanitize=address")
+        
+        message(STATUS "AddressSanitizer enabled (MSVC)")
+    else()
+        message(WARNING "AddressSanitizer is not supported by this compiler")
+    endif()
+endif()
 
 if(BUILD_TESTS)
     target_compile_definitions(rats PUBLIC TESTING)
