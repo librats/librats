@@ -25,6 +25,15 @@ if(GIT_FOUND)
         ERROR_QUIET
     )
     
+    # Get commit count (revision number)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_REVISION_COUNT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    
     # Parse version components
     if(GIT_TAG MATCHES "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)")
         set(VERSION_MAJOR ${CMAKE_MATCH_1})
@@ -42,10 +51,15 @@ else()
     set(VERSION_MINOR ${PROJECT_VERSION_MINOR})
     set(VERSION_PATCH ${PROJECT_VERSION_PATCH})
     set(GIT_DESCRIBE "unknown")
+    set(GIT_REVISION_COUNT 0)
 endif()
 
-# Set build number (could be commit count or CI build number)
-set(VERSION_BUILD 0)
+# Set build number to revision count (commit count)
+if(GIT_REVISION_COUNT)
+    set(VERSION_BUILD ${GIT_REVISION_COUNT})
+else()
+    set(VERSION_BUILD 0)
+endif()
 set(VERSION_STRING "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}.${VERSION_BUILD}")
 
 # Configure version.rc from template
