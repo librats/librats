@@ -767,11 +767,22 @@ struct FileMetadata {
 
 ## 🛠️ Building
 
+### Supported Platforms
+
+librats has been thoroughly tested on the following platforms and build environments:
+
+| Platform | Build Environment | Compiler | Status |
+|----------|------------------|----------|---------|
+| **Windows** | MinGW-w64 | GCC 7+ | ✅ **Fully Tested** |
+| **Windows** | Visual Studio | MSVC 2017+ | ✅ **Fully Tested** |
+| **Linux** | Native | GCC 7+, Clang 5+ | ✅ **Fully Tested** |
+| **macOS** | Xcode/Native | Clang 10+ | ✅ **Fully Tested** |
+
 ### Prerequisites
 - **CMake 3.10+**
 - **C++17 compatible compiler**:
-  - GCC 7+ (Linux)
-  - Clang 5+ (macOS)
+  - GCC 7+ (Linux, MinGW)
+  - Clang 5+ (macOS, Linux)
   - MSVC 2017+ (Windows)
 - **Git** (for dependency management)
 
