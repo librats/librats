@@ -25,8 +25,6 @@
 
 namespace librats {
 
-// Static variable initialization
-std::atomic<uint32_t> DhtClient::rats_dht_transaction_counter_ = 0;
 
 DhtClient::DhtClient(int port) 
     : port_(port), socket_(INVALID_SOCKET_VALUE), running_(false) {
@@ -121,13 +119,7 @@ bool DhtClient::bootstrap(const std::vector<Peer>& bootstrap_nodes) {
         LOG_DHT_DEBUG("  - " << peer.ip << ":" << peer.port);
     }
     
-    // Pre-set protocol for known BitTorrent bootstrap nodes
-    for (const auto& peer : bootstrap_nodes) {
-        if (is_known_bittorrent_bootstrap_node(peer)) {
-            LOG_DHT_DEBUG("Setting BitTorrent protocol for known bootstrap node: " << peer.ip << ":" << peer.port);
-            set_peer_protocol(peer, PeerProtocol::BitTorrent);
-        }
-    }
+
     
     // Send ping to bootstrap nodes
     LOG_DHT_DEBUG("Sending PING to all bootstrap nodes");
@@ -173,9 +165,6 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
     }
     
     for (const auto& node : closest_nodes) {
-        PeerProtocol protocol = get_peer_protocol(node.peer);
-        
-        if (protocol == PeerProtocol::BitTorrent) {
             // Generate transaction ID and track this as a pending search for KRPC
             std::string transaction_id = KrpcProtocol::generate_transaction_id();
             
@@ -190,24 +179,6 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
             
             auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
             send_krpc_message(message, node.peer);
-        } else {
-            // For rats DHT protocol, also use proper transaction tracking
-            std::string transaction_id = generate_rats_dht_transaction_id();
-            
-            {
-                std::lock_guard<std::mutex> lock(pending_searches_mutex_);
-                transaction_to_search_[transaction_id] = hash_key;
-                auto search_it = pending_searches_.find(hash_key);
-                if (search_it != pending_searches_.end()) {
-                    search_it->second.queried_nodes.insert(node_id_to_hex(node.id));
-                }
-            }
-            
-            // Send get_peers with transaction ID for rats dht protocol
-            DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
-            message.target_id = info_hash;
-            send_message(message, node.peer);
-        }
     }
     
     return true;
@@ -229,9 +200,6 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port) {
     // This is the proper BEP 5 flow: get_peers -> collect tokens -> announce_peer
     auto closest_nodes = find_closest_nodes(info_hash, ALPHA);
     for (const auto& node : closest_nodes) {
-        PeerProtocol protocol = get_peer_protocol(node.peer);
-        
-        if (protocol == PeerProtocol::BitTorrent) {
             // Generate transaction ID and track this as a pending announce for KRPC
             std::string transaction_id = KrpcProtocol::generate_transaction_id();
             
@@ -242,20 +210,6 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port) {
             
             auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
             send_krpc_message(message, node.peer);
-        } else {
-            // For rats DHT protocol, also use proper transaction tracking
-            std::string transaction_id = generate_rats_dht_transaction_id();
-            
-            {
-                std::lock_guard<std::mutex> lock(pending_announces_mutex_);
-                pending_announces_.emplace(transaction_id, PendingAnnounce(info_hash, port));
-            }
-            
-            // Send get_peers with transaction ID for rats dht protocol
-            DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
-            message.target_id = info_hash;
-            send_message(message, node.peer);
-        }
     }
     
     return true;
@@ -307,23 +261,28 @@ void DhtClient::maintenance_loop() {
     LOG_DHT_DEBUG("Maintenance loop started");
     
     auto last_bucket_refresh = std::chrono::steady_clock::now();
+    auto last_general_cleanup = std::chrono::steady_clock::now();
     
     while (running_) {
         auto now = std::chrono::steady_clock::now();
 
-        // Cleanup stale nodes every 5 minutes
-        cleanup_stale_nodes();
         
-        // Cleanup stale pending announces
-        cleanup_stale_announces();
-        
-        // Cleanup stale pending searches
-        cleanup_stale_searches();
-        
-
-        
-        // Cleanup stale announced peers
-        cleanup_stale_announced_peers();
+        // General cleanup operations every 1 minute (like previously)
+        if (now - last_general_cleanup >= std::chrono::minutes(1)) {
+            // Cleanup stale nodes every 1 minute
+            cleanup_stale_nodes();
+            
+            // Cleanup stale pending announces
+            cleanup_stale_announces();
+            
+            // Cleanup stale pending searches
+            cleanup_stale_searches();
+            
+            // Cleanup stale announced peers
+            cleanup_stale_announced_peers();
+            
+            last_general_cleanup = now;
+        }
         
         // Refresh buckets every 30 minutes
         if (now - last_bucket_refresh >= std::chrono::minutes(30)) {
@@ -331,10 +290,12 @@ void DhtClient::maintenance_loop() {
             last_bucket_refresh = now;
         }
         
-        // Use conditional variable for responsive shutdown
+
+        
+        // Execute maintenance loop every 5 seconds
         {
             std::unique_lock<std::mutex> lock(shutdown_mutex_);
-            if (shutdown_cv_.wait_for(lock, std::chrono::minutes(1), [this] { return !running_.load(); })) {
+            if (shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return !running_.load(); })) {
                 break;
             }
         }
@@ -346,18 +307,7 @@ void DhtClient::maintenance_loop() {
 void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sender) {
     LOG_DHT_DEBUG("Processing message of " << data.size() << " bytes from " << sender.ip << ":" << sender.port);
     
-    // First, try to detect the protocol
-    PeerProtocol protocol = get_peer_protocol(sender);
-    if (protocol == PeerProtocol::Unknown) {
-        protocol = detect_protocol(data);
-        if (protocol != PeerProtocol::Unknown) {
-            LOG_DHT_DEBUG("Detected protocol " << (protocol == PeerProtocol::BitTorrent ? "BitTorrent" : "RatsDht") << " for peer " << sender.ip << ":" << sender.port);
-            set_peer_protocol(sender, protocol);
-        }
-    }
-    
-    if (protocol == PeerProtocol::BitTorrent) {
-        LOG_DHT_DEBUG("Detected BitTorrent DHT (KRPC) protocol from " << sender.ip << ":" << sender.port);
+    LOG_DHT_DEBUG("Using BitTorrent DHT (KRPC) protocol from " << sender.ip << ":" << sender.port);
 
         // Handle KRPC message
         auto krpc_message = KrpcProtocol::decode_message(data);
@@ -367,446 +317,6 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sen
         }
         
         handle_krpc_message(*krpc_message, sender);
-    } else {
-        // Try rats dht protocol first
-        auto rats_dht_message = decode_message(data);
-        if (rats_dht_message) {
-            LOG_DHT_DEBUG("Decoded rats dht protocol message from " << sender.ip << ":" << sender.port);
-
-            LOG_DHT_DEBUG("Received message type " << static_cast<int>(rats_dht_message->type) << " from " << node_id_to_hex(rats_dht_message->sender_id) << " at " << sender.ip << ":" << sender.port);
-            
-            // Add sender to routing table
-            DhtNode sender_node(rats_dht_message->sender_id, sender);
-            LOG_DHT_DEBUG("Adding/updating node " << node_id_to_hex(rats_dht_message->sender_id) << " in routing table");
-            add_node(sender_node);
-            
-            switch (rats_dht_message->type) {
-                case DhtMessageType::PING:
-                    handle_ping(*rats_dht_message, sender);
-                    break;
-                case DhtMessageType::FIND_NODE:
-                    handle_find_node(*rats_dht_message, sender);
-                    break;
-                case DhtMessageType::GET_PEERS:
-                    handle_get_peers(*rats_dht_message, sender);
-                    break;
-                case DhtMessageType::ANNOUNCE_PEER:
-                    handle_announce_peer(*rats_dht_message, sender);
-                    break;
-                default:
-                    LOG_DHT_WARN("Unknown message type " << static_cast<int>(rats_dht_message->type) << " from " << sender.ip << ":" << sender.port);
-                    break;
-            }
-        } else {
-            LOG_DHT_WARN("Failed to decode message from " << sender.ip << ":" << sender.port << " with any protocol");
-        }
-    }
-}
-
-void DhtClient::handle_ping(const DhtMessage& message, const Peer& sender) {
-    LOG_DHT_DEBUG("Handling PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
-    // Respond with pong using the same transaction ID
-    DhtMessage response(DhtMessageType::PING, message.transaction_id, node_id_);
-    LOG_DHT_DEBUG("Responding to PING with PONG to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
-    send_message(response, sender);
-}
-
-void DhtClient::handle_find_node(const DhtMessage& message, const Peer& sender) {
-    LOG_DHT_DEBUG("Handling FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for target " << node_id_to_hex(message.target_id) << " (transaction: " << message.transaction_id << ")");
-    
-    auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
-    LOG_DHT_DEBUG("Found " << closest_nodes.size() << " closest nodes for target " << node_id_to_hex(message.target_id));
-    
-    DhtMessage response(DhtMessageType::FIND_NODE, message.transaction_id, node_id_);
-    response.nodes = closest_nodes;
-    
-    LOG_DHT_DEBUG("Responding to FIND_NODE with " << response.nodes.size() << " nodes to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
-    send_message(response, sender);
-}
-
-void DhtClient::handle_get_peers(const DhtMessage& message, const Peer& sender) {
-    LOG_DHT_DEBUG("Handling GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " (transaction: " << message.transaction_id << ")");
-    
-    // Check if this is a response to our own get_peers request
-    if (!message.peers.empty() || !message.nodes.empty()) {
-        // Check if we have a pending search for this transaction
-        {
-            std::lock_guard<std::mutex> lock(pending_searches_mutex_);
-            auto it = pending_searches_.find(message.transaction_id);
-            if (it != pending_searches_.end()) {
-                // This is a response to our get_peers request for search
-                if (!message.peers.empty()) {
-                    handle_get_peers_response_for_search_rats_dht(message.transaction_id, sender, message.peers);
-                } else {
-                    handle_get_peers_response_with_nodes_rats_dht(message.transaction_id, sender, message.nodes);
-                }
-                return;
-            }
-        }
-        
-        // Check if we have a pending announce for this transaction
-        if (!message.token.empty()) {
-            std::lock_guard<std::mutex> lock(pending_announces_mutex_);
-            auto it = pending_announces_.find(message.transaction_id);
-            if (it != pending_announces_.end()) {
-                // This is a response to our get_peers request for announce
-                handle_get_peers_response_for_announce_rats_dht(message.transaction_id, sender, message.token);
-                return;
-            }
-        }
-    }
-    
-    // Handle as a regular get_peers request
-    DhtMessage response(DhtMessageType::GET_PEERS, message.transaction_id, node_id_);
-    
-    // First check if we have announced peers for this info_hash
-    auto announced_peers = get_announced_peers(message.target_id);
-    
-    if (!announced_peers.empty()) {
-        // Return the peers we have stored
-        response.peers = announced_peers;
-        LOG_DHT_DEBUG("Responding to GET_PEERS with " << response.peers.size() << " announced peers for info_hash " << node_id_to_hex(message.target_id));
-    } else {
-        // Return closest nodes
-        auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
-        response.nodes = closest_nodes;
-        LOG_DHT_DEBUG("Responding to GET_PEERS with " << response.nodes.size() << " closest nodes for info_hash " << node_id_to_hex(message.target_id));
-    }
-    
-    // Generate a token for this peer
-    std::string token = generate_token(sender);
-    response.token = token;
-    
-    LOG_DHT_DEBUG("Sending GET_PEERS response with token '" << token << "' to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
-    send_message(response, sender);
-}
-
-void DhtClient::handle_announce_peer(const DhtMessage& message, const Peer& sender) {
-    LOG_DHT_DEBUG("Handling ANNOUNCE_PEER from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.target_id) << " on port " << message.announce_port << " (transaction: " << message.transaction_id << ")");
-    
-    // Verify token
-    if (!verify_token(sender, message.token)) {
-        LOG_DHT_WARN("Invalid token '" << message.token << "' from " << sender.ip << ":" << sender.port << " for ANNOUNCE_PEER (transaction: " << message.transaction_id << ")");
-        return;
-    }
-    
-    LOG_DHT_DEBUG("Token verified, accepting announcement from " << sender.ip << ":" << sender.port);
-    
-    // Store the peer announcement
-    Peer announcing_peer(sender.ip, message.announce_port);
-    store_announced_peer(message.target_id, announcing_peer);
-    
-    DhtMessage response(DhtMessageType::ANNOUNCE_PEER, message.transaction_id, node_id_);
-    LOG_DHT_DEBUG("Responding to ANNOUNCE_PEER with acknowledgment to " << sender.ip << ":" << sender.port << " (transaction: " << message.transaction_id << ")");
-    send_message(response, sender);
-}
-
-
-
-bool DhtClient::send_message(const DhtMessage& message, const Peer& peer) {
-    LOG_DHT_DEBUG("Encoding message type " << static_cast<int>(message.type) << " for " << peer.ip << ":" << peer.port);
-    auto data = encode_message(message);
-    if (data.empty()) {
-        LOG_DHT_ERROR("Failed to encode message");
-        return false;
-    }
-    
-    LOG_DHT_DEBUG("Sending " << data.size() << " bytes to " << peer.ip << ":" << peer.port);
-    int result = send_udp_data(socket_, data, peer);
-    
-    if (result > 0) {
-        LOG_DHT_DEBUG("Successfully sent message type " << static_cast<int>(message.type) << " to " << peer.ip << ":" << peer.port);
-    } else {
-        LOG_DHT_ERROR("Failed to send message type " << static_cast<int>(message.type) << " to " << peer.ip << ":" << peer.port);
-    }
-    
-    return result > 0;
-}
-
-std::vector<uint8_t> DhtClient::encode_message(const DhtMessage& message) {
-    LOG_DHT_DEBUG("Encoding message: type=" << static_cast<int>(message.type) << 
-                  ", transaction_id=" << message.transaction_id <<
-                  ", sender=" << node_id_to_hex(message.sender_id) << 
-                  ", target=" << node_id_to_hex(message.target_id) << 
-                  ", nodes=" << message.nodes.size() << 
-                  ", peers=" << message.peers.size() << 
-                  ", announce_port=" << message.announce_port << 
-                  ", token_size=" << message.token.size());
-    
-    std::vector<uint8_t> data;
-    
-    // Simple binary encoding
-    data.push_back(static_cast<uint8_t>(message.type));
-    
-    // Encode transaction ID
-    data.push_back(static_cast<uint8_t>(message.transaction_id.size()));
-    data.insert(data.end(), message.transaction_id.begin(), message.transaction_id.end());
-    
-    data.insert(data.end(), message.sender_id.begin(), message.sender_id.end());
-    data.insert(data.end(), message.target_id.begin(), message.target_id.end());
-    
-    // Encode nodes
-    data.push_back(static_cast<uint8_t>(message.nodes.size()));
-    for (const auto& node : message.nodes) {
-        LOG_DHT_DEBUG("Encoding node: " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port);
-        data.insert(data.end(), node.id.begin(), node.id.end());
-        
-        // Encode IP address (support both IPv4 and IPv6)
-        if (network_utils::is_valid_ipv4(node.peer.ip)) {
-            // IPv4 address
-            data.push_back(0x04);  // IPv4 flag
-            in_addr addr;
-            inet_pton(AF_INET, node.peer.ip.c_str(), &addr);
-            uint32_t ip = ntohl(addr.s_addr);
-            data.push_back((ip >> 24) & 0xFF);
-            data.push_back((ip >> 16) & 0xFF);
-            data.push_back((ip >> 8) & 0xFF);
-            data.push_back(ip & 0xFF);
-        } else if (network_utils::is_valid_ipv6(node.peer.ip)) {
-            // IPv6 address
-            data.push_back(0x06);  // IPv6 flag
-            in6_addr addr;
-            inet_pton(AF_INET6, node.peer.ip.c_str(), &addr);
-            for (int i = 0; i < 16; ++i) {
-                data.push_back(addr.s6_addr[i]);
-            }
-        } else {
-            // Invalid IP address, treat as IPv4 with 0.0.0.0
-            data.push_back(0x04);  // IPv4 flag
-            data.push_back(0x00);
-            data.push_back(0x00);
-            data.push_back(0x00);
-            data.push_back(0x00);
-        }
-        
-        // Encode port (2 bytes)
-        data.push_back((node.peer.port >> 8) & 0xFF);
-        data.push_back(node.peer.port & 0xFF);
-    }
-    
-    // Encode peers
-    data.push_back(static_cast<uint8_t>(message.peers.size()));
-    for (const auto& peer : message.peers) {
-        LOG_DHT_DEBUG("Encoding peer: " << peer.ip << ":" << peer.port);
-        // Encode IP address (support both IPv4 and IPv6)
-        if (network_utils::is_valid_ipv4(peer.ip)) {
-            // IPv4 address
-            data.push_back(0x04);  // IPv4 flag
-            in_addr addr;
-            inet_pton(AF_INET, peer.ip.c_str(), &addr);
-            uint32_t ip = ntohl(addr.s_addr);
-            data.push_back((ip >> 24) & 0xFF);
-            data.push_back((ip >> 16) & 0xFF);
-            data.push_back((ip >> 8) & 0xFF);
-            data.push_back(ip & 0xFF);
-        } else if (network_utils::is_valid_ipv6(peer.ip)) {
-            // IPv6 address
-            data.push_back(0x06);  // IPv6 flag
-            in6_addr addr;
-            inet_pton(AF_INET6, peer.ip.c_str(), &addr);
-            for (int i = 0; i < 16; ++i) {
-                data.push_back(addr.s6_addr[i]);
-            }
-        } else {
-            // Invalid IP address, treat as IPv4 with 0.0.0.0
-            data.push_back(0x04);  // IPv4 flag
-            data.push_back(0x00);
-            data.push_back(0x00);
-            data.push_back(0x00);
-            data.push_back(0x00);
-        }
-        
-        // Encode port (2 bytes)
-        data.push_back((peer.port >> 8) & 0xFF);
-        data.push_back(peer.port & 0xFF);
-    }
-    
-    // Encode announce port
-    data.push_back((message.announce_port >> 8) & 0xFF);
-    data.push_back(message.announce_port & 0xFF);
-    
-    // Encode token
-    data.push_back(static_cast<uint8_t>(message.token.size()));
-    data.insert(data.end(), message.token.begin(), message.token.end());
-    
-    LOG_DHT_DEBUG("Encoded message to " << data.size() << " bytes");
-    return data;
-}
-
-std::unique_ptr<DhtMessage> DhtClient::decode_message(const std::vector<uint8_t>& data) {
-    LOG_DHT_DEBUG("Decoding message of " << data.size() << " bytes");
-    
-    if (data.size() < 1 + 1 + NODE_ID_SIZE * 2 + 4) {  // Minimum size with transaction ID
-        LOG_DHT_ERROR("Message too small: " << data.size() << " bytes (minimum " << (1 + 1 + NODE_ID_SIZE * 2 + 4) << ")");
-        return nullptr;
-    }
-    
-    size_t offset = 0;
-    
-    // Decode message type
-    auto type = static_cast<DhtMessageType>(data[offset++]);
-    LOG_DHT_DEBUG("Decoded message type: " << static_cast<int>(type));
-    
-    // Decode transaction ID
-    uint8_t transaction_id_size = data[offset++];
-    if (offset + transaction_id_size > data.size()) {
-        LOG_DHT_ERROR("Invalid transaction ID size: " << static_cast<int>(transaction_id_size));
-        return nullptr;
-    }
-    std::string transaction_id(data.begin() + offset, data.begin() + offset + transaction_id_size);
-    offset += transaction_id_size;
-    LOG_DHT_DEBUG("Decoded transaction ID: " << transaction_id);
-    
-    // Decode sender ID
-    NodeId sender_id;
-    if (offset + NODE_ID_SIZE > data.size()) {
-        LOG_DHT_ERROR("Insufficient data for sender ID");
-        return nullptr;
-    }
-    std::copy(data.begin() + offset, data.begin() + offset + NODE_ID_SIZE, sender_id.begin());
-    offset += NODE_ID_SIZE;
-    LOG_DHT_DEBUG("Decoded sender ID: " << node_id_to_hex(sender_id));
-    
-    auto message = std::make_unique<DhtMessage>(type, transaction_id, sender_id);
-    
-    // Decode target ID
-    std::copy(data.begin() + offset, data.begin() + offset + NODE_ID_SIZE, message->target_id.begin());
-    offset += NODE_ID_SIZE;
-    LOG_DHT_DEBUG("Decoded target ID: " << node_id_to_hex(message->target_id));
-    
-    if (offset >= data.size()) {
-        LOG_DHT_DEBUG("Message decoded successfully (minimal)");
-        return message;
-    }
-    
-    // Decode nodes
-    uint8_t node_count = data[offset++];
-    LOG_DHT_DEBUG("Decoding " << static_cast<int>(node_count) << " nodes");
-    for (int i = 0; i < node_count && offset + NODE_ID_SIZE + 1 < data.size(); ++i) {
-        NodeId node_id;
-        std::copy(data.begin() + offset, data.begin() + offset + NODE_ID_SIZE, node_id.begin());
-        offset += NODE_ID_SIZE;
-        
-        // Check if we have enough data for IP version flag
-        if (offset >= data.size()) break;
-        
-        // Decode IP address (support both IPv4 and IPv6)
-        uint8_t ip_version = data[offset++];
-        std::string ip_str;
-        
-        if (ip_version == 0x04) {
-            // IPv4 address
-            if (offset + 4 > data.size()) break;
-            uint32_t ip = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
-            offset += 4;
-            
-            struct in_addr addr;
-            addr.s_addr = htonl(ip);
-            char ip_str_buf[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &addr, ip_str_buf, INET_ADDRSTRLEN);
-            ip_str = ip_str_buf;
-        } else if (ip_version == 0x06) {
-            // IPv6 address
-            if (offset + 16 > data.size()) break;
-            struct in6_addr addr;
-            for (int j = 0; j < 16; ++j) {
-                addr.s6_addr[j] = data[offset + j];
-            }
-            offset += 16;
-            
-            char ip_str_buf[INET6_ADDRSTRLEN];
-            inet_ntop(AF_INET6, &addr, ip_str_buf, INET6_ADDRSTRLEN);
-            ip_str = ip_str_buf;
-        } else {
-            // Unknown IP version, skip this node
-            LOG_DHT_WARN("Unknown IP version " << static_cast<int>(ip_version) << " in node data");
-            break;
-        }
-        
-        // Decode port
-        if (offset + 2 > data.size()) break;
-        uint16_t port = (data[offset] << 8) | data[offset + 1];
-        offset += 2;
-        
-        LOG_DHT_DEBUG("Decoded node: " << node_id_to_hex(node_id) << " at " << ip_str << ":" << port);
-        message->nodes.emplace_back(node_id, Peer(ip_str, port));
-    }
-    
-    if (offset >= data.size()) {
-        LOG_DHT_DEBUG("Message decoded successfully (with nodes)");
-        return message;
-    }
-    
-    // Decode peers
-    uint8_t peer_count = data[offset++];
-    LOG_DHT_DEBUG("Decoding " << static_cast<int>(peer_count) << " peers");
-    for (int i = 0; i < peer_count && offset + 1 < data.size(); ++i) {
-        // Check if we have enough data for IP version flag
-        if (offset >= data.size()) break;
-        
-        // Decode IP address (support both IPv4 and IPv6)
-        uint8_t ip_version = data[offset++];
-        std::string ip_str;
-        
-        if (ip_version == 0x04) {
-            // IPv4 address
-            if (offset + 4 > data.size()) break;
-            uint32_t ip = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
-            offset += 4;
-            
-            struct in_addr addr;
-            addr.s_addr = htonl(ip);
-            char ip_str_buf[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &addr, ip_str_buf, INET_ADDRSTRLEN);
-            ip_str = ip_str_buf;
-        } else if (ip_version == 0x06) {
-            // IPv6 address
-            if (offset + 16 > data.size()) break;
-            struct in6_addr addr;
-            for (int j = 0; j < 16; ++j) {
-                addr.s6_addr[j] = data[offset + j];
-            }
-            offset += 16;
-            
-            char ip_str_buf[INET6_ADDRSTRLEN];
-            inet_ntop(AF_INET6, &addr, ip_str_buf, INET6_ADDRSTRLEN);
-            ip_str = ip_str_buf;
-        } else {
-            // Unknown IP version, skip this peer
-            LOG_DHT_WARN("Unknown IP version " << static_cast<int>(ip_version) << " in peer data");
-            break;
-        }
-        
-        // Decode port
-        if (offset + 2 > data.size()) break;
-        uint16_t port = (data[offset] << 8) | data[offset + 1];
-        offset += 2;
-        
-        LOG_DHT_DEBUG("Decoded peer: " << ip_str << ":" << port);
-        message->peers.emplace_back(ip_str, port);
-    }
-    
-    if (offset + 2 < data.size()) {
-        // Decode announce port
-        message->announce_port = (data[offset] << 8) | data[offset + 1];
-        offset += 2;
-        LOG_DHT_DEBUG("Decoded announce port: " << message->announce_port);
-        
-        if (offset < data.size()) {
-            // Decode token
-            uint8_t token_size = data[offset++];
-            if (offset + token_size <= data.size()) {
-                message->token = std::string(data.begin() + offset, data.begin() + offset + token_size);
-                LOG_DHT_DEBUG("Decoded token: " << message->token << " (size: " << static_cast<int>(token_size) << ")");
-            }
-        }
-    }
-    
-    LOG_DHT_DEBUG("Message decoded successfully (complete): type=" << static_cast<int>(type) << 
-                  ", nodes=" << message->nodes.size() << 
-                  ", peers=" << message->peers.size());
-    
-    return message;
 }
 
 void DhtClient::add_node(const DhtNode& node) {
@@ -826,23 +336,27 @@ void DhtClient::add_node(const DhtNode& node) {
     if (it != bucket.end()) {
         // Update existing node
         LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " already exists in bucket " << bucket_index << ", updating");
+        
         it->peer = node.peer;
         it->last_seen = std::chrono::steady_clock::now();
-        return;
-    }
-    
-    // Add new node
-    if (bucket.size() < K_BUCKET_SIZE) {
-        bucket.push_back(node);
-        LOG_DHT_DEBUG("Added new node " << node_id_to_hex(node.id) << " to bucket " << bucket_index << " (size: " << bucket.size() << "/" << K_BUCKET_SIZE << ")");
     } else {
-        // Bucket is full, replace least recently seen node
-        auto oldest_it = std::min_element(bucket.begin(), bucket.end(),
-                                         [](const DhtNode& a, const DhtNode& b) {
-                                             return a.last_seen < b.last_seen;
-                                         });
-        LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, replacing oldest node " << node_id_to_hex(oldest_it->id) << " with " << node_id_to_hex(node.id));
-        *oldest_it = node;
+        // Add new node
+        if (bucket.size() < K_BUCKET_SIZE) {
+            bucket.push_back(node);
+            LOG_DHT_DEBUG("Added new node " << node_id_to_hex(node.id) << " to bucket " << bucket_index << " (size: " << bucket.size() << "/" << K_BUCKET_SIZE << ")");
+        } else {
+            // Bucket is full, replace least recently seen node
+            auto worst_it = std::min_element(bucket.begin(), bucket.end(),
+                                             [](const DhtNode& a, const DhtNode& b) {
+                                                 return a.last_seen < b.last_seen;
+                                             });
+            LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, replacing node " << node_id_to_hex(worst_it->id) 
+                          << " (last_seen age: " 
+                          << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - worst_it->last_seen).count() 
+                          << "s) with " << node_id_to_hex(node.id));
+            
+            *worst_it = node;
+        }
     }
 }
 
@@ -914,78 +428,7 @@ int DhtClient::get_bucket_index(const NodeId& id) {
     return NODE_ID_SIZE * 8 - 1;  // All bits are 0, maximum distance
 }
 
-// Protocol detection and management
-DhtClient::PeerProtocol DhtClient::detect_protocol(const std::vector<uint8_t>& data) {
-    if (data.empty()) {
-        return PeerProtocol::Unknown;
-    }
-    
-    // Check for KRPC (bencode) format
-    // KRPC messages start with 'd' (dictionary) and contain specific keys
-    if (data[0] == 'd') {
-        try {
-            auto decoded = bencode::decode(data);
-            if (decoded.is_dict() && decoded.has_key("y") && decoded.has_key("t")) {
-                // This looks like a valid KRPC message
-                return PeerProtocol::BitTorrent;
-            }
-        } catch (const std::exception&) {
-            // Not valid bencode, fall through to custom protocol
-        }
-    }
-    
-    // Check for our rats dht protocol format
-    // Our rats dht messages have specific structure: type (1 byte) + transaction_id_size (1 byte) + transaction_id + sender_id (20 bytes) + target_id (20 bytes) + ...
-    if (data.size() >= 43 && data[0] <= 3) { // Message type 0-3, minimum size for transaction ID
-        // Additional check: ensure transaction ID size is reasonable
-        if (data.size() > 1 && data[1] <= 32) { // Transaction ID should be <= 32 bytes
-            return PeerProtocol::RatsDht;
-        }
-    }
-    
-    return PeerProtocol::Unknown;
-}
 
-DhtClient::PeerProtocol DhtClient::get_peer_protocol(const Peer& peer) {
-    std::lock_guard<std::mutex> lock(peer_protocols_mutex_);
-    auto it = peer_protocols_.find(peer);
-    if (it != peer_protocols_.end()) {
-        return it->second;
-    }
-    return PeerProtocol::BitTorrent;  // Default to BitTorrent protocol
-}
-
-void DhtClient::set_peer_protocol(const Peer& peer, PeerProtocol protocol) {
-    std::lock_guard<std::mutex> lock(peer_protocols_mutex_);
-    peer_protocols_[peer] = protocol;
-}
-
-bool DhtClient::is_known_bittorrent_bootstrap_node(const Peer& peer) {
-    // Check if this is a known BitTorrent DHT bootstrap node
-    // These nodes are expected to use KRPC protocol only
-    static const std::vector<std::string> known_bittorrent_hosts = {
-        "router.bittorrent.com",
-        "dht.transmissionbt.com", 
-        "router.utorrent.com",
-        "dht.aelitis.com",
-        "dht.libtorrent.org",
-        "bootstrap.ring.cx"
-    };
-    
-    // Check if the peer is on a known BitTorrent DHT port
-    if (peer.port != 6881) {
-        return false;
-    }
-    
-    // Check if the hostname/IP matches known BitTorrent bootstrap nodes
-    for (const auto& host : known_bittorrent_hosts) {
-        if (peer.ip == host) {
-            return true;
-        }
-    }
-    
-    return false;
-}
 
 // KRPC message handling
 void DhtClient::handle_krpc_message(const KrpcMessage& message, const Peer& sender) {
@@ -1181,66 +624,25 @@ void DhtClient::send_krpc_announce_peer(const Peer& peer, const InfoHash& info_h
     send_krpc_message(message, peer);
 }
 
-// Update sending functions to use protocol detection
+// KRPC protocol sending functions
 void DhtClient::send_ping(const Peer& peer) {
-    PeerProtocol protocol = get_peer_protocol(peer);
-    
-    if (protocol == PeerProtocol::BitTorrent) {
         LOG_DHT_DEBUG("Sending KRPC PING to " << peer.ip << ":" << peer.port);
         send_krpc_ping(peer);
-    } else {
-        std::string transaction_id = generate_rats_dht_transaction_id();
-        LOG_DHT_DEBUG("Sending rats dht PING to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
-        DhtMessage message(DhtMessageType::PING, transaction_id, node_id_);
-        send_message(message, peer);
-    }
 }
 
 void DhtClient::send_find_node(const Peer& peer, const NodeId& target) {
-    PeerProtocol protocol = get_peer_protocol(peer);
-    
-    if (protocol == PeerProtocol::BitTorrent) {
         LOG_DHT_DEBUG("Sending KRPC FIND_NODE to " << peer.ip << ":" << peer.port);
         send_krpc_find_node(peer, target);
-    } else {
-        std::string transaction_id = generate_rats_dht_transaction_id();
-        LOG_DHT_DEBUG("Sending rats dht FIND_NODE to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
-        DhtMessage message(DhtMessageType::FIND_NODE, transaction_id, node_id_);
-        message.target_id = target;
-        send_message(message, peer);
-    }
 }
 
 void DhtClient::send_get_peers(const Peer& peer, const InfoHash& info_hash) {
-    PeerProtocol protocol = get_peer_protocol(peer);
-    
-    if (protocol == PeerProtocol::BitTorrent) {
         LOG_DHT_DEBUG("Sending KRPC GET_PEERS to " << peer.ip << ":" << peer.port);
         send_krpc_get_peers(peer, info_hash);
-    } else {
-        std::string transaction_id = generate_rats_dht_transaction_id();
-        LOG_DHT_DEBUG("Sending rats dht GET_PEERS to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
-        DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
-        message.target_id = info_hash;
-        send_message(message, peer);
-    }
 }
 
 void DhtClient::send_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
-    PeerProtocol protocol = get_peer_protocol(peer);
-    
-    if (protocol == PeerProtocol::BitTorrent) {
         LOG_DHT_DEBUG("Sending KRPC ANNOUNCE_PEER to " << peer.ip << ":" << peer.port);
         send_krpc_announce_peer(peer, info_hash, port, token);
-    } else {
-        std::string transaction_id = generate_rats_dht_transaction_id();
-        LOG_DHT_DEBUG("Sending rats dht ANNOUNCE_PEER to " << peer.ip << ":" << peer.port << " (transaction: " << transaction_id << ")");
-        DhtMessage message(DhtMessageType::ANNOUNCE_PEER, transaction_id, node_id_);
-        message.target_id = info_hash;
-        message.announce_port = port;
-        message.token = token;
-        send_message(message, peer);
-    }
 }
 
 // Conversion utilities
@@ -1319,12 +721,6 @@ std::string DhtClient::generate_token(const Peer& peer) {
     return oss.str();
 }
 
-std::string DhtClient::generate_rats_dht_transaction_id() {
-    return "r" + std::to_string(++rats_dht_transaction_counter_);
-}
-
-
-
 bool DhtClient::verify_token(const Peer& peer, const std::string& token) {
     std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
     auto it = peer_tokens_.find(peer);
@@ -1335,16 +731,33 @@ bool DhtClient::verify_token(const Peer& peer, const std::string& token) {
 }
 
 void DhtClient::cleanup_stale_nodes() {
-    std::lock_guard<std::mutex> lock(routing_table_mutex_);
+    std::lock_guard<std::mutex> routing_lock(routing_table_mutex_);
     
     auto now = std::chrono::steady_clock::now();
     auto stale_threshold = std::chrono::minutes(15);
     
+    size_t total_removed = 0;
+    
     for (auto& bucket : routing_table_) {
+        auto old_size = bucket.size();
+        
         bucket.erase(std::remove_if(bucket.begin(), bucket.end(),
                                    [now, stale_threshold](const DhtNode& node) {
-                                       return now - node.last_seen > stale_threshold;
+                                       bool should_remove = (now - node.last_seen > stale_threshold);
+                                       
+                                       if (should_remove) {
+                                           LOG_DHT_DEBUG("Removing stale node " << node_id_to_hex(node.id) 
+                                                       << " at " << node.peer.ip << ":" << node.peer.port);
+                                       }
+                                       
+                                       return should_remove;
                                    }), bucket.end());
+        
+        total_removed += (old_size - bucket.size());
+    }
+    
+    if (total_removed > 0) {
+        LOG_DHT_DEBUG("Cleaned up " << total_removed << " stale/failed nodes from routing table");
     }
 }
 
@@ -1444,23 +857,6 @@ void DhtClient::handle_get_peers_response_for_announce(const std::string& transa
     }
 }
 
-void DhtClient::handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const Peer& responder, const std::string& token) {
-    std::lock_guard<std::mutex> lock(pending_announces_mutex_);
-    
-    auto it = pending_announces_.find(transaction_id);
-    if (it != pending_announces_.end()) {
-        const auto& pending_announce = it->second;
-        LOG_DHT_DEBUG("Found pending announce for rats DHT transaction " << transaction_id 
-                      << " - sending announce_peer for info_hash " << node_id_to_hex(pending_announce.info_hash) 
-                      << " to " << responder.ip << ":" << responder.port);
-        
-        // Send announce_peer with the received token using unified function
-        send_announce_peer(responder, pending_announce.info_hash, pending_announce.port, token);
-        
-        // Remove the pending announce since we've handled it
-        pending_announces_.erase(it);
-    }
-}
 
 void DhtClient::handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers) {
     std::lock_guard<std::mutex> lock(pending_searches_mutex_);
@@ -1496,39 +892,6 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
     }
 }
 
-void DhtClient::handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers) {
-    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
-    
-    auto trans_it = transaction_to_search_.find(transaction_id);
-    if (trans_it != transaction_to_search_.end()) {
-        std::string hash_key = trans_it->second;
-        auto search_it = pending_searches_.find(hash_key);
-        if (search_it != pending_searches_.end()) {
-            auto& pending_search = search_it->second;
-            LOG_DHT_DEBUG("Found pending search for rats DHT transaction " << transaction_id 
-                          << " - received " << peers.size() << " peers for info_hash " << hash_key 
-                          << " from " << responder.ip << ":" << responder.port);
-            
-            if (!peers.empty()) {
-                // We found actual peers - call callback and clean up search
-                {
-                    std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
-                    auto active_it = active_searches_.find(hash_key);
-                    if (active_it != active_searches_.end() && active_it->second) {
-                        active_it->second(peers, pending_search.info_hash);
-                    }
-                    // Remove from active searches since we found peers
-                    active_searches_.erase(hash_key);
-                }
-                // Remove the completed search
-                pending_searches_.erase(search_it);
-            }
-        }
-        
-        // Remove the transaction mapping since we've handled it
-        transaction_to_search_.erase(trans_it);
-    }
-}
 
 void DhtClient::handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes) {
     std::lock_guard<std::mutex> lock(pending_searches_mutex_);
@@ -1562,37 +925,7 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
     }
 }
 
-void DhtClient::handle_get_peers_response_with_nodes_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<DhtNode>& nodes) {
-    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
-    
-    auto trans_it = transaction_to_search_.find(transaction_id);
-    if (trans_it != transaction_to_search_.end()) {
-        std::string hash_key = trans_it->second;
-        auto search_it = pending_searches_.find(hash_key);
-        if (search_it != pending_searches_.end()) {
-            auto& pending_search = search_it->second;
-            LOG_DHT_DEBUG("Found pending search for rats DHT transaction " << transaction_id 
-                          << " - received " << nodes.size() << " nodes for info_hash " << hash_key 
-                          << " from " << responder.ip << ":" << responder.port);
 
-            // Continue search iteration
-            bool should_remove_search = continue_search_iteration(pending_search);
-            if (should_remove_search) {
-                LOG_DHT_DEBUG("Removing completed search for info_hash " << hash_key);
-                pending_searches_.erase(search_it);
-                
-                // Also clean up the active search callback
-                {
-                    std::lock_guard<std::mutex> search_lock(active_searches_mutex_);
-                    active_searches_.erase(hash_key);
-                }
-            }
-        }
-        
-        // Remove the transaction mapping since we've handled it
-        transaction_to_search_.erase(trans_it);
-    }
-}
 
 bool DhtClient::continue_search_iteration(PendingSearch& search) {
     std::string hash_key = node_id_to_hex(search.info_hash);
@@ -1623,29 +956,18 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
         candidates_found++;
         
         if (search.queried_nodes.find(node_hex) == search.queried_nodes.end()) {
-            PeerProtocol protocol = get_peer_protocol(node.peer);
-            
             LOG_DHT_DEBUG("Querying node " << node_hex << " at " << node.peer.ip << ":" << node.peer.port 
-                          << " (protocol: " << (protocol == PeerProtocol::BitTorrent ? "BitTorrent" : "RatsDht") 
+                          << " (protocol: BitTorrent" 
                           << ", iteration: " << (search.iteration_count + 1) << ")");
             
             // Mark node as queried in the shared search object
             search.queried_nodes.insert(node_hex);
             
-            if (protocol == PeerProtocol::BitTorrent) {
-                std::string transaction_id = KrpcProtocol::generate_transaction_id();
-                transaction_to_search_[transaction_id] = hash_key;
-                
-                auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, search.info_hash);
-                send_krpc_message(message, node.peer);
-            } else {
-                std::string transaction_id = generate_rats_dht_transaction_id();
-                transaction_to_search_[transaction_id] = hash_key;
-                
-                DhtMessage message(DhtMessageType::GET_PEERS, transaction_id, node_id_);
-                message.target_id = search.info_hash;
-                send_message(message, node.peer);
-            }
+            std::string transaction_id = KrpcProtocol::generate_transaction_id();
+            transaction_to_search_[transaction_id] = hash_key;
+            
+            auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, search.info_hash);
+            send_krpc_message(message, node.peer);
             
             nodes_queried++;
         } else {
