@@ -94,6 +94,8 @@ add_library(rats
     src/krpc.h
     src/librats.cpp
     src/librats_logging.cpp
+    src/librats_file_transfer.cpp
+    src/librats_gossipsub.cpp
     src/librats.h
     src/sha1.cpp
     src/sha1.h
