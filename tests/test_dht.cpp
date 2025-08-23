@@ -77,19 +77,7 @@ TEST_F(DhtTest, DhtNodeTest) {
     EXPECT_LT(time_diff.count(), 1000);  // Should be less than 1 second
 }
 
-// Test DhtMessage structure
-TEST_F(DhtTest, DhtMessageTest) {
-    DhtMessage msg;
-    msg.type = DhtMessageType::PING;
-    msg.transaction_id = "test_tx_123";
-    msg.sender_id = create_test_node_id(0x11);
-    msg.is_response = false;
-    
-    EXPECT_EQ(msg.type, DhtMessageType::PING);
-    EXPECT_EQ(msg.transaction_id, "test_tx_123");
-    EXPECT_EQ(msg.sender_id, create_test_node_id(0x11));
-    EXPECT_FALSE(msg.is_response);
-}
+// Note: DhtMessage and DhtMessageType removed - DHT now uses KRPC protocol only
 
 // Test DhtClient creation and basic operations
 TEST_F(DhtTest, DhtClientBasicTest) {
@@ -279,19 +267,7 @@ TEST_F(DhtTest, ConstantsTest) {
     EXPECT_EQ(DHT_PORT, 6881);
 }
 
-// Test message types
-TEST_F(DhtTest, MessageTypesTest) {
-    // Test that all message types are defined
-    DhtMessageType ping = DhtMessageType::PING;
-    DhtMessageType find_node = DhtMessageType::FIND_NODE;
-    DhtMessageType get_peers = DhtMessageType::GET_PEERS;
-    DhtMessageType announce = DhtMessageType::ANNOUNCE_PEER;
-    
-    EXPECT_EQ(static_cast<int>(ping), 0);
-    EXPECT_EQ(static_cast<int>(find_node), 1);
-    EXPECT_EQ(static_cast<int>(get_peers), 2);
-    EXPECT_EQ(static_cast<int>(announce), 3);
-}
+// Note: DhtMessageType removed - DHT now uses KRPC protocol only
 
 // Test Peer equality
 TEST_F(DhtTest, PeerEqualityTest) {

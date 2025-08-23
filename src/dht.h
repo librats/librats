@@ -13,7 +13,6 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
-#include <atomic>
 #include <condition_variable>
 
 // Hash specialization for Peer (must be defined before use in unordered_map)
@@ -46,39 +45,12 @@ struct DhtNode {
     Peer peer;
     std::chrono::steady_clock::time_point last_seen;
     
-    DhtNode() = default;
+    DhtNode() : last_seen(std::chrono::steady_clock::now()) {}
     DhtNode(const NodeId& id, const Peer& peer)
         : id(id), peer(peer), last_seen(std::chrono::steady_clock::now()) {}
 };
 
-/**
- * DHT Message types
- */
-enum class DhtMessageType {
-    PING = 0,
-    FIND_NODE = 1,
-    GET_PEERS = 2,
-    ANNOUNCE_PEER = 3
-};
 
-/**
- * DHT Message structure
- */
-struct DhtMessage {
-    DhtMessageType type;
-    std::string transaction_id;
-    NodeId sender_id;
-    NodeId target_id;
-    std::vector<DhtNode> nodes;
-    std::vector<Peer> peers;
-    uint16_t announce_port;
-    std::string token;
-    bool is_response;
-    
-    DhtMessage() : type(DhtMessageType::PING), announce_port(0), is_response(false) {}
-    DhtMessage(DhtMessageType type, const std::string& transaction_id, const NodeId& sender_id) 
-        : type(type), transaction_id(transaction_id), sender_id(sender_id), announce_port(0), is_response(false) {}
-};
 
 /**
  * Peer discovery callback
@@ -159,6 +131,8 @@ public:
      */
     bool is_running() const { return running_; }
     
+
+    
     /**
      * Get default BitTorrent DHT bootstrap nodes
      * @return Vector of bootstrap nodes
@@ -183,17 +157,9 @@ private:
     std::unordered_map<Peer, std::string> peer_tokens_;
     std::mutex peer_tokens_mutex_;
     
-    // Protocol detection - track which protocol each peer uses
-    enum class PeerProtocol {
-        Unknown,
-        RatsDht,    // Our rats dht binary protocol
-        BitTorrent  // Standard BitTorrent DHT (KRPC)
-    };
-    std::unordered_map<Peer, PeerProtocol> peer_protocols_;
-    std::mutex peer_protocols_mutex_;
-        
-    // Transaction ID counters
-    static std::atomic<uint32_t> rats_dht_transaction_counter_;
+
+    
+
     
     // Pending announce tracking (for BEP 5 compliance)
     struct PendingAnnounce {
@@ -250,17 +216,7 @@ private:
     void maintenance_loop();
     void handle_message(const std::vector<uint8_t>& data, const Peer& sender);
     
-    // Protocol detection
-    PeerProtocol detect_protocol(const std::vector<uint8_t>& data);
-    PeerProtocol get_peer_protocol(const Peer& peer);
-    void set_peer_protocol(const Peer& peer, PeerProtocol protocol);
-    bool is_known_bittorrent_bootstrap_node(const Peer& peer);
-    
-    // Rats DHT protocol handlers
-    void handle_ping(const DhtMessage& message, const Peer& sender);
-    void handle_find_node(const DhtMessage& message, const Peer& sender);
-    void handle_get_peers(const DhtMessage& message, const Peer& sender);
-    void handle_announce_peer(const DhtMessage& message, const Peer& sender);
+
     
     // KRPC protocol handlers  
     void handle_krpc_message(const KrpcMessage& message, const Peer& sender);
@@ -271,16 +227,11 @@ private:
     void handle_krpc_response(const KrpcMessage& message, const Peer& sender);
     void handle_krpc_error(const KrpcMessage& message, const Peer& sender);
     
-    // Sending functions (will auto-detect protocol)
+    // KRPC protocol sending functions
     void send_ping(const Peer& peer);
     void send_find_node(const Peer& peer, const NodeId& target);
     void send_get_peers(const Peer& peer, const InfoHash& info_hash);
     void send_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
-    
-    // Rats DHT protocol sending
-    bool send_message(const DhtMessage& message, const Peer& peer);
-    std::vector<uint8_t> encode_message(const DhtMessage& message);
-    std::unique_ptr<DhtMessage> decode_message(const std::vector<uint8_t>& data);
     
     // KRPC protocol sending
     bool send_krpc_message(const KrpcMessage& message, const Peer& peer);
@@ -297,12 +248,12 @@ private:
     NodeId generate_node_id();
     NodeId xor_distance(const NodeId& a, const NodeId& b);
     bool is_closer(const NodeId& a, const NodeId& b, const NodeId& target);
+
     
     std::string generate_token(const Peer& peer);
     bool verify_token(const Peer& peer, const std::string& token);
     
-    // Transaction ID management
-    std::string generate_rats_dht_transaction_id();
+
     
     void cleanup_stale_nodes();
     void refresh_buckets();
@@ -310,14 +261,11 @@ private:
     // Pending announce management
     void cleanup_stale_announces();
     void handle_get_peers_response_for_announce(const std::string& transaction_id, const Peer& responder, const std::string& token);
-    void handle_get_peers_response_for_announce_rats_dht(const std::string& transaction_id, const Peer& responder, const std::string& token);
     
     // Pending search management
     void cleanup_stale_searches();
     void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
-    void handle_get_peers_response_for_search_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
-    void handle_get_peers_response_with_nodes_rats_dht(const std::string& transaction_id, const Peer& responder, const std::vector<DhtNode>& nodes);
     bool continue_search_iteration(PendingSearch& search);
     
     // Peer announcement storage management
