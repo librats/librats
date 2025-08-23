@@ -62,6 +62,13 @@ else()
 endif()
 set(VERSION_STRING "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}.${VERSION_BUILD}")
 
+# Configure version.h from template
+configure_file(
+    ${CMAKE_SOURCE_DIR}/src/version.h.in
+    ${CMAKE_BINARY_DIR}/src/version.h
+    @ONLY
+)
+
 # Configure version.rc from template
 if(WIN32)
     configure_file(
@@ -111,10 +118,12 @@ add_library(rats
     src/gossipsub.h
     src/file_transfer.cpp
     src/file_transfer.h
+    src/version.cpp
+    ${CMAKE_BINARY_DIR}/src/version.h
 )
 
 # Include directories
-target_include_directories(rats PUBLIC src)
+target_include_directories(rats PUBLIC ${CMAKE_BINARY_DIR}/src src)
 
 # Find and link threading support
 find_package(Threads REQUIRED)

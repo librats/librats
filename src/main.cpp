@@ -1,5 +1,6 @@
 #include "librats.h"
 #include "network_utils.h"
+#include "version.h"
 #include <iostream>
 #include <string>
 #include <thread>
@@ -27,6 +28,7 @@ void print_usage(const char* program_name) {
 void print_help() {
     std::cout << "Available commands:" << std::endl;
     std::cout << "  help              - Show this help message" << std::endl;
+    std::cout << "  version           - Show version information" << std::endl;
     std::cout << "  peers             - Show number of connected peers" << std::endl;
     std::cout << "  list              - List all connected peers with their hash IDs" << std::endl;
     std::cout << "  broadcast <msg>   - Send message to all connected peers" << std::endl;
@@ -48,6 +50,9 @@ void print_help() {
 }
 
 int main(int argc, char* argv[]) {
+    // Display ASCII header with version information
+    librats::version::print_header();
+    
     // Enable debug level logging
     librats::Logger::getInstance().set_log_level(librats::LogLevel::DEBUG);
     
@@ -66,7 +71,6 @@ int main(int argc, char* argv[]) {
         peer_port = std::stoi(argv[3]);
     }
     
-    LOG_MAIN_INFO("=== RatsClient Demo ===");
     LOG_MAIN_DEBUG("Debug logging enabled");
     LOG_MAIN_INFO("Starting RatsClient on port " << listen_port);
     
@@ -171,6 +175,9 @@ int main(int argc, char* argv[]) {
         }
         else if (command == "help") {
             print_help();
+        }
+        else if (command == "version") {
+            librats::version::print_version_info();
         }
         else if (command == "peers") {
             LOG_MAIN_INFO("Connected peers: " << client.get_peer_count());
