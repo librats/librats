@@ -14,11 +14,12 @@
 #define LOG_MAIN_ERROR(message) LOG_ERROR("main", message)
 
 void print_usage(const char* program_name) {
-    std::cout << "Usage: " << program_name << " <listen_port> [peer_host] [peer_port]\n";
-    std::cout << "  listen_port: Port to listen on for incoming connections\n";
+    std::cout << "Usage: " << program_name << " [listen_port] [peer_host] [peer_port]\n";
+    std::cout << "  listen_port: Port to listen on for incoming connections (default: 8080)\n";
     std::cout << "  peer_host:   Optional hostname/IP to connect to as peer\n";
     std::cout << "  peer_port:   Optional port of peer to connect to\n";
     std::cout << "\nExample:\n";
+    std::cout << "  " << program_name << "                     # Listen on default port 8080\n";
     std::cout << "  " << program_name << " 8080              # Listen on port 8080\n";
     std::cout << "  " << program_name << " 8081 localhost 8080  # Listen on 8081 and connect to 8080\n";
 }
@@ -50,12 +51,13 @@ int main(int argc, char* argv[]) {
     // Enable debug level logging
     librats::Logger::getInstance().set_log_level(librats::LogLevel::DEBUG);
     
-    if (argc < 2) {
-        print_usage(argv[0]);
-        return 1;
-    }
+    int listen_port = 8080; // Default port
     
-    int listen_port = std::stoi(argv[1]);
+    if (argc >= 2) {
+        listen_port = std::stoi(argv[1]);
+    } else {
+        LOG_MAIN_INFO("No port specified, using default port " << listen_port);
+    }
     std::string peer_host = "";
     int peer_port = 0;
     
