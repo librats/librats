@@ -15,13 +15,25 @@
 #include <memory>
 #include <condition_variable>
 
-// Hash specialization for Peer (must be defined before use in unordered_map)
+// Hash specialization for Peer and NodeId (must be defined before use in unordered_map/set)
 namespace std {
     template<>
     struct hash<librats::Peer> {
         std::size_t operator()(const librats::Peer& peer) const noexcept {
             std::hash<std::string> hasher;
             return hasher(peer.ip + ":" + std::to_string(peer.port));
+        }
+    };
+    
+    template<>
+    struct hash<array<uint8_t, 20>> {
+        std::size_t operator()(const array<uint8_t, 20>& id) const noexcept {
+            std::size_t seed = 0;
+            std::hash<uint8_t> hasher;
+            for (const auto& byte : id) {
+                seed ^= hasher(byte) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            }
+            return seed;
         }
     };
 }
@@ -126,6 +138,12 @@ public:
     size_t get_routing_table_size() const;
     
     /**
+     * Get number of pending ping verifications
+     * @return Number of pending ping verifications
+     */
+    size_t get_pending_ping_verifications_count() const;
+    
+    /**
      * Check if DHT is running
      * @return true if running, false otherwise
      */
@@ -199,6 +217,25 @@ private:
     std::unordered_map<std::string, std::vector<AnnouncedPeer>> announced_peers_;
     std::mutex announced_peers_mutex_;
     
+    // Ping-before-replace eviction tracking
+    struct PingVerification {
+        DhtNode candidate_node;      // The new node wanting to be added (this is what we ping)
+        DhtNode old_node;            // The existing node to potentially replace
+        int bucket_index;            // Which bucket this affects
+        std::chrono::steady_clock::time_point ping_sent_at;
+        std::string transaction_id;  // Transaction ID of the ping
+        
+        PingVerification(const DhtNode& candidate, const DhtNode& old, int bucket_idx, const std::string& trans_id)
+            : candidate_node(candidate), old_node(old), bucket_index(bucket_idx), 
+              ping_sent_at(std::chrono::steady_clock::now()), transaction_id(trans_id) {}
+    };
+    std::unordered_map<std::string, PingVerification> pending_pings_;  // transaction_id -> PingVerification
+    mutable std::mutex pending_pings_mutex_;
+    
+    // Track nodes that have pending ping verifications to avoid duplicate pings
+    std::unordered_set<NodeId> nodes_being_replaced_;
+    mutable std::mutex nodes_being_replaced_mutex_;
+    
     // Network thread
     std::thread network_thread_;
     std::thread maintenance_thread_;
@@ -268,6 +305,12 @@ private:
     void store_announced_peer(const InfoHash& info_hash, const Peer& peer);
     std::vector<Peer> get_announced_peers(const InfoHash& info_hash);
     void cleanup_stale_announced_peers();
+    
+    // Ping-before-replace eviction management
+    void initiate_ping_verification(const DhtNode& candidate_node, const DhtNode& old_node, int bucket_index);
+    void handle_ping_verification_response(const std::string& transaction_id, const NodeId& responder_id, const Peer& responder);
+    void cleanup_stale_ping_verifications();
+    void perform_replacement(const DhtNode& candidate_node, const DhtNode& node_to_replace, int bucket_index);
     
     // Conversion utilities
     static KrpcNode dht_node_to_krpc_node(const DhtNode& node);
