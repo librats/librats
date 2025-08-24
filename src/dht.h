@@ -147,6 +147,8 @@ private:
     
     // Routing table (k-buckets)
     std::vector<std::vector<DhtNode>> routing_table_;
+    // Peer to node routing table mapping for efficient responsiveness tracking
+    std::unordered_map<Peer, DhtNode*> peer_to_node_; // Peer -> DhtNode*
     mutable std::mutex routing_table_mutex_;
     
     // Active searches (use string keys instead of InfoHash to avoid hash conflicts)
@@ -248,7 +250,8 @@ private:
     NodeId generate_node_id();
     NodeId xor_distance(const NodeId& a, const NodeId& b);
     bool is_closer(const NodeId& a, const NodeId& b, const NodeId& target);
-
+    // Helper function to find DHT node by peer (ensure routing table is locked)
+    DhtNode* find_dht_node_by_peer_unlocked(const Peer& peer);
     
     std::string generate_token(const Peer& peer);
     bool verify_token(const Peer& peer, const std::string& token);

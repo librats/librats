@@ -32,6 +32,11 @@ DhtClient::DhtClient(int port)
     node_id_ = generate_node_id();
     routing_table_.resize(NODE_ID_SIZE * 8);  // 160 buckets for 160-bit node IDs
     
+    // Reserve capacity for each bucket to prevent pointer invalidation
+    for (auto& bucket : routing_table_) {
+        bucket.reserve(K_BUCKET_SIZE);
+    }
+    
     LOG_DHT_INFO("DHT client created with node ID: " << node_id_to_hex(node_id_));
 }
 
@@ -336,16 +341,32 @@ void DhtClient::add_node(const DhtNode& node) {
                               return existing.id == node.id;
                           });
     
+    DhtNode* node_ptr = nullptr;
+    
     if (it != bucket.end()) {
         // Update existing node
         LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " already exists in bucket " << bucket_index << ", updating");
         
+        // Remove old peer mapping if peer changed
+        if (it->peer.ip != node.peer.ip || it->peer.port != node.peer.port) {
+            peer_to_node_.erase(it->peer);
+        }
+        
         it->peer = node.peer;
         it->last_seen = std::chrono::steady_clock::now();
+        node_ptr = &(*it);
     } else {
         // Add new node
         if (bucket.size() < K_BUCKET_SIZE) {
+            // Ensure we don't exceed reserved capacity
+            if (bucket.capacity() < K_BUCKET_SIZE) {
+                LOG_DHT_WARN("Bucket " << bucket_index << " capacity (" << bucket.capacity() 
+                           << ") is less than K_BUCKET_SIZE (" << K_BUCKET_SIZE << "), reserving more space");
+                bucket.reserve(K_BUCKET_SIZE);
+            }
+            
             bucket.push_back(node);
+            node_ptr = &bucket.back();
             LOG_DHT_DEBUG("Added new node " << node_id_to_hex(node.id) << " to bucket " << bucket_index << " (size: " << bucket.size() << "/" << K_BUCKET_SIZE << ")");
         } else {
             // Bucket is full, replace least recently seen node
@@ -358,8 +379,18 @@ void DhtClient::add_node(const DhtNode& node) {
                           << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - worst_it->last_seen).count() 
                           << "s) with " << node_id_to_hex(node.id));
             
+            // Remove old peer mapping
+            peer_to_node_.erase(worst_it->peer);
+            
             *worst_it = node;
+            node_ptr = &(*worst_it);
         }
+    }
+    
+    // Update peer-to-node mapping
+    if (node_ptr) {
+        peer_to_node_[node.peer] = node_ptr;
+        LOG_DHT_DEBUG("Updated peer-to-node mapping for " << node.peer.ip << ":" << node.peer.port);
     }
 }
 
@@ -705,7 +736,13 @@ bool DhtClient::is_closer(const NodeId& a, const NodeId& b, const NodeId& target
                                        dist_b.begin(), dist_b.end());
 }
 
-
+DhtNode* DhtClient::find_dht_node_by_peer_unlocked(const Peer& peer) {
+    auto it = peer_to_node_.find(peer);
+    if (it != peer_to_node_.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
 
 std::string DhtClient::generate_token(const Peer& peer) {
     // Simple token generation (in real implementation, use proper cryptographic hash)
@@ -746,17 +783,33 @@ void DhtClient::cleanup_stale_nodes() {
     for (auto& bucket : routing_table_) {
         auto old_size = bucket.size();
         
+        // Remove stale nodes from peer_to_node_ mapping
         bucket.erase(std::remove_if(bucket.begin(), bucket.end(),
-                                   [now, stale_threshold](const DhtNode& node) {
+                                   [now, stale_threshold, this](const DhtNode& node) {
                                        bool should_remove = (now - node.last_seen > stale_threshold);
                                        
                                        if (should_remove) {
+                                           // Remove from peer-to-node mapping
+                                           peer_to_node_.erase(node.peer);
                                            LOG_DHT_DEBUG("Removing stale node " << node_id_to_hex(node.id) 
                                                        << " at " << node.peer.ip << ":" << node.peer.port);
                                        }
                                        
                                        return should_remove;
                                    }), bucket.end());
+        
+        // After removing elements, rebuild peer_to_node_ mapping for remaining nodes in this bucket
+        // since vector element removal invalidates pointers
+        if (bucket.size() != old_size) {
+            // Ensure capacity is maintained after removal
+            if (bucket.capacity() < K_BUCKET_SIZE) {
+                bucket.reserve(K_BUCKET_SIZE);
+            }
+            
+            for (auto& node : bucket) {
+                peer_to_node_[node.peer] = &node;
+            }
+        }
         
         total_removed += (old_size - bucket.size());
     }
