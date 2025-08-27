@@ -410,7 +410,7 @@ bool PeerConnection::connect() {
     LOG_BT_INFO("Connecting to peer " << peer_info_.ip << ":" << peer_info_.port);
     
     if (!is_valid_socket(socket_)) {
-        socket_ = create_tcp_client(peer_info_.ip, peer_info_.port);
+        socket_ = create_tcp_client(peer_info_.ip, peer_info_.port, 10000); // 10-second timeout
         if (!is_valid_socket(socket_)) {
             LOG_BT_ERROR("Failed to create connection to " << peer_info_.ip << ":" << peer_info_.port);
             state_ = PeerState::ERROR;

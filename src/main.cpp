@@ -241,8 +241,8 @@ int main(int argc, char* argv[]) {
             if (!host.empty() && port > 0) {
                 LOG_MAIN_INFO("Connecting to " << host << ":" << port << " using IPv6...");
                 
-                // Test IPv6 connection using low-level API
-                socket_t test_socket = librats::create_tcp_client_v6(host, port);
+                // Test IPv6 connection using low-level API with 10-second timeout
+                socket_t test_socket = librats::create_tcp_client_v6(host, port, 10000);
                 if (test_socket != INVALID_SOCKET_VALUE) {
                     LOG_MAIN_INFO("IPv6 connection successful!");
                     librats::close_socket(test_socket);
@@ -268,7 +268,7 @@ int main(int argc, char* argv[]) {
                 LOG_MAIN_INFO("Connecting to " << host << ":" << port << " using dual stack...");
                 
                 // Test dual stack connection using low-level API
-                socket_t test_socket = librats::create_tcp_client(host, port);
+                socket_t test_socket = librats::create_tcp_client(host, port, 10000);
                 if (test_socket != INVALID_SOCKET_VALUE) {
                     LOG_MAIN_INFO("Dual stack connection successful!");
                     librats::close_socket(test_socket);
@@ -435,7 +435,7 @@ int main(int argc, char* argv[]) {
                 
                 // Test IPv6 TCP client
                 LOG_MAIN_INFO("Testing IPv6 TCP client...");
-                socket_t tcp_socket = librats::create_tcp_client_v6(host, port);
+                socket_t tcp_socket = librats::create_tcp_client_v6(host, port, 10000);
                 if (tcp_socket != INVALID_SOCKET_VALUE) {
                     LOG_MAIN_INFO("IPv6 TCP connection successful!");
                     librats::close_socket(tcp_socket);
@@ -445,7 +445,7 @@ int main(int argc, char* argv[]) {
                 
                 // Test dual stack TCP client
                 LOG_MAIN_INFO("Testing dual stack TCP client...");
-                socket_t dual_socket = librats::create_tcp_client(host, port);
+                socket_t dual_socket = librats::create_tcp_client(host, port, 10000);
                 if (dual_socket != INVALID_SOCKET_VALUE) {
                     LOG_MAIN_INFO("Dual stack TCP connection successful!");
                     librats::close_socket(dual_socket);

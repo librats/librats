@@ -62,12 +62,111 @@ void cleanup_socket_library() {
     LOG_SOCKET_INFO("Socket library cleaned up");
 }
 
+// Helper function for connection with timeout
+bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr_len, int timeout_ms) {
+    // Set socket to non-blocking mode
+    if (!set_socket_nonblocking(socket)) {
+        LOG_SOCKET_ERROR("Failed to set socket to non-blocking mode for timeout connection");
+        return false;
+    }
+    
+    // Attempt to connect
+    int result = connect(socket, addr, addr_len);
+    
+    if (result == 0) {
+        // Connection succeeded immediately - this is rare but possible
+        LOG_SOCKET_DEBUG("Connection succeeded immediately");
+        return true;
+    }
+    
+    // Check for expected non-blocking connect error
+#ifdef _WIN32
+    int error = WSAGetLastError();
+    if (error != WSAEWOULDBLOCK) {
+        LOG_SOCKET_ERROR("Connect failed immediately with error: " << error);
+        return false;
+    }
+#else
+    int error = errno;
+    if (error != EINPROGRESS) {
+        LOG_SOCKET_ERROR("Connect failed immediately with error: " << strerror(error));
+        return false;
+    }
+#endif
+    
+    // Use select to wait for connection with timeout
+    fd_set write_fds, error_fds;
+    FD_ZERO(&write_fds);
+    FD_ZERO(&error_fds);
+    FD_SET(socket, &write_fds);
+    FD_SET(socket, &error_fds);
+    
+    struct timeval timeout;
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    
+    LOG_SOCKET_DEBUG("Waiting for connection with timeout " << timeout_ms << "ms");
+    int select_result = select(socket + 1, nullptr, &write_fds, &error_fds, &timeout);
+    
+    if (select_result == 0) {
+        // Timeout occurred
+        LOG_SOCKET_WARN("Connection timeout after " << timeout_ms << "ms");
+        return false;
+    } else if (select_result < 0) {
+        // Select error
+#ifdef _WIN32
+        LOG_SOCKET_ERROR("Select error during connect: " << WSAGetLastError());
+#else
+        LOG_SOCKET_ERROR("Select error during connect: " << strerror(errno));
+#endif
+        return false;
+    }
+    
+    // Check if connection completed successfully or failed
+    if (FD_ISSET(socket, &error_fds)) {
+        // Connection failed
+        LOG_SOCKET_ERROR("Connection failed (error detected)");
+        return false;
+    }
+    
+    if (FD_ISSET(socket, &write_fds)) {
+        // Check for actual connection success using getsockopt
+        int sock_error;
+        socklen_t len = sizeof(sock_error);
+        if (getsockopt(socket, SOL_SOCKET, SO_ERROR, (char*)&sock_error, &len) < 0) {
+            LOG_SOCKET_ERROR("Failed to get socket error status");
+            return false;
+        }
+        
+        if (sock_error != 0) {
+#ifdef _WIN32
+            LOG_SOCKET_ERROR("Connection failed with error: " << sock_error);
+#else
+            LOG_SOCKET_ERROR("Connection failed with error: " << strerror(sock_error));
+#endif
+            return false;
+        }
+        
+        // Connection succeeded
+        LOG_SOCKET_DEBUG("Connection succeeded within timeout");
+        return true;
+    }
+    
+    // This shouldn't happen
+    LOG_SOCKET_ERROR("Unexpected select result state");
+    return false;
+}
+
 // TCP Socket Functions
-socket_t create_tcp_client(const std::string& host, int port) {
-    LOG_SOCKET_DEBUG("Creating TCP client socket (dual stack) for " << host << ":" << port);
+socket_t create_tcp_client(const std::string& host, int port, int timeout_ms) {
+    if (timeout_ms > 0) {
+        LOG_SOCKET_DEBUG("Creating TCP client socket (dual stack) for " << host << ":" << port << " with timeout " << timeout_ms << "ms");
+    } else {
+        LOG_SOCKET_DEBUG("Creating TCP client socket (dual stack) for " << host << ":" << port);
+    }
     
     // Try IPv6 first
-    socket_t client_socket = create_tcp_client_v6(host, port);
+    socket_t client_socket = create_tcp_client_v6(host, port, timeout_ms);
     if (client_socket != INVALID_SOCKET_VALUE) {
         LOG_SOCKET_INFO("Successfully connected using IPv6");
         return client_socket;
@@ -75,7 +174,7 @@ socket_t create_tcp_client(const std::string& host, int port) {
     
     // Fall back to IPv4
     LOG_SOCKET_DEBUG("IPv6 connection failed, trying IPv4");
-    client_socket = create_tcp_client_v4(host, port);
+    client_socket = create_tcp_client_v4(host, port, timeout_ms);
     if (client_socket != INVALID_SOCKET_VALUE) {
         LOG_SOCKET_INFO("Successfully connected using IPv4");
         return client_socket;
@@ -85,8 +184,12 @@ socket_t create_tcp_client(const std::string& host, int port) {
     return INVALID_SOCKET_VALUE;
 }
 
-socket_t create_tcp_client_v4(const std::string& host, int port) {
-    LOG_SOCKET_DEBUG("Creating TCP client socket for " << host << ":" << port);
+socket_t create_tcp_client_v4(const std::string& host, int port, int timeout_ms) {
+    if (timeout_ms > 0) {
+        LOG_SOCKET_DEBUG("Creating TCP client socket for " << host << ":" << port << " with timeout " << timeout_ms << "ms");
+    } else {
+        LOG_SOCKET_DEBUG("Creating TCP client socket for " << host << ":" << port);
+    }
     
     // Validate port number
     if (port < 0 || port > 65535) {
@@ -122,8 +225,22 @@ socket_t create_tcp_client_v4(const std::string& host, int port) {
 
     // Connect to server
     LOG_SOCKET_DEBUG("Connecting to " << resolved_ip << ":" << port);
-    if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_ERROR("Connection to " << resolved_ip << ":" << port << " failed");
+    bool connection_success;
+    
+    if (timeout_ms > 0) {
+        // Use timeout connection
+        connection_success = connect_with_timeout(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr), timeout_ms);
+    } else {
+        // Use blocking connection
+        connection_success = (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) != SOCKET_ERROR_VALUE);
+    }
+    
+    if (!connection_success) {
+        if (timeout_ms > 0) {
+            LOG_SOCKET_ERROR("Connection to " << resolved_ip << ":" << port << " failed or timed out after " << timeout_ms << "ms");
+        } else {
+            LOG_SOCKET_ERROR("Connection to " << resolved_ip << ":" << port << " failed");
+        }
         close_socket(client_socket);
         return INVALID_SOCKET_VALUE;
     }
@@ -132,8 +249,12 @@ socket_t create_tcp_client_v4(const std::string& host, int port) {
     return client_socket;
 }
 
-socket_t create_tcp_client_v6(const std::string& host, int port) {
-    LOG_SOCKET_DEBUG("Creating TCP client socket for IPv6 " << host << ":" << port);
+socket_t create_tcp_client_v6(const std::string& host, int port, int timeout_ms) {
+    if (timeout_ms > 0) {
+        LOG_SOCKET_DEBUG("Creating TCP client socket for IPv6 " << host << ":" << port << " with timeout " << timeout_ms << "ms");
+    } else {
+        LOG_SOCKET_DEBUG("Creating TCP client socket for IPv6 " << host << ":" << port);
+    }
     
     // Validate port number
     if (port < 0 || port > 65535) {
@@ -169,8 +290,22 @@ socket_t create_tcp_client_v6(const std::string& host, int port) {
 
     // Connect to server
     LOG_SOCKET_DEBUG("Connecting to IPv6 " << resolved_ip << ":" << port);
-    if (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
-        LOG_SOCKET_ERROR("Connection to IPv6 " << resolved_ip << ":" << port << " failed");
+    bool connection_success;
+    
+    if (timeout_ms > 0) {
+        // Use timeout connection
+        connection_success = connect_with_timeout(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr), timeout_ms);
+    } else {
+        // Use blocking connection
+        connection_success = (connect(client_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) != SOCKET_ERROR_VALUE);
+    }
+    
+    if (!connection_success) {
+        if (timeout_ms > 0) {
+            LOG_SOCKET_ERROR("Connection to IPv6 " << resolved_ip << ":" << port << " failed or timed out after " << timeout_ms << "ms");
+        } else {
+            LOG_SOCKET_ERROR("Connection to IPv6 " << resolved_ip << ":" << port << " failed");
+        }
         close_socket(client_socket);
         return INVALID_SOCKET_VALUE;
     }

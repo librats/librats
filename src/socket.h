@@ -61,25 +61,28 @@ void cleanup_socket_library();
  * Create a TCP client socket and connect to a server using dual stack (IPv6 with IPv4 fallback)
  * @param host The hostname or IP address to connect to
  * @param port The port number to connect to
+ * @param timeout_ms Connection timeout in milliseconds (0 for blocking)
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
  */
-socket_t create_tcp_client(const std::string& host, int port);
+socket_t create_tcp_client(const std::string& host, int port, int timeout_ms = 0);
 
 /**
  * Create a TCP client socket and connect to a server using IPv4 only
  * @param host The hostname or IP address to connect to
  * @param port The port number to connect to
+ * @param timeout_ms Connection timeout in milliseconds (0 for blocking)
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
  */
-socket_t create_tcp_client_v4(const std::string& host, int port);
+socket_t create_tcp_client_v4(const std::string& host, int port, int timeout_ms = 0);
 
 /**
  * Create a TCP client socket and connect to a server using IPv6 only
  * @param host The hostname or IPv6 address to connect to
  * @param port The port number to connect to
+ * @param timeout_ms Connection timeout in milliseconds (0 for blocking)
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
  */
-socket_t create_tcp_client_v6(const std::string& host, int port);
+socket_t create_tcp_client_v6(const std::string& host, int port, int timeout_ms = 0);
 
 /**
  * Create a TCP server socket and bind to a port using dual stack (IPv6 with IPv4 support)
@@ -279,5 +282,15 @@ bool set_socket_nonblocking(socket_t socket);
  * @return true if TCP socket, false otherwise
  */
 bool is_tcp_socket(socket_t socket);
+
+/**
+ * Connect to a socket address with timeout
+ * @param socket The socket handle (should be non-blocking)
+ * @param addr The socket address structure
+ * @param addr_len Length of the address structure
+ * @param timeout_ms Connection timeout in milliseconds
+ * @return true if connected successfully, false on timeout or error
+ */
+bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr_len, int timeout_ms);
 
 } // namespace librats 

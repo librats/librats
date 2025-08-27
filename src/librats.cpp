@@ -4011,10 +4011,10 @@ bool RatsClient::attempt_direct_connection(const std::string& host, int port, Co
         return true; // Not really an error
     }
     
-    // Attempt TCP connection
-    socket_t peer_socket = create_tcp_client(host, port);
+    // Attempt TCP connection with 10-second timeout
+    socket_t peer_socket = create_tcp_client(host, port, 10000); // 10 seconds = 10000ms
     if (!is_valid_socket(peer_socket)) {
-        result.error_message = "Failed to create TCP connection";
+        result.error_message = "Failed to create TCP connection (connection may have timed out after 10s)";
         return false;
     }
     
