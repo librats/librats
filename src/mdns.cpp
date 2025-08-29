@@ -282,7 +282,11 @@ void MdnsClient::set_query_interval(std::chrono::seconds interval) {
 bool MdnsClient::create_multicast_socket() {
     multicast_socket_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (!librats::is_valid_socket(multicast_socket_)) {
-        LOG_MDNS_ERROR("Failed to create UDP socket");
+#ifdef _WIN32
+        LOG_MDNS_ERROR("Failed to create UDP socket (error: " << WSAGetLastError() << ")");
+#else
+        LOG_MDNS_ERROR("Failed to create UDP socket (error: " << strerror(errno) << ")");
+#endif
         return false;
     }
     
@@ -307,7 +311,11 @@ bool MdnsClient::create_multicast_socket() {
     bind_addr.sin_port = htons(MDNS_PORT);
     
     if (bind(multicast_socket_, reinterpret_cast<sockaddr*>(&bind_addr), sizeof(bind_addr)) < 0) {
-        LOG_MDNS_ERROR("Failed to bind to mDNS port " << MDNS_PORT);
+#ifdef _WIN32
+        LOG_MDNS_ERROR("Failed to bind to mDNS port " << MDNS_PORT << " (error: " << WSAGetLastError() << ")");
+#else
+        LOG_MDNS_ERROR("Failed to bind to mDNS port " << MDNS_PORT << " (error: " << strerror(errno) << ")");
+#endif
         close_socket(multicast_socket_);
         multicast_socket_ = INVALID_SOCKET_VALUE;
         return false;
@@ -329,7 +337,11 @@ bool MdnsClient::join_multicast_group() {
     
     if (setsockopt(multicast_socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP, 
                    reinterpret_cast<const char*>(&mreq), sizeof(mreq)) < 0) {
-        LOG_MDNS_ERROR("Failed to join IPv4 multicast group");
+#ifdef _WIN32
+        LOG_MDNS_ERROR("Failed to join IPv4 multicast group (error: " << WSAGetLastError() << ")");
+#else
+        LOG_MDNS_ERROR("Failed to join IPv4 multicast group (error: " << strerror(errno) << ")");
+#endif
         return false;
     }
     
@@ -1133,7 +1145,11 @@ bool MdnsClient::send_multicast_packet(const std::vector<uint8_t>& packet) {
                       static_cast<int>(packet.size()), 0, reinterpret_cast<sockaddr*>(&dest_addr), sizeof(dest_addr));
     
     if (sent < 0 || static_cast<size_t>(sent) != packet.size()) {
-        LOG_MDNS_ERROR("Failed to send multicast packet");
+#ifdef _WIN32
+        LOG_MDNS_ERROR("Failed to send multicast packet (error: " << WSAGetLastError() << ")");
+#else
+        LOG_MDNS_ERROR("Failed to send multicast packet (error: " << strerror(errno) << ")");
+#endif
         return false;
     }
     
