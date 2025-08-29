@@ -204,8 +204,8 @@ if(BUILD_TESTS)
         FetchContent_MakeAvailable(googletest)
     endif()
     
-    # Create test executable
-    add_executable(librats_tests
+    # Create test source list
+    set(TEST_SOURCES
         tests/test_socket.cpp
         tests/test_bencode.cpp
         tests/test_sha1.cpp
@@ -220,11 +220,18 @@ if(BUILD_TESTS)
         tests/test_main.cpp
         tests/test_message_exchange.cpp
         tests/test_noise.cpp
-        tests/test_mdns.cpp
         tests/test_gossipsub.cpp
         tests/test_logging_api_gtest.cpp
         tests/test_file_transfer.cpp
     )
+    
+    # Add mDNS tests only on non-macOS platforms
+    if(NOT APPLE)
+        list(APPEND TEST_SOURCES tests/test_mdns.cpp)
+    endif()
+    
+    # Create test executable
+    add_executable(librats_tests ${TEST_SOURCES})
     
     # Link with GoogleTest and our library
     target_link_libraries(librats_tests 
