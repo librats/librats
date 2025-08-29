@@ -3821,6 +3821,12 @@ void RatsClient::detect_and_cache_nat_type() {
         return;
     }
     
+    // Check if client is still running before proceeding
+    if (!running_.load()) {
+        LOG_CLIENT_DEBUG("Client not running, skipping NAT detection");
+        return;
+    }
+    
     LOG_CLIENT_INFO("Detecting NAT type and characteristics");
     
     try {
@@ -3829,6 +3835,12 @@ void RatsClient::detect_and_cache_nat_type() {
         if (stun_servers.empty()) {
             stun_servers.push_back("stun.l.google.com:19302");
             stun_servers.push_back("stun1.l.google.com:19302");
+        }
+        
+        // Check again before mutex access
+        if (!running_.load()) {
+            LOG_CLIENT_DEBUG("Client stopped during NAT detection setup");
+            return;
         }
         
         // Detect detailed NAT characteristics
@@ -3865,8 +3877,11 @@ void RatsClient::detect_and_cache_nat_type() {
         
     } catch (const std::exception& e) {
         LOG_CLIENT_ERROR("NAT detection failed: " << e.what());
-        std::lock_guard<std::mutex> lock(nat_mutex_);
-        detected_nat_type_ = NatType::UNKNOWN;
+        // Only try to update state if client is still running
+        if (running_.load()) {
+            std::lock_guard<std::mutex> lock(nat_mutex_);
+            detected_nat_type_ = NatType::UNKNOWN;
+        }
     }
 }
 
