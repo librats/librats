@@ -60,6 +60,7 @@ body {
     width: 32px;
     height: 32px;
     border-radius: 8px;
+    object-fit: contain;
 }
 
 .nav-menu {

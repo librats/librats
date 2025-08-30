@@ -1,6 +1,6 @@
 # 🐀 librats
 
-<p align="center"><a href="https://github.com/DEgITx/librats"><img src="https://raw.githubusercontent.com/DEgITx/librats/master/resources/logo.png"></a></p>
+<p align="center"><a href="https://github.com/DEgITx/librats"><img src="https://raw.githubusercontent.com/DEgITx/librats/master/docs/logo.png"></a></p>
 
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
