@@ -887,6 +887,439 @@ body {
     color: #991b1b;
 }
 
+/* Downloads Section */
+.downloads {
+    padding: 120px 0;
+    background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+    position: relative;
+}
+
+.downloads::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: 
+        radial-gradient(circle at 70% 20%, rgba(59, 130, 246, 0.1) 0%, transparent 50%),
+        radial-gradient(circle at 20% 80%, rgba(139, 92, 246, 0.1) 0%, transparent 50%);
+    pointer-events: none;
+}
+
+.downloads-content {
+    position: relative;
+    z-index: 2;
+}
+
+.version-info {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 32px;
+    margin-bottom: 48px;
+    padding: 24px;
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+    border: 1px solid rgba(59, 130, 246, 0.1);
+}
+
+.current-version {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.version-label {
+    font-weight: 600;
+    color: #6b7280;
+}
+
+.version-number {
+    font-size: 1.5rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.release-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #3b82f6;
+    text-decoration: none;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid #e5e7eb;
+}
+
+.release-link:hover {
+    background: #3b82f6;
+    color: white;
+    border-color: #3b82f6;
+    transform: translateY(-2px);
+}
+
+.platform-downloads {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 24px;
+    margin-bottom: 48px;
+}
+
+.download-card {
+    background: white;
+    border-radius: 20px;
+    padding: 32px;
+    border: 2px solid #e5e7eb;
+    transition: all 0.4s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.download-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 4px;
+    background: linear-gradient(90deg, #6b7280, #9ca3af);
+    transform: scaleX(0);
+    transition: transform 0.3s ease;
+}
+
+.download-card:hover::before {
+    transform: scaleX(1);
+}
+
+.download-card:hover {
+    transform: translateY(-8px);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+    border-color: #3b82f6;
+}
+
+.download-card.recommended {
+    border-color: #10b981;
+    box-shadow: 0 8px 32px rgba(16, 185, 129, 0.2);
+}
+
+.download-card.recommended::before {
+    background: linear-gradient(90deg, #10b981, #059669);
+    transform: scaleX(1);
+}
+
+.download-card.recommended::after {
+    content: 'Recommended for your platform';
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    background: #10b981;
+    color: white;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.platform-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.platform-icon {
+    width: 64px;
+    height: 64px;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 28px;
+}
+
+.download-card.recommended .platform-icon {
+    background: linear-gradient(135deg, #10b981, #059669);
+}
+
+.platform-info h3 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 4px;
+}
+
+.platform-info p {
+    color: #6b7280;
+    font-weight: 500;
+}
+
+.download-options {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.download-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-radius: 12px;
+    text-decoration: none;
+    font-weight: 600;
+    transition: all 0.3s ease;
+    border: 2px solid transparent;
+    position: relative;
+    overflow: hidden;
+}
+
+.download-btn::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    transition: left 0.5s;
+}
+
+.download-btn:hover::before {
+    left: 100%;
+}
+
+.download-btn.primary {
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    color: white;
+    box-shadow: 0 4px 15px rgba(59, 130, 246, 0.3);
+}
+
+.download-btn.primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(59, 130, 246, 0.4);
+}
+
+.download-btn.secondary {
+    background: #f8fafc;
+    color: #3b82f6;
+    border-color: #e5e7eb;
+}
+
+.download-btn.secondary:hover {
+    background: #3b82f6;
+    color: white;
+    border-color: #3b82f6;
+    transform: translateY(-2px);
+}
+
+.download-btn .file-size {
+    font-size: 0.875rem;
+    opacity: 0.8;
+    font-weight: 500;
+}
+
+.platform-requirements {
+    text-align: center;
+    color: #6b7280;
+    font-style: italic;
+}
+
+.build-from-source {
+    margin-bottom: 48px;
+}
+
+.source-card {
+    background: #1a1a1a;
+    border-radius: 16px;
+    padding: 32px;
+    color: white;
+    position: relative;
+    overflow: hidden;
+}
+
+.source-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: 
+        radial-gradient(circle at 80% 20%, rgba(59, 130, 246, 0.2) 0%, transparent 50%),
+        radial-gradient(circle at 20% 80%, rgba(139, 92, 246, 0.2) 0%, transparent 50%);
+    pointer-events: none;
+}
+
+.source-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
+    position: relative;
+    z-index: 2;
+}
+
+.source-icon {
+    width: 64px;
+    height: 64px;
+    background: linear-gradient(135deg, #10b981, #059669);
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+}
+
+.source-info h3 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.source-info p {
+    color: #9ca3af;
+}
+
+.source-commands {
+    margin-bottom: 24px;
+    position: relative;
+    z-index: 2;
+}
+
+.command-block {
+    position: relative;
+    background: #0f172a;
+    border-radius: 12px;
+    padding: 24px;
+    border: 1px solid #334155;
+}
+
+.command-block pre {
+    margin: 0;
+    color: #e2e8f0;
+    font-family: 'Fira Code', 'Monaco', 'Menlo', monospace;
+    line-height: 1.6;
+}
+
+.copy-source-btn {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    background: #334155;
+    border: 1px solid #475569;
+    color: #cbd5e1;
+    padding: 8px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.copy-source-btn:hover {
+    background: #475569;
+    color: white;
+}
+
+.source-links {
+    display: flex;
+    gap: 16px;
+    position: relative;
+    z-index: 2;
+}
+
+.source-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #10b981;
+    text-decoration: none;
+    font-weight: 500;
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid #334155;
+    transition: all 0.3s ease;
+}
+
+.source-link:hover {
+    background: #10b981;
+    color: white;
+    border-color: #10b981;
+    transform: translateY(-2px);
+}
+
+.package-managers {
+    text-align: center;
+}
+
+.package-managers h3 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 32px;
+}
+
+.package-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 20px;
+}
+
+.package-item {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 24px;
+    transition: all 0.3s ease;
+    text-align: left;
+}
+
+.package-item:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+    border-color: #3b82f6;
+}
+
+.package-icon {
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, #6b7280, #9ca3af);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 20px;
+    margin-bottom: 16px;
+}
+
+.package-content h4 {
+    font-size: 1.125rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 8px;
+}
+
+.package-content code {
+    background: #f1f5f9;
+    color: #475569;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-family: 'Fira Code', 'Monaco', 'Menlo', monospace;
+    font-size: 0.875rem;
+    word-break: break-all;
+}
+
 /* Documentation Section */
 .documentation {
     padding: 120px 0;
@@ -1154,6 +1587,64 @@ body {
     .nat-table td {
         padding: 12px 8px;
     }
+
+    .version-info {
+        flex-direction: column;
+        gap: 16px;
+        text-align: center;
+    }
+
+    .platform-downloads {
+        grid-template-columns: 1fr;
+    }
+
+    .download-card {
+        padding: 24px;
+    }
+
+    .platform-header {
+        flex-direction: column;
+        text-align: center;
+        gap: 12px;
+    }
+
+    .platform-icon {
+        width: 56px;
+        height: 56px;
+        font-size: 24px;
+    }
+
+    .download-options {
+        gap: 8px;
+    }
+
+    .download-btn {
+        padding: 14px 16px;
+        font-size: 14px;
+    }
+
+    .source-card {
+        padding: 24px;
+    }
+
+    .source-header {
+        flex-direction: column;
+        text-align: center;
+        gap: 12px;
+    }
+
+    .source-links {
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .package-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .package-item {
+        padding: 20px;
+    }
 }
 
 @media (max-width: 480px) {
@@ -1182,6 +1673,39 @@ body {
     .metric-card,
     .doc-card {
         padding: 20px;
+    }
+
+    .download-card {
+        padding: 20px;
+    }
+
+    .download-card.recommended::after {
+        font-size: 0.6rem;
+        padding: 2px 8px;
+        top: 12px;
+        right: 12px;
+    }
+
+    .platform-icon {
+        width: 48px;
+        height: 48px;
+        font-size: 20px;
+    }
+
+    .source-card {
+        padding: 20px;
+    }
+
+    .command-block {
+        padding: 16px;
+    }
+
+    .command-block pre {
+        font-size: 12px;
+    }
+
+    .package-item {
+        padding: 16px;
     }
 }
 

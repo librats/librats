@@ -19,8 +19,9 @@
             </div>
             <ul class="nav-menu">
                 <li><a href="#features" class="nav-link">Features</a></li>
-                <li><a href="#docs" class="nav-link">Documentation</a></li>
                 <li><a href="#quickstart" class="nav-link">Quick Start</a></li>
+                <li><a href="#downloads" class="nav-link">Downloads</a></li>
+                <li><a href="#docs" class="nav-link">Documentation</a></li>
                 <li><a href="#performance" class="nav-link">Performance</a></li>
                 <li><a href="https://github.com/DEgITx/librats" class="nav-link github-link" target="_blank">
                     <i class="fab fa-github"></i> GitHub
@@ -507,6 +508,190 @@ int main() {
         </div>
     </section>
 
+    <!-- Downloads Section -->
+    <section id="downloads" class="downloads">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Download librats</h2>
+                <p class="section-subtitle">Get the latest version for your platform</p>
+            </div>
+            <div class="downloads-content">
+                <div class="version-info">
+                    <div class="current-version">
+                        <span class="version-label">Latest Release</span>
+                        <span class="version-number">v0.2.1</span>
+                    </div>
+                    <div class="release-notes">
+                        <a href="https://github.com/DEgITx/librats/releases/latest" target="_blank" class="release-link">
+                            <i class="fas fa-file-alt"></i>
+                            View Release Notes
+                        </a>
+                    </div>
+                </div>
+                <div class="platform-downloads">
+                    <div class="download-card" data-platform="windows">
+                        <div class="platform-header">
+                            <div class="platform-icon">
+                                <i class="fab fa-windows"></i>
+                            </div>
+                            <div class="platform-info">
+                                <h3>Windows</h3>
+                                <p>Windows 10/11 (x64)</p>
+                            </div>
+                        </div>
+                        <div class="download-options">
+                            <a href="https://github.com/DEgITx/librats/releases/download/0.2.1/librats-windows-0.2.1.zip" class="download-btn primary">
+                                <i class="fas fa-download"></i>
+                                Download .zip
+                                <span class="file-size">~5.6 MB</span>
+                            </a>
+                            <!-- <a href="https://github.com/DEgITx/librats/releases/latest/download/librats-windows-installer.msi" class="download-btn secondary">
+                                <i class="fas fa-box-open"></i>
+                                Installer (.msi)
+                                <span class="file-size">~3.1 MB</span>
+                            </a> -->
+                        </div>
+                        <div class="platform-requirements">
+                            <small>Requires: Visual C++ Redistributable 2019+</small>
+                        </div>
+                    </div>
+                    
+                    <div class="download-card" data-platform="macos">
+                        <div class="platform-header">
+                            <div class="platform-icon">
+                                <i class="fab fa-apple"></i>
+                            </div>
+                            <div class="platform-info">
+                                <h3>macOS</h3>
+                                <p>macOS 10.15+ (Universal)</p>
+                            </div>
+                        </div>
+                        <div class="download-options">
+                            <!-- <a href="https://github.com/DEgITx/librats/releases/latest/download/librats-macos-universal.dmg" class="download-btn secondary">
+                                <i class="fas fa-download"></i>
+                                Download .dmg
+                                <span class="file-size">~2.8 MB</span>
+                            </a> -->
+                            <a href="https://github.com/DEgITx/librats/releases/download/0.2.1/librats-macos-0.2.1.zip" class="download-btn primary">
+                                <i class="fas fa-file-archive"></i>
+                                Archive (.zip)
+                                <span class="file-size">~2.1 MB</span>
+                            </a>
+                        </div>
+                        <div class="platform-requirements">
+                            <small>Intel & Apple Silicon supported</small>
+                        </div>
+                    </div>
+                    
+                    <div class="download-card" data-platform="linux">
+                        <div class="platform-header">
+                            <div class="platform-icon">
+                                <i class="fab fa-linux"></i>
+                            </div>
+                            <div class="platform-info">
+                                <h3>Linux</h3>
+                                <p>Ubuntu 18.04+ / CentOS 7+</p>
+                            </div>
+                        </div>
+                        <div class="download-options">
+                            <a href="https://github.com/DEgITx/librats/releases/download/0.2.1/librats-linux-0.2.1.zip" class="download-btn primary">
+                                <i class="fas fa-download"></i>
+                                Download .zip
+                                <span class="file-size">~2.3 MB</span>
+                            </a>
+                            <!-- <a href="https://github.com/DEgITx/librats/releases/latest/download/librats-linux-x64.deb" class="download-btn secondary">
+                                <i class="fas fa-box-open"></i>
+                                Debian Package
+                                <span class="file-size">~2.2 MB</span>
+                            </a> -->
+                        </div>
+                        <div class="platform-requirements">
+                            <small>glibc 2.27+ required</small>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="build-from-source">
+                    <div class="source-card">
+                        <div class="source-header">
+                            <div class="source-icon">
+                                <i class="fas fa-code"></i>
+                            </div>
+                            <div class="source-info">
+                                <h3>Build from Source</h3>
+                                <p>Compile librats yourself for maximum compatibility</p>
+                            </div>
+                        </div>
+                        <div class="source-commands">
+                            <div class="command-block">
+                                <pre><code>git clone https://github.com/DEgITx/librats.git
+cd librats
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)</code></pre>
+                                <button class="copy-source-btn" onclick="copySourceCode()">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="source-links">
+                            <a href="https://github.com/DEgITx/librats" class="source-link" target="_blank">
+                                <i class="fab fa-github"></i>
+                                View on GitHub
+                            </a>
+                            <a href="#quickstart" class="source-link">
+                                <i class="fas fa-book"></i>
+                                Build Guide
+                            </a>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- <div class="package-managers">
+                    <h3>Package Managers</h3>
+                    <div class="package-grid">
+                        <div class="package-item">
+                            <div class="package-icon">
+                                <i class="fas fa-cube"></i>
+                            </div>
+                            <div class="package-content">
+                                <h4>vcpkg</h4>
+                                <code>vcpkg install librats</code>
+                            </div>
+                        </div>
+                        <div class="package-item">
+                            <div class="package-icon">
+                                <i class="fas fa-box"></i>
+                            </div>
+                            <div class="package-content">
+                                <h4>Conan</h4>
+                                <code>conan install librats/2.1.0@</code>
+                            </div>
+                        </div>
+                        <div class="package-item">
+                            <div class="package-icon">
+                                <i class="fas fa-beer"></i>
+                            </div>
+                            <div class="package-content">
+                                <h4>Homebrew</h4>
+                                <code>brew install librats</code>
+                            </div>
+                        </div>
+                        <div class="package-item">
+                            <div class="package-icon">
+                                <i class="fas fa-archive"></i>
+                            </div>
+                            <div class="package-content">
+                                <h4>AUR</h4>
+                                <code>yay -S librats</code>
+                            </div>
+                        </div>
+                    </div>
+                </div> -->
+            </div>
+        </div>
+    </section>
+
     <!-- Documentation Section -->
     <section id="docs" class="documentation">
         <div class="container">
@@ -750,6 +935,59 @@ int main() {
 
         // Create particles periodically
         setInterval(createParticle, 3000);
+
+        // Platform detection and highlighting
+        function detectPlatform() {
+            const userAgent = navigator.userAgent.toLowerCase();
+            const platform = navigator.platform.toLowerCase();
+            
+            let detectedPlatform = 'linux'; // default
+            
+            if (userAgent.indexOf('win') !== -1 || platform.indexOf('win') !== -1) {
+                detectedPlatform = 'windows';
+            } else if (userAgent.indexOf('mac') !== -1 || platform.indexOf('mac') !== -1) {
+                detectedPlatform = 'macos';
+            }
+            
+            // Highlight detected platform
+            const platformCard = document.querySelector(`[data-platform="${detectedPlatform}"]`);
+            if (platformCard) {
+                platformCard.classList.add('recommended');
+            }
+        }
+
+        // Copy source code functionality
+        function copySourceCode() {
+            const sourceCode = `git clone https://github.com/DEgITx/librats.git
+cd librats
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)`;
+            
+            navigator.clipboard.writeText(sourceCode).then(() => {
+                const copyBtn = document.querySelector('.copy-source-btn');
+                const originalContent = copyBtn.innerHTML;
+                copyBtn.innerHTML = '<i class="fas fa-check"></i>';
+                copyBtn.style.color = '#10b981';
+                
+                setTimeout(() => {
+                    copyBtn.innerHTML = originalContent;
+                    copyBtn.style.color = '';
+                }, 2000);
+            });
+        }
+
+        // Initialize platform detection when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            detectPlatform();
+            
+            // Add animation to download cards
+            const downloadCards = document.querySelectorAll('.download-card');
+            downloadCards.forEach((card, index) => {
+                card.style.animationDelay = `${index * 0.1}s`;
+                card.classList.add('animate-in');
+            });
+        });
     </script>
 </body>
 </html>
