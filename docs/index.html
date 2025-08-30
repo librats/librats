@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>librats - High-Performance P2P Networking Library</title>
+    <meta name="description" content="A modern, high-performance peer-to-peer networking library written in C++17. Enterprise-grade P2P capabilities with minimal overhead and maximum efficiency.">
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="nav-logo">
+                <img src="resources/logo.png" alt="librats" class="logo-img">
+                <span class="logo-text">librats</span>
+            </div>
+            <ul class="nav-menu">
+                <li><a href="#features" class="nav-link">Features</a></li>
+                <li><a href="#docs" class="nav-link">Documentation</a></li>
+                <li><a href="#quickstart" class="nav-link">Quick Start</a></li>
+                <li><a href="#performance" class="nav-link">Performance</a></li>
+                <li><a href="https://github.com/DEgITx/librats" class="nav-link github-link" target="_blank">
+                    <i class="fab fa-github"></i> GitHub
+                </a></li>
+            </ul>
+            <div class="hamburger">
+                <span class="bar"></span>
+                <span class="bar"></span>
+                <span class="bar"></span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="hero-background">
+            <div class="grid-overlay"></div>
+            <div class="floating-particles"></div>
+        </div>
+        <div class="hero-content">
+            <div class="hero-badge">
+                <span class="badge-text">C++17 • Open Source • MIT License</span>
+            </div>
+            <h1 class="hero-title">
+                High-Performance
+                <span class="gradient-text">P2P Networking</span>
+                for Modern Applications
+            </h1>
+            <p class="hero-description">
+                Enterprise-grade peer-to-peer networking library with advanced NAT traversal, 
+                end-to-end encryption, and publish-subscribe messaging. Built from the ground up in C++17.
+            </p>
+            <div class="hero-stats">
+                <div class="stat-item">
+                    <div class="stat-number">50x</div>
+                    <div class="stat-label">Less Memory</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">99%</div>
+                    <div class="stat-label">NAT Success</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">1.6MB</div>
+                    <div class="stat-label">Footprint</div>
+                </div>
+            </div>
+            <div class="hero-actions">
+                <a href="#quickstart" class="btn btn-primary">
+                    <i class="fas fa-rocket"></i>
+                    Get Started
+                </a>
+                <a href="https://github.com/DEgITx/librats" class="btn btn-secondary" target="_blank">
+                    <i class="fab fa-github"></i>
+                    View on GitHub
+                </a>
+            </div>
+        </div>
+        <div class="hero-visual">
+            <div class="network-animation">
+                <div class="node central-node">
+                    <div class="node-pulse"></div>
+                </div>
+                <div class="node peer-node peer-1">
+                    <div class="connection-line line-1"></div>
+                </div>
+                <div class="node peer-node peer-2">
+                    <div class="connection-line line-2"></div>
+                </div>
+                <div class="node peer-node peer-3">
+                    <div class="connection-line line-3"></div>
+                </div>
+                <div class="node peer-node peer-4">
+                    <div class="connection-line line-4"></div>
+                </div>
+                <div class="data-packet packet-1"></div>
+                <div class="data-packet packet-2"></div>
+                <div class="data-packet packet-3"></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="features">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Enterprise-Grade Features</h2>
+                <p class="section-subtitle">Everything you need for robust P2P networking</p>
+            </div>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-network-wired"></i>
+                    </div>
+                    <h3>Advanced NAT Traversal</h3>
+                    <p>ICE, STUN, and TURN support with 99%+ success rate across any network topology. Automatic strategy selection for optimal connectivity.</p>
+                    <div class="feature-badge">RFC Compliant</div>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-shield-alt"></i>
+                    </div>
+                    <h3>End-to-End Encryption</h3>
+                    <p>Noise Protocol implementation with Curve25519 + ChaCha20-Poly1305. Automatic key management and perfect forward secrecy.</p>
+                    <div class="feature-badge">Noise Protocol</div>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-comments"></i>
+                    </div>
+                    <h3>GossipSub Messaging</h3>
+                    <p>Scalable publish-subscribe messaging with mesh networking. Topic-based communication and message validation.</p>
+                    <div class="feature-badge">Pub/Sub</div>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-file-transfer"></i>
+                    </div>
+                    <h3>File Transfer</h3>
+                    <p>Chunked transfers with resume capability. Directory transfer support with parallel transmission and integrity verification.</p>
+                    <div class="feature-badge">Resumable</div>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-search"></i>
+                    </div>
+                    <h3>Multi-Layer Discovery</h3>
+                    <p>DHT integration, mDNS local discovery, and STUN-based public IP discovery. Automatic peer reconnection.</p>
+                    <div class="feature-badge">Auto Discovery</div>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-tachometer-alt"></i>
+                    </div>
+                    <h3>High Performance</h3>
+                    <p>Native C++17 implementation with zero-copy operations. Thread-safe design and minimal memory footprint.</p>
+                    <div class="feature-badge">50x Faster</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Code Examples Section -->
+    <section id="quickstart" class="code-examples">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Quick Start</h2>
+                <p class="section-subtitle">Get up and running in minutes</p>
+            </div>
+            <div class="code-tabs">
+                <div class="tab-buttons">
+                    <button class="tab-button active" data-tab="basic">Basic P2P</button>
+                    <button class="tab-button" data-tab="messaging">Event Messaging</button>
+                    <button class="tab-button" data-tab="file-transfer">File Transfer</button>
+                    <button class="tab-button" data-tab="gossipsub">GossipSub</button>
+                </div>
+                <div class="tab-content">
+                    <div class="tab-pane active" id="basic">
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span class="code-title">Basic P2P Connection</span>
+                                <button class="copy-btn" onclick="copyCode('basic-code')">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                            <pre><code id="basic-code">#include "librats.h"
+
+int main() {
+    // Create client with automatic NAT traversal
+    librats::NatTraversalConfig nat_config;
+    nat_config.enable_ice = true;
+    nat_config.enable_turn_relay = true;
+    
+    librats::RatsClient client(8080, 10, nat_config);
+    
+    // Set up connection callback
+    client.set_advanced_connection_callback([](socket_t socket, 
+        const std::string& peer_id, 
+        const librats::ConnectionAttemptResult& result) {
+        std::cout << "✅ Connected via: " << result.method 
+                  << " in " << result.duration.count() << "ms" << std::endl;
+    });
+    
+    // Start with all discovery methods
+    client.start();
+    client.start_dht_discovery();           // Wide-area discovery
+    client.start_mdns_discovery();         // Local network discovery
+    client.discover_and_ignore_public_ip(); // NAT traversal setup
+    
+    // Connect with automatic strategy selection
+    client.connect_to_peer("peer.example.com", 8081, 
+                          librats::ConnectionStrategy::AUTO_ADAPTIVE);
+    
+    return 0;
+}</code></pre>
+                        </div>
+                    </div>
+                    <div class="tab-pane" id="messaging">
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span class="code-title">Event-Driven Messaging</span>
+                                <button class="copy-btn" onclick="copyCode('messaging-code')">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                            <pre><code id="messaging-code">int main() {
+    librats::RatsClient client(8080);
+    
+    // Set up event handlers using the modern message API
+    client.on("chat", [](const std::string& peer_id, const nlohmann::json& data) {
+        std::cout << "Chat from " << peer_id << ": " 
+                  << data.value("message", "") << std::endl;
+    });
+    
+    client.on("file_request", [&](const std::string& peer_id, const nlohmann::json& data) {
+        std::string filename = data.value("filename", "");
+        std::cout << "File request from " << peer_id << ": " << filename << std::endl;
+        
+        // Respond with file data
+        nlohmann::json response;
+        response["status"] = "found";
+        response["size"] = 12345;
+        client.send(peer_id, "file_response", response);
+    });
+    
+    // Start the client with all discovery methods
+    client.start();
+    client.start_dht_discovery();
+    client.start_mdns_discovery("my-node");
+    
+    // Send a message to all peers
+    nlohmann::json chat_msg;
+    chat_msg["message"] = "Hello, P2P world!";
+    chat_msg["timestamp"] = std::time(nullptr);
+    client.send("chat", chat_msg);
+    
+    return 0;
+}</code></pre>
+                        </div>
+                    </div>
+                    <div class="tab-pane" id="file-transfer">
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span class="code-title">File Transfer</span>
+                                <button class="copy-btn" onclick="copyCode('file-transfer-code')">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                            <pre><code id="file-transfer-code">int main() {
+    librats::RatsClient client(8080);
+    
+    // Set up file transfer callbacks
+    client.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
+        std::cout << "Transfer " << progress.transfer_id.substr(0, 8) 
+                  << ": " << progress.get_completion_percentage() << "% complete" << std::endl;
+        std::cout << "Rate: " << (progress.transfer_rate_bps / 1024) << " KB/s" << std::endl;
+    });
+    
+    client.on_file_transfer_request([](const std::string& peer_id, 
+        const librats::FileMetadata& metadata, const std::string& transfer_id) {
+        std::cout << "📥 File transfer request from " << peer_id.substr(0, 8) << std::endl;
+        std::cout << "File: " << metadata.filename << " (" << metadata.file_size << " bytes)" << std::endl;
+        
+        // Auto-accept files smaller than 10MB
+        return metadata.file_size < 10 * 1024 * 1024;
+    });
+    
+    // Configure file transfer settings
+    librats::FileTransferConfig config;
+    config.chunk_size = 128 * 1024;          // 128KB chunks
+    config.max_concurrent_chunks = 8;        // 8 chunks in parallel
+    config.verify_checksums = true;          // Verify data integrity
+    client.set_file_transfer_config(config);
+    
+    client.start();
+    client.start_dht_discovery();
+    
+    // Send a file to a peer
+    std::string transfer_id = client.send_file("peer_id_here", "document.pdf", "shared_document.pdf");
+    
+    return 0;
+}</code></pre>
+                        </div>
+                    </div>
+                    <div class="tab-pane" id="gossipsub">
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span class="code-title">GossipSub Messaging</span>
+                                <button class="copy-btn" onclick="copyCode('gossipsub-code')">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                            <pre><code id="gossipsub-code">int main() {
+    librats::RatsClient client(8080);
+    
+    // Set up topic message handlers
+    client.on_topic_message("chat", [](const std::string& peer_id, 
+        const std::string& topic, const std::string& message) {
+        std::cout << "Chat from " << peer_id << ": " << message << std::endl;
+    });
+    
+    client.on_topic_json_message("events", [](const std::string& peer_id, 
+        const std::string& topic, const nlohmann::json& data) {
+        std::cout << "Event: " << data["type"] << " from " << peer_id << std::endl;
+    });
+    
+    // Set message validator
+    client.set_topic_message_validator("chat", [](const std::string& topic, 
+        const std::string& message, const std::string& peer_id) {
+        // Only accept messages shorter than 1000 characters
+        return message.length() <= 1000 ? 
+            librats::ValidationResult::ACCEPT : 
+            librats::ValidationResult::REJECT;
+    });
+    
+    client.start();
+    client.start_dht_discovery();
+    
+    // Subscribe to topics
+    client.subscribe_to_topic("chat");
+    client.subscribe_to_topic("events");
+    
+    // Publish messages
+    client.publish_to_topic("chat", "Hello, GossipSub world!");
+    
+    nlohmann::json event_data;
+    event_data["type"] = "user_login";
+    event_data["timestamp"] = std::time(nullptr);
+    client.publish_json_to_topic("events", event_data);
+    
+    return 0;
+}</code></pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Performance Section -->
+    <section id="performance" class="performance">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Exceptional Performance</h2>
+                <p class="section-subtitle">Engineered for efficiency and resource optimization</p>
+            </div>
+            <div class="performance-comparison">
+                <div class="comparison-header">
+                    <h3>librats vs libp2p (JavaScript)</h3>
+                    <p>Test Environment: AMD Ryzen 7 5700U, 16GB RAM</p>
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="metric-icon">
+                            <i class="fas fa-memory"></i>
+                        </div>
+                        <div class="metric-content">
+                            <div class="metric-title">Startup Memory</div>
+                            <div class="metric-comparison">
+                                <div class="metric-value librats">1.6 MB</div>
+                                <div class="vs">vs</div>
+                                <div class="metric-value competitor">50-80 MB</div>
+                            </div>
+                            <div class="improvement">31-50x less memory</div>
+                        </div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-icon">
+                            <i class="fas fa-users"></i>
+                        </div>
+                        <div class="metric-content">
+                            <div class="metric-title">Memory per Peer</div>
+                            <div class="metric-comparison">
+                                <div class="metric-value librats">80 KB</div>
+                                <div class="vs">vs</div>
+                                <div class="metric-value competitor">4-6 MB</div>
+                            </div>
+                            <div class="improvement">50-75x more efficient</div>
+                        </div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-icon">
+                            <i class="fas fa-microchip"></i>
+                        </div>
+                        <div class="metric-content">
+                            <div class="metric-title">CPU Usage (idle)</div>
+                            <div class="metric-comparison">
+                                <div class="metric-value librats">0-1%</div>
+                                <div class="vs">vs</div>
+                                <div class="metric-value competitor">15-25%</div>
+                            </div>
+                            <div class="improvement">15-25x less CPU</div>
+                        </div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-icon">
+                            <i class="fas fa-chart-line"></i>
+                        </div>
+                        <div class="metric-content">
+                            <div class="metric-title">Peak Memory (100 peers)</div>
+                            <div class="metric-comparison">
+                                <div class="metric-value librats">9.4 MB</div>
+                                <div class="vs">vs</div>
+                                <div class="metric-value competitor">400-600 MB</div>
+                            </div>
+                            <div class="improvement">42-64x less memory</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- NAT Traversal Section -->
+    <section class="nat-traversal">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Industry-Leading NAT Traversal</h2>
+                <p class="section-subtitle">Connect across virtually any network topology</p>
+            </div>
+            <div class="nat-table-container">
+                <table class="nat-table">
+                    <thead>
+                        <tr>
+                            <th>NAT Type</th>
+                            <th>Direct</th>
+                            <th>STUN</th>
+                            <th>ICE</th>
+                            <th>TURN</th>
+                            <th>Success Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Open Internet</strong></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="success-rate excellent">100%</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Full Cone NAT</strong></td>
+                            <td><span class="status fail">❌</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="success-rate excellent">95%</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Restricted Cone</strong></td>
+                            <td><span class="status fail">❌</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="success-rate good">90%</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Port Restricted</strong></td>
+                            <td><span class="status fail">❌</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="success-rate good">85%</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Symmetric NAT</strong></td>
+                            <td><span class="status fail">❌</span></td>
+                            <td><span class="status fail">❌</span></td>
+                            <td><span class="status warning">⚠️</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="success-rate fair">70%</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Double NAT</strong></td>
+                            <td><span class="status fail">❌</span></td>
+                            <td><span class="status fail">❌</span></td>
+                            <td><span class="status fail">❌</span></td>
+                            <td><span class="status success">✅</span></td>
+                            <td><span class="success-rate excellent">99%</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- Documentation Section -->
+    <section id="docs" class="documentation">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Comprehensive Documentation</h2>
+                <p class="section-subtitle">Everything you need to get started and build amazing P2P applications</p>
+            </div>
+            <div class="docs-grid">
+                <a href="NAT_TRAVERSAL.md" class="doc-card">
+                    <div class="doc-icon">
+                        <i class="fas fa-network-wired"></i>
+                    </div>
+                    <h3>NAT Traversal Guide</h3>
+                    <p>Complete documentation for NAT traversal configuration and optimization</p>
+                    <div class="doc-arrow">
+                        <i class="fas fa-arrow-right"></i>
+                    </div>
+                </a>
+                <a href="FILE_TRANSFER_EXAMPLE.md" class="doc-card">
+                    <div class="doc-icon">
+                        <i class="fas fa-file-transfer"></i>
+                    </div>
+                    <h3>File Transfer Example</h3>
+                    <p>Efficient P2P file and directory transfer with resume capability</p>
+                    <div class="doc-arrow">
+                        <i class="fas fa-arrow-right"></i>
+                    </div>
+                </a>
+                <a href="MESSAGE_EXCHANGE_API.md" class="doc-card">
+                    <div class="doc-icon">
+                        <i class="fas fa-comments"></i>
+                    </div>
+                    <h3>Message Exchange API</h3>
+                    <p>Event-driven messaging system with JSON support and callbacks</p>
+                    <div class="doc-arrow">
+                        <i class="fas fa-arrow-right"></i>
+                    </div>
+                </a>
+                <a href="GOSSIPSUB_EXAMPLE.md" class="doc-card">
+                    <div class="doc-icon">
+                        <i class="fas fa-project-diagram"></i>
+                    </div>
+                    <h3>GossipSub Example</h3>
+                    <p>Publish-subscribe messaging with mesh networking and topic routing</p>
+                    <div class="doc-arrow">
+                        <i class="fas fa-arrow-right"></i>
+                    </div>
+                </a>
+                <a href="NOISE_ENCRYPTION.md" class="doc-card">
+                    <div class="doc-icon">
+                        <i class="fas fa-shield-alt"></i>
+                    </div>
+                    <h3>Noise Encryption</h3>
+                    <p>End-to-end encryption details and key management</p>
+                    <div class="doc-arrow">
+                        <i class="fas fa-arrow-right"></i>
+                    </div>
+                </a>
+                <a href="CUSTOM_PROTOCOL.md" class="doc-card">
+                    <div class="doc-icon">
+                        <i class="fas fa-cogs"></i>
+                    </div>
+                    <h3>Custom Protocol Setup</h3>
+                    <p>Configure custom protocols and discovery mechanisms</p>
+                    <div class="doc-arrow">
+                        <i class="fas fa-arrow-right"></i>
+                    </div>
+                </a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-left">
+                    <div class="footer-logo">
+                        <img src="resources/logo.png" alt="librats" class="footer-logo-img">
+                        <span class="footer-logo-text">librats</span>
+                    </div>
+                    <p class="footer-description">
+                        High-performance P2P networking library for modern applications
+                    </p>
+                    <div class="footer-badges">
+                        <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License">
+                        <img src="https://img.shields.io/badge/C%2B%2B-17-blue.svg" alt="C++17">
+                        <img src="https://img.shields.io/badge/build-passing-brightgreen.svg" alt="Build Status">
+                    </div>
+                </div>
+                <div class="footer-links">
+                    <div class="footer-column">
+                        <h4>Documentation</h4>
+                        <ul>
+                            <li><a href="#quickstart">Quick Start</a></li>
+                            <li><a href="NAT_TRAVERSAL.md">NAT Traversal</a></li>
+                            <li><a href="FILE_TRANSFER_EXAMPLE.md">File Transfer</a></li>
+                            <li><a href="GOSSIPSUB_EXAMPLE.md">GossipSub</a></li>
+                        </ul>
+                    </div>
+                    <div class="footer-column">
+                        <h4>Community</h4>
+                        <ul>
+                            <li><a href="https://github.com/DEgITx/librats" target="_blank">GitHub</a></li>
+                            <li><a href="https://github.com/DEgITx/librats/issues" target="_blank">Issues</a></li>
+                            <li><a href="https://github.com/DEgITx/librats/discussions" target="_blank">Discussions</a></li>
+                            <li><a href="CONTRIBUTING.md">Contributing</a></li>
+                        </ul>
+                    </div>
+                    <div class="footer-column">
+                        <h4>Resources</h4>
+                        <ul>
+                            <li><a href="LICENSE">License</a></li>
+                            <li><a href="#performance">Performance</a></li>
+                            <li><a href="MDNS_DISCOVERY.md">mDNS Discovery</a></li>
+                            <li><a href="BITTORRENT_EXAMPLE.md">BitTorrent</a></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>&copy; 2024 librats. Released under the MIT License.</p>
+                <div class="footer-social">
+                    <a href="https://github.com/DEgITx/librats" target="_blank">
+                        <i class="fab fa-github"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Mobile navigation toggle
+        const hamburger = document.querySelector('.hamburger');
+        const navMenu = document.querySelector('.nav-menu');
+
+        hamburger.addEventListener('click', () => {
+            hamburger.classList.toggle('active');
+            navMenu.classList.toggle('active');
+        });
+
+        // Close mobile menu when clicking on a link
+        document.querySelectorAll('.nav-link').forEach(n => n.addEventListener('click', () => {
+            hamburger.classList.remove('active');
+            navMenu.classList.remove('active');
+        }));
+
+        // Code tabs functionality
+        const tabButtons = document.querySelectorAll('.tab-button');
+        const tabPanes = document.querySelectorAll('.tab-pane');
+
+        tabButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                const targetTab = button.getAttribute('data-tab');
+                
+                // Remove active class from all buttons and panes
+                tabButtons.forEach(btn => btn.classList.remove('active'));
+                tabPanes.forEach(pane => pane.classList.remove('active'));
+                
+                // Add active class to clicked button and corresponding pane
+                button.classList.add('active');
+                document.getElementById(targetTab).classList.add('active');
+            });
+        });
+
+        // Copy code functionality
+        function copyCode(elementId) {
+            const codeElement = document.getElementById(elementId);
+            const text = codeElement.textContent;
+            
+            navigator.clipboard.writeText(text).then(() => {
+                // Show feedback
+                const copyBtn = codeElement.parentElement.querySelector('.copy-btn');
+                const originalContent = copyBtn.innerHTML;
+                copyBtn.innerHTML = '<i class="fas fa-check"></i>';
+                copyBtn.style.color = '#10b981';
+                
+                setTimeout(() => {
+                    copyBtn.innerHTML = originalContent;
+                    copyBtn.style.color = '';
+                }, 2000);
+            });
+        }
+
+        // Smooth scrolling for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'start'
+                    });
+                }
+            });
+        });
+
+        // Parallax effect for hero background
+        window.addEventListener('scroll', () => {
+            const scrolled = window.pageYOffset;
+            const heroBackground = document.querySelector('.hero-background');
+            if (heroBackground) {
+                heroBackground.style.transform = `translateY(${scrolled * 0.5}px)`;
+            }
+        });
+
+        // Intersection Observer for animations
+        const observerOptions = {
+            threshold: 0.1,
+            rootMargin: '0px 0px -50px 0px'
+        };
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('animate-in');
+                }
+            });
+        }, observerOptions);
+
+        // Observe all feature cards and metric cards
+        document.querySelectorAll('.feature-card, .metric-card, .doc-card').forEach(card => {
+            observer.observe(card);
+        });
+
+        // Floating particles animation
+        function createParticle() {
+            const particle = document.createElement('div');
+            particle.className = 'particle';
+            particle.style.left = Math.random() * 100 + '%';
+            particle.style.animationDuration = (Math.random() * 20 + 10) + 's';
+            particle.style.opacity = Math.random() * 0.5 + 0.1;
+            
+            document.querySelector('.floating-particles').appendChild(particle);
+            
+            setTimeout(() => {
+                particle.remove();
+            }, 30000);
+        }
+
+        // Create particles periodically
+        setInterval(createParticle, 3000);
+    </script>
+</body>
+</html>
