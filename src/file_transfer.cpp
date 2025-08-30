@@ -464,19 +464,20 @@ bool FileTransferManager::accept_file_transfer(const std::string& transfer_id, c
         return false;
     }
     
-    FileMetadata metadata = it->second;
+    PendingFileTransfer pending_transfer = it->second;
     pending_transfers_.erase(it);
     
     // Create transfer progress tracking
     auto progress = std::make_shared<FileTransferProgress>();
     progress->transfer_id = transfer_id;
+    progress->peer_id = pending_transfer.peer_id;
     progress->direction = FileTransferDirection::RECEIVING;
     progress->status = FileTransferStatus::STARTING;
-    progress->filename = metadata.filename;
+    progress->filename = pending_transfer.metadata.filename;
     progress->local_path = local_path;
-    progress->file_size = metadata.file_size;
-    progress->total_bytes = metadata.file_size;
-    progress->total_chunks = (metadata.file_size + config_.chunk_size - 1) / config_.chunk_size;
+    progress->file_size = pending_transfer.metadata.file_size;
+    progress->total_bytes = pending_transfer.metadata.file_size;
+    progress->total_chunks = (pending_transfer.metadata.file_size + config_.chunk_size - 1) / config_.chunk_size;
     
     {
         std::lock_guard<std::mutex> transfers_lock(transfers_mutex_);
@@ -485,12 +486,16 @@ bool FileTransferManager::accept_file_transfer(const std::string& transfer_id, c
     
     // Send acceptance response
     nlohmann::json response_msg = create_transfer_response_message(transfer_id, true);
+    client_.send(pending_transfer.peer_id, "file_transfer_response", response_msg);
     
-    // Find peer ID for this transfer (we should store this with pending transfers)
-    // For now, we'll need to get it from the progress structure or store it separately
-    // This is a design consideration - we need to track which peer each transfer is with
+    // Add to work queue for processing
+    {
+        std::lock_guard<std::mutex> work_lock(work_mutex_);
+        work_queue_.push(transfer_id);
+    }
+    work_condition_.notify_one();
     
-    LOG_FILE_TRANSFER_INFO("Accepted file transfer: " << transfer_id << " -> " << local_path);
+    LOG_FILE_TRANSFER_INFO("Accepted file transfer: " << transfer_id << " (" << pending_transfer.metadata.filename << " from " << pending_transfer.peer_id << " -> " << local_path << ")");
     return true;
 }
 
@@ -503,12 +508,14 @@ bool FileTransferManager::reject_file_transfer(const std::string& transfer_id, c
         return false;
     }
     
+    PendingFileTransfer pending_transfer = it->second;
     pending_transfers_.erase(it);
     
     // Send rejection response
     nlohmann::json response_msg = create_transfer_response_message(transfer_id, false, reason);
+    client_.send(pending_transfer.peer_id, "file_transfer_response", response_msg);
     
-    LOG_FILE_TRANSFER_INFO("Rejected file transfer: " << transfer_id << " (reason: " << reason << ")");
+    LOG_FILE_TRANSFER_INFO("Rejected file transfer: " << transfer_id << " (" << pending_transfer.metadata.filename << " from " << pending_transfer.peer_id << ", reason: " << reason << ")");
     return true;
 }
 
@@ -521,17 +528,18 @@ bool FileTransferManager::accept_directory_transfer(const std::string& transfer_
         return false;
     }
     
-    DirectoryMetadata dir_metadata = it->second;
+    PendingDirectoryTransfer pending_transfer = it->second;
     pending_directory_transfers_.erase(it);
     
     // Create transfer progress tracking
     auto progress = std::make_shared<FileTransferProgress>();
     progress->transfer_id = transfer_id;
+    progress->peer_id = pending_transfer.peer_id;
     progress->direction = FileTransferDirection::RECEIVING;
     progress->status = FileTransferStatus::STARTING;
-    progress->filename = dir_metadata.directory_name;
+    progress->filename = pending_transfer.metadata.directory_name;
     progress->local_path = local_path;
-    progress->total_bytes = dir_metadata.get_total_size();
+    progress->total_bytes = pending_transfer.metadata.get_total_size();
     progress->file_size = progress->total_bytes;
     progress->total_chunks = 0; // Will be calculated per file
     
@@ -542,14 +550,22 @@ bool FileTransferManager::accept_directory_transfer(const std::string& transfer_
     
     // Send acceptance response
     nlohmann::json response_msg = create_transfer_response_message(transfer_id, true);
+    client_.send(pending_transfer.peer_id, "file_transfer_response", response_msg);
     
     // Store directory metadata for processing
     {
         std::lock_guard<std::mutex> dir_lock(directory_transfers_mutex_);
-        active_directory_transfers_[transfer_id] = dir_metadata;
+        active_directory_transfers_[transfer_id] = pending_transfer.metadata;
     }
     
-    LOG_FILE_TRANSFER_INFO("Accepted directory transfer: " << transfer_id << " -> " << local_path);
+    // Add to work queue for processing
+    {
+        std::lock_guard<std::mutex> work_lock(work_mutex_);
+        work_queue_.push(transfer_id);
+    }
+    work_condition_.notify_one();
+    
+    LOG_FILE_TRANSFER_INFO("Accepted directory transfer: " << transfer_id << " (" << pending_transfer.metadata.directory_name << " from " << pending_transfer.peer_id << " -> " << local_path << ")");
     return true;
 }
 
@@ -562,12 +578,14 @@ bool FileTransferManager::reject_directory_transfer(const std::string& transfer_
         return false;
     }
     
+    PendingDirectoryTransfer pending_transfer = it->second;
     pending_directory_transfers_.erase(it);
     
     // Send rejection response
     nlohmann::json response_msg = create_transfer_response_message(transfer_id, false, reason);
+    client_.send(pending_transfer.peer_id, "file_transfer_response", response_msg);
     
-    LOG_FILE_TRANSFER_INFO("Rejected directory transfer: " << transfer_id << " (reason: " << reason << ")");
+    LOG_FILE_TRANSFER_INFO("Rejected directory transfer: " << transfer_id << " (" << pending_transfer.metadata.directory_name << " from " << pending_transfer.peer_id << ", reason: " << reason << ")");
     return true;
 }
 
@@ -807,18 +825,18 @@ FileMetadata FileTransferManager::get_file_metadata(const std::string& file_path
     FileMetadata metadata;
     
     try {
-        if (!librats::file_or_directory_exists(file_path)) {
+        if (!file_or_directory_exists(file_path.c_str())) {
             return metadata;
         }
         
-        metadata.filename = get_filename_from_path(file_path);
-        int64_t file_size = librats::get_file_size(file_path.c_str());
+        metadata.filename = get_filename_from_path(file_path.c_str());
+        int64_t file_size = get_file_size(file_path.c_str());
         if (file_size >= 0) {
             metadata.file_size = static_cast<uint64_t>(file_size);
         }
         
         // Get last modification time
-        metadata.last_modified = librats::get_file_modified_time(file_path.c_str());
+        metadata.last_modified = get_file_modified_time(file_path.c_str());
         
         // Calculate checksum (optional, can be expensive for large files)
         if (metadata.file_size < 100 * 1024 * 1024) { // Only for files < 100MB
@@ -839,7 +857,7 @@ DirectoryMetadata FileTransferManager::get_directory_metadata(const std::string&
     DirectoryMetadata metadata;
     
     try {
-        metadata.directory_name = get_filename_from_path(directory_path);
+        metadata.directory_name = get_filename_from_path(directory_path.c_str());
         
         std::vector<DirectoryEntry> entries;
         if (list_directory(directory_path.c_str(), entries)) {
@@ -955,7 +973,7 @@ void FileTransferManager::start_file_send(const std::string& transfer_id) {
         chunk.data.resize(chunk_size);
         
         // Read chunk data
-        if (!librats::read_file_chunk(progress->local_path.c_str(), file_offset, chunk.data.data(), chunk_size)) {
+        if (!read_file_chunk(progress->local_path.c_str(), file_offset, chunk.data.data(), chunk_size)) {
             complete_transfer(transfer_id, false, "Failed to read complete chunk from file");
             return;
         }
@@ -1202,7 +1220,10 @@ void FileTransferManager::handle_transfer_request(const std::string& peer_id, co
             
             {
                 std::lock_guard<std::mutex> lock(pending_mutex_);
-                pending_directory_transfers_[transfer_id] = dir_metadata;
+                PendingDirectoryTransfer pending_transfer;
+                pending_transfer.metadata = dir_metadata;
+                pending_transfer.peer_id = peer_id;
+                pending_directory_transfers_[transfer_id] = pending_transfer;
             }
             
             // Call user callback to approve/reject
@@ -1238,7 +1259,10 @@ void FileTransferManager::handle_transfer_request(const std::string& peer_id, co
         
         {
             std::lock_guard<std::mutex> lock(pending_mutex_);
-            pending_transfers_[transfer_id] = metadata;
+            PendingFileTransfer pending_transfer;
+            pending_transfer.metadata = metadata;
+            pending_transfer.peer_id = peer_id;
+            pending_transfers_[transfer_id] = pending_transfer;
         }
         
         // Call user callback to approve/reject
@@ -1587,7 +1611,7 @@ void FileTransferManager::handle_chunk_received(const FileChunk& chunk) {
     // Write chunk to temporary file
     std::string temp_path = get_temp_file_path(chunk.transfer_id, config_.temp_directory);
     
-    if (!librats::write_file_chunk(temp_path.c_str(), chunk.file_offset, chunk.data.data(), chunk.chunk_size)) {
+    if (!write_file_chunk(temp_path.c_str(), chunk.file_offset, chunk.data.data(), chunk.chunk_size)) {
         LOG_FILE_TRANSFER_ERROR("Failed to write chunk to temp file: " << temp_path);
         return;
     }

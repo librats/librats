@@ -443,8 +443,16 @@ private:
     
     // Pending transfers (not yet accepted/rejected)
     mutable std::mutex pending_mutex_;
-    std::unordered_map<std::string, FileMetadata> pending_transfers_;
-    std::unordered_map<std::string, DirectoryMetadata> pending_directory_transfers_;
+    struct PendingFileTransfer {
+        FileMetadata metadata;
+        std::string peer_id;
+    };
+    struct PendingDirectoryTransfer {
+        DirectoryMetadata metadata;
+        std::string peer_id;
+    };
+    std::unordered_map<std::string, PendingFileTransfer> pending_transfers_;
+    std::unordered_map<std::string, PendingDirectoryTransfer> pending_directory_transfers_;
     
     // Active directory transfers
     mutable std::mutex directory_transfers_mutex_;
@@ -515,12 +523,8 @@ private:
     void handle_chunk_ack(const std::string& transfer_id, uint64_t chunk_index, bool success);
     
     // File operations
-    bool read_file_chunk(const std::string& file_path, uint64_t offset, uint32_t size, std::vector<uint8_t>& data);
-    bool write_file_chunk(const std::string& file_path, uint64_t offset, const std::vector<uint8_t>& data);
     bool create_temp_file(const std::string& transfer_id, uint64_t file_size);
     bool finalize_received_file(const std::string& transfer_id, const std::string& final_path);
-    
-    // Note: Compression methods removed as requested
     
     // Checksum validation
     bool verify_chunk_checksum(const FileChunk& chunk);
@@ -554,8 +558,6 @@ private:
     static std::string get_temp_file_path(const std::string& transfer_id, const std::string& temp_dir);
     static std::string extract_filename(const std::string& file_path);
     static std::string get_mime_type(const std::string& file_path);
-    static uint64_t get_file_size(const std::string& file_path);
-    static uint64_t get_file_modified_time(const std::string& file_path);
     
     // Binary chunk transmission helper
     bool parse_chunk_binary_header(const std::vector<uint8_t>& binary_data, FileChunk& chunk);
