@@ -9,10 +9,10 @@
 #include <algorithm>
 
 // Main module logging macros
-#define LOG_MAIN_DEBUG(message) LOG_DEBUG("main", message)
-#define LOG_MAIN_INFO(message)  LOG_INFO("main", message)
-#define LOG_MAIN_WARN(message)  LOG_WARN("main", message)
-#define LOG_MAIN_ERROR(message) LOG_ERROR("main", message)
+#define LOG_MAIN_DEBUG(message) LOG_DEBUG("rats", message)
+#define LOG_MAIN_INFO(message)  LOG_INFO("rats", message)
+#define LOG_MAIN_WARN(message)  LOG_WARN("rats", message)
+#define LOG_MAIN_ERROR(message) LOG_ERROR("rats", message)
 
 void print_usage(const char* program_name) {
     std::cout << "Usage: " << program_name << " [listen_port] [peer_host] [peer_port]\n";
@@ -46,6 +46,17 @@ void print_help() {
     std::cout << "  netutils6 [hostname] - Test IPv6 network utilities" << std::endl;
     std::cout << "  dht_test <ip> <port> - Test DHT protocol with specific peer" << std::endl;
     std::cout << "  test_ipv6 <host> <port> - Test IPv6 connectivity" << std::endl;
+    std::cout << "\nFile Transfer Commands:" << std::endl;
+    std::cout << "  file_send <peer_hash> <file_path> [remote_name] - Send file to peer" << std::endl;
+    std::cout << "  dir_send <peer_hash> <dir_path> [remote_name] [recursive] - Send directory to peer" << std::endl;
+    std::cout << "  file_request <peer_hash> <remote_path> <local_path> - Request file from peer" << std::endl;
+    std::cout << "  dir_request <peer_hash> <remote_path> <local_path> [recursive] - Request directory from peer" << std::endl;
+    std::cout << "  transfer_list     - List active file transfers" << std::endl;
+    std::cout << "  transfer_status <transfer_id> - Show transfer progress" << std::endl;
+    std::cout << "  transfer_pause <transfer_id> - Pause a transfer" << std::endl;
+    std::cout << "  transfer_resume <transfer_id> - Resume a transfer" << std::endl;
+    std::cout << "  transfer_cancel <transfer_id> - Cancel a transfer" << std::endl;
+    std::cout << "  transfer_stats    - Show transfer statistics" << std::endl;
     std::cout << "  quit              - Exit the program" << std::endl;
 }
 
@@ -112,6 +123,74 @@ int main(int argc, char* argv[]) {
         }
     });
     
+    // Set up file transfer callbacks
+    if (client.is_file_transfer_available()) {
+        // Progress callback for file transfers
+        client.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
+            LOG_MAIN_INFO("Transfer " << progress.transfer_id << ": " 
+                         << progress.get_completion_percentage() << "% complete ("
+                         << progress.bytes_transferred << "/" << progress.total_bytes << " bytes)"
+                         << " - Rate: " << (progress.transfer_rate_bps / 1024.0) << " KB/s");
+        });
+        
+        // Completion callback for file transfers
+        client.on_file_transfer_completed([](const std::string& transfer_id, bool success, const std::string& error_message) {
+            if (success) {
+                LOG_MAIN_INFO("Transfer " << transfer_id << " completed successfully!");
+            } else {
+                LOG_MAIN_ERROR("Transfer " << transfer_id << " failed: " << error_message);
+            }
+        });
+        
+        // Incoming file transfer request callback
+        client.on_file_transfer_request([](const std::string& peer_id, const librats::FileMetadata& metadata, const std::string& transfer_id) {
+            LOG_MAIN_INFO("=== Incoming File Transfer Request ===");
+            LOG_MAIN_INFO("From peer: " << peer_id);
+            LOG_MAIN_INFO("File: " << metadata.filename);
+            LOG_MAIN_INFO("Size: " << metadata.file_size << " bytes");
+            LOG_MAIN_INFO("Transfer ID: " << transfer_id);
+            LOG_MAIN_INFO("Auto-accepting file transfer...");
+            return true; // Auto-accept for now - could be made interactive
+        });
+        
+        // Directory transfer progress callback
+        client.on_directory_transfer_progress([](const std::string& transfer_id, const std::string& current_file, 
+                                                uint64_t files_completed, uint64_t total_files, 
+                                                uint64_t bytes_completed, uint64_t total_bytes) {
+            double file_progress = total_files > 0 ? (double(files_completed) / total_files) * 100.0 : 0.0;
+            double byte_progress = total_bytes > 0 ? (double(bytes_completed) / total_bytes) * 100.0 : 0.0;
+            LOG_MAIN_INFO("Directory transfer " << transfer_id << ": " << files_completed << "/" << total_files 
+                         << " files (" << file_progress << "%), " << bytes_completed << "/" << total_bytes 
+                         << " bytes (" << byte_progress << "%) - Current: " << current_file);
+        });
+        
+        // File request callback (when receiving file requests)
+        client.on_file_request([](const std::string& peer_id, const std::string& file_path, const std::string& transfer_id) {
+            LOG_MAIN_INFO("=== Incoming File Request ===");
+            LOG_MAIN_INFO("From peer: " << peer_id);
+            LOG_MAIN_INFO("Requested file: " << file_path);
+            LOG_MAIN_INFO("Transfer ID: " << transfer_id);
+            LOG_MAIN_INFO("Auto-accepting file request...");
+            return true; // Auto-accept for now - could be made interactive
+        });
+        
+        // Directory request callback (when receiving directory requests)
+        client.on_directory_request([](const std::string& peer_id, const std::string& directory_path, 
+                                      bool recursive, const std::string& transfer_id) {
+            LOG_MAIN_INFO("=== Incoming Directory Request ===");
+            LOG_MAIN_INFO("From peer: " << peer_id);
+            LOG_MAIN_INFO("Requested directory: " << directory_path);
+            LOG_MAIN_INFO("Recursive: " << (recursive ? "yes" : "no"));
+            LOG_MAIN_INFO("Transfer ID: " << transfer_id);
+            LOG_MAIN_INFO("Auto-accepting directory request...");
+            return true; // Auto-accept for now - could be made interactive
+        });
+        
+        LOG_MAIN_INFO("File transfer callbacks configured");
+    } else {
+        LOG_MAIN_WARN("File transfer manager not available");
+    }
+    
     // Start the client
     if (!client.start()) {
         LOG_MAIN_ERROR("Failed to start RatsClient on port " << listen_port);
@@ -151,7 +230,7 @@ int main(int argc, char* argv[]) {
     print_help();
     
     // Add initial prompt
-    std::cout << "\nType your command: ";
+    std::cout << "\nrats> ";
     std::cout.flush();
     
     // Main command loop
@@ -160,7 +239,7 @@ int main(int argc, char* argv[]) {
         std::getline(std::cin, input);
         
         if (input.empty()) {
-            std::cout << "Type your command: ";
+            std::cout << "rats> ";
             std::cout.flush();
             continue;
         }
@@ -506,13 +585,243 @@ int main(int argc, char* argv[]) {
                 std::cout << "Usage: dht_test <ip> <port>" << std::endl;
             }
         }
+        else if (command == "file_send") {
+            std::string peer_hash, file_path, remote_name;
+            iss >> peer_hash >> file_path;
+            std::getline(iss, remote_name);
+            if (!remote_name.empty()) {
+                remote_name = remote_name.substr(1); // Remove leading space
+            }
+            
+            if (!peer_hash.empty() && !file_path.empty()) {
+                if (!client.is_file_transfer_available()) {
+                    LOG_MAIN_ERROR("File transfer not available");
+                } else {
+                    LOG_MAIN_INFO("Sending file '" << file_path << "' to peer " << peer_hash 
+                                 << (remote_name.empty() ? "" : " as '" + remote_name + "'"));
+                    std::string transfer_id = client.send_file(peer_hash, file_path, remote_name);
+                    if (!transfer_id.empty()) {
+                        LOG_MAIN_INFO("File transfer initiated with ID: " << transfer_id);
+                    } else {
+                        LOG_MAIN_ERROR("Failed to initiate file transfer");
+                    }
+                }
+            } else {
+                std::cout << "Usage: file_send <peer_hash> <file_path> [remote_name]" << std::endl;
+            }
+        }
+        else if (command == "dir_send") {
+            std::string peer_hash, dir_path, remote_name, recursive_str;
+            iss >> peer_hash >> dir_path >> remote_name >> recursive_str;
+            
+            if (!peer_hash.empty() && !dir_path.empty()) {
+                if (!client.is_file_transfer_available()) {
+                    LOG_MAIN_ERROR("File transfer not available");
+                } else {
+                    bool recursive = (recursive_str.empty() || recursive_str == "true" || recursive_str == "1");
+                    LOG_MAIN_INFO("Sending directory '" << dir_path << "' to peer " << peer_hash 
+                                 << (remote_name.empty() ? "" : " as '" + remote_name + "'")
+                                 << " (recursive: " << (recursive ? "yes" : "no") << ")");
+                    std::string transfer_id = client.send_directory(peer_hash, dir_path, remote_name, recursive);
+                    if (!transfer_id.empty()) {
+                        LOG_MAIN_INFO("Directory transfer initiated with ID: " << transfer_id);
+                    } else {
+                        LOG_MAIN_ERROR("Failed to initiate directory transfer");
+                    }
+                }
+            } else {
+                std::cout << "Usage: dir_send <peer_hash> <dir_path> [remote_name] [recursive]" << std::endl;
+            }
+        }
+        else if (command == "file_request") {
+            std::string peer_hash, remote_path, local_path;
+            iss >> peer_hash >> remote_path >> local_path;
+            
+            if (!peer_hash.empty() && !remote_path.empty() && !local_path.empty()) {
+                if (!client.is_file_transfer_available()) {
+                    LOG_MAIN_ERROR("File transfer not available");
+                } else {
+                    LOG_MAIN_INFO("Requesting file '" << remote_path << "' from peer " << peer_hash 
+                                 << " to save as '" << local_path << "'");
+                    std::string transfer_id = client.request_file(peer_hash, remote_path, local_path);
+                    if (!transfer_id.empty()) {
+                        LOG_MAIN_INFO("File request initiated with ID: " << transfer_id);
+                    } else {
+                        LOG_MAIN_ERROR("Failed to initiate file request");
+                    }
+                }
+            } else {
+                std::cout << "Usage: file_request <peer_hash> <remote_path> <local_path>" << std::endl;
+            }
+        }
+        else if (command == "dir_request") {
+            std::string peer_hash, remote_path, local_path, recursive_str;
+            iss >> peer_hash >> remote_path >> local_path >> recursive_str;
+            
+            if (!peer_hash.empty() && !remote_path.empty() && !local_path.empty()) {
+                if (!client.is_file_transfer_available()) {
+                    LOG_MAIN_ERROR("File transfer not available");
+                } else {
+                    bool recursive = (recursive_str.empty() || recursive_str == "true" || recursive_str == "1");
+                    LOG_MAIN_INFO("Requesting directory '" << remote_path << "' from peer " << peer_hash 
+                                 << " to save as '" << local_path << "' (recursive: " << (recursive ? "yes" : "no") << ")");
+                    std::string transfer_id = client.request_directory(peer_hash, remote_path, local_path, recursive);
+                    if (!transfer_id.empty()) {
+                        LOG_MAIN_INFO("Directory request initiated with ID: " << transfer_id);
+                    } else {
+                        LOG_MAIN_ERROR("Failed to initiate directory request");
+                    }
+                }
+            } else {
+                std::cout << "Usage: dir_request <peer_hash> <remote_path> <local_path> [recursive]" << std::endl;
+            }
+        }
+        else if (command == "transfer_list") {
+            if (!client.is_file_transfer_available()) {
+                LOG_MAIN_ERROR("File transfer not available");
+            } else {
+                auto active_transfers = client.get_active_file_transfers();
+                if (active_transfers.empty()) {
+                    std::cout << "No active file transfers." << std::endl;
+                } else {
+                    std::cout << "Active file transfers:" << std::endl;
+                    for (const auto& transfer : active_transfers) {
+                        std::cout << "  ID: " << transfer->transfer_id << std::endl;
+                        std::cout << "    Peer: " << transfer->peer_id << std::endl;
+                        std::cout << "    File: " << transfer->filename << std::endl;
+                        std::cout << "    Direction: " << (transfer->direction == librats::FileTransferDirection::SENDING ? "SENDING" : "RECEIVING") << std::endl;
+                        std::cout << "    Status: ";
+                        switch (transfer->status) {
+                            case librats::FileTransferStatus::PENDING: std::cout << "PENDING"; break;
+                            case librats::FileTransferStatus::STARTING: std::cout << "STARTING"; break;
+                            case librats::FileTransferStatus::IN_PROGRESS: std::cout << "IN_PROGRESS"; break;
+                            case librats::FileTransferStatus::PAUSED: std::cout << "PAUSED"; break;
+                            case librats::FileTransferStatus::COMPLETED: std::cout << "COMPLETED"; break;
+                            case librats::FileTransferStatus::FAILED: std::cout << "FAILED"; break;
+                            case librats::FileTransferStatus::CANCELLED: std::cout << "CANCELLED"; break;
+                            case librats::FileTransferStatus::RESUMING: std::cout << "RESUMING"; break;
+                        }
+                        std::cout << std::endl;
+                        std::cout << "    Progress: " << transfer->get_completion_percentage() << "% ("
+                                 << transfer->bytes_transferred << "/" << transfer->total_bytes << " bytes)" << std::endl;
+                        std::cout << "    Rate: " << (transfer->transfer_rate_bps / 1024.0) << " KB/s" << std::endl;
+                        std::cout << std::endl;
+                    }
+                }
+            }
+        }
+        else if (command == "transfer_status") {
+            std::string transfer_id;
+            iss >> transfer_id;
+            if (!transfer_id.empty()) {
+                if (!client.is_file_transfer_available()) {
+                    LOG_MAIN_ERROR("File transfer not available");
+                } else {
+                    auto progress = client.get_file_transfer_progress(transfer_id);
+                    if (progress) {
+                        std::cout << "Transfer " << transfer_id << " status:" << std::endl;
+                        std::cout << "  Peer: " << progress->peer_id << std::endl;
+                        std::cout << "  File: " << progress->filename << std::endl;
+                        std::cout << "  Direction: " << (progress->direction == librats::FileTransferDirection::SENDING ? "SENDING" : "RECEIVING") << std::endl;
+                        std::cout << "  Status: ";
+                        switch (progress->status) {
+                            case librats::FileTransferStatus::PENDING: std::cout << "PENDING"; break;
+                            case librats::FileTransferStatus::STARTING: std::cout << "STARTING"; break;
+                            case librats::FileTransferStatus::IN_PROGRESS: std::cout << "IN_PROGRESS"; break;
+                            case librats::FileTransferStatus::PAUSED: std::cout << "PAUSED"; break;
+                            case librats::FileTransferStatus::COMPLETED: std::cout << "COMPLETED"; break;
+                            case librats::FileTransferStatus::FAILED: std::cout << "FAILED"; break;
+                            case librats::FileTransferStatus::CANCELLED: std::cout << "CANCELLED"; break;
+                            case librats::FileTransferStatus::RESUMING: std::cout << "RESUMING"; break;
+                        }
+                        std::cout << std::endl;
+                        std::cout << "  Progress: " << progress->get_completion_percentage() << "%" << std::endl;
+                        std::cout << "  Bytes: " << progress->bytes_transferred << "/" << progress->total_bytes << std::endl;
+                        std::cout << "  Chunks: " << progress->chunks_completed << "/" << progress->total_chunks << std::endl;
+                        std::cout << "  Rate: " << (progress->transfer_rate_bps / 1024.0) << " KB/s" << std::endl;
+                        std::cout << "  Average Rate: " << (progress->average_rate_bps / 1024.0) << " KB/s" << std::endl;
+                        std::cout << "  Elapsed: " << progress->get_elapsed_time().count() << " ms" << std::endl;
+                        if (progress->estimated_time_remaining.count() > 0) {
+                            std::cout << "  ETA: " << progress->estimated_time_remaining.count() << " ms" << std::endl;
+                        }
+                        if (!progress->error_message.empty()) {
+                            std::cout << "  Error: " << progress->error_message << std::endl;
+                        }
+                    } else {
+                        LOG_MAIN_ERROR("Transfer " << transfer_id << " not found");
+                    }
+                }
+            } else {
+                std::cout << "Usage: transfer_status <transfer_id>" << std::endl;
+            }
+        }
+        else if (command == "transfer_pause") {
+            std::string transfer_id;
+            iss >> transfer_id;
+            if (!transfer_id.empty()) {
+                if (!client.is_file_transfer_available()) {
+                    LOG_MAIN_ERROR("File transfer not available");
+                } else {
+                    if (client.pause_file_transfer(transfer_id)) {
+                        LOG_MAIN_INFO("Transfer " << transfer_id << " paused");
+                    } else {
+                        LOG_MAIN_ERROR("Failed to pause transfer " << transfer_id);
+                    }
+                }
+            } else {
+                std::cout << "Usage: transfer_pause <transfer_id>" << std::endl;
+            }
+        }
+        else if (command == "transfer_resume") {
+            std::string transfer_id;
+            iss >> transfer_id;
+            if (!transfer_id.empty()) {
+                if (!client.is_file_transfer_available()) {
+                    LOG_MAIN_ERROR("File transfer not available");
+                } else {
+                    if (client.resume_file_transfer(transfer_id)) {
+                        LOG_MAIN_INFO("Transfer " << transfer_id << " resumed");
+                    } else {
+                        LOG_MAIN_ERROR("Failed to resume transfer " << transfer_id);
+                    }
+                }
+            } else {
+                std::cout << "Usage: transfer_resume <transfer_id>" << std::endl;
+            }
+        }
+        else if (command == "transfer_cancel") {
+            std::string transfer_id;
+            iss >> transfer_id;
+            if (!transfer_id.empty()) {
+                if (!client.is_file_transfer_available()) {
+                    LOG_MAIN_ERROR("File transfer not available");
+                } else {
+                    if (client.cancel_file_transfer(transfer_id)) {
+                        LOG_MAIN_INFO("Transfer " << transfer_id << " cancelled");
+                    } else {
+                        LOG_MAIN_ERROR("Failed to cancel transfer " << transfer_id);
+                    }
+                }
+            } else {
+                std::cout << "Usage: transfer_cancel <transfer_id>" << std::endl;
+            }
+        }
+        else if (command == "transfer_stats") {
+            if (!client.is_file_transfer_available()) {
+                LOG_MAIN_ERROR("File transfer not available");
+            } else {
+                auto stats = client.get_file_transfer_statistics();
+                std::cout << "File Transfer Statistics:" << std::endl;
+                std::cout << stats.dump(2) << std::endl;
+            }
+        }
         else {
             std::cout << "Unknown command: " << command << std::endl;
             std::cout << "Type 'help' for available commands." << std::endl;
         }
         
         // Always show prompt after each command
-        std::cout << "Type your command: ";
+        std::cout << "rats> ";
         std::cout.flush();
     }
     
