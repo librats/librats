@@ -948,14 +948,14 @@ public:
 
 Comprehensive documentation is available:
 
-- **[NAT Traversal Guide](NAT_TRAVERSAL.md)** - Complete NAT traversal documentation
-- **[File Transfer Example](FILE_TRANSFER_EXAMPLE.md)** - Efficient P2P file and directory transfer
-- **[Custom Protocol Setup](CUSTOM_PROTOCOL.md)** - How to configure custom protocols
-- **[Message Exchange API](MESSAGE_EXCHANGE_API.md)** - Event-driven messaging system  
-- **[GossipSub Example](GOSSIPSUB_EXAMPLE.md)** - Publish-subscribe messaging with GossipSub
-- **[mDNS Discovery](MDNS_DISCOVERY.md)** - Local network peer discovery
-- **[Noise Encryption](NOISE_ENCRYPTION.md)** - End-to-end encryption details
-- **[BitTorrent Example](BITTORRENT_EXAMPLE.md)** - BitTorrent protocol implementation
+- **[NAT Traversal Guide](docs/NAT_TRAVERSAL.md)** - Complete NAT traversal documentation
+- **[File Transfer Example](docs/FILE_TRANSFER_EXAMPLE.md)** - Efficient P2P file and directory transfer
+- **[Custom Protocol Setup](docs/CUSTOM_PROTOCOL.md)** - How to configure custom protocols
+- **[Message Exchange API](docs/MESSAGE_EXCHANGE_API.md)** - Event-driven messaging system  
+- **[GossipSub Example](docs/GOSSIPSUB_EXAMPLE.md)** - Publish-subscribe messaging with GossipSub
+- **[mDNS Discovery](docs/MDNS_DISCOVERY.md)** - Local network peer discovery
+- **[Noise Encryption](docs/NOISE_ENCRYPTION.md)** - End-to-end encryption details
+- **[BitTorrent Example](docs/BITTORRENT_EXAMPLE.md)** - BitTorrent protocol implementation
 
 ## 🔧 Configuration Files
 
