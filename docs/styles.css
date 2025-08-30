@@ -2243,6 +2243,7 @@ body {
         gap: 40px;
         text-align: center;
         padding-top: 100px;
+        min-width: fit-content;
     }
 
     .hero-title {
