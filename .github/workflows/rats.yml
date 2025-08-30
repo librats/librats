@@ -34,6 +34,10 @@ jobs:
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
+          # Check if cmake is already installed and uninstall if needed
+          if brew list cmake &>/dev/null; then
+            brew uninstall cmake
+          fi
           brew install cmake
       
       - name: Configure CMake
