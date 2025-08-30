@@ -21,6 +21,7 @@
                 <li><a href="#features" class="nav-link">Features</a></li>
                 <li><a href="#quickstart" class="nav-link">Quick Start</a></li>
                 <li><a href="#downloads" class="nav-link">Downloads</a></li>
+                <li><a href="#platforms" class="nav-link">Platforms</a></li>
                 <li><a href="#docs" class="nav-link">Documentation</a></li>
                 <li><a href="#performance" class="nav-link">Performance</a></li>
                 <li><a href="https://github.com/DEgITx/librats" class="nav-link github-link" target="_blank">
@@ -688,6 +689,491 @@ make -j$(nproc)</code></pre>
                         </div>
                     </div>
                 </div> -->
+            </div>
+        </div>
+    </section>
+
+    <!-- Platforms & Language Bindings Section -->
+    <section id="platforms" class="platforms">
+        <div class="container">
+            <div class="section-header">
+                <h2 class="section-title">Supported Platforms & Language Bindings</h2>
+                <p class="section-subtitle">Cross-platform support with bindings for multiple programming languages</p>
+            </div>
+            
+            <!-- Native C++ Support -->
+            <div class="platform-category">
+                <div class="category-header">
+                    <div class="category-icon">
+                        <i class="fas fa-desktop"></i>
+                    </div>
+                    <div class="category-info">
+                        <h3>Native C++ Support</h3>
+                        <p>Production-ready implementations across all major platforms</p>
+                    </div>
+                </div>
+                
+                <div class="platform-table-container">
+                    <table class="platform-table">
+                        <thead>
+                            <tr>
+                                <th>Platform</th>
+                                <th>Build Environment</th>
+                                <th>Compiler</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="platform-row supported">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-windows platform-icon"></i>
+                                        <strong>Windows</strong>
+                                    </div>
+                                </td>
+                                <td>MinGW-w64</td>
+                                <td>GCC 7+</td>
+                                <td>
+                                    <span class="status-badge fully-supported">
+                                        <i class="fas fa-check-circle"></i>
+                                        Fully Supported
+                                    </span>
+                                </td>
+                            </tr>
+                            <tr class="platform-row supported">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-windows platform-icon"></i>
+                                        <strong>Windows</strong>
+                                    </div>
+                                </td>
+                                <td>Visual Studio</td>
+                                <td>MSVC 2017+</td>
+                                <td>
+                                    <span class="status-badge fully-supported">
+                                        <i class="fas fa-check-circle"></i>
+                                        Fully Supported
+                                    </span>
+                                </td>
+                            </tr>
+                            <tr class="platform-row supported">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-linux platform-icon"></i>
+                                        <strong>Linux</strong>
+                                    </div>
+                                </td>
+                                <td>Native</td>
+                                <td>GCC 7+, Clang 5+</td>
+                                <td>
+                                    <span class="status-badge fully-supported">
+                                        <i class="fas fa-check-circle"></i>
+                                        Fully Supported
+                                    </span>
+                                </td>
+                            </tr>
+                            <tr class="platform-row supported">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-apple platform-icon"></i>
+                                        <strong>macOS</strong>
+                                    </div>
+                                </td>
+                                <td>Xcode/Native</td>
+                                <td>Clang 10+</td>
+                                <td>
+                                    <span class="status-badge fully-supported">
+                                        <i class="fas fa-check-circle"></i>
+                                        Fully Supported
+                                    </span>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Language Bindings -->
+            <div class="platform-category">
+                <div class="category-header">
+                    <div class="category-icon">
+                        <i class="fas fa-code"></i>
+                    </div>
+                    <div class="category-info">
+                        <h3>Language Bindings & Wrappers</h3>
+                        <p>Multi-language support for diverse development ecosystems</p>
+                    </div>
+                </div>
+                
+                <div class="platform-table-container">
+                    <table class="platform-table">
+                        <thead>
+                            <tr>
+                                <th>Language/Platform</th>
+                                <th>Binding Type</th>
+                                <th>Status</th>
+                                <th>Timeline</th>
+                                <th>Notes</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="platform-row supported">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-cuttlefish platform-icon"></i>
+                                        <strong>C/C++</strong>
+                                    </div>
+                                </td>
+                                <td>Native Library</td>
+                                <td>
+                                    <span class="status-badge fully-supported">
+                                        <i class="fas fa-check-circle"></i>
+                                        Fully Supported
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline available">Available Now</span>
+                                </td>
+                                <td>Core implementation with full feature set</td>
+                            </tr>
+                            <tr class="platform-row in-development">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-android platform-icon"></i>
+                                        <strong>Android (NDK)</strong>
+                                    </div>
+                                </td>
+                                <td>Native C++</td>
+                                <td>
+                                    <span class="status-badge in-development">
+                                        <i class="fas fa-cog fa-spin"></i>
+                                        In Development
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline q2-2024">Soon</span>
+                                </td>
+                                <td>Android NDK integration with JNI bindings</td>
+                            </tr>
+                            <tr class="platform-row in-development">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-java platform-icon"></i>
+                                        <strong>Android (Java)</strong>
+                                    </div>
+                                </td>
+                                <td>JNI Wrapper</td>
+                                <td>
+                                    <span class="status-badge in-development">
+                                        <i class="fas fa-cog fa-spin"></i>
+                                        In Development
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline q2-2024">Soon</span>
+                                </td>
+                                <td>High-level Java API for Android apps</td>
+                            </tr>
+                            <tr class="platform-row planned">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-js-square platform-icon"></i>
+                                        <strong>JavaScript</strong>
+                                    </div>
+                                </td>
+                                <td>Native Module</td>
+                                <td>
+                                    <span class="status-badge planned">
+                                        <i class="fas fa-calendar-alt"></i>
+                                        Planned
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline q3-2024">Soon</span>
+                                </td>
+                                <td>Node.js native addon with async/await support</td>
+                            </tr>
+                            <tr class="platform-row planned">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-python platform-icon"></i>
+                                        <strong>Python</strong>
+                                    </div>
+                                </td>
+                                <td>C Extension</td>
+                                <td>
+                                    <span class="status-badge planned">
+                                        <i class="fas fa-calendar-alt"></i>
+                                        Planned
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline q3-2024">Soon</span>
+                                </td>
+                                <td>CPython extension with asyncio integration</td>
+                            </tr>
+                            <tr class="platform-row planned">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-rust platform-icon"></i>
+                                        <strong>Rust</strong>
+                                    </div>
+                                </td>
+                                <td>FFI Bindings</td>
+                                <td>
+                                    <span class="status-badge planned">
+                                        <i class="fas fa-calendar-alt"></i>
+                                        Planned
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline q4-2024">Soon</span>
+                                </td>
+                                <td>Safe Rust bindings with tokio async support</td>
+                            </tr>
+                            <tr class="platform-row future">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-golang platform-icon"></i>
+                                        <strong>Go</strong>
+                                    </div>
+                                </td>
+                                <td>CGO Bindings</td>
+                                <td>
+                                    <span class="status-badge future">
+                                        <i class="fas fa-clock"></i>
+                                        Future
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline future-2025">Soon</span>
+                                </td>
+                                <td>CGO wrapper for Go applications</td>
+                            </tr>
+                            <tr class="platform-row future">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-microsoft platform-icon"></i>
+                                        <strong>C#/.NET</strong>
+                                    </div>
+                                </td>
+                                <td>P/Invoke</td>
+                                <td>
+                                    <span class="status-badge future">
+                                        <i class="fas fa-clock"></i>
+                                        Future
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline future-2025">Soon</span>
+                                </td>
+                                <td>.NET bindings for Windows/Linux/macOS</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Mobile Platform Support -->
+            <div class="platform-category">
+                <div class="category-header">
+                    <div class="category-icon">
+                        <i class="fas fa-mobile-alt"></i>
+                    </div>
+                    <div class="category-info">
+                        <h3>Mobile Platform Support</h3>
+                        <p>Native mobile development for iOS and Android</p>
+                    </div>
+                </div>
+                
+                <div class="mobile-platforms">
+                    <div class="mobile-card in-development">
+                        <div class="mobile-header">
+                            <div class="mobile-icon">
+                                <i class="fab fa-android"></i>
+                            </div>
+                            <div class="mobile-info">
+                                <h4>Android</h4>
+                                <p>NDK + JNI Implementation</p>
+                            </div>
+                            <span class="status-badge in-development">
+                                <i class="fas fa-cog fa-spin"></i>
+                                In Development
+                            </span>
+                        </div>
+                        <div class="mobile-features">
+                            <ul>
+                                <li><i class="fas fa-check"></i> Full P2P networking</li>
+                                <li><i class="fas fa-check"></i> File transfer</li>
+                                <li><i class="fas fa-check"></i> GossipSub messaging</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class="mobile-card planned">
+                        <div class="mobile-header">
+                            <div class="mobile-icon">
+                                <i class="fab fa-apple"></i>
+                            </div>
+                            <div class="mobile-info">
+                                <h4>iOS</h4>
+                                <p>Native C++ Implementation</p>
+                            </div>
+                            <span class="status-badge planned">
+                                <i class="fas fa-calendar-alt"></i>
+                                Planned
+                            </span>
+                        </div>
+                        <div class="mobile-features">
+                            <ul>
+                                <li><i class="fas fa-clock"></i> Swift/Objective-C bindings planned</li>
+                                <li><i class="fas fa-clock"></i> Full feature parity with Android</li>
+                                <li><i class="fas fa-clock"></i> App Store compatible</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="framework-support">
+                    <h4>Cross-Platform Mobile Frameworks</h4>
+                    <div class="framework-grid">
+                        <div class="framework-item future">
+                            <div class="framework-icon">
+                                <i class="fab fa-react"></i>
+                            </div>
+                            <div class="framework-content">
+                                <h5>React Native</h5>
+                                <span class="status-badge future">Future</span>
+                            </div>
+                        </div>
+                        <div class="framework-item future">
+                            <div class="framework-icon">
+                                <i class="fas fa-feather-alt"></i>
+                            </div>
+                            <div class="framework-content">
+                                <h5>Flutter</h5>
+                                <span class="status-badge future">Future</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Web Platform Support -->
+            <div class="platform-category">
+                <div class="category-header">
+                    <div class="category-icon">
+                        <i class="fas fa-globe"></i>
+                    </div>
+                    <div class="category-info">
+                        <h3>Web Platform Support</h3>
+                        <p>Web and desktop application development</p>
+                    </div>
+                </div>
+                
+                <div class="web-platforms">
+                    <div class="web-card research">
+                        <div class="web-header">
+                            <div class="web-icon">
+                                <i class="fas fa-cube"></i>
+                            </div>
+                            <div class="web-info">
+                                <h4>Browser (WASM)</h4>
+                                <p>WebAssembly Implementation</p>
+                            </div>
+                            <span class="status-badge research">
+                                <i class="fas fa-search"></i>
+                                Research
+                            </span>
+                        </div>
+                        <div class="web-note">
+                            <i class="fas fa-info-circle"></i>
+                            Limited by browser networking APIs
+                        </div>
+                    </div>
+                    
+                    <div class="web-card planned">
+                        <div class="web-header">
+                            <div class="web-icon">
+                                <i class="fas fa-desktop"></i>
+                            </div>
+                            <div class="web-info">
+                                <h4>Electron</h4>
+                                <p>Node.js Module</p>
+                            </div>
+                            <span class="status-badge planned">
+                                <i class="fas fa-calendar-alt"></i>
+                                Planned
+                            </span>
+                        </div>
+                        <div class="web-note">
+                            <i class="fas fa-info-circle"></i>
+                            Desktop app development
+                        </div>
+                    </div>
+                    
+                    <div class="web-card future">
+                        <div class="web-header">
+                            <div class="web-icon">
+                                <i class="fas fa-feather"></i>
+                            </div>
+                            <div class="web-info">
+                                <h4>Tauri</h4>
+                                <p>Rust Bindings</p>
+                            </div>
+                            <span class="status-badge future">
+                                <i class="fas fa-clock"></i>
+                                Future
+                            </span>
+                        </div>
+                        <div class="web-note">
+                            <i class="fas fa-info-circle"></i>
+                            Lightweight desktop apps
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Status Legend -->
+            <div class="status-legend">
+                <h4>Status Legend</h4>
+                <div class="legend-grid">
+                    <div class="legend-item">
+                        <span class="status-badge fully-supported">
+                            <i class="fas fa-check-circle"></i>
+                            Fully Supported
+                        </span>
+                        <span class="legend-description">Production-ready with comprehensive testing</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="status-badge in-development">
+                            <i class="fas fa-cog"></i>
+                            In Development
+                        </span>
+                        <span class="legend-description">Active development, preview/beta available</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="status-badge planned">
+                            <i class="fas fa-calendar-alt"></i>
+                            Planned
+                        </span>
+                        <span class="legend-description">Confirmed for development, timeline estimated</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="status-badge future">
+                            <i class="fas fa-clock"></i>
+                            Future
+                        </span>
+                        <span class="legend-description">Under consideration, timeline not confirmed</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="status-badge research">
+                            <i class="fas fa-search"></i>
+                            Research
+                        </span>
+                        <span class="legend-description">Investigating feasibility and implementation</span>
+                    </div>
+                </div>
             </div>
         </div>
     </section>

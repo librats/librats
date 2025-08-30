@@ -770,16 +770,55 @@ struct FileMetadata {
 
 ## 🛠️ Building
 
-### Supported Platforms
+### Supported Platforms & Language Bindings
 
-librats has been thoroughly tested on the following platforms and build environments:
+librats provides comprehensive cross-platform support with bindings for multiple programming languages:
+
+#### Native C++ Support
 
 | Platform | Build Environment | Compiler | Status |
 |----------|------------------|----------|---------|
-| **Windows** | MinGW-w64 | GCC 7+ | ✅ **Fully Tested** |
-| **Windows** | Visual Studio | MSVC 2017+ | ✅ **Fully Tested** |
-| **Linux** | Native | GCC 7+, Clang 5+ | ✅ **Fully Tested** |
-| **macOS** | Xcode/Native | Clang 10+ | ✅ **Fully Tested** |
+| **Windows** | MinGW-w64 | GCC 7+ | ✅ **Fully Supported** |
+| **Windows** | Visual Studio | MSVC 2017+ | ✅ **Fully Supported** |
+| **Linux** | Native | GCC 7+, Clang 5+ | ✅ **Fully Supported** |
+| **macOS** | Xcode/Native | Clang 10+ | ✅ **Fully Supported** |
+
+#### Language Bindings & Wrappers
+
+| Language/Platform | Binding Type | Status | Timeline | Notes |
+|-------------------|--------------|--------|----------|-------|
+| **C/C++** | Native Library | ✅ **Fully Supported** | **Available Now** | Core implementation with full feature set |
+| **Android (NDK)** | Native C++ | 🔶 **In Development** | **Soon** | Android NDK integration with JNI bindings |
+| **Android (Java)** | JNI Wrapper | 🔶 **In Development** | **Soon** | High-level Java API for Android apps |
+| **JavaScript** | Native Module | 📋 **Planned** | **Soon** | Node.js native addon with async/await support |
+| **Python** | C Extension | 📋 **Planned** | **Soon** | CPython extension with asyncio integration |
+| **Rust** | FFI Bindings | 📋 **Planned** | **Soon** | Safe Rust bindings with tokio async support |
+| **Go** | CGO Bindings | 📋 **Future** | **Soon** | CGO wrapper for Go applications |
+| **C#/.NET** | P/Invoke | 📋 **Future** | **Soon** | .NET bindings for Windows/Linux/macOS |
+
+#### Mobile Platform Support
+
+| Platform | Implementation | Status | Features |
+|----------|----------------|--------|----------|
+| **Android** | NDK + JNI | 🔶 **In Development** | Full P2P networking, file transfer, GossipSub |
+| **iOS** | Native C++ | 📋 **Planned** | Swift/Objective-C bindings planned |
+| **React Native** | Native Module | 📋 **Future** | Cross-platform mobile development |
+| **Flutter** | FFI Plugin | 📋 **Future** | Dart FFI integration |
+
+#### Web Platform Support
+
+| Platform | Technology | Status | Limitations |
+|----------|------------|--------|-------------|
+| **Browser (WASM)** | WebAssembly | 📋 **Research** | Limited by browser networking APIs |
+| **Electron** | Node.js Module | 📋 **Planned** | Desktop app development |
+| **Tauri** | Rust Bindings | 📋 **Future** | Lightweight desktop apps |
+
+**Legend:**
+- ✅ **Fully Supported**: Production-ready with comprehensive testing
+- 🔶 **In Development**: Active development, preview/beta available
+- 📋 **Planned**: Confirmed for development, timeline estimated
+- 📋 **Future**: Under consideration, timeline not confirmed
+- 📋 **Research**: Investigating feasibility and implementation approach
 
 ### Prerequisites
 - **CMake 3.10+**
