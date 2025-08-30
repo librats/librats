@@ -56,6 +56,7 @@ RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig&
       nat_config_(nat_config),
       server_socket_(INVALID_SOCKET_VALUE),
       running_(false),
+      auto_discovery_running_(false),
       encryption_enabled_(false),
       detected_nat_type_(NatType::UNKNOWN),
       data_directory_("."),
