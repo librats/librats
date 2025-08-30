@@ -323,6 +323,22 @@ public:
      */
     bool reject_file_transfer(const std::string& transfer_id, const std::string& reason = "");
     
+    /**
+     * Accept an incoming directory transfer
+     * @param transfer_id Transfer identifier from request
+     * @param local_path Local path where directory should be saved
+     * @return true if accepted successfully
+     */
+    bool accept_directory_transfer(const std::string& transfer_id, const std::string& local_path);
+    
+    /**
+     * Reject an incoming directory transfer
+     * @param transfer_id Transfer identifier from request
+     * @param reason Optional reason for rejection
+     * @return true if rejected successfully
+     */
+    bool reject_directory_transfer(const std::string& transfer_id, const std::string& reason = "");
+    
     // Transfer control
     /**
      * Pause an active transfer
@@ -428,6 +444,11 @@ private:
     // Pending transfers (not yet accepted/rejected)
     mutable std::mutex pending_mutex_;
     std::unordered_map<std::string, FileMetadata> pending_transfers_;
+    std::unordered_map<std::string, DirectoryMetadata> pending_directory_transfers_;
+    
+    // Active directory transfers
+    mutable std::mutex directory_transfers_mutex_;
+    std::unordered_map<std::string, DirectoryMetadata> active_directory_transfers_;
     
     // Chunk management
     mutable std::mutex chunks_mutex_;
@@ -488,6 +509,8 @@ private:
     std::string generate_transfer_id() const;
     void start_file_send(const std::string& transfer_id);
     void start_file_receive(const std::string& transfer_id);
+    void start_directory_send(const std::string& transfer_id);
+    void start_directory_receive(const std::string& transfer_id);
     void handle_chunk_received(const FileChunk& chunk);
     void handle_chunk_ack(const std::string& transfer_id, uint64_t chunk_index, bool success);
     

@@ -377,16 +377,42 @@ std::string FileTransferManager::send_directory(const std::string& peer_id, cons
         active_transfers_[transfer_id] = progress;
     }
     
+    // Store directory metadata for processing
+    {
+        std::lock_guard<std::mutex> dir_lock(directory_transfers_mutex_);
+        active_directory_transfers_[transfer_id] = dir_metadata;
+    }
+    
     // Create directory transfer request message
     nlohmann::json request_msg;
     request_msg["transfer_id"] = transfer_id;
     request_msg["type"] = "directory";
-    request_msg["directory_metadata"] = {
-        {"directory_name", dir_metadata.directory_name},
-        {"relative_path", dir_metadata.relative_path},
-        {"total_size", dir_metadata.get_total_size()},
-        {"total_files", dir_metadata.get_total_file_count()}
-    };
+    
+    // Serialize directory metadata with full file information
+    nlohmann::json dir_metadata_json;
+    dir_metadata_json["directory_name"] = dir_metadata.directory_name;
+    dir_metadata_json["relative_path"] = dir_metadata.relative_path;
+    dir_metadata_json["total_size"] = dir_metadata.get_total_size();
+    dir_metadata_json["total_files"] = dir_metadata.get_total_file_count();
+    
+    // Serialize file metadata
+    nlohmann::json files_json = nlohmann::json::array();
+    for (const auto& file_meta : dir_metadata.files) {
+        nlohmann::json file_json;
+        file_json["filename"] = file_meta.filename;
+        file_json["relative_path"] = file_meta.relative_path;
+        file_json["file_size"] = file_meta.file_size;
+        file_json["last_modified"] = file_meta.last_modified;
+        file_json["mime_type"] = file_meta.mime_type;
+        file_json["checksum"] = file_meta.checksum;
+        files_json.push_back(file_json);
+    }
+    dir_metadata_json["files"] = files_json;
+    
+    // For now, we'll handle single-level directories (can be extended for nested later)
+    dir_metadata_json["subdirectories"] = nlohmann::json::array();
+    
+    request_msg["directory_metadata"] = dir_metadata_json;
     
     client_.send(peer_id, "file_transfer_request", request_msg);
     
@@ -483,6 +509,65 @@ bool FileTransferManager::reject_file_transfer(const std::string& transfer_id, c
     nlohmann::json response_msg = create_transfer_response_message(transfer_id, false, reason);
     
     LOG_FILE_TRANSFER_INFO("Rejected file transfer: " << transfer_id << " (reason: " << reason << ")");
+    return true;
+}
+
+bool FileTransferManager::accept_directory_transfer(const std::string& transfer_id, const std::string& local_path) {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    
+    auto it = pending_directory_transfers_.find(transfer_id);
+    if (it == pending_directory_transfers_.end()) {
+        LOG_FILE_TRANSFER_ERROR("Directory transfer not found in pending transfers: " << transfer_id);
+        return false;
+    }
+    
+    DirectoryMetadata dir_metadata = it->second;
+    pending_directory_transfers_.erase(it);
+    
+    // Create transfer progress tracking
+    auto progress = std::make_shared<FileTransferProgress>();
+    progress->transfer_id = transfer_id;
+    progress->direction = FileTransferDirection::RECEIVING;
+    progress->status = FileTransferStatus::STARTING;
+    progress->filename = dir_metadata.directory_name;
+    progress->local_path = local_path;
+    progress->total_bytes = dir_metadata.get_total_size();
+    progress->file_size = progress->total_bytes;
+    progress->total_chunks = 0; // Will be calculated per file
+    
+    {
+        std::lock_guard<std::mutex> transfers_lock(transfers_mutex_);
+        active_transfers_[transfer_id] = progress;
+    }
+    
+    // Send acceptance response
+    nlohmann::json response_msg = create_transfer_response_message(transfer_id, true);
+    
+    // Store directory metadata for processing
+    {
+        std::lock_guard<std::mutex> dir_lock(directory_transfers_mutex_);
+        active_directory_transfers_[transfer_id] = dir_metadata;
+    }
+    
+    LOG_FILE_TRANSFER_INFO("Accepted directory transfer: " << transfer_id << " -> " << local_path);
+    return true;
+}
+
+bool FileTransferManager::reject_directory_transfer(const std::string& transfer_id, const std::string& reason) {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    
+    auto it = pending_directory_transfers_.find(transfer_id);
+    if (it == pending_directory_transfers_.end()) {
+        LOG_FILE_TRANSFER_ERROR("Directory transfer not found in pending transfers: " << transfer_id);
+        return false;
+    }
+    
+    pending_directory_transfers_.erase(it);
+    
+    // Send rejection response
+    nlohmann::json response_msg = create_transfer_response_message(transfer_id, false, reason);
+    
+    LOG_FILE_TRANSFER_INFO("Rejected directory transfer: " << transfer_id << " (reason: " << reason << ")");
     return true;
 }
 
@@ -815,10 +900,25 @@ void FileTransferManager::process_transfer(const std::string& transfer_id) {
         return;
     }
     
-    if (progress->direction == FileTransferDirection::SENDING) {
-        start_file_send(transfer_id);
+    // Check if this is a directory transfer
+    bool is_directory_transfer = false;
+    {
+        std::lock_guard<std::mutex> dir_lock(directory_transfers_mutex_);
+        is_directory_transfer = active_directory_transfers_.find(transfer_id) != active_directory_transfers_.end();
+    }
+    
+    if (is_directory_transfer) {
+        if (progress->direction == FileTransferDirection::SENDING) {
+            start_directory_send(transfer_id);
+        } else {
+            start_directory_receive(transfer_id);
+        }
     } else {
-        start_file_receive(transfer_id);
+        if (progress->direction == FileTransferDirection::SENDING) {
+            start_file_send(transfer_id);
+        } else {
+            start_file_receive(transfer_id);
+        }
     }
 }
 
@@ -914,6 +1014,100 @@ void FileTransferManager::start_file_receive(const std::string& transfer_id) {
     LOG_FILE_TRANSFER_INFO("Started receiving file transfer: " << transfer_id);
 }
 
+void FileTransferManager::start_directory_send(const std::string& transfer_id) {
+    auto progress = get_transfer_progress(transfer_id);
+    if (!progress) {
+        return;
+    }
+    
+    DirectoryMetadata dir_metadata;
+    {
+        std::lock_guard<std::mutex> dir_lock(directory_transfers_mutex_);
+        auto it = active_directory_transfers_.find(transfer_id);
+        if (it == active_directory_transfers_.end()) {
+            complete_transfer(transfer_id, false, "Directory metadata not found");
+            return;
+        }
+        dir_metadata = it->second;
+    }
+    
+    progress->status = FileTransferStatus::IN_PROGRESS;
+    update_transfer_progress(transfer_id);
+    
+    // Send each file in the directory
+    for (const auto& file_metadata : dir_metadata.files) {
+        if (!running_.load()) {
+            return;
+        }
+        
+        // Check if transfer was cancelled or paused
+        auto current_progress = get_transfer_progress(transfer_id);
+        if (!current_progress || current_progress->status == FileTransferStatus::CANCELLED ||
+            current_progress->status == FileTransferStatus::PAUSED) {
+            return;
+        }
+        
+        std::string full_file_path = combine_paths(progress->local_path, file_metadata.relative_path);
+        
+        // Send individual file using existing file transfer logic
+        std::string file_transfer_id = send_file_with_metadata(progress->peer_id, full_file_path, file_metadata);
+        
+        if (file_transfer_id.empty()) {
+            complete_transfer(transfer_id, false, "Failed to send file: " + file_metadata.filename);
+            return;
+        }
+        
+        // Wait for individual file transfer to complete
+        // Note: In a real implementation, we might want to track multiple concurrent file transfers
+        // For now, we'll send files sequentially
+    }
+    
+    LOG_FILE_TRANSFER_INFO("Completed sending directory transfer: " << transfer_id);
+    complete_transfer(transfer_id, true);
+}
+
+void FileTransferManager::start_directory_receive(const std::string& transfer_id) {
+    auto progress = get_transfer_progress(transfer_id);
+    if (!progress) {
+        return;
+    }
+    
+    DirectoryMetadata dir_metadata;
+    {
+        std::lock_guard<std::mutex> dir_lock(directory_transfers_mutex_);
+        auto it = active_directory_transfers_.find(transfer_id);
+        if (it == active_directory_transfers_.end()) {
+            complete_transfer(transfer_id, false, "Directory metadata not found");
+            return;
+        }
+        dir_metadata = it->second;
+    }
+    
+    progress->status = FileTransferStatus::IN_PROGRESS;
+    
+    // Create directory structure
+    std::string base_path = progress->local_path;
+    if (!ensure_directory_exists(base_path)) {
+        complete_transfer(transfer_id, false, "Failed to create local directory structure");
+        return;
+    }
+    
+    // Create subdirectories if needed
+    for (const auto& file_metadata : dir_metadata.files) {
+        std::string file_dir = combine_paths(base_path, get_parent_directory(file_metadata.relative_path.c_str()));
+        if (!file_dir.empty() && !ensure_directory_exists(file_dir)) {
+            complete_transfer(transfer_id, false, "Failed to create subdirectory: " + file_dir);
+            return;
+        }
+    }
+    
+    update_transfer_progress(transfer_id);
+    LOG_FILE_TRANSFER_INFO("Started receiving directory transfer: " << transfer_id);
+    
+    // Note: Individual files will be received as separate file transfer requests
+    // The directory transfer completion will be handled when all files are received
+}
+
 bool FileTransferManager::create_temp_file(const std::string& transfer_id, uint64_t file_size) {
     std::string temp_path = get_temp_file_path(transfer_id, config_.temp_directory);
     
@@ -985,9 +1179,52 @@ void FileTransferManager::handle_transfer_request(const std::string& peer_id, co
         
         if (message.contains("directory_metadata")) {
             // Directory transfer request
-            // For now, we'll implement file transfers first
-            LOG_FILE_TRANSFER_INFO("Received directory transfer request from " << peer_id << " (not yet implemented)");
-            reject_file_transfer(transfer_id, "Directory transfers not yet implemented");
+            DirectoryMetadata dir_metadata;
+            auto dir_info = message["directory_metadata"];
+            dir_metadata.directory_name = dir_info["directory_name"];
+            dir_metadata.relative_path = dir_info["relative_path"];
+            
+            // Parse files and subdirectories from the metadata
+            if (dir_info.contains("files")) {
+                for (const auto& file_json : dir_info["files"]) {
+                    FileMetadata file_meta;
+                    file_meta.filename = file_json["filename"];
+                    file_meta.relative_path = file_json["relative_path"];
+                    file_meta.file_size = file_json["file_size"];
+                    file_meta.mime_type = file_json.value("mime_type", "application/octet-stream");
+                    file_meta.checksum = file_json.value("checksum", "");
+                    file_meta.last_modified = file_json.value("last_modified", 0);
+                    dir_metadata.files.push_back(file_meta);
+                }
+            }
+            
+            // For now, handle as single directory level (can be expanded for nested later)
+            
+            {
+                std::lock_guard<std::mutex> lock(pending_mutex_);
+                pending_directory_transfers_[transfer_id] = dir_metadata;
+            }
+            
+            // Call user callback to approve/reject
+            if (request_callback_) {
+                // Create a dummy file metadata for compatibility with existing callback
+                FileMetadata dummy_metadata;
+                dummy_metadata.filename = dir_metadata.directory_name + " (directory)";
+                dummy_metadata.file_size = dir_info.value("total_size", 0);
+                
+                bool accepted = request_callback_(peer_id, dummy_metadata, transfer_id);
+                if (accepted) {
+                    std::string local_path = "./" + dir_metadata.directory_name;
+                    accept_directory_transfer(transfer_id, local_path);
+                } else {
+                    reject_directory_transfer(transfer_id, "Rejected by user");
+                }
+            } else {
+                // Auto-reject if no callback is set
+                reject_directory_transfer(transfer_id, "No request handler configured");
+            }
+            
+            LOG_FILE_TRANSFER_INFO("Received directory transfer request from " << peer_id << " for " << dir_metadata.directory_name);
             return;
         }
         

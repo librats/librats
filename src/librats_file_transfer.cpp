@@ -60,6 +60,24 @@ bool RatsClient::reject_file_transfer(const std::string& transfer_id, const std:
     return file_transfer_manager_->reject_file_transfer(transfer_id, reason);
 }
 
+bool RatsClient::accept_directory_transfer(const std::string& transfer_id, const std::string& local_path) {
+    if (!is_file_transfer_available()) {
+        LOG_CLIENT_ERROR("File transfer manager not available");
+        return false;
+    }
+    
+    return file_transfer_manager_->accept_directory_transfer(transfer_id, local_path);
+}
+
+bool RatsClient::reject_directory_transfer(const std::string& transfer_id, const std::string& reason) {
+    if (!is_file_transfer_available()) {
+        LOG_CLIENT_ERROR("File transfer manager not available");
+        return false;
+    }
+    
+    return file_transfer_manager_->reject_directory_transfer(transfer_id, reason);
+}
+
 bool RatsClient::pause_file_transfer(const std::string& transfer_id) {
     if (!is_file_transfer_available()) {
         LOG_CLIENT_ERROR("File transfer manager not available");

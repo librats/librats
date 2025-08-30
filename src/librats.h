@@ -1159,6 +1159,22 @@ public:
     bool reject_file_transfer(const std::string& transfer_id, const std::string& reason = "");
     
     /**
+     * Accept an incoming directory transfer
+     * @param transfer_id Transfer identifier from request
+     * @param local_path Local path where directory should be saved
+     * @return true if accepted successfully
+     */
+    bool accept_directory_transfer(const std::string& transfer_id, const std::string& local_path);
+    
+    /**
+     * Reject an incoming directory transfer
+     * @param transfer_id Transfer identifier from request
+     * @param reason Optional reason for rejection
+     * @return true if rejected successfully
+     */
+    bool reject_directory_transfer(const std::string& transfer_id, const std::string& reason = "");
+    
+    /**
      * Pause an active file transfer
      * @param transfer_id Transfer to pause
      * @return true if paused successfully

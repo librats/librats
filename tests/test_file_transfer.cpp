@@ -167,7 +167,17 @@ protected:
         
         transfer_manager2_->set_request_callback([this](const std::string& peer_id, const FileMetadata& metadata, const std::string& transfer_id) {
             std::string local_path = "test_output/" + metadata.filename;
-            return transfer_manager2_->accept_file_transfer(transfer_id, local_path);
+            // Check if this is a directory transfer (indicated by " (directory)" suffix)
+            if (metadata.filename.find(" (directory)") != std::string::npos) {
+                std::string dir_name = metadata.filename;
+                size_t pos = dir_name.find(" (directory)");
+                if (pos != std::string::npos) {
+                    dir_name = dir_name.substr(0, pos);
+                }
+                return transfer_manager2_->accept_directory_transfer(transfer_id, "test_output/" + dir_name);
+            } else {
+                return transfer_manager2_->accept_file_transfer(transfer_id, local_path);
+            }
         });
         
         // Set up file request callbacks
@@ -476,4 +486,31 @@ TEST_F(FileTransferTest, TransferProgressDetails) {
     progress.update_transfer_rates(2000);
     EXPECT_EQ(progress.bytes_transferred, 2000);
     EXPECT_DOUBLE_EQ(progress.get_completion_percentage(), 100.0);
+}
+
+TEST_F(FileTransferTest, DirectoryTransferOperations) {
+    std::string peer_id = simulate_peer_connection();
+    
+    // Test sending directory
+    std::string transfer_id = transfer_manager1_->send_directory(peer_id, "test_data/test_directory");
+    EXPECT_FALSE(transfer_id.empty()) << "Directory transfer should generate transfer ID";
+    
+    // Check that transfer was added to active transfers
+    auto progress = transfer_manager1_->get_transfer_progress(transfer_id);
+    EXPECT_NE(progress, nullptr);
+    EXPECT_EQ(progress->direction, FileTransferDirection::SENDING);
+    EXPECT_EQ(progress->filename, "test_directory");
+    EXPECT_GT(progress->total_bytes, 0);
+    
+    // Test directory request operations
+    transfer_id = transfer_manager1_->request_directory(peer_id, "remote_dir", "local_dir", true);
+    EXPECT_FALSE(transfer_id.empty()) << "Directory request should generate transfer ID";
+}
+
+TEST_F(FileTransferTest, DirectoryTransferAcceptReject) {
+    // Test accepting non-existent directory transfer
+    EXPECT_FALSE(transfer_manager1_->accept_directory_transfer("non_existent", "output_dir"));
+    
+    // Test rejecting non-existent directory transfer
+    EXPECT_FALSE(transfer_manager1_->reject_directory_transfer("non_existent", "test reason"));
 }
