@@ -810,7 +810,7 @@ cmake --build . --config Release
 
 ```bash
 # Disable tests
-cmake .. -DBUILD_TESTS=OFF
+cmake .. -DRATS_BUILD_TESTS=OFF
 
 # Debug build with full logging
 cmake .. -DCMAKE_BUILD_TYPE=Debug
@@ -834,7 +834,7 @@ ctest -j$(nproc) --output-on-failure
 After building, you'll find:
 - **Library**: `build/lib/librats.a` (static library)
 - **Executable**: `build/bin/rats-client` (demo application)
-- **Tests**: `build/bin/librats_tests` (if `BUILD_TESTS=ON`)
+- **Tests**: `build/bin/librats_tests` (if `RATS_BUILD_TESTS=ON`)
 
 ## 🎯 Usage Examples
 
@@ -1049,7 +1049,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 git clone https://github.com/DEgITx/librats.git
 cd librats
 mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON
+cmake .. -DCMAKE_BUILD_TYPE=Debug -DRATS_BUILD_TESTS=ON
 make -j$(nproc)
 ./bin/librats_tests
 ```

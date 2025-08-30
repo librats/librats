@@ -10,7 +10,7 @@ if(GIT_FOUND)
     # Get the current git tag/commit
     execute_process(
         COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         OUTPUT_VARIABLE GIT_DESCRIBE
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
@@ -19,7 +19,7 @@ if(GIT_FOUND)
     # Extract version from git tag (format: v1.2.3 or 1.2.3)
     execute_process(
         COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         OUTPUT_VARIABLE GIT_TAG
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
@@ -28,7 +28,7 @@ if(GIT_FOUND)
     # Get commit count (revision number)
     execute_process(
         COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         OUTPUT_VARIABLE GIT_REVISION_COUNT
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
@@ -64,16 +64,16 @@ set(VERSION_STRING "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}.${VERSION
 
 # Configure version.h from template
 configure_file(
-    ${CMAKE_SOURCE_DIR}/src/version.h.in
-    ${CMAKE_BINARY_DIR}/src/version.h
+    ${PROJECT_SOURCE_DIR}/src/version.h.in
+    ${PROJECT_BINARY_DIR}/src/version.h
     @ONLY
 )
 
 # Configure version.rc from template
 if(WIN32)
     configure_file(
-        ${CMAKE_SOURCE_DIR}/version.rc.in
-        ${CMAKE_BINARY_DIR}/version.rc
+        ${PROJECT_SOURCE_DIR}/version.rc.in
+        ${PROJECT_BINARY_DIR}/version.rc
         @ONLY
     )
 endif()
@@ -121,11 +121,11 @@ add_library(rats
     src/file_transfer.cpp
     src/file_transfer.h
     src/version.cpp
-    ${CMAKE_BINARY_DIR}/src/version.h
+    ${PROJECT_BINARY_DIR}/src/version.h
 )
 
 # Include directories
-target_include_directories(rats PUBLIC ${CMAKE_BINARY_DIR}/src src)
+target_include_directories(rats PUBLIC ${PROJECT_BINARY_DIR}/src src)
 
 # Find and link threading support
 find_package(Threads REQUIRED)
@@ -136,32 +136,36 @@ if(WIN32)
     target_link_libraries(rats ws2_32 iphlpapi bcrypt)
 endif()
 
-# Create the main executable
-add_executable(rats-client src/main.cpp)
-target_link_libraries(rats-client rats)
+option(RATS_BUILD_EXAMPLES "Build examples" ON)
 
-# Add version information to help reduce false positives (Windows only)
-if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/version.rc.in")
-    set(VERSION_RC "${CMAKE_BINARY_DIR}/version.rc")
-    target_sources(rats-client PRIVATE "${VERSION_RC}")
+# Create the main executable
+if(RATS_BUILD_EXAMPLES)
+    add_executable(rats-client src/main.cpp)
+    target_link_libraries(rats-client rats)
+
+    # Add version information to help reduce false positives (Windows only)
+    if(WIN32 AND EXISTS "${PROJECT_SOURCE_DIR}/version.rc.in")
+        set(VERSION_RC "${PROJECT_BINARY_DIR}/version.rc")
+        target_sources(rats-client PRIVATE "${VERSION_RC}")
+    endif()
+
+    set_target_properties(rats-client PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin
+    )
 endif()
 
 # Set output directories
 set_target_properties(rats PROPERTIES
-    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
-)
-
-set_target_properties(rats-client PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib
+    LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib
 )
 
 # Testing setup
-option(BUILD_TESTS "Build unit tests" ON)
-option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(RATS_BUILD_TESTS "Build unit tests" ON)
+option(RATS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 
 # AddressSanitizer configuration
-if(ENABLE_ASAN)
+if(RATS_ENABLE_ASAN)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set(ASAN_FLAGS "-fsanitize=address -fno-omit-frame-pointer -g")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ASAN_FLAGS}")
@@ -180,7 +184,7 @@ if(ENABLE_ASAN)
     endif()
 endif()
 
-if(BUILD_TESTS)
+if(RATS_BUILD_TESTS)
     target_compile_definitions(rats PUBLIC TESTING)
 
     # Enable testing
@@ -248,6 +252,6 @@ if(BUILD_TESTS)
     
     # Set test output directory
     set_target_properties(librats_tests PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin
     )
 endif()
