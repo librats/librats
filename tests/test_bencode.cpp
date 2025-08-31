@@ -3,6 +3,7 @@
 #include "bencode.h"
 #include <vector>
 #include <string>
+#include <limits>
 
 using namespace librats;
 
@@ -388,4 +389,243 @@ TEST_F(BencodeTest, CopyAndAssignmentTest) {
     // Test move constructor
     BencodeValue moved(std::move(original));
     EXPECT_EQ(moved.as_integer(), 42);
+}
+
+// Test static factory methods
+TEST_F(BencodeTest, StaticFactoryMethodsTest) {
+    // Test create_integer
+    BencodeValue int_val = BencodeValue::create_integer(123);
+    EXPECT_TRUE(int_val.is_integer());
+    EXPECT_EQ(int_val.as_integer(), 123);
+    
+    // Test create_string
+    BencodeValue str_val = BencodeValue::create_string("test");
+    EXPECT_TRUE(str_val.is_string());
+    EXPECT_EQ(str_val.as_string(), "test");
+    
+    // Test create_list
+    BencodeValue list_val = BencodeValue::create_list();
+    EXPECT_TRUE(list_val.is_list());
+    EXPECT_EQ(list_val.size(), 0);
+    
+    // Test create_dict
+    BencodeValue dict_val = BencodeValue::create_dict();
+    EXPECT_TRUE(dict_val.is_dict());
+    EXPECT_EQ(dict_val.size(), 0);
+}
+
+// Test default constructor
+TEST_F(BencodeTest, DefaultConstructorTest) {
+    BencodeValue default_val;
+    EXPECT_TRUE(default_val.is_string());
+    EXPECT_EQ(default_val.as_string(), "");
+}
+
+// Test char* constructor
+TEST_F(BencodeTest, CharPointerConstructorTest) {
+    BencodeValue char_val("hello world");
+    EXPECT_TRUE(char_val.is_string());
+    EXPECT_EQ(char_val.as_string(), "hello world");
+}
+
+// Test utility namespace functions
+TEST_F(BencodeTest, UtilityNamespaceFunctionsTest) {
+    // Test bencode::encode with vector output
+    BencodeValue test_val(42);
+    std::vector<uint8_t> encoded_vec = bencode::encode(test_val);
+    std::string expected = "i42e";
+    std::vector<uint8_t> expected_vec(expected.begin(), expected.end());
+    EXPECT_EQ(encoded_vec, expected_vec);
+    
+    // Test bencode::encode_string
+    std::string encoded_str = bencode::encode_string(test_val);
+    EXPECT_EQ(encoded_str, "i42e");
+    
+    // Test bencode::decode with vector input
+    BencodeValue decoded_from_vec = bencode::decode(encoded_vec);
+    EXPECT_TRUE(decoded_from_vec.is_integer());
+    EXPECT_EQ(decoded_from_vec.as_integer(), 42);
+}
+
+// Test BencodeDecoder static methods
+TEST_F(BencodeTest, BencodeDecoderStaticMethodsTest) {
+    std::string test_data = "i42e";
+    std::vector<uint8_t> test_vec(test_data.begin(), test_data.end());
+    
+    // Test decode from vector
+    BencodeValue decoded_vec = BencodeDecoder::decode(test_vec);
+    EXPECT_TRUE(decoded_vec.is_integer());
+    EXPECT_EQ(decoded_vec.as_integer(), 42);
+    
+    // Test decode from string
+    BencodeValue decoded_str = BencodeDecoder::decode(test_data);
+    EXPECT_TRUE(decoded_str.is_integer());
+    EXPECT_EQ(decoded_str.as_integer(), 42);
+    
+    // Test decode from raw pointer
+    BencodeValue decoded_raw = BencodeDecoder::decode(reinterpret_cast<const uint8_t*>(test_data.data()), test_data.size());
+    EXPECT_TRUE(decoded_raw.is_integer());
+    EXPECT_EQ(decoded_raw.as_integer(), 42);
+}
+
+// Test edge cases for type checking
+TEST_F(BencodeTest, TypeCheckingEdgeCasesTest) {
+    BencodeValue int_val(42);
+    BencodeValue str_val("test");
+    BencodeValue list_val = BencodeValue::create_list();
+    BencodeValue dict_val = BencodeValue::create_dict();
+    
+    // Test has_key on non-dictionary types
+    EXPECT_FALSE(int_val.has_key("any"));
+    EXPECT_FALSE(str_val.has_key("any"));
+    EXPECT_FALSE(list_val.has_key("any"));
+    EXPECT_TRUE(dict_val.has_key("nonexistent") == false);
+}
+
+// Test error cases for type mismatches
+TEST_F(BencodeTest, TypeMismatchErrorsTest) {
+    BencodeValue int_val(42);
+    BencodeValue str_val("test");
+    BencodeValue list_val = BencodeValue::create_list();
+    BencodeValue dict_val = BencodeValue::create_dict();
+    
+    // Test accessing wrong types
+    EXPECT_THROW(int_val.as_string(), std::runtime_error);
+    EXPECT_THROW(int_val.as_list(), std::runtime_error);
+    EXPECT_THROW(int_val.as_dict(), std::runtime_error);
+    
+    EXPECT_THROW(str_val.as_integer(), std::runtime_error);
+    EXPECT_THROW(str_val.as_list(), std::runtime_error);
+    EXPECT_THROW(str_val.as_dict(), std::runtime_error);
+    
+    EXPECT_THROW(list_val.as_integer(), std::runtime_error);
+    EXPECT_THROW(list_val.as_string(), std::runtime_error);
+    EXPECT_THROW(list_val.as_dict(), std::runtime_error);
+    
+    EXPECT_THROW(dict_val.as_integer(), std::runtime_error);
+    EXPECT_THROW(dict_val.as_string(), std::runtime_error);
+    EXPECT_THROW(dict_val.as_list(), std::runtime_error);
+    
+    // Test dictionary operations on non-dictionary
+    EXPECT_THROW(int_val["key"], std::runtime_error);
+    EXPECT_THROW(str_val["key"], std::runtime_error);
+    EXPECT_THROW(list_val["key"], std::runtime_error);
+    
+    // Test list operations on non-list
+    EXPECT_THROW(int_val[0], std::runtime_error);
+    EXPECT_THROW(str_val[0], std::runtime_error);
+    EXPECT_THROW(dict_val[0], std::runtime_error);
+    
+    EXPECT_THROW(int_val.push_back(BencodeValue(1)), std::runtime_error);
+    EXPECT_THROW(str_val.push_back(BencodeValue(1)), std::runtime_error);
+    EXPECT_THROW(dict_val.push_back(BencodeValue(1)), std::runtime_error);
+}
+
+// Test size() method for different types
+TEST_F(BencodeTest, SizeMethodTest) {
+    BencodeValue str_val("hello");
+    EXPECT_EQ(str_val.size(), 5);
+    
+    BencodeValue list_val = BencodeValue::create_list();
+    list_val.push_back(BencodeValue(1));
+    list_val.push_back(BencodeValue(2));
+    EXPECT_EQ(list_val.size(), 2);
+    
+    BencodeValue dict_val = BencodeValue::create_dict();
+    dict_val["key1"] = BencodeValue(1);
+    dict_val["key2"] = BencodeValue(2);
+    EXPECT_EQ(dict_val.size(), 2);
+    
+    // Test size() on integer (should throw)
+    BencodeValue int_val(42);
+    EXPECT_THROW(int_val.size(), std::runtime_error);
+}
+
+// Test list index bounds checking
+TEST_F(BencodeTest, ListIndexBoundsTest) {
+    BencodeValue list_val = BencodeValue::create_list();
+    list_val.push_back(BencodeValue(1));
+    list_val.push_back(BencodeValue(2));
+    
+    // Valid indices
+    EXPECT_EQ(list_val[0].as_integer(), 1);
+    EXPECT_EQ(list_val[1].as_integer(), 2);
+    
+    // Invalid indices
+    EXPECT_THROW(list_val[2], std::runtime_error);
+    EXPECT_THROW(list_val[100], std::runtime_error);
+}
+
+// Test dictionary key not found
+TEST_F(BencodeTest, DictionaryKeyNotFoundTest) {
+    BencodeValue dict_val = BencodeValue::create_dict();
+    dict_val["existing"] = BencodeValue(42);
+    
+    // Existing key should work
+    EXPECT_EQ(dict_val["existing"].as_integer(), 42);
+    
+    // Non-existing key should throw when using const operator[]
+    const BencodeValue& const_dict = dict_val;
+    EXPECT_THROW(const_dict["nonexistent"], std::runtime_error);
+}
+
+// Test move assignment operator
+TEST_F(BencodeTest, MoveAssignmentTest) {
+    BencodeValue original(42);
+    BencodeValue target("initial");
+    
+    target = std::move(original);
+    EXPECT_TRUE(target.is_integer());
+    EXPECT_EQ(target.as_integer(), 42);
+}
+
+// Test large integer values
+TEST_F(BencodeTest, LargeIntegerTest) {
+    int64_t large_positive = 9223372036854775807LL; // max int64_t
+    int64_t large_negative = std::numeric_limits<int64_t>::min(); // min int64_t
+    
+    BencodeValue pos_val(large_positive);
+    BencodeValue neg_val(large_negative);
+    
+    std::string pos_encoded = pos_val.encode_string();
+    std::string neg_encoded = neg_val.encode_string();
+    
+    BencodeValue pos_decoded = bencode::decode(pos_encoded);
+    BencodeValue neg_decoded = bencode::decode(neg_encoded);
+    
+    EXPECT_EQ(pos_decoded.as_integer(), large_positive);
+    EXPECT_EQ(neg_decoded.as_integer(), large_negative);
+}
+
+// Test additional error cases in decoding
+TEST_F(BencodeTest, AdditionalDecodingErrorsTest) {
+    // Test malformed integer (just minus sign)
+    EXPECT_THROW(bencode::decode("i-e"), std::runtime_error);
+    
+    // Test string with negative length
+    EXPECT_THROW(bencode::decode("-1:"), std::runtime_error);
+    
+    // Test incomplete string
+    EXPECT_THROW(bencode::decode("5:abc"), std::runtime_error);
+    
+    // Test list with incomplete element
+    EXPECT_THROW(bencode::decode("li1ei"), std::runtime_error);
+    
+    // Test dictionary with odd number of elements
+    EXPECT_THROW(bencode::decode("d3:keye"), std::runtime_error);
+    
+    // Test completely empty data
+    EXPECT_THROW(bencode::decode(""), std::runtime_error);
+}
+
+// Test integers with leading zeros (allowed by this implementation)
+TEST_F(BencodeTest, LeadingZerosTest) {
+    // Test integer with leading zeros (should be allowed)
+    BencodeValue decoded = bencode::decode("i01e");
+    EXPECT_TRUE(decoded.is_integer());
+    EXPECT_EQ(decoded.as_integer(), 1);
+    
+    BencodeValue decoded_zero = bencode::decode("i00e");
+    EXPECT_TRUE(decoded_zero.is_integer());
+    EXPECT_EQ(decoded_zero.as_integer(), 0);
 } 
