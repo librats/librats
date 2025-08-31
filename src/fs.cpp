@@ -120,21 +120,18 @@ bool append_to_file(const char* path, const char* content) {
 
 char* read_file_text(const char* path, size_t* size_out) {
     if (!path) return nullptr;
+
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        LOG_ERROR("FS", "Failed to stat file: " << path);
+        return nullptr;
+    }
+
+    size_t file_size = st.st_size;
     
     FILE* file = fopen(path, "rb");
     if (!file) {
         LOG_ERROR("FS", "Failed to open file for reading: " << path);
-        return nullptr;
-    }
-    
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    
-    if (file_size < 0) {
-        LOG_ERROR("FS", "Failed to get file size: " << path);
-        fclose(file);
         return nullptr;
     }
     
