@@ -21,10 +21,10 @@ ThreadManager::~ThreadManager() {
 void ThreadManager::add_managed_thread(std::thread&& t, const std::string& name) {
     // Check if shutdown has been requested - don't add new threads during shutdown
     if (shutdown_requested_.load()) {
-        LOG_THREAD_WARN("Ignoring thread creation during shutdown: " << name);
-        // Detach the thread so it can finish on its own during shutdown
+        LOG_THREAD_WARN("Ignoring thread detach during shutdown: " << name);
+        // Join the thread so it can finish on its own during shutdown
         if (t.joinable()) {
-            t.detach();
+            t.join();
         }
         return;
     }
@@ -33,10 +33,10 @@ void ThreadManager::add_managed_thread(std::thread&& t, const std::string& name)
     
     // Double-check after acquiring lock
     if (shutdown_requested_.load()) {
-        LOG_THREAD_WARN("Ignoring thread creation during shutdown (double-check): " << name);
-        // Release lock before detaching
+        LOG_THREAD_WARN("Ignoring thread detach during shutdown (double-check): " << name);
+        // Join the thread so it can finish on its own during shutdown
         if (t.joinable()) {
-            t.detach();
+            t.join();
         }
         return;
     }

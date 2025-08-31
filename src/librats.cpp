@@ -117,9 +117,6 @@ RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig&
 
 RatsClient::~RatsClient() {
     stop();
-    
-    // Save configuration before destruction
-    save_configuration();
 }
 
 std::string RatsClient::generate_peer_hash_id(socket_t socket, const std::string& connection_info) {
@@ -430,6 +427,9 @@ void RatsClient::stop() {
     join_all_active_threads();
     
     cleanup_socket_library();
+
+    // Save configuration before stopping
+    save_configuration();
     
     LOG_CLIENT_INFO("RatsClient stopped successfully");
 }
@@ -1443,9 +1443,13 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     }
                     
                     // Save configuration after a new peer connects to keep peer list current
-                    add_managed_thread(std::thread([this]() {
-                        save_configuration();
-                    }), "config-save");
+                    if (running_.load()) {
+                        add_managed_thread(std::thread([this]() {
+                            if (running_.load()) {
+                                save_configuration();
+                            }
+                        }), "config-save");
+                    }
                 }
             }
             
@@ -1545,10 +1549,12 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     }
     
     // Save configuration after a validated peer disconnects to update the saved peer list
-    if (handshake_completed) {
+    if (handshake_completed && running_.load()) {
         // Save configuration in a separate thread to avoid blocking
         add_managed_thread(std::thread([this]() {
-            save_configuration();
+            if (running_.load()) {
+                save_configuration();
+            }
         }), "config-save-disconnect");
     }
     
