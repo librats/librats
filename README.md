@@ -11,6 +11,8 @@
 
 librats is a modern P2P networking library designed for **superior performance** and **simplicity**. Built from the ground up in C++17, it provides enterprise-grade P2P networking capabilities with minimal overhead and maximum efficiency.
 
+**Official Website**: [https://librats.com](https://librats.com)
+
 ## ✨ Key Features
 
 ### **Core Architecture**
