@@ -15,9 +15,9 @@ BencodeValue::BencodeValue(const std::string& value) : type_(Type::String), valu
 
 BencodeValue::BencodeValue(const char* value) : type_(Type::String), value_(std::string(value)) {}
 
-BencodeValue::BencodeValue(const BencodeList& value) : type_(Type::List), value_(value) {}
+BencodeValue::BencodeValue(const BencodeList& value) : type_(Type::List), value_(std::make_shared<BencodeList>(value)) {}
 
-BencodeValue::BencodeValue(const BencodeDict& value) : type_(Type::Dictionary), value_(value) {}
+BencodeValue::BencodeValue(const BencodeDict& value) : type_(Type::Dictionary), value_(std::make_shared<BencodeDict>(value)) {}
 
 BencodeValue::BencodeValue(const BencodeValue& other) : type_(other.type_), value_(other.value_) {}
 
@@ -59,35 +59,35 @@ const BencodeList& BencodeValue::as_list() const {
     if (type_ != Type::List) {
         throw std::runtime_error("BencodeValue is not a list");
     }
-    return std::get<BencodeList>(value_);
+    return *std::get<std::shared_ptr<BencodeList>>(value_);
 }
 
 const BencodeDict& BencodeValue::as_dict() const {
     if (type_ != Type::Dictionary) {
         throw std::runtime_error("BencodeValue is not a dictionary");
     }
-    return std::get<BencodeDict>(value_);
+    return *std::get<std::shared_ptr<BencodeDict>>(value_);
 }
 
 BencodeList& BencodeValue::as_list() {
     if (type_ != Type::List) {
         throw std::runtime_error("BencodeValue is not a list");
     }
-    return std::get<BencodeList>(value_);
+    return *std::get<std::shared_ptr<BencodeList>>(value_);
 }
 
 BencodeDict& BencodeValue::as_dict() {
     if (type_ != Type::Dictionary) {
         throw std::runtime_error("BencodeValue is not a dictionary");
     }
-    return std::get<BencodeDict>(value_);
+    return *std::get<std::shared_ptr<BencodeDict>>(value_);
 }
 
 bool BencodeValue::has_key(const std::string& key) const {
     if (type_ != Type::Dictionary) {
         return false;
     }
-    const auto& dict = std::get<BencodeDict>(value_);
+    const auto& dict = *std::get<std::shared_ptr<BencodeDict>>(value_);
     return dict.find(key) != dict.end();
 }
 
@@ -95,7 +95,7 @@ const BencodeValue& BencodeValue::operator[](const std::string& key) const {
     if (type_ != Type::Dictionary) {
         throw std::runtime_error("BencodeValue is not a dictionary");
     }
-    const auto& dict = std::get<BencodeDict>(value_);
+    const auto& dict = *std::get<std::shared_ptr<BencodeDict>>(value_);
     auto it = dict.find(key);
     if (it == dict.end()) {
         throw std::runtime_error("Key not found in dictionary: " + key);
@@ -107,7 +107,7 @@ BencodeValue& BencodeValue::operator[](const std::string& key) {
     if (type_ != Type::Dictionary) {
         throw std::runtime_error("BencodeValue is not a dictionary");
     }
-    auto& dict = std::get<BencodeDict>(value_);
+    auto& dict = *std::get<std::shared_ptr<BencodeDict>>(value_);
     return dict[key];
 }
 
@@ -115,7 +115,7 @@ const BencodeValue& BencodeValue::operator[](size_t index) const {
     if (type_ != Type::List) {
         throw std::runtime_error("BencodeValue is not a list");
     }
-    const auto& list = std::get<BencodeList>(value_);
+    const auto& list = *std::get<std::shared_ptr<BencodeList>>(value_);
     if (index >= list.size()) {
         throw std::runtime_error("Index out of bounds");
     }
@@ -126,7 +126,7 @@ BencodeValue& BencodeValue::operator[](size_t index) {
     if (type_ != Type::List) {
         throw std::runtime_error("BencodeValue is not a list");
     }
-    auto& list = std::get<BencodeList>(value_);
+    auto& list = *std::get<std::shared_ptr<BencodeList>>(value_);
     if (index >= list.size()) {
         throw std::runtime_error("Index out of bounds");
     }
@@ -137,7 +137,7 @@ void BencodeValue::push_back(const BencodeValue& value) {
     if (type_ != Type::List) {
         throw std::runtime_error("BencodeValue is not a list");
     }
-    auto& list = std::get<BencodeList>(value_);
+    auto& list = *std::get<std::shared_ptr<BencodeList>>(value_);
     list.push_back(value);
 }
 
@@ -146,9 +146,9 @@ size_t BencodeValue::size() const {
         case Type::String:
             return std::get<std::string>(value_).size();
         case Type::List:
-            return std::get<BencodeList>(value_).size();
+            return std::get<std::shared_ptr<BencodeList>>(value_)->size();
         case Type::Dictionary:
-            return std::get<BencodeDict>(value_).size();
+            return std::get<std::shared_ptr<BencodeDict>>(value_)->size();
         default:
             throw std::runtime_error("Size not applicable to this type");
     }
@@ -181,7 +181,7 @@ void BencodeValue::encode_to_buffer(std::vector<uint8_t>& buffer) const {
         }
         case Type::List: {
             buffer.push_back('l');
-            const auto& list = std::get<BencodeList>(value_);
+            const auto& list = *std::get<std::shared_ptr<BencodeList>>(value_);
             for (const auto& item : list) {
                 item.encode_to_buffer(buffer);
             }
@@ -190,7 +190,7 @@ void BencodeValue::encode_to_buffer(std::vector<uint8_t>& buffer) const {
         }
         case Type::Dictionary: {
             buffer.push_back('d');
-            const auto& dict = std::get<BencodeDict>(value_);
+            const auto& dict = *std::get<std::shared_ptr<BencodeDict>>(value_);
             
             // Sort keys for consistent encoding
             std::vector<std::string> keys;
@@ -223,11 +223,17 @@ BencodeValue BencodeValue::create_string(const std::string& value) {
 }
 
 BencodeValue BencodeValue::create_list() {
-    return BencodeValue(BencodeList());
+    BencodeValue v;
+    v.type_ = Type::List;
+    v.value_ = std::make_shared<BencodeList>();
+    return v;
 }
 
 BencodeValue BencodeValue::create_dict() {
-    return BencodeValue(BencodeDict());
+    BencodeValue v;
+    v.type_ = Type::Dictionary;
+    v.value_ = std::make_shared<BencodeDict>();
+    return v;
 }
 
 // BencodeDecoder implementation

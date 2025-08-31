@@ -86,7 +86,8 @@ public:
 
 private:
     Type type_;
-    std::variant<int64_t, std::string, BencodeList, BencodeDict> value_;
+    // Store recursive types via shared_ptr to avoid incomplete-type issues on older compilers
+    std::variant<int64_t, std::string, std::shared_ptr<BencodeList>, std::shared_ptr<BencodeDict>> value_;
     
     void encode_to_buffer(std::vector<uint8_t>& buffer) const;
 };
