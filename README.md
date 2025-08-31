@@ -69,215 +69,183 @@ librats is a modern P2P networking library designed for **superior performance**
 
 ## 🚀 Quick Start
 
-### Basic P2P Connection
+### 1. Basic P2P Connection
 
 ```cpp
 #include "librats.h"
+#include <iostream>
+#include <thread>
+#include <chrono>
 
 int main() {
-    // Create client with automatic NAT traversal
-    librats::NatTraversalConfig nat_config;
-    nat_config.enable_ice = true;
-    nat_config.enable_turn_relay = true;
-    
-    librats::RatsClient client(8080, 10, nat_config);
-    
-    // Set up connection callback with NAT traversal info
-    client.set_advanced_connection_callback([](socket_t socket, const std::string& peer_id, 
-                                              const librats::ConnectionAttemptResult& result) {
-        std::cout << "✅ Connected via: " << result.method 
-                  << " in " << result.duration.count() << "ms" << std::endl;
-        std::cout << "📊 Local NAT: " << (int)result.local_nat_type 
-                  << ", Remote NAT: " << (int)result.remote_nat_type << std::endl;
-    });
-    
-    // Start with all discovery methods
-    client.start();
-    client.start_dht_discovery();           // Wide-area discovery
-    client.start_mdns_discovery();         // Local network discovery
-    client.discover_and_ignore_public_ip(); // NAT traversal setup
-    
-    // Connect with automatic strategy selection
-    client.connect_to_peer("peer.example.com", 8081, 
-                          librats::ConnectionStrategy::AUTO_ADAPTIVE);
-    
-    return 0;
-}
-```
-
-### Event-Driven Message Exchange
-
-```cpp
-int main() {
-    // Create a rats client listening on port 8080
+    // Create a simple P2P client
     librats::RatsClient client(8080);
     
-    // Set up event handlers using the modern message API
-    client.on("chat", [](const std::string& peer_id, const nlohmann::json& data) {
-        std::cout << "Chat from " << peer_id << ": " 
-                  << data.value("message", "") << std::endl;
+    // Set up connection callback
+    client.set_connection_callback([](socket_t socket, const std::string& peer_id) {
+        std::cout << "✅ New peer connected: " << peer_id << std::endl;
     });
     
-    client.on("file_request", [&](const std::string& peer_id, const nlohmann::json& data) {
-        std::string filename = data.value("filename", "");
-        std::cout << "File request from " << peer_id << ": " << filename << std::endl;
-        
-        // Respond with file data
-        nlohmann::json response;
-        response["status"] = "found";
-        response["size"] = 12345;
-        client.send(peer_id, "file_response", response);
+    // Set up message callback
+    client.set_string_data_callback([](socket_t socket, const std::string& peer_id, const std::string& message) {
+        std::cout << "💬 Message from " << peer_id << ": " << message << std::endl;
     });
     
-    // Set up connection callbacks
-    client.set_connection_callback([](auto socket, const std::string& peer_id) {
-        std::cout << "New peer connected: " << peer_id << std::endl;
-    });
+    // Start the client
+    if (!client.start()) {
+        std::cerr << "Failed to start client" << std::endl;
+        return 1;
+    }
     
-    // Start the client with all discovery methods
-    client.start();
+    std::cout << "🐀 librats client running on port 8080" << std::endl;
     
-    // Enable automatic peer discovery
-    client.start_dht_discovery();           // Wide-area discovery via DHT
-    client.start_mdns_discovery("my-node"); // Local network discovery
-    client.discover_and_ignore_public_ip(); // NAT traversal setup
+    // Connect to another peer (optional)
+    // client.connect_to_peer("127.0.0.1", 8081);
     
-    // Send a message to all peers
-    nlohmann::json chat_msg;
-    chat_msg["message"] = "Hello, P2P world!";
-    chat_msg["timestamp"] = std::time(nullptr);
-    client.send("chat", chat_msg);
+    // Send a message to all connected peers
+    client.broadcast_string_to_peers("Hello from librats!");
     
-    // Connect to a specific peer (optional)
-    client.connect_to_peer("192.168.1.100", 8081);
-    
-    // Keep running...
-    std::this_thread::sleep_for(std::chrono::minutes(5));
+    // Keep running
+    std::this_thread::sleep_for(std::chrono::minutes(1));
     
     return 0;
 }
 ```
 
-### Custom Protocol Setup
+### 2. Custom Protocol Setup
 
 ```cpp
+#include "librats.h"
+#include <iostream>
+
 int main() {
     librats::RatsClient client(8080);
     
     // Configure custom protocol for your application
-    client.set_protocol_name("my_app");      // Default: "rats"
-    client.set_protocol_version("2.1");     // Default: "1.0"
+    client.set_protocol_name("my_app");
+    client.set_protocol_version("1.0");
     
-    // Get discovery hash based on your protocol
-    std::string discovery_hash = client.get_discovery_hash();
-    std::cout << "Custom discovery hash: " << discovery_hash << std::endl;
+    std::cout << "Protocol: " << client.get_protocol_name() 
+              << " v" << client.get_protocol_version() << std::endl;
+    std::cout << "Discovery hash: " << client.get_discovery_hash() << std::endl;
     
-    // Start with custom protocol
     client.start();
-    client.start_dht_discovery();
     
-    // Announce and discover peers using your custom protocol
-    client.announce_for_hash(discovery_hash);
-    client.find_peers_by_hash(discovery_hash, [](const std::vector<std::string>& peers) {
-        std::cout << "Found " << peers.size() << " peers for custom protocol" << std::endl;
-    });
+    // Start DHT discovery with custom protocol
+    if (client.start_dht_discovery()) {
+        // Announce our presence
+        client.announce_for_hash(client.get_discovery_hash());
+        
+        // Search for other peers using same protocol
+        client.find_peers_by_hash(client.get_discovery_hash(), 
+            [](const std::vector<std::string>& peers) {
+                std::cout << "Found " << peers.size() << " peers" << std::endl;
+            });
+    }
     
     return 0;
 }
 ```
 
-### Advanced Encryption Setup
+### 3. Chat Application with Message Exchange API
 
 ```cpp
+#include "librats.h"
+#include <iostream>
+#include <string>
+
 int main() {
     librats::RatsClient client(8080);
     
-    // Enable encryption
-    client.initialize_encryption(true);
+    // Set up message handlers using the modern API
+    client.on("chat", [](const std::string& peer_id, const nlohmann::json& data) {
+        std::cout << "[CHAT] " << peer_id << ": " << data["message"].get<std::string>() << std::endl;
+    });
     
-    // Generate and save a new encryption key
-    std::string new_key = client.generate_new_encryption_key();
-    std::cout << "Generated encryption key: " << new_key << std::endl;
+    client.on("user_join", [](const std::string& peer_id, const nlohmann::json& data) {
+        std::cout << "[JOIN] " << data["username"].get<std::string>() << " joined" << std::endl;
+    });
     
-    // Or use an existing key
-    client.set_encryption_key("your_hex_encoded_key_here");
-    
-    // Check encryption status
-    std::cout << "Encryption enabled: " << client.is_encryption_enabled() << std::endl;
+    // Connection callback
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
+        std::cout << "✅ Peer connected: " << peer_id << std::endl;
+        
+        // Send welcome message
+        nlohmann::json welcome;
+        welcome["username"] = "User_" + client.get_our_peer_id().substr(0, 8);
+        client.send("user_join", welcome);
+    });
     
     client.start();
     
-    // All communications will now be encrypted
-    client.connect_to_peer("encrypted.peer.com", 8081);
+    // Send a chat message
+    nlohmann::json chat_msg;
+    chat_msg["message"] = "Hello, P2P chat!";
+    chat_msg["timestamp"] = std::time(nullptr);
+    client.send("chat", chat_msg);
     
     return 0;
 }
 ```
 
-### GossipSub Publish-Subscribe Messaging
+### 4. GossipSub Publish-Subscribe
 
 ```cpp
+#include "librats.h"
+#include <iostream>
+
 int main() {
     librats::RatsClient client(8080);
     
     // Set up topic message handlers
-    client.on_topic_message("chat", [](const std::string& peer_id, const std::string& topic, const std::string& message) {
-        std::cout << "Chat from " << peer_id << ": " << message << std::endl;
+    client.on_topic_message("news", [](const std::string& peer_id, const std::string& topic, const std::string& message) {
+        std::cout << "📰 [" << topic << "] " << peer_id << ": " << message << std::endl;
     });
     
     client.on_topic_json_message("events", [](const std::string& peer_id, const std::string& topic, const nlohmann::json& data) {
-        std::cout << "Event: " << data["type"] << " from " << peer_id << std::endl;
+        std::cout << "🎉 [" << topic << "] Event: " << data["type"].get<std::string>() << std::endl;
     });
     
-    // Set up peer join/leave handlers
-    client.on_topic_peer_joined("chat", [](const std::string& peer_id, const std::string& topic) {
-        std::cout << peer_id << " joined " << topic << std::endl;
-    });
-    
-    client.on_topic_peer_left("chat", [](const std::string& peer_id, const std::string& topic) {
-        std::cout << peer_id << " left " << topic << std::endl;
-    });
-    
-    // Set message validator
-    client.set_topic_message_validator("chat", [](const std::string& topic, const std::string& message, const std::string& peer_id) {
-        // Only accept messages shorter than 1000 characters
-        return message.length() <= 1000 ? librats::ValidationResult::ACCEPT : librats::ValidationResult::REJECT;
+    // Peer join/leave notifications
+    client.on_topic_peer_joined("news", [](const std::string& peer_id, const std::string& topic) {
+        std::cout << "➕ " << peer_id << " joined " << topic << std::endl;
     });
     
     client.start();
     client.start_dht_discovery();
     
     // Subscribe to topics
-    client.subscribe_to_topic("chat");
+    client.subscribe_to_topic("news");
     client.subscribe_to_topic("events");
     
     // Publish messages
-    client.publish_to_topic("chat", "Hello, GossipSub world!");
+    client.publish_to_topic("news", "Breaking: librats is awesome!");
     
-    nlohmann::json event_data;
-    event_data["type"] = "user_login";
-    event_data["timestamp"] = std::time(nullptr);
-    client.publish_json_to_topic("events", event_data);
+    nlohmann::json event;
+    event["type"] = "celebration";
+    event["reason"] = "successful_connection";
+    client.publish_json_to_topic("events", event);
     
-    // Get topic statistics
-    auto stats = client.get_gossipsub_statistics();
-    std::cout << "GossipSub peers: " << client.get_topic_peers("chat").size() << std::endl;
+    std::cout << "📊 Peers in 'news': " << client.get_topic_peers("news").size() << std::endl;
     
     return 0;
 }
 ```
 
-### File and Directory Transfer
+### 5. File and Directory Transfer
 
 ```cpp
+#include "librats.h"
+#include <iostream>
+
 int main() {
     librats::RatsClient client(8080);
     
     // Set up file transfer callbacks
     client.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
-        std::cout << "Transfer " << progress.transfer_id.substr(0, 8) 
-                  << ": " << progress.get_completion_percentage() << "% complete" << std::endl;
-        std::cout << "Rate: " << (progress.transfer_rate_bps / 1024) << " KB/s" << std::endl;
+        std::cout << "📁 Transfer " << progress.transfer_id.substr(0, 8) 
+                  << ": " << progress.get_completion_percentage() << "% complete"
+                  << " (" << (progress.transfer_rate_bps / 1024) << " KB/s)" << std::endl;
     });
     
     client.on_file_transfer_completed([](const std::string& transfer_id, bool success, const std::string& error) {
@@ -288,130 +256,152 @@ int main() {
         }
     });
     
-    client.on_file_transfer_request([](const std::string& peer_id, const librats::FileMetadata& metadata, const std::string& transfer_id) {
-        std::cout << "📥 File transfer request from " << peer_id.substr(0, 8) << std::endl;
-        std::cout << "File: " << metadata.filename << " (" << metadata.file_size << " bytes)" << std::endl;
-        
-        // Auto-accept files smaller than 10MB
-        return metadata.file_size < 10 * 1024 * 1024;
+    // Auto-accept incoming file transfers
+    client.on_file_transfer_request([](const std::string& peer_id, 
+                                      const librats::FileMetadata& metadata, 
+                                      const std::string& transfer_id) {
+        std::cout << "📥 Incoming: " << metadata.filename 
+                  << " (" << metadata.file_size << " bytes) from " << peer_id.substr(0, 8) << std::endl;
+        return true; // Auto-accept
     });
     
+    // Allow file requests from "shared" directory
     client.on_file_request([](const std::string& peer_id, const std::string& file_path, const std::string& transfer_id) {
-        std::cout << "📤 File request from " << peer_id.substr(0, 8) << ": " << file_path << std::endl;
-        
-        // Allow access to files in "shared" directory
-        return file_path.find("../") == std::string::npos && 
-               file_path.substr(0, 7) == "shared/";
+        std::cout << "📤 Request: " << file_path << " from " << peer_id.substr(0, 8) << std::endl;
+        return file_path.find("../") == std::string::npos; // Prevent path traversal
     });
-    
-    // Configure file transfer settings
-    librats::FileTransferConfig config;
-    config.chunk_size = 128 * 1024;          // 128KB chunks
-    config.max_concurrent_chunks = 8;        // 8 chunks in parallel
-    config.verify_checksums = true;          // Verify data integrity
-    config.allow_resume = true;              // Enable resume capability
-    config.temp_directory = "./temp_files";  // Temporary file storage
-    client.set_file_transfer_config(config);
     
     client.start();
-    client.start_dht_discovery();
     
-    // Send a file to a peer
-    std::string transfer_id = client.send_file("peer_id_here", "document.pdf", "shared_document.pdf");
-    if (!transfer_id.empty()) {
-        std::cout << "File transfer started: " << transfer_id << std::endl;
-    }
+    // Configure transfer settings
+    librats::FileTransferConfig config;
+    config.chunk_size = 64 * 1024;       // 64KB chunks
+    config.max_concurrent_chunks = 4;    // 4 parallel chunks
+    config.verify_checksums = true;      // Verify integrity
+    client.set_file_transfer_config(config);
     
-    // Send entire directory
-    std::string dir_transfer = client.send_directory("peer_id_here", "./project_files", "backup", true);
-    if (!dir_transfer.empty()) {
-        std::cout << "Directory transfer started: " << dir_transfer << std::endl;
-    }
+    // Example transfers (replace "peer_id" with actual peer ID)
+    // std::string file_transfer = client.send_file("peer_id", "my_file.txt");
+    // std::string dir_transfer = client.send_directory("peer_id", "./my_folder");
+    // std::string file_request = client.request_file("peer_id", "remote_file.txt", "./downloaded_file.txt");
     
-    // Request a file from remote peer
-    std::string request_id = client.request_file("peer_id_here", "shared/report.docx", "./downloads/report.docx");
-    
-    // Get transfer progress
-    auto progress = client.get_file_transfer_progress(transfer_id);
-    if (progress) {
-        std::cout << "Progress: " << progress->get_completion_percentage() << "%" << std::endl;
-        std::cout << "ETA: " << progress->estimated_time_remaining.count() << "ms" << std::endl;
-    }
-    
-    // Pause/resume/cancel transfers
-    client.pause_file_transfer(transfer_id);
-    client.resume_file_transfer(transfer_id);
-    // client.cancel_file_transfer(transfer_id);
-    
-    // Get all active transfers
-    auto active_transfers = client.get_active_file_transfers();
-    std::cout << "Active transfers: " << active_transfers.size() << std::endl;
-    
-    // Get transfer statistics
-    auto stats = client.get_file_transfer_statistics();
-    std::cout << "Total bytes transferred: " << stats["total_bytes_transferred"] << std::endl;
+    std::cout << "File transfer ready. Connect peers and exchange files!" << std::endl;
     
     return 0;
 }
 ```
 
-### Configuration Persistence
+### 6. Encryption
 
 ```cpp
+#include "librats.h"
+#include <iostream>
+
 int main() {
     librats::RatsClient client(8080);
     
-    // Set custom data directory
-    client.set_data_directory("./my_app_data");
+    // Initialize encryption system
+    if (!client.initialize_encryption(true)) {
+        std::cerr << "Failed to initialize encryption" << std::endl;
+        return 1;
+    }
     
-    // Load saved configuration and peers
-    client.load_configuration();
+    // Generate a new encryption key (or load existing one)
+    std::string encryption_key = client.generate_new_encryption_key();
+    std::cout << "🔐 Generated encryption key: " << encryption_key.substr(0, 16) << "..." << std::endl;
     
-    // Reconnect to historical peers
-    int reconnected = client.load_and_reconnect_peers();
-    std::cout << "Attempted to reconnect to " << reconnected << " peers" << std::endl;
+    // Alternatively, set a specific key:
+    // client.set_encryption_key("your_64_character_hex_key_here");
     
-    // Get our persistent peer ID
-    std::cout << "Our peer ID: " << client.get_our_peer_id() << std::endl;
+    std::cout << "🔒 Encryption enabled: " << (client.is_encryption_enabled() ? "Yes" : "No") << std::endl;
+    
+    // Connection callback with encryption status
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
+        bool encrypted = client.is_peer_encrypted(peer_id);
+        std::cout << "🔗 Peer connected: " << peer_id 
+                  << (encrypted ? " [ENCRYPTED]" : " [UNENCRYPTED]") << std::endl;
+    });
     
     client.start();
     
-    // Configuration and peers are automatically saved
+    // All communications are now automatically encrypted
+    client.broadcast_string_to_peers("This message is encrypted!");
+    
+    return 0;
+}
+```
+
+### 7. Configuration Persistence
+
+```cpp
+#include "librats.h"
+#include <iostream>
+
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Set custom data directory for config files
+    client.set_data_directory("./my_app_data");
+    
+    // Load saved configuration (if exists)
+    if (client.load_configuration()) {
+        std::cout << "📄 Loaded existing configuration" << std::endl;
+    } else {
+        std::cout << "📄 Using default configuration" << std::endl;
+    }
+    
+    // Get our persistent peer ID
+    std::cout << "🆔 Our peer ID: " << client.get_our_peer_id() << std::endl;
+    
+    client.start();
+    
+    // Try to reconnect to previously connected peers
+    int reconnect_attempts = client.load_and_reconnect_peers();
+    std::cout << "🔄 Attempted to reconnect to " << reconnect_attempts << " previous peers" << std::endl;
+    
+    // Configuration is automatically saved when client stops
     // Files created: config.json, peers.rats, peers_ever.rats
     
     // Manual save if needed
     client.save_configuration();
     client.save_historical_peers();
     
+    std::cout << "💾 Configuration will be saved to: " << client.get_data_directory() << std::endl;
+    
     return 0;
 }
 ```
 
-### Comprehensive Logging Configuration
+### 8. Logging Configuration
 
 ```cpp
+#include "librats.h"
+#include <iostream>
+
 int main() {
     librats::RatsClient client(8080);
     
-    // Configure logging before starting
+    // Enable and configure logging
     client.set_logging_enabled(true);
-    client.set_log_file_path("my_app.log");
-    client.set_log_level("DEBUG");  // DEBUG, INFO, WARN, ERROR
+    client.set_log_file_path("librats_app.log");
+    client.set_log_level("INFO");  // DEBUG, INFO, WARN, ERROR
     client.set_log_colors_enabled(true);
     client.set_log_timestamps_enabled(true);
     
-    // Configure log rotation
-    client.set_log_rotation_size(10 * 1024 * 1024);  // 10MB
-    client.set_log_retention_count(5);  // Keep 5 old log files
+    // Configure log file rotation
+    client.set_log_rotation_size(5 * 1024 * 1024);  // 5MB max file size
+    client.set_log_retention_count(3);               // Keep 3 old log files
     
-    // Check logging status
-    std::cout << "Logging enabled: " << client.is_logging_enabled() << std::endl;
-    std::cout << "Log file: " << client.get_log_file_path() << std::endl;
-    std::cout << "Log level: " << static_cast<int>(client.get_log_level()) << std::endl;
+    std::cout << "📝 Logging to: " << client.get_log_file_path() << std::endl;
+    std::cout << "📊 Log level: " << static_cast<int>(client.get_log_level()) << std::endl;
+    std::cout << "🎨 Colors enabled: " << (client.is_log_colors_enabled() ? "Yes" : "No") << std::endl;
     
     client.start();
     
-    // Clear log file if needed
+    // All librats operations will now be logged
+    client.broadcast_string_to_peers("This action will be logged!");
+    
+    // Clear log file if needed (uncomment to use)
     // client.clear_log_file();
     
     return 0;
@@ -981,6 +971,61 @@ public:
         client_.connect_to_peer(host, port);
     }
 };
+```
+
+## 🎯 More Examples
+
+### Complete Chat Application
+
+```cpp
+#include "librats.h"
+#include <iostream>
+#include <string>
+#include <thread>
+
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Set up chat message handling
+    client.on("chat_message", [](const std::string& peer_id, const nlohmann::json& data) {
+        std::string username = data.value("username", "Unknown");
+        std::string message = data.value("message", "");
+        std::cout << "[" << username << "]: " << message << std::endl;
+    });
+    
+    // Handle user join/leave
+    client.on("user_joined", [](const std::string& peer_id, const nlohmann::json& data) {
+        std::cout << "*** " << data["username"].get<std::string>() << " joined the chat ***" << std::endl;
+    });
+    
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
+        // Announce our presence
+        nlohmann::json join_msg;
+        join_msg["username"] = "User_" + client.get_our_peer_id().substr(0, 8);
+        client.send("user_joined", join_msg);
+    });
+    
+    client.start();
+    client.start_dht_discovery(); // Auto-discover other chat users
+    
+    std::cout << "🐀 librats Chat - Type messages and press Enter" << std::endl;
+    std::cout << "Type 'quit' to exit" << std::endl;
+    
+    std::string input;
+    while (std::getline(std::cin, input)) {
+        if (input == "quit") break;
+        
+        if (!input.empty()) {
+            nlohmann::json chat_msg;
+            chat_msg["username"] = "User_" + client.get_our_peer_id().substr(0, 8);
+            chat_msg["message"] = input;
+            chat_msg["timestamp"] = std::time(nullptr);
+            client.send("chat_message", chat_msg);
+        }
+    }
+    
+    return 0;
+}
 ```
 
 ## 📚 Documentation

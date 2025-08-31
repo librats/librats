@@ -208,9 +208,10 @@
             <div class="code-tabs">
                 <div class="tab-buttons">
                     <button class="tab-button active" data-tab="basic">Basic P2P</button>
-                    <button class="tab-button" data-tab="messaging">Event Messaging</button>
-                    <button class="tab-button" data-tab="file-transfer">File Transfer</button>
+                    <button class="tab-button" data-tab="protocol">Custom Protocol</button>
+                    <button class="tab-button" data-tab="chat">Chat App</button>
                     <button class="tab-button" data-tab="gossipsub">GossipSub</button>
+                    <button class="tab-button" data-tab="files">File Transfer</button>
                 </div>
                 <div class="tab-content">
                     <div class="tab-pane active" id="basic">
@@ -222,73 +223,126 @@
                                 </button>
                             </div>
                             <pre><code id="basic-code">#include "librats.h"
+#include &lt;iostream&gt;
+#include &lt;thread&gt;
+#include &lt;chrono&gt;
 
 int main() {
-    // Create client with automatic NAT traversal
-    librats::NatTraversalConfig nat_config;
-    nat_config.enable_ice = true;
-    nat_config.enable_turn_relay = true;
-    
-    librats::RatsClient client(8080, 10, nat_config);
+    // Create a simple P2P client
+    librats::RatsClient client(8080);
     
     // Set up connection callback
-    client.set_advanced_connection_callback([](socket_t socket, 
-        const std::string& peer_id, 
-        const librats::ConnectionAttemptResult& result) {
-        std::cout << "✅ Connected via: " << result.method 
-                  << " in " << result.duration.count() << "ms" << std::endl;
+    client.set_connection_callback([](socket_t socket, const std::string& peer_id) {
+        std::cout &lt;&lt; "✅ New peer connected: " &lt;&lt; peer_id &lt;&lt; std::endl;
     });
     
-    // Start with all discovery methods
-    client.start();
-    client.start_dht_discovery();           // Wide-area discovery
-    client.start_mdns_discovery();         // Local network discovery
-    client.discover_and_ignore_public_ip(); // NAT traversal setup
+    // Set up message callback
+    client.set_string_data_callback([](socket_t socket, const std::string& peer_id, const std::string& message) {
+        std::cout &lt;&lt; "💬 Message from " &lt;&lt; peer_id &lt;&lt; ": " &lt;&lt; message &lt;&lt; std::endl;
+    });
     
-    // Connect with automatic strategy selection
-    client.connect_to_peer("peer.example.com", 8081, 
-                          librats::ConnectionStrategy::AUTO_ADAPTIVE);
+    // Start the client
+    if (!client.start()) {
+        std::cerr &lt;&lt; "Failed to start client" &lt;&lt; std::endl;
+        return 1;
+    }
+    
+    std::cout &lt;&lt; "🐀 librats client running on port 8080" &lt;&lt; std::endl;
+    
+    // Connect to another peer (optional)
+    // client.connect_to_peer("127.0.0.1", 8081);
+    
+    // Send a message to all connected peers
+    client.broadcast_string_to_peers("Hello from librats!");
+    
+    // Keep running
+    std::this_thread::sleep_for(std::chrono::minutes(1));
     
     return 0;
 }</code></pre>
                         </div>
                     </div>
-                    <div class="tab-pane" id="messaging">
+                    <div class="tab-pane" id="protocol">
                         <div class="code-block">
                             <div class="code-header">
-                                <span class="code-title">Event-Driven Messaging</span>
-                                <button class="copy-btn" onclick="copyCode('messaging-code')">
+                                <span class="code-title">Custom Protocol Setup</span>
+                                <button class="copy-btn" onclick="copyCode('protocol-code')">
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="messaging-code">int main() {
+                            <pre><code id="protocol-code">#include "librats.h"
+#include &lt;iostream&gt;
+
+int main() {
     librats::RatsClient client(8080);
     
-    // Set up event handlers using the modern message API
-    client.on("chat", [](const std::string& peer_id, const nlohmann::json& data) {
-        std::cout << "Chat from " << peer_id << ": " 
-                  << data.value("message", "") << std::endl;
-    });
+    // Configure custom protocol for your application
+    client.set_protocol_name("my_app");
+    client.set_protocol_version("1.0");
     
-    client.on("file_request", [&](const std::string& peer_id, const nlohmann::json& data) {
-        std::string filename = data.value("filename", "");
-        std::cout << "File request from " << peer_id << ": " << filename << std::endl;
-        
-        // Respond with file data
-        nlohmann::json response;
-        response["status"] = "found";
-        response["size"] = 12345;
-        client.send(peer_id, "file_response", response);
-    });
+    std::cout &lt;&lt; "Protocol: " &lt;&lt; client.get_protocol_name() 
+              &lt;&lt; " v" &lt;&lt; client.get_protocol_version() &lt;&lt; std::endl;
+    std::cout &lt;&lt; "Discovery hash: " &lt;&lt; client.get_discovery_hash() &lt;&lt; std::endl;
     
-    // Start the client with all discovery methods
     client.start();
-    client.start_dht_discovery();
-    client.start_mdns_discovery("my-node");
     
-    // Send a message to all peers
+    // Start DHT discovery with custom protocol
+    if (client.start_dht_discovery()) {
+        // Announce our presence
+        client.announce_for_hash(client.get_discovery_hash());
+        
+        // Search for other peers using same protocol
+        client.find_peers_by_hash(client.get_discovery_hash(), 
+            [](const std::vector&lt;std::string&gt;& peers) {
+                std::cout &lt;&lt; "Found " &lt;&lt; peers.size() &lt;&lt; " peers" &lt;&lt; std::endl;
+            });
+    }
+    
+    return 0;
+}</code></pre>
+                        </div>
+                    </div>
+                    <div class="tab-pane" id="chat">
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span class="code-title">Chat Application with Message Exchange API</span>
+                                <button class="copy-btn" onclick="copyCode('chat-code')">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                            <pre><code id="chat-code">#include "librats.h"
+#include &lt;iostream&gt;
+#include &lt;string&gt;
+
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Set up message handlers using the modern API
+    client.on("chat", [](const std::string& peer_id, const nlohmann::json& data) {
+        std::cout &lt;&lt; "[CHAT] " &lt;&lt; peer_id &lt;&lt; ": " 
+                  &lt;&lt; data["message"].get&lt;std::string&gt;() &lt;&lt; std::endl;
+    });
+    
+    client.on("user_join", [](const std::string& peer_id, const nlohmann::json& data) {
+        std::cout &lt;&lt; "[JOIN] " &lt;&lt; data["username"].get&lt;std::string&gt;() 
+                  &lt;&lt; " joined" &lt;&lt; std::endl;
+    });
+    
+    // Connection callback
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
+        std::cout &lt;&lt; "✅ Peer connected: " &lt;&lt; peer_id &lt;&lt; std::endl;
+        
+        // Send welcome message
+        nlohmann::json welcome;
+        welcome["username"] = "User_" + client.get_our_peer_id().substr(0, 8);
+        client.send("user_join", welcome);
+    });
+    
+    client.start();
+    
+    // Send a chat message
     nlohmann::json chat_msg;
-    chat_msg["message"] = "Hello, P2P world!";
+    chat_msg["message"] = "Hello, P2P chat!";
     chat_msg["timestamp"] = std::time(nullptr);
     client.send("chat", chat_msg);
     
@@ -296,50 +350,7 @@ int main() {
 }</code></pre>
                         </div>
                     </div>
-                    <div class="tab-pane" id="file-transfer">
-                        <div class="code-block">
-                            <div class="code-header">
-                                <span class="code-title">File Transfer</span>
-                                <button class="copy-btn" onclick="copyCode('file-transfer-code')">
-                                    <i class="fas fa-copy"></i>
-                                </button>
-                            </div>
-                            <pre><code id="file-transfer-code">int main() {
-    librats::RatsClient client(8080);
-    
-    // Set up file transfer callbacks
-    client.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
-        std::cout << "Transfer " << progress.transfer_id.substr(0, 8) 
-                  << ": " << progress.get_completion_percentage() << "% complete" << std::endl;
-        std::cout << "Rate: " << (progress.transfer_rate_bps / 1024) << " KB/s" << std::endl;
-    });
-    
-    client.on_file_transfer_request([](const std::string& peer_id, 
-        const librats::FileMetadata& metadata, const std::string& transfer_id) {
-        std::cout << "📥 File transfer request from " << peer_id.substr(0, 8) << std::endl;
-        std::cout << "File: " << metadata.filename << " (" << metadata.file_size << " bytes)" << std::endl;
-        
-        // Auto-accept files smaller than 10MB
-        return metadata.file_size < 10 * 1024 * 1024;
-    });
-    
-    // Configure file transfer settings
-    librats::FileTransferConfig config;
-    config.chunk_size = 128 * 1024;          // 128KB chunks
-    config.max_concurrent_chunks = 8;        // 8 chunks in parallel
-    config.verify_checksums = true;          // Verify data integrity
-    client.set_file_transfer_config(config);
-    
-    client.start();
-    client.start_dht_discovery();
-    
-    // Send a file to a peer
-    std::string transfer_id = client.send_file("peer_id_here", "document.pdf", "shared_document.pdf");
-    
-    return 0;
-}</code></pre>
-                        </div>
-                    </div>
+
                     <div class="tab-pane" id="gossipsub">
                         <div class="code-block">
                             <div class="code-header">
@@ -386,6 +397,63 @@ int main() {
     event_data["timestamp"] = std::time(nullptr);
     client.publish_json_to_topic("events", event_data);
     
+    return 0;
+}</code></pre>
+                        </div>
+                    </div>
+                    <div class="tab-pane" id="files">
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span class="code-title">File Transfer</span>
+                                <button class="copy-btn" onclick="copyCode('files-code')">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                            <pre><code id="files-code">#include "librats.h"
+#include &lt;iostream&gt;
+
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Set up file transfer callbacks
+    client.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
+        std::cout &lt;&lt; "\ud83d\udcc1 Transfer " &lt;&lt; progress.transfer_id.substr(0, 8) 
+                  &lt;&lt; ": " &lt;&lt; progress.get_completion_percentage() &lt;&lt; "% complete"
+                  &lt;&lt; " (" &lt;&lt; (progress.transfer_rate_bps / 1024) &lt;&lt; " KB/s)" &lt;&lt; std::endl;
+    });
+    
+    client.on_file_transfer_completed([](const std::string& transfer_id, bool success, const std::string& error) {
+        if (success) {
+            std::cout &lt;&lt; "\u2705 Transfer completed: " &lt;&lt; transfer_id.substr(0, 8) &lt;&lt; std::endl;
+        } else {
+            std::cout &lt;&lt; "\u274c Transfer failed: " &lt;&lt; error &lt;&lt; std::endl;
+        }
+    });
+    
+    // Auto-accept incoming file transfers
+    client.on_file_transfer_request([](const std::string& peer_id, 
+                                      const librats::FileMetadata& metadata, 
+                                      const std::string& transfer_id) {
+        std::cout &lt;&lt; "\ud83d\udce5 Incoming: " &lt;&lt; metadata.filename &lt;&lt; " from " &lt;&lt; peer_id.substr(0, 8) &lt;&lt; std::endl;
+        return true; // Auto-accept
+    });
+    
+    client.start();
+    
+    // Configure transfer settings
+    librats::FileTransferConfig config;
+    config.chunk_size = 64 * 1024;       // 64KB chunks
+    config.max_concurrent_chunks = 4;    // 4 parallel chunks
+    config.verify_checksums = true;      // Verify integrity
+    client.set_file_transfer_config(config);
+    
+    std::cout &lt;&lt; "File transfer ready. Connect peers and exchange files!" &lt;&lt; std::endl;
+    
+    // Example transfers (replace "peer_id" with actual peer ID)
+    //std::string file_transfer = client.send_file("peer_id", "my_file.txt");
+    //std::string dir_transfer = client.send_directory("peer_id", "./my_folder");
+    //std::string file_request = client.request_file("peer_id", "remote_file.txt", "./downloaded_file.txt");
+
     return 0;
 }</code></pre>
                         </div>
