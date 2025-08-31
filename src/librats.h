@@ -1341,6 +1341,9 @@ private:
     // File transfer manager
     std::unique_ptr<FileTransferManager> file_transfer_manager_;
     
+    void initialize_modules();
+    void destroy_modules();
+
     void server_loop();
     void management_loop();
     void handle_client(socket_t client_socket, const std::string& peer_hash_id);

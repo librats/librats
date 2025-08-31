@@ -111,12 +111,43 @@ RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig&
     // Load configuration (this will generate peer ID if needed)
     load_configuration();
     
+    // Initialize modules
+    initialize_modules();
+    
     // Initialize NAT traversal
     initialize_nat_traversal();
 }
 
 RatsClient::~RatsClient() {
     stop();
+    // Destroy modules
+    destroy_modules();
+}
+
+void RatsClient::initialize_modules() {
+    // Initialize GossipSub
+    if (!gossipsub_) {
+        LOG_CLIENT_INFO("Initializing GossipSub");
+        gossipsub_ = std::make_unique<GossipSub>(*this);
+    }
+
+    // Initialize File Transfer Manager
+    if (!file_transfer_manager_) {
+        LOG_CLIENT_INFO("Initializing File Transfer Manager");
+        file_transfer_manager_ = std::make_unique<FileTransferManager>(*this);
+    }
+}
+
+void RatsClient::destroy_modules() {
+    if (gossipsub_) {
+        LOG_CLIENT_INFO("Destroying GossipSub");
+        gossipsub_.reset();
+    }
+
+    if (file_transfer_manager_) {
+        LOG_CLIENT_INFO("Destroying File Transfer Manager");
+        file_transfer_manager_.reset();
+    }
 }
 
 std::string RatsClient::generate_peer_hash_id(socket_t socket, const std::string& connection_info) {
@@ -303,12 +334,6 @@ bool RatsClient::start() {
     
     // Initialize local interface addresses for connection blocking
     initialize_local_addresses();
-    
-    // Initialize GossipSub
-    gossipsub_ = std::make_unique<GossipSub>(*this);
-    
-    // Initialize File Transfer Manager
-    file_transfer_manager_ = std::make_unique<FileTransferManager>(*this);
     
     // Discover public IP address via STUN and add to ignore list
     if (!discover_and_ignore_public_ip()) {

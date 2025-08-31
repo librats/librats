@@ -122,12 +122,6 @@ int main(int argc, char* argv[]) {
             );
         }
     });
-    
-    // Start the client
-    if (!client.start()) {
-        LOG_MAIN_ERROR("Failed to start RatsClient on port " << listen_port);
-        return 1;
-    }
 
     // Set up file transfer callbacks
     if (client.is_file_transfer_available()) {
@@ -195,6 +189,12 @@ int main(int argc, char* argv[]) {
         LOG_MAIN_INFO("File transfer callbacks configured");
     } else {
         LOG_MAIN_WARN("File transfer manager not available");
+    }
+
+    // Start the client
+    if (!client.start()) {
+        LOG_MAIN_ERROR("Failed to start RatsClient on port " << listen_port);
+        return 1;
     }
     
     // Start DHT discovery
