@@ -1481,6 +1481,24 @@ private:
     void detect_and_cache_nat_type();
     void update_connection_statistics(const std::string& peer_id, const ConnectionAttemptResult& result);
     std::string select_best_connection_strategy(const std::string& host, int port);
+    NatType map_characteristics_to_nat_type(const NatTypeInfo& characteristics);
+    void log_nat_detection_results();
+    bool perform_tcp_connection(const std::string& host, int port, ConnectionAttemptResult& result);
+    
+    // ICE coordination helpers
+    void initialize_ice_agent();
+    void setup_ice_callbacks();
+    socket_t get_peer_socket_by_id(const std::string& peer_id);
+    void update_peer_ice_info(socket_t socket, const nlohmann::json& payload);
+    void add_candidate_to_peer(socket_t socket, const IceCandidate& candidate);
+    bool should_initiate_ice_coordination(const std::string& peer_id);
+    void mark_ice_coordination_in_progress(const std::string& peer_id);
+    void remove_ice_coordination_tracking(const std::string& peer_id);
+    void cleanup_ice_coordination_for_peer(const std::string& peer_id);
+    nlohmann::json get_ice_statistics() const;
+    bool is_ice_enabled() const;
+    bool is_peer_ice_connected(const std::string& peer_id) const;
+    void cleanup_ice_resources();
 };
 
 // Utility functions
