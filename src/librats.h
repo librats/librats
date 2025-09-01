@@ -1508,13 +1508,6 @@ private:
 
     int broadcast_rats_message(const nlohmann::json& message, const std::string& exclude_peer_id = "");
     int broadcast_rats_message_to_validated_peers(const nlohmann::json& message, const std::string& exclude_peer_id = "");
-    int broadcast_custom_message(const std::string& type, const nlohmann::json& payload, 
-                                const std::string& sender_peer_id = "", 
-                                const std::string& exclude_peer_id = "");
-    bool send_custom_message_to_peer(const std::string& peer_id, const std::string& type, 
-                                    const nlohmann::json& payload, 
-                                    const std::string& sender_peer_id = "");
-
     // Message exchange API implementation
     struct MessageHandler {
         MessageCallback callback;

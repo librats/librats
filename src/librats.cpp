@@ -43,6 +43,10 @@ const std::string RatsClient::CONFIG_FILE_NAME = "config.json";
 const std::string RatsClient::PEERS_FILE_NAME = "peers.rats";
 const std::string RatsClient::PEERS_EVER_FILE_NAME = "peers_ever.rats";
 
+// =========================================================================
+// Constructor and Destructor
+// =========================================================================
+
 RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig& nat_config) 
     : listen_port_(listen_port), 
       max_peers_(max_peers),
@@ -83,6 +87,10 @@ RatsClient::~RatsClient() {
     destroy_modules();
 }
 
+// =========================================================================
+// Modules Initialization and Destruction
+// =========================================================================
+
 void RatsClient::initialize_modules() {
     // Initialize GossipSub
     if (!gossipsub_) {
@@ -109,156 +117,10 @@ void RatsClient::destroy_modules() {
     }
 }
 
-std::string RatsClient::generate_peer_hash_id(socket_t socket, const std::string& connection_info) {
-    // Generate unique hash ID using timestamp, socket, connection info, and random component
-    auto now = std::chrono::high_resolution_clock::now();
-    auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-    
-    // Create a random component
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(0, 255);
-    
-    // Build hash string
-    std::ostringstream hash_stream;
-    hash_stream << std::hex << timestamp << "_" << socket << "_";
-    
-    // Add connection info hash
-    std::hash<std::string> hasher;
-    hash_stream << hasher(connection_info) << "_";
-    
-    // Add random component
-    for (int i = 0; i < 8; ++i) {
-        hash_stream << std::setfill('0') << std::setw(2) << dis(gen);
-    }
-    
-    return hash_stream.str();
-}
+// =========================================================================
+// Core Lifecycle Management
+// =========================================================================
 
-std::string RatsClient::normalize_peer_address(const std::string& ip, int port) const {
-    // Normalize IPv6 addresses and create consistent format
-    std::string normalized_ip = ip;
-    
-    // Remove brackets from IPv6 addresses if present
-    if (!normalized_ip.empty() && normalized_ip.front() == '[' && normalized_ip.back() == ']') {
-        normalized_ip = normalized_ip.substr(1, normalized_ip.length() - 2);
-    }
-    
-    // Handle localhost variations
-    if (normalized_ip == "localhost" || normalized_ip == "::1") {
-        normalized_ip = "127.0.0.1";
-    }
-    
-    // For IPv6 addresses, add brackets for consistency
-    if (normalized_ip.find(':') != std::string::npos && normalized_ip.find('.') == std::string::npos) {
-        // This is likely an IPv6 address (contains colons but no dots)
-        return "[" + normalized_ip + "]:" + std::to_string(port);
-    }
-    
-    return normalized_ip + ":" + std::to_string(port);
-}
-
-// New RatsPeer-based peer management methods
-void RatsClient::add_peer(const RatsPeer& peer) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    add_peer_unlocked(peer);
-}
-
-void RatsClient::add_peer_unlocked(const RatsPeer& peer) {
-    // Assumes peers_mutex_ is already locked
-    peers_[peer.peer_id] = peer;
-    socket_to_peer_id_[peer.socket] = peer.peer_id;
-    address_to_peer_id_[peer.normalized_address] = peer.peer_id;
-}
-
-void RatsClient::remove_peer_by_id(const std::string& peer_id) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    remove_peer_by_id_unlocked(peer_id);
-}
-
-void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
-    // Assumes peers_mutex_ is already locked
-    
-    // Make a copy of peer_id to avoid use-after-free if the reference points to memory that gets freed
-    std::string peer_id_copy = peer_id;
-    
-    auto it = peers_.find(peer_id_copy);
-    if (it != peers_.end()) {
-        // Copy the values we need before erasing to avoid use-after-free
-        socket_t peer_socket = it->second.socket;
-        std::string peer_normalized_address = it->second.normalized_address;
-        
-        socket_to_peer_id_.erase(peer_socket);
-        address_to_peer_id_.erase(peer_normalized_address);
-        peers_.erase(it);
-        
-        // Clean up socket-specific mutex
-        cleanup_socket_send_mutex(peer_socket);
-
-        // Clean up ICE coordination tracking for this peer
-        cleanup_ice_coordination_for_peer(peer_id_copy);
-    }
-}
-
-bool RatsClient::is_already_connected_to_address(const std::string& normalized_address) const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    return address_to_peer_id_.find(normalized_address) != address_to_peer_id_.end();
-}
-
-std::vector<RatsPeer> RatsClient::get_all_peers() const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    std::vector<RatsPeer> result;
-    result.reserve(peers_.size());
-    
-    for (const auto& pair : peers_) {
-        result.push_back(pair.second);
-    }
-    
-    return result;
-}
-
-std::vector<RatsPeer> RatsClient::get_validated_peers() const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    std::vector<RatsPeer> result;
-    
-    for (const auto& pair : peers_) {
-        if (pair.second.is_handshake_completed()) {
-            result.push_back(pair.second);
-        }
-    }
-    
-    return result;
-}
-
-const RatsPeer* RatsClient::get_peer_by_id(const std::string& peer_id) const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    auto it = peers_.find(peer_id);
-    return (it != peers_.end()) ? &it->second : nullptr;
-}
-
-const RatsPeer* RatsClient::get_peer_by_socket(socket_t socket) const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    auto it = socket_to_peer_id_.find(socket);
-    if (it != socket_to_peer_id_.end()) {
-        auto peer_it = peers_.find(it->second);
-        return (peer_it != peers_.end()) ? &peer_it->second : nullptr;
-    }
-    return nullptr;
-}
-
-std::string RatsClient::get_peer_hash_id(socket_t socket) const {
-    const RatsPeer* peer = get_peer_by_socket(socket);
-    return peer ? peer->peer_id : "";
-}
-
-socket_t RatsClient::get_peer_socket(const std::string& peer_hash_id) const {
-    const RatsPeer* peer = get_peer_by_id(peer_hash_id);
-    return peer ? peer->socket : INVALID_SOCKET_VALUE;
-}
-
-std::string RatsClient::get_our_peer_id() const {
-    return our_peer_id_;
-}
 
 bool RatsClient::start() {
     if (running_.load()) {
@@ -419,641 +281,14 @@ void RatsClient::shutdown_all_threads() {
     ThreadManager::shutdown_all_threads();
 }
 
-bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionStrategy strategy) {
-    if (!running_.load()) {
-        LOG_CLIENT_ERROR("RatsClient is not running");
-        return false;
-    }
-    
-    LOG_CLIENT_INFO("Connecting to peer " << host << ":" << port << " using strategy: " << static_cast<int>(strategy));
-    
-    // Create connection attempt result to track the attempt
-    ConnectionAttemptResult result;
-    result.local_nat_type = detect_nat_type();
-    result.remote_nat_type = NatType::UNKNOWN;
-    
-    auto start_time = std::chrono::high_resolution_clock::now();
-    bool success = false;
-    
-    // Execute connection strategy
-    switch (strategy) {
-        case ConnectionStrategy::DIRECT_ONLY:
-            success = attempt_direct_connection(host, port, result);
-            result.method = "direct";
-            break;
-            
-        case ConnectionStrategy::STUN_ASSISTED:
-            success = attempt_stun_assisted_connection(host, port, result);
-            result.method = "stun";
-            break;
-            
-        case ConnectionStrategy::ICE_FULL:
-            success = attempt_ice_connection(host, port, result);
-            result.method = "ice";
-            break;
-            
-        case ConnectionStrategy::TURN_RELAY:
-            success = attempt_turn_relay_connection(host, port, result);
-            result.method = "turn";
-            break;
-            
-        case ConnectionStrategy::AUTO_ADAPTIVE:
-            // Select best strategy based on NAT type
-            std::string best_strategy = select_best_connection_strategy(host, port);
-            result.method = best_strategy;
-            
-            if (best_strategy == "direct") {
-                success = attempt_direct_connection(host, port, result);
-            } else if (best_strategy == "stun") {
-                success = attempt_stun_assisted_connection(host, port, result);
-            } else if (best_strategy == "ice") {
-                success = attempt_ice_connection(host, port, result);
-            } else if (best_strategy == "turn") {
-                success = attempt_turn_relay_connection(host, port, result);
-            } else {
-                success = attempt_hole_punch_connection(host, port, result);
-            }
-            break;
-    }
-    
-    auto end_time = std::chrono::high_resolution_clock::now();
-    result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    result.success = success;
-    
-    // Log connection attempt result
-    LOG_CLIENT_INFO("Connection attempt to " << host << ":" << port << " via " << result.method 
-                   << " completed: " << (success ? "SUCCESS" : "FAILED") 
-                   << " in " << result.duration.count() << "ms");
-    
-    if (!result.error_message.empty()) {
-        LOG_CLIENT_DEBUG("Error details: " << result.error_message);
-    }
-    
-    // Update connection statistics
-    std::string peer_address = normalize_peer_address(host, port);
-    update_connection_statistics(peer_address, result);
-    
-    // Call advanced connection callback if set
-    if (success && advanced_connection_callback_) {
-        // Find the socket for this connection to pass to callback
-        socket_t connected_socket = INVALID_SOCKET_VALUE;
-        std::string peer_id;
-        
-        {
-            std::lock_guard<std::mutex> lock(peers_mutex_);
-            auto addr_it = address_to_peer_id_.find(peer_address);
-            if (addr_it != address_to_peer_id_.end()) {
-                auto peer_it = peers_.find(addr_it->second);
-                if (peer_it != peers_.end()) {
-                    connected_socket = peer_it->second.socket;
-                    peer_id = peer_it->second.peer_id;
-                }
-            }
-        }
-        
-        if (is_valid_socket(connected_socket)) {
-            advanced_connection_callback_(connected_socket, peer_id, result);
-        }
-    }
-    
-    return success;
-}
-
-// Helper method to create a message with header
-std::vector<uint8_t> RatsClient::create_message_with_header(const std::vector<uint8_t>& payload, MessageDataType type) {
-    MessageHeader header(type);
-    std::vector<uint8_t> header_bytes = header.serialize();
-    
-    // Combine header + payload
-    std::vector<uint8_t> message;
-    message.reserve(header_bytes.size() + payload.size());
-    message.insert(message.end(), header_bytes.begin(), header_bytes.end());
-    message.insert(message.end(), payload.begin(), payload.end());
-    
-    return message;
-}
-
-// Helper method to parse message header and extract payload
-bool RatsClient::parse_message_with_header(const std::vector<uint8_t>& message, MessageHeader& header, std::vector<uint8_t>& payload) const {
-    // Check if message is large enough to contain header
-    if (message.size() < MessageHeader::HEADER_SIZE) {
-        LOG_CLIENT_DEBUG("Message too small to contain header: " << message.size() << " bytes");
-        return false;
-    }
-    
-    // Extract header bytes
-    std::vector<uint8_t> header_bytes(message.begin(), message.begin() + MessageHeader::HEADER_SIZE);
-    
-    // Parse header
-    if (!MessageHeader::deserialize(header_bytes, header)) {
-        LOG_CLIENT_DEBUG("Failed to parse message header - invalid magic number or format");
-        return false;
-    }
-    
-    // Validate header
-    if (!header.is_valid_type()) {
-        LOG_CLIENT_WARN("Invalid message data type: " << static_cast<int>(header.type));
-        return false;
-    }
-    
-    // Extract payload
-    payload.assign(message.begin() + MessageHeader::HEADER_SIZE, message.end());
-    
-    LOG_CLIENT_DEBUG("Parsed message header: type=" << static_cast<int>(header.type) << ", payload_size=" << payload.size());
-    return true;
-}
-
-bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data, MessageDataType message_type) {
-    if (!running_.load()) {
-        return false;
-    }
-    
-    // Get socket-specific mutex for thread-safe sending
-    // Prevent framed messages corruption (like two-times sending the number of bytes instead number of bytes + message)
-    std::mutex* socket_mutex = get_socket_send_mutex(socket);
-    std::lock_guard<std::mutex> send_lock(*socket_mutex);
-    
-    // Create message with specified header type
-    std::vector<uint8_t> message_with_header = create_message_with_header(data, message_type);
-    
-    // Use encrypted communication if encryption is enabled
-    if (is_encryption_enabled()) {
-        // Check if handshake is completed before sending data
-        if (!encrypted_communication::is_handshake_completed(socket)) {
-            std::string type_name = (message_type == MessageDataType::BINARY) ? "binary" : 
-                                   (message_type == MessageDataType::STRING) ? "string" : "JSON";
-            LOG_CLIENT_WARN("Cannot send " << type_name << " data to socket " << socket << " - encryption handshake not completed");
-            return false;
-        }
-        
-        int sent = encrypted_communication::send_tcp_data_encrypted(socket, message_with_header);
-        return sent > 0;
-    } else {
-        // Use framed messages for reliable large message handling
-        int sent = send_tcp_message_framed(socket, message_with_header);
-        return sent > 0;
-    }
-}
-
-bool RatsClient::send_string_to_peer(socket_t socket, const std::string& data) {
-    // Convert string to binary and use the primary send_binary_to_peer method
-    std::vector<uint8_t> binary_data(data.begin(), data.end());
-    return send_binary_to_peer(socket, binary_data, MessageDataType::STRING);
-}
-
-bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& data) {
-    try {
-        // Serialize JSON and convert to binary, then use the primary send_binary_to_peer method
-        std::string json_string = data.dump();
-        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
-        return send_binary_to_peer(socket, binary_data, MessageDataType::JSON);
-    } catch (const nlohmann::json::exception& e) {
-        LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
-        return false;
-    }
-}
-
-bool RatsClient::send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data, MessageDataType message_type) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    auto it = peers_.find(peer_hash_id);
-    if (it == peers_.end() || !it->second.is_handshake_completed()) {
-        return false;
-    }
-    
-    return send_binary_to_peer(it->second.socket, data, message_type);
-}
-
-bool RatsClient::send_string_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
-    // Convert string to binary and use primary binary method with STRING type
-    std::vector<uint8_t> binary_data(data.begin(), data.end());
-    return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::STRING);
-}
-
-bool RatsClient::send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& data) {
-    try {
-        // Serialize JSON and convert to binary, then use primary binary method with JSON type
-        std::string json_string = data.dump();
-        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
-        return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::JSON);
-    } catch (const nlohmann::json::exception& e) {
-        LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
-        return false;
-    }
-}
-
-int RatsClient::broadcast_json_to_peers(const nlohmann::json& data) {
-    try {
-        // Serialize JSON and convert to binary, then use primary binary method with JSON type
-        std::string json_string = data.dump();
-        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
-        return broadcast_binary_to_peers(binary_data, MessageDataType::JSON);
-    } catch (const nlohmann::json::exception& e) {
-        LOG_CLIENT_ERROR("Failed to serialize JSON message for broadcast: " << e.what());
-        return 0;
-    }
-}
-
-bool RatsClient::parse_json_message(const std::string& message, nlohmann::json& out_json) {
-    try {
-        out_json = nlohmann::json::parse(message);
-        return true;
-    } catch (const nlohmann::json::exception& e) {
-        LOG_CLIENT_ERROR("Failed to parse JSON message: " << e.what());
-        return false;
-    }
-}
-
-
-
-int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data, MessageDataType message_type) {
-    if (!running_.load()) {
-        return 0;
-    }
-    
-    int sent_count = 0;
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    
-    for (const auto& pair : peers_) {
-        const RatsPeer& peer = pair.second;
-        // Only send to peers that have completed handshake
-        if (peer.is_handshake_completed()) {
-            if (send_binary_to_peer(peer.socket, data, message_type)) {
-                sent_count++;
-            }
-        }
-    }
-    
-    return sent_count;
-}
-
-int RatsClient::broadcast_string_to_peers(const std::string& data) {
-    // Convert string to binary and use primary binary method with STRING type
-    std::vector<uint8_t> binary_data(data.begin(), data.end());
-    return broadcast_binary_to_peers(binary_data, MessageDataType::STRING);
-}
-
-void RatsClient::disconnect_peer(socket_t socket) {
-    remove_peer(socket);
-    
-    // Clean up encryption state
-    if (is_encryption_enabled()) {
-        encrypted_communication::cleanup_socket(socket);
-    }
-    
-    close_socket(socket);
-}
-
-void RatsClient::disconnect_peer_by_hash(const std::string& peer_hash_id) {
-    socket_t socket = get_peer_socket(peer_hash_id);
-    if (is_valid_socket(socket)) {
-        disconnect_peer(socket);
-    }
-}
-
-int RatsClient::get_peer_count_unlocked() const {
-    // Assumes peers_mutex_ is already locked
-    int count = 0;
-    for (const auto& pair : peers_) {
-        if (pair.second.is_handshake_completed()) {
-            count++;
-        }
-    }
-    return count;
-}
-
-int RatsClient::get_peer_count() const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    return get_peer_count_unlocked();
-}
-
 bool RatsClient::is_running() const {
     return running_.load();
 }
 
-void RatsClient::set_connection_callback(ConnectionCallback callback) {
-    connection_callback_ = callback;
-}
 
-void RatsClient::set_binary_data_callback(BinaryDataCallback callback) {
-    binary_data_callback_ = callback;
-}
-
-void RatsClient::set_string_data_callback(StringDataCallback callback) {
-    string_data_callback_ = callback;
-}
-
-void RatsClient::set_json_data_callback(JsonDataCallback callback) {
-    json_data_callback_ = callback;
-}
-
-void RatsClient::set_disconnect_callback(DisconnectCallback callback) {
-    disconnect_callback_ = callback;
-}
-
-bool RatsClient::start_dht_discovery(int dht_port) {
-    if (dht_client_ && dht_client_->is_running()) {
-        LOG_CLIENT_WARN("DHT discovery is already running");
-        return true;
-    }
-    
-    LOG_CLIENT_INFO("Starting DHT discovery on port " << dht_port);
-    
-    dht_client_ = std::make_unique<DhtClient>(dht_port);
-    if (!dht_client_->start()) {
-        LOG_CLIENT_ERROR("Failed to start DHT client");
-        dht_client_.reset();
-        return false;
-    }
-    
-    // Bootstrap with default nodes
-    auto bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
-    if (!dht_client_->bootstrap(bootstrap_nodes)) {
-        LOG_CLIENT_WARN("Failed to bootstrap DHT");
-    }
-    
-    // Start automatic peer discovery
-    start_automatic_peer_discovery();
-    
-    LOG_CLIENT_INFO("DHT discovery started successfully");
-    return true;
-}
-
-void RatsClient::stop_dht_discovery() {
-    if (!dht_client_) {
-        return;
-    }
-    
-    LOG_CLIENT_INFO("Stopping DHT discovery");
-    
-    // Stop automatic peer discovery
-    stop_automatic_peer_discovery();
-    
-    dht_client_->stop();
-    dht_client_.reset();
-    LOG_CLIENT_INFO("DHT discovery stopped");
-}
-
-bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback, int iteration_max) {
-    if (!dht_client_ || !dht_client_->is_running()) {
-        LOG_CLIENT_ERROR("DHT client not running");
-        return false;
-    }
-    
-    if (content_hash.length() != 40) {  // 160-bit hash as hex string
-        LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected 40)");
-        return false;
-    }
-    
-    LOG_CLIENT_INFO("Finding peers for content hash: " << content_hash << " with iteration max: " << iteration_max);
-    
-    InfoHash info_hash = hex_to_node_id(content_hash);
-    
-    return dht_client_->find_peers(info_hash, [this, callback](const std::vector<Peer>& peers, const InfoHash& info_hash) {
-        handle_dht_peer_discovery(peers, info_hash);
-        
-        // Convert Peer to string addresses for callback
-        std::vector<std::string> peer_addresses;
-        for (const auto& peer : peers) {
-            peer_addresses.push_back(peer.ip + ":" + std::to_string(peer.port));
-        }
-        
-        if (callback) {
-            callback(peer_addresses);
-        }
-    }, iteration_max);
-}
-
-bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t port) {
-    if (!dht_client_ || !dht_client_->is_running()) {
-        LOG_CLIENT_ERROR("DHT client not running");
-        return false;
-    }
-    
-    if (content_hash.length() != 40) {  // 160-bit hash as hex string
-        LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected 40)");
-        return false;
-    }
-    
-    if (port == 0) {
-        port = listen_port_;
-    }
-    
-    LOG_CLIENT_INFO("Announcing for content hash: " << content_hash << " on port " << port);
-    
-    InfoHash info_hash = hex_to_node_id(content_hash);
-    return dht_client_->announce_peer(info_hash, port);
-}
-
-bool RatsClient::is_dht_running() const {
-    return dht_client_ && dht_client_->is_running();
-}
-
-size_t RatsClient::get_dht_routing_table_size() const {
-    if (!dht_client_) {
-        return 0;
-    }
-    return dht_client_->get_routing_table_size();
-}
-
-
-
-void RatsClient::add_ignored_address(const std::string& ip_address) {
-    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
-    
-    // Check if already in the list
-    if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), ip_address) == local_interface_addresses_.end()) {
-        local_interface_addresses_.push_back(ip_address);
-        LOG_CLIENT_INFO("Added " << ip_address << " to ignore list");
-    } else {
-        LOG_CLIENT_DEBUG("IP address " << ip_address << " already in ignore list");
-    }
-}
-
-void RatsClient::handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash) {
-    LOG_CLIENT_INFO("DHT discovered " << peers.size() << " peers for info hash: " << node_id_to_hex(info_hash));
-    
-    // Auto-connect to discovered peers (optional behavior)
-    for (const auto& peer : peers) {
-        // Check if this peer should be ignored (local interface)
-        if (should_ignore_peer(peer.ip, peer.port)) {
-            LOG_CLIENT_DEBUG("Ignoring discovered peer " << peer.ip << ":" << peer.port << " - local interface address");
-            continue;
-        }
-        
-        // Check if we're already connected to this peer
-        std::string normalized_peer_address = normalize_peer_address(peer.ip, peer.port);
-        bool already_connected = is_already_connected_to_address(normalized_peer_address);
-        
-        if (!already_connected) {
-            // Check if peer limit is reached
-            if (is_peer_limit_reached()) {
-                LOG_CLIENT_DEBUG("Peer limit reached, not connecting to DHT discovered peer " << peer.ip << ":" << peer.port);
-                continue;
-            }
-            
-            LOG_CLIENT_DEBUG("Attempting to connect to discovered peer: " << peer.ip << ":" << peer.port);
-            
-            // Try to connect to the peer (non-blocking)
-            std::thread([this, peer]() {
-                if (connect_to_peer(peer.ip, peer.port)) {
-                    LOG_CLIENT_INFO("Successfully connected to DHT discovered peer: " << peer.ip << ":" << peer.port);
-                } else {
-                    LOG_CLIENT_DEBUG("Failed to connect to DHT discovered peer: " << peer.ip << ":" << peer.port);
-                }
-            }).detach();
-        } else {
-            LOG_CLIENT_DEBUG("Already connected to discovered peer: " << normalized_peer_address);
-        }
-    }
-}
-
-// ===== mDNS DISCOVERY METHODS IMPLEMENTATION =====
-
-bool RatsClient::start_mdns_discovery(const std::string& service_instance_name, 
-                                     const std::map<std::string, std::string>& txt_records) {
-    if (!running_.load()) {
-        LOG_CLIENT_ERROR("RatsClient is not running, cannot start mDNS discovery");
-        return false;
-    }
-    
-    if (mdns_client_ && mdns_client_->is_running()) {
-        LOG_CLIENT_WARN("mDNS discovery is already running");
-        return true;
-    }
-    
-    LOG_CLIENT_INFO("Starting mDNS service discovery and announcement");
-    
-    // Create service instance name from our peer ID if not provided
-    std::string instance_name = service_instance_name;
-    if (instance_name.empty()) {
-        instance_name = "librats-" + get_our_peer_id().substr(0, 8);
-    }
-    
-    // Create mDNS client
-    mdns_client_ = std::make_unique<MdnsClient>(instance_name, listen_port_);
-    
-    // Set service discovery callback
-    mdns_client_->set_service_callback([this](const MdnsService& service, bool is_new) {
-        handle_mdns_service_discovery(service, is_new);
-    });
-    
-    // Start mDNS client
-    if (!mdns_client_->start()) {
-        LOG_CLIENT_ERROR("Failed to start mDNS client");
-        mdns_client_.reset();
-        return false;
-    }
-    
-    // Start service announcement
-    if (!mdns_client_->announce_service(instance_name, listen_port_, txt_records)) {
-        LOG_CLIENT_WARN("Failed to start mDNS service announcement");
-    }
-    
-    // Start service discovery
-    if (!mdns_client_->start_discovery()) {
-        LOG_CLIENT_WARN("Failed to start mDNS service discovery");
-    }
-    
-    LOG_CLIENT_INFO("mDNS discovery started successfully for service: " << instance_name);
-    return true;
-}
-
-void RatsClient::stop_mdns_discovery() {
-    if (!mdns_client_) {
-        return;
-    }
-    
-    LOG_CLIENT_INFO("Stopping mDNS discovery");
-    
-    mdns_client_->stop();
-    mdns_client_.reset();
-    
-    LOG_CLIENT_INFO("mDNS discovery stopped");
-}
-
-bool RatsClient::is_mdns_running() const {
-    return mdns_client_ && mdns_client_->is_running();
-}
-
-void RatsClient::set_mdns_callback(std::function<void(const std::string&, int, const std::string&)> callback) {
-    mdns_callback_ = callback;
-}
-
-std::vector<MdnsService> RatsClient::get_mdns_services() const {
-    if (!mdns_client_) {
-        return {};
-    }
-    
-    return mdns_client_->get_recent_services(std::chrono::seconds(300)); // Services seen in last 5 minutes
-}
-
-bool RatsClient::query_mdns_services() {
-    if (!mdns_client_) {
-        LOG_CLIENT_ERROR("mDNS client not initialized");
-        return false;
-    }
-    
-    return mdns_client_->query_services();
-}
-
-void RatsClient::handle_mdns_service_discovery(const MdnsService& service, bool is_new) {
-    LOG_CLIENT_INFO("mDNS discovered " << (is_new ? "new" : "updated") << " librats service: " 
-                   << service.service_name << " at " << service.ip_address << ":" << service.port);
-    
-    // Extract instance name from service name for logging
-    std::string instance_name = service.service_name;
-    size_t pos = instance_name.find("._librats._tcp.local.");
-    if (pos != std::string::npos) {
-        instance_name = instance_name.substr(0, pos);
-    }
-    
-    // Call user callback if registered
-    if (mdns_callback_) {
-        try {
-            mdns_callback_(service.ip_address, service.port, instance_name);
-        } catch (const std::exception& e) {
-            LOG_CLIENT_ERROR("Exception in mDNS callback: " << e.what());
-        }
-    }
-    
-    // Auto-connect to discovered services if they're new
-    if (is_new) {
-        // Check if this peer should be ignored (local interface)
-        if (should_ignore_peer(service.ip_address, service.port)) {
-            LOG_CLIENT_DEBUG("Ignoring mDNS discovered peer " << service.ip_address << ":" 
-                            << service.port << " - local interface address");
-            return;
-        }
-        
-        // Check if we're already connected to this peer
-        std::string normalized_peer_address = normalize_peer_address(service.ip_address, service.port);
-        if (is_already_connected_to_address(normalized_peer_address)) {
-            LOG_CLIENT_DEBUG("Already connected to mDNS discovered peer: " << normalized_peer_address);
-            return;
-        }
-        
-        // Check if peer limit is reached
-        if (is_peer_limit_reached()) {
-            LOG_CLIENT_DEBUG("Peer limit reached, not connecting to mDNS discovered peer " 
-                            << service.ip_address << ":" << service.port);
-            return;
-        }
-        
-        LOG_CLIENT_INFO("Attempting to connect to mDNS discovered peer: " 
-                       << service.ip_address << ":" << service.port);
-        
-        // Try to connect to the discovered peer (non-blocking)
-        std::thread([this, service]() {
-            if (connect_to_peer(service.ip_address, service.port)) {
-                LOG_CLIENT_INFO("Successfully connected to mDNS discovered peer: " 
-                               << service.ip_address << ":" << service.port);
-            } else {
-                LOG_CLIENT_DEBUG("Failed to connect to mDNS discovered peer: " 
-                                << service.ip_address << ":" << service.port);
-            }
-        }).detach();
-    }
-}
+// =========================================================================
+// Managment loops
+// =========================================================================
 
 void RatsClient::server_loop() {
     LOG_SERVER_INFO("Server loop started");
@@ -1152,6 +387,7 @@ void RatsClient::management_loop() {
     
     LOG_CLIENT_INFO("Management loop ended");
 }
+
 
 void RatsClient::handle_client(socket_t client_socket, const std::string& peer_hash_id) {
     LOG_CLIENT_INFO("Started handling client: " << peer_hash_id);
@@ -1490,236 +726,6 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     LOG_CLIENT_INFO("Client disconnected: " << peer_hash_id);
 }
 
-void RatsClient::remove_peer(socket_t socket) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    auto it = socket_to_peer_id_.find(socket);
-    if (it != socket_to_peer_id_.end()) {
-        remove_peer_by_id_unlocked(it->second);
-    }
-}
-
-// Local interface address blocking methods
-void RatsClient::initialize_local_addresses() {
-    LOG_CLIENT_INFO("Initializing local interface addresses for connection blocking");
-    
-    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
-    
-    // Get all local interface addresses using network_utils
-    local_interface_addresses_ = network_utils::get_local_interface_addresses();
-    
-    // Add common localhost addresses if not already present
-    std::vector<std::string> localhost_addrs = {"127.0.0.1", "::1", "0.0.0.0", "::"};
-    for (const auto& addr : localhost_addrs) {
-        if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
-            local_interface_addresses_.push_back(addr);
-        }
-    }
-    
-    LOG_CLIENT_INFO("Found " << local_interface_addresses_.size() << " local addresses to block:");
-    for (const auto& addr : local_interface_addresses_) {
-        LOG_CLIENT_INFO("  - " << addr);
-    }
-}
-
-void RatsClient::refresh_local_addresses() {
-    LOG_CLIENT_DEBUG("Refreshing local interface addresses");
-    
-    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
-    
-    // Clear old addresses and get fresh ones
-    local_interface_addresses_.clear();
-    local_interface_addresses_ = network_utils::get_local_interface_addresses();
-    
-    // Add common localhost addresses if not already present
-    std::vector<std::string> localhost_addrs = {"127.0.0.1", "::1", "0.0.0.0", "::"};
-    for (const auto& addr : localhost_addrs) {
-        if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
-            local_interface_addresses_.push_back(addr);
-        }
-    }
-    
-    LOG_CLIENT_DEBUG("Refreshed " << local_interface_addresses_.size() << " local addresses");
-}
-
-bool RatsClient::is_blocked_address(const std::string& ip_address) const {
-    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
-    
-    // Check against our stored local addresses
-    for (const auto& local_addr : local_interface_addresses_) {
-        if (local_addr == ip_address) {
-            return true;
-        }
-    }
-    
-    return false;
-}
-
-bool RatsClient::should_ignore_peer(const std::string& ip, int port) const {
-    // Always block connections to ourselves (same port)
-    if (port == listen_port_) {
-        if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost" || ip == "0.0.0.0" || ip == "::") {
-            LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - localhost with same port");
-            return true;
-        }
-    }
-    
-    // For localhost addresses on different ports, allow the connection (for testing)
-    if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost") {
-        LOG_CLIENT_DEBUG("Allowing localhost peer " << ip << ":" << port << " on different port");
-        return false;
-    }
-    
-    // Check if the IP is a non-localhost local interface address
-    if (is_blocked_address(ip)) {
-        LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - matches local interface address");
-        return true;
-    }
-    
-    return false;
-}
-
-// Helper functions
-std::unique_ptr<RatsClient> create_rats_client(int listen_port) {
-    auto client = std::make_unique<RatsClient>(listen_port, 10); // Default 10 max peers
-    if (!client->start()) {
-        return nullptr;
-    }
-    return client;
-}
-
-void RatsClient::start_automatic_peer_discovery() {
-    if (auto_discovery_running_.load()) {
-        LOG_CLIENT_WARN("Automatic peer discovery is already running");
-        return;
-    }
-    
-    LOG_CLIENT_INFO("Starting automatic rats peer discovery");
-    auto_discovery_running_.store(true);
-    auto_discovery_thread_ = std::thread(&RatsClient::automatic_discovery_loop, this);
-}
-
-void RatsClient::stop_automatic_peer_discovery() {
-    if (!auto_discovery_running_.load()) {
-        return;
-    }
-    
-    LOG_CLIENT_INFO("Stopping automatic peer discovery");
-    auto_discovery_running_.store(false);
-    
-    if (auto_discovery_thread_.joinable()) {
-        auto_discovery_thread_.join();
-    }
-    
-    LOG_CLIENT_INFO("Automatic peer discovery stopped");
-}
-
-bool RatsClient::is_automatic_discovery_running() const {
-    return auto_discovery_running_.load();
-}
-
-// This function will be removed - implementation moved to end of file
-
-void RatsClient::automatic_discovery_loop() {
-    LOG_CLIENT_INFO("Automatic peer discovery loop started");
-    
-    // Initial delay to let DHT bootstrap
-    {
-        std::unique_lock<std::mutex> lock(shutdown_mutex_);
-        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
-            LOG_CLIENT_INFO("Automatic peer discovery loop stopped during initial delay");
-            return;
-        }
-    }
-
-    // Search immediately
-    search_rats_peers(5);
-    
-    {
-        std::unique_lock<std::mutex> lock(shutdown_mutex_);
-        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(10), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
-            LOG_CLIENT_INFO("Automatic peer discovery loop stopped during search delay");
-            return;
-        }
-    }
-    
-    // Announce immediately
-    announce_rats_peer();
-
-    auto last_announce = std::chrono::steady_clock::now();
-    auto last_search = std::chrono::steady_clock::now();
-    
-    while (auto_discovery_running_.load()) {
-        auto now = std::chrono::steady_clock::now();
-        
-        if (get_peer_count() == 0) {
-            // No peers: aggressive search and announce
-            if (now - last_search >= std::chrono::seconds(2)) {
-                search_rats_peers();
-                last_search = now;
-            }
-            if (now - last_announce >= std::chrono::seconds(10)) {
-                announce_rats_peer();
-                last_announce = now;
-            }
-        } else {
-            // Peers connected: less aggressive, similar to original logic
-            if (now - last_search >= std::chrono::minutes(5)) {
-                search_rats_peers();
-                last_search = now;
-            }
-            if (now - last_announce >= std::chrono::minutes(10)) {
-                announce_rats_peer();
-                last_announce = now;
-            }
-        }
-        
-        // Use conditional variable for responsive shutdown
-        {
-            std::unique_lock<std::mutex> lock(shutdown_mutex_);
-            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
-                break;
-            }
-        }
-    }
-    
-    LOG_CLIENT_INFO("Automatic peer discovery loop stopped");
-}
-
-void RatsClient::announce_rats_peer() {
-    if (!dht_client_ || !dht_client_->is_running()) {
-        LOG_CLIENT_WARN("DHT client not running, cannot announce peer");
-        return;
-    }
-    
-    std::string discovery_hash = get_discovery_hash();
-    LOG_CLIENT_INFO("Announcing peer for discovery hash: " << discovery_hash << " on port " << listen_port_);
-    
-    if (announce_for_hash(discovery_hash, listen_port_)) {
-        LOG_CLIENT_DEBUG("Successfully announced peer for discovery");
-    } else {
-        LOG_CLIENT_WARN("Failed to announce peer for discovery");
-    }
-}
-
-void RatsClient::search_rats_peers(int iteration_max) {
-    if (!dht_client_ || !dht_client_->is_running()) {
-        LOG_CLIENT_WARN("DHT client not running, cannot search for peers");
-        return;
-    }
-    
-    std::string discovery_hash = get_discovery_hash();
-    LOG_CLIENT_INFO("Searching for peers using discovery hash: " << discovery_hash << " with iteration max: " << iteration_max);
-    
-    find_peers_by_hash(discovery_hash, [this](const std::vector<std::string>& peers) {
-        LOG_CLIENT_INFO("Found " << peers.size() << " peers through DHT discovery");
-        // Note: Connection attempts are handled by handle_dht_peer_discovery() which is called
-        // automatically by find_peers_by_hash(), so no need to duplicate connection logic here
-        for (const auto& peer_address : peers) {
-            LOG_CLIENT_DEBUG("Discovered peer: " << peer_address);
-        }
-    }, iteration_max);
-}
-
 // Handshake protocol implementation
 std::string RatsClient::create_handshake_message(const std::string& message_type, const std::string& our_peer_id) const {
     auto now = std::chrono::high_resolution_clock::now();
@@ -2028,310 +1034,529 @@ void RatsClient::check_handshake_timeouts() {
     }
 }
 
-bool RatsClient::parse_address_string(const std::string& address_str, std::string& out_ip, int& out_port) {
-    if (address_str.empty()) {
+// =========================================================================
+// Connection Management
+// =========================================================================
+
+bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionStrategy strategy) {
+    if (!running_.load()) {
+        LOG_CLIENT_ERROR("RatsClient is not running");
         return false;
     }
-
-    size_t colon_pos;
-    if (address_str.front() == '[') {
-        // IPv6 format: [ip]:port
-        size_t bracket_end = address_str.find(']');
-        if (bracket_end == std::string::npos || bracket_end < 2) { // Must be at least [a]
-            return false;
+    
+    LOG_CLIENT_INFO("Connecting to peer " << host << ":" << port << " using strategy: " << static_cast<int>(strategy));
+    
+    // Create connection attempt result to track the attempt
+    ConnectionAttemptResult result;
+    result.local_nat_type = detect_nat_type();
+    result.remote_nat_type = NatType::UNKNOWN;
+    
+    auto start_time = std::chrono::high_resolution_clock::now();
+    bool success = false;
+    
+    // Execute connection strategy
+    switch (strategy) {
+        case ConnectionStrategy::DIRECT_ONLY:
+            success = attempt_direct_connection(host, port, result);
+            result.method = "direct";
+            break;
+            
+        case ConnectionStrategy::STUN_ASSISTED:
+            success = attempt_stun_assisted_connection(host, port, result);
+            result.method = "stun";
+            break;
+            
+        case ConnectionStrategy::ICE_FULL:
+            success = attempt_ice_connection(host, port, result);
+            result.method = "ice";
+            break;
+            
+        case ConnectionStrategy::TURN_RELAY:
+            success = attempt_turn_relay_connection(host, port, result);
+            result.method = "turn";
+            break;
+            
+        case ConnectionStrategy::AUTO_ADAPTIVE:
+            // Select best strategy based on NAT type
+            std::string best_strategy = select_best_connection_strategy(host, port);
+            result.method = best_strategy;
+            
+            if (best_strategy == "direct") {
+                success = attempt_direct_connection(host, port, result);
+            } else if (best_strategy == "stun") {
+                success = attempt_stun_assisted_connection(host, port, result);
+            } else if (best_strategy == "ice") {
+                success = attempt_ice_connection(host, port, result);
+            } else if (best_strategy == "turn") {
+                success = attempt_turn_relay_connection(host, port, result);
+            } else {
+                success = attempt_hole_punch_connection(host, port, result);
+            }
+            break;
+    }
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    result.success = success;
+    
+    // Log connection attempt result
+    LOG_CLIENT_INFO("Connection attempt to " << host << ":" << port << " via " << result.method 
+                   << " completed: " << (success ? "SUCCESS" : "FAILED") 
+                   << " in " << result.duration.count() << "ms");
+    
+    if (!result.error_message.empty()) {
+        LOG_CLIENT_DEBUG("Error details: " << result.error_message);
+    }
+    
+    // Update connection statistics
+    std::string peer_address = normalize_peer_address(host, port);
+    update_connection_statistics(peer_address, result);
+    
+    // Call advanced connection callback if set
+    if (success && advanced_connection_callback_) {
+        // Find the socket for this connection to pass to callback
+        socket_t connected_socket = INVALID_SOCKET_VALUE;
+        std::string peer_id;
+        
+        {
+            std::lock_guard<std::mutex> lock(peers_mutex_);
+            auto addr_it = address_to_peer_id_.find(peer_address);
+            if (addr_it != address_to_peer_id_.end()) {
+                auto peer_it = peers_.find(addr_it->second);
+                if (peer_it != peers_.end()) {
+                    connected_socket = peer_it->second.socket;
+                    peer_id = peer_it->second.peer_id;
+                }
+            }
         }
-        out_ip = address_str.substr(1, bracket_end - 1);
-        colon_pos = address_str.find(':', bracket_end);
+        
+        if (is_valid_socket(connected_socket)) {
+            advanced_connection_callback_(connected_socket, peer_id, result);
+        }
+    }
+    
+    return success;
+}
+
+void RatsClient::disconnect_peer(socket_t socket) {
+    remove_peer(socket);
+    
+    // Clean up encryption state
+    if (is_encryption_enabled()) {
+        encrypted_communication::cleanup_socket(socket);
+    }
+    
+    close_socket(socket);
+}
+
+void RatsClient::disconnect_peer_by_hash(const std::string& peer_hash_id) {
+    socket_t socket = get_peer_socket(peer_hash_id);
+    if (is_valid_socket(socket)) {
+        disconnect_peer(socket);
+    }
+}
+
+// Helper methods for peer management
+void RatsClient::add_peer(const RatsPeer& peer) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    add_peer_unlocked(peer);
+}
+
+void RatsClient::add_peer_unlocked(const RatsPeer& peer) {
+    // Assumes peers_mutex_ is already locked
+    peers_[peer.peer_id] = peer;
+    socket_to_peer_id_[peer.socket] = peer.peer_id;
+    address_to_peer_id_[peer.normalized_address] = peer.peer_id;
+}
+
+void RatsClient::remove_peer(socket_t socket) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = socket_to_peer_id_.find(socket);
+    if (it != socket_to_peer_id_.end()) {
+        remove_peer_by_id_unlocked(it->second);
+    }
+}
+
+void RatsClient::remove_peer_by_id(const std::string& peer_id) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    remove_peer_by_id_unlocked(peer_id);
+}
+
+void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
+    // Assumes peers_mutex_ is already locked
+    
+    // Make a copy of peer_id to avoid use-after-free if the reference points to memory that gets freed
+    std::string peer_id_copy = peer_id;
+    
+    auto it = peers_.find(peer_id_copy);
+    if (it != peers_.end()) {
+        // Copy the values we need before erasing to avoid use-after-free
+        socket_t peer_socket = it->second.socket;
+        std::string peer_normalized_address = it->second.normalized_address;
+        
+        socket_to_peer_id_.erase(peer_socket);
+        address_to_peer_id_.erase(peer_normalized_address);
+        peers_.erase(it);
+        
+        // Clean up socket-specific mutex
+        cleanup_socket_send_mutex(peer_socket);
+
+        // Clean up ICE coordination tracking for this peer
+        cleanup_ice_coordination_for_peer(peer_id_copy);
+    }
+}
+
+bool RatsClient::is_already_connected_to_address(const std::string& normalized_address) const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    return address_to_peer_id_.find(normalized_address) != address_to_peer_id_.end();
+}
+
+void RatsClient::add_ignored_address(const std::string& ip_address) {
+    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
+    
+    // Check if already in the list
+    if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), ip_address) == local_interface_addresses_.end()) {
+        local_interface_addresses_.push_back(ip_address);
+        LOG_CLIENT_INFO("Added " << ip_address << " to ignore list");
     } else {
-        // IPv4 or IPv6 without brackets
-        colon_pos = address_str.find_last_of(':');
-        if (colon_pos == std::string::npos || colon_pos == 0) {
-            return false;
+        LOG_CLIENT_DEBUG("IP address " << ip_address << " already in ignore list");
+    }
+}
+
+
+// Local interface address blocking methods
+void RatsClient::initialize_local_addresses() {
+    LOG_CLIENT_INFO("Initializing local interface addresses for connection blocking");
+    
+    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
+    
+    // Get all local interface addresses using network_utils
+    local_interface_addresses_ = network_utils::get_local_interface_addresses();
+    
+    // Add common localhost addresses if not already present
+    std::vector<std::string> localhost_addrs = {"127.0.0.1", "::1", "0.0.0.0", "::"};
+    for (const auto& addr : localhost_addrs) {
+        if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
+            local_interface_addresses_.push_back(addr);
         }
-        out_ip = address_str.substr(0, colon_pos);
     }
+    
+    LOG_CLIENT_INFO("Found " << local_interface_addresses_.size() << " local addresses to block:");
+    for (const auto& addr : local_interface_addresses_) {
+        LOG_CLIENT_INFO("  - " << addr);
+    }
+}
 
-    if (colon_pos == std::string::npos || colon_pos + 1 >= address_str.length()) {
+void RatsClient::refresh_local_addresses() {
+    LOG_CLIENT_DEBUG("Refreshing local interface addresses");
+    
+    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
+    
+    // Clear old addresses and get fresh ones
+    local_interface_addresses_.clear();
+    local_interface_addresses_ = network_utils::get_local_interface_addresses();
+    
+    // Add common localhost addresses if not already present
+    std::vector<std::string> localhost_addrs = {"127.0.0.1", "::1", "0.0.0.0", "::"};
+    for (const auto& addr : localhost_addrs) {
+        if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
+            local_interface_addresses_.push_back(addr);
+        }
+    }
+    
+    LOG_CLIENT_DEBUG("Refreshed " << local_interface_addresses_.size() << " local addresses");
+}
+
+bool RatsClient::is_blocked_address(const std::string& ip_address) const {
+    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
+    
+    // Check against our stored local addresses
+    for (const auto& local_addr : local_interface_addresses_) {
+        if (local_addr == ip_address) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+bool RatsClient::should_ignore_peer(const std::string& ip, int port) const {
+    // Always block connections to ourselves (same port)
+    if (port == listen_port_) {
+        if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost" || ip == "0.0.0.0" || ip == "::") {
+            LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - localhost with same port");
+            return true;
+        }
+    }
+    
+    // For localhost addresses on different ports, allow the connection (for testing)
+    if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost") {
+        LOG_CLIENT_DEBUG("Allowing localhost peer " << ip << ":" << port << " on different port");
         return false;
     }
-
-    try {
-        out_port = std::stoi(address_str.substr(colon_pos + 1));
-    } catch (const std::exception&) {
-        return false;
+    
+    // Check if the IP is a non-localhost local interface address
+    if (is_blocked_address(ip)) {
+        LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - matches local interface address");
+        return true;
     }
-
-    return !out_ip.empty() && out_port > 0 && out_port <= 65535;
-}
-
-std::string get_box_separator() {
-    return supports_unicode() ? 
-        "════════════════════════════════════════════════════════════════════" :
-        "=====================================================================";
-}
-
-std::string get_box_vertical() {
-    return supports_unicode() ? "│" : "|";
-}
-
-std::string get_checkmark() {
-    return supports_unicode() ? "✓" : "[*]";
-}
-
-void RatsClient::log_handshake_completion_unlocked(const RatsPeer& peer) {
-    // Calculate connection duration
-    auto now = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - peer.connected_at);
     
-    // Get current peer count (assumes peers_mutex_ is already locked)
-    int current_peer_count = get_peer_count_unlocked();
+    return false;
+}
+
+// =========================================================================
+// Data Transmission Methods
+// =========================================================================
+
+// Helper method to create a message with header
+std::vector<uint8_t> RatsClient::create_message_with_header(const std::vector<uint8_t>& payload, MessageDataType type) {
+    MessageHeader header(type);
+    std::vector<uint8_t> header_bytes = header.serialize();
     
-    // Create visually appealing log output
-    std::string connection_type = peer.is_outgoing ? "OUTGOING" : "INCOMING";
-    std::string separator = get_box_separator();
-    std::string vertical = get_box_vertical();
-    std::string checkmark = get_checkmark();
-    
-    LOG_CLIENT_INFO("");
-    LOG_CLIENT_INFO(separator);
-    LOG_CLIENT_INFO(checkmark << " HANDSHAKE COMPLETED - NEW PEER CONNECTED");
-    LOG_CLIENT_INFO(separator);
-    LOG_CLIENT_INFO(vertical << " Peer ID       : " << peer.peer_id);
-    LOG_CLIENT_INFO(vertical << " Address       : " << peer.ip << ":" << peer.port);
-    LOG_CLIENT_INFO(vertical << " Connection    : " << connection_type);
-    LOG_CLIENT_INFO(vertical << " Protocol Ver. : " << peer.version);
-    LOG_CLIENT_INFO(vertical << " Socket        : " << peer.socket);
-    LOG_CLIENT_INFO(vertical << " Duration      : " << duration.count() << "ms");
-    LOG_CLIENT_INFO(vertical << " Network Peers : " << current_peer_count << "/" << max_peers_);
-    
-    LOG_CLIENT_INFO(separator);
-    LOG_CLIENT_INFO("");
-}
-
-void RatsClient::log_handshake_completion(const RatsPeer& peer) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    log_handshake_completion_unlocked(peer);
-}
-
-// Peer limit management methods
-int RatsClient::get_max_peers() const {
-    return max_peers_;
-}
-
-void RatsClient::set_max_peers(int max_peers) {
-    max_peers_ = max_peers;
-    LOG_CLIENT_INFO("Maximum peers set to " << max_peers_);
-}
-
-bool RatsClient::is_peer_limit_reached() const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    return static_cast<int>(peers_.size()) >= max_peers_;
-}
-
-// Message handling system
-nlohmann::json RatsClient::create_rats_message(const std::string& type, const nlohmann::json& payload, const std::string& sender_peer_id) {
-    nlohmann::json message;
-    message["rats_protocol"] = true;
-    message["type"] = type;
-    message["payload"] = payload;
-    message["sender_peer_id"] = sender_peer_id;
-    message["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+    // Combine header + payload
+    std::vector<uint8_t> message;
+    message.reserve(header_bytes.size() + payload.size());
+    message.insert(message.end(), header_bytes.begin(), header_bytes.end());
+    message.insert(message.end(), payload.begin(), payload.end());
     
     return message;
 }
 
-void RatsClient::handle_rats_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& message) {
-    try {
-        std::string message_type = message.value("type", "");
-        nlohmann::json payload = message.value("payload", nlohmann::json::object());
-        std::string sender_peer_id = message.value("sender_peer_id", "");
+// Helper method to parse message header and extract payload
+bool RatsClient::parse_message_with_header(const std::vector<uint8_t>& message, MessageHeader& header, std::vector<uint8_t>& payload) const {
+    // Check if message is large enough to contain header
+    if (message.size() < MessageHeader::HEADER_SIZE) {
+        LOG_CLIENT_DEBUG("Message too small to contain header: " << message.size() << " bytes");
+        return false;
+    }
+    
+    // Extract header bytes
+    std::vector<uint8_t> header_bytes(message.begin(), message.begin() + MessageHeader::HEADER_SIZE);
+    
+    // Parse header
+    if (!MessageHeader::deserialize(header_bytes, header)) {
+        LOG_CLIENT_DEBUG("Failed to parse message header - invalid magic number or format");
+        return false;
+    }
+    
+    // Validate header
+    if (!header.is_valid_type()) {
+        LOG_CLIENT_WARN("Invalid message data type: " << static_cast<int>(header.type));
+        return false;
+    }
+    
+    // Extract payload
+    payload.assign(message.begin() + MessageHeader::HEADER_SIZE, message.end());
+    
+    LOG_CLIENT_DEBUG("Parsed message header: type=" << static_cast<int>(header.type) << ", payload_size=" << payload.size());
+    return true;
+}
+
+bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data, MessageDataType message_type) {
+    if (!running_.load()) {
+        return false;
+    }
+    
+    // Get socket-specific mutex for thread-safe sending
+    // Prevent framed messages corruption (like two-times sending the number of bytes instead number of bytes + message)
+    std::mutex* socket_mutex = get_socket_send_mutex(socket);
+    std::lock_guard<std::mutex> send_lock(*socket_mutex);
+    
+    // Create message with specified header type
+    std::vector<uint8_t> message_with_header = create_message_with_header(data, message_type);
+    
+    // Use encrypted communication if encryption is enabled
+    if (is_encryption_enabled()) {
+        // Check if handshake is completed before sending data
+        if (!encrypted_communication::is_handshake_completed(socket)) {
+            std::string type_name = (message_type == MessageDataType::BINARY) ? "binary" : 
+                                   (message_type == MessageDataType::STRING) ? "string" : "JSON";
+            LOG_CLIENT_WARN("Cannot send " << type_name << " data to socket " << socket << " - encryption handshake not completed");
+            return false;
+        }
         
-        LOG_CLIENT_DEBUG("Received rats message type '" << message_type << "' from " << peer_hash_id);
-        
-        // Call registered message handlers for all message types (including custom ones)
-        call_message_handlers(message_type, sender_peer_id.empty() ? peer_hash_id : sender_peer_id, payload);
-        
-        // Handle built-in message types for internal functionality
-        if (message_type == "peer") {
-            handle_peer_exchange_message(socket, peer_hash_id, payload);
-        } 
-        else if (message_type == "peers_request") {
-            handle_peers_request_message(socket, peer_hash_id, payload);
-        }
-        else if (message_type == "peers_response") {
-            handle_peers_response_message(socket, peer_hash_id, payload);
-        }
-        // ICE coordination messages
-        else if (message_type == "ice_offer") {
-            handle_ice_offer_message(socket, peer_hash_id, payload);
-        }
-        else if (message_type == "ice_answer") {
-            handle_ice_answer_message(socket, peer_hash_id, payload);
-        }
-        else if (message_type == "ice_candidate") {
-            handle_ice_candidate_message(socket, peer_hash_id, payload);
-        }
-        // NAT traversal coordination messages
-        else if (message_type == "hole_punch_coordination") {
-            handle_hole_punch_coordination_message(socket, peer_hash_id, payload);
-        }
-        else if (message_type == "nat_info_exchange") {
-            handle_nat_info_exchange_message(socket, peer_hash_id, payload);
-        }
-        // Custom message types are now handled by registered handlers above
-        // No need for else clause - all message types are valid if they have registered handlers
-        
-    } catch (const nlohmann::json::exception& e) {
-        LOG_CLIENT_ERROR("Failed to handle rats message: " << e.what());
+        int sent = encrypted_communication::send_tcp_data_encrypted(socket, message_with_header);
+        return sent > 0;
+    } else {
+        // Use framed messages for reliable large message handling
+        int sent = send_tcp_message_framed(socket, message_with_header);
+        return sent > 0;
     }
 }
 
-void RatsClient::handle_peer_exchange_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
+bool RatsClient::send_string_to_peer(socket_t socket, const std::string& data) {
+    // Convert string to binary and use the primary send_binary_to_peer method
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return send_binary_to_peer(socket, binary_data, MessageDataType::STRING);
+}
+
+bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& data) {
     try {
-        std::string peer_ip = payload.value("ip", "");
-        int peer_port = payload.value("port", 0);
-        std::string peer_id = payload.value("peer_id", "");
-        
-        if (peer_ip.empty() || peer_port <= 0 || peer_id.empty()) {
-            LOG_CLIENT_WARN("Invalid peer exchange message from " << peer_hash_id);
-            return;
-        }
-        
-        LOG_CLIENT_INFO("Received peer exchange: " << peer_ip << ":" << peer_port << " (peer_id: " << peer_id << ")");
-        
-        // Check if we should ignore this peer (local interface)
-        if (should_ignore_peer(peer_ip, peer_port)) {
-            LOG_CLIENT_DEBUG("Ignoring exchanged peer " << peer_ip << ":" << peer_port << " - local interface address");
-            return;
-        }
-        
-        // Check if we're already connected to this peer
-        std::string normalized_peer_address = normalize_peer_address(peer_ip, peer_port);
-        if (is_already_connected_to_address(normalized_peer_address)) {
-            LOG_CLIENT_DEBUG("Already connected to exchanged peer " << normalized_peer_address);
-            return;
-        }
-        
-        // Check if peer limit is reached
-        if (is_peer_limit_reached()) {
-            LOG_CLIENT_DEBUG("Peer limit reached, not connecting to exchanged peer " << peer_ip << ":" << peer_port);
-            return;
-        }
-        
-        // Try to connect to the exchanged peer (non-blocking)
-        add_managed_thread(std::thread([this, peer_ip, peer_port, peer_id]() {
-            if (connect_to_peer(peer_ip, peer_port)) {
-                LOG_CLIENT_INFO("Successfully connected to exchanged peer: " << peer_ip << ":" << peer_port);
-            } else {
-                LOG_CLIENT_DEBUG("Failed to connect to exchanged peer: " << peer_ip << ":" << peer_port);
-            }
-        }), "peer-exchange-connect-" + peer_id.substr(0, 8));
-        
+        // Serialize JSON and convert to binary, then use the primary send_binary_to_peer method
+        std::string json_string = data.dump();
+        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
+        return send_binary_to_peer(socket, binary_data, MessageDataType::JSON);
     } catch (const nlohmann::json::exception& e) {
-        LOG_CLIENT_ERROR("Failed to handle peer exchange message: " << e.what());
+        LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
+        return false;
     }
 }
 
-// General broadcasting functions
-int RatsClient::broadcast_rats_message(const nlohmann::json& message, const std::string& exclude_peer_id) {
+bool RatsClient::send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data, MessageDataType message_type) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = peers_.find(peer_hash_id);
+    if (it == peers_.end() || !it->second.is_handshake_completed()) {
+        return false;
+    }
+    
+    return send_binary_to_peer(it->second.socket, data, message_type);
+}
+
+bool RatsClient::send_string_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
+    // Convert string to binary and use primary binary method with STRING type
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::STRING);
+}
+
+bool RatsClient::send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& data) {
+    try {
+        // Serialize JSON and convert to binary, then use primary binary method with JSON type
+        std::string json_string = data.dump();
+        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
+        return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::JSON);
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
+        return false;
+    }
+}
+
+int RatsClient::broadcast_json_to_peers(const nlohmann::json& data) {
+    try {
+        // Serialize JSON and convert to binary, then use primary binary method with JSON type
+        std::string json_string = data.dump();
+        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
+        return broadcast_binary_to_peers(binary_data, MessageDataType::JSON);
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to serialize JSON message for broadcast: " << e.what());
+        return 0;
+    }
+}
+
+int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data, MessageDataType message_type) {
+    if (!running_.load()) {
+        return 0;
+    }
+    
     int sent_count = 0;
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        for (const auto& pair : peers_) {
-            const RatsPeer& peer = pair.second;
-            // Don't send to excluded peer
-            if (!exclude_peer_id.empty() && peer.peer_id == exclude_peer_id) {
-                continue;
-            }
-            
-            if (send_json_to_peer(peer.socket, message)) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    
+    for (const auto& pair : peers_) {
+        const RatsPeer& peer = pair.second;
+        // Only send to peers that have completed handshake
+        if (peer.is_handshake_completed()) {
+            if (send_binary_to_peer(peer.socket, data, message_type)) {
                 sent_count++;
             }
         }
     }
+    
     return sent_count;
 }
 
-int RatsClient::broadcast_rats_message_to_validated_peers(const nlohmann::json& message, const std::string& exclude_peer_id) {
-    int sent_count = 0;
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        for (const auto& pair : peers_) {
-            const RatsPeer& peer = pair.second;
-            // Don't send to excluded peer and only send to peers with completed handshake
-            if ((!exclude_peer_id.empty() && peer.peer_id == exclude_peer_id) || 
-                !peer.is_handshake_completed()) {
-                continue;
-            }
-            
-            if (send_json_to_peer(peer.socket, message)) {
-                sent_count++;
-            }
+int RatsClient::broadcast_string_to_peers(const std::string& data) {
+    // Convert string to binary and use primary binary method with STRING type
+    std::vector<uint8_t> binary_data(data.begin(), data.end());
+    return broadcast_binary_to_peers(binary_data, MessageDataType::STRING);
+}
+
+bool RatsClient::parse_json_message(const std::string& message, nlohmann::json& out_json) {
+    try {
+        out_json = nlohmann::json::parse(message);
+        return true;
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to parse JSON message: " << e.what());
+        return false;
+    }
+}
+
+// Helpers
+
+// Per-socket synchronization helpers
+std::mutex* RatsClient::get_socket_send_mutex(socket_t socket) {
+    std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
+    auto it = socket_send_mutexes_.find(socket);
+    if (it == socket_send_mutexes_.end()) {
+        // Create new mutex for this socket
+        socket_send_mutexes_[socket] = std::make_unique<std::mutex>();
+        return socket_send_mutexes_[socket].get();
+    }
+    return it->second.get();
+}
+
+void RatsClient::cleanup_socket_send_mutex(socket_t socket) {
+    std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
+    socket_send_mutexes_.erase(socket);
+}
+
+// =========================================================================
+// Peer Information and Management
+// =========================================================================
+
+std::string RatsClient::get_our_peer_id() const {
+    return our_peer_id_;
+}
+
+int RatsClient::get_peer_count_unlocked() const {
+    // Assumes peers_mutex_ is already locked
+    int count = 0;
+    for (const auto& pair : peers_) {
+        if (pair.second.is_handshake_completed()) {
+            count++;
         }
     }
-    return sent_count;
+    return count;
 }
 
-// Specific message creation functions
-nlohmann::json RatsClient::create_peer_exchange_message(const RatsPeer& peer) {
-    // Create peer exchange payload
-    nlohmann::json payload;
-    payload["ip"] = peer.ip;
-    payload["port"] = peer.port;
-    payload["peer_id"] = peer.peer_id;
-    payload["connection_type"] = peer.is_outgoing ? "outgoing" : "incoming";
+int RatsClient::get_peer_count() const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    return get_peer_count_unlocked();
+}
+
+std::string RatsClient::get_peer_hash_id(socket_t socket) const {
+    const RatsPeer* peer = get_peer_by_socket(socket);
+    return peer ? peer->peer_id : "";
+}
+
+socket_t RatsClient::get_peer_socket(const std::string& peer_hash_id) const {
+    const RatsPeer* peer = get_peer_by_id(peer_hash_id);
+    return peer ? peer->socket : INVALID_SOCKET_VALUE;
+}
+
+std::vector<RatsPeer> RatsClient::get_all_peers() const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    std::vector<RatsPeer> result;
+    result.reserve(peers_.size());
     
-    // Create rats message
-    return create_rats_message("peer", payload, peer.peer_id);
-}
-
-void RatsClient::broadcast_peer_exchange_message(const RatsPeer& new_peer) {
-    // Don't broadcast exchange messages for ourselves
-    if (new_peer.peer_id.empty()) {
-        return;
+    for (const auto& pair : peers_) {
+        result.push_back(pair.second);
     }
     
-    // Create peer exchange message
-    nlohmann::json message = create_peer_exchange_message(new_peer);
-    
-    // Broadcast to all validated peers except the new peer
-    int sent_count = broadcast_rats_message_to_validated_peers(message, new_peer.peer_id);
-    
-    LOG_CLIENT_INFO("Broadcasted peer exchange message for " << new_peer.ip << ":" << new_peer.port 
-                    << " to " << sent_count << " peers");
+    return result;
 }
 
-// Peers request/response system implementation
-nlohmann::json RatsClient::create_peers_request_message(const std::string& sender_peer_id) {
-    nlohmann::json payload;
-    payload["max_peers"] = 5;  // Request up to 5 peers
-    payload["requester_info"] = {
-        {"listen_port", listen_port_},
-        {"peer_count", get_peer_count()}
-    };
+std::vector<RatsPeer> RatsClient::get_validated_peers() const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    std::vector<RatsPeer> result;
     
-    return create_rats_message("peers_request", payload, sender_peer_id);
-}
-
-nlohmann::json RatsClient::create_peers_response_message(const std::vector<RatsPeer>& peers, const std::string& sender_peer_id) {
-    nlohmann::json payload;
-    nlohmann::json peers_array = nlohmann::json::array();
-    
-    for (const auto& peer : peers) {
-        nlohmann::json peer_info;
-        peer_info["ip"] = peer.ip;
-        peer_info["port"] = peer.port;
-        peer_info["peer_id"] = peer.peer_id;
-        peer_info["connection_type"] = peer.is_outgoing ? "outgoing" : "incoming";
-        peers_array.push_back(peer_info);
+    for (const auto& pair : peers_) {
+        if (pair.second.is_handshake_completed()) {
+            result.push_back(pair.second);
+        }
     }
     
-    payload["peers"] = peers_array;
-    payload["total_peers"] = get_peer_count();
-    
-    return create_rats_message("peers_response", payload, sender_peer_id);
+    return result;
 }
+
 
 std::vector<RatsPeer> RatsClient::get_random_peers(int max_count, const std::string& exclude_peer_id) const {
     std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -2363,299 +1588,874 @@ std::vector<RatsPeer> RatsClient::get_random_peers(int max_count, const std::str
     return selected_peers;
 }
 
-void RatsClient::handle_peers_request_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
-    try {
-        int max_peers = payload.value("max_peers", 5);
-        
-        LOG_CLIENT_INFO("Received peers request from " << peer_hash_id << " for up to " << max_peers << " peers");
-        
-        // Get random peers excluding the requester
-        std::vector<RatsPeer> random_peers = get_random_peers(max_peers, peer_hash_id);
-        
-        LOG_CLIENT_DEBUG("Sending " << random_peers.size() << " peers to " << peer_hash_id);
-        
-        // Create and send peers response
-        nlohmann::json response_message = create_peers_response_message(random_peers, peer_hash_id);
-        
-        if (!send_json_to_peer(socket, response_message)) {
-            LOG_CLIENT_ERROR("Failed to send peers response to " << peer_hash_id);
-        } else {
-            LOG_CLIENT_DEBUG("Sent peers response with " << random_peers.size() << " peers to " << peer_hash_id);
-        }
-        
-    } catch (const nlohmann::json::exception& e) {
-        LOG_CLIENT_ERROR("Failed to handle peers request message: " << e.what());
-    }
-}
-
-void RatsClient::handle_peers_response_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
-    try {
-        nlohmann::json peers_array = payload.value("peers", nlohmann::json::array());
-        int total_peers = payload.value("total_peers", 0);
-        
-        LOG_CLIENT_INFO("Received peers response from " << peer_hash_id << " with " << peers_array.size() 
-                        << " peers (total: " << total_peers << ")");
-        
-        // Process each peer in the response
-        for (const auto& peer_info : peers_array) {
-            std::string peer_ip = peer_info.value("ip", "");
-            int peer_port = peer_info.value("port", 0);
-            std::string peer_id = peer_info.value("peer_id", "");
-            
-            if (peer_ip.empty() || peer_port <= 0 || peer_id.empty()) {
-                LOG_CLIENT_WARN("Invalid peer info in peers response from " << peer_hash_id);
-                continue;
-            }
-            
-            LOG_CLIENT_DEBUG("Processing peer from response: " << peer_ip << ":" << peer_port << " (peer_id: " << peer_id << ")");
-            
-            // Check if we should ignore this peer (local interface)
-            if (should_ignore_peer(peer_ip, peer_port)) {
-                LOG_CLIENT_DEBUG("Ignoring peer from response " << peer_ip << ":" << peer_port << " - local interface address");
-                continue;
-            }
-            
-            // Check if we're already connected to this peer
-            std::string normalized_peer_address = normalize_peer_address(peer_ip, peer_port);
-            if (is_already_connected_to_address(normalized_peer_address)) {
-                LOG_CLIENT_DEBUG("Already connected to peer from response " << normalized_peer_address);
-                continue;
-            }
-            
-            // Check if peer limit is reached
-            if (is_peer_limit_reached()) {
-                LOG_CLIENT_DEBUG("Peer limit reached, not connecting to peer from response " << peer_ip << ":" << peer_port);
-                continue;
-            }
-            
-            // Try to connect to the peer (non-blocking)
-            LOG_CLIENT_INFO("Attempting to connect to peer from response: " << peer_ip << ":" << peer_port);
-            add_managed_thread(std::thread([this, peer_ip, peer_port, peer_id]() {
-                if (connect_to_peer(peer_ip, peer_port)) {
-                    LOG_CLIENT_INFO("Successfully connected to peer from response: " << peer_ip << ":" << peer_port);
-                } else {
-                    LOG_CLIENT_DEBUG("Failed to connect to peer from response: " << peer_ip << ":" << peer_port);
-                }
-            }), "peer-response-connect-" + peer_id.substr(0, 8));
-        }
-        
-    } catch (const nlohmann::json::exception& e) {
-        LOG_CLIENT_ERROR("Failed to handle peers response message: " << e.what());
-    }
-}
-
-void RatsClient::send_peers_request(socket_t socket, const std::string& our_peer_id) {
-    nlohmann::json request_message = create_peers_request_message(our_peer_id);
-    
-    if (send_json_to_peer(socket, request_message)) {
-        LOG_CLIENT_INFO("Sent peers request to socket " << socket);
-    } else {
-        LOG_CLIENT_ERROR("Failed to send peers request to socket " << socket);
-    }
-}
-
-// Utility functions for custom message types
-int RatsClient::broadcast_custom_message(const std::string& type, const nlohmann::json& payload, 
-                                        const std::string& sender_peer_id, 
-                                        const std::string& exclude_peer_id) {
-    // Create rats message
-    nlohmann::json message = create_rats_message(type, payload, sender_peer_id);
-    
-    // Broadcast to all validated peers
-    int sent_count = broadcast_rats_message_to_validated_peers(message, exclude_peer_id);
-    
-    LOG_CLIENT_DEBUG("Broadcasted custom message type '" << type << "' to " << sent_count << " peers");
-    return sent_count;
-}
-
-bool RatsClient::send_custom_message_to_peer(const std::string& peer_id, const std::string& type, 
-                                            const nlohmann::json& payload, 
-                                            const std::string& sender_peer_id) {
-    // Create rats message
-    nlohmann::json message = create_rats_message(type, payload, sender_peer_id);
-    
-    // Send to specific peer
+const RatsPeer* RatsClient::get_peer_by_id(const std::string& peer_id) const {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     auto it = peers_.find(peer_id);
-    if (it == peers_.end() || !it->second.is_handshake_completed()) {
-        LOG_CLIENT_WARN("Cannot send custom message to peer " << peer_id << " - peer not found or handshake not completed");
-        return false;
-    }
-    
-    bool success = send_json_to_peer(it->second.socket, message);
-    if (success) {
-        LOG_CLIENT_DEBUG("Sent custom message type '" << type << "' to peer " << peer_id);
-    } else {
-        LOG_CLIENT_ERROR("Failed to send custom message type '" << type << "' to peer " << peer_id);
-    }
-    
-    return success;
+    return (it != peers_.end()) ? &it->second : nullptr;
 }
 
-// Per-socket synchronization helpers
-std::mutex* RatsClient::get_socket_send_mutex(socket_t socket) {
-    std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
-    auto it = socket_send_mutexes_.find(socket);
-    if (it == socket_send_mutexes_.end()) {
-        // Create new mutex for this socket
-        socket_send_mutexes_[socket] = std::make_unique<std::mutex>();
-        return socket_send_mutexes_[socket].get();
+const RatsPeer* RatsClient::get_peer_by_socket(socket_t socket) const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = socket_to_peer_id_.find(socket);
+    if (it != socket_to_peer_id_.end()) {
+        auto peer_it = peers_.find(it->second);
+        return (peer_it != peers_.end()) ? &peer_it->second : nullptr;
     }
-    return it->second.get();
+    return nullptr;
 }
 
-void RatsClient::cleanup_socket_send_mutex(socket_t socket) {
-    std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
-    socket_send_mutexes_.erase(socket);
+
+// Peer limit management methods
+int RatsClient::get_max_peers() const {
+    return max_peers_;
 }
 
-// Configuration persistence implementation
-std::string RatsClient::generate_persistent_peer_id() const {
-    // Generate a unique peer ID using SHA1 hash of timestamp, random data, and hostname
+void RatsClient::set_max_peers(int max_peers) {
+    max_peers_ = max_peers;
+    LOG_CLIENT_INFO("Maximum peers set to " << max_peers_);
+}
+
+bool RatsClient::is_peer_limit_reached() const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    return static_cast<int>(peers_.size()) >= max_peers_;
+}
+
+std::string RatsClient::generate_peer_hash_id(socket_t socket, const std::string& connection_info) {
+    // Generate unique hash ID using timestamp, socket, connection info, and random component
     auto now = std::chrono::high_resolution_clock::now();
     auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
     
-    // Get system information for uniqueness
-    SystemInfo sys_info = get_system_info();
-    
-    // Create random component
+    // Create a random component
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, 255);
     
-    // Build unique string
-    std::ostringstream unique_stream;
-    unique_stream << timestamp << "_" << sys_info.hostname << "_" << listen_port_ << "_";
+    // Build hash string
+    std::ostringstream hash_stream;
+    hash_stream << std::hex << timestamp << "_" << socket << "_";
+    
+    // Add connection info hash
+    std::hash<std::string> hasher;
+    hash_stream << hasher(connection_info) << "_";
     
     // Add random component
-    for (int i = 0; i < 16; ++i) {
-        unique_stream << std::setfill('0') << std::setw(2) << std::hex << dis(gen);
+    for (int i = 0; i < 8; ++i) {
+        hash_stream << std::setfill('0') << std::setw(2) << dis(gen);
     }
     
-    // Generate SHA1 hash of the unique string
-    std::string unique_string = unique_stream.str();
-    std::string peer_id = SHA1::hash(unique_string);
-    
-    LOG_CLIENT_INFO("Generated new persistent peer ID: " << peer_id);
-    return peer_id;
+    return hash_stream.str();
 }
 
-nlohmann::json RatsClient::serialize_peer_for_persistence(const RatsPeer& peer) const {
-    nlohmann::json peer_json;
-    peer_json["ip"] = peer.ip;
-    peer_json["port"] = peer.port;
-    peer_json["peer_id"] = peer.peer_id;
-    peer_json["normalized_address"] = peer.normalized_address;
-    peer_json["is_outgoing"] = peer.is_outgoing;
-    peer_json["version"] = peer.version;
+std::string RatsClient::normalize_peer_address(const std::string& ip, int port) const {
+    // Normalize IPv6 addresses and create consistent format
+    std::string normalized_ip = ip;
     
-    // Add timestamp for cleanup of old peers
-    auto now = std::chrono::high_resolution_clock::now();
-    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-    peer_json["last_seen"] = timestamp;
+    // Remove brackets from IPv6 addresses if present
+    if (!normalized_ip.empty() && normalized_ip.front() == '[' && normalized_ip.back() == ']') {
+        normalized_ip = normalized_ip.substr(1, normalized_ip.length() - 2);
+    }
     
-    return peer_json;
+    // Handle localhost variations
+    if (normalized_ip == "localhost" || normalized_ip == "::1") {
+        normalized_ip = "127.0.0.1";
+    }
+    
+    // For IPv6 addresses, add brackets for consistency
+    if (normalized_ip.find(':') != std::string::npos && normalized_ip.find('.') == std::string::npos) {
+        // This is likely an IPv6 address (contains colons but no dots)
+        return "[" + normalized_ip + "]:" + std::to_string(port);
+    }
+    
+    return normalized_ip + ":" + std::to_string(port);
 }
 
-bool RatsClient::deserialize_peer_from_persistence(const nlohmann::json& json, std::string& ip, int& port, std::string& peer_id) const {
-    try {
-        ip = json.value("ip", "");
-        port = json.value("port", 0);
-        peer_id = json.value("peer_id", "");
-        
-        // Validate required fields
-        if (ip.empty() || port <= 0 || port > 65535 || peer_id.empty()) {
-            return false;
-        }
-        
-        // Check if peer data is not too old (optional - remove peers older than 7 days)
-        if (json.contains("last_seen")) {
-            auto now = std::chrono::high_resolution_clock::now();
-            auto current_timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-            int64_t last_seen = json.value("last_seen", current_timestamp);
-            
-            const int64_t MAX_PEER_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 days
-            if (current_timestamp - last_seen > MAX_PEER_AGE_SECONDS) {
-                LOG_CLIENT_DEBUG("Skipping old peer " << ip << ":" << port << " (last seen " << (current_timestamp - last_seen) << " seconds ago)");
-                return false;
-            }
-        }
-        
+// =========================================================================
+// Callback Registration
+// ========================================================================
+
+void RatsClient::set_connection_callback(ConnectionCallback callback) {
+    connection_callback_ = callback;
+}
+
+void RatsClient::set_binary_data_callback(BinaryDataCallback callback) {
+    binary_data_callback_ = callback;
+}
+
+void RatsClient::set_string_data_callback(StringDataCallback callback) {
+    string_data_callback_ = callback;
+}
+
+void RatsClient::set_json_data_callback(JsonDataCallback callback) {
+    json_data_callback_ = callback;
+}
+
+void RatsClient::set_disconnect_callback(DisconnectCallback callback) {
+    disconnect_callback_ = callback;
+}
+
+// NAT Traversal and ICE Callback Registration
+void RatsClient::set_advanced_connection_callback(AdvancedConnectionCallback callback) {
+    advanced_connection_callback_ = callback;
+}
+
+void RatsClient::set_nat_traversal_progress_callback(NatTraversalProgressCallback callback) {
+    nat_progress_callback_ = callback;
+}
+
+void RatsClient::set_ice_candidate_callback(IceCandidateDiscoveredCallback callback) {
+    ice_candidate_callback_ = callback;
+}
+
+// =========================================================================
+// Peer Discovery Methods
+// =========================================================================
+
+bool RatsClient::start_dht_discovery(int dht_port) {
+    if (dht_client_ && dht_client_->is_running()) {
+        LOG_CLIENT_WARN("DHT discovery is already running");
         return true;
-        
-    } catch (const nlohmann::json::exception& e) {
-        LOG_CLIENT_ERROR("Failed to deserialize peer: " << e.what());
-        return false;
-    }
-}
-
-std::string RatsClient::get_config_file_path() const {
-    #ifdef TESTING
-        return "config_" + std::to_string(listen_port_) + ".json";
-    #else
-        return data_directory_ + "/" + CONFIG_FILE_NAME;
-    #endif
-}
-
-std::string RatsClient::get_peers_file_path() const {
-    #ifdef TESTING
-        return "peers_" + std::to_string(listen_port_) + ".json";
-    #else
-        return data_directory_ + "/" + PEERS_FILE_NAME;
-    #endif
-}
-
-std::string RatsClient::get_peers_ever_file_path() const {
-    #ifdef TESTING
-        return "peers_ever_" + std::to_string(listen_port_) + ".json";
-    #else
-        return data_directory_ + "/" + PEERS_EVER_FILE_NAME;
-    #endif
-}
-
-bool RatsClient::set_data_directory(const std::string& directory_path) {
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    
-    // Normalize the path (remove trailing slashes)
-    std::string normalized_path = directory_path;
-    while (!normalized_path.empty() && (normalized_path.back() == '/' || normalized_path.back() == '\\')) {
-        normalized_path.pop_back();
     }
     
-    // Use current directory if empty
-    if (normalized_path.empty()) {
-        normalized_path = ".";
-    }
+    LOG_CLIENT_INFO("Starting DHT discovery on port " << dht_port);
     
-    // Check if directory exists
-    if (!directory_exists(normalized_path)) {
-        // Try to create the directory
-        if (!create_directories(normalized_path.c_str())) {
-            LOG_CLIENT_ERROR("Failed to create data directory: " << normalized_path);
-            return false;
-        }
-        LOG_CLIENT_INFO("Created data directory: " << normalized_path);
-    }
-    
-    // Test if we can write to the directory by creating a temporary file
-    std::string test_file = normalized_path + "/test_write_access.tmp";
-    if (!create_file(test_file, "test")) {
-        LOG_CLIENT_ERROR("Cannot write to data directory: " << normalized_path);
+    dht_client_ = std::make_unique<DhtClient>(dht_port);
+    if (!dht_client_->start()) {
+        LOG_CLIENT_ERROR("Failed to start DHT client");
+        dht_client_.reset();
         return false;
     }
     
-    // Clean up test file
-    delete_file(test_file.c_str());
+    // Bootstrap with default nodes
+    auto bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
+    if (!dht_client_->bootstrap(bootstrap_nodes)) {
+        LOG_CLIENT_WARN("Failed to bootstrap DHT");
+    }
     
-    data_directory_ = normalized_path;
-    LOG_CLIENT_INFO("Data directory set to: " << data_directory_);
+    // Start automatic peer discovery
+    start_automatic_peer_discovery();
+    
+    LOG_CLIENT_INFO("DHT discovery started successfully");
     return true;
 }
 
-std::string RatsClient::get_data_directory() const {
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    return data_directory_;
+void RatsClient::stop_dht_discovery() {
+    if (!dht_client_) {
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Stopping DHT discovery");
+    
+    // Stop automatic peer discovery
+    stop_automatic_peer_discovery();
+    
+    dht_client_->stop();
+    dht_client_.reset();
+    LOG_CLIENT_INFO("DHT discovery stopped");
 }
+
+bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback, int iteration_max) {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_CLIENT_ERROR("DHT client not running");
+        return false;
+    }
+    
+    if (content_hash.length() != 40) {  // 160-bit hash as hex string
+        LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected 40)");
+        return false;
+    }
+    
+    LOG_CLIENT_INFO("Finding peers for content hash: " << content_hash << " with iteration max: " << iteration_max);
+    
+    InfoHash info_hash = hex_to_node_id(content_hash);
+    
+    return dht_client_->find_peers(info_hash, [this, callback](const std::vector<Peer>& peers, const InfoHash& info_hash) {
+        handle_dht_peer_discovery(peers, info_hash);
+        
+        // Convert Peer to string addresses for callback
+        std::vector<std::string> peer_addresses;
+        for (const auto& peer : peers) {
+            peer_addresses.push_back(peer.ip + ":" + std::to_string(peer.port));
+        }
+        
+        if (callback) {
+            callback(peer_addresses);
+        }
+    }, iteration_max);
+}
+
+bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t port) {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_CLIENT_ERROR("DHT client not running");
+        return false;
+    }
+    
+    if (content_hash.length() != 40) {  // 160-bit hash as hex string
+        LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected 40)");
+        return false;
+    }
+    
+    if (port == 0) {
+        port = listen_port_;
+    }
+    
+    LOG_CLIENT_INFO("Announcing for content hash: " << content_hash << " on port " << port);
+    
+    InfoHash info_hash = hex_to_node_id(content_hash);
+    return dht_client_->announce_peer(info_hash, port);
+}
+
+bool RatsClient::is_dht_running() const {
+    return dht_client_ && dht_client_->is_running();
+}
+
+size_t RatsClient::get_dht_routing_table_size() const {
+    if (!dht_client_) {
+        return 0;
+    }
+    return dht_client_->get_routing_table_size();
+}
+
+void RatsClient::handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash) {
+    LOG_CLIENT_INFO("DHT discovered " << peers.size() << " peers for info hash: " << node_id_to_hex(info_hash));
+    
+    // Auto-connect to discovered peers (optional behavior)
+    for (const auto& peer : peers) {
+        // Check if this peer should be ignored (local interface)
+        if (should_ignore_peer(peer.ip, peer.port)) {
+            LOG_CLIENT_DEBUG("Ignoring discovered peer " << peer.ip << ":" << peer.port << " - local interface address");
+            continue;
+        }
+        
+        // Check if we're already connected to this peer
+        std::string normalized_peer_address = normalize_peer_address(peer.ip, peer.port);
+        bool already_connected = is_already_connected_to_address(normalized_peer_address);
+        
+        if (!already_connected) {
+            // Check if peer limit is reached
+            if (is_peer_limit_reached()) {
+                LOG_CLIENT_DEBUG("Peer limit reached, not connecting to DHT discovered peer " << peer.ip << ":" << peer.port);
+                continue;
+            }
+            
+            LOG_CLIENT_DEBUG("Attempting to connect to discovered peer: " << peer.ip << ":" << peer.port);
+            
+            // Try to connect to the peer (non-blocking)
+            std::thread([this, peer]() {
+                if (connect_to_peer(peer.ip, peer.port)) {
+                    LOG_CLIENT_INFO("Successfully connected to DHT discovered peer: " << peer.ip << ":" << peer.port);
+                } else {
+                    LOG_CLIENT_DEBUG("Failed to connect to DHT discovered peer: " << peer.ip << ":" << peer.port);
+                }
+            }).detach();
+        } else {
+            LOG_CLIENT_DEBUG("Already connected to discovered peer: " << normalized_peer_address);
+        }
+    }
+}
+
+void RatsClient::start_automatic_peer_discovery() {
+    if (auto_discovery_running_.load()) {
+        LOG_CLIENT_WARN("Automatic peer discovery is already running");
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Starting automatic rats peer discovery");
+    auto_discovery_running_.store(true);
+    auto_discovery_thread_ = std::thread(&RatsClient::automatic_discovery_loop, this);
+}
+
+void RatsClient::stop_automatic_peer_discovery() {
+    if (!auto_discovery_running_.load()) {
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Stopping automatic peer discovery");
+    auto_discovery_running_.store(false);
+    
+    if (auto_discovery_thread_.joinable()) {
+        auto_discovery_thread_.join();
+    }
+    
+    LOG_CLIENT_INFO("Automatic peer discovery stopped");
+}
+
+bool RatsClient::is_automatic_discovery_running() const {
+    return auto_discovery_running_.load();
+}
+
+// This function will be removed - implementation moved to end of file
+
+void RatsClient::automatic_discovery_loop() {
+    LOG_CLIENT_INFO("Automatic peer discovery loop started");
+    
+    // Initial delay to let DHT bootstrap
+    {
+        std::unique_lock<std::mutex> lock(shutdown_mutex_);
+        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
+            LOG_CLIENT_INFO("Automatic peer discovery loop stopped during initial delay");
+            return;
+        }
+    }
+
+    // Search immediately
+    search_rats_peers(5);
+    
+    {
+        std::unique_lock<std::mutex> lock(shutdown_mutex_);
+        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(10), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
+            LOG_CLIENT_INFO("Automatic peer discovery loop stopped during search delay");
+            return;
+        }
+    }
+    
+    // Announce immediately
+    announce_rats_peer();
+
+    auto last_announce = std::chrono::steady_clock::now();
+    auto last_search = std::chrono::steady_clock::now();
+    
+    while (auto_discovery_running_.load()) {
+        auto now = std::chrono::steady_clock::now();
+        
+        if (get_peer_count() == 0) {
+            // No peers: aggressive search and announce
+            if (now - last_search >= std::chrono::seconds(2)) {
+                search_rats_peers();
+                last_search = now;
+            }
+            if (now - last_announce >= std::chrono::seconds(10)) {
+                announce_rats_peer();
+                last_announce = now;
+            }
+        } else {
+            // Peers connected: less aggressive, similar to original logic
+            if (now - last_search >= std::chrono::minutes(5)) {
+                search_rats_peers();
+                last_search = now;
+            }
+            if (now - last_announce >= std::chrono::minutes(10)) {
+                announce_rats_peer();
+                last_announce = now;
+            }
+        }
+        
+        // Use conditional variable for responsive shutdown
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
+                break;
+            }
+        }
+    }
+    
+    LOG_CLIENT_INFO("Automatic peer discovery loop stopped");
+}
+
+void RatsClient::announce_rats_peer() {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_CLIENT_WARN("DHT client not running, cannot announce peer");
+        return;
+    }
+    
+    std::string discovery_hash = get_discovery_hash();
+    LOG_CLIENT_INFO("Announcing peer for discovery hash: " << discovery_hash << " on port " << listen_port_);
+    
+    if (announce_for_hash(discovery_hash, listen_port_)) {
+        LOG_CLIENT_DEBUG("Successfully announced peer for discovery");
+    } else {
+        LOG_CLIENT_WARN("Failed to announce peer for discovery");
+    }
+}
+
+void RatsClient::search_rats_peers(int iteration_max) {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_CLIENT_WARN("DHT client not running, cannot search for peers");
+        return;
+    }
+    
+    std::string discovery_hash = get_discovery_hash();
+    LOG_CLIENT_INFO("Searching for peers using discovery hash: " << discovery_hash << " with iteration max: " << iteration_max);
+    
+    find_peers_by_hash(discovery_hash, [this](const std::vector<std::string>& peers) {
+        LOG_CLIENT_INFO("Found " << peers.size() << " peers through DHT discovery");
+        // Note: Connection attempts are handled by handle_dht_peer_discovery() which is called
+        // automatically by find_peers_by_hash(), so no need to duplicate connection logic here
+        for (const auto& peer_address : peers) {
+            LOG_CLIENT_DEBUG("Discovered peer: " << peer_address);
+        }
+    }, iteration_max);
+}
+
+std::string RatsClient::get_discovery_hash() const {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    // Generate discovery hash based on current protocol configuration
+    std::string discovery_string = custom_protocol_name_ + "_peer_discovery_v" + custom_protocol_version_;
+    return SHA1::hash(discovery_string);
+}
+
+std::string RatsClient::get_rats_peer_discovery_hash() {
+    // Well-known hash for rats peer discovery
+    // Compute SHA1 hash of "rats_peer_discovery_v1.0"
+    return SHA1::hash("rats_peer_discovery_v1.0");
+}
+
+// ===== mDNS DISCOVERY METHODS IMPLEMENTATION =====
+
+bool RatsClient::start_mdns_discovery(const std::string& service_instance_name, 
+                                     const std::map<std::string, std::string>& txt_records) {
+    if (!running_.load()) {
+        LOG_CLIENT_ERROR("RatsClient is not running, cannot start mDNS discovery");
+        return false;
+    }
+    
+    if (mdns_client_ && mdns_client_->is_running()) {
+        LOG_CLIENT_WARN("mDNS discovery is already running");
+        return true;
+    }
+    
+    LOG_CLIENT_INFO("Starting mDNS service discovery and announcement");
+    
+    // Create service instance name from our peer ID if not provided
+    std::string instance_name = service_instance_name;
+    if (instance_name.empty()) {
+        instance_name = "librats-" + get_our_peer_id().substr(0, 8);
+    }
+    
+    // Create mDNS client
+    mdns_client_ = std::make_unique<MdnsClient>(instance_name, listen_port_);
+    
+    // Set service discovery callback
+    mdns_client_->set_service_callback([this](const MdnsService& service, bool is_new) {
+        handle_mdns_service_discovery(service, is_new);
+    });
+    
+    // Start mDNS client
+    if (!mdns_client_->start()) {
+        LOG_CLIENT_ERROR("Failed to start mDNS client");
+        mdns_client_.reset();
+        return false;
+    }
+    
+    // Start service announcement
+    if (!mdns_client_->announce_service(instance_name, listen_port_, txt_records)) {
+        LOG_CLIENT_WARN("Failed to start mDNS service announcement");
+    }
+    
+    // Start service discovery
+    if (!mdns_client_->start_discovery()) {
+        LOG_CLIENT_WARN("Failed to start mDNS service discovery");
+    }
+    
+    LOG_CLIENT_INFO("mDNS discovery started successfully for service: " << instance_name);
+    return true;
+}
+
+void RatsClient::stop_mdns_discovery() {
+    if (!mdns_client_) {
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Stopping mDNS discovery");
+    
+    mdns_client_->stop();
+    mdns_client_.reset();
+    
+    LOG_CLIENT_INFO("mDNS discovery stopped");
+}
+
+bool RatsClient::is_mdns_running() const {
+    return mdns_client_ && mdns_client_->is_running();
+}
+
+void RatsClient::set_mdns_callback(std::function<void(const std::string&, int, const std::string&)> callback) {
+    mdns_callback_ = callback;
+}
+
+std::vector<MdnsService> RatsClient::get_mdns_services() const {
+    if (!mdns_client_) {
+        return {};
+    }
+    
+    return mdns_client_->get_recent_services(std::chrono::seconds(300)); // Services seen in last 5 minutes
+}
+
+bool RatsClient::query_mdns_services() {
+    if (!mdns_client_) {
+        LOG_CLIENT_ERROR("mDNS client not initialized");
+        return false;
+    }
+    
+    return mdns_client_->query_services();
+}
+
+void RatsClient::handle_mdns_service_discovery(const MdnsService& service, bool is_new) {
+    LOG_CLIENT_INFO("mDNS discovered " << (is_new ? "new" : "updated") << " librats service: " 
+                   << service.service_name << " at " << service.ip_address << ":" << service.port);
+    
+    // Extract instance name from service name for logging
+    std::string instance_name = service.service_name;
+    size_t pos = instance_name.find("._librats._tcp.local.");
+    if (pos != std::string::npos) {
+        instance_name = instance_name.substr(0, pos);
+    }
+    
+    // Call user callback if registered
+    if (mdns_callback_) {
+        try {
+            mdns_callback_(service.ip_address, service.port, instance_name);
+        } catch (const std::exception& e) {
+            LOG_CLIENT_ERROR("Exception in mDNS callback: " << e.what());
+        }
+    }
+    
+    // Auto-connect to discovered services if they're new
+    if (is_new) {
+        // Check if this peer should be ignored (local interface)
+        if (should_ignore_peer(service.ip_address, service.port)) {
+            LOG_CLIENT_DEBUG("Ignoring mDNS discovered peer " << service.ip_address << ":" 
+                            << service.port << " - local interface address");
+            return;
+        }
+        
+        // Check if we're already connected to this peer
+        std::string normalized_peer_address = normalize_peer_address(service.ip_address, service.port);
+        if (is_already_connected_to_address(normalized_peer_address)) {
+            LOG_CLIENT_DEBUG("Already connected to mDNS discovered peer: " << normalized_peer_address);
+            return;
+        }
+        
+        // Check if peer limit is reached
+        if (is_peer_limit_reached()) {
+            LOG_CLIENT_DEBUG("Peer limit reached, not connecting to mDNS discovered peer " 
+                            << service.ip_address << ":" << service.port);
+            return;
+        }
+        
+        LOG_CLIENT_INFO("Attempting to connect to mDNS discovered peer: " 
+                       << service.ip_address << ":" << service.port);
+        
+        // Try to connect to the discovered peer (non-blocking)
+        std::thread([this, service]() {
+            if (connect_to_peer(service.ip_address, service.port)) {
+                LOG_CLIENT_INFO("Successfully connected to mDNS discovered peer: " 
+                               << service.ip_address << ":" << service.port);
+            } else {
+                LOG_CLIENT_DEBUG("Failed to connect to mDNS discovered peer: " 
+                                << service.ip_address << ":" << service.port);
+            }
+        }).detach();
+    }
+}
+
+// =========================================================================
+// Protocol Configuration
+// =========================================================================
+
+void RatsClient::set_protocol_name(const std::string& protocol_name) {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    custom_protocol_name_ = protocol_name;
+    LOG_CLIENT_INFO("Protocol name set to: " << protocol_name);
+}
+
+void RatsClient::set_protocol_version(const std::string& protocol_version) {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    custom_protocol_version_ = protocol_version;
+    LOG_CLIENT_INFO("Protocol version set to: " << protocol_version);
+}
+
+std::string RatsClient::get_protocol_name() const {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    return custom_protocol_name_;
+}
+
+std::string RatsClient::get_protocol_version() const {
+    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+    return custom_protocol_version_;
+}
+
+// =========================================================================
+// Message Exchange API
+// =========================================================================
+
+
+void RatsClient::on(const std::string& message_type, MessageCallback callback) {
+    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+    message_handlers_[message_type].emplace_back(callback, false); // false = not once
+    LOG_CLIENT_INFO("Registered persistent handler for message type: " << message_type << " (total handlers: " << message_handlers_[message_type].size() << ")");
+}
+
+void RatsClient::once(const std::string& message_type, MessageCallback callback) {
+    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+    message_handlers_[message_type].emplace_back(callback, true); // true = once
+    LOG_CLIENT_DEBUG("Registered one-time handler for message type: " << message_type);
+}
+
+void RatsClient::off(const std::string& message_type) {
+    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+    auto it = message_handlers_.find(message_type);
+    if (it != message_handlers_.end()) {
+        size_t removed_count = it->second.size();
+        message_handlers_.erase(it);
+        LOG_CLIENT_DEBUG("Removed " << removed_count << " handlers for message type: " << message_type);
+    }
+}
+
+void RatsClient::send(const std::string& message_type, const nlohmann::json& data, SendCallback callback) {
+    if (!running_.load()) {
+        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' - client is not running");
+        if (callback) {
+            callback(false, "Client is not running");
+        }
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Sending broadcast message type '" << message_type << "' with data: " << data.dump());
+    
+    // Create rats message
+    nlohmann::json message = create_rats_message(message_type, data, get_our_peer_id());
+    
+    // Broadcast to all validated peers
+    int sent_count = broadcast_rats_message_to_validated_peers(message);
+    
+    LOG_CLIENT_INFO("Broadcasted message type '" << message_type << "' to " << sent_count << " peers");
+    
+    if (callback) {
+        if (sent_count > 0) {
+            callback(true, "");
+        } else {
+            LOG_CLIENT_WARN("No peers to send message to");
+            callback(false, "No peers to send message to");
+        }
+    }
+}
+
+void RatsClient::send(const std::string& peer_id, const std::string& message_type, const nlohmann::json& data, SendCallback callback) {
+    if (!running_.load()) {
+        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' to peer " << peer_id << " - client is not running");
+        if (callback) {
+            callback(false, "Client is not running");
+        }
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Sending targeted message type '" << message_type << "' to peer " << peer_id << " with data: " << data.dump());
+    
+    // Create rats message
+    nlohmann::json message = create_rats_message(message_type, data, get_our_peer_id());
+    
+    // Send to specific peer
+    socket_t target_socket = INVALID_SOCKET_VALUE;
+    bool peer_found = false;
+    bool handshake_completed = false;
+    
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto it = peers_.find(peer_id);
+        if (it != peers_.end()) {
+            peer_found = true;
+            handshake_completed = it->second.is_handshake_completed();
+            if (handshake_completed) {
+                target_socket = it->second.socket;
+            }
+        }
+    }
+    
+    if (!peer_found) {
+        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' - peer not found: " << peer_id);
+        if (callback) {
+            callback(false, "Peer not found: " + peer_id);
+        }
+        return;
+    }
+    
+    if (!handshake_completed) {
+        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' - peer handshake not completed: " << peer_id);
+        if (callback) {
+            callback(false, "Peer handshake not completed: " + peer_id);
+        }
+        return;
+    }
+    
+    bool success = send_json_to_peer(target_socket, message);
+    
+    LOG_CLIENT_INFO("Sent message type '" << message_type << "' to peer " << peer_id << " - " << (success ? "success" : "failed"));
+    
+    if (callback) {
+        if (success) {
+            callback(true, "");
+        } else {
+            callback(false, "Failed to send message to peer: " + peer_id);
+        }
+    }
+}
+
+// Message exchange system helpers
+void RatsClient::call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data) {
+    std::vector<MessageHandler> handlers_to_call;
+    std::vector<MessageHandler> remaining_handlers;
+    
+    LOG_CLIENT_INFO("Calling message handlers for type '" << message_type << "' from peer " << peer_id << " with data: " << data.dump());
+    
+    // Get handlers to call and identify once handlers
+    {
+        std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+        auto it = message_handlers_.find(message_type);
+        if (it != message_handlers_.end()) {
+            handlers_to_call = it->second; // Copy handlers
+            
+            // Keep only non-once handlers for the remaining list
+            for (const auto& handler : it->second) {
+                if (!handler.is_once) {
+                    remaining_handlers.push_back(handler);
+                }
+            }
+            
+            // Update the handlers list (removes once handlers)
+            it->second = remaining_handlers;
+        } else {
+            LOG_CLIENT_WARN("No handlers registered for message type '" << message_type << "'");
+        }
+    }
+    
+    LOG_CLIENT_INFO("Found " << handlers_to_call.size() << " handlers for message type '" << message_type << "'");
+    
+    // Call handlers outside of mutex to avoid deadlock
+    for (const auto& handler : handlers_to_call) {
+        try {
+            LOG_CLIENT_INFO("Calling handler for message type '" << message_type << "'");
+            handler.callback(peer_id, data);
+            LOG_CLIENT_INFO("Handler for message type '" << message_type << "' completed successfully");
+        } catch (const std::exception& e) {
+            LOG_CLIENT_ERROR("Exception in message handler for type '" << message_type << "': " << e.what());
+        } catch (...) {
+            LOG_CLIENT_ERROR("Unknown exception in message handler for type '" << message_type << "'");
+        }
+    }
+    
+    if (!handlers_to_call.empty()) {
+        LOG_CLIENT_INFO("Called " << handlers_to_call.size() << " handlers for message type '" << message_type << "'");
+    }
+}
+
+void RatsClient::remove_once_handlers(const std::string& message_type) {
+    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
+    auto it = message_handlers_.find(message_type);
+    if (it != message_handlers_.end()) {
+        auto& handlers = it->second;
+        auto new_end = std::remove_if(handlers.begin(), handlers.end(), 
+                                     [](const MessageHandler& handler) { return handler.is_once; });
+        handlers.erase(new_end, handlers.end());
+        
+        // Remove the entire entry if no handlers remain
+        if (handlers.empty()) {
+            message_handlers_.erase(it);
+        }
+    }
+}
+
+//=============================================================================
+// Encryption Methods Implementation
+//=============================================================================
+
+bool RatsClient::initialize_encryption(bool enable) {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    
+    encryption_enabled_ = enable;
+    
+    if (enable) {
+        // Initialize the encryption system with our static key
+        bool success = encrypted_communication::initialize_encryption(static_encryption_key_);
+        if (!success) {
+            LOG_CLIENT_ERROR("Failed to initialize encryption system");
+            encryption_enabled_ = false;
+            return false;
+        }
+        
+        LOG_CLIENT_INFO("Encryption initialized and enabled");
+    } else {
+        encrypted_communication::set_encryption_enabled(false);
+        LOG_CLIENT_INFO("Encryption disabled");
+    }
+    
+    return true;
+}
+
+void RatsClient::set_encryption_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    encryption_enabled_ = enabled;
+    encrypted_communication::set_encryption_enabled(enabled);
+    
+    LOG_CLIENT_INFO("Encryption " << (enabled ? "enabled" : "disabled"));
+}
+
+bool RatsClient::is_encryption_enabled() const {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    return encryption_enabled_;
+}
+
+std::string RatsClient::get_encryption_key() const {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    return EncryptedSocket::key_to_string(static_encryption_key_);
+}
+
+bool RatsClient::set_encryption_key(const std::string& key_hex) {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    
+    NoiseKey new_key = EncryptedSocket::string_to_key(key_hex);
+    
+    // Validate key (check if it's not all zeros)
+    bool is_valid = false;
+    for (uint8_t byte : new_key) {
+        if (byte != 0) {
+            is_valid = true;
+            break;
+        }
+    }
+    
+    if (!is_valid) {
+        LOG_CLIENT_ERROR("Invalid encryption key provided");
+        return false;
+    }
+    
+    static_encryption_key_ = new_key;
+    
+    // Reinitialize encryption system if it's enabled
+    if (encryption_enabled_) {
+        encrypted_communication::initialize_encryption(static_encryption_key_);
+    }
+    
+    LOG_CLIENT_INFO("Updated encryption key");
+    return true;
+}
+
+std::string RatsClient::generate_new_encryption_key() {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    
+    static_encryption_key_ = encrypted_communication::generate_node_key();
+    
+    // Reinitialize encryption system if it's enabled
+    if (encryption_enabled_) {
+        encrypted_communication::initialize_encryption(static_encryption_key_);
+    }
+    
+    std::string key_hex = EncryptedSocket::key_to_string(static_encryption_key_);
+    LOG_CLIENT_INFO("Generated new encryption key: " << key_hex);
+    
+    return key_hex;
+}
+
+bool RatsClient::is_peer_encrypted(const std::string& peer_id) const {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto it = peers_.find(peer_id);
+    if (it != peers_.end()) {
+        return it->second.encryption_enabled && it->second.noise_handshake_completed;
+    }
+    return false;
+}
+
+// =========================================================================
+// Configuration Persistence
+// =========================================================================
 
 bool RatsClient::load_configuration() {
     std::lock_guard<std::mutex> lock(config_mutex_);
@@ -3266,295 +3066,461 @@ int RatsClient::load_and_reconnect_historical_peers() {
     }
 }
 
-// Message exchange API implementation
-void RatsClient::on(const std::string& message_type, MessageCallback callback) {
-    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
-    message_handlers_[message_type].emplace_back(callback, false); // false = not once
-    LOG_CLIENT_INFO("Registered persistent handler for message type: " << message_type << " (total handlers: " << message_handlers_[message_type].size() << ")");
+// Configuration persistence implementation
+std::string RatsClient::generate_persistent_peer_id() const {
+    // Generate a unique peer ID using SHA1 hash of timestamp, random data, and hostname
+    auto now = std::chrono::high_resolution_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    
+    // Get system information for uniqueness
+    SystemInfo sys_info = get_system_info();
+    
+    // Create random component
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 255);
+    
+    // Build unique string
+    std::ostringstream unique_stream;
+    unique_stream << timestamp << "_" << sys_info.hostname << "_" << listen_port_ << "_";
+    
+    // Add random component
+    for (int i = 0; i < 16; ++i) {
+        unique_stream << std::setfill('0') << std::setw(2) << std::hex << dis(gen);
+    }
+    
+    // Generate SHA1 hash of the unique string
+    std::string unique_string = unique_stream.str();
+    std::string peer_id = SHA1::hash(unique_string);
+    
+    LOG_CLIENT_INFO("Generated new persistent peer ID: " << peer_id);
+    return peer_id;
 }
 
-void RatsClient::once(const std::string& message_type, MessageCallback callback) {
-    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
-    message_handlers_[message_type].emplace_back(callback, true); // true = once
-    LOG_CLIENT_DEBUG("Registered one-time handler for message type: " << message_type);
+nlohmann::json RatsClient::serialize_peer_for_persistence(const RatsPeer& peer) const {
+    nlohmann::json peer_json;
+    peer_json["ip"] = peer.ip;
+    peer_json["port"] = peer.port;
+    peer_json["peer_id"] = peer.peer_id;
+    peer_json["normalized_address"] = peer.normalized_address;
+    peer_json["is_outgoing"] = peer.is_outgoing;
+    peer_json["version"] = peer.version;
+    
+    // Add timestamp for cleanup of old peers
+    auto now = std::chrono::high_resolution_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    peer_json["last_seen"] = timestamp;
+    
+    return peer_json;
 }
 
-void RatsClient::off(const std::string& message_type) {
-    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
-    auto it = message_handlers_.find(message_type);
-    if (it != message_handlers_.end()) {
-        size_t removed_count = it->second.size();
-        message_handlers_.erase(it);
-        LOG_CLIENT_DEBUG("Removed " << removed_count << " handlers for message type: " << message_type);
-    }
-}
-
-void RatsClient::send(const std::string& message_type, const nlohmann::json& data, SendCallback callback) {
-    if (!running_.load()) {
-        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' - client is not running");
-        if (callback) {
-            callback(false, "Client is not running");
-        }
-        return;
-    }
-    
-    LOG_CLIENT_INFO("Sending broadcast message type '" << message_type << "' with data: " << data.dump());
-    
-    // Create rats message
-    nlohmann::json message = create_rats_message(message_type, data, get_our_peer_id());
-    
-    // Broadcast to all validated peers
-    int sent_count = broadcast_rats_message_to_validated_peers(message);
-    
-    LOG_CLIENT_INFO("Broadcasted message type '" << message_type << "' to " << sent_count << " peers");
-    
-    if (callback) {
-        if (sent_count > 0) {
-            callback(true, "");
-        } else {
-            LOG_CLIENT_WARN("No peers to send message to");
-            callback(false, "No peers to send message to");
-        }
-    }
-}
-
-void RatsClient::send(const std::string& peer_id, const std::string& message_type, const nlohmann::json& data, SendCallback callback) {
-    if (!running_.load()) {
-        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' to peer " << peer_id << " - client is not running");
-        if (callback) {
-            callback(false, "Client is not running");
-        }
-        return;
-    }
-    
-    LOG_CLIENT_INFO("Sending targeted message type '" << message_type << "' to peer " << peer_id << " with data: " << data.dump());
-    
-    // Create rats message
-    nlohmann::json message = create_rats_message(message_type, data, get_our_peer_id());
-    
-    // Send to specific peer
-    socket_t target_socket = INVALID_SOCKET_VALUE;
-    bool peer_found = false;
-    bool handshake_completed = false;
-    
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        auto it = peers_.find(peer_id);
-        if (it != peers_.end()) {
-            peer_found = true;
-            handshake_completed = it->second.is_handshake_completed();
-            if (handshake_completed) {
-                target_socket = it->second.socket;
-            }
-        }
-    }
-    
-    if (!peer_found) {
-        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' - peer not found: " << peer_id);
-        if (callback) {
-            callback(false, "Peer not found: " + peer_id);
-        }
-        return;
-    }
-    
-    if (!handshake_completed) {
-        LOG_CLIENT_ERROR("Cannot send message '" << message_type << "' - peer handshake not completed: " << peer_id);
-        if (callback) {
-            callback(false, "Peer handshake not completed: " + peer_id);
-        }
-        return;
-    }
-    
-    bool success = send_json_to_peer(target_socket, message);
-    
-    LOG_CLIENT_INFO("Sent message type '" << message_type << "' to peer " << peer_id << " - " << (success ? "success" : "failed"));
-    
-    if (callback) {
-        if (success) {
-            callback(true, "");
-        } else {
-            callback(false, "Failed to send message to peer: " + peer_id);
-        }
-    }
-}
-
-// Message exchange system helpers
-void RatsClient::call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data) {
-    std::vector<MessageHandler> handlers_to_call;
-    std::vector<MessageHandler> remaining_handlers;
-    
-    LOG_CLIENT_INFO("Calling message handlers for type '" << message_type << "' from peer " << peer_id << " with data: " << data.dump());
-    
-    // Get handlers to call and identify once handlers
-    {
-        std::lock_guard<std::mutex> lock(message_handlers_mutex_);
-        auto it = message_handlers_.find(message_type);
-        if (it != message_handlers_.end()) {
-            handlers_to_call = it->second; // Copy handlers
-            
-            // Keep only non-once handlers for the remaining list
-            for (const auto& handler : it->second) {
-                if (!handler.is_once) {
-                    remaining_handlers.push_back(handler);
-                }
-            }
-            
-            // Update the handlers list (removes once handlers)
-            it->second = remaining_handlers;
-        } else {
-            LOG_CLIENT_WARN("No handlers registered for message type '" << message_type << "'");
-        }
-    }
-    
-    LOG_CLIENT_INFO("Found " << handlers_to_call.size() << " handlers for message type '" << message_type << "'");
-    
-    // Call handlers outside of mutex to avoid deadlock
-    for (const auto& handler : handlers_to_call) {
-        try {
-            LOG_CLIENT_INFO("Calling handler for message type '" << message_type << "'");
-            handler.callback(peer_id, data);
-            LOG_CLIENT_INFO("Handler for message type '" << message_type << "' completed successfully");
-        } catch (const std::exception& e) {
-            LOG_CLIENT_ERROR("Exception in message handler for type '" << message_type << "': " << e.what());
-        } catch (...) {
-            LOG_CLIENT_ERROR("Unknown exception in message handler for type '" << message_type << "'");
-        }
-    }
-    
-    if (!handlers_to_call.empty()) {
-        LOG_CLIENT_INFO("Called " << handlers_to_call.size() << " handlers for message type '" << message_type << "'");
-    }
-}
-
-void RatsClient::remove_once_handlers(const std::string& message_type) {
-    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
-    auto it = message_handlers_.find(message_type);
-    if (it != message_handlers_.end()) {
-        auto& handlers = it->second;
-        auto new_end = std::remove_if(handlers.begin(), handlers.end(), 
-                                     [](const MessageHandler& handler) { return handler.is_once; });
-        handlers.erase(new_end, handlers.end());
+bool RatsClient::deserialize_peer_from_persistence(const nlohmann::json& json, std::string& ip, int& port, std::string& peer_id) const {
+    try {
+        ip = json.value("ip", "");
+        port = json.value("port", 0);
+        peer_id = json.value("peer_id", "");
         
-        // Remove the entire entry if no handlers remain
-        if (handlers.empty()) {
-            message_handlers_.erase(it);
-        }
-    }
-}
-
-//=============================================================================
-// Encryption Methods Implementation
-//=============================================================================
-
-bool RatsClient::initialize_encryption(bool enable) {
-    std::lock_guard<std::mutex> lock(encryption_mutex_);
-    
-    encryption_enabled_ = enable;
-    
-    if (enable) {
-        // Initialize the encryption system with our static key
-        bool success = encrypted_communication::initialize_encryption(static_encryption_key_);
-        if (!success) {
-            LOG_CLIENT_ERROR("Failed to initialize encryption system");
-            encryption_enabled_ = false;
+        // Validate required fields
+        if (ip.empty() || port <= 0 || port > 65535 || peer_id.empty()) {
             return false;
         }
         
-        LOG_CLIENT_INFO("Encryption initialized and enabled");
-    } else {
-        encrypted_communication::set_encryption_enabled(false);
-        LOG_CLIENT_INFO("Encryption disabled");
-    }
-    
-    return true;
-}
-
-void RatsClient::set_encryption_enabled(bool enabled) {
-    std::lock_guard<std::mutex> lock(encryption_mutex_);
-    encryption_enabled_ = enabled;
-    encrypted_communication::set_encryption_enabled(enabled);
-    
-    LOG_CLIENT_INFO("Encryption " << (enabled ? "enabled" : "disabled"));
-}
-
-bool RatsClient::is_encryption_enabled() const {
-    std::lock_guard<std::mutex> lock(encryption_mutex_);
-    return encryption_enabled_;
-}
-
-std::string RatsClient::get_encryption_key() const {
-    std::lock_guard<std::mutex> lock(encryption_mutex_);
-    return EncryptedSocket::key_to_string(static_encryption_key_);
-}
-
-bool RatsClient::set_encryption_key(const std::string& key_hex) {
-    std::lock_guard<std::mutex> lock(encryption_mutex_);
-    
-    NoiseKey new_key = EncryptedSocket::string_to_key(key_hex);
-    
-    // Validate key (check if it's not all zeros)
-    bool is_valid = false;
-    for (uint8_t byte : new_key) {
-        if (byte != 0) {
-            is_valid = true;
-            break;
+        // Check if peer data is not too old (optional - remove peers older than 7 days)
+        if (json.contains("last_seen")) {
+            auto now = std::chrono::high_resolution_clock::now();
+            auto current_timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+            int64_t last_seen = json.value("last_seen", current_timestamp);
+            
+            const int64_t MAX_PEER_AGE_SECONDS = 7 * 24 * 60 * 60; // 7 days
+            if (current_timestamp - last_seen > MAX_PEER_AGE_SECONDS) {
+                LOG_CLIENT_DEBUG("Skipping old peer " << ip << ":" << port << " (last seen " << (current_timestamp - last_seen) << " seconds ago)");
+                return false;
+            }
         }
+        
+        return true;
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to deserialize peer: " << e.what());
+        return false;
+    }
+}
+
+std::string RatsClient::get_config_file_path() const {
+    #ifdef TESTING
+        return "config_" + std::to_string(listen_port_) + ".json";
+    #else
+        return data_directory_ + "/" + CONFIG_FILE_NAME;
+    #endif
+}
+
+std::string RatsClient::get_peers_file_path() const {
+    #ifdef TESTING
+        return "peers_" + std::to_string(listen_port_) + ".json";
+    #else
+        return data_directory_ + "/" + PEERS_FILE_NAME;
+    #endif
+}
+
+std::string RatsClient::get_peers_ever_file_path() const {
+    #ifdef TESTING
+        return "peers_ever_" + std::to_string(listen_port_) + ".json";
+    #else
+        return data_directory_ + "/" + PEERS_EVER_FILE_NAME;
+    #endif
+}
+
+// =========================================================================
+// Data directory management
+// =========================================================================
+
+bool RatsClient::set_data_directory(const std::string& directory_path) {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    
+    // Normalize the path (remove trailing slashes)
+    std::string normalized_path = directory_path;
+    while (!normalized_path.empty() && (normalized_path.back() == '/' || normalized_path.back() == '\\')) {
+        normalized_path.pop_back();
     }
     
-    if (!is_valid) {
-        LOG_CLIENT_ERROR("Invalid encryption key provided");
+    // Use current directory if empty
+    if (normalized_path.empty()) {
+        normalized_path = ".";
+    }
+    
+    // Check if directory exists
+    if (!directory_exists(normalized_path)) {
+        // Try to create the directory
+        if (!create_directories(normalized_path.c_str())) {
+            LOG_CLIENT_ERROR("Failed to create data directory: " << normalized_path);
+            return false;
+        }
+        LOG_CLIENT_INFO("Created data directory: " << normalized_path);
+    }
+    
+    // Test if we can write to the directory by creating a temporary file
+    std::string test_file = normalized_path + "/test_write_access.tmp";
+    if (!create_file(test_file, "test")) {
+        LOG_CLIENT_ERROR("Cannot write to data directory: " << normalized_path);
         return false;
     }
     
-    static_encryption_key_ = new_key;
+    // Clean up test file
+    delete_file(test_file.c_str());
     
-    // Reinitialize encryption system if it's enabled
-    if (encryption_enabled_) {
-        encrypted_communication::initialize_encryption(static_encryption_key_);
-    }
-    
-    LOG_CLIENT_INFO("Updated encryption key");
+    data_directory_ = normalized_path;
+    LOG_CLIENT_INFO("Data directory set to: " << data_directory_);
     return true;
 }
 
-std::string RatsClient::generate_new_encryption_key() {
-    std::lock_guard<std::mutex> lock(encryption_mutex_);
+std::string RatsClient::get_data_directory() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    return data_directory_;
+}
+
+// =========================================================================
+// Rats messages protocol / Message handling system
+// =========================================================================
+
+nlohmann::json RatsClient::create_rats_message(const std::string& type, const nlohmann::json& payload, const std::string& sender_peer_id) {
+    nlohmann::json message;
+    message["rats_protocol"] = true;
+    message["type"] = type;
+    message["payload"] = payload;
+    message["sender_peer_id"] = sender_peer_id;
+    message["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
     
-    static_encryption_key_ = encrypted_communication::generate_node_key();
+    return message;
+}
+
+void RatsClient::handle_rats_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& message) {
+    try {
+        std::string message_type = message.value("type", "");
+        nlohmann::json payload = message.value("payload", nlohmann::json::object());
+        std::string sender_peer_id = message.value("sender_peer_id", "");
+        
+        LOG_CLIENT_DEBUG("Received rats message type '" << message_type << "' from " << peer_hash_id);
+        
+        // Call registered message handlers for all message types (including custom ones)
+        call_message_handlers(message_type, sender_peer_id.empty() ? peer_hash_id : sender_peer_id, payload);
+        
+        // Handle built-in message types for internal functionality
+        if (message_type == "peer") {
+            handle_peer_exchange_message(socket, peer_hash_id, payload);
+        } 
+        else if (message_type == "peers_request") {
+            handle_peers_request_message(socket, peer_hash_id, payload);
+        }
+        else if (message_type == "peers_response") {
+            handle_peers_response_message(socket, peer_hash_id, payload);
+        }
+        // ICE coordination messages
+        else if (message_type == "ice_offer") {
+            handle_ice_offer_message(socket, peer_hash_id, payload);
+        }
+        else if (message_type == "ice_answer") {
+            handle_ice_answer_message(socket, peer_hash_id, payload);
+        }
+        else if (message_type == "ice_candidate") {
+            handle_ice_candidate_message(socket, peer_hash_id, payload);
+        }
+        // NAT traversal coordination messages
+        else if (message_type == "hole_punch_coordination") {
+            handle_hole_punch_coordination_message(socket, peer_hash_id, payload);
+        }
+        else if (message_type == "nat_info_exchange") {
+            handle_nat_info_exchange_message(socket, peer_hash_id, payload);
+        }
+        // Custom message types are now handled by registered handlers above
+        // No need for else clause - all message types are valid if they have registered handlers
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to handle rats message: " << e.what());
+    }
+}
+
+void RatsClient::handle_peer_exchange_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
+    try {
+        std::string peer_ip = payload.value("ip", "");
+        int peer_port = payload.value("port", 0);
+        std::string peer_id = payload.value("peer_id", "");
+        
+        if (peer_ip.empty() || peer_port <= 0 || peer_id.empty()) {
+            LOG_CLIENT_WARN("Invalid peer exchange message from " << peer_hash_id);
+            return;
+        }
+        
+        LOG_CLIENT_INFO("Received peer exchange: " << peer_ip << ":" << peer_port << " (peer_id: " << peer_id << ")");
+        
+        // Check if we should ignore this peer (local interface)
+        if (should_ignore_peer(peer_ip, peer_port)) {
+            LOG_CLIENT_DEBUG("Ignoring exchanged peer " << peer_ip << ":" << peer_port << " - local interface address");
+            return;
+        }
+        
+        // Check if we're already connected to this peer
+        std::string normalized_peer_address = normalize_peer_address(peer_ip, peer_port);
+        if (is_already_connected_to_address(normalized_peer_address)) {
+            LOG_CLIENT_DEBUG("Already connected to exchanged peer " << normalized_peer_address);
+            return;
+        }
+        
+        // Check if peer limit is reached
+        if (is_peer_limit_reached()) {
+            LOG_CLIENT_DEBUG("Peer limit reached, not connecting to exchanged peer " << peer_ip << ":" << peer_port);
+            return;
+        }
+        
+        // Try to connect to the exchanged peer (non-blocking)
+        add_managed_thread(std::thread([this, peer_ip, peer_port, peer_id]() {
+            if (connect_to_peer(peer_ip, peer_port)) {
+                LOG_CLIENT_INFO("Successfully connected to exchanged peer: " << peer_ip << ":" << peer_port);
+            } else {
+                LOG_CLIENT_DEBUG("Failed to connect to exchanged peer: " << peer_ip << ":" << peer_port);
+            }
+        }), "peer-exchange-connect-" + peer_id.substr(0, 8));
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to handle peer exchange message: " << e.what());
+    }
+}
+
+// General broadcasting functions
+int RatsClient::broadcast_rats_message(const nlohmann::json& message, const std::string& exclude_peer_id) {
+    int sent_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        for (const auto& pair : peers_) {
+            const RatsPeer& peer = pair.second;
+            // Don't send to excluded peer
+            if (!exclude_peer_id.empty() && peer.peer_id == exclude_peer_id) {
+                continue;
+            }
+            
+            if (send_json_to_peer(peer.socket, message)) {
+                sent_count++;
+            }
+        }
+    }
+    return sent_count;
+}
+
+int RatsClient::broadcast_rats_message_to_validated_peers(const nlohmann::json& message, const std::string& exclude_peer_id) {
+    int sent_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        for (const auto& pair : peers_) {
+            const RatsPeer& peer = pair.second;
+            // Don't send to excluded peer and only send to peers with completed handshake
+            if ((!exclude_peer_id.empty() && peer.peer_id == exclude_peer_id) || 
+                !peer.is_handshake_completed()) {
+                continue;
+            }
+            
+            if (send_json_to_peer(peer.socket, message)) {
+                sent_count++;
+            }
+        }
+    }
+    return sent_count;
+}
+
+// Specific message creation functions
+nlohmann::json RatsClient::create_peer_exchange_message(const RatsPeer& peer) {
+    // Create peer exchange payload
+    nlohmann::json payload;
+    payload["ip"] = peer.ip;
+    payload["port"] = peer.port;
+    payload["peer_id"] = peer.peer_id;
+    payload["connection_type"] = peer.is_outgoing ? "outgoing" : "incoming";
     
-    // Reinitialize encryption system if it's enabled
-    if (encryption_enabled_) {
-        encrypted_communication::initialize_encryption(static_encryption_key_);
+    // Create rats message
+    return create_rats_message("peer", payload, peer.peer_id);
+}
+
+void RatsClient::broadcast_peer_exchange_message(const RatsPeer& new_peer) {
+    // Don't broadcast exchange messages for ourselves
+    if (new_peer.peer_id.empty()) {
+        return;
     }
     
-    std::string key_hex = EncryptedSocket::key_to_string(static_encryption_key_);
-    LOG_CLIENT_INFO("Generated new encryption key: " << key_hex);
+    // Create peer exchange message
+    nlohmann::json message = create_peer_exchange_message(new_peer);
     
-    return key_hex;
+    // Broadcast to all validated peers except the new peer
+    int sent_count = broadcast_rats_message_to_validated_peers(message, new_peer.peer_id);
+    
+    LOG_CLIENT_INFO("Broadcasted peer exchange message for " << new_peer.ip << ":" << new_peer.port 
+                    << " to " << sent_count << " peers");
 }
 
-bool RatsClient::is_peer_encrypted(const std::string& peer_id) const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    auto it = peers_.find(peer_id);
-    if (it != peers_.end()) {
-        return it->second.encryption_enabled && it->second.noise_handshake_completed;
+// Peers request/response system implementation
+nlohmann::json RatsClient::create_peers_request_message(const std::string& sender_peer_id) {
+    nlohmann::json payload;
+    payload["max_peers"] = 5;  // Request up to 5 peers
+    payload["requester_info"] = {
+        {"listen_port", listen_port_},
+        {"peer_count", get_peer_count()}
+    };
+    
+    return create_rats_message("peers_request", payload, sender_peer_id);
+}
+
+nlohmann::json RatsClient::create_peers_response_message(const std::vector<RatsPeer>& peers, const std::string& sender_peer_id) {
+    nlohmann::json payload;
+    nlohmann::json peers_array = nlohmann::json::array();
+    
+    for (const auto& peer : peers) {
+        nlohmann::json peer_info;
+        peer_info["ip"] = peer.ip;
+        peer_info["port"] = peer.port;
+        peer_info["peer_id"] = peer.peer_id;
+        peer_info["connection_type"] = peer.is_outgoing ? "outgoing" : "incoming";
+        peers_array.push_back(peer_info);
     }
-    return false;
+    
+    payload["peers"] = peers_array;
+    payload["total_peers"] = get_peer_count();
+    
+    return create_rats_message("peers_response", payload, sender_peer_id);
 }
 
 
-
-void RatsClient::set_advanced_connection_callback(AdvancedConnectionCallback callback) {
-    advanced_connection_callback_ = callback;
+void RatsClient::handle_peers_request_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
+    try {
+        int max_peers = payload.value("max_peers", 5);
+        
+        LOG_CLIENT_INFO("Received peers request from " << peer_hash_id << " for up to " << max_peers << " peers");
+        
+        // Get random peers excluding the requester
+        std::vector<RatsPeer> random_peers = get_random_peers(max_peers, peer_hash_id);
+        
+        LOG_CLIENT_DEBUG("Sending " << random_peers.size() << " peers to " << peer_hash_id);
+        
+        // Create and send peers response
+        nlohmann::json response_message = create_peers_response_message(random_peers, peer_hash_id);
+        
+        if (!send_json_to_peer(socket, response_message)) {
+            LOG_CLIENT_ERROR("Failed to send peers response to " << peer_hash_id);
+        } else {
+            LOG_CLIENT_DEBUG("Sent peers response with " << random_peers.size() << " peers to " << peer_hash_id);
+        }
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to handle peers request message: " << e.what());
+    }
 }
 
-void RatsClient::set_nat_traversal_progress_callback(NatTraversalProgressCallback callback) {
-    nat_progress_callback_ = callback;
+void RatsClient::handle_peers_response_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
+    try {
+        nlohmann::json peers_array = payload.value("peers", nlohmann::json::array());
+        int total_peers = payload.value("total_peers", 0);
+        
+        LOG_CLIENT_INFO("Received peers response from " << peer_hash_id << " with " << peers_array.size() 
+                        << " peers (total: " << total_peers << ")");
+        
+        // Process each peer in the response
+        for (const auto& peer_info : peers_array) {
+            std::string peer_ip = peer_info.value("ip", "");
+            int peer_port = peer_info.value("port", 0);
+            std::string peer_id = peer_info.value("peer_id", "");
+            
+            if (peer_ip.empty() || peer_port <= 0 || peer_id.empty()) {
+                LOG_CLIENT_WARN("Invalid peer info in peers response from " << peer_hash_id);
+                continue;
+            }
+            
+            LOG_CLIENT_DEBUG("Processing peer from response: " << peer_ip << ":" << peer_port << " (peer_id: " << peer_id << ")");
+            
+            // Check if we should ignore this peer (local interface)
+            if (should_ignore_peer(peer_ip, peer_port)) {
+                LOG_CLIENT_DEBUG("Ignoring peer from response " << peer_ip << ":" << peer_port << " - local interface address");
+                continue;
+            }
+            
+            // Check if we're already connected to this peer
+            std::string normalized_peer_address = normalize_peer_address(peer_ip, peer_port);
+            if (is_already_connected_to_address(normalized_peer_address)) {
+                LOG_CLIENT_DEBUG("Already connected to peer from response " << normalized_peer_address);
+                continue;
+            }
+            
+            // Check if peer limit is reached
+            if (is_peer_limit_reached()) {
+                LOG_CLIENT_DEBUG("Peer limit reached, not connecting to peer from response " << peer_ip << ":" << peer_port);
+                continue;
+            }
+            
+            // Try to connect to the peer (non-blocking)
+            LOG_CLIENT_INFO("Attempting to connect to peer from response: " << peer_ip << ":" << peer_port);
+            add_managed_thread(std::thread([this, peer_ip, peer_port, peer_id]() {
+                if (connect_to_peer(peer_ip, peer_port)) {
+                    LOG_CLIENT_INFO("Successfully connected to peer from response: " << peer_ip << ":" << peer_port);
+                } else {
+                    LOG_CLIENT_DEBUG("Failed to connect to peer from response: " << peer_ip << ":" << peer_port);
+                }
+            }), "peer-response-connect-" + peer_id.substr(0, 8));
+        }
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to handle peers response message: " << e.what());
+    }
 }
 
-void RatsClient::set_ice_candidate_callback(IceCandidateDiscoveredCallback callback) {
-    ice_candidate_callback_ = callback;
+void RatsClient::send_peers_request(socket_t socket, const std::string& our_peer_id) {
+    nlohmann::json request_message = create_peers_request_message(our_peer_id);
+    
+    if (send_json_to_peer(socket, request_message)) {
+        LOG_CLIENT_INFO("Sent peers request to socket " << socket);
+    } else {
+        LOG_CLIENT_ERROR("Failed to send peers request to socket " << socket);
+    }
 }
+
+// =========================================================================
+// Statistics and Information
+// =========================================================================
 
 nlohmann::json RatsClient::get_connection_statistics() const {
     nlohmann::json stats;
@@ -3587,43 +3553,101 @@ nlohmann::json RatsClient::get_connection_statistics() const {
 }
 
 
+// =========================================================================
+// Helper functions
+// =========================================================================
 
-
-
-// Protocol configuration methods
-void RatsClient::set_protocol_name(const std::string& protocol_name) {
-    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
-    custom_protocol_name_ = protocol_name;
-    LOG_CLIENT_INFO("Protocol name set to: " << protocol_name);
+std::unique_ptr<RatsClient> create_rats_client(int listen_port) {
+    auto client = std::make_unique<RatsClient>(listen_port, 10); // Default 10 max peers
+    if (!client->start()) {
+        return nullptr;
+    }
+    return client;
 }
 
-void RatsClient::set_protocol_version(const std::string& protocol_version) {
-    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
-    custom_protocol_version_ = protocol_version;
-    LOG_CLIENT_INFO("Protocol version set to: " << protocol_version);
+bool RatsClient::parse_address_string(const std::string& address_str, std::string& out_ip, int& out_port) {
+    if (address_str.empty()) {
+        return false;
+    }
+
+    size_t colon_pos;
+    if (address_str.front() == '[') {
+        // IPv6 format: [ip]:port
+        size_t bracket_end = address_str.find(']');
+        if (bracket_end == std::string::npos || bracket_end < 2) { // Must be at least [a]
+            return false;
+        }
+        out_ip = address_str.substr(1, bracket_end - 1);
+        colon_pos = address_str.find(':', bracket_end);
+    } else {
+        // IPv4 or IPv6 without brackets
+        colon_pos = address_str.find_last_of(':');
+        if (colon_pos == std::string::npos || colon_pos == 0) {
+            return false;
+        }
+        out_ip = address_str.substr(0, colon_pos);
+    }
+
+    if (colon_pos == std::string::npos || colon_pos + 1 >= address_str.length()) {
+        return false;
+    }
+
+    try {
+        out_port = std::stoi(address_str.substr(colon_pos + 1));
+    } catch (const std::exception&) {
+        return false;
+    }
+
+    return !out_ip.empty() && out_port > 0 && out_port <= 65535;
 }
 
-std::string RatsClient::get_protocol_name() const {
-    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
-    return custom_protocol_name_;
+std::string get_box_separator() {
+    return supports_unicode() ? 
+        "════════════════════════════════════════════════════════════════════" :
+        "=====================================================================";
 }
 
-std::string RatsClient::get_protocol_version() const {
-    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
-    return custom_protocol_version_;
+std::string get_box_vertical() {
+    return supports_unicode() ? "│" : "|";
 }
 
-std::string RatsClient::get_discovery_hash() const {
-    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
-    // Generate discovery hash based on current protocol configuration
-    std::string discovery_string = custom_protocol_name_ + "_peer_discovery_v" + custom_protocol_version_;
-    return SHA1::hash(discovery_string);
+std::string get_checkmark() {
+    return supports_unicode() ? "✓" : "[*]";
 }
 
-std::string RatsClient::get_rats_peer_discovery_hash() {
-    // Well-known hash for rats peer discovery
-    // Compute SHA1 hash of "rats_peer_discovery_v1.0"
-    return SHA1::hash("rats_peer_discovery_v1.0");
+void RatsClient::log_handshake_completion_unlocked(const RatsPeer& peer) {
+    // Calculate connection duration
+    auto now = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - peer.connected_at);
+    
+    // Get current peer count (assumes peers_mutex_ is already locked)
+    int current_peer_count = get_peer_count_unlocked();
+    
+    // Create visually appealing log output
+    std::string connection_type = peer.is_outgoing ? "OUTGOING" : "INCOMING";
+    std::string separator = get_box_separator();
+    std::string vertical = get_box_vertical();
+    std::string checkmark = get_checkmark();
+    
+    LOG_CLIENT_INFO("");
+    LOG_CLIENT_INFO(separator);
+    LOG_CLIENT_INFO(checkmark << " HANDSHAKE COMPLETED - NEW PEER CONNECTED");
+    LOG_CLIENT_INFO(separator);
+    LOG_CLIENT_INFO(vertical << " Peer ID       : " << peer.peer_id);
+    LOG_CLIENT_INFO(vertical << " Address       : " << peer.ip << ":" << peer.port);
+    LOG_CLIENT_INFO(vertical << " Connection    : " << connection_type);
+    LOG_CLIENT_INFO(vertical << " Protocol Ver. : " << peer.version);
+    LOG_CLIENT_INFO(vertical << " Socket        : " << peer.socket);
+    LOG_CLIENT_INFO(vertical << " Duration      : " << duration.count() << "ms");
+    LOG_CLIENT_INFO(vertical << " Network Peers : " << current_peer_count << "/" << max_peers_);
+    
+    LOG_CLIENT_INFO(separator);
+    LOG_CLIENT_INFO("");
+}
+
+void RatsClient::log_handshake_completion(const RatsPeer& peer) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    log_handshake_completion_unlocked(peer);
 }
 
 } // namespace librats
