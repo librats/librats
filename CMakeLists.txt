@@ -98,6 +98,9 @@ add_library(rats
     src/librats_gossipsub.cpp
     src/librats_nat.cpp
     src/librats_ice.cpp
+    src/librats_mdns.cpp
+    src/librats_persistence.cpp
+    src/librats_encryption.cpp
     src/librats.h
     src/sha1.cpp
     src/sha1.h
