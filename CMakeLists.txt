@@ -4,6 +4,11 @@ project(librats VERSION 1.0.0)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(RATS_BUILD_EXAMPLES "Build examples" ON)
+option(RATS_BUILD_TESTS "Build unit tests" ON)
+option(RATS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(RATS_BINDINGS "Enable bindings" ON)
+
 # Get version from git
 find_package(Git QUIET)
 if(GIT_FOUND)
@@ -78,8 +83,8 @@ if(WIN32)
     )
 endif()
 
-# Create the library
-add_library(rats
+# Define library sources
+set(LIBRARY_SOURCES
     src/socket.cpp
     src/socket.h
     src/network_utils.cpp
@@ -129,8 +134,23 @@ add_library(rats
     ${PROJECT_BINARY_DIR}/src/version.h
 )
 
+if(RATS_BINDINGS)
+    list(APPEND LIBRARY_SOURCES 
+        src/librats_c.cpp
+        src/librats_c.h
+    )
+endif()
+
+add_library(rats ${LIBRARY_SOURCES})
+
 # Include directories
 target_include_directories(rats PUBLIC ${PROJECT_BINARY_DIR}/src src)
+
+if(RATS_BINDINGS)
+    if(WIN32)
+        target_compile_definitions(rats PRIVATE RATS_BUILDING_DLL)
+    endif()
+endif()
 
 # Find and link threading support
 find_package(Threads REQUIRED)
@@ -140,8 +160,6 @@ target_link_libraries(rats Threads::Threads)
 if(WIN32)
     target_link_libraries(rats ws2_32 iphlpapi bcrypt)
 endif()
-
-option(RATS_BUILD_EXAMPLES "Build examples" ON)
 
 # Create the main executable
 if(RATS_BUILD_EXAMPLES)
@@ -164,10 +182,6 @@ set_target_properties(rats PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib
     LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib
 )
-
-# Testing setup
-option(RATS_BUILD_TESTS "Build unit tests" ON)
-option(RATS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 
 # AddressSanitizer configuration
 if(RATS_ENABLE_ASAN)
@@ -233,6 +247,12 @@ if(RATS_BUILD_TESTS)
         tests/test_logging_api_gtest.cpp
         tests/test_file_transfer.cpp
     )
+
+    if(RATS_BINDINGS)
+        list(APPEND TEST_SOURCES 
+            tests/test_librats_c_api.cpp
+        )
+    endif()
     
     # Add mDNS tests only on non-macOS platforms
     if(NOT APPLE)
