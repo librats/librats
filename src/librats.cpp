@@ -1618,7 +1618,12 @@ void RatsClient::set_max_peers(int max_peers) {
 
 bool RatsClient::is_peer_limit_reached() const {
     std::lock_guard<std::mutex> lock(peers_mutex_);
-    return static_cast<int>(peers_.size()) >= max_peers_;
+    // Connected peers only enforcement (exclude handshake peers)
+    int connected_peers = get_peer_count_unlocked();
+    if (connected_peers >= max_peers_) {
+        return true;
+    }
+    return false;
 }
 
 std::string RatsClient::generate_peer_hash_id(socket_t socket, const std::string& connection_info) {
