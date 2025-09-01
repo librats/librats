@@ -250,7 +250,9 @@ struct MessageHeader {
  */
 class RatsClient : public ThreadManager {
 public:
-    // Callback function types
+    // =========================================================================
+    // Type Definitions and Callbacks
+    // =========================================================================
     using ConnectionCallback = std::function<void(socket_t, const std::string&)>;
     using BinaryDataCallback = std::function<void(socket_t, const std::string&, const std::vector<uint8_t>&)>;
     using StringDataCallback = std::function<void(socket_t, const std::string&, const std::string&)>;
@@ -259,6 +261,10 @@ public:
     using MessageCallback = std::function<void(const std::string&, const nlohmann::json&)>;
     using SendCallback = std::function<void(bool, const std::string&)>;
 
+    // =========================================================================
+    // Constructor and Destructor
+    // =========================================================================
+    
     /**
      * Constructor
      * @param listen_port Port to listen on for incoming connections
@@ -272,7 +278,10 @@ public:
      */
     ~RatsClient();
 
-    // Core lifecycle methods
+    // =========================================================================
+    // Core Lifecycle Management
+    // =========================================================================
+    
     /**
      * Start the RatsClient and begin listening for connections
      * @return true if successful, false otherwise
@@ -295,7 +304,10 @@ public:
      */
     bool is_running() const;
 
-    // Enhanced connection methods with NAT traversal
+    // =========================================================================
+    // Connection Management
+    // =========================================================================
+    
     /**
      * Connect to a peer with automatic NAT traversal
      * @param host Target host/IP address
@@ -328,8 +340,24 @@ public:
      * @return true if successfully processed
      */
     bool handle_ice_answer(const std::string& peer_id, const nlohmann::json& ice_answer);
+    
+    /**
+     * Disconnect from a specific peer
+     * @param socket Peer socket to disconnect
+     */
+    void disconnect_peer(socket_t socket);
 
-    // Data transmission methods
+    /**
+     * Disconnect from a peer by hash ID
+     * @param peer_hash_id Peer hash ID to disconnect
+     */
+    void disconnect_peer_by_hash(const std::string& peer_hash_id);
+
+    // =========================================================================
+    // Data Transmission Methods
+    // =========================================================================
+    
+    // Send to specific peer by socket
     /**
      * Send binary data to a specific peer (primary method)
      * @param socket Target peer socket
@@ -355,6 +383,7 @@ public:
      */
     bool send_json_to_peer(socket_t socket, const nlohmann::json& data);
 
+    // Send to specific peer by ID
     /**
      * Send binary data to a peer by peer hash ID (primary method)
      * @param peer_hash_id Target peer hash ID
@@ -380,6 +409,7 @@ public:
      */
     bool send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& data);
 
+    // Broadcast to all peers
     /**
      * Broadcast binary data to all connected peers (primary method)
      * @param data Binary data to broadcast
@@ -402,26 +432,16 @@ public:
      */
     int broadcast_json_to_peers(const nlohmann::json& data);
 
-    // Connection management
-    /**
-     * Disconnect from a specific peer
-     * @param socket Peer socket to disconnect
-     */
-    void disconnect_peer(socket_t socket);
-
-    /**
-     * Disconnect from a peer by hash ID
-     * @param peer_hash_id Peer hash ID to disconnect
-     */
-    void disconnect_peer_by_hash(const std::string& peer_hash_id);
-
+    // =========================================================================
+    // Peer Information and Management
+    // =========================================================================
+    
     /**
      * Get the number of currently connected peers
      * @return Number of connected peers
      */
     int get_peer_count() const;
 
-    // Peer information retrieval
     /**
      * Get hash ID for a peer by socket
      * @param socket Peer socket
@@ -441,8 +461,55 @@ public:
      * @return Our persistent peer ID
      */
     std::string get_our_peer_id() const;
+    
+    /**
+     * Get all connected peers
+     * @return Vector of RatsPeer objects
+     */
+    std::vector<RatsPeer> get_all_peers() const;
+    
+    /**
+     * Get all peers that have completed handshake
+     * @return Vector of RatsPeer objects with completed handshake
+     */
+    std::vector<RatsPeer> get_validated_peers() const;
+    
+    /**
+     * Get peer information by peer ID
+     * @param peer_id The peer ID to look up
+     * @return Pointer to RatsPeer object, or nullptr if not found
+     */
+    const RatsPeer* get_peer_by_id(const std::string& peer_id) const;
+    
+    /**
+     * Get peer information by socket
+     * @param socket The socket handle to look up
+     * @return Pointer to RatsPeer object, or nullptr if not found  
+     */
+    const RatsPeer* get_peer_by_socket(socket_t socket) const;
+    
+    /**
+     * Get maximum number of peers
+     * @return Maximum peer count
+     */
+    int get_max_peers() const;
 
-    // Callback registration
+    /**
+     * Set maximum number of peers
+     * @param max_peers New maximum peer count
+     */
+    void set_max_peers(int max_peers);
+
+    /**
+     * Check if peer limit has been reached
+     * @return true if at limit, false otherwise
+     */
+    bool is_peer_limit_reached() const;
+
+    // =========================================================================
+    // Callback Registration
+    // =========================================================================
+    
     /**
      * Set connection callback (called when a new peer connects)
      * @param callback Function to call on new connections
@@ -491,7 +558,11 @@ public:
      */
     void set_ice_candidate_callback(IceCandidateDiscoveredCallback callback);
 
-    // DHT functionality for peer discovery
+    // =========================================================================
+    // Peer Discovery Methods
+    // =========================================================================
+    
+    // DHT Discovery
     /**
      * Start DHT discovery on specified port
      * @param dht_port Port for DHT communication (default: 6881)
@@ -535,7 +606,7 @@ public:
      */
     size_t get_dht_routing_table_size() const;
 
-    // mDNS functionality for local network discovery
+    // mDNS Discovery
     /**
      * Start mDNS service discovery and announcement
      * @param service_instance_name Service instance name (optional)
@@ -574,7 +645,39 @@ public:
      */
     bool query_mdns_services();
 
-    // Enhanced STUN/NAT traversal functionality
+    // Automatic Discovery
+    /**
+     * Start automatic peer discovery
+     */
+    void start_automatic_peer_discovery();
+    
+    /**
+     * Stop automatic peer discovery
+     */
+    void stop_automatic_peer_discovery();
+    
+    /**
+     * Check if automatic discovery is running
+     * @return true if automatic discovery is running
+     */
+    bool is_automatic_discovery_running() const;
+    
+    /**
+     * Get the discovery hash for current protocol configuration
+     * @return Discovery hash based on current protocol name and version
+     */
+    std::string get_discovery_hash() const;
+    
+    /**
+     * Get the well-known RATS peer discovery hash
+     * @return Standard RATS discovery hash
+     */
+    static std::string get_rats_peer_discovery_hash();
+
+    // =========================================================================
+    // NAT Traversal and STUN Functionality
+    // =========================================================================
+    
     /**
      * Discover public IP address using STUN and add to ignore list
      * @param stun_server STUN server hostname (default: Google STUN)
@@ -616,39 +719,6 @@ public:
      */
     bool coordinate_hole_punching(const std::string& peer_ip, uint16_t peer_port,
                                  const nlohmann::json& coordination_data);
-
-    // Peer information and statistics
-    /**
-     * Get all connected peers
-     * @return Vector of RatsPeer objects
-     */
-    std::vector<RatsPeer> get_all_peers() const;
-    
-    /**
-     * Get all peers that have completed handshake
-     * @return Vector of RatsPeer objects with completed handshake
-     */
-    std::vector<RatsPeer> get_validated_peers() const;
-    
-    /**
-     * Get peer information by peer ID
-     * @param peer_id The peer ID to look up
-     * @return Pointer to RatsPeer object, or nullptr if not found
-     */
-    const RatsPeer* get_peer_by_id(const std::string& peer_id) const;
-    
-    /**
-     * Get peer information by socket
-     * @param socket The socket handle to look up
-     * @return Pointer to RatsPeer object, or nullptr if not found  
-     */
-    const RatsPeer* get_peer_by_socket(socket_t socket) const;
-    
-    /**
-     * Get connection statistics
-     * @return JSON object with detailed statistics
-     */
-    nlohmann::json get_connection_statistics() const;
     
     /**
      * Get NAT traversal statistics
@@ -656,12 +726,10 @@ public:
      */
     nlohmann::json get_nat_traversal_statistics() const;
 
-    // Automatic peer discovery
-    void start_automatic_peer_discovery();
-    void stop_automatic_peer_discovery();
-    bool is_automatic_discovery_running() const;
-    static std::string get_rats_peer_discovery_hash();
-
+    // =========================================================================
+    // Protocol Configuration
+    // =========================================================================
+    
     /**
      * Set custom protocol name for handshakes and DHT discovery
      * @param protocol_name Custom protocol name (default: "rats")
@@ -686,31 +754,10 @@ public:
      */
     std::string get_protocol_version() const;
 
-    /**
-     * Get discovery hash for current protocol configuration
-     * @return Discovery hash based on current protocol name and version
-     */
-    std::string get_discovery_hash() const;
-
-    /**
-     * Get maximum number of peers
-     * @return Maximum peer count
-     */
-    int get_max_peers() const;
-
-    /**
-     * Set maximum number of peers
-     * @param max_peers New maximum peer count
-     */
-    void set_max_peers(int max_peers);
-
-    /**
-     * Check if peer limit has been reached
-     * @return true if at limit, false otherwise
-     */
-    bool is_peer_limit_reached() const;
-
-    // Message exchange API
+    // =========================================================================
+    // Message Exchange API
+    // =========================================================================
+    
     /**
      * Register a persistent message handler
      * @param message_type Type of message to handle
@@ -756,7 +803,10 @@ public:
      */
     bool parse_json_message(const std::string& message, nlohmann::json& out_json);
 
-    // Encryption functionality
+    // =========================================================================
+    // Encryption Functionality
+    // =========================================================================
+    
     /**
      * Initialize encryption system
      * @param enable Whether to enable encryption
@@ -802,7 +852,10 @@ public:
      */
     bool is_peer_encrypted(const std::string& peer_id) const;
 
-    // Configuration persistence
+    // =========================================================================
+    // Configuration Persistence
+    // =========================================================================
+    
     /**
      * Load configuration from files
      * @return true if successful, false otherwise
@@ -857,7 +910,20 @@ public:
      */
     std::vector<RatsPeer> get_historical_peers() const;
 
-    // GossipSub functionality
+    // =========================================================================
+    // Statistics and Information
+    // =========================================================================
+    
+    /**
+     * Get connection statistics
+     * @return JSON object with detailed statistics
+     */
+    nlohmann::json get_connection_statistics() const;
+
+    // =========================================================================
+    // GossipSub Functionality
+    // =========================================================================
+    
     /**
      * Get GossipSub instance for publish-subscribe messaging
      * @return Reference to GossipSub instance
@@ -870,7 +936,7 @@ public:
      */
     bool is_gossipsub_available() const;
     
-    // GossipSub convenience methods - Topic Management
+    // Topic Management
     /**
      * Subscribe to a GossipSub topic
      * @param topic Topic name to subscribe to
@@ -898,7 +964,7 @@ public:
      */
     std::vector<std::string> get_subscribed_topics() const;
     
-    // GossipSub convenience methods - Publishing
+    // Publishing
     /**
      * Publish a message to a GossipSub topic
      * @param topic Topic to publish to
@@ -915,7 +981,7 @@ public:
      */
     bool publish_json_to_topic(const std::string& topic, const nlohmann::json& message);
     
-    // GossipSub convenience methods - Event Handlers (Unified API)
+    // Event Handlers (Unified API)
     /**
      * Set a message handler for a GossipSub topic using unified event API pattern
      * @param topic Topic name
@@ -957,7 +1023,7 @@ public:
      */
     void off_topic(const std::string& topic);
     
-    // GossipSub convenience methods - Information
+    // Information
     /**
      * Get peers subscribed to a GossipSub topic
      * @param topic Topic name
@@ -984,9 +1050,9 @@ public:
      */
     bool is_gossipsub_running() const;
 
-    //=============================================================================
+    // =========================================================================
     // Logging Control API
-    //=============================================================================
+    // =========================================================================
     
     /**
      * Enable or disable file logging
@@ -1072,9 +1138,9 @@ public:
      */
     void clear_log_file();
 
-    //=============================================================================
+    // =========================================================================
     // File Transfer API
-    //=============================================================================
+    // =========================================================================
     
     /**
      * Get the file transfer manager instance
@@ -1088,7 +1154,7 @@ public:
      */
     bool is_file_transfer_available() const;
     
-    // File Transfer convenience methods
+    // Sending and Requesting
     /**
      * Send a file to a peer
      * @param peer_id Target peer ID
@@ -1131,6 +1197,7 @@ public:
     std::string request_directory(const std::string& peer_id, const std::string& remote_directory_path,
                                  const std::string& local_directory_path, bool recursive = true);
     
+    // Accept/Reject Operations
     /**
      * Accept an incoming file transfer
      * @param transfer_id Transfer identifier from request
@@ -1163,6 +1230,7 @@ public:
      */
     bool reject_directory_transfer(const std::string& transfer_id, const std::string& reason = "");
     
+    // Transfer Control
     /**
      * Pause an active file transfer
      * @param transfer_id Transfer to pause
@@ -1184,6 +1252,7 @@ public:
      */
     bool cancel_file_transfer(const std::string& transfer_id);
     
+    // Information and Monitoring
     /**
      * Get file transfer progress information
      * @param transfer_id Transfer to query
@@ -1215,7 +1284,7 @@ public:
      */
     const FileTransferConfig& get_file_transfer_config() const;
     
-    // File Transfer Event Handlers
+    // Event Handlers
     /**
      * Set file transfer progress callback
      * @param callback Function to call with progress updates
