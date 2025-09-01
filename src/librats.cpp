@@ -632,7 +632,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
             std::vector<uint8_t> payload;
             if (parse_message_with_header(received_data, header, payload)) {
                 // Message has valid header - call appropriate callback based on type
-                std::string peer_id = get_peer_hash_id(client_socket);
+                std::string peer_id = get_peer_id(client_socket);
                 
                 switch (header.type) {
                     case MessageDataType::BINARY: {
@@ -693,7 +693,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     }
     
     // Get current peer ID before cleanup for disconnect callback
-    std::string current_peer_id = get_peer_hash_id(client_socket);
+    std::string current_peer_id = get_peer_id(client_socket);
     
     // Clean up
     remove_peer(client_socket);
@@ -1150,8 +1150,8 @@ void RatsClient::disconnect_peer(socket_t socket) {
     close_socket(socket);
 }
 
-void RatsClient::disconnect_peer_by_hash(const std::string& peer_hash_id) {
-    socket_t socket = get_peer_socket(peer_hash_id);
+void RatsClient::disconnect_peer_by_id(const std::string& peer_id) {
+    socket_t socket = get_peer_socket_by_id(peer_id);
     if (is_valid_socket(socket)) {
         disconnect_peer(socket);
     }
@@ -1523,13 +1523,13 @@ int RatsClient::get_peer_count() const {
     return get_peer_count_unlocked();
 }
 
-std::string RatsClient::get_peer_hash_id(socket_t socket) const {
+std::string RatsClient::get_peer_id(socket_t socket) const {
     const RatsPeer* peer = get_peer_by_socket(socket);
     return peer ? peer->peer_id : "";
 }
 
-socket_t RatsClient::get_peer_socket(const std::string& peer_hash_id) const {
-    const RatsPeer* peer = get_peer_by_id(peer_hash_id);
+socket_t RatsClient::get_peer_socket_by_id(const std::string& peer_id) const {
+    const RatsPeer* peer = get_peer_by_id(peer_id);
     return peer ? peer->socket : INVALID_SOCKET_VALUE;
 }
 

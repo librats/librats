@@ -229,10 +229,10 @@ TEST_F(RatsClientTest, PeerHashIdTest) {
     EXPECT_TRUE(client.start());
     
     // Test hash ID functions with no peers
-    std::string empty_hash = client.get_peer_hash_id(123);
+    std::string empty_hash = client.get_peer_id(123);
     EXPECT_TRUE(empty_hash.empty());
     
-    socket_t invalid_socket = client.get_peer_socket("nonexistent_hash");
+    socket_t invalid_socket = client.get_peer_socket_by_id("nonexistent_hash");
     EXPECT_EQ(invalid_socket, INVALID_SOCKET_VALUE);
     
     client.stop();
@@ -254,7 +254,7 @@ TEST_F(RatsClientTest, PeerDisconnectionTest) {
     
     // Test disconnecting non-existent peer (should not crash)
     client.disconnect_peer(INVALID_SOCKET_VALUE);
-    client.disconnect_peer_by_hash("nonexistent_hash");
+    client.disconnect_peer_by_id("nonexistent_hash");
     
     client.stop();
 }
@@ -483,7 +483,7 @@ TEST_F(RatsClientTest, EdgeCasesTest) {
     bool send_result = client.send_string_to_peer_id("", "test");
     EXPECT_FALSE(send_result);
     
-    client.disconnect_peer_by_hash("");
+    client.disconnect_peer_by_id("");
     
     // Test very long message
     std::string long_message(10000, 'a');

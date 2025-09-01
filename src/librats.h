@@ -350,10 +350,10 @@ public:
     void disconnect_peer(socket_t socket);
 
     /**
-     * Disconnect from a peer by hash ID
-     * @param peer_hash_id Peer hash ID to disconnect
+     * Disconnect from a peer by peer_id (preferred)
+     * @param peer_id Peer ID to disconnect
      */
-    void disconnect_peer_by_hash(const std::string& peer_hash_id);
+    void disconnect_peer_by_id(const std::string& peer_id);
 
     // =========================================================================
     // Data Transmission Methods
@@ -444,19 +444,20 @@ public:
      */
     int get_peer_count() const;
 
-    /**
-     * Get hash ID for a peer by socket
-     * @param socket Peer socket
-     * @return Peer hash ID or empty string if not found
-     */
-    std::string get_peer_hash_id(socket_t socket) const;
 
     /**
-     * Get socket for a peer by hash ID
-     * @param peer_hash_id Peer hash ID
+     * Get peer_id for a peer by socket (preferred)
+     * @param socket Peer socket
+     * @return Peer ID or empty string if not found
+     */
+    std::string get_peer_id(socket_t socket) const;
+
+    /**
+     * Get socket for a peer by peer_id (preferred)
+     * @param peer_id Peer ID
      * @return Peer socket or INVALID_SOCKET_VALUE if not found
      */
-    socket_t get_peer_socket(const std::string& peer_hash_id) const;
+    socket_t get_peer_socket_by_id(const std::string& peer_id) const;
 
     /**
      * Get our own peer ID
@@ -1552,7 +1553,6 @@ private:
     // ICE coordination helpers
     void initialize_ice_agent();
     void setup_ice_callbacks();
-    socket_t get_peer_socket_by_id(const std::string& peer_id);
     void update_peer_ice_info(socket_t socket, const nlohmann::json& payload);
     void add_candidate_to_peer(socket_t socket, const IceCandidate& candidate);
     bool should_initiate_ice_coordination(const std::string& peer_id);

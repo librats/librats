@@ -191,15 +191,6 @@ void RatsClient::initiate_ice_with_peer(const std::string& peer_id, const std::s
     }
 }
 
-socket_t RatsClient::get_peer_socket_by_id(const std::string& peer_id) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    auto it = peers_.find(peer_id);
-    if (it != peers_.end()) {
-        return it->second.socket;
-    }
-    return INVALID_SOCKET_VALUE;
-}
-
 //=============================================================================
 // ICE Message Handlers
 //=============================================================================
