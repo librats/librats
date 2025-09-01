@@ -991,7 +991,7 @@ void FileTransferManager::start_file_send(const std::string& transfer_id) {
         
         // Send chunk binary data
         std::vector<uint8_t> binary_msg = create_chunk_binary_message(chunk);
-        client_.send_binary_to_peer_by_hash(progress->peer_id, binary_msg, MessageDataType::BINARY);
+        client_.send_binary_to_peer_id(progress->peer_id, binary_msg, MessageDataType::BINARY);
         
         chunk_index++;
         file_offset += chunk_size;

@@ -361,7 +361,7 @@ TEST_F(RatsClientTest, ErrorHandlingTest) {
     EXPECT_FALSE(send_result);
     
     // Test operations with invalid hash
-    bool send_by_hash_result = valid_client.send_string_to_peer_by_hash("invalid_hash", "test");
+    bool send_by_hash_result = valid_client.send_string_to_peer_id("invalid_hash", "test");
     EXPECT_FALSE(send_by_hash_result);
     
     // Test connecting to invalid address
@@ -480,7 +480,7 @@ TEST_F(RatsClientTest, EdgeCasesTest) {
     EXPECT_EQ(sent, 0);
     
     // Test null/empty hash operations
-    bool send_result = client.send_string_to_peer_by_hash("", "test");
+    bool send_result = client.send_string_to_peer_id("", "test");
     EXPECT_FALSE(send_result);
     
     client.disconnect_peer_by_hash("");
@@ -867,7 +867,7 @@ TEST_F(RatsClientTest, BinaryDataTransferByHashTest) {
     EXPECT_GT(client_peers.size(), 0);
     
     std::string server_hash_on_client = client_peers[0].peer_id;
-    bool sent = client.send_binary_to_peer_by_hash(server_hash_on_client, test_data);
+    bool sent = client.send_binary_to_peer_id(server_hash_on_client, test_data);
     EXPECT_TRUE(sent);
     
     bool received = wait_for_condition([&]() {

@@ -5,6 +5,7 @@
 #include "network_utils.h"
 #include "fs.h"
 #include "json.hpp" // nlohmann::json
+#include "version.h"
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -1402,7 +1403,7 @@ bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& data) 
     }
 }
 
-bool RatsClient::send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data, MessageDataType message_type) {
+bool RatsClient::send_binary_to_peer_id(const std::string& peer_hash_id, const std::vector<uint8_t>& data, MessageDataType message_type) {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     auto it = peers_.find(peer_hash_id);
     if (it == peers_.end() || !it->second.is_handshake_completed()) {
@@ -1412,18 +1413,18 @@ bool RatsClient::send_binary_to_peer_by_hash(const std::string& peer_hash_id, co
     return send_binary_to_peer(it->second.socket, data, message_type);
 }
 
-bool RatsClient::send_string_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data) {
+bool RatsClient::send_string_to_peer_id(const std::string& peer_hash_id, const std::string& data) {
     // Convert string to binary and use primary binary method with STRING type
     std::vector<uint8_t> binary_data(data.begin(), data.end());
-    return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::STRING);
+    return send_binary_to_peer_id(peer_hash_id, binary_data, MessageDataType::STRING);
 }
 
-bool RatsClient::send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& data) {
+bool RatsClient::send_json_to_peer_id(const std::string& peer_hash_id, const nlohmann::json& data) {
     try {
         // Serialize JSON and convert to binary, then use primary binary method with JSON type
         std::string json_string = data.dump();
         std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
-        return send_binary_to_peer_by_hash(peer_hash_id, binary_data, MessageDataType::JSON);
+        return send_binary_to_peer_id(peer_hash_id, binary_data, MessageDataType::JSON);
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
         return false;
@@ -2552,6 +2553,29 @@ std::unique_ptr<RatsClient> create_rats_client(int listen_port) {
         return nullptr;
     }
     return client;
+}
+
+// Version query functions
+const char* get_library_version_string() {
+    return librats::version::STRING;
+}
+
+void get_library_version(int* major, int* minor, int* patch, int* build) {
+    if (major) *major = librats::version::MAJOR;
+    if (minor) *minor = librats::version::MINOR;
+    if (patch) *patch = librats::version::PATCH;
+    if (build) *build = librats::version::BUILD;
+}
+
+const char* get_library_git_describe() {
+    return librats::version::GIT_DESCRIBE;
+}
+
+uint32_t get_library_abi() {
+    // ABI policy: MAJOR bumps on breaking changes; MINOR for additive; PATCH ignored in ABI id
+    return (static_cast<uint32_t>(librats::version::MAJOR) << 16) |
+           (static_cast<uint32_t>(librats::version::MINOR) << 8) |
+           (static_cast<uint32_t>(librats::version::PATCH));
 }
 
 bool RatsClient::parse_address_string(const std::string& address_str, std::string& out_ip, int& out_port) {

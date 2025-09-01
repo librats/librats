@@ -22,6 +22,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <unordered_set> // Added for unordered_set
+#include <cstdint>
+#include <cstring>
 
 namespace librats {
 
@@ -385,29 +387,29 @@ public:
 
     // Send to specific peer by ID
     /**
-     * Send binary data to a peer by peer hash ID (primary method)
-     * @param peer_hash_id Target peer hash ID
+     * Send binary data to a peer by peer_id (preferred)
+     * @param peer_id Target peer ID
      * @param data Binary data to send
      * @param message_type Type of message data (BINARY, STRING, JSON)
      * @return true if sent successfully
      */
-    bool send_binary_to_peer_by_hash(const std::string& peer_hash_id, const std::vector<uint8_t>& data, MessageDataType message_type = MessageDataType::BINARY);
+    bool send_binary_to_peer_id(const std::string& peer_id, const std::vector<uint8_t>& data, MessageDataType message_type = MessageDataType::BINARY);
 
     /**
-     * Send string data to a peer by peer hash ID
-     * @param peer_hash_id Target peer hash ID
+     * Send string data to a peer by peer_id (preferred)
+     * @param peer_id Target peer ID
      * @param data String data to send
      * @return true if sent successfully
      */
-    bool send_string_to_peer_by_hash(const std::string& peer_hash_id, const std::string& data);
+    bool send_string_to_peer_id(const std::string& peer_id, const std::string& data);
 
     /**
-     * Send JSON data to a peer by peer hash ID
-     * @param peer_hash_id Target peer hash ID
+     * Send JSON data to a peer by peer_id (preferred)
+     * @param peer_id Target peer ID
      * @param data JSON data to send
      * @return true if sent successfully
      */
-    bool send_json_to_peer_by_hash(const std::string& peer_hash_id, const nlohmann::json& data);
+    bool send_json_to_peer_id(const std::string& peer_id, const nlohmann::json& data);
 
     // Broadcast to all peers
     /**
@@ -1565,5 +1567,11 @@ private:
 
 // Utility functions
 std::unique_ptr<RatsClient> create_rats_client(int listen_port);
+
+// Library version query (stable, binding-friendly)
+const char* get_library_version_string();
+void get_library_version(int* major, int* minor, int* patch, int* build);
+const char* get_library_git_describe();
+uint32_t get_library_abi(); // packed as (major<<16)|(minor<<8)|patch
 
 } // namespace librats 

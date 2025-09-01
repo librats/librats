@@ -289,7 +289,7 @@ int main(int argc, char* argv[]) {
             std::getline(iss, message);
             if (!hash_id.empty() && !message.empty()) {
                 message = message.substr(1); // Remove leading space
-                if (client.send_string_to_peer_by_hash(hash_id, message)) {
+                if (client.send_string_to_peer_id(hash_id, message)) {
                     LOG_MAIN_INFO("Sent message to peer " << hash_id);
                 } else {
                     LOG_MAIN_ERROR("Failed to send message to peer " << hash_id);
