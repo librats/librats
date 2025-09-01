@@ -12,9 +12,7 @@
 #include <random>
 #include <sstream>
 #include <iomanip>
-#include <cmath>
 #include <stdexcept>
-#include <cstdio> // for std::remove
 
 #ifdef TESTING
 #define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", "[pointer: " << this << "] " << message)
@@ -37,11 +35,6 @@
 #define LOG_SERVER_WARN(message)  LOG_WARN("server", message)
 #define LOG_SERVER_ERROR(message) LOG_ERROR("server", message)
 #endif
-
-#define LOG_MAIN_DEBUG(message) LOG_DEBUG("main", message)
-#define LOG_MAIN_INFO(message)  LOG_INFO("main", message)
-#define LOG_MAIN_WARN(message)  LOG_WARN("main", message)
-#define LOG_MAIN_ERROR(message) LOG_ERROR("main", message)
 
 namespace librats {
 
@@ -1683,149 +1676,6 @@ std::unique_ptr<RatsClient> create_rats_client(int listen_port) {
     return client;
 }
 
-void run_rats_client_demo(int listen_port, const std::string& peer_host, int peer_port) {
-    LOG_MAIN_INFO("Starting RatsClient demo on port " << listen_port);
-    
-    RatsClient client(listen_port, 10); // Default 10 max peers
-    
-    // Set up connection callback
-    client.set_connection_callback([&client](socket_t socket, const std::string& peer_hash_id) {
-        bool is_encrypted = client.is_peer_encrypted(peer_hash_id);
-        LOG_MAIN_INFO("New validated connection (handshake completed): " << peer_hash_id << " (socket: " << socket << ")");
-        LOG_MAIN_INFO("Encryption status: " << (is_encrypted ? "ENCRYPTED" : "UNENCRYPTED"));
-        LOG_MAIN_INFO("Total connected peers: " << client.get_peer_count() << "/" << client.get_max_peers());
-    });
-    
-    // Set up message exchange API handlers
-    client.on("greeting", [](const std::string& peer_id, const nlohmann::json& data) {
-        LOG_MAIN_INFO("Received greeting from " << peer_id << ": " << data.value("message", ""));
-    });
-    
-    client.on("status", [](const std::string& peer_id, const nlohmann::json& data) {
-        LOG_MAIN_INFO("Peer " << peer_id << " status: " << data.value("status", "unknown"));
-    });
-    
-    client.once("test_once", [](const std::string& peer_id, const nlohmann::json& data) {
-        LOG_MAIN_INFO("One-time handler triggered by " << peer_id << ": " << data.dump());
-    });
-    
-    // Set up legacy data callback for non-protocol messages
-    client.set_string_data_callback([&client](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
-        LOG_MAIN_INFO("Received legacy data from peer " << peer_hash_id << ": " << data);
-        
-        // Try to parse as JSON first
-        nlohmann::json json_data;
-        if (client.parse_json_message(data, json_data)) {
-            // Check if it's a rats protocol message (these are handled by message exchange API)
-            if (json_data.contains("rats_protocol") && json_data["rats_protocol"] == true) {
-                LOG_MAIN_INFO("Received rats protocol message (handled by API)");
-                return; // Don't echo protocol messages
-            }
-            
-            LOG_MAIN_INFO("Parsed legacy JSON message: " << json_data.dump());
-            
-            // Create a JSON response using new API
-            nlohmann::json response_data;
-            response_data["original_message"] = json_data;
-            response_data["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-            
-            client.send("echo_response", response_data);
-        } else {
-            // Handle as plain text
-            std::string response = "Echo: " + data;
-            client.send_string_to_peer(socket, response);
-        }
-    });
-    
-    client.set_disconnect_callback([&client](socket_t socket, const std::string& peer_hash_id) {
-        LOG_MAIN_INFO("Peer disconnected: " << peer_hash_id << " (socket: " << socket << ")");
-        LOG_MAIN_INFO("Total connected peers: " << client.get_peer_count() << "/" << client.get_max_peers());
-    });
-    
-    // Start the client
-    if (!client.start()) {
-        LOG_MAIN_ERROR("Failed to start RatsClient");
-        return;
-    }
-    
-    // Print encryption information
-    LOG_MAIN_INFO("=== Encryption Information ===");
-    LOG_MAIN_INFO("Encryption enabled: " << (client.is_encryption_enabled() ? "YES" : "NO"));
-    if (client.is_encryption_enabled()) {
-        LOG_MAIN_INFO("Static encryption key: " << client.get_encryption_key());
-    }
-    LOG_MAIN_INFO("==============================");
-    
-    // Start mDNS discovery for local network peer discovery
-    std::map<std::string, std::string> mdns_txt_records;
-    mdns_txt_records["version"] = "1.0";
-    mdns_txt_records["port"] = std::to_string(listen_port);
-    mdns_txt_records["protocol"] = "librats";
-    
-    if (client.start_mdns_discovery("", mdns_txt_records)) {
-        LOG_MAIN_INFO("Started mDNS service discovery for local network peers");
-        
-        // Set mDNS callback to log discovered services
-        client.set_mdns_callback([&client](const std::string& ip, int port, const std::string& service_name) {
-            LOG_MAIN_INFO("mDNS discovered local librats service: " << service_name << " at " << ip << ":" << port);
-        });
-    } else {
-        LOG_MAIN_WARN("Failed to start mDNS discovery - continuing without local network discovery");
-    }
-    
-    // If peer information is provided, connect to peer
-    if (!peer_host.empty() && peer_port > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (client.connect_to_peer(peer_host, peer_port)) {
-            LOG_MAIN_INFO("Connected to peer " << peer_host << ":" << peer_port);
-            
-            // Send test messages using the new message exchange API
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            
-            // Send a greeting message
-            nlohmann::json greeting_data;
-            greeting_data["message"] = "Hello from RatsClient on port " + std::to_string(listen_port);
-            greeting_data["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-            greeting_data["sender_port"] = listen_port;
-            
-            client.send("greeting", greeting_data, [](bool success, const std::string& error) {
-                if (success) {
-                    LOG_MAIN_INFO("Greeting message sent successfully");
-                } else {
-                    LOG_MAIN_ERROR("Failed to send greeting: " << error);
-                }
-            });
-            
-            // Send a status message
-            nlohmann::json status_data;
-            status_data["status"] = "online";
-            status_data["details"] = "Demo client running";
-            status_data["peer_count"] = client.get_peer_count();
-            
-            client.send("status", status_data);
-            
-            // Send a test_once message to demonstrate once handlers
-            nlohmann::json once_data;
-            once_data["message"] = "This should only be handled once";
-            once_data["attempt"] = 1;
-            
-            client.send("test_once", once_data);
-            
-            LOG_MAIN_INFO("Sent test messages using new message exchange API");
-            LOG_MAIN_INFO("Peer exchange messages will be sent automatically when new peers connect");
-        }
-    }
-    
-    LOG_MAIN_INFO("RatsClient demo running. Press Enter to stop...");
-    std::cin.ignore();
-    std::cin.get();
-    
-    client.stop();
-    LOG_MAIN_INFO("RatsClient demo finished");
-}
-
 void RatsClient::start_automatic_peer_discovery() {
     if (auto_discovery_running_.load()) {
         LOG_CLIENT_WARN("Automatic peer discovery is already running");
@@ -2706,49 +2556,6 @@ int RatsClient::broadcast_custom_message(const std::string& type, const nlohmann
     LOG_CLIENT_DEBUG("Broadcasted custom message type '" << type << "' to " << sent_count << " peers");
     return sent_count;
 }
-
-/*
- * EXAMPLE: How to add new message types using the broadcasting system
- * 
- * 1. Create a message creation function:
- *    nlohmann::json create_status_message(const std::string& status, const std::string& details) {
- *        nlohmann::json payload;
- *        payload["status"] = status;
- *        payload["details"] = details;
- *        payload["node_info"] = get_node_info(); // example additional data
- *        return payload;
- *    }
- * 
- * 2. Create a handler function:
- *    void handle_status_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload) {
- *        std::string status = payload.value("status", "");
- *        std::string details = payload.value("details", "");
- *        LOG_CLIENT_INFO("Peer " << peer_hash_id << " status: " << status << " - " << details);
- *        // Handle the status update...
- *    }
- * 
- * 3. Add the handler to handle_rats_message() function:
- *    else if (message_type == "status") {
- *        handle_status_message(socket, peer_hash_id, payload);
- *    }
- * 
- * 4. Use the broadcasting system to send messages:
- *    // Broadcast to all peers:
- *    nlohmann::json status_payload = create_status_message("online", "Node is healthy");
- *    broadcast_custom_message("status", status_payload);
- * 
- *    // Send to specific peer:
- *    send_custom_message_to_peer("target_peer_id", "status", status_payload);
- * 
- * 5. Message format will automatically be:
- *    {
- *      "rats_protocol": true,
- *      "type": "status",
- *      "payload": { "status": "online", "details": "Node is healthy", ... },
- *      "sender_peer_id": "your_peer_id",
- *      "timestamp": 1234567890123
- *    }
- */
 
 bool RatsClient::send_custom_message_to_peer(const std::string& peer_id, const std::string& type, 
                                             const nlohmann::json& payload, 
@@ -3925,71 +3732,6 @@ NatType RatsClient::detect_nat_type() {
 NatTypeInfo RatsClient::get_nat_characteristics() {
     std::lock_guard<std::mutex> lock(nat_mutex_);
     return nat_characteristics_;
-}
-
-std::vector<ConnectionAttemptResult> RatsClient::test_connection_strategies(
-    const std::string& host, int port,
-    const std::vector<ConnectionStrategy>& strategies) {
-    
-    std::vector<ConnectionAttemptResult> results;
-    results.reserve(strategies.size());
-    
-    LOG_CLIENT_INFO("Testing " << strategies.size() << " connection strategies for " << host << ":" << port);
-    
-    for (const auto& strategy : strategies) {
-        ConnectionAttemptResult result;
-        result.local_nat_type = detect_nat_type();
-        result.remote_nat_type = NatType::UNKNOWN; // Will be detected during connection
-        
-        auto start_time = std::chrono::high_resolution_clock::now();
-        
-        switch (strategy) {
-            case ConnectionStrategy::DIRECT_ONLY:
-                result.success = attempt_direct_connection(host, port, result);
-                result.method = "direct";
-                break;
-                
-            case ConnectionStrategy::STUN_ASSISTED:
-                result.success = attempt_stun_assisted_connection(host, port, result);
-                result.method = "stun";
-                break;
-                
-            case ConnectionStrategy::ICE_FULL:
-                result.success = attempt_ice_connection(host, port, result);
-                result.method = "ice";
-                break;
-                
-            case ConnectionStrategy::TURN_RELAY:
-                result.success = attempt_turn_relay_connection(host, port, result);
-                result.method = "turn";
-                break;
-                
-            case ConnectionStrategy::AUTO_ADAPTIVE:
-                result.method = select_best_connection_strategy(host, port);
-                if (result.method == "direct") {
-                    result.success = attempt_direct_connection(host, port, result);
-                } else if (result.method == "stun") {
-                    result.success = attempt_stun_assisted_connection(host, port, result);
-                } else if (result.method == "ice") {
-                    result.success = attempt_ice_connection(host, port, result);
-                } else if (result.method == "turn") {
-                    result.success = attempt_turn_relay_connection(host, port, result);
-                } else {
-                    result.success = attempt_hole_punch_connection(host, port, result);
-                }
-                break;
-        }
-        
-        auto end_time = std::chrono::high_resolution_clock::now();
-        result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-        
-        LOG_CLIENT_INFO("Strategy " << result.method << " result: " << (result.success ? "SUCCESS" : "FAILED") 
-                       << " in " << result.duration.count() << "ms");
-        
-        results.push_back(result);
-    }
-    
-    return results;
 }
 
 std::string RatsClient::select_best_connection_strategy(const std::string& host, int port) {

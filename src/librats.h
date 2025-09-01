@@ -608,17 +608,6 @@ public:
     void add_ignored_address(const std::string& ip_address);
     
     /**
-     * Test connection to a peer with different strategies
-     * @param host Target host
-     * @param port Target port
-     * @param strategies List of strategies to try
-     * @return Connection attempt results
-     */
-    std::vector<ConnectionAttemptResult> test_connection_strategies(
-        const std::string& host, int port,
-        const std::vector<ConnectionStrategy>& strategies);
-    
-    /**
      * Perform coordinated hole punching with a peer
      * @param peer_ip Peer IP address
      * @param peer_port Peer port
@@ -1492,11 +1481,9 @@ private:
     void detect_and_cache_nat_type();
     void update_connection_statistics(const std::string& peer_id, const ConnectionAttemptResult& result);
     std::string select_best_connection_strategy(const std::string& host, int port);
-    bool coordinate_connection_with_peer(const std::string& peer_id, const nlohmann::json& coordination_data);
 };
 
 // Utility functions
 std::unique_ptr<RatsClient> create_rats_client(int listen_port);
-void run_rats_client_demo(int listen_port, const std::string& peer_host = "", int peer_port = 0);
 
 } // namespace librats 
