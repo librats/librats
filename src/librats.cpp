@@ -759,7 +759,8 @@ bool RatsClient::parse_handshake_message(const std::string& message, HandshakeMe
         out_msg.version = json_msg.value("version", "");
         out_msg.peer_id = json_msg.value("peer_id", "");
         out_msg.message_type = json_msg.value("message_type", "");
-        out_msg.timestamp = json_msg["timestamp"].get<int64_t>();
+        // Tolerate missing timestamp to avoid hard dependency on remote system clock
+        out_msg.timestamp = json_msg.value("timestamp", static_cast<int64_t>(0));
         
         return true;
         
@@ -805,13 +806,17 @@ bool RatsClient::validate_handshake_message(const HandshakeMessage& msg) const {
         return false;
     }
     
-    // Validate timestamp (should be recent, within 60 seconds)
-    auto now = std::chrono::high_resolution_clock::now();
-    auto current_timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    int64_t time_diff = std::abs(current_timestamp - msg.timestamp);
-    if (time_diff > 60000) { // 60 seconds in milliseconds
-        LOG_CLIENT_WARN("Handshake timestamp too old: " << time_diff << "ms" << " (current: " << current_timestamp << ", msg: " << msg.timestamp << ")");
-        return false;
+    // Soft-validate timestamp to avoid rejecting valid peers due to clock skew
+    if (msg.timestamp == 0) {
+        LOG_CLIENT_WARN("Handshake missing timestamp; accepting to avoid clock-skew rejection");
+    } else {
+        auto now = std::chrono::high_resolution_clock::now();
+        auto current_timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        int64_t time_diff = std::abs(current_timestamp - msg.timestamp);
+        const int64_t allowed_skew_ms = 10LL * 60LL * 1000LL; // 10 minutes tolerance
+        if (time_diff > allowed_skew_ms) {
+            LOG_CLIENT_WARN("Handshake timestamp skew " << time_diff << "ms exceeds " << allowed_skew_ms << "ms; accepting to be tolerant of clock skew");
+        }
     }
     
     return true;
