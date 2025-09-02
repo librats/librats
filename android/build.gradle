@@ -7,7 +7,7 @@ android {
     compileSdk 35
 
     defaultConfig {
-        minSdk 21
+        minSdk 24
         targetSdk 35
         versionCode 1
         versionName "1.0.0"
@@ -21,11 +21,7 @@ android {
 
         externalNativeBuild {
             cmake {
-                cppFlags "-std=c++17 -frtti -fexceptions"
                 abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'
-                arguments "-DANDROID_PLATFORM=android-21",
-                          "-DANDROID_TOOLCHAIN=clang",
-                          "-DANDROID_STL=c++_shared"
             }
         }
     }
@@ -44,27 +40,13 @@ android {
     externalNativeBuild {
         cmake {
             path "src/main/cpp/CMakeLists.txt"
-            version "3.18.1"
+            version "3.22.1"
         }
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
-    }
-
-    packaging {
-        pickFirst '**/libc++_shared.so'
-        pickFirst '**/libjsc.so'
-    }
-
-    splits {
-        abi {
-            enable true
-            reset()
-            include 'arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'
-            universalApk false
-        }
     }
 }
 

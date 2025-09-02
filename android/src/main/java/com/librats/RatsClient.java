@@ -15,7 +15,6 @@ public class RatsClient {
     
     static {
         try {
-            System.loadLibrary("rats");
             System.loadLibrary("rats_jni");
         } catch (UnsatisfiedLinkError e) {
             Log.e(TAG, "Failed to load native library", e);
