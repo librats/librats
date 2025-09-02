@@ -8,6 +8,7 @@ option(RATS_BUILD_EXAMPLES "Build examples" ON)
 option(RATS_BUILD_TESTS "Build unit tests" ON)
 option(RATS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(RATS_BINDINGS "Enable bindings" ON)
+option(RATS_CROSSCOMPILING "Force cross-compilation flags" OFF)
 
 # Get version from git
 find_package(Git QUIET)
@@ -273,7 +274,12 @@ if(RATS_BUILD_TESTS)
     
     # Add test discovery
     include(GoogleTest)
-    gtest_discover_tests(librats_tests)
+    # When cross-compiling, the host cannot execute target binaries. Skip discovery.
+    if(NOT CMAKE_CROSSCOMPILING AND NOT RATS_CROSSCOMPILING)
+        gtest_discover_tests(librats_tests)
+    else()
+        message(STATUS "Skipping gtest_discover_tests during cross-compilation")
+    endif()
     
     # Set test output directory
     set_target_properties(librats_tests PROPERTIES
