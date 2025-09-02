@@ -509,3 +509,333 @@ TEST_F(RatsCApiTest, VersionAPIs) {
     uint32_t abi = rats_get_abi();
     EXPECT_GT(abi, 0);
 }
+
+// New coverage: max peers configuration
+TEST_F(RatsCApiTest, MaxPeersConfiguration) {
+    client1 = rats_create(56000);
+    ASSERT_NE(client1, nullptr);
+
+    // Invalid handle / parameters
+    EXPECT_EQ(rats_set_max_peers(nullptr, 5), RATS_ERROR_INVALID_HANDLE);
+    EXPECT_EQ(rats_set_max_peers(client1, 0), RATS_ERROR_INVALID_PARAMETER);
+
+    // Set and get
+    EXPECT_EQ(rats_set_max_peers(client1, 1), RATS_SUCCESS);
+    EXPECT_EQ(rats_get_max_peers(client1), 1);
+
+    // Start server with max 1 and connect one client
+    EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
+    client2 = rats_create(56001);
+    ASSERT_NE(client2, nullptr);
+    EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
+
+    // Connect and wait
+    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", 56000, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    // Peer limit should be reached on server side with max 1
+    EXPECT_EQ(rats_is_peer_limit_reached(client1), 1);
+
+    rats_stop(client1);
+    rats_stop(client2);
+}
+
+// New coverage: disconnect by peer id
+TEST_F(RatsCApiTest, DisconnectPeerById) {
+    const int server_port = 56002;
+    const int client_port = 56003;
+
+    client1 = rats_create(server_port);
+    client2 = rats_create(client_port);
+    ASSERT_NE(client1, nullptr);
+    ASSERT_NE(client2, nullptr);
+
+    EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
+    EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    EXPECT_EQ(rats_get_peer_count(client1), 1);
+    EXPECT_EQ(rats_get_peer_count(client2), 1);
+
+    // Get server's view of connected peer id
+    int count = 0;
+    char** server_peer_ids = rats_get_peer_ids(client1, &count);
+    ASSERT_EQ(count, 1);
+    ASSERT_NE(server_peer_ids, nullptr);
+
+    // Disconnect by id
+    EXPECT_EQ(rats_disconnect_peer_by_id(client1, server_peer_ids[0]), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    EXPECT_EQ(rats_get_peer_count(client1), 0);
+    EXPECT_EQ(rats_get_peer_count(client2), 0);
+
+    for (int i = 0; i < count; ++i) rats_string_free(server_peer_ids[i]);
+    free(server_peer_ids);
+
+    rats_stop(client1);
+    rats_stop(client2);
+}
+
+// New coverage: broadcast string and JSON
+TEST_F(RatsCApiTest, BroadcastStringAndJson) {
+    const int server_port = 56004;
+    const int client_port = 56005;
+
+    client1 = rats_create(server_port);
+    client2 = rats_create(client_port);
+    ASSERT_NE(client1, nullptr);
+    ASSERT_NE(client2, nullptr);
+
+    // Track receptions
+    bool client_received_str = false;
+    bool client_received_json = false;
+    static char str_buf[128] = {0};
+    static char json_buf[256] = {0};
+
+    rats_set_string_callback(client2, [](void* ud, const char* peer_id, const char* msg){
+        bool* flag = static_cast<bool*>(ud);
+        *flag = true;
+        strncpy(str_buf, msg, sizeof(str_buf)-1);
+    }, &client_received_str);
+    rats_set_json_callback(client2, [](void* ud, const char* peer_id, const char* json_str){
+        bool* flag = static_cast<bool*>(ud);
+        *flag = true;
+        strncpy(json_buf, json_str, sizeof(json_buf)-1);
+    }, &client_received_json);
+
+    EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
+    EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    // Broadcast string from server
+    EXPECT_GE(rats_broadcast_string(client1, "hello all"), 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(client_received_str);
+    EXPECT_STREQ(str_buf, "hello all");
+
+    // Broadcast JSON from server
+    EXPECT_GE(rats_broadcast_json(client1, "{\"k\":123}"), 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(client_received_json);
+
+    rats_stop(client1);
+    rats_stop(client2);
+}
+
+// New coverage: connection stats and peer info JSON
+TEST_F(RatsCApiTest, StatsAndPeerInfoJson) {
+    const int server_port = 56006;
+    const int client_port = 56007;
+
+    client1 = rats_create(server_port);
+    client2 = rats_create(client_port);
+    ASSERT_NE(client1, nullptr);
+    ASSERT_NE(client2, nullptr);
+
+    EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
+    EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    // Stats JSON should be non-empty and parseable
+    char* stats = rats_get_connection_statistics_json(client1);
+    ASSERT_NE(stats, nullptr);
+    nlohmann::json parsed;
+    ASSERT_NO_THROW(parsed = nlohmann::json::parse(stats));
+    rats_string_free(stats);
+
+    // Peer info JSON
+    int count = 0;
+    char** ids = rats_get_peer_ids(client1, &count);
+    ASSERT_EQ(count, 1);
+    ASSERT_NE(ids, nullptr);
+    char* info = rats_get_peer_info_json(client1, ids[0]);
+    ASSERT_NE(info, nullptr);
+    nlohmann::json peer_info;
+    ASSERT_NO_THROW(peer_info = nlohmann::json::parse(info));
+    EXPECT_TRUE(peer_info.contains("peer_id"));
+    EXPECT_TRUE(peer_info.contains("ip"));
+    rats_string_free(info);
+    for (int i = 0; i < count; ++i) rats_string_free(ids[i]);
+    free(ids);
+
+    rats_stop(client1);
+    rats_stop(client2);
+}
+
+// New coverage: encryption key APIs
+TEST_F(RatsCApiTest, EncryptionKeyApis) {
+    client1 = rats_create(56008);
+    ASSERT_NE(client1, nullptr);
+
+    // Generate, set, get
+    char* key = rats_generate_encryption_key(client1);
+    ASSERT_NE(key, nullptr);
+    ASSERT_GT(strlen(key), 0u);
+    EXPECT_EQ(rats_set_encryption_key(client1, key), RATS_SUCCESS);
+    char* got = rats_get_encryption_key(client1);
+    ASSERT_NE(got, nullptr);
+    ASSERT_GT(strlen(got), 0u);
+
+    // Toggle and check
+    EXPECT_EQ(rats_set_encryption_enabled(client1, 1), RATS_SUCCESS);
+    EXPECT_EQ(rats_is_encryption_enabled(client1), 1);
+    EXPECT_EQ(rats_set_encryption_enabled(client1, 0), RATS_SUCCESS);
+    EXPECT_EQ(rats_is_encryption_enabled(client1), 0);
+
+    rats_string_free(key);
+    rats_string_free(got);
+    rats_destroy(client1);
+    client1 = nullptr;
+}
+
+// New coverage: protocol name/version set/get
+TEST_F(RatsCApiTest, ProtocolConfigApis) {
+    client1 = rats_create(56010);
+    ASSERT_NE(client1, nullptr);
+
+    EXPECT_EQ(rats_set_protocol_name(client1, "myproto"), RATS_SUCCESS);
+    EXPECT_EQ(rats_set_protocol_version(client1, "2.1"), RATS_SUCCESS);
+    char* name = rats_get_protocol_name(client1);
+    char* ver = rats_get_protocol_version(client1);
+    ASSERT_NE(name, nullptr);
+    ASSERT_NE(ver, nullptr);
+    EXPECT_STREQ(name, "myproto");
+    EXPECT_STREQ(ver, "2.1");
+    rats_string_free(name);
+    rats_string_free(ver);
+
+    rats_destroy(client1);
+    client1 = nullptr;
+}
+
+// New coverage: mDNS running state and query
+TEST_F(RatsCApiTest, MdnsStateAndQuery) {
+    client1 = rats_create(56012);
+    ASSERT_NE(client1, nullptr);
+    EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
+
+    EXPECT_EQ(rats_start_mdns_discovery(client1, "test_service"), RATS_SUCCESS);
+    EXPECT_EQ(rats_is_mdns_running(client1), 1);
+    EXPECT_EQ(rats_query_mdns_services(client1), RATS_SUCCESS);
+    rats_stop_mdns_discovery(client1);
+    EXPECT_EQ(rats_is_mdns_running(client1), 0);
+
+    rats_stop(client1);
+}
+
+// New coverage: DHT running and announce validation
+TEST_F(RatsCApiTest, DhtRunningAndAnnounceValidation) {
+    client1 = rats_create(56014);
+    ASSERT_NE(client1, nullptr);
+    EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
+
+    EXPECT_EQ(rats_start_dht_discovery(client1, 6881), RATS_SUCCESS);
+    EXPECT_EQ(rats_is_dht_running(client1), 1);
+    EXPECT_GE(rats_get_dht_routing_table_size(client1), 0u);
+
+    // Invalid hash length should fail
+    EXPECT_EQ(rats_announce_for_hash(client1, "deadbeef", 0), RATS_ERROR_INVALID_PARAMETER);
+
+    rats_stop_dht_discovery(client1);
+    EXPECT_EQ(rats_is_dht_running(client1), 0);
+
+    rats_stop(client1);
+}
+
+// New coverage: Message exchange positive path (on/send and broadcast)
+TEST_F(RatsCApiTest, MessageExchangePositive) {
+    const int server_port = 56016;
+    const int client_port = 56017;
+
+    client1 = rats_create(server_port);
+    client2 = rats_create(client_port);
+    ASSERT_NE(client1, nullptr);
+    ASSERT_NE(client2, nullptr);
+
+    bool received = false;
+    static char last_peer[256] = {0};
+    static char last_payload[256] = {0};
+
+    // Register handler on server
+    EXPECT_EQ(rats_on_message(client1, "mtype", [](void* ud, const char* peer_id, const char* json_str){
+        bool* flag = static_cast<bool*>(ud);
+        *flag = true;
+        strncpy(last_peer, peer_id, sizeof(last_peer)-1);
+        strncpy(last_payload, json_str, sizeof(last_payload)-1);
+    }, &received), RATS_SUCCESS);
+
+    EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
+    EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    // Send a JSON message from client to server
+    int peer_count = 0;
+    char** peers = rats_get_peer_ids(client2, &peer_count);
+    ASSERT_EQ(peer_count, 1);
+    ASSERT_NE(peers, nullptr);
+    EXPECT_EQ(rats_send_message(client2, peers[0], "mtype", "{\"x\":42}"), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_TRUE(received);
+
+    // Reset and test broadcast message from client
+    received = false;
+    EXPECT_EQ(rats_broadcast_message(client2, "mtype", "{\"y\":99}"), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_TRUE(received);
+
+    for (int i = 0; i < peer_count; ++i) rats_string_free(peers[i]);
+    free(peers);
+
+    rats_stop(client1);
+    rats_stop(client2);
+}
+
+// New coverage: basic rats_connect convenience API
+TEST_F(RatsCApiTest, BasicRatsConnect) {
+    const int server_port = 56018;
+    const int client_port = 56019;
+
+    client1 = rats_create(server_port);
+    client2 = rats_create(client_port);
+    ASSERT_NE(client1, nullptr);
+    ASSERT_NE(client2, nullptr);
+    EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
+    EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    EXPECT_EQ(rats_get_peer_count(client1), 1);
+    EXPECT_EQ(rats_get_peer_count(client2), 1);
+
+    rats_stop(client1);
+    rats_stop(client2);
+}
+
+// New coverage: invalid file transfer accept/reject/cancel
+TEST_F(RatsCApiTest, FileTransferInvalidControl) {
+    client1 = rats_create(56020);
+    ASSERT_NE(client1, nullptr);
+
+    // Invalid handle
+    EXPECT_EQ(rats_accept_file_transfer(nullptr, "tid", "/tmp/x"), RATS_ERROR_INVALID_PARAMETER);
+    EXPECT_EQ(rats_reject_file_transfer(nullptr, "tid", "reason"), RATS_ERROR_INVALID_PARAMETER);
+    EXPECT_EQ(rats_cancel_file_transfer(nullptr, "tid"), RATS_ERROR_INVALID_PARAMETER);
+
+    // Non-existent transfer id should fail
+    EXPECT_EQ(rats_accept_file_transfer(client1, "nope", "/tmp/x"), RATS_ERROR_OPERATION_FAILED);
+    EXPECT_EQ(rats_reject_file_transfer(client1, "nope", "reason"), RATS_ERROR_OPERATION_FAILED);
+    EXPECT_EQ(rats_cancel_file_transfer(client1, "nope"), RATS_ERROR_OPERATION_FAILED);
+
+    rats_destroy(client1);
+    client1 = nullptr;
+}
