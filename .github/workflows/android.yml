@@ -128,10 +128,16 @@ jobs:
         run: |
           cmake --build build --config ${{ matrix.build-type }} --parallel
 
+      - name: Build Android AAR
+        run: |
+          cd android
+          gradle assembleRelease assembleDebug --no-daemon --stacktrace
+
       - name: Prepare artifacts
         if: matrix.build-type == 'Release'
         run: |
           mkdir -p artifacts/android-${{ env.ARCH_NAME }}/include
+          mkdir -p artifacts/android-${{ env.ARCH_NAME }}/aar
           
           # Copy binaries and libraries based on what's actually built
           if [ -d "build/bin" ]; then
@@ -147,6 +153,16 @@ jobs:
           fi
           if [ -d "include" ]; then
             cp include/*.h artifacts/android-${{ env.ARCH_NAME }}/include/ 2>/dev/null || true
+          fi
+          
+          # Copy AAR files and rename them to include architecture
+          if [ -d "android/build/outputs/aar" ]; then
+            for aar in android/build/outputs/aar/*.aar; do
+              if [ -f "$aar" ]; then
+                aar_name=$(basename "$aar" .aar)
+                cp "$aar" "artifacts/android-${{ env.ARCH_NAME }}/aar/${aar_name}-${{ env.ARCH_NAME }}.aar"
+              fi
+            done
           fi
           
           cd artifacts
@@ -169,6 +185,9 @@ jobs:
         if: matrix.build-type == 'Release' && github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/librats-android-${{ env.ARCH_NAME }}-${{ github.ref_name }}.zip
+          files: |
+            artifacts/librats-android-${{ env.ARCH_NAME }}-${{ github.ref_name }}.zip
+            artifacts/android-${{ env.ARCH_NAME }}/aar/librats-release-${{ env.ARCH_NAME }}.aar
+            artifacts/android-${{ env.ARCH_NAME }}/aar/librats-debug-${{ env.ARCH_NAME }}.aar
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
