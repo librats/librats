@@ -7,9 +7,9 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Release](https://img.shields.io/github/release/DEgITx/librats.svg)](https://github.com/DEgITx/librats/releases)
 
-**A high-performance, lightweight peer-to-peer networking library written in C++17**
+**A high-performance, lightweight peer-to-peer networking library with C++, C, Java, and Android support**
 
-librats is a modern P2P networking library designed for **superior performance** and **simplicity**. Built from the ground up in C++17, it provides enterprise-grade P2P networking capabilities with minimal overhead and maximum efficiency.
+librats is a modern P2P networking library designed for **superior performance** and **simplicity**. Built from the ground up in C++17 with comprehensive language bindings, it provides enterprise-grade P2P networking capabilities with minimal overhead and maximum efficiency.
 
 **Official Website**: [https://librats.com](https://librats.com)
 
@@ -780,8 +780,8 @@ librats provides comprehensive cross-platform support with bindings for multiple
 | Language/Platform | Binding Type | Status | Timeline | Notes |
 |-------------------|--------------|--------|----------|-------|
 | **C/C++** | Native Library | ✅ **Fully Supported** | **Available Now** | Core implementation with full feature set |
-| **Android (NDK)** | Native C++ | 🔶 **In Development** | **Soon** | Android NDK integration with JNI bindings |
-| **Android (Java)** | JNI Wrapper | 🔶 **In Development** | **Soon** | High-level Java API for Android apps |
+| **Android (NDK)** | Native C++ | ✅ **Fully Supported** | **Available Now** | Android NDK integration with JNI bindings |
+| **Android (Java)** | JNI Wrapper | ✅ **Fully Supported** | **Available Now** | High-level Java API for Android apps |
 | **JavaScript** | Native Module | 📋 **Planned** | **Soon** | Node.js native addon with async/await support |
 | **Python** | C Extension | 📋 **Planned** | **Soon** | CPython extension with asyncio integration |
 | **Rust** | FFI Bindings | 📋 **Planned** | **Soon** | Safe Rust bindings with tokio async support |
@@ -792,7 +792,7 @@ librats provides comprehensive cross-platform support with bindings for multiple
 
 | Platform | Implementation | Status | Features |
 |----------|----------------|--------|----------|
-| **Android** | NDK + JNI | 🔶 **In Development** | Full P2P networking, file transfer, GossipSub |
+| **Android** | NDK + JNI | ✅ **Fully Supported** | Full P2P networking, file transfer, GossipSub |
 | **iOS** | Native C++ | 📋 **Planned** | Swift/Objective-C bindings planned |
 | **React Native** | Native Module | 📋 **Future** | Cross-platform mobile development |
 | **Flutter** | FFI Plugin | 📋 **Future** | Dart FFI integration |
