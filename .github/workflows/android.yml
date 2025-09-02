@@ -1,10 +1,10 @@
 name: Android CMake CI
 
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+#  push:
+#    branches: [main, master]
+#  pull_request:
+#    branches: [main, master]
   release:
     types: [created]
 

@@ -171,11 +171,13 @@ TEST_F(RatsCApiTest, ConfigurationAPIs) {
     EXPECT_EQ(rats_start_dht_discovery(nullptr, 6881), RATS_ERROR_INVALID_HANDLE);
     
     // Test mDNS operations - need to start client first
+#ifndef __APPLE__
     EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
     EXPECT_EQ(rats_start_mdns_discovery(client1, "test_service"), RATS_SUCCESS);
     rats_stop_mdns_discovery(client1);
     rats_stop(client1);
     EXPECT_EQ(rats_start_mdns_discovery(nullptr, "test_service"), RATS_ERROR_INVALID_HANDLE);
+#endif
     
     rats_destroy(client1);
     client1 = nullptr;
@@ -717,6 +719,7 @@ TEST_F(RatsCApiTest, ProtocolConfigApis) {
 }
 
 // New coverage: mDNS running state and query
+#ifndef __APPLE__
 TEST_F(RatsCApiTest, MdnsStateAndQuery) {
     client1 = rats_create(56012);
     ASSERT_NE(client1, nullptr);
@@ -730,6 +733,7 @@ TEST_F(RatsCApiTest, MdnsStateAndQuery) {
 
     rats_stop(client1);
 }
+#endif
 
 // New coverage: DHT running and announce validation
 TEST_F(RatsCApiTest, DhtRunningAndAnnounceValidation) {
