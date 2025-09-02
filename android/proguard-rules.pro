@@ -19,14 +19,3 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
-
-# Keep all librats classes and their native methods
--keep class com.librats.** { *; }
-
-# Keep native methods
--keepclasseswithmembernames class * {
-    native <methods>;
-}
-
-# Keep callback interfaces
--keep interface com.librats.*Callback { *; }
