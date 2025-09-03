@@ -10,8 +10,15 @@
     #include <netdb.h>
     #include <arpa/inet.h>
     #include <netinet/in.h>
-    #include <ifaddrs.h>
+
+    #ifdef RATS_ANDROID_OLD_API
+        #include <ifaddrs-android.h>
+    #else
+        #include <ifaddrs.h>
+    #endif
 #endif
+
+
 
 #include "network_utils.h"
 #include "logger.h"
