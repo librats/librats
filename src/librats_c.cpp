@@ -34,8 +34,24 @@ struct rats_client_wrapper {
     rats_file_progress_cb file_progress_cb = nullptr;
     void* file_progress_ud = nullptr;
 
+    // File transfer callbacks
+    rats_file_request_cb file_request_cb = nullptr;
+    void* file_request_ud = nullptr;
+    
+    rats_directory_request_cb directory_request_cb = nullptr;
+    void* directory_request_ud = nullptr;
+    
+    rats_directory_progress_cb directory_progress_cb = nullptr;
+    void* directory_progress_ud = nullptr;
+
     // Message handlers - using a simple map for demonstration
     std::unordered_map<std::string, std::pair<rats_message_cb, void*>> message_handlers;
+    
+    // GossipSub topic callbacks
+    std::unordered_map<std::string, std::pair<rats_topic_message_cb, void*>> topic_message_handlers;
+    std::unordered_map<std::string, std::pair<rats_topic_json_message_cb, void*>> topic_json_message_handlers;
+    std::unordered_map<std::string, std::pair<rats_topic_peer_joined_cb, void*>> topic_peer_joined_handlers;
+    std::unordered_map<std::string, std::pair<rats_topic_peer_left_cb, void*>> topic_peer_left_handlers;
 };
 
 static char* rats_strdup_owned(const std::string& s) {
@@ -154,6 +170,61 @@ void rats_set_log_level(const char* level_str) {
     else if (upper == "WARN" || upper == "WARNING") level = LogLevel::WARN;
     else if (upper == "ERROR") level = LogLevel::ERROR;
     Logger::getInstance().set_log_level(level);
+}
+
+
+void rats_set_log_file_path(rats_client_t handle, const char* file_path) {
+    if (!handle || !file_path) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->set_log_file_path(std::string(file_path));
+}
+
+char* rats_get_log_file_path(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return rats_strdup_owned(wrap->client->get_log_file_path());
+}
+
+void rats_set_log_colors_enabled(rats_client_t handle, int enabled) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->set_log_colors_enabled(enabled != 0);
+}
+
+int rats_is_log_colors_enabled(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_log_colors_enabled() ? 1 : 0;
+}
+
+void rats_set_log_timestamps_enabled(rats_client_t handle, int enabled) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->set_log_timestamps_enabled(enabled != 0);
+}
+
+int rats_is_log_timestamps_enabled(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_log_timestamps_enabled() ? 1 : 0;
+}
+
+void rats_set_log_rotation_size(rats_client_t handle, size_t max_size_bytes) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->set_log_rotation_size(max_size_bytes);
+}
+
+void rats_set_log_retention_count(rats_client_t handle, int count) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->set_log_retention_count(count);
+}
+
+void rats_clear_log_file(rats_client_t handle) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->clear_log_file();
 }
 
 void rats_set_connection_callback(rats_client_t handle, rats_connection_cb cb, void* user_data) {
@@ -323,6 +394,36 @@ size_t rats_get_dht_routing_table_size(rats_client_t handle) {
     if (!handle) return 0;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
     return wrap->client->get_dht_routing_table_size();
+}
+
+// Automatic discovery
+
+void rats_start_automatic_peer_discovery(rats_client_t handle) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->start_automatic_peer_discovery();
+}
+
+void rats_stop_automatic_peer_discovery(rats_client_t handle) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->stop_automatic_peer_discovery();
+}
+
+int rats_is_automatic_discovery_running(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_automatic_discovery_running() ? 1 : 0;
+}
+
+char* rats_get_discovery_hash(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return rats_strdup_owned(wrap->client->get_discovery_hash());
+}
+
+char* rats_get_rats_peer_discovery_hash(void) {
+    return rats_strdup_owned(RatsClient::get_rats_peer_discovery_hash());
 }
 
 // mDNS Discovery
@@ -568,6 +669,140 @@ void rats_set_file_progress_callback(rats_client_t handle, rats_file_progress_cb
     });
 }
 
+char* rats_send_directory(rats_client_t handle, const char* peer_id, const char* directory_path, const char* remote_directory_name, int recursive) {
+    if (!handle || !peer_id || !directory_path) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string remote_name = remote_directory_name ? std::string(remote_directory_name) : std::string("");
+    std::string transfer_id = wrap->client->send_directory(std::string(peer_id), std::string(directory_path), remote_name, recursive != 0);
+    
+    return transfer_id.empty() ? nullptr : rats_strdup_owned(transfer_id);
+}
+
+char* rats_request_file(rats_client_t handle, const char* peer_id, const char* remote_file_path, const char* local_path) {
+    if (!handle || !peer_id || !remote_file_path || !local_path) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string transfer_id = wrap->client->request_file(std::string(peer_id), std::string(remote_file_path), std::string(local_path));
+    
+    return transfer_id.empty() ? nullptr : rats_strdup_owned(transfer_id);
+}
+
+char* rats_request_directory(rats_client_t handle, const char* peer_id, const char* remote_directory_path, const char* local_directory_path, int recursive) {
+    if (!handle || !peer_id || !remote_directory_path || !local_directory_path) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string transfer_id = wrap->client->request_directory(std::string(peer_id), std::string(remote_directory_path), std::string(local_directory_path), recursive != 0);
+    
+    return transfer_id.empty() ? nullptr : rats_strdup_owned(transfer_id);
+}
+
+rats_error_t rats_accept_directory_transfer(rats_client_t handle, const char* transfer_id, const char* local_path) {
+    if (!handle || !transfer_id || !local_path) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    return wrap->client->accept_directory_transfer(std::string(transfer_id), std::string(local_path)) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+rats_error_t rats_reject_directory_transfer(rats_client_t handle, const char* transfer_id, const char* reason) {
+    if (!handle || !transfer_id) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string reject_reason = reason ? std::string(reason) : std::string("");
+    return wrap->client->reject_directory_transfer(std::string(transfer_id), reject_reason) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+rats_error_t rats_pause_file_transfer(rats_client_t handle, const char* transfer_id) {
+    if (!handle || !transfer_id) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    return wrap->client->pause_file_transfer(std::string(transfer_id)) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+rats_error_t rats_resume_file_transfer(rats_client_t handle, const char* transfer_id) {
+    if (!handle || !transfer_id) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    return wrap->client->resume_file_transfer(std::string(transfer_id)) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+char* rats_get_file_transfer_progress_json(rats_client_t handle, const char* transfer_id) {
+    if (!handle || !transfer_id) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    auto progress = wrap->client->get_file_transfer_progress(std::string(transfer_id));
+    if (!progress) return nullptr;
+    
+    // Convert progress to JSON
+    nlohmann::json progress_json;
+    progress_json["transfer_id"] = progress->transfer_id;
+    progress_json["filename"] = progress->filename;
+    progress_json["local_path"] = progress->local_path;
+    progress_json["peer_id"] = progress->peer_id;
+    progress_json["bytes_transferred"] = progress->bytes_transferred;
+    progress_json["total_bytes"] = progress->total_bytes;
+    progress_json["completion_percentage"] = progress->get_completion_percentage();
+    progress_json["status"] = static_cast<int>(progress->status);
+    progress_json["direction"] = static_cast<int>(progress->direction);
+    
+    return rats_strdup_owned(progress_json.dump());
+}
+
+char* rats_get_file_transfer_statistics_json(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto stats = wrap->client->get_file_transfer_statistics();
+    return rats_strdup_owned(stats.dump());
+}
+
+// File transfer callback setters
+void rats_set_file_request_callback(rats_client_t handle, rats_file_request_cb cb, void* user_data) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->file_request_cb = cb;
+    wrap->file_request_ud = user_data;
+    
+    if (cb) {
+        wrap->client->on_file_request([wrap](const std::string& peer_id, const std::string& file_path, const std::string& transfer_id) {
+            if (wrap->file_request_cb) {
+                wrap->file_request_cb(wrap->file_request_ud, peer_id.c_str(), transfer_id.c_str(), file_path.c_str(), "");
+            }
+            return true; // Accept the file request
+        });
+    }
+}
+
+void rats_set_directory_request_callback(rats_client_t handle, rats_directory_request_cb cb, void* user_data) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->directory_request_cb = cb;
+    wrap->directory_request_ud = user_data;
+    
+    if (cb) {
+        wrap->client->on_directory_request([wrap](const std::string& peer_id, const std::string& directory_path, bool recursive, const std::string& transfer_id) {
+            if (wrap->directory_request_cb) {
+                wrap->directory_request_cb(wrap->directory_request_ud, peer_id.c_str(), transfer_id.c_str(), directory_path.c_str(), "");
+            }
+            return true; // Accept the directory request
+        });
+    }
+}
+
+void rats_set_directory_progress_callback(rats_client_t handle, rats_directory_progress_cb cb, void* user_data) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->directory_progress_cb = cb;
+    wrap->directory_progress_ud = user_data;
+    
+    if (cb) {
+        wrap->client->on_directory_transfer_progress([wrap](const std::string& transfer_id, const std::string& current_file, uint64_t files_completed, uint64_t total_files, uint64_t bytes_completed, uint64_t total_bytes) {
+            if (wrap->directory_progress_cb) {
+                wrap->directory_progress_cb(wrap->directory_progress_ud, transfer_id.c_str(), static_cast<int>(files_completed), static_cast<int>(total_files), current_file.c_str());
+            }
+        });
+    }
+}
+
 // Peer information
 char** rats_get_peer_ids(rats_client_t handle, int* count) {
     if (!handle || !count) {
@@ -621,6 +856,454 @@ char* rats_get_peer_info_json(rats_client_t handle, const char* peer_id) {
     peer_info["encryption_enabled"] = peer->encryption_enabled;
     
     return rats_strdup_owned(peer_info.dump());
+}
+
+char** rats_get_validated_peer_ids(rats_client_t handle, int* count) {
+    if (!handle || !count) {
+        if (count) *count = 0;
+        return nullptr;
+    }
+    
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto peers = wrap->client->get_validated_peers();
+    
+    *count = static_cast<int>(peers.size());
+    if (*count == 0) return nullptr;
+    
+    char** peer_ids = static_cast<char**>(malloc(*count * sizeof(char*)));
+    if (!peer_ids) {
+        *count = 0;
+        return nullptr;
+    }
+    
+    for (int i = 0; i < *count; ++i) {
+        peer_ids[i] = rats_strdup_owned(peers[i].peer_id);
+        if (!peer_ids[i]) {
+            // Clean up on allocation failure
+            for (int j = 0; j < i; ++j) {
+                free(peer_ids[j]);
+            }
+            free(peer_ids);
+            *count = 0;
+            return nullptr;
+        }
+    }
+    
+    return peer_ids;
+}
+
+// ===================== GOSSIPSUB FUNCTIONALITY =====================
+
+int rats_is_gossipsub_available(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_gossipsub_available() ? 1 : 0;
+}
+
+int rats_is_gossipsub_running(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_gossipsub_running() ? 1 : 0;
+}
+
+rats_error_t rats_subscribe_to_topic(rats_client_t handle, const char* topic) {
+    if (!handle || !topic) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->subscribe_to_topic(std::string(topic)) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+rats_error_t rats_unsubscribe_from_topic(rats_client_t handle, const char* topic) {
+    if (!handle || !topic) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->unsubscribe_from_topic(std::string(topic)) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+int rats_is_subscribed_to_topic(rats_client_t handle, const char* topic) {
+    if (!handle || !topic) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_subscribed_to_topic(std::string(topic)) ? 1 : 0;
+}
+
+char** rats_get_subscribed_topics(rats_client_t handle, int* count) {
+    if (!handle || !count) {
+        if (count) *count = 0;
+        return nullptr;
+    }
+    
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto topics = wrap->client->get_subscribed_topics();
+    
+    *count = static_cast<int>(topics.size());
+    if (*count == 0) return nullptr;
+    
+    char** topic_array = static_cast<char**>(malloc(*count * sizeof(char*)));
+    if (!topic_array) {
+        *count = 0;
+        return nullptr;
+    }
+    
+    for (int i = 0; i < *count; ++i) {
+        topic_array[i] = rats_strdup_owned(topics[i]);
+        if (!topic_array[i]) {
+            // Clean up on allocation failure
+            for (int j = 0; j < i; ++j) {
+                free(topic_array[j]);
+            }
+            free(topic_array);
+            *count = 0;
+            return nullptr;
+        }
+    }
+    
+    return topic_array;
+}
+
+rats_error_t rats_publish_to_topic(rats_client_t handle, const char* topic, const char* message) {
+    if (!handle || !topic || !message) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->publish_to_topic(std::string(topic), std::string(message)) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+rats_error_t rats_publish_json_to_topic(rats_client_t handle, const char* topic, const char* json_str) {
+    if (!handle || !topic || !json_str) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    try {
+        nlohmann::json json_data = nlohmann::json::parse(json_str);
+        return wrap->client->publish_json_to_topic(std::string(topic), json_data) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+    } catch (const nlohmann::json::exception&) {
+        return RATS_ERROR_JSON_PARSE;
+    }
+}
+
+char** rats_get_topic_peers(rats_client_t handle, const char* topic, int* count) {
+    if (!handle || !topic || !count) {
+        if (count) *count = 0;
+        return nullptr;
+    }
+    
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto peers = wrap->client->get_topic_peers(std::string(topic));
+    
+    *count = static_cast<int>(peers.size());
+    if (*count == 0) return nullptr;
+    
+    char** peer_array = static_cast<char**>(malloc(*count * sizeof(char*)));
+    if (!peer_array) {
+        *count = 0;
+        return nullptr;
+    }
+    
+    for (int i = 0; i < *count; ++i) {
+        peer_array[i] = rats_strdup_owned(peers[i]);
+        if (!peer_array[i]) {
+            // Clean up on allocation failure
+            for (int j = 0; j < i; ++j) {
+                free(peer_array[j]);
+            }
+            free(peer_array);
+            *count = 0;
+            return nullptr;
+        }
+    }
+    
+    return peer_array;
+}
+
+char** rats_get_topic_mesh_peers(rats_client_t handle, const char* topic, int* count) {
+    if (!handle || !topic || !count) {
+        if (count) *count = 0;
+        return nullptr;
+    }
+    
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto peers = wrap->client->get_topic_mesh_peers(std::string(topic));
+    
+    *count = static_cast<int>(peers.size());
+    if (*count == 0) return nullptr;
+    
+    char** peer_array = static_cast<char**>(malloc(*count * sizeof(char*)));
+    if (!peer_array) {
+        *count = 0;
+        return nullptr;
+    }
+    
+    for (int i = 0; i < *count; ++i) {
+        peer_array[i] = rats_strdup_owned(peers[i]);
+        if (!peer_array[i]) {
+            // Clean up on allocation failure
+            for (int j = 0; j < i; ++j) {
+                free(peer_array[j]);
+            }
+            free(peer_array);
+            *count = 0;
+            return nullptr;
+        }
+    }
+    
+    return peer_array;
+}
+
+char* rats_get_gossipsub_statistics_json(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto stats = wrap->client->get_gossipsub_statistics();
+    return rats_strdup_owned(stats.dump());
+}
+
+// GossipSub callback setters
+void rats_set_topic_message_callback(rats_client_t handle, const char* topic, rats_topic_message_cb cb, void* user_data) {
+    if (!handle || !topic) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string topic_str(topic);
+    if (cb) {
+        wrap->topic_message_handlers[topic_str] = std::make_pair(cb, user_data);
+        wrap->client->on_topic_message(topic_str, [wrap, cb, user_data](const std::string& peer_id, const std::string& topic, const std::string& message) {
+            if (cb) {
+                cb(user_data, peer_id.c_str(), topic.c_str(), message.c_str());
+            }
+        });
+    } else {
+        wrap->topic_message_handlers.erase(topic_str);
+    }
+}
+
+void rats_set_topic_json_message_callback(rats_client_t handle, const char* topic, rats_topic_json_message_cb cb, void* user_data) {
+    if (!handle || !topic) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string topic_str(topic);
+    if (cb) {
+        wrap->topic_json_message_handlers[topic_str] = std::make_pair(cb, user_data);
+        wrap->client->on_topic_json_message(topic_str, [wrap, cb, user_data](const std::string& peer_id, const std::string& topic, const nlohmann::json& message) {
+            if (cb) {
+                std::string json_str = message.dump();
+                cb(user_data, peer_id.c_str(), topic.c_str(), json_str.c_str());
+            }
+        });
+    } else {
+        wrap->topic_json_message_handlers.erase(topic_str);
+    }
+}
+
+void rats_set_topic_peer_joined_callback(rats_client_t handle, const char* topic, rats_topic_peer_joined_cb cb, void* user_data) {
+    if (!handle || !topic) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string topic_str(topic);
+    if (cb) {
+        wrap->topic_peer_joined_handlers[topic_str] = std::make_pair(cb, user_data);
+        wrap->client->on_topic_peer_joined(topic_str, [wrap, cb, user_data](const std::string& peer_id, const std::string& topic) {
+            if (cb) {
+                cb(user_data, peer_id.c_str(), topic.c_str());
+            }
+        });
+    } else {
+        wrap->topic_peer_joined_handlers.erase(topic_str);
+    }
+}
+
+void rats_set_topic_peer_left_callback(rats_client_t handle, const char* topic, rats_topic_peer_left_cb cb, void* user_data) {
+    if (!handle || !topic) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string topic_str(topic);
+    if (cb) {
+        wrap->topic_peer_left_handlers[topic_str] = std::make_pair(cb, user_data);
+        wrap->client->on_topic_peer_left(topic_str, [wrap, cb, user_data](const std::string& peer_id, const std::string& topic) {
+            if (cb) {
+                cb(user_data, peer_id.c_str(), topic.c_str());
+            }
+        });
+    } else {
+        wrap->topic_peer_left_handlers.erase(topic_str);
+    }
+}
+
+void rats_clear_topic_callbacks(rats_client_t handle, const char* topic) {
+    if (!handle || !topic) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string topic_str(topic);
+    wrap->topic_message_handlers.erase(topic_str);
+    wrap->topic_json_message_handlers.erase(topic_str);
+    wrap->topic_peer_joined_handlers.erase(topic_str);
+    wrap->topic_peer_left_handlers.erase(topic_str);
+    
+    wrap->client->off_topic(topic_str);
+}
+
+// ===================== NAT TRAVERSAL AND STUN =====================
+
+rats_error_t rats_discover_and_ignore_public_ip(rats_client_t handle, const char* stun_server, int stun_port) {
+    if (!handle) return RATS_ERROR_INVALID_HANDLE;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string server = stun_server ? std::string(stun_server) : "stun.l.google.com";
+    int port = (stun_port > 0) ? stun_port : 19302;
+    
+    return wrap->client->discover_and_ignore_public_ip(server, port) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+char* rats_get_public_ip(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    std::string public_ip = wrap->client->get_public_ip();
+    return public_ip.empty() ? nullptr : rats_strdup_owned(public_ip);
+}
+
+int rats_detect_nat_type(rats_client_t handle) {
+    if (!handle) return 0; // UNKNOWN
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return static_cast<int>(wrap->client->detect_nat_type());
+}
+
+char* rats_get_nat_characteristics_json(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto characteristics = wrap->client->get_nat_characteristics();
+    
+    // Convert NatTypeInfo to JSON manually
+    nlohmann::json nat_json;
+    nat_json["has_nat"] = characteristics.has_nat;
+    nat_json["filtering_behavior"] = static_cast<int>(characteristics.filtering_behavior);
+    nat_json["mapping_behavior"] = static_cast<int>(characteristics.mapping_behavior);
+    nat_json["preserves_port"] = characteristics.preserves_port;
+    nat_json["hairpin_support"] = characteristics.hairpin_support;
+    nat_json["description"] = characteristics.description;
+    
+    return rats_strdup_owned(nat_json.dump());
+}
+
+void rats_add_ignored_address(rats_client_t handle, const char* ip_address) {
+    if (!handle || !ip_address) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->add_ignored_address(std::string(ip_address));
+}
+
+char* rats_get_nat_traversal_statistics_json(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto stats = wrap->client->get_nat_traversal_statistics();
+    return rats_strdup_owned(stats.dump());
+}
+
+// ===================== ICE COORDINATION =====================
+
+char* rats_create_ice_offer(rats_client_t handle, const char* peer_id) {
+    if (!handle || !peer_id) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto offer = wrap->client->create_ice_offer(std::string(peer_id));
+    return rats_strdup_owned(offer.dump());
+}
+
+rats_error_t rats_connect_with_ice(rats_client_t handle, const char* peer_id, const char* ice_offer_json) {
+    if (!handle || !peer_id || !ice_offer_json) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    try {
+        nlohmann::json offer = nlohmann::json::parse(ice_offer_json);
+        return wrap->client->connect_with_ice(std::string(peer_id), offer) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+    } catch (const nlohmann::json::exception&) {
+        return RATS_ERROR_JSON_PARSE;
+    }
+}
+
+rats_error_t rats_handle_ice_answer(rats_client_t handle, const char* peer_id, const char* ice_answer_json) {
+    if (!handle || !peer_id || !ice_answer_json) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    try {
+        nlohmann::json answer = nlohmann::json::parse(ice_answer_json);
+        return wrap->client->handle_ice_answer(std::string(peer_id), answer) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+    } catch (const nlohmann::json::exception&) {
+        return RATS_ERROR_JSON_PARSE;
+    }
+}
+
+// ===================== CONFIGURATION PERSISTENCE =====================
+
+rats_error_t rats_load_configuration(rats_client_t handle) {
+    if (!handle) return RATS_ERROR_INVALID_HANDLE;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->load_configuration() ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+rats_error_t rats_save_configuration(rats_client_t handle) {
+    if (!handle) return RATS_ERROR_INVALID_HANDLE;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->save_configuration() ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+rats_error_t rats_set_data_directory(rats_client_t handle, const char* directory_path) {
+    if (!handle || !directory_path) return RATS_ERROR_INVALID_PARAMETER;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->set_data_directory(std::string(directory_path)) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+char* rats_get_data_directory(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return rats_strdup_owned(wrap->client->get_data_directory());
+}
+
+int rats_load_and_reconnect_peers(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->load_and_reconnect_peers();
+}
+
+int rats_load_historical_peers(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->load_historical_peers() ? 1 : 0;
+}
+
+int rats_save_historical_peers(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->save_historical_peers() ? 1 : 0;
+}
+
+void rats_clear_historical_peers(rats_client_t handle) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->clear_historical_peers();
+}
+
+char** rats_get_historical_peer_ids(rats_client_t handle, int* count) {
+    if (!handle || !count) {
+        if (count) *count = 0;
+        return nullptr;
+    }
+    
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto historical_peers = wrap->client->get_historical_peers();
+    
+    *count = static_cast<int>(historical_peers.size());
+    if (*count == 0) return nullptr;
+    
+    char** peer_ids = static_cast<char**>(malloc(*count * sizeof(char*)));
+    if (!peer_ids) {
+        *count = 0;
+        return nullptr;
+    }
+    
+    for (int i = 0; i < *count; ++i) {
+        peer_ids[i] = rats_strdup_owned(historical_peers[i].peer_id);
+        if (!peer_ids[i]) {
+            // Clean up on allocation failure
+            for (int j = 0; j < i; ++j) {
+                free(peer_ids[j]);
+            }
+            free(peer_ids);
+            *count = 0;
+            return nullptr;
+        }
+    }
+    
+    return peer_ids;
 }
 
 } // extern "C"

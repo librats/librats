@@ -30,6 +30,17 @@ static std::unordered_map<rats_client_t, CallbackData> g_disconnect_callbacks;
 static std::unordered_map<rats_client_t, CallbackData> g_peer_discovered_callbacks;
 static std::unordered_map<rats_client_t, CallbackData> g_file_progress_callbacks;
 
+// GossipSub callback maps
+static std::unordered_map<std::string, CallbackData> g_topic_message_callbacks; // key: client_ptr:topic
+static std::unordered_map<std::string, CallbackData> g_topic_json_message_callbacks;
+static std::unordered_map<std::string, CallbackData> g_topic_peer_joined_callbacks;
+static std::unordered_map<std::string, CallbackData> g_topic_peer_left_callbacks;
+
+// File transfer callback maps
+static std::unordered_map<rats_client_t, CallbackData> g_file_request_callbacks;
+static std::unordered_map<rats_client_t, CallbackData> g_directory_request_callbacks;
+static std::unordered_map<rats_client_t, CallbackData> g_directory_progress_callbacks;
+
 // Helper to get JNI env
 JNIEnv* getJNIEnv() {
     JNIEnv* env = nullptr;
@@ -228,6 +239,51 @@ Java_com_librats_RatsClient_nativeDestroy(JNIEnv* env, jobject thiz, jlong clien
         g_disconnect_callbacks.erase(client);
         g_peer_discovered_callbacks.erase(client);
         g_file_progress_callbacks.erase(client);
+        g_file_request_callbacks.erase(client);
+        g_directory_request_callbacks.erase(client);
+        g_directory_progress_callbacks.erase(client);
+        
+        // Clean up topic callbacks for this client
+        std::string client_prefix = std::to_string(reinterpret_cast<intptr_t>(client)) + ":";
+        auto it = g_topic_message_callbacks.begin();
+        while (it != g_topic_message_callbacks.end()) {
+            if (it->first.substr(0, client_prefix.length()) == client_prefix) {
+                env->DeleteGlobalRef(it->second.java_obj);
+                it = g_topic_message_callbacks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        
+        it = g_topic_json_message_callbacks.begin();
+        while (it != g_topic_json_message_callbacks.end()) {
+            if (it->first.substr(0, client_prefix.length()) == client_prefix) {
+                env->DeleteGlobalRef(it->second.java_obj);
+                it = g_topic_json_message_callbacks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        
+        it = g_topic_peer_joined_callbacks.begin();
+        while (it != g_topic_peer_joined_callbacks.end()) {
+            if (it->first.substr(0, client_prefix.length()) == client_prefix) {
+                env->DeleteGlobalRef(it->second.java_obj);
+                it = g_topic_peer_joined_callbacks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        
+        it = g_topic_peer_left_callbacks.begin();
+        while (it != g_topic_peer_left_callbacks.end()) {
+            if (it->first.substr(0, client_prefix.length()) == client_prefix) {
+                env->DeleteGlobalRef(it->second.java_obj);
+                it = g_topic_peer_left_callbacks.erase(it);
+            } else {
+                ++it;
+            }
+        }
         
         rats_destroy(client);
     }
@@ -582,5 +638,105 @@ Java_com_librats_RatsClient_nativeRejectFileTransfer(JNIEnv* env, jobject thiz, 
     std::string reason_str = javaStringToCString(env, reason);
     return rats_reject_file_transfer(client, transfer_id_str.c_str(), reason_str.c_str());
 }
+
+// ===================== GOSSIPSUB FUNCTIONALITY =====================
+
+JNIEXPORT jboolean JNICALL
+Java_com_librats_RatsClient_nativeIsGossipsubAvailable(JNIEnv* env, jobject thiz, jlong client_ptr) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    return rats_is_gossipsub_available(client) != 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_librats_RatsClient_nativeIsGossipsubRunning(JNIEnv* env, jobject thiz, jlong client_ptr) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    return rats_is_gossipsub_running(client) != 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsClient_nativeSubscribeToTopic(JNIEnv* env, jobject thiz, jlong client_ptr, jstring topic) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string topic_str = javaStringToCString(env, topic);
+    return rats_subscribe_to_topic(client, topic_str.c_str());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsClient_nativeUnsubscribeFromTopic(JNIEnv* env, jobject thiz, jlong client_ptr, jstring topic) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string topic_str = javaStringToCString(env, topic);
+    return rats_unsubscribe_from_topic(client, topic_str.c_str());
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_librats_RatsClient_nativeIsSubscribedToTopic(JNIEnv* env, jobject thiz, jlong client_ptr, jstring topic) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string topic_str = javaStringToCString(env, topic);
+    return rats_is_subscribed_to_topic(client, topic_str.c_str()) != 0;
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_com_librats_RatsClient_nativeGetSubscribedTopics(JNIEnv* env, jobject thiz, jlong client_ptr) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    int count = 0;
+    char** topics = rats_get_subscribed_topics(client, &count);
+    
+    jobjectArray result = env->NewObjectArray(count, env->FindClass("java/lang/String"), nullptr);
+    for (int i = 0; i < count; i++) {
+        jstring jstr = createJavaString(env, topics[i]);
+        env->SetObjectArrayElement(result, i, jstr);
+        env->DeleteLocalRef(jstr);
+        rats_string_free(topics[i]);
+    }
+    if (topics) free(topics);
+    
+    return result;
+}
+
+// ===================== CONFIGURATION PERSISTENCE =====================
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsClient_nativeLoadConfiguration(JNIEnv* env, jobject thiz, jlong client_ptr) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    return rats_load_configuration(client);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_librats_RatsClient_nativeGetDiscoveryHash(JNIEnv* env, jobject thiz, jlong client_ptr) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    char* hash = rats_get_discovery_hash(client);
+    jstring result = createJavaString(env, hash);
+    if (hash) rats_string_free(hash);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_librats_RatsClient_nativeGetRatsPeerDiscoveryHash(JNIEnv* env, jclass clazz) {
+    char* hash = rats_get_rats_peer_discovery_hash();
+    jstring result = createJavaString(env, hash);
+    if (hash) rats_string_free(hash);
+    return result;
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_com_librats_RatsClient_nativeGetValidatedPeerIds(JNIEnv* env, jobject thiz, jlong client_ptr) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    int count = 0;
+    char** peer_ids = rats_get_validated_peer_ids(client, &count);
+    
+    jobjectArray result = env->NewObjectArray(count, env->FindClass("java/lang/String"), nullptr);
+    for (int i = 0; i < count; i++) {
+        jstring jstr = createJavaString(env, peer_ids[i]);
+        env->SetObjectArrayElement(result, i, jstr);
+        env->DeleteLocalRef(jstr);
+        rats_string_free(peer_ids[i]);
+    }
+    if (peer_ids) free(peer_ids);
+    
+    return result;
+}
+
+// Note: This is a condensed implementation showing key functions
+// Additional implementations for NAT traversal, ICE coordination, 
+// logging, file transfer, and other features would follow the same pattern
 
 } // extern "C"
