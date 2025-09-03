@@ -1365,7 +1365,7 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
     
     // Get socket-specific mutex for thread-safe sending
     // Prevent framed messages corruption (like two-times sending the number of bytes instead number of bytes + message)
-    std::mutex* socket_mutex = get_socket_send_mutex(socket);
+    auto socket_mutex = get_socket_send_mutex(socket);
     std::lock_guard<std::mutex> send_lock(*socket_mutex);
     
     // Create message with specified header type
@@ -1488,15 +1488,15 @@ bool RatsClient::parse_json_message(const std::string& message, nlohmann::json& 
 // Helpers
 
 // Per-socket synchronization helpers
-std::mutex* RatsClient::get_socket_send_mutex(socket_t socket) {
+std::shared_ptr<std::mutex> RatsClient::get_socket_send_mutex(socket_t socket) {
     std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
     auto it = socket_send_mutexes_.find(socket);
     if (it == socket_send_mutexes_.end()) {
         // Create new mutex for this socket
-        socket_send_mutexes_[socket] = std::make_unique<std::mutex>();
-        return socket_send_mutexes_[socket].get();
+        socket_send_mutexes_[socket] = std::make_shared<std::mutex>();
+        return socket_send_mutexes_[socket];
     }
-    return it->second.get();
+    return it->second;
 }
 
 void RatsClient::cleanup_socket_send_mutex(socket_t socket) {

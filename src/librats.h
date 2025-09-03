@@ -1369,7 +1369,7 @@ private:
     
     // Per-socket synchronization for thread-safe message sending
     mutable std::mutex socket_send_mutexes_mutex_;
-    std::unordered_map<socket_t, std::unique_ptr<std::mutex>> socket_send_mutexes_;
+    std::unordered_map<socket_t, std::shared_ptr<std::mutex>> socket_send_mutexes_;
     
     // Server and client management
     std::thread server_thread_;
@@ -1527,7 +1527,7 @@ private:
     void remove_once_handlers(const std::string& message_type);
 
     // Per-socket synchronization helpers
-    std::mutex* get_socket_send_mutex(socket_t socket);
+    std::shared_ptr<std::mutex> get_socket_send_mutex(socket_t socket);
     void cleanup_socket_send_mutex(socket_t socket);
 
     // Configuration persistence helpers
