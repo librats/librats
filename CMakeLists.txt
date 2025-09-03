@@ -166,6 +166,7 @@ if(ANDROID)
     if(DEFINED ANDROID_PLATFORM)
         string(REGEX REPLACE "android-" "" ANDROID_API_LEVEL ${ANDROID_PLATFORM})
         math(EXPR ANDROID_API_LEVEL "${ANDROID_API_LEVEL}")
+        message(STATUS "Android API level detected: ${ANDROID_API_LEVEL}")
     else()
         message(FATAL_ERROR "ANDROID_PLATFORM is not defined!")
     endif()
@@ -173,9 +174,11 @@ if(ANDROID)
     if(ANDROID_API_LEVEL LESS 24)
         target_sources(rats PRIVATE ${PROJECT_SOURCE_DIR}/3rdparty/android/ifaddrs-android.c)
         target_include_directories(rats
-        PRIVATE
-        ${PROJECT_SOURCE_DIR}/3rdparty/android)
+            PRIVATE
+            ${PROJECT_SOURCE_DIR}/3rdparty/android
+        )
         target_compile_definitions(rats PUBLIC RATS_ANDROID_OLD_API)
+        message(STATUS "Using ifaddrs-android for backward compatibility")
     endif()
 endif()
 
