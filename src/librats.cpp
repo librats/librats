@@ -2566,22 +2566,22 @@ std::unique_ptr<RatsClient> create_rats_client(int listen_port) {
 }
 
 // Version query functions
-const char* get_library_version_string() {
+const char* rats_get_library_version_string() {
     return librats::version::STRING;
 }
 
-void get_library_version(int* major, int* minor, int* patch, int* build) {
+void rats_get_library_version(int* major, int* minor, int* patch, int* build) {
     if (major) *major = librats::version::MAJOR;
     if (minor) *minor = librats::version::MINOR;
     if (patch) *patch = librats::version::PATCH;
     if (build) *build = librats::version::BUILD;
 }
 
-const char* get_library_git_describe() {
+const char* rats_get_library_git_describe() {
     return librats::version::GIT_DESCRIBE;
 }
 
-uint32_t get_library_abi() {
+uint32_t rats_get_library_abi() {
     // ABI policy: MAJOR bumps on breaking changes; MINOR for additive; PATCH ignored in ABI id
     return (static_cast<uint32_t>(librats::version::MAJOR) << 16) |
            (static_cast<uint32_t>(librats::version::MINOR) << 8) |

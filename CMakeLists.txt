@@ -9,6 +9,23 @@ option(RATS_BUILD_TESTS "Build unit tests" ON)
 option(RATS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(RATS_BINDINGS "Enable bindings" ON)
 option(RATS_CROSSCOMPILING "Force cross-compilation flags" OFF)
+option(RATS_SHARED_LIBRARY "Build as shared library" OFF)
+option(RATS_STATIC_LIBRARY "Build as static library" ON)
+
+# Validate library type options
+if(RATS_SHARED_LIBRARY AND RATS_STATIC_LIBRARY)
+    message(WARNING "Both RATS_SHARED_LIBRARY and RATS_STATIC_LIBRARY are enabled. Defaulting to shared library.")
+    set(RATS_STATIC_LIBRARY OFF)
+elseif(NOT RATS_SHARED_LIBRARY AND NOT RATS_STATIC_LIBRARY)
+    message(WARNING "Neither RATS_SHARED_LIBRARY nor RATS_STATIC_LIBRARY are enabled. Defaulting to static library.")
+    set(RATS_STATIC_LIBRARY ON)
+endif()
+
+# Disable tests when building shared library
+if(RATS_SHARED_LIBRARY AND RATS_BUILD_TESTS)
+    message(STATUS "Disabling tests when building shared library.")
+    set(RATS_BUILD_TESTS OFF)
+endif()
 
 # Get version from git
 find_package(Git QUIET)
@@ -132,6 +149,7 @@ set(LIBRARY_SOURCES
     src/file_transfer.cpp
     src/file_transfer.h
     src/version.cpp
+    src/rats_export.h
     ${PROJECT_BINARY_DIR}/src/version.h
 )
 
@@ -142,16 +160,20 @@ if(RATS_BINDINGS)
     )
 endif()
 
-add_library(rats ${LIBRARY_SOURCES})
+# Create library with appropriate type
+if(RATS_SHARED_LIBRARY)
+    add_library(rats SHARED ${LIBRARY_SOURCES})
+    set_target_properties(rats PROPERTIES
+        VERSION ${VERSION_STRING}
+        SOVERSION ${VERSION_MAJOR}
+    )
+    target_compile_definitions(rats PRIVATE RATS_EXPORT_DLL)
+else()
+    add_library(rats STATIC ${LIBRARY_SOURCES})
+endif()
 
 # Include directories
 target_include_directories(rats PUBLIC ${PROJECT_BINARY_DIR}/src src)
-
-if(RATS_BINDINGS)
-    if(WIN32)
-        target_compile_definitions(rats PRIVATE RATS_BUILDING_DLL)
-    endif()
-endif()
 
 # Find and link threading support
 find_package(Threads REQUIRED)
@@ -202,6 +224,7 @@ endif()
 set_target_properties(rats PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib
     LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib
+    RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin
 )
 
 # AddressSanitizer configuration

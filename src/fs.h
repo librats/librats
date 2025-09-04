@@ -4,12 +4,13 @@
 #include <vector>
 #include <cstdint>
 #include <cstdio>
+#include "rats_export.h"
 
 namespace librats {
 
 // File/Directory existence check
 bool file_or_directory_exists(const char* path);
-bool directory_exists(const char* path);
+RATS_API bool directory_exists(const char* path);
 bool file_exists(const char* path);
 
 // File creation and writing
@@ -23,7 +24,7 @@ void* read_file_binary(const char* path, size_t* size_out);
 
 // Directory operations
 bool create_directory(const char* path);
-bool create_directories(const char* path); // Create parent directories if needed
+RATS_API bool create_directories(const char* path); // Create parent directories if needed
 
 // File information
 int64_t get_file_size(const char* path);

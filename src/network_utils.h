@@ -158,12 +158,5 @@ std::vector<std::string> get_local_interface_addresses_v6();
  */
 bool is_local_interface_address(const std::string& ip_address);
 
-/**
- * Test and demonstrate network utility functions
- * This function shows how to use all the network utility functions
- * @param test_hostname A hostname to test with (default: "google.com")
- */
-void demo_network_utils(const std::string& test_hostname = "google.com");
-
 } // namespace network_utils
 } // namespace librats 

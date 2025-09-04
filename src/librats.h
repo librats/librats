@@ -24,6 +24,7 @@
 #include <unordered_set> // Added for unordered_set
 #include <cstdint>
 #include <cstring>
+#include "rats_export.h"
 
 namespace librats {
 
@@ -250,7 +251,7 @@ struct MessageHeader {
 /**
  * Enhanced RatsClient with comprehensive NAT traversal capabilities
  */
-class RatsClient : public ThreadManager {
+class RATS_API RatsClient : public ThreadManager {
 public:
     // =========================================================================
     // Type Definitions and Callbacks
@@ -1569,9 +1570,9 @@ private:
 std::unique_ptr<RatsClient> create_rats_client(int listen_port);
 
 // Library version query (stable, binding-friendly)
-const char* get_library_version_string();
-void get_library_version(int* major, int* minor, int* patch, int* build);
-const char* get_library_git_describe();
-uint32_t get_library_abi(); // packed as (major<<16)|(minor<<8)|patch
+RATS_API const char* rats_get_library_version_string();
+RATS_API void rats_get_library_version(int* major, int* minor, int* patch, int* build);
+RATS_API const char* rats_get_library_git_describe();
+RATS_API uint32_t rats_get_library_abi(); // packed as (major<<16)|(minor<<8)|patch
 
 } // namespace librats 

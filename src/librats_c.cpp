@@ -70,19 +70,19 @@ void rats_string_free(const char* str) {
 }
 
 const char* rats_get_version_string(void) {
-    return get_library_version_string();
+    return rats_get_library_version_string();
 }
 
 void rats_get_version(int* major, int* minor, int* patch, int* build) {
-    get_library_version(major, minor, patch, build);
+    rats_get_library_version(major, minor, patch, build);
 }
 
 const char* rats_get_git_describe(void) {
-    return get_library_git_describe();
+    return rats_get_library_git_describe();
 }
 
 uint32_t rats_get_abi(void) {
-    return get_library_abi();
+    return rats_get_library_abi();
 }
 
 rats_client_t rats_create(int listen_port) {
