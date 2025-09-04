@@ -14,7 +14,9 @@
 #else
     #include <fcntl.h>
     #include <unistd.h>
+#ifndef __IPHONE_OS_VERSION_MIN_REQUIRED
     #include <sys/random.h>
+#endif
 #endif
 
 #define LOG_NOISE_DEBUG(message) LOG_DEBUG("noise", message)
