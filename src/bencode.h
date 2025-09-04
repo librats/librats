@@ -7,6 +7,15 @@
 #include <variant>
 #include <cstdint>
 
+// Use shared_ptr variant for GCC 11 and lower compatibility
+#ifndef LIBRATS_USE_SHARED_PTR_VARIANT
+#if defined(__GNUC__) && (__GNUC__ <= 11)
+#define LIBRATS_USE_SHARED_PTR_VARIANT 1
+#else
+#define LIBRATS_USE_SHARED_PTR_VARIANT 0
+#endif
+#endif
+
 namespace librats {
 
 // Forward declarations
@@ -86,7 +95,11 @@ public:
 
 private:
     Type type_;
+#if LIBRATS_USE_SHARED_PTR_VARIANT
+    std::variant<int64_t, std::string, std::shared_ptr<BencodeList>, std::shared_ptr<BencodeDict>> value_;
+#else
     std::variant<int64_t, std::string, BencodeList, BencodeDict> value_;
+#endif
     
     void encode_to_buffer(std::vector<uint8_t>& buffer) const;
 };
