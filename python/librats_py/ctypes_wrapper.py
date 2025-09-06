@@ -89,18 +89,18 @@ class LibratsCtypes:
         """Set up function signatures for type safety."""
         
         # Memory management
-        self.lib.rats_string_free.argtypes = [c_char_p]
+        self.lib.rats_string_free.argtypes = [c_void_p]
         self.lib.rats_string_free.restype = None
         
         # Version functions
         self.lib.rats_get_version_string.argtypes = []
-        self.lib.rats_get_version_string.restype = c_char_p
+        self.lib.rats_get_version_string.restype = c_void_p
         
         self.lib.rats_get_version.argtypes = [POINTER(c_int), POINTER(c_int), POINTER(c_int), POINTER(c_int)]
         self.lib.rats_get_version.restype = None
         
         self.lib.rats_get_git_describe.argtypes = []
-        self.lib.rats_get_git_describe.restype = c_char_p
+        self.lib.rats_get_git_describe.restype = c_void_p
         
         self.lib.rats_get_abi.argtypes = []
         self.lib.rats_get_abi.restype = c_uint32
@@ -133,10 +133,10 @@ class LibratsCtypes:
         self.lib.rats_get_peer_count.restype = c_int
         
         self.lib.rats_get_our_peer_id.argtypes = [c_void_p]
-        self.lib.rats_get_our_peer_id.restype = c_char_p
+        self.lib.rats_get_our_peer_id.restype = c_void_p
         
         self.lib.rats_get_connection_statistics_json.argtypes = [c_void_p]
-        self.lib.rats_get_connection_statistics_json.restype = c_char_p
+        self.lib.rats_get_connection_statistics_json.restype = c_void_p
         
         # Peer configuration
         self.lib.rats_set_max_peers.argtypes = [c_void_p, c_int]
@@ -187,17 +187,17 @@ class LibratsCtypes:
         self.lib.rats_is_encryption_enabled.restype = c_int
         
         self.lib.rats_get_encryption_key.argtypes = [c_void_p]
-        self.lib.rats_get_encryption_key.restype = c_char_p
+        self.lib.rats_get_encryption_key.restype = c_void_p
         
         self.lib.rats_set_encryption_key.argtypes = [c_void_p, c_char_p]
         self.lib.rats_set_encryption_key.restype = c_int
         
         self.lib.rats_generate_encryption_key.argtypes = [c_void_p]
-        self.lib.rats_generate_encryption_key.restype = c_char_p
+        self.lib.rats_generate_encryption_key.restype = c_void_p
         
         # File Transfer
         self.lib.rats_send_file.argtypes = [c_void_p, c_char_p, c_char_p, c_char_p]
-        self.lib.rats_send_file.restype = c_char_p
+        self.lib.rats_send_file.restype = c_void_p
         
         self.lib.rats_accept_file_transfer.argtypes = [c_void_p, c_char_p, c_char_p]
         self.lib.rats_accept_file_transfer.restype = c_int

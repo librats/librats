@@ -6,7 +6,7 @@ import json
 import threading
 import weakref
 from typing import Optional, List, Dict, Any, Callable
-from ctypes import c_void_p, c_char_p, create_string_buffer, byref, cast, c_int
+from ctypes import c_void_p, c_char_p, create_string_buffer, byref, cast, c_int, string_at
 
 from .ctypes_wrapper import get_librats
 from .enums import RatsError as ErrorCode, ConnectionStrategy, LogLevel
@@ -210,7 +210,7 @@ class RatsClient:
         result = self._lib.lib.rats_get_our_peer_id(self._handle)
         if not result:
             return ""
-        peer_id = result.decode('utf-8')
+        peer_id = string_at(result).decode('utf-8')
         self._lib.lib.rats_string_free(result)
         return peer_id
     
@@ -220,7 +220,7 @@ class RatsClient:
         if not result:
             return {}
         
-        json_str = result.decode('utf-8')
+        json_str = string_at(result).decode('utf-8')
         self._lib.lib.rats_string_free(result)
         
         try:
@@ -271,7 +271,7 @@ class RatsClient:
         result = self._lib.lib.rats_get_encryption_key(self._handle)
         if not result:
             return ""
-        key = result.decode('utf-8')
+        key = string_at(result).decode('utf-8')
         self._lib.lib.rats_string_free(result)
         return key
     
@@ -286,7 +286,7 @@ class RatsClient:
         result = self._lib.lib.rats_generate_encryption_key(self._handle)
         if not result:
             return ""
-        key = result.decode('utf-8')
+        key = string_at(result).decode('utf-8')
         self._lib.lib.rats_string_free(result)
         return key
     
@@ -318,7 +318,7 @@ class RatsClient:
         if not result:
             raise RatsError(f"Failed to send file {file_path} to peer {peer_id}")
         
-        transfer_id = result.decode('utf-8')
+        transfer_id = string_at(result).decode('utf-8')
         self._lib.lib.rats_string_free(result)
         return transfer_id
     
@@ -397,11 +397,9 @@ class RatsClient:
     def _create_binary_callback(self, callback: BinaryCallback):
         """Create a C callback wrapper for binary data."""
         def c_callback(user_data, peer_id_ptr, data_ptr, size):
-            if callback and peer_id_ptr and data_ptr:
+            if callback and peer_id_ptr and data_ptr and size:
                 peer_id = peer_id_ptr.decode('utf-8')
-                # Convert C pointer to bytes
-                data = (c_char_p * size).from_address(data_ptr)
-                data_bytes = b''.join(data)
+                data_bytes = string_at(data_ptr, size)
                 try:
                     callback(peer_id, data_bytes)
                 except Exception as e:
