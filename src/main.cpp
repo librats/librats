@@ -62,7 +62,7 @@ void print_help() {
 
 int main(int argc, char* argv[]) {
     // Display ASCII header with version information
-    librats::version::print_header();
+    librats::version::rats_print_header();
     
     // Enable debug level logging
     librats::Logger::getInstance().set_log_level(librats::LogLevel::DEBUG);
@@ -256,7 +256,7 @@ int main(int argc, char* argv[]) {
             print_help();
         }
         else if (command == "version") {
-            librats::version::print_version_info();
+            librats::version::rats_print_version_info();
         }
         else if (command == "peers") {
             LOG_MAIN_INFO("Connected peers: " << client.get_peer_count());
