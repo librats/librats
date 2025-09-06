@@ -7,7 +7,7 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Release](https://img.shields.io/github/release/DEgITx/librats.svg)](https://github.com/DEgITx/librats/releases)
 
-**A high-performance, lightweight peer-to-peer networking library with C++, C, Java, and Android support**
+**A high-performance, lightweight peer-to-peer networking library with C++, C, Java, Python, and Android support**
 
 librats is a modern P2P networking library designed for **superior performance** and **simplicity**. Built from the ground up in C++17 with comprehensive language bindings, it provides enterprise-grade P2P networking capabilities with minimal overhead and maximum efficiency.
 
@@ -68,6 +68,13 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Unified API Design**: Consistent patterns across P2P messaging and pub-sub
 - **Topic-based Messaging**: Subscribe to topics and publish messages with automatic routing
 - **Enhanced Peer Management**: Detailed peer information with encryption and NAT traversal status
+
+### **Multi-Language Support**
+- **Native C++17**: Core implementation with full feature set and maximum performance
+- **C API**: Clean C interface for legacy systems and FFI bindings
+- **Java/Android**: Complete JNI wrapper with high-level Java API for Android development
+- **Python Bindings**: Full-featured Python package with ctypes wrapper and asyncio support
+- **Cross-Platform**: Consistent API across Windows, Linux, macOS, and Android platforms
 
 ## 🚀 Quick Start
 
@@ -783,7 +790,7 @@ librats provides comprehensive cross-platform support with bindings for multiple
 | **Android (NDK)** | Native C++ | ✅ **Fully Supported** | **Available Now** | Android NDK integration with JNI bindings |
 | **Android (Java)** | JNI Wrapper | ✅ **Fully Supported** | **Available Now** | High-level Java API for Android apps |
 | **JavaScript** | Native Module | 📋 **Planned** | **Soon** | Node.js native addon with async/await support |
-| **Python** | C Extension | 📋 **Planned** | **Soon** | CPython extension with asyncio integration |
+| **Python** | C Extension | ✅ **Fully Supported** | **Available Now** | CPython extension with asyncio integration |
 | **Rust** | FFI Bindings | 📋 **Planned** | **Soon** | Safe Rust bindings with tokio async support |
 | **Go** | CGO Bindings | 📋 **Future** | **Soon** | CGO wrapper for Go applications |
 | **C#/.NET** | P/Invoke | 📋 **Future** | **Soon** | .NET bindings for Windows/Linux/macOS |
