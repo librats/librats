@@ -12,7 +12,9 @@ from .enums import (
     ConnectionStrategy,
     MessageDataType,
     FileTransferStatus,
-    LogLevel
+    LogLevel,
+    NatType,
+    VersionInfo
 )
 from .callbacks import *
 
@@ -27,5 +29,23 @@ __all__ = [
     'ConnectionStrategy',
     'MessageDataType', 
     'FileTransferStatus',
-    'LogLevel'
+    'LogLevel',
+    'NatType',
+    'VersionInfo',
+    # Callback types
+    'ConnectionCallback',
+    'StringCallback',
+    'BinaryCallback',
+    'JsonCallback',
+    'DisconnectCallback',
+    'PeerDiscoveredCallback',
+    'MessageCallback',
+    'FileProgressCallback',
+    'FileRequestCallback',
+    'DirectoryRequestCallback',
+    'DirectoryProgressCallback',
+    'TopicMessageCallback',
+    'TopicJsonMessageCallback',
+    'TopicPeerJoinedCallback',
+    'TopicPeerLeftCallback'
 ]

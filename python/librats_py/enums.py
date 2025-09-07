@@ -62,3 +62,19 @@ class NatType(IntEnum):
     PORT_RESTRICTED_CONE = 4
     SYMMETRIC = 5
     UDP_BLOCKED = 6
+
+
+# Version information helper
+class VersionInfo:
+    """Version information container."""
+    def __init__(self, major: int, minor: int, patch: int, build: int):
+        self.major = major
+        self.minor = minor
+        self.patch = patch
+        self.build = build
+    
+    def __str__(self) -> str:
+        return f"{self.major}.{self.minor}.{self.patch}.{self.build}"
+    
+    def __repr__(self) -> str:
+        return f"VersionInfo(major={self.major}, minor={self.minor}, patch={self.patch}, build={self.build})"
