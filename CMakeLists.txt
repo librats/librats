@@ -11,6 +11,7 @@ option(RATS_BINDINGS "Enable bindings" ON)
 option(RATS_CROSSCOMPILING "Force cross-compilation flags" OFF)
 option(RATS_SHARED_LIBRARY "Build as shared library" OFF)
 option(RATS_STATIC_LIBRARY "Build as static library" ON)
+option(RATS_SEACH_FEATURES "Features related to rats-search project (like bittorrent)" OFF)
 
 # Validate library type options
 if(RATS_SHARED_LIBRARY AND RATS_STATIC_LIBRARY)
@@ -203,6 +204,11 @@ if(ANDROID)
         message(STATUS "Using ifaddrs-android for backward compatibility")
     endif()
 endif()
+
+if(RATS_SEACH_FEATURES)
+    message(STATUS "Enable rats-search features")
+    target_compile_definitions(rats PUBLIC RATS_SEACH_FEATURES)
+endif(RATS_SEACH_FEATURES)
 
 # Create the main executable
 if(RATS_BUILD_EXAMPLES)
