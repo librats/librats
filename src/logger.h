@@ -121,7 +121,13 @@ public:
             auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now.time_since_epoch()) % 1000;
             
-            console_oss << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S");
+            struct tm local_tm;
+#ifdef _WIN32
+            localtime_s(&local_tm, &time_t);
+#else
+            local_tm = *std::localtime(&time_t);
+#endif
+            console_oss << "[" << std::put_time(&local_tm, "%H:%M:%S");
             console_oss << "." << std::setfill('0') << std::setw(3) << ms.count() << "] ";
         }
         
@@ -273,7 +279,13 @@ private:
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now.time_since_epoch()) % 1000;
         
-        file_oss << "[" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
+        struct tm local_tm;
+#ifdef _WIN32
+        localtime_s(&local_tm, &time_t);
+#else
+        local_tm = *std::localtime(&time_t);
+#endif
+        file_oss << "[" << std::put_time(&local_tm, "%Y-%m-%d %H:%M:%S");
         file_oss << "." << std::setfill('0') << std::setw(3) << ms.count() << "] ";
         
         // Add log level (no colors in file)
