@@ -382,6 +382,12 @@ Java_com_librats_RatsClient_nativeGetPeerCount(JNIEnv* env, jobject thiz, jlong 
     return rats_get_peer_count(client);
 }
 
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsClient_nativeGetListenPort(JNIEnv* env, jobject thiz, jlong client_ptr) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    return rats_get_listen_port(client);
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_librats_RatsClient_nativeGetOurPeerId(JNIEnv* env, jobject thiz, jlong client_ptr) {
     rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);

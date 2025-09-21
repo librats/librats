@@ -184,6 +184,15 @@ public class RatsClient {
     }
     
     /**
+     * Gets the port this client is listening on.
+     * 
+     * @return The listen port number
+     */
+    public int getListenPort() {
+        return nativeGetListenPort(nativeClientPtr);
+    }
+    
+    /**
      * Gets this client's peer ID.
      * 
      * @return The peer ID string
@@ -955,6 +964,7 @@ public class RatsClient {
     private native int nativeBroadcastJson(long clientPtr, String jsonStr);
     
     private native int nativeGetPeerCount(long clientPtr);
+    private native int nativeGetListenPort(long clientPtr);
     private native String nativeGetOurPeerId(long clientPtr);
     private native String nativeGetConnectionStatisticsJson(long clientPtr);
     private native String[] nativeGetPeerIds(long clientPtr);

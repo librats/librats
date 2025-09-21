@@ -111,6 +111,7 @@ public:
             InstanceMethod("broadcastJson", &RatsClient::BroadcastJson),
             InstanceMethod("sendJson", &RatsClient::SendJson),
             InstanceMethod("getPeerCount", &RatsClient::GetPeerCount),
+            InstanceMethod("getListenPort", &RatsClient::GetListenPort),
             InstanceMethod("getOurPeerId", &RatsClient::GetOurPeerId),
             InstanceMethod("getPeerIds", &RatsClient::GetPeerIds),
             InstanceMethod("getConnectionStatistics", &RatsClient::GetConnectionStatistics),
@@ -364,6 +365,12 @@ private:
         Napi::Env env = info.Env();
         int count = rats_get_peer_count(client_);
         return Napi::Number::New(env, count);
+    }
+    
+    Napi::Value GetListenPort(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        int port = rats_get_listen_port(client_);
+        return Napi::Number::New(env, port);
     }
     
     Napi::Value GetOurPeerId(const Napi::CallbackInfo& info) {

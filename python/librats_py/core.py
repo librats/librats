@@ -205,6 +205,10 @@ class RatsClient:
         """Get the number of currently connected peers."""
         return self._lib.lib.rats_get_peer_count(self._handle)
     
+    def get_listen_port(self) -> int:
+        """Get the port the client is listening on."""
+        return self._lib.lib.rats_get_listen_port(self._handle)
+    
     def get_our_peer_id(self) -> str:
         """Get our own peer ID."""
         result = self._lib.lib.rats_get_our_peer_id(self._handle)

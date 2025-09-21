@@ -121,6 +121,12 @@ int rats_connect(rats_client_t handle, const char* host, int port) {
     return wrap->client->connect_to_peer(std::string(host), port) ? 1 : 0;
 }
 
+int rats_get_listen_port(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->get_listen_port();
+}
+
 int rats_broadcast_string(rats_client_t handle, const char* message) {
     if (!handle || !message) return 0;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);

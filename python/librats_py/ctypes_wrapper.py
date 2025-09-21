@@ -122,6 +122,9 @@ class LibratsCtypes:
         self.lib.rats_connect.argtypes = [c_void_p, c_char_p, c_int]
         self.lib.rats_connect.restype = c_int
         
+        self.lib.rats_get_listen_port.argtypes = [c_void_p]
+        self.lib.rats_get_listen_port.restype = c_int
+        
         self.lib.rats_broadcast_string.argtypes = [c_void_p, c_char_p]
         self.lib.rats_broadcast_string.restype = c_int
         

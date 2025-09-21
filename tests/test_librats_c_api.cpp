@@ -723,7 +723,7 @@ TEST_F(RatsCApiTest, ProtocolConfigApis) {
 // New coverage: mDNS running state and query
 #ifndef __APPLE__
 TEST_F(RatsCApiTest, MdnsStateAndQuery) {
-    client1 = rats_create(56012);
+    client1 = rats_create(0);  // Use port 0 for automatic assignment
     ASSERT_NE(client1, nullptr);
     EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
 
@@ -739,7 +739,7 @@ TEST_F(RatsCApiTest, MdnsStateAndQuery) {
 
 // New coverage: DHT running and announce validation
 TEST_F(RatsCApiTest, DhtRunningAndAnnounceValidation) {
-    client1 = rats_create(56014);
+    client1 = rats_create(0);  // Use port 0 for automatic assignment
     ASSERT_NE(client1, nullptr);
     EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
 
@@ -758,11 +758,8 @@ TEST_F(RatsCApiTest, DhtRunningAndAnnounceValidation) {
 
 // New coverage: Message exchange positive path (on/send and broadcast)
 TEST_F(RatsCApiTest, MessageExchangePositive) {
-    const int server_port = 56016;
-    const int client_port = 56017;
-
-    client1 = rats_create(server_port);
-    client2 = rats_create(client_port);
+    client1 = rats_create(0);  // Use port 0 for automatic assignment
+    client2 = rats_create(0);  // Use port 0 for automatic assignment
     ASSERT_NE(client1, nullptr);
     ASSERT_NE(client2, nullptr);
 
@@ -781,6 +778,10 @@ TEST_F(RatsCApiTest, MessageExchangePositive) {
     EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
     EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Get the actual port that client1 is listening on
+    int server_port = rats_get_listen_port(client1);
+    
     EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
@@ -808,16 +809,16 @@ TEST_F(RatsCApiTest, MessageExchangePositive) {
 
 // New coverage: basic rats_connect convenience API
 TEST_F(RatsCApiTest, BasicRatsConnect) {
-    const int server_port = 56018;
-    const int client_port = 56019;
-
-    client1 = rats_create(server_port);
-    client2 = rats_create(client_port);
+    client1 = rats_create(0);  // Use port 0 for automatic assignment
+    client2 = rats_create(0);  // Use port 0 for automatic assignment
     ASSERT_NE(client1, nullptr);
     ASSERT_NE(client2, nullptr);
     EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
     EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Get the actual port that client1 is listening on
+    int server_port = rats_get_listen_port(client1);
 
     EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
@@ -830,7 +831,7 @@ TEST_F(RatsCApiTest, BasicRatsConnect) {
 
 // New coverage: invalid file transfer accept/reject/cancel
 TEST_F(RatsCApiTest, FileTransferInvalidControl) {
-    client1 = rats_create(56020);
+    client1 = rats_create(0);  // Use port 0 for automatic assignment
     ASSERT_NE(client1, nullptr);
 
     // Invalid handle

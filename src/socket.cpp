@@ -1297,4 +1297,14 @@ bool set_socket_nonblocking(socket_t socket) {
     return true;
 }
 
+int get_ephemeral_port(socket_t socket)
+{
+    sockaddr_in6 bound_addr;
+    socklen_t addr_len = sizeof(bound_addr);
+    if (getsockname(socket, (struct sockaddr*)&bound_addr, &addr_len) == 0) {
+        return ntohs(bound_addr.sin6_port);
+    }
+    return 0;
+}
+
 } // namespace librats 

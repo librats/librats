@@ -293,4 +293,11 @@ bool is_tcp_socket(socket_t socket);
  */
 bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr_len, int timeout_ms);
 
+/**
+ * Get the ephemeral port that a socket is bound to
+ * @param socket The socket handle to get the ephemeral port for
+ * @return The ephemeral port, or 0 if the socket is not bound to an ephemeral port
+ */
+int get_ephemeral_port(socket_t socket);
+
 } // namespace librats 

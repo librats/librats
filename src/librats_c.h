@@ -28,6 +28,7 @@ RATS_API void rats_stop(rats_client_t client);
 
 // Basic operations
 RATS_API int rats_connect(rats_client_t client, const char* host, int port);
+RATS_API int rats_get_listen_port(rats_client_t client);
 RATS_API int rats_broadcast_string(rats_client_t client, const char* message);
 RATS_API int rats_send_string(rats_client_t client, const char* peer_id, const char* message);
 

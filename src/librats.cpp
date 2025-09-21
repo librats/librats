@@ -160,10 +160,20 @@ bool RatsClient::start() {
     }
     
     // Create dual-stack server socket (supports both IPv4 and IPv6)
-            server_socket_ = create_tcp_server(listen_port_);
+   server_socket_ = create_tcp_server(listen_port_);
     if (!is_valid_socket(server_socket_)) {
         LOG_CLIENT_ERROR("Failed to create dual-stack server socket on port " << listen_port_);
         return false;
+    }
+    
+    // Update listen_port_ with actual bound port if ephemeral port was requested
+    if (listen_port_ == 0) {
+        listen_port_ = get_ephemeral_port(server_socket_);
+        if (listen_port_ == 0) {
+            LOG_CLIENT_WARN("Failed to get actual bound port - using port 0");
+        } else {
+            LOG_CLIENT_INFO("Server bound to ephemeral port " << listen_port_);
+        }
     }
     
     running_.store(true);
@@ -286,6 +296,13 @@ bool RatsClient::is_running() const {
     return running_.load();
 }
 
+// =========================================================================
+// Utility Methods
+// =========================================================================
+
+int RatsClient::get_listen_port() const {
+    return listen_port_;
+}
 
 // =========================================================================
 // Managment loops

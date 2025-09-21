@@ -721,6 +721,13 @@ bool RatsClient::deserialize_peer_from_persistence(const nlohmann::json& json, s
 
 std::string RatsClient::get_config_file_path() const {
     #ifdef TESTING
+        // For testing with ephemeral ports (port 0), use a unique identifier to avoid conflicts
+        if (listen_port_ == 0) {
+            // Generate a unique file path based on object pointer to ensure uniqueness during testing
+            std::ostringstream oss;
+            oss << "config_" << this << ".json";
+            return oss.str();
+        }
         return "config_" + std::to_string(listen_port_) + ".json";
     #else
         return data_directory_ + "/" + CONFIG_FILE_NAME;
@@ -729,6 +736,13 @@ std::string RatsClient::get_config_file_path() const {
 
 std::string RatsClient::get_peers_file_path() const {
     #ifdef TESTING
+        // For testing with ephemeral ports (port 0), use a unique identifier to avoid conflicts
+        if (listen_port_ == 0) {
+            // Generate a unique file path based on object pointer to ensure uniqueness during testing
+            std::ostringstream oss;
+            oss << "peers_" << this << ".json";
+            return oss.str();
+        }
         return "peers_" + std::to_string(listen_port_) + ".json";
     #else
         return data_directory_ + "/" + PEERS_FILE_NAME;
@@ -737,6 +751,13 @@ std::string RatsClient::get_peers_file_path() const {
 
 std::string RatsClient::get_peers_ever_file_path() const {
     #ifdef TESTING
+        // For testing with ephemeral ports (port 0), use a unique identifier to avoid conflicts
+        if (listen_port_ == 0) {
+            // Generate a unique file path based on object pointer to ensure uniqueness during testing
+            std::ostringstream oss;
+            oss << "peers_ever_" << this << ".json";
+            return oss.str();
+        }
         return "peers_ever_" + std::to_string(listen_port_) + ".json";
     #else
         return data_directory_ + "/" + PEERS_EVER_FILE_NAME;
