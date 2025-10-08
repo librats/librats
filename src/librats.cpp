@@ -48,8 +48,9 @@ const std::string RatsClient::PEERS_EVER_FILE_NAME = "peers_ever.rats";
 // Constructor and Destructor
 // =========================================================================
 
-RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig& nat_config) 
+RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig& nat_config, const std::string& bind_address) 
     : listen_port_(listen_port), 
+      bind_address_(bind_address),
       max_peers_(max_peers),
       nat_config_(nat_config),
       server_socket_(INVALID_SOCKET_VALUE),
@@ -129,7 +130,8 @@ bool RatsClient::start() {
         return false;
     }
 
-    LOG_CLIENT_INFO("Starting RatsClient on port " << listen_port_);
+    LOG_CLIENT_INFO("Starting RatsClient on port " << listen_port_ <<
+                   (bind_address_.empty() ? "" : " bound to " + bind_address_));
     
     // Print system information for debugging and log analysis
     SystemInfo sys_info = get_system_info();
@@ -160,9 +162,10 @@ bool RatsClient::start() {
     }
     
     // Create dual-stack server socket (supports both IPv4 and IPv6)
-   server_socket_ = create_tcp_server(listen_port_);
+   server_socket_ = create_tcp_server(listen_port_, 5, bind_address_);
     if (!is_valid_socket(server_socket_)) {
-        LOG_CLIENT_ERROR("Failed to create dual-stack server socket on port " << listen_port_);
+        LOG_CLIENT_ERROR("Failed to create dual-stack server socket on port " << listen_port_ <<
+                        (bind_address_.empty() ? "" : " bound to " + bind_address_));
         return false;
     }
     
@@ -302,6 +305,10 @@ bool RatsClient::is_running() const {
 
 int RatsClient::get_listen_port() const {
     return listen_port_;
+}
+
+std::string RatsClient::get_bind_address() const {
+    return bind_address_;
 }
 
 // =========================================================================
@@ -1744,9 +1751,10 @@ bool RatsClient::start_dht_discovery(int dht_port) {
         return true;
     }
     
-    LOG_CLIENT_INFO("Starting DHT discovery on port " << dht_port);
+    LOG_CLIENT_INFO("Starting DHT discovery on port " << dht_port <<
+                   (bind_address_.empty() ? "" : " bound to " + bind_address_));
     
-    dht_client_ = std::make_unique<DhtClient>(dht_port);
+    dht_client_ = std::make_unique<DhtClient>(dht_port, bind_address_);
     if (!dht_client_->start()) {
         LOG_CLIENT_ERROR("Failed to start DHT client");
         dht_client_.reset();

@@ -88,25 +88,28 @@ socket_t create_tcp_client_v6(const std::string& host, int port, int timeout_ms 
  * Create a TCP server socket and bind to a port using dual stack (IPv6 with IPv4 support)
  * @param port The port number to bind to
  * @param backlog The maximum number of pending connections
+ * @param bind_address The interface IP address to bind to (empty for all interfaces)
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
  */
-socket_t create_tcp_server(int port, int backlog = 5);
+socket_t create_tcp_server(int port, int backlog = 5, const std::string& bind_address = "");
 
 /**
  * Create a TCP server socket and bind to a port using IPv4 only
  * @param port The port number to bind to
  * @param backlog The maximum number of pending connections
+ * @param bind_address The interface IP address to bind to (empty for all interfaces)
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
  */
-socket_t create_tcp_server_v4(int port, int backlog = 5);
+socket_t create_tcp_server_v4(int port, int backlog = 5, const std::string& bind_address = "");
 
 /**
  * Create a TCP server socket and bind to a port using IPv6 only
  * @param port The port number to bind to
  * @param backlog The maximum number of pending connections
+ * @param bind_address The interface IP address to bind to (empty for all interfaces)
  * @return Socket handle, or INVALID_SOCKET_VALUE on error
  */
-socket_t create_tcp_server_v6(int port, int backlog = 5);
+socket_t create_tcp_server_v6(int port, int backlog = 5, const std::string& bind_address = "");
 
 /**
  * Accept a client connection on a server socket
@@ -197,23 +200,26 @@ std::string receive_tcp_string_framed(socket_t socket);
 /**
  * Create a UDP socket with dual stack support (IPv6 with IPv4 support)
  * @param port The port to bind to (0 for any available port)
+ * @param bind_address The interface IP address to bind to (empty for all interfaces)
  * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
  */
-socket_t create_udp_socket(int port = 0);
+socket_t create_udp_socket(int port = 0, const std::string& bind_address = "");
 
 /**
  * Create a UDP socket with IPv4 support only
  * @param port The port to bind to (0 for any available port)
+ * @param bind_address The interface IP address to bind to (empty for all interfaces)
  * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
  */
-socket_t create_udp_socket_v4(int port = 0);
+socket_t create_udp_socket_v4(int port = 0, const std::string& bind_address = "");
 
 /**
  * Create a UDP socket with IPv6 support only
  * @param port The port to bind to (0 for any available port)
+ * @param bind_address The interface IP address to bind to (empty for all interfaces)
  * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
  */
-socket_t create_udp_socket_v6(int port = 0);
+socket_t create_udp_socket_v6(int port = 0, const std::string& bind_address = "");
 
 /**
  * Send UDP data to a peer

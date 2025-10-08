@@ -273,8 +273,9 @@ public:
      * @param listen_port Port to listen on for incoming connections
      * @param max_peers Maximum number of concurrent peers (default: 10)
      * @param nat_config NAT traversal configuration
+     * @param bind_address Interface IP address to bind to (empty for all interfaces)
      */
-    RatsClient(int listen_port, int max_peers = 10, const NatTraversalConfig& nat_config = NatTraversalConfig());
+    RatsClient(int listen_port, int max_peers = 10, const NatTraversalConfig& nat_config = NatTraversalConfig(), const std::string& bind_address = "");
     
     /**
      * Destructor
@@ -313,6 +314,12 @@ public:
     // =========================================================================
 
     int get_listen_port() const;
+    
+    /**
+     * Get the bind address being used
+     * @return Bind address (empty string if binding to all interfaces)
+     */
+    std::string get_bind_address() const;
 
     // =========================================================================
     // Connection Management
@@ -1334,6 +1341,7 @@ public:
 
 private:
     int listen_port_;
+    std::string bind_address_;
     int max_peers_;
     socket_t server_socket_;
     std::atomic<bool> running_;

@@ -314,8 +314,9 @@ socket_t create_tcp_client_v6(const std::string& host, int port, int timeout_ms)
     return client_socket;
 }
 
-socket_t create_tcp_server(int port, int backlog) {
-    LOG_SOCKET_DEBUG("Creating TCP server socket (dual stack) on port " << port);
+socket_t create_tcp_server(int port, int backlog, const std::string& bind_address) {
+    LOG_SOCKET_DEBUG("Creating TCP server socket (dual stack) on port " << port <<
+                     (bind_address.empty() ? "" : " bound to " + bind_address));
     
     // Validate port number
     if (port < 0 || port > 65535) {
@@ -348,8 +349,18 @@ socket_t create_tcp_server(int port, int backlog) {
     sockaddr_in6 server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin6_family = AF_INET6;
-    server_addr.sin6_addr = in6addr_any;
     server_addr.sin6_port = htons(port);
+    
+    // Set bind address (default to all interfaces if empty)
+    if (bind_address.empty()) {
+        server_addr.sin6_addr = in6addr_any;
+    } else {
+        if (inet_pton(AF_INET6, bind_address.c_str(), &server_addr.sin6_addr) != 1) {
+            LOG_SOCKET_ERROR("Invalid IPv6 bind address: " << bind_address);
+            close_socket(server_socket);
+            return INVALID_SOCKET_VALUE;
+        }
+    }
 
     // Bind socket to address
     LOG_SOCKET_DEBUG("Binding dual stack server socket to port " << port);
@@ -370,8 +381,9 @@ socket_t create_tcp_server(int port, int backlog) {
     return server_socket;
 }
 
-socket_t create_tcp_server_v4(int port, int backlog) {
-    LOG_SOCKET_DEBUG("Creating TCP server socket on port " << port);
+socket_t create_tcp_server_v4(int port, int backlog, const std::string& bind_address) {
+    LOG_SOCKET_DEBUG("Creating TCP server socket on port " << port <<
+                     (bind_address.empty() ? "" : " bound to " + bind_address));
     
     // Validate port number
     if (port < 0 || port > 65535) {
@@ -397,8 +409,18 @@ socket_t create_tcp_server_v4(int port, int backlog) {
     sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(port);
+    
+    // Set bind address (default to all interfaces if empty)
+    if (bind_address.empty()) {
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        if (inet_pton(AF_INET, bind_address.c_str(), &server_addr.sin_addr) != 1) {
+            LOG_SOCKET_ERROR("Invalid IPv4 bind address: " << bind_address);
+            close_socket(server_socket);
+            return INVALID_SOCKET_VALUE;
+        }
+    }
 
     // Bind socket to address
     LOG_SOCKET_DEBUG("Binding server socket to port " << port);
@@ -419,8 +441,9 @@ socket_t create_tcp_server_v4(int port, int backlog) {
     return server_socket;
 }
 
-socket_t create_tcp_server_v6(int port, int backlog) {
-    LOG_SOCKET_DEBUG("Creating TCP server socket on IPv6 port " << port);
+socket_t create_tcp_server_v6(int port, int backlog, const std::string& bind_address) {
+    LOG_SOCKET_DEBUG("Creating TCP server socket on IPv6 port " << port <<
+                     (bind_address.empty() ? "" : " bound to " + bind_address));
     
     // Validate port number
     if (port < 0 || port > 65535) {
@@ -446,8 +469,18 @@ socket_t create_tcp_server_v6(int port, int backlog) {
     sockaddr_in6 server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin6_family = AF_INET6;
-    server_addr.sin6_addr = in6addr_any;
     server_addr.sin6_port = htons(port);
+    
+    // Set bind address (default to all interfaces if empty)
+    if (bind_address.empty()) {
+        server_addr.sin6_addr = in6addr_any;
+    } else {
+        if (inet_pton(AF_INET6, bind_address.c_str(), &server_addr.sin6_addr) != 1) {
+            LOG_SOCKET_ERROR("Invalid IPv6 bind address: " << bind_address);
+            close_socket(server_socket);
+            return INVALID_SOCKET_VALUE;
+        }
+    }
 
     // Bind socket to address
     LOG_SOCKET_DEBUG("Binding IPv6 server socket to port " << port);
@@ -752,8 +785,9 @@ std::string receive_tcp_string_framed(socket_t socket) {
 }
 
 // UDP Socket Functions
-socket_t create_udp_socket(int port) {
-    LOG_SOCKET_DEBUG("Creating dual stack UDP socket on port " << port);
+socket_t create_udp_socket(int port, const std::string& bind_address) {
+    LOG_SOCKET_DEBUG("Creating dual stack UDP socket on port " << port <<
+                     (bind_address.empty() ? "" : " bound to " + bind_address));
     
     // Validate port number
     if (port < 0 || port > 65535) {
@@ -791,8 +825,18 @@ socket_t create_udp_socket(int port) {
     sockaddr_in6 addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin6_family = AF_INET6;
-    addr.sin6_addr = in6addr_any;
     addr.sin6_port = htons(port);  // port=0 will get an ephemeral port
+    
+    // Set bind address (default to all interfaces if empty)
+    if (bind_address.empty()) {
+        addr.sin6_addr = in6addr_any;
+    } else {
+        if (inet_pton(AF_INET6, bind_address.c_str(), &addr.sin6_addr) != 1) {
+            LOG_SOCKET_ERROR("Invalid IPv6 bind address: " << bind_address);
+            close_socket(udp_socket);
+            return INVALID_SOCKET_VALUE;
+        }
+    }
 
     if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
 #ifdef _WIN32
@@ -821,8 +865,9 @@ socket_t create_udp_socket(int port) {
     return udp_socket;
 }
 
-socket_t create_udp_socket_v4(int port) {
-    LOG_SOCKET_DEBUG("Creating UDP socket on port " << port);
+socket_t create_udp_socket_v4(int port, const std::string& bind_address) {
+    LOG_SOCKET_DEBUG("Creating UDP socket on port " << port <<
+                     (bind_address.empty() ? "" : " bound to " + bind_address));
     
     // Validate port number
     if (port < 0 || port > 65535) {
@@ -853,8 +898,18 @@ socket_t create_udp_socket_v4(int port) {
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port);  // port=0 will get an ephemeral port
+    
+    // Set bind address (default to all interfaces if empty)
+    if (bind_address.empty()) {
+        addr.sin_addr.s_addr = INADDR_ANY;
+    } else {
+        if (inet_pton(AF_INET, bind_address.c_str(), &addr.sin_addr) != 1) {
+            LOG_SOCKET_ERROR("Invalid IPv4 bind address: " << bind_address);
+            close_socket(udp_socket);
+            return INVALID_SOCKET_VALUE;
+        }
+    }
 
     if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
 #ifdef _WIN32
@@ -883,8 +938,9 @@ socket_t create_udp_socket_v4(int port) {
     return udp_socket;
 }
 
-socket_t create_udp_socket_v6(int port) {
-    LOG_SOCKET_DEBUG("Creating UDP socket on IPv6 port " << port);
+socket_t create_udp_socket_v6(int port, const std::string& bind_address) {
+    LOG_SOCKET_DEBUG("Creating UDP socket on IPv6 port " << port <<
+                     (bind_address.empty() ? "" : " bound to " + bind_address));
     
     // Validate port number
     if (port < 0 || port > 65535) {
@@ -915,8 +971,18 @@ socket_t create_udp_socket_v6(int port) {
     sockaddr_in6 addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin6_family = AF_INET6;
-    addr.sin6_addr = in6addr_any;
     addr.sin6_port = htons(port);  // port=0 will get an ephemeral port
+    
+    // Set bind address (default to all interfaces if empty)
+    if (bind_address.empty()) {
+        addr.sin6_addr = in6addr_any;
+    } else {
+        if (inet_pton(AF_INET6, bind_address.c_str(), &addr.sin6_addr) != 1) {
+            LOG_SOCKET_ERROR("Invalid IPv6 bind address: " << bind_address);
+            close_socket(udp_socket);
+            return INVALID_SOCKET_VALUE;
+        }
+    }
 
     if (bind(udp_socket, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR_VALUE) {
 #ifdef _WIN32

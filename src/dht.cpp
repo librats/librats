@@ -26,12 +26,13 @@
 namespace librats {
 
 
-DhtClient::DhtClient(int port) 
-    : port_(port), socket_(INVALID_SOCKET_VALUE), running_(false) {
+DhtClient::DhtClient(int port, const std::string& bind_address) 
+    : port_(port), bind_address_(bind_address), socket_(INVALID_SOCKET_VALUE), running_(false) {
     node_id_ = generate_node_id();
     routing_table_.resize(NODE_ID_SIZE * 8);  // 160 buckets for 160-bit node IDs
     
-    LOG_DHT_INFO("DHT client created with node ID: " << node_id_to_hex(node_id_));
+    LOG_DHT_INFO("DHT client created with node ID: " << node_id_to_hex(node_id_) <<
+                 (bind_address_.empty() ? "" : " bind address: " + bind_address_));
 }
 
 DhtClient::~DhtClient() {
@@ -43,7 +44,8 @@ bool DhtClient::start() {
         return true;
     }
     
-    LOG_DHT_INFO("Starting DHT client on port " << port_);
+    LOG_DHT_INFO("Starting DHT client on port " << port_ <<
+                 (bind_address_.empty() ? "" : " bound to " + bind_address_));
     
     // Initialize socket library (safe to call multiple times)
     if (!init_socket_library()) {
@@ -51,7 +53,7 @@ bool DhtClient::start() {
         return false;
     }
     
-    socket_ = create_udp_socket(port_);
+    socket_ = create_udp_socket(port_, bind_address_);
     if (!is_valid_socket(socket_)) {
         LOG_DHT_ERROR("Failed to create dual-stack UDP socket");
         return false;

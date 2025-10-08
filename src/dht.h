@@ -77,8 +77,9 @@ public:
     /**
      * Constructor
      * @param port The UDP port to bind to (default: 6881)
+     * @param bind_address The interface IP address to bind to (empty for all interfaces)
      */
-    DhtClient(int port = DHT_PORT);
+    DhtClient(int port = DHT_PORT, const std::string& bind_address = "");
     
     /**
      * Destructor
@@ -157,6 +158,7 @@ public:
 
 private:
     int port_;
+    std::string bind_address_;
     NodeId node_id_;
     socket_t socket_;
     std::atomic<bool> running_;
