@@ -112,8 +112,6 @@ set(LIBRARY_SOURCES
     src/dht.h
     src/bencode.cpp
     src/bencode.h
-    src/bittorrent.cpp
-    src/bittorrent.h
     src/krpc.cpp
     src/krpc.h
     src/librats.cpp
@@ -153,6 +151,15 @@ set(LIBRARY_SOURCES
     src/rats_export.h
     ${PROJECT_BINARY_DIR}/src/version.h
 )
+
+# Add BitTorrent sources if RATS_SEACH_FEATURES is enabled
+if(RATS_SEACH_FEATURES)
+    list(APPEND LIBRARY_SOURCES
+        src/librats_bittorrent.cpp
+        src/bittorrent.cpp
+        src/bittorrent.h
+    )
+endif()
 
 if(RATS_BINDINGS)
     list(APPEND LIBRARY_SOURCES 
@@ -297,6 +304,11 @@ if(RATS_BUILD_TESTS)
         tests/test_logging_api_gtest.cpp
         tests/test_file_transfer.cpp
     )
+    
+    # Add BitTorrent tests if RATS_SEACH_FEATURES is enabled
+    if(RATS_SEACH_FEATURES)
+        list(APPEND TEST_SOURCES tests/test_bittorrent.cpp)
+    endif()
 
     if(RATS_BINDINGS)
         list(APPEND TEST_SOURCES 

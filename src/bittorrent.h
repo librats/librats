@@ -487,9 +487,6 @@ private:
     void handle_incoming_connections();
     void handle_incoming_connection(socket_t client_socket);
     bool perform_incoming_handshake(socket_t socket, InfoHash& info_hash, PeerID& peer_id);
-    
-    // DHT callbacks
-    void on_dht_peers_discovered(const std::vector<Peer>& peers, const InfoHash& info_hash);
 };
 
 // Utility functions

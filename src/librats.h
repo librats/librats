@@ -10,6 +10,9 @@
 #include "threadmanager.h"
 #include "gossipsub.h" // For ValidationResult enum and GossipSub types
 #include "file_transfer.h" // File transfer functionality
+#ifdef RATS_SEACH_FEATURES
+#include "bittorrent.h" // BitTorrent functionality (optional, requires RATS_SEACH_FEATURES)
+#endif
 #include "json.hpp" // nlohmann::json
 #include <string>
 #include <functional>
@@ -1339,6 +1342,80 @@ public:
      */
     void on_directory_request(DirectoryRequestCallback callback);
 
+#ifdef RATS_SEACH_FEATURES
+    // =========================================================================
+    // BitTorrent API (requires RATS_SEACH_FEATURES)
+    // =========================================================================
+    
+    /**
+     * Enable BitTorrent functionality
+     * @param listen_port Port to listen for BitTorrent connections (default: 6881)
+     * @return true if BitTorrent was successfully enabled
+     */
+    bool enable_bittorrent(int listen_port = 6881);
+    
+    /**
+     * Disable BitTorrent functionality
+     */
+    void disable_bittorrent();
+    
+    /**
+     * Check if BitTorrent is enabled
+     * @return true if BitTorrent is active
+     */
+    bool is_bittorrent_enabled() const;
+    
+    /**
+     * Add a torrent from a file
+     * @param torrent_file Path to the .torrent file
+     * @param download_path Directory where files will be downloaded
+     * @return Shared pointer to TorrentDownload object, or nullptr on failure
+     */
+    std::shared_ptr<TorrentDownload> add_torrent(const std::string& torrent_file, 
+                                                  const std::string& download_path);
+    
+    /**
+     * Add a torrent from TorrentInfo
+     * @param torrent_info TorrentInfo object with torrent metadata
+     * @param download_path Directory where files will be downloaded
+     * @return Shared pointer to TorrentDownload object, or nullptr on failure
+     */
+    std::shared_ptr<TorrentDownload> add_torrent(const TorrentInfo& torrent_info, 
+                                                  const std::string& download_path);
+    
+    /**
+     * Remove a torrent by info hash
+     * @param info_hash Info hash of the torrent to remove
+     * @return true if torrent was removed successfully
+     */
+    bool remove_torrent(const InfoHash& info_hash);
+    
+    /**
+     * Get a torrent by info hash
+     * @param info_hash Info hash of the torrent
+     * @return Shared pointer to TorrentDownload object, or nullptr if not found
+     */
+    std::shared_ptr<TorrentDownload> get_torrent(const InfoHash& info_hash);
+    
+    /**
+     * Get all active torrents
+     * @return Vector of all active torrent downloads
+     */
+    std::vector<std::shared_ptr<TorrentDownload>> get_all_torrents();
+    
+    /**
+     * Get the number of active torrents
+     * @return Number of active torrents
+     */
+    size_t get_active_torrents_count() const;
+    
+    /**
+     * Get BitTorrent statistics (downloaded and uploaded bytes)
+     * @return Pair of (downloaded_bytes, uploaded_bytes)
+     */
+    std::pair<uint64_t, uint64_t> get_bittorrent_stats() const;
+#endif // RATS_SEACH_FEATURES
+
 private:
     int listen_port_;
     std::string bind_address_;
@@ -1417,6 +1494,11 @@ private:
     
     // File transfer manager
     std::unique_ptr<FileTransferManager> file_transfer_manager_;
+    
+#ifdef RATS_SEACH_FEATURES
+    // BitTorrent client (optional, requires RATS_SEACH_FEATURES)
+    std::unique_ptr<BitTorrentClient> bittorrent_client_;
+#endif
     
     void initialize_modules();
     void destroy_modules();

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <cstring>
 #include <climits>
+#include <cerrno>  // For errno on POSIX systems
 
 #define LOG_BT_DEBUG(message) LOG_DEBUG("bittorrent", message)
 #define LOG_BT_INFO(message)  LOG_INFO("bittorrent", message)
@@ -818,14 +819,43 @@ bool PeerConnection::read_data(std::vector<uint8_t>& buffer, size_t length) {
         return false;
     }
     
-    // Use existing network utilities
-    std::string data = receive_tcp_string(socket_);
-    if (data.length() >= length) {
-        std::copy(data.begin(), data.begin() + length, buffer.begin());
-        return true;
+    // Read exact amount of binary data from socket
+    size_t total_read = 0;
+    while (total_read < length) {
+        int bytes_read = recv(socket_, reinterpret_cast<char*>(buffer.data() + total_read), 
+                             static_cast<int>(length - total_read), 0);
+        
+        if (bytes_read <= 0) {
+            // Socket error or closed
+            if (bytes_read == 0 || !is_valid_socket(socket_)) {
+                LOG_BT_DEBUG("Socket closed during read");
+                return false;
+            }
+            
+            // Check if it's just a temporary error
+#ifdef _WIN32
+            int error = WSAGetLastError();
+            if (error == WSAEWOULDBLOCK || error == WSAEINPROGRESS) {
+                // Non-blocking socket with no data available, try again
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+#else
+            if (errno == EWOULDBLOCK || errno == EAGAIN || errno == EINPROGRESS) {
+                // Non-blocking socket with no data available, try again
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+#endif
+            // Real error occurred
+            LOG_BT_ERROR("Socket read error");
+            return false;
+        }
+        
+        total_read += bytes_read;
     }
     
-    return false;
+    return total_read == length;
 }
 
 bool PeerConnection::write_data(const std::vector<uint8_t>& data) {
