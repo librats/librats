@@ -1,7 +1,15 @@
 #include "librats.h"
 
-
 #ifdef RATS_SEACH_FEATURES
+
+// Logging macros for BitTorrent client
+#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
+#define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
+#define LOG_CLIENT_WARN(message)  LOG_WARN("client", message)
+#define LOG_CLIENT_ERROR(message) LOG_ERROR("client", message)
+
+namespace librats {
+
 //=============================================================================
 // BitTorrent API Implementation (requires RATS_SEACH_FEATURES)
 //=============================================================================
@@ -107,4 +115,7 @@ std::pair<uint64_t, uint64_t> RatsClient::get_bittorrent_stats() const {
     return {bittorrent_client_->get_total_downloaded(), 
             bittorrent_client_->get_total_uploaded()};
 }
+
+}
+
 #endif // RATS_SEACH_FEATURES

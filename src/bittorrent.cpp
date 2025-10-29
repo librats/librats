@@ -429,7 +429,8 @@ void PeerConnection::disconnect() {
     should_disconnect_ = true;
     
     if (is_valid_socket(socket_)) {
-        close_socket(socket_);
+        // Force shutdown for TCP socket to ensure immediate disconnect
+        close_socket(socket_, true);
         socket_ = INVALID_SOCKET_VALUE;
     }
     
@@ -819,43 +820,15 @@ bool PeerConnection::read_data(std::vector<uint8_t>& buffer, size_t length) {
         return false;
     }
     
-    // Read exact amount of binary data from socket
-    size_t total_read = 0;
-    while (total_read < length) {
-        int bytes_read = recv(socket_, reinterpret_cast<char*>(buffer.data() + total_read), 
-                             static_cast<int>(length - total_read), 0);
-        
-        if (bytes_read <= 0) {
-            // Socket error or closed
-            if (bytes_read == 0 || !is_valid_socket(socket_)) {
-                LOG_BT_DEBUG("Socket closed during read");
-                return false;
-            }
-            
-            // Check if it's just a temporary error
-#ifdef _WIN32
-            int error = WSAGetLastError();
-            if (error == WSAEWOULDBLOCK || error == WSAEINPROGRESS) {
-                // Non-blocking socket with no data available, try again
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-#else
-            if (errno == EWOULDBLOCK || errno == EAGAIN || errno == EINPROGRESS) {
-                // Non-blocking socket with no data available, try again
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-#endif
-            // Real error occurred
-            LOG_BT_ERROR("Socket read error");
-            return false;
-        }
-        
-        total_read += bytes_read;
+    // Use the existing socket function to read exact bytes
+    std::vector<uint8_t> data = receive_exact_bytes(socket_, length);
+    if (data.size() != length) {
+        LOG_BT_DEBUG("Failed to read exact amount of data from socket");
+        return false;
     }
     
-    return total_read == length;
+    buffer = std::move(data);
+    return true;
 }
 
 bool PeerConnection::write_data(const std::vector<uint8_t>& data) {
@@ -863,9 +836,9 @@ bool PeerConnection::write_data(const std::vector<uint8_t>& data) {
         return false;
     }
     
-    std::string data_str(data.begin(), data.end());
-    int sent = send_tcp_string(socket_, data_str);
-    return sent > 0;
+    // Use the existing socket function for binary data directly
+    int sent = send_tcp_data(socket_, data);
+    return sent > 0 && static_cast<size_t>(sent) == data.size();
 }
 
 //=============================================================================
