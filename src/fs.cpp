@@ -417,7 +417,12 @@ bool write_file_chunk(const char* path, uint64_t offset, const void* data, size_
         }
     }
     
-    if (fseek(file, offset, SEEK_SET) != 0) {
+    // Use platform-specific 64-bit seek
+#ifdef _WIN32
+    if (_fseeki64(file, static_cast<__int64>(offset), SEEK_SET) != 0) {
+#else
+    if (fseeko(file, static_cast<off_t>(offset), SEEK_SET) != 0) {
+#endif
         LOG_ERROR("FS", "Failed to seek to offset " << offset << " in file: " << path);
         fclose(file);
         return false;
@@ -443,7 +448,12 @@ bool read_file_chunk(const char* path, uint64_t offset, void* buffer, size_t siz
         return false;
     }
     
-    if (fseek(file, offset, SEEK_SET) != 0) {
+    // Use platform-specific 64-bit seek
+#ifdef _WIN32
+    if (_fseeki64(file, static_cast<__int64>(offset), SEEK_SET) != 0) {
+#else
+    if (fseeko(file, static_cast<off_t>(offset), SEEK_SET) != 0) {
+#endif
         LOG_ERROR("FS", "Failed to seek to offset " << offset << " in file: " << path);
         fclose(file);
         return false;
@@ -472,7 +482,12 @@ bool create_file_with_size(const char* path, uint64_t size) {
     
     if (size > 0) {
         // Pre-allocate file space by seeking to size-1 and writing a byte
-        if (fseek(file, size - 1, SEEK_SET) == 0) {
+        // Use platform-specific 64-bit seek
+#ifdef _WIN32
+        if (_fseeki64(file, static_cast<__int64>(size - 1), SEEK_SET) == 0) {
+#else
+        if (fseeko(file, static_cast<off_t>(size - 1), SEEK_SET) == 0) {
+#endif
             fputc(0, file);
         }
     }
