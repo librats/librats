@@ -1148,29 +1148,18 @@ void TorrentDownload::write_piece_to_disk(PieceIndex piece_index) {
             continue;
         }
         
-        // Open file for writing
-        std::string file_path = download_path_ + "/" + file_info.path;
-        std::fstream file(file_path, std::ios::binary | std::ios::in | std::ios::out);
-        
-        if (!file.is_open()) {
-            LOG_BT_ERROR("Failed to open file for writing: " << file_path);
-            continue;
-        }
-        
-        // Seek to correct position in file
+        // Calculate file offset
         uint64_t file_offset = (piece_offset > file_info.offset) ? 
                               piece_offset - file_info.offset : 0;
-        file.seekp(file_offset);
         
-        // Write data
-        file.write(reinterpret_cast<const char*>(piece->data.data() + file_start_in_piece), 
-                  write_length);
+        // Write data chunk to file using fs module
+        std::string file_path = download_path_ + "/" + file_info.path;
+        const void* write_data = piece->data.data() + file_start_in_piece;
         
-        if (!file.good()) {
+        if (!write_file_chunk(file_path.c_str(), file_offset, write_data, write_length)) {
             LOG_BT_ERROR("Failed to write data to file: " << file_path);
+            continue;
         }
-        
-        file.close();
         
         LOG_BT_DEBUG("Wrote " << write_length << " bytes to file " << file_info.path 
                      << " at offset " << file_offset);
@@ -1364,37 +1353,17 @@ bool TorrentDownload::open_files() {
     std::lock_guard<std::mutex> lock(files_mutex_);
     
     const auto& files = torrent_info_.get_files();
-    file_handles_.clear();
-    file_handles_.reserve(files.size());
     
     for (const auto& file_info : files) {
         std::string file_path = download_path_ + "/" + file_info.path;
         
-        // Create file with correct size
-        std::fstream file(file_path, std::ios::binary | std::ios::in | std::ios::out);
-        if (!file.is_open()) {
-            // Try to create the file
-            file.open(file_path, std::ios::binary | std::ios::out);
-            if (!file.is_open()) {
-                LOG_BT_ERROR("Failed to create file: " << file_path);
-                return false;
-            }
-            file.close();
-            
-            // Reopen for reading and writing
-            file.open(file_path, std::ios::binary | std::ios::in | std::ios::out);
-            if (!file.is_open()) {
-                LOG_BT_ERROR("Failed to reopen file: " << file_path);
-                return false;
-            }
+        // Pre-allocate file with correct size using fs module
+        if (!create_file_with_size(file_path.c_str(), file_info.length)) {
+            LOG_BT_ERROR("Failed to create file: " << file_path);
+            return false;
         }
         
-        // Resize file to correct length
-        file.seekp(file_info.length - 1);
-        file.write("\0", 1);
-        
-        file_handles_.emplace_back(std::move(file));
-        LOG_BT_DEBUG("Opened file: " << file_path << " (size: " << file_info.length << ")");
+        LOG_BT_DEBUG("Created file: " << file_path << " (size: " << file_info.length << ")");
     }
     
     return true;
@@ -1403,12 +1372,9 @@ bool TorrentDownload::open_files() {
 void TorrentDownload::close_files() {
     std::lock_guard<std::mutex> lock(files_mutex_);
     
-    for (auto& file : file_handles_) {
-        if (file.is_open()) {
-            file.close();
-        }
-    }
-    file_handles_.clear();
+    // With fs module, files are opened/closed per operation
+    // No persistent file handles to close
+    LOG_BT_DEBUG("Files closed (using fs module, no persistent handles)");
 }
 
 bool TorrentDownload::create_directory_structure() {

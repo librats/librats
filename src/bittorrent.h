@@ -16,7 +16,6 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
-#include <fstream>
 #include <array>
 #include <algorithm>  // Add this for std::all_of
 #include <condition_variable>
@@ -379,8 +378,7 @@ private:
     std::condition_variable shutdown_cv_;
     std::mutex shutdown_mutex_;
     
-    // File handling
-    std::vector<std::fstream> file_handles_;
+    // File handling (using fs module, no persistent handles needed)
     mutable std::mutex files_mutex_;
     
     // Callbacks
