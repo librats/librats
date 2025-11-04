@@ -167,10 +167,6 @@ private:
     std::vector<std::vector<DhtNode>> routing_table_;
     mutable std::mutex routing_table_mutex_;
     
-    // Active searches (use string keys instead of InfoHash to avoid hash conflicts)
-    std::unordered_map<std::string, PeerDiscoveryCallback> active_searches_;
-    std::mutex active_searches_mutex_;
-    
     // Tokens for peers (use Peer directly as key for efficiency)
     std::unordered_map<Peer, std::string> peer_tokens_;
     std::mutex peer_tokens_mutex_;
@@ -198,6 +194,9 @@ private:
         std::unordered_set<std::string> queried_nodes;  // node_id as hex string
         int iteration_count;                            // current iteration number
         int iteration_max;                              // maximum iteration limit
+        
+        // Callbacks to invoke when peers are found (supports multiple concurrent searches for same info_hash)
+        std::vector<PeerDiscoveryCallback> callbacks;
         
         PendingSearch(const InfoHash& hash, int max_iterations = 1)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
