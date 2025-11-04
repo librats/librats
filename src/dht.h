@@ -113,7 +113,7 @@ public:
      * Find peers for a specific info hash
      * @param info_hash The info hash to search for
      * @param callback Callback to receive discovered peers
-     * @param iteration_max Maximum number of search iterations (default: 1)
+     * @param iteration_max Maximum number of search iterations (default: 1, 0 = infinite)
      * @return true if search started successfully, false otherwise
      */
     bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max = 1);

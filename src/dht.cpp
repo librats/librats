@@ -951,10 +951,10 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     
     LOG_DHT_DEBUG("Continuing search iteration for info_hash " << hash_key 
                   << " with " << search.queried_nodes.size() << " queried nodes, iteration " 
-                  << search.iteration_count << "/" << search.iteration_max);
+                  << search.iteration_count << "/" << (search.iteration_max == 0 ? "infinity" : std::to_string(search.iteration_max)));
     
-    // Stop if we've reached max iterations (simple limit)
-    if (search.iteration_count >= search.iteration_max) {
+    // Stop if we've reached max iterations (iteration_max = 0 means infinite)
+    if (search.iteration_max > 0 && search.iteration_count >= search.iteration_max) {
         LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations (" << search.iteration_count << "/" << search.iteration_max << ")");
         return true;  // Return true to indicate the search should be removed
     }
