@@ -167,6 +167,12 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
     
     // Start search by querying closest nodes
     auto closest_nodes = find_closest_nodes(info_hash, ALPHA);
+
+    if (closest_nodes.empty()) {
+        LOG_DHT_WARN("No nodes in routing table to query for info_hash " << hash_key 
+                    << " - search will retry when nodes become available");
+        return false;
+    }
     
     for (const auto& node : closest_nodes) {
         // Generate transaction ID and track this as a pending search for KRPC
@@ -423,7 +429,7 @@ void DhtClient::on_node_added(const DhtNode& node, std::string transaction_id) {
                           << " - continuing search iteration");
 
             // Continue search iteration since we now have a new node in the routing table
-            bool should_remove_search = continue_search_iteration(pending_search);
+            bool should_remove_search = !continue_search_iteration(pending_search);
             if (should_remove_search) {
                 LOG_DHT_DEBUG("Removing completed search for info_hash " << hash_key);
                 pending_searches_.erase(search_it);
@@ -998,12 +1004,12 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     // Stop if we've reached max iterations (iteration_max = 0 means infinite)
     if (search.iteration_max > 0 && search.iteration_count >= search.iteration_max) {
         LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations (" << search.iteration_count << "/" << search.iteration_max << ")");
-        return true;  // Return true to indicate the search should be removed
+        return false;  // Return false to indicate the search should be removed
     }
     
     // Get closest nodes from routing table (already sorted by distance to target)
     std::vector<DhtNode> closest_nodes = find_closest_nodes(search.info_hash, ALPHA);
-    
+
     // Query up to ALPHA closest unqueried nodes
     int nodes_queried = 0;
     int candidates_found = 0;
@@ -1048,10 +1054,10 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     // If we are not making progress, or if we've hit the limit, stop the search.
     if (nodes_queried == 0) {
         LOG_DHT_DEBUG("Stopping search for " << hash_key << " - no new nodes to query");
-        return true; // Signal to remove the search
+        return false; // Signal to remove the search
     }
     
-    return false;
+    return true;
 }
 
 // Peer announcement storage management
