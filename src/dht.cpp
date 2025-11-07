@@ -350,9 +350,9 @@ void DhtClient::add_node_with_verification(const DhtNode& node, std::string tran
         if (it != bucket.end()) {
             // Update existing node
             LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " already exists in bucket " << bucket_index << ", updating");
-            
             it->peer = node.peer;
             it->last_seen = std::chrono::steady_clock::now();
+            node_was_added = true;
         } else {
             // Add new node
             if (bucket.size() < K_BUCKET_SIZE) {
