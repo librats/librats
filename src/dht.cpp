@@ -1234,6 +1234,10 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
     // Call on_node_added() outside the pending_pings_mutex_ to avoid deadlock
     if (should_call_on_node_added) {
         on_node_added(updated_candidate_copy, transaction_id_copy);
+
+        // Clean up the ping transaction mapping
+        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+        transaction_to_search_.erase(transaction_id_copy);
     }
 }
 
