@@ -1123,22 +1123,38 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
         }
     }
     
-    // Update iteration count
-    search.iteration_count++;
-    
     LOG_DHT_DEBUG("Search iteration summary for " << hash_key << ":");
     LOG_DHT_DEBUG("  - Candidates evaluated: " << candidates_found);
     LOG_DHT_DEBUG("  - Nodes queried: " << nodes_queried);
     LOG_DHT_DEBUG("  - Already queried nodes skipped: " << (candidates_found - nodes_queried));
     LOG_DHT_DEBUG("  - Current iteration: " << search.iteration_count << "/" << search.iteration_max);
     
-    // If we are not making progress, or if we've hit the limit, stop the search.
-    if (nodes_queried == 0) {
-        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - no new nodes to query");
-        return false; // Signal to remove the search
+    // If we queried new nodes, update the search timestamp and iteration count
+    if (nodes_queried > 0) {
+        search.updated_at = std::chrono::steady_clock::now();
+        search.iteration_count++;
+        return true;  // Continue search
     }
     
-    return true;
+    // No new nodes queried - check if search is stale
+    auto now = std::chrono::steady_clock::now();
+    auto time_since_update = std::chrono::duration_cast<std::chrono::seconds>(now - search.updated_at).count();
+    auto time_since_creation = std::chrono::duration_cast<std::chrono::seconds>(now - search.created_at).count();
+    
+    // Only terminate if the search is stale (no activity for 30 seconds)
+    // This allows time for pending responses to arrive with new nodes
+    constexpr int SEARCH_STALE_TIMEOUT = 30;  // seconds
+    
+    if (time_since_update >= SEARCH_STALE_TIMEOUT || time_since_creation >= SEARCH_STALE_TIMEOUT) {
+        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - search is stale (no progress for " 
+                      << time_since_update << "s, total time: " << time_since_creation << "s)");
+        return false;  // Signal to remove the search
+    }
+    
+    // Search is still fresh but temporarily has no new nodes - keep it alive
+    LOG_DHT_DEBUG("Keeping search alive for " << hash_key << " - no new nodes to query yet, but search is still fresh "
+                  << "(last update: " << time_since_update << "s ago, waiting for responses)");
+    return true;  // Keep search alive
 }
 
 // Peer announcement storage management

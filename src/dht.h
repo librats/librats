@@ -189,6 +189,7 @@ private:
     struct PendingSearch {
         InfoHash info_hash;
         std::chrono::steady_clock::time_point created_at;
+        std::chrono::steady_clock::time_point updated_at;
         
         // Iterative search state
         std::unordered_set<std::string> queried_nodes;  // node_id as hex string
@@ -200,6 +201,7 @@ private:
         
         PendingSearch(const InfoHash& hash, int max_iterations = 1)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
+              updated_at(std::chrono::steady_clock::now()),
               iteration_count(1), iteration_max(max_iterations) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
