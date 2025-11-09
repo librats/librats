@@ -625,10 +625,10 @@ void DhtClient::handle_krpc_message(const KrpcMessage& message, const Peer& send
 void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
-    // Add sender to routing table
+    // Add sender to routing table (no verification needed - they contacted us)
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node);
+    add_node(sender_node, "", false);
     
     // Respond with ping response
     auto response = KrpcProtocol::create_ping_response(message.transaction_id, node_id_);
@@ -638,10 +638,10 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender)
 void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
-    // Add sender to routing table
+    // Add sender to routing table (no verification needed - they contacted us)
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node);
+    add_node(sender_node, "", false);
     
     // Find closest nodes
     auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
@@ -655,10 +655,10 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
 void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.info_hash));
     
-    // Add sender to routing table
+    // Add sender to routing table (no verification needed - they contacted us)
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node);
+    add_node(sender_node, "", false);
     
     // Generate a token for this peer
     std::string token = generate_token(sender);
@@ -693,10 +693,10 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
         return;
     }
     
-    // Add sender to routing table
+    // Add sender to routing table (no verification needed - they contacted us)
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node);
+    add_node(sender_node, "", false);
     
     // Store the peer announcement
     Peer announcing_peer(sender.ip, message.port);
@@ -713,15 +713,15 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     // Check if this is a ping verification response before normal processing
     handle_ping_verification_response(message.transaction_id, message.response_id, sender);
     
-    // Add responder to routing table
+    // Add responder to routing table (no verification needed - they responded to us)
     KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, message.transaction_id);
+    add_node(sender_node, message.transaction_id, false);
     
-    // Add any nodes from the response
+    // Add any nodes from the response (these need verification - we haven't contacted them)
     for (const auto& node : message.nodes) {
         DhtNode dht_node = krpc_node_to_dht_node(node);
-        add_node(dht_node, message.transaction_id);
+        add_node(dht_node, message.transaction_id, true);
     }
     
     // Check if this is a response to a pending search (get_peers with peers)
