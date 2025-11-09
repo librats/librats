@@ -333,7 +333,7 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sen
         handle_krpc_message(*krpc_message, sender);
 }
 
-void DhtClient::add_node(const DhtNode& node, std::string transaction_id) {
+void DhtClient::add_node(const DhtNode& node, std::string transaction_id, bool verify) {
     bool node_was_added = false;
     bool should_initiate_ping = false;
     DhtNode worst_node_copy;
@@ -345,7 +345,7 @@ void DhtClient::add_node(const DhtNode& node, std::string transaction_id) {
         int bucket_index = get_bucket_index(node.id);
         auto& bucket = routing_table_[bucket_index];
         
-        LOG_DHT_DEBUG("Adding node " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port << " to bucket " << bucket_index);
+        LOG_DHT_DEBUG("Adding node " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port << " to bucket " << bucket_index << " (verify: " << verify << ")");
         
         // Check if node already exists
         auto it = std::find_if(bucket.begin(), bucket.end(),
@@ -366,35 +366,51 @@ void DhtClient::add_node(const DhtNode& node, std::string transaction_id) {
                 LOG_DHT_DEBUG("Added new node " << node_id_to_hex(node.id) << " to bucket " << bucket_index << " (size: " << bucket.size() << "/" << K_BUCKET_SIZE << ")");
                 node_was_added = true;
             } else {
-                // Bucket is full, use ping-before-replace eviction (BEP 5)
-                
-                // Find the worst node that's not already being pinged for replacement
-                auto worst_it = bucket.end();
-                {
-                    std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
-                    for (auto it = bucket.begin(); it != bucket.end(); ++it) {
-                        if (nodes_being_replaced_.find(it->id) == nodes_being_replaced_.end()) {
-                            if (worst_it == bucket.end() || it->last_seen < worst_it->last_seen) {
-                                worst_it = it;
+                // Bucket is full
+                if (!verify) {
+                    // Direct replacement without ping verification
+                    auto worst_it = std::min_element(bucket.begin(), bucket.end(),
+                                                     [](const DhtNode& a, const DhtNode& b) {
+                                                         return a.last_seen < b.last_seen;
+                                                     });
+                    
+                    LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, directly replacing oldest node " 
+                                  << node_id_to_hex(worst_it->id) << " with " << node_id_to_hex(node.id) 
+                                  << " (verify=false)");
+                    
+                    *worst_it = node;
+                    node_was_added = true;
+                } else {
+                    // Bucket is full, use ping-before-replace eviction (BEP 5)
+                    
+                    // Find the worst node that's not already being pinged for replacement
+                    auto worst_it = bucket.end();
+                    {
+                        std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
+                        for (auto it = bucket.begin(); it != bucket.end(); ++it) {
+                            if (nodes_being_replaced_.find(it->id) == nodes_being_replaced_.end()) {
+                                if (worst_it == bucket.end() || it->last_seen < worst_it->last_seen) {
+                                    worst_it = it;
+                                }
                             }
                         }
                     }
+                    
+                    if (worst_it == bucket.end()) {
+                        LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, but all nodes already have pending ping verifications - skipping new node " << node_id_to_hex(node.id));
+                        return;
+                    }
+                    
+                    LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, initiating ping-before-replace for node " 
+                                  << node_id_to_hex(worst_it->id) << " (last_seen age: " 
+                                  << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - worst_it->last_seen).count() 
+                                  << "s) to potentially replace with " << node_id_to_hex(node.id));
+                    
+                    // Copy data for ping verification to be done outside the lock
+                    should_initiate_ping = true;
+                    worst_node_copy = *worst_it;
+                    bucket_index_copy = bucket_index;
                 }
-                
-                if (worst_it == bucket.end()) {
-                    LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, but all nodes already have pending ping verifications - skipping new node " << node_id_to_hex(node.id));
-                    return;
-                }
-                
-                LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, initiating ping-before-replace for node " 
-                              << node_id_to_hex(worst_it->id) << " (last_seen age: " 
-                              << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - worst_it->last_seen).count() 
-                              << "s) to potentially replace with " << node_id_to_hex(node.id));
-                
-                // Copy data for ping verification to be done outside the lock
-                should_initiate_ping = true;
-                worst_node_copy = *worst_it;
-                bucket_index_copy = bucket_index;
             }
         }
     } // Release routing_table_mutex_ here
