@@ -356,7 +356,7 @@ int main(int argc, char* argv[]) {
                             for (const auto& peer : peers) {
                                 LOG_MAIN_INFO("  Peer: " << peer);
                             }
-                        });
+                        }, 0);
                     if (success) {
                         LOG_MAIN_INFO("DHT peer search initiated");
                     } else {

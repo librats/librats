@@ -527,6 +527,32 @@ std::vector<DhtNode> DhtClient::find_closest_nodes_unlocked(const NodeId& target
     for (size_t i = 0; i < candidates.size(); ++i) {
         LOG_DHT_DEBUG("  [" << i << "] " << node_id_to_hex(candidates[i].id) << " at " << candidates[i].peer.ip << ":" << candidates[i].peer.port);
     }
+
+    // Debug alternative: Compare with full routing table algorithm
+    /*
+    candidates.clear();
+    for (const auto& bucket : routing_table_) {
+        candidates.insert(candidates.end(), bucket.begin(), bucket.end());
+    }
+    sort_count = std::min(count, candidates.size());
+    std::partial_sort(
+        candidates.begin(),
+        candidates.begin() + sort_count,
+        candidates.end(),
+        [&target, this](const DhtNode& a, const DhtNode& b) {
+            return is_closer(a.id, b.id, target);
+        }
+    );
+    // Return up to 'count' closest nodes
+    if (candidates.size() > count) {
+        candidates.resize(count);
+    }
+    LOG_DHT_DEBUG("Found " << candidates.size() << " closest nodes to target " << node_id_to_hex(target));
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        LOG_DHT_DEBUG("  +[" << i << "] " << node_id_to_hex(candidates[i].id) << " at " << candidates[i].peer.ip << ":" << candidates[i].peer.port);
+    }
+    */
+    // End of debug alternative
     
     return candidates;
 }
