@@ -452,44 +452,83 @@ std::vector<DhtNode> DhtClient::find_closest_nodes(const NodeId& target, size_t 
 std::vector<DhtNode> DhtClient::find_closest_nodes_unlocked(const NodeId& target, size_t count) {
     LOG_DHT_DEBUG("Finding closest nodes to target " << node_id_to_hex(target) << " (max " << count << " nodes)");
     
-    std::vector<DhtNode> all_nodes;
-    size_t total_nodes = 0;
-    for (const auto& bucket : routing_table_) {
-        all_nodes.insert(all_nodes.end(), bucket.begin(), bucket.end());
-        total_nodes += bucket.size();
+    // Find closest bucket to target
+    int target_bucket = get_bucket_index(target);
+    
+    // Candidate nodes to be closest to target
+    std::vector<DhtNode> candidates;
+    // Reserve extra space: 3x count + buffer for 2 full buckets to avoid reallocation
+    candidates.reserve(count * 3 + K_BUCKET_SIZE * 2);
+    
+    // Add nodes from ideal bucket
+    if (target_bucket < routing_table_.size()) {
+        const auto& bucket = routing_table_[target_bucket];
+        candidates.insert(candidates.end(), bucket.begin(), bucket.end());
+        LOG_DHT_DEBUG("Collected " << bucket.size() << " nodes from target bucket " << target_bucket);
     }
     
-    LOG_DHT_DEBUG("Routing table contains " << total_nodes << " nodes across " << routing_table_.size() << " buckets");
+    // Add nodes from buckets above and below the ideal bucket
+    // Collect more candidates than needed to ensure we get the actual closest ones after sorting
+    size_t desired_candidates = count * 3;  // Collect 3x more candidates for better selection
+    int low = target_bucket - 1;
+    int high = target_bucket + 1;
+    const int max_bucket_index = routing_table_.size() - 1;
+    int buckets_checked = 1;  // Already checked target_bucket
     
-    // Sort by distance to target
-    std::sort(all_nodes.begin(), all_nodes.end(),
-              [&target, this](const DhtNode& a, const DhtNode& b) {
-                  return is_closer(a.id, b.id, target);
-              });
+    while (candidates.size() < desired_candidates && (low >= 0 || high <= max_bucket_index)) {
+        // Search left (closer buckets)
+        if (low >= 0) {
+            const auto& bucket = routing_table_[low];
+            if (!bucket.empty()) {
+                candidates.insert(candidates.end(), bucket.begin(), bucket.end());
+                LOG_DHT_DEBUG("Collected " << bucket.size() << " nodes from bucket " << low);
+            }
+            low--;
+            buckets_checked++;
+        }
+        
+        // Search right (farther buckets)
+        if (high <= max_bucket_index) {
+            const auto& bucket = routing_table_[high];
+            if (!bucket.empty()) {
+                candidates.insert(candidates.end(), bucket.begin(), bucket.end());
+                LOG_DHT_DEBUG("Collected " << bucket.size() << " nodes from bucket " << high);
+            }
+            high++;
+            buckets_checked++;
+        }
+    }
+    
+    LOG_DHT_DEBUG("Bucket-aware collection: checked " << buckets_checked << " buckets, collected " 
+                  << candidates.size() << " candidate nodes around target bucket " << target_bucket);
+    
+    if (candidates.empty()) {
+        LOG_DHT_DEBUG("No candidates found in routing table");
+        return candidates;
+    }
+    
+    // Use partial_sort to efficiently get only the 'count' closest nodes - O(n log k) vs O(n log n)
+    size_t sort_count = std::min(count, candidates.size());
+    std::partial_sort(
+        candidates.begin(), 
+        candidates.begin() + sort_count, 
+        candidates.end(),
+        [&target, this](const DhtNode& a, const DhtNode& b) {
+            return is_closer(a.id, b.id, target);
+        }
+    );
     
     // Return up to 'count' closest nodes
-    if (all_nodes.size() > count) {
-        all_nodes.resize(count);
+    if (candidates.size() > count) {
+        candidates.resize(count);
     }
     
-    LOG_DHT_DEBUG("Found " << all_nodes.size() << " closest nodes to target " << node_id_to_hex(target));
-    for (size_t i = 0; i < all_nodes.size(); ++i) {
-        LOG_DHT_DEBUG("  [" << i << "] " << node_id_to_hex(all_nodes[i].id) << " at " << all_nodes[i].peer.ip << ":" << all_nodes[i].peer.port);
+    LOG_DHT_DEBUG("Found " << candidates.size() << " closest nodes to target " << node_id_to_hex(target));
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        LOG_DHT_DEBUG("  [" << i << "] " << node_id_to_hex(candidates[i].id) << " at " << candidates[i].peer.ip << ":" << candidates[i].peer.port);
     }
-    // Print the xor distance for each node
-    // for (size_t i = 0; i < all_nodes.size(); ++i) {
-    //     NodeId dist = xor_distance(all_nodes[i].id, target);
-    //     // Convert the NodeId (20 bytes) to a single uint64_t for a simple distance metric (using the first 8 bytes)
-    //     uint64_t dist_metric = 0;
-    //     for (int j = 0; j < 8 && j < dist.size(); ++j) {
-    //         dist_metric = (dist_metric << 8) | dist[j];
-    //     }
-    //     LOG_DHT_DEBUG("  [" << i << "] " << node_id_to_hex(all_nodes[i].id) 
-    //         << " at " << all_nodes[i].peer.ip << ":" << all_nodes[i].peer.port
-    //         << " xor_distance=" << dist_metric);
-    // }
     
-    return all_nodes;
+    return candidates;
 }
 
 int DhtClient::get_bucket_index(const NodeId& id) {
