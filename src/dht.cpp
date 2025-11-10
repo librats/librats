@@ -1036,6 +1036,11 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
                           << " - received " << peers.size() << " peers for info_hash " << hash_key 
                           << " from " << responder.ip << ":" << responder.port);
             
+            // Log each found peer with indentation
+            for (size_t i = 0; i < peers.size(); ++i) {
+                LOG_DHT_DEBUG("  [" << i << "] found peer for hash(" << hash_key << ") = " << peers[i].ip << ":" << peers[i].port);
+            }
+            
             if (!peers.empty()) {
                 // We found actual peers - invoke all callbacks
                 LOG_DHT_INFO("Invoking " << pending_search.callbacks.size() << " callback(s) for info_hash " << hash_key);
