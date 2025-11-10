@@ -1805,8 +1805,6 @@ bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::functi
     InfoHash info_hash = hex_to_node_id(content_hash);
     
     return dht_client_->find_peers(info_hash, [this, callback](const std::vector<Peer>& peers, const InfoHash& info_hash) {
-        handle_dht_peer_discovery(peers, info_hash);
-        
         // Convert Peer to string addresses for callback
         std::vector<std::string> peer_addresses;
         for (const auto& peer : peers) {
@@ -2012,13 +2010,24 @@ void RatsClient::search_rats_peers(int iteration_max) {
     std::string discovery_hash = get_discovery_hash();
     LOG_CLIENT_INFO("Searching for peers using discovery hash: " << discovery_hash << " with iteration max: " << iteration_max);
     
-    find_peers_by_hash(discovery_hash, [this](const std::vector<std::string>& peers) {
-        LOG_CLIENT_INFO("Found " << peers.size() << " peers through DHT discovery");
-        // Note: Connection attempts are handled by handle_dht_peer_discovery() which is called
-        // automatically by find_peers_by_hash(), so no need to duplicate connection logic here
-        for (const auto& peer_address : peers) {
-            LOG_CLIENT_DEBUG("Discovered peer: " << peer_address);
+    InfoHash info_hash = hex_to_node_id(discovery_hash);
+    
+    find_peers_by_hash(discovery_hash, [this, info_hash](const std::vector<std::string>& peer_addresses) {
+        LOG_CLIENT_INFO("Found " << peer_addresses.size() << " peers through DHT discovery");
+        
+        // Convert peer addresses back to Peer objects for handle_dht_peer_discovery()
+        std::vector<Peer> peers;
+        for (const auto& peer_address : peer_addresses) {
+            std::string ip;
+            int port;
+            if (parse_address_string(peer_address, ip, port)) {
+                peers.push_back(Peer(ip, port));
+                LOG_CLIENT_DEBUG("Discovered peer: " << peer_address);
+            }
         }
+        
+        // Auto-connect to discovered RATS peers
+        handle_dht_peer_discovery(peers, info_hash);
     }, iteration_max);
 }
 
