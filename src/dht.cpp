@@ -1090,6 +1090,8 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     
     // Stop if we've reached max iterations (iteration_max = 0 means infinite)
     if (search.iteration_max > 0 && search.iteration_count >= search.iteration_max) {
+        LOG_DHT_DEBUG("Search iteration summary for " << hash_key << ":");
+        LOG_DHT_DEBUG("  - Current iteration: " << search.iteration_count << "/" << search.iteration_max);
         LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations (" << search.iteration_count << "/" << search.iteration_max << ")");
         return false;  // Return false to indicate the search should be removed
     }
