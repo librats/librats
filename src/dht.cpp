@@ -442,15 +442,21 @@ void DhtClient::on_node_added(const DhtNode& node, std::string transaction_id) {
         auto search_it = pending_searches_.find(hash_key);
         if (search_it != pending_searches_.end()) {
             auto& pending_search = search_it->second;
+            
+            // Skip if already finished (don't continue iterating a finished search)
+            if (pending_search.is_finished) {
+                LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " is relevant to pending search for info_hash " << hash_key 
+                              << " but search is already finished - skipping");
+                return;
+            }
+            
             LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " is relevant to pending search for info_hash " << hash_key 
                           << " - continuing search iteration");
 
             // Continue search iteration since we now have a new node in the routing table
-            bool should_remove_search = !continue_search_iteration(pending_search);
-            if (should_remove_search) {
-                LOG_DHT_DEBUG("Removing completed search for info_hash " << hash_key);
-                pending_searches_.erase(search_it);
-            }
+            // Don't remove the search here - it will be cleaned up in handle_krpc_response() 
+            // after all response data (nodes AND peers) is fully processed
+            continue_search_iteration(pending_search);
         }
         
         // DON'T remove the transaction mapping here - it will be removed when the response is fully processed
@@ -737,6 +743,24 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     // Check if this is a response to a pending announce (get_peers with token)
     if (!message.token.empty()) {
         handle_get_peers_response_for_announce(message.transaction_id, sender, message.token);
+    }
+    
+    // Clean up finished searches AFTER all response data has been processed
+    // This ensures peers and nodes are fully handled before removing the search
+    {
+        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+        auto trans_it = transaction_to_search_.find(message.transaction_id);
+        if (trans_it != transaction_to_search_.end()) {
+            std::string hash_key = trans_it->second;
+            auto search_it = pending_searches_.find(hash_key);
+            if (search_it != pending_searches_.end() && search_it->second.is_finished) {
+                LOG_DHT_DEBUG("Cleaning up finished search for info_hash " << hash_key 
+                              << " after processing transaction " << message.transaction_id);
+                pending_searches_.erase(search_it);
+            }
+            // Always remove the transaction mapping after processing
+            transaction_to_search_.erase(trans_it);
+        }
     }
 }
 
@@ -1043,7 +1067,7 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
             }
             
             if (!peers.empty()) {
-                // We found actual peers - invoke all callbacks
+                // We found actual peers - invoke all callbacks and mark search as finished
                 LOG_DHT_INFO("Invoking " << pending_search.callbacks.size() << " callback(s) for info_hash " << hash_key);
                 for (const auto& callback : pending_search.callbacks) {
                     if (callback) {
@@ -1051,13 +1075,13 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
                     }
                 }
                 
-                // Remove the completed search
-                pending_searches_.erase(search_it);
+                // Mark the search as finished (will be cleaned up at end of handle_krpc_response)
+                pending_search.is_finished = true;
             }
         }
         
-        // Remove the transaction mapping since we've handled it
-        transaction_to_search_.erase(trans_it);
+        // DON'T remove the transaction mapping here - it will be removed at the end of handle_krpc_response
+        // This ensures all response data is fully processed before cleanup
     }
 }
 
@@ -1075,8 +1099,8 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
         LOG_DHT_DEBUG("Completed processing get_peers response with " << nodes.size() 
                       << " nodes for info_hash " << hash_key << " from " << responder.ip << ":" << responder.port);
         
-        // Now remove the transaction mapping since all nodes have been processed
-        transaction_to_search_.erase(trans_it);
+        // DON'T remove the transaction mapping here - it will be removed at the end of handle_krpc_response
+        // This ensures all response data is fully processed before cleanup
     }
 }
 
@@ -1093,7 +1117,8 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
         LOG_DHT_DEBUG("Search iteration summary for " << hash_key << ":");
         LOG_DHT_DEBUG("  - Current iteration: " << search.iteration_count << "/" << search.iteration_max);
         LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations (" << search.iteration_count << "/" << search.iteration_max << ")");
-        return false;  // Return false to indicate the search should be removed
+        search.is_finished = true;
+        return false;  // Return false to indicate the search should be marked finished
     }
     
     // Get closest nodes from routing table (already sorted by distance to target)
@@ -1156,7 +1181,8 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     if (time_since_update >= SEARCH_STALE_TIMEOUT || time_since_creation >= SEARCH_STALE_TIMEOUT) {
         LOG_DHT_DEBUG("Stopping search for " << hash_key << " - search is stale (no progress for " 
                       << time_since_update << "s, total time: " << time_since_creation << "s)");
-        return false;  // Signal to remove the search
+        search.is_finished = true;
+        return false;  // Signal to mark the search as finished
     }
     
     // Search is still fresh but temporarily has no new nodes - keep it alive
@@ -1339,10 +1365,9 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
     // Call on_node_added() outside the pending_pings_mutex_ to avoid deadlock
     if (should_call_on_node_added) {
         on_node_added(updated_candidate_copy, transaction_id_copy);
-
-        // Clean up the ping transaction mapping
-        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
-        transaction_to_search_.erase(transaction_id_copy);
+        
+        // Note: ping transaction mapping cleanup is now handled at the end of handle_krpc_response
+        // No need to manually remove it here
     }
 }
 

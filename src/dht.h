@@ -196,14 +196,15 @@ private:
         std::unordered_set<std::string> queried_nodes;  // node_id as hex string
         int iteration_count;                            // current iteration number
         int iteration_max;                              // maximum iteration limit
-        
+        bool is_finished;                                 // whether the search is finished
+
         // Callbacks to invoke when peers are found (supports multiple concurrent searches for same info_hash)
         std::vector<PeerDiscoveryCallback> callbacks;
         
         PendingSearch(const InfoHash& hash, int max_iterations = 1)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
               updated_at(std::chrono::steady_clock::now()),
-              iteration_count(1), iteration_max(max_iterations) {}
+              iteration_count(1), iteration_max(max_iterations), is_finished(false) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
     std::mutex pending_searches_mutex_;
