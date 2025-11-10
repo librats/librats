@@ -1060,7 +1060,7 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
             LOG_DHT_DEBUG("Found pending search for KRPC transaction " << transaction_id 
                           << " - received " << peers.size() << " peers for info_hash " << hash_key 
                           << " from " << responder.ip << ":" << responder.port);
-            
+
             // Log each found peer with indentation
             for (size_t i = 0; i < peers.size(); ++i) {
                 LOG_DHT_DEBUG("  [" << i << "] found peer for hash(" << hash_key << ") = " << peers[i].ip << ":" << peers[i].port);
