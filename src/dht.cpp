@@ -166,7 +166,7 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
     PendingSearch& search_ref = insert_result.first->second;
     
     // Start search by querying closest nodes
-    int alpha = std::min(6, std::max(alpha_max, (int)ALPHA));
+    int alpha = (std::min)(6, (std::max)(alpha_max, (int)ALPHA));
     auto closest_nodes = find_closest_nodes(info_hash, alpha);
 
     if (closest_nodes.empty()) {
@@ -495,7 +495,7 @@ std::vector<DhtNode> DhtClient::find_closest_nodes_unlocked(const NodeId& target
     size_t desired_candidates = count * 3;  // Collect 3x more candidates for better selection
     int low = target_bucket - 1;
     int high = target_bucket + 1;
-    const int max_bucket_index = routing_table_.size() - 1;
+    const int max_bucket_index = static_cast<int>(routing_table_.size()) - 1;
     int buckets_checked = 1;  // Already checked target_bucket
     
     while (candidates.size() < desired_candidates && (low >= 0 || high <= max_bucket_index)) {
@@ -531,7 +531,7 @@ std::vector<DhtNode> DhtClient::find_closest_nodes_unlocked(const NodeId& target
     }
     
     // Use partial_sort to efficiently get only the 'count' closest nodes - O(n log k) vs O(n log n)
-    size_t sort_count = std::min(count, candidates.size());
+    size_t sort_count = (std::min)(count, candidates.size());
     std::partial_sort(
         candidates.begin(), 
         candidates.begin() + sort_count, 
@@ -557,7 +557,7 @@ std::vector<DhtNode> DhtClient::find_closest_nodes_unlocked(const NodeId& target
     for (const auto& bucket : routing_table_) {
         candidates.insert(candidates.end(), bucket.begin(), bucket.end());
     }
-    sort_count = std::min(count, candidates.size());
+    sort_count = (std::min)(count, candidates.size());
     std::partial_sort(
         candidates.begin(),
         candidates.begin() + sort_count,
@@ -961,8 +961,8 @@ void DhtClient::refresh_buckets() {
             NodeId random_id = generate_node_id();
             
             // Set the appropriate bits to place it in bucket i
-            int byte_index = i / 8;
-            int bit_index = i % 8;
+            int byte_index = static_cast<int>(i / 8);
+            int bit_index = static_cast<int>(i % 8);
             
             if (byte_index < NODE_ID_SIZE) {
                 // Clear the target bit and higher bits
