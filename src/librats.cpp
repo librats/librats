@@ -1789,7 +1789,7 @@ void RatsClient::stop_dht_discovery() {
     LOG_CLIENT_INFO("DHT discovery stopped");
 }
 
-bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback, int iteration_max) {
+bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback, int iteration_max, int alpha_max) {
     if (!dht_client_ || !dht_client_->is_running()) {
         LOG_CLIENT_ERROR("DHT client not running");
         return false;
@@ -1800,7 +1800,7 @@ bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::functi
         return false;
     }
     
-    LOG_CLIENT_INFO("Finding peers for content hash: " << content_hash << " with iteration max: " << iteration_max);
+    LOG_CLIENT_INFO("Finding peers for content hash: " << content_hash << " with iteration max: " << iteration_max << " and alpha max: " << alpha_max);
     
     InfoHash info_hash = hex_to_node_id(content_hash);
     
@@ -1814,7 +1814,7 @@ bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::functi
         if (callback) {
             callback(peer_addresses);
         }
-    }, iteration_max);
+    }, iteration_max, alpha_max);
 }
 
 bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t port) {
@@ -1931,8 +1931,8 @@ void RatsClient::automatic_discovery_loop() {
         }
     }
 
-    // Search immediately
-    search_rats_peers(5);
+    // Search immediately, incease alpha to 6 because initially we have poor ping table entries
+    search_rats_peers(5 , 6);
     
     {
         std::unique_lock<std::mutex> lock(shutdown_mutex_);
@@ -2001,7 +2001,7 @@ void RatsClient::announce_rats_peer() {
     }
 }
 
-void RatsClient::search_rats_peers(int iteration_max) {
+void RatsClient::search_rats_peers(int iteration_max, int alpha_max) {
     if (!dht_client_ || !dht_client_->is_running()) {
         LOG_CLIENT_WARN("DHT client not running, cannot search for peers");
         return;
@@ -2028,7 +2028,7 @@ void RatsClient::search_rats_peers(int iteration_max) {
         
         // Auto-connect to discovered RATS peers
         handle_dht_peer_discovery(peers, info_hash);
-    }, iteration_max);
+    }, iteration_max, alpha_max);
 }
 
 std::string RatsClient::get_discovery_hash() const {

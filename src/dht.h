@@ -114,9 +114,10 @@ public:
      * @param info_hash The info hash to search for
      * @param callback Callback to receive discovered peers
      * @param iteration_max Maximum number of search iterations (default: 1, 0 = infinite)
+     * @param alpha_max Maximum DHT alpha (default: 1, usually between 3 and 6)
      * @return true if search started successfully, false otherwise
      */
-    bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max = 1);
+    bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max = 1, int alpha_max = 1);
     
     /**
      * Announce that this node is a peer for a specific info hash

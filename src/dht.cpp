@@ -139,7 +139,7 @@ bool DhtClient::bootstrap(const std::vector<Peer>& bootstrap_nodes) {
     return true;
 }
 
-bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max) {
+bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max, int alpha_max) {
     if (!running_) {
         LOG_DHT_ERROR("DHT client not running");
         return false;
@@ -166,7 +166,8 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
     PendingSearch& search_ref = insert_result.first->second;
     
     // Start search by querying closest nodes
-    auto closest_nodes = find_closest_nodes(info_hash, ALPHA);
+    int alpha = std::min(6, std::max(alpha_max, (int)ALPHA));
+    auto closest_nodes = find_closest_nodes(info_hash, alpha);
 
     if (closest_nodes.empty()) {
         LOG_DHT_WARN("No nodes in routing table to query for info_hash " << hash_key 

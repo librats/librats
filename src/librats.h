@@ -601,11 +601,12 @@ public:
      * @param content_hash Hash to search for (40-character hex string)
      * @param callback Function to call with discovered peers
      * @param iteration_max Maximum DHT iterations (default: 1)
+     * @param alpha_max Maximum DHT alpha (default: 1, usually between 3 and 6)
      * @return true if search initiated successfully
      */
     bool find_peers_by_hash(const std::string& content_hash, 
                            std::function<void(const std::vector<std::string>&)> callback,
-                           int iteration_max = 1);
+                           int iteration_max = 1, int alpha_max = 1);
 
     /**
      * Announce our presence for a content hash
@@ -1588,7 +1589,7 @@ private:
     std::thread auto_discovery_thread_;
     void automatic_discovery_loop();
     void announce_rats_peer();
-    void search_rats_peers(int iteration_max = 1);
+    void search_rats_peers(int iteration_max = 1, int alpha_max = 1);
 
     // Message handling system
     nlohmann::json create_rats_message(const std::string& type, const nlohmann::json& payload, const std::string& sender_peer_id);
