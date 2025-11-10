@@ -1384,6 +1384,16 @@ void DhtClient::cleanup_stale_ping_verifications() {
             LOG_DHT_DEBUG("Ping verification timed out for candidate node " << node_id_to_hex(it->second.candidate_node.id) 
                           << " - candidate is unresponsive, keeping old node " << node_id_to_hex(it->second.old_node.id));
             
+            // Clean up the transaction mapping for this ping (if it was part of a search)
+            {
+                std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
+                auto trans_it = transaction_to_search_.find(it->first);
+                if (trans_it != transaction_to_search_.end()) {
+                    LOG_DHT_DEBUG("Removing transaction mapping for timed-out ping verification: " << it->first);
+                    transaction_to_search_.erase(trans_it);
+                }
+            }
+            
             // Remove the old node from nodes_being_replaced set since the ping verification failed
             nodes_being_replaced_.erase(it->second.old_node.id);
             it = pending_pings_.erase(it);
