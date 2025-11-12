@@ -283,6 +283,9 @@ void DhtClient::maintenance_loop() {
             // Cleanup stale nodes every 1 minute
             cleanup_stale_nodes();
             
+            // Cleanup stale peer tokens
+            cleanup_stale_peer_tokens();
+            
             // Cleanup stale pending announces
             cleanup_stale_announces();
             
@@ -901,21 +904,22 @@ std::string DhtClient::generate_token(const Peer& peer) {
     // Convert hash to hex string
     std::ostringstream oss;
     oss << std::hex << hash;
+    std::string token = oss.str();
     
-    // Store token for this peer
+    // Store token for this peer with timestamp
     {
         std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
-        peer_tokens_[peer] = oss.str();
+        peer_tokens_[peer] = PeerToken(token);
     }
     
-    return oss.str();
+    return token;
 }
 
 bool DhtClient::verify_token(const Peer& peer, const std::string& token) {
     std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
     auto it = peer_tokens_.find(peer);
     if (it != peer_tokens_.end()) {
-        return it->second == token;
+        return it->second.token == token;
     }
     return false;
 }
@@ -948,6 +952,32 @@ void DhtClient::cleanup_stale_nodes() {
     
     if (total_removed > 0) {
         LOG_DHT_DEBUG("Cleaned up " << total_removed << " stale/failed nodes from routing table");
+    }
+}
+
+void DhtClient::cleanup_stale_peer_tokens() {
+    std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
+    
+    auto now = std::chrono::steady_clock::now();
+    auto stale_threshold = std::chrono::minutes(10);  // Tokens valid for 10 minutes (BEP 5 recommends tokens expire)
+    
+    size_t total_before = peer_tokens_.size();
+    
+    auto it = peer_tokens_.begin();
+    while (it != peer_tokens_.end()) {
+        if (now - it->second.created_at > stale_threshold) {
+            LOG_DHT_DEBUG("Removing stale token for peer " << it->first.ip << ":" << it->first.port);
+            it = peer_tokens_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    
+    size_t total_after = peer_tokens_.size();
+    
+    if (total_before > total_after) {
+        LOG_DHT_DEBUG("Cleaned up " << (total_before - total_after) << " stale peer tokens "
+                      << "(from " << total_before << " to " << total_after << ")");
     }
 }
 

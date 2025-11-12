@@ -169,7 +169,15 @@ private:
     mutable std::mutex routing_table_mutex_;
     
     // Tokens for peers (use Peer directly as key for efficiency)
-    std::unordered_map<Peer, std::string> peer_tokens_;
+    struct PeerToken {
+        std::string token;
+        std::chrono::steady_clock::time_point created_at;
+        
+        PeerToken() : created_at(std::chrono::steady_clock::now()) {}
+        PeerToken(const std::string& t)
+            : token(t), created_at(std::chrono::steady_clock::now()) {}
+    };
+    std::unordered_map<Peer, PeerToken> peer_tokens_;
     std::mutex peer_tokens_mutex_;
     
 
@@ -295,6 +303,7 @@ private:
 
     
     void cleanup_stale_nodes();
+    void cleanup_stale_peer_tokens();
     void refresh_buckets();
     
     // Pending announce management
