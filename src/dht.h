@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 #include <functional>
@@ -43,6 +44,7 @@ namespace librats {
 // Constants for Kademlia DHT
 constexpr size_t NODE_ID_SIZE = 20;  // 160 bits = 20 bytes
 constexpr size_t K_BUCKET_SIZE = 8;  // Maximum nodes per k-bucket
+constexpr size_t PENDING_CANDIDATES_QUEUE_SIZE = 50; // Maximum number of pending candidates per bucket
 constexpr size_t ALPHA = 3;          // Concurrency parameter
 constexpr int DHT_PORT = 6881;       // Standard BitTorrent DHT port
 
@@ -249,6 +251,20 @@ private:
     std::unordered_set<NodeId> nodes_being_replaced_;
     mutable std::mutex nodes_being_replaced_mutex_;
     
+    // Pending candidates queue (for nodes that couldn't be added due to full bucket with all nodes being verified)
+    struct PendingCandidate {
+        DhtNode node;
+        std::string transaction_id;
+        std::chrono::steady_clock::time_point added_at;
+        
+        PendingCandidate() : added_at(std::chrono::steady_clock::now()) {}
+        PendingCandidate(const DhtNode& n, const std::string& tid)
+            : node(n), transaction_id(tid), added_at(std::chrono::steady_clock::now()) {}
+    };
+    std::unordered_map<int, std::deque<PendingCandidate>> pending_candidates_; // bucket_index -> candidates (FIFO queue)
+    std::unordered_map<int, std::unordered_set<NodeId>> pending_candidates_set_;
+    std::mutex pending_candidates_mutex_;
+    
     // Network thread
     std::thread network_thread_;
     std::thread maintenance_thread_;
@@ -326,6 +342,10 @@ private:
     void handle_ping_verification_response(const std::string& transaction_id, const NodeId& responder_id, const Peer& responder);
     void cleanup_stale_ping_verifications();
     bool perform_replacement(const DhtNode& candidate_node, const DhtNode& node_to_replace, int bucket_index);
+    
+    // Pending candidates queue management
+    void process_pending_candidates_for_bucket(int bucket_index);
+    void cleanup_stale_pending_candidates();
     
     // Conversion utilities
     static KrpcNode dht_node_to_krpc_node(const DhtNode& node);

@@ -295,6 +295,9 @@ void DhtClient::maintenance_loop() {
             // Cleanup stale announced peers
             cleanup_stale_announced_peers();
             
+            // Cleanup stale pending candidates
+            cleanup_stale_pending_candidates();
+            
             last_general_cleanup = now;
         }
         
@@ -401,7 +404,31 @@ void DhtClient::add_node(const DhtNode& node, std::string transaction_id, bool v
                     }
                     
                     if (worst_it == bucket.end()) {
-                        LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, but all nodes already have pending ping verifications - skipping new node " << node_id_to_hex(node.id));
+                        // All nodes are already being verified - add to pending candidates queue
+                        LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, all nodes have pending ping verifications - adding node " 
+                                      << node_id_to_hex(node.id) << " to pending candidates queue");
+                        
+                        std::lock_guard<std::mutex> candidates_lock(pending_candidates_mutex_);
+                        auto& candidates = pending_candidates_[bucket_index];
+                        auto& candidates_set = pending_candidates_set_[bucket_index];
+                        
+                        // Check if this node is already in the queue using O(1) set lookup
+                        if (candidates_set.find(node.id) == candidates_set.end()) {
+                            // Limit queue size to prevent unbounded growth
+                            if (candidates.size() < PENDING_CANDIDATES_QUEUE_SIZE) {
+                                candidates.emplace_back(node, transaction_id);
+                                candidates_set.insert(node.id);
+                                LOG_DHT_DEBUG("Added node " << node_id_to_hex(node.id) << " to pending candidates queue for bucket " 
+                                              << bucket_index << " (queue size: " << candidates.size() << "/" << PENDING_CANDIDATES_QUEUE_SIZE << " idx: " << bucket_index << ")");
+                            } else {
+                                LOG_DHT_DEBUG("Pending candidates queue for bucket " << bucket_index << " is full - skipping node " 
+                                              << node_id_to_hex(node.id) << " (queue size: " << candidates.size() << "/" << PENDING_CANDIDATES_QUEUE_SIZE << " idx: " << bucket_index << ")");
+                            }
+                        } else {
+                            LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " already in pending candidates queue for bucket " << bucket_index 
+                            << " (queue size: " << candidates.size() << "/" << PENDING_CANDIDATES_QUEUE_SIZE << " idx: " << bucket_index << ")");
+                        }
+                        
                         return;
                     }
                     
@@ -1353,6 +1380,7 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
     bool should_call_on_node_added = false;
     DhtNode updated_candidate_copy;
     std::string transaction_id_copy;
+    int bucket_to_process = -1;  // Store bucket index for processing outside the lock
     
     {
         std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
@@ -1370,11 +1398,15 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
                 // Create a copy of the candidate node with updated timestamp
                 DhtNode updated_candidate = verification.candidate_node;
                 updated_candidate.last_seen = std::chrono::steady_clock::now();
-                if (perform_replacement(updated_candidate, verification.old_node, verification.bucket_index)) {
+                int bucket_idx = verification.bucket_index;
+                if (perform_replacement(updated_candidate, verification.old_node, bucket_idx)) {
                     // Store data for calling on_node_added outside the lock
                     should_call_on_node_added = true;
                     updated_candidate_copy = updated_candidate;
                     transaction_id_copy = verification.transaction_id;
+                    
+                    // Store bucket index to process pending candidates outside the lock
+                    bucket_to_process = bucket_idx;
                 }
             } else {
                 LOG_DHT_WARN("Ping verification response from unexpected node " << node_id_to_hex(responder_id) 
@@ -1392,6 +1424,12 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
         }
     } // Release pending_pings_mutex_ here
     
+    // Process pending candidates OUTSIDE the lock to avoid deadlock
+    // (process_pending_candidates_for_bucket calls add_node which may call initiate_ping_verification)
+    if (bucket_to_process >= 0) {
+        process_pending_candidates_for_bucket(bucket_to_process);
+    }
+    
     // Call on_node_added() outside the pending_pings_mutex_ to avoid deadlock
     if (should_call_on_node_added) {
         on_node_added(updated_candidate_copy, transaction_id_copy);
@@ -1402,34 +1440,100 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
 }
 
 void DhtClient::cleanup_stale_ping_verifications() {
-    std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
-    std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
+    // Collect bucket indices that need candidate processing after timeout
+    std::vector<int> buckets_to_process;
+    
+    {
+        std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
+        std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
+        
+        auto now = std::chrono::steady_clock::now();
+        auto timeout_threshold = std::chrono::seconds(30);  // 30 second timeout for ping responses
+        
+        auto it = pending_pings_.begin();
+        while (it != pending_pings_.end()) {
+            if (now - it->second.ping_sent_at > timeout_threshold) {
+                LOG_DHT_DEBUG("Ping verification timed out for candidate node " << node_id_to_hex(it->second.candidate_node.id) 
+                              << " - candidate is unresponsive, keeping old node " << node_id_to_hex(it->second.old_node.id));
+                
+                // Clean up the transaction mapping for this ping (if it was part of a search)
+                {
+                    std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
+                    auto trans_it = transaction_to_search_.find(it->first);
+                    if (trans_it != transaction_to_search_.end()) {
+                        LOG_DHT_DEBUG("Removing transaction mapping for timed-out ping verification: " << it->first);
+                        transaction_to_search_.erase(trans_it);
+                    }
+                }
+                
+                // Store bucket index for processing pending candidates
+                int bucket_idx = it->second.bucket_index;
+                buckets_to_process.push_back(bucket_idx);
+                
+                // Remove the old node from nodes_being_replaced set since the ping verification failed
+                nodes_being_replaced_.erase(it->second.old_node.id);
+                it = pending_pings_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } // Release locks here
+    
+    // Process pending candidates for each bucket OUTSIDE the locks to avoid deadlock
+    // (process_pending_candidates_for_bucket calls add_node which may call initiate_ping_verification)
+    for (int bucket_index : buckets_to_process) {
+        LOG_DHT_DEBUG("Processing pending candidates for bucket " << bucket_index << " after ping verification timeout");
+        process_pending_candidates_for_bucket(bucket_index);
+    }
+}
+
+void DhtClient::cleanup_stale_pending_candidates() {
+    std::lock_guard<std::mutex> lock(pending_candidates_mutex_);
     
     auto now = std::chrono::steady_clock::now();
-    auto timeout_threshold = std::chrono::seconds(30);  // 30 second timeout for ping responses
+    auto stale_threshold = std::chrono::minutes(5);  // Remove candidates older than 5 minutes
     
-    auto it = pending_pings_.begin();
-    while (it != pending_pings_.end()) {
-        if (now - it->second.ping_sent_at > timeout_threshold) {
-            LOG_DHT_DEBUG("Ping verification timed out for candidate node " << node_id_to_hex(it->second.candidate_node.id) 
-                          << " - candidate is unresponsive, keeping old node " << node_id_to_hex(it->second.old_node.id));
-            
-            // Clean up the transaction mapping for this ping (if it was part of a search)
-            {
-                std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
-                auto trans_it = transaction_to_search_.find(it->first);
-                if (trans_it != transaction_to_search_.end()) {
-                    LOG_DHT_DEBUG("Removing transaction mapping for timed-out ping verification: " << it->first);
-                    transaction_to_search_.erase(trans_it);
-                }
-            }
-            
-            // Remove the old node from nodes_being_replaced set since the ping verification failed
-            nodes_being_replaced_.erase(it->second.old_node.id);
-            it = pending_pings_.erase(it);
+    size_t total_before = 0;
+    size_t total_after = 0;
+    
+    for (auto it = pending_candidates_.begin(); it != pending_candidates_.end(); ) {
+        int bucket_index = it->first;
+        auto& candidates = it->second;
+        total_before += candidates.size();
+        
+        // Get reference to the corresponding set
+        auto& candidates_set = pending_candidates_set_[bucket_index];
+        
+        // Remove stale candidates and update the set
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                       [now, stale_threshold, &candidates_set](const PendingCandidate& candidate) {
+                                           bool is_stale = now - candidate.added_at > stale_threshold;
+                                           if (is_stale) {
+                                               LOG_DHT_DEBUG("Removing stale pending candidate " 
+                                                           << node_id_to_hex(candidate.node.id) 
+                                                           << " at " << candidate.node.peer.ip 
+                                                           << ":" << candidate.node.peer.port);
+                                               // Remove from set
+                                               candidates_set.erase(candidate.node.id);
+                                           }
+                                           return is_stale;
+                                       }), candidates.end());
+        
+        total_after += candidates.size();
+        
+        // Remove empty bucket entries from both deque and set
+        if (candidates.empty()) {
+            LOG_DHT_DEBUG("Removing empty pending candidates entry for bucket " << bucket_index);
+            pending_candidates_set_.erase(bucket_index);
+            it = pending_candidates_.erase(it);
         } else {
             ++it;
         }
+    }
+    
+    if (total_before > total_after) {
+        LOG_DHT_DEBUG("Cleaned up " << (total_before - total_after) << " stale pending candidates "
+                      << "(from " << total_before << " to " << total_after << ")");
     }
 }
 
@@ -1446,6 +1550,9 @@ bool DhtClient::perform_replacement(const DhtNode& candidate_node, const DhtNode
         LOG_DHT_DEBUG("Replacing old node " << node_id_to_hex(node_to_replace.id) 
                       << " with " << node_id_to_hex(candidate_node.id) << " in bucket " << bucket_index);
         *it = candidate_node;
+        
+        // After successful replacement, try to process pending candidates for this bucket
+        // This is done outside the routing_table_mutex_ to avoid deadlock
         return true;
     } else {
         LOG_DHT_WARN("Could not find node " << node_id_to_hex(node_to_replace.id) 
@@ -1453,6 +1560,59 @@ bool DhtClient::perform_replacement(const DhtNode& candidate_node, const DhtNode
     }
 
     return false;
+}
+
+void DhtClient::process_pending_candidates_for_bucket(int bucket_index) {
+    LOG_DHT_DEBUG("Processing pending candidates for bucket " << bucket_index);
+    
+    // Process candidates one at a time to avoid unnecessary re-queuing
+    // Only process one candidate per call - if it fails, it will be re-added to the queue
+    PendingCandidate candidate_to_process;
+    bool has_candidate = false;
+    
+    // Get the oldest (first) candidate to process
+    {
+        std::lock_guard<std::mutex> lock(pending_candidates_mutex_);
+        auto it = pending_candidates_.find(bucket_index);
+        if (it != pending_candidates_.end() && !it->second.empty()) {
+            // Take the first candidate (FIFO)
+            candidate_to_process = it->second.front();
+            it->second.pop_front();
+            has_candidate = true;
+            
+            // Remove from the set as well
+            auto set_it = pending_candidates_set_.find(bucket_index);
+            if (set_it != pending_candidates_set_.end()) {
+                set_it->second.erase(candidate_to_process.node.id);
+                // Remove empty set entries
+                if (set_it->second.empty()) {
+                    pending_candidates_set_.erase(set_it);
+                }
+            }
+            
+            LOG_DHT_DEBUG("Found pending candidate " << node_id_to_hex(candidate_to_process.node.id) 
+                          << " for bucket " << bucket_index << " (remaining in queue: " << it->second.size() << ")");
+            
+            // Remove empty bucket entries
+            if (it->second.empty()) {
+                pending_candidates_.erase(it);
+            }
+        } else {
+            LOG_DHT_DEBUG("No pending candidates found for bucket " << bucket_index);
+            return;
+        }
+    }
+    
+    // Process candidate outside the lock
+    if (has_candidate) {
+        LOG_DHT_DEBUG("Attempting to add pending candidate " << node_id_to_hex(candidate_to_process.node.id) 
+                      << " at " << candidate_to_process.node.peer.ip << ":" << candidate_to_process.node.peer.port 
+                      << " to bucket " << bucket_index);
+        
+        // Try to add the candidate - add_node will handle the logic
+        // Use verify=true since we haven't contacted these nodes
+        add_node(candidate_to_process.node, candidate_to_process.transaction_id, true);
+    }
 }
 
 // Utility functions implementation
