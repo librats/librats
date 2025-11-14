@@ -243,6 +243,7 @@ private:
               ping_sent_at(std::chrono::steady_clock::now()), transaction_id(trans_id) {}
     };
     std::unordered_map<std::string, PingVerification> pending_pings_;  // transaction_id -> PingVerification
+    std::unordered_map<int, std::set<std::pair<std::chrono::steady_clock::time_point, std::string>>> pings_by_bucket_; // bucket_index -> (time_point, transaction_id) to found oldest ping
     mutable std::mutex pending_pings_mutex_;
     
     // Track nodes that have pending ping verifications to avoid duplicate pings
@@ -326,6 +327,7 @@ private:
     void handle_ping_verification_response(const std::string& transaction_id, const NodeId& responder_id, const Peer& responder);
     void cleanup_stale_ping_verifications();
     bool perform_replacement(const DhtNode& candidate_node, const DhtNode& node_to_replace, int bucket_index);
+    DhtNode cancel_oldest_ping(int bucket_index);
     
     // Conversion utilities
     static KrpcNode dht_node_to_krpc_node(const DhtNode& node);

@@ -340,6 +340,7 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sen
 void DhtClient::add_node(const DhtNode& node, std::string transaction_id, bool verify) {
     bool node_was_added = false;
     bool should_initiate_ping = false;
+    bool should_cancel_oldest_ping = false;
     DhtNode worst_node_copy;
     int bucket_index_copy = 0;
     
@@ -401,19 +402,22 @@ void DhtClient::add_node(const DhtNode& node, std::string transaction_id, bool v
                     }
                     
                     if (worst_it == bucket.end()) {
-                        LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, but all nodes already have pending ping verifications - skipping new node " << node_id_to_hex(node.id));
-                        return;
+                        LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, but all nodes already have pending ping verifications - replace oldest ping record " << node_id_to_hex(node.id));
+                        should_cancel_oldest_ping = true;
+                        bucket_index_copy = bucket_index;
                     }
-                    
-                    LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, initiating ping-before-replace for node " 
-                                  << node_id_to_hex(worst_it->id) << " (last_seen age: " 
-                                  << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - worst_it->last_seen).count() 
-                                  << "s) to potentially replace with " << node_id_to_hex(node.id));
-                    
-                    // Copy data for ping verification to be done outside the lock
-                    should_initiate_ping = true;
-                    worst_node_copy = *worst_it;
-                    bucket_index_copy = bucket_index;
+                    else
+                    { 
+                        LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, initiating ping-before-replace for node " 
+                                    << node_id_to_hex(worst_it->id) << " (last_seen age: " 
+                                    << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - worst_it->last_seen).count() 
+                                    << "s) to potentially replace with " << node_id_to_hex(node.id));
+                        
+                        // Copy data for ping verification to be done outside the lock
+                        should_initiate_ping = true;
+                        worst_node_copy = *worst_it;
+                        bucket_index_copy = bucket_index;
+                    }
                 }
             }
         }
@@ -423,7 +427,16 @@ void DhtClient::add_node(const DhtNode& node, std::string transaction_id, bool v
     if (node_was_added) {
         on_node_added(node, transaction_id);
     }
-    
+
+    // Cancel oldest ping if needed
+    if (should_cancel_oldest_ping) {
+        DhtNode old_node = cancel_oldest_ping(bucket_index_copy); 
+        if (old_node.id != NodeId()) {
+            worst_node_copy = old_node;
+            should_initiate_ping = true;
+        }
+    }
+
     // Initiate ping verification outside the routing_table_mutex_ to avoid deadlock
     if (should_initiate_ping) {
         initiate_ping_verification(node, worst_node_copy, bucket_index_copy, transaction_id);
@@ -1324,10 +1337,15 @@ void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const 
                   << " (transaction: " << ping_transaction_id << ")");
     
     // Store ping verification state and mark old node as being replaced
+    auto ping_sent_at = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
         std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
         pending_pings_.emplace(ping_transaction_id, PingVerification(candidate_node, old_node, bucket_index, ping_transaction_id));
+        
+        // Add to bucket-based index for efficient oldest-ping lookup
+        pings_by_bucket_[bucket_index].insert({ping_sent_at, ping_transaction_id});
+        
         nodes_being_replaced_.insert(old_node.id);
     }
 
@@ -1387,6 +1405,16 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
                 std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
                 nodes_being_replaced_.erase(verification.old_node.id);
             }
+            
+            // Remove from pings_by_bucket_
+            auto bucket_it = pings_by_bucket_.find(verification.bucket_index);
+            if (bucket_it != pings_by_bucket_.end()) {
+                bucket_it->second.erase({verification.ping_sent_at, transaction_id});
+                if (bucket_it->second.empty()) {
+                    pings_by_bucket_.erase(bucket_it);
+                }
+            }
+            
             // Remove the pending ping verification
             pending_pings_.erase(it);
         }
@@ -1414,18 +1442,33 @@ void DhtClient::cleanup_stale_ping_verifications() {
             LOG_DHT_DEBUG("Ping verification timed out for candidate node " << node_id_to_hex(it->second.candidate_node.id) 
                           << " - candidate is unresponsive, keeping old node " << node_id_to_hex(it->second.old_node.id));
             
+            // Store data before erasing
+            std::string transaction_id = it->first;
+            int bucket_index = it->second.bucket_index;
+            auto ping_sent_at = it->second.ping_sent_at;
+            
             // Clean up the transaction mapping for this ping (if it was part of a search)
             {
                 std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
-                auto trans_it = transaction_to_search_.find(it->first);
+                auto trans_it = transaction_to_search_.find(transaction_id);
                 if (trans_it != transaction_to_search_.end()) {
-                    LOG_DHT_DEBUG("Removing transaction mapping for timed-out ping verification: " << it->first);
+                    LOG_DHT_DEBUG("Removing transaction mapping for timed-out ping verification: " << transaction_id);
                     transaction_to_search_.erase(trans_it);
                 }
             }
             
             // Remove the old node from nodes_being_replaced set since the ping verification failed
             nodes_being_replaced_.erase(it->second.old_node.id);
+            
+            // Remove from pings_by_bucket_
+            auto bucket_it = pings_by_bucket_.find(bucket_index);
+            if (bucket_it != pings_by_bucket_.end()) {
+                bucket_it->second.erase({ping_sent_at, transaction_id});
+                if (bucket_it->second.empty()) {
+                    pings_by_bucket_.erase(bucket_it);
+                }
+            }
+            
             it = pending_pings_.erase(it);
         } else {
             ++it;
@@ -1453,6 +1496,70 @@ bool DhtClient::perform_replacement(const DhtNode& candidate_node, const DhtNode
     }
 
     return false;
+}
+
+DhtNode DhtClient::cancel_oldest_ping(int bucket_index) {
+    std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
+    std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
+    
+    // Use optimized O(log k) lookup instead of O(n) search
+    auto bucket_it = pings_by_bucket_.find(bucket_index);
+    if (bucket_it == pings_by_bucket_.end() || bucket_it->second.empty()) {
+        LOG_DHT_WARN("No pending ping verification found for bucket " << bucket_index 
+                     << " - returning default node");
+        return DhtNode();
+    }
+    
+    // Get the oldest ping for this bucket (first element in sorted set)
+    auto oldest_pair = *bucket_it->second.begin();
+    auto ping_sent_at = oldest_pair.first;
+    std::string transaction_id = oldest_pair.second;
+    
+    auto ping_it = pending_pings_.find(transaction_id);
+    if (ping_it == pending_pings_.end()) {
+        LOG_DHT_ERROR("Inconsistent state: transaction_id in pings_by_bucket_ but not in pending_pings_");
+        // Clean up the inconsistent entry
+        bucket_it->second.erase(oldest_pair);
+        if (bucket_it->second.empty()) {
+            pings_by_bucket_.erase(bucket_it);
+        }
+        return DhtNode();
+    }
+    
+    const auto& verification = ping_it->second;
+    
+    LOG_DHT_DEBUG("Canceling oldest ping verification for bucket " << bucket_index 
+                  << " - candidate node " << node_id_to_hex(verification.candidate_node.id)
+                  << ", old node " << node_id_to_hex(verification.old_node.id)
+                  << " (age: " << std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::steady_clock::now() - verification.ping_sent_at).count() << "s)");
+    
+    // Store the old node to return
+    DhtNode old_node = verification.old_node;
+    
+    // Clean up transaction mapping if this ping was part of a search
+    {
+        std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
+        auto trans_it = transaction_to_search_.find(transaction_id);
+        if (trans_it != transaction_to_search_.end()) {
+            LOG_DHT_DEBUG("Removing transaction mapping for canceled ping: " << transaction_id);
+            transaction_to_search_.erase(trans_it);
+        }
+    }
+    
+    // Remove the old node from nodes_being_replaced set
+    nodes_being_replaced_.erase(verification.old_node.id);
+    
+    // Remove from pings_by_bucket_
+    bucket_it->second.erase(oldest_pair);
+    if (bucket_it->second.empty()) {
+        pings_by_bucket_.erase(bucket_it);
+    }
+    
+    // Remove from pending_pings_
+    pending_pings_.erase(ping_it);
+    
+    return old_node;
 }
 
 // Utility functions implementation
