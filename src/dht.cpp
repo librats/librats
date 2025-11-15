@@ -1412,7 +1412,11 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
             // Remove from pings_by_bucket_
             auto bucket_it = pings_by_bucket_.find(verification.bucket_index);
             if (bucket_it != pings_by_bucket_.end()) {
-                bucket_it->second.erase({verification.ping_sent_at, transaction_id});
+                auto erased = bucket_it->second.erase({verification.ping_sent_at, transaction_id});
+                if (erased == 0) {
+                    LOG_DHT_WARN("Inconsistency: transaction_id " << transaction_id 
+                                 << " not found in pings_by_bucket_ for bucket " << verification.bucket_index);
+                }
                 if (bucket_it->second.empty()) {
                     pings_by_bucket_.erase(bucket_it);
                 }
@@ -1467,7 +1471,11 @@ void DhtClient::cleanup_stale_ping_verifications() {
             // Remove from pings_by_bucket_
             auto bucket_it = pings_by_bucket_.find(bucket_index);
             if (bucket_it != pings_by_bucket_.end()) {
-                bucket_it->second.erase({ping_sent_at, transaction_id});
+                auto erased = bucket_it->second.erase({ping_sent_at, transaction_id});
+                if (erased == 0) {
+                    LOG_DHT_WARN("Inconsistency: transaction_id " << transaction_id 
+                                 << " not found in pings_by_bucket_ for bucket " << bucket_index);
+                }
                 if (bucket_it->second.empty()) {
                     pings_by_bucket_.erase(bucket_it);
                 }
@@ -1556,7 +1564,11 @@ DhtNode DhtClient::cancel_oldest_ping(int bucket_index) {
     candidates_being_pinged_.erase(verification.candidate_node.id);
     
     // Remove from pings_by_bucket_
-    bucket_it->second.erase(oldest_pair);
+    auto erased = bucket_it->second.erase(oldest_pair);
+    if (erased == 0) {
+        LOG_DHT_WARN("Inconsistency: oldest ping pair not found in pings_by_bucket_ for bucket " 
+                     << bucket_index);
+    }
     if (bucket_it->second.empty()) {
         pings_by_bucket_.erase(bucket_it);
     }
