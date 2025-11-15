@@ -1317,17 +1317,7 @@ void DhtClient::cleanup_stale_announced_peers() {
 }
 
 // Ping-before-replace eviction implementation
-void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const DhtNode& old_node, int bucket_index, std::string transaction_id) {
-    {
-        std::lock_guard<std::mutex> lock(pending_pings_mutex_);
-        // Optimized O(1) lookup instead of O(n) iteration
-        if (candidates_being_pinged_.find(candidate_node.id) != candidates_being_pinged_.end()) {
-            LOG_DHT_DEBUG("Already pinging candidate node " << node_id_to_hex(candidate_node.id) 
-                          << " - skipping duplicate ping verification");
-            return;
-        }
-    }
-    
+void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const DhtNode& old_node, int bucket_index, std::string transaction_id) {    
     std::string ping_transaction_id = KrpcProtocol::generate_transaction_id();
     
     LOG_DHT_DEBUG("Initiating ping verification for candidate node " << node_id_to_hex(candidate_node.id) 
@@ -1340,6 +1330,14 @@ void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const 
     {
         std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
         std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
+
+        // Optimized O(1) lookup instead of O(n) iteration
+        if (candidates_being_pinged_.find(candidate_node.id) != candidates_being_pinged_.end()) {
+            LOG_DHT_DEBUG("Already pinging candidate node " << node_id_to_hex(candidate_node.id) 
+                        << " - skipping duplicate ping verification");
+            return;
+        }
+
         pending_pings_.emplace(ping_transaction_id, PingVerification(candidate_node, old_node, bucket_index, ping_transaction_id));
         
         // Add to bucket-based index for efficient oldest-ping lookup
