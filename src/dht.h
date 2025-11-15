@@ -164,9 +164,23 @@ private:
     socket_t socket_;
     std::atomic<bool> running_;
     
+    // ============================================================================
+    // MUTEX LOCK ORDER - CRITICAL: Always acquire mutexes in this order to avoid deadlocks
+    // ============================================================================
+    // When acquiring multiple mutexes, ALWAYS follow this order:
+    //
+    // 1. pending_pings_mutex_           (Ping verification state)
+    // 2. nodes_being_replaced_mutex_    (Node replacement tracking)
+    // 3. pending_searches_mutex_        (Search state and transaction mappings)
+    // 4. routing_table_mutex_           (core routing data)
+    // 5. pending_announces_mutex_       (Announce state)
+    // 6. announced_peers_mutex_         (Stored peer data)
+    // 7. peer_tokens_mutex_             (Token validation data)
+    // 8. shutdown_mutex_                (Lowest priority - can be locked independently)
+    //
     // Routing table (k-buckets)
     std::vector<std::vector<DhtNode>> routing_table_;
-    mutable std::mutex routing_table_mutex_;
+    mutable std::mutex routing_table_mutex_;  // Lock order: 4
     
     // Tokens for peers (use Peer directly as key for efficiency)
     struct PeerToken {
@@ -178,10 +192,9 @@ private:
             : token(t), created_at(std::chrono::steady_clock::now()) {}
     };
     std::unordered_map<Peer, PeerToken> peer_tokens_;
-    std::mutex peer_tokens_mutex_;
+    std::mutex peer_tokens_mutex_;  // Lock order: 7
     
 
-    
     // Pending announce tracking (for BEP 5 compliance)
     struct PendingAnnounce {
         InfoHash info_hash;
@@ -192,7 +205,7 @@ private:
             : info_hash(hash), port(p), created_at(std::chrono::steady_clock::now()) {}
     };
     std::unordered_map<std::string, PendingAnnounce> pending_announces_;
-    std::mutex pending_announces_mutex_;
+    std::mutex pending_announces_mutex_;  // Lock order: 5
     
     // Pending find_peers tracking (to map transaction IDs to info_hash)
     struct PendingSearch {
@@ -215,7 +228,7 @@ private:
               iteration_count(1), iteration_max(max_iterations), is_finished(false) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
-    std::mutex pending_searches_mutex_;
+    std::mutex pending_searches_mutex_;  // Lock order: 3
     std::unordered_map<std::string, std::string> transaction_to_search_; // transaction_id -> info_hash (hex)
     
     // Peer announcement storage (BEP 5 compliant)
@@ -228,7 +241,7 @@ private:
     };
     // Map from info_hash (as hex string) to list of announced peers
     std::unordered_map<std::string, std::vector<AnnouncedPeer>> announced_peers_;
-    std::mutex announced_peers_mutex_;
+    std::mutex announced_peers_mutex_;  // Lock order: 6
     
     // Ping-before-replace eviction tracking
     struct PingVerification {
@@ -244,11 +257,11 @@ private:
     };
     std::unordered_map<std::string, PingVerification> pending_pings_;  // transaction_id -> PingVerification
     std::unordered_set<NodeId> candidates_being_pinged_; // Track candidate nodes that are currently being pinged to avoid duplicate pings
-    mutable std::mutex pending_pings_mutex_;
+    mutable std::mutex pending_pings_mutex_;  // Lock order: 1
     
     // Track nodes that have pending ping verifications to avoid duplicate pings
     std::unordered_set<NodeId> nodes_being_replaced_;
-    mutable std::mutex nodes_being_replaced_mutex_;
+    mutable std::mutex nodes_being_replaced_mutex_;  // Lock order: 2
     
     // Network thread
     std::thread network_thread_;
@@ -256,7 +269,7 @@ private:
     
     // Conditional variables for immediate shutdown
     std::condition_variable shutdown_cv_;
-    std::mutex shutdown_mutex_;
+    std::mutex shutdown_mutex_;  // Lock order: 8 (can be locked independently)
     
     // Helper functions
     void network_loop();

@@ -520,6 +520,7 @@ void DhtClient::add_node(const DhtNode& node, std::string transaction_id, bool v
     int bucket_index_copy = 0;
     
     {
+        std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
         std::lock_guard<std::mutex> lock(routing_table_mutex_);
         
         int bucket_index = get_bucket_index(node.id);
@@ -566,7 +567,6 @@ void DhtClient::add_node(const DhtNode& node, std::string transaction_id, bool v
                     // Find the worst node that's not already being pinged for replacement
                     auto worst_it = bucket.end();
                     {
-                        std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
                         for (auto it = bucket.begin(); it != bucket.end(); ++it) {
                             if (nodes_being_replaced_.find(it->id) == nodes_being_replaced_.end()) {
                                 if (worst_it == bucket.end() || it->last_seen < worst_it->last_seen) {
