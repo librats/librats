@@ -145,6 +145,28 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
         return false;
     }
     
+    // Clear ALL pending ping verifications before starting search to improve performance
+    {
+        std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
+        std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
+        std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
+        
+        size_t cleared_pings = pending_pings_.size();
+        if (cleared_pings > 0) {
+            LOG_DHT_DEBUG("Clearing " << cleared_pings << " pending ping verifications before peer search");
+            
+            // Clear transaction mappings for all pending pings
+            for (const auto& ping_pair : pending_pings_) {
+                transaction_to_search_.erase(ping_pair.first);
+            }
+            
+            // Clear all ping verification data structures
+            pending_pings_.clear();
+            nodes_being_replaced_.clear();
+            candidates_being_pinged_.clear();
+        }
+    }
+    
     std::string hash_key = node_id_to_hex(info_hash);
     LOG_DHT_INFO("Finding peers for info hash: " << hash_key);
     
