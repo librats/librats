@@ -14,6 +14,7 @@
 #include <chrono>
 #include <memory>
 #include <condition_variable>
+#include <set>
 
 // Hash specialization for Peer and NodeId (must be defined before use in unordered_map/set)
 namespace std {
