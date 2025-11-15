@@ -145,41 +145,121 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
         return false;
     }
     
-    // Clear ALL pending ping verifications before starting search to improve performance
+    std::string hash_key = node_id_to_hex(info_hash);
+    LOG_DHT_INFO("Finding peers for info hash: " << hash_key);
+    
+    // Check if a search is already ongoing for this info_hash
+    {
+        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+        auto search_it = pending_searches_.find(hash_key);
+        if (search_it != pending_searches_.end()) {
+            // Search already in progress - just add the callback to the list
+            LOG_DHT_INFO("Search already in progress for info hash " << hash_key << " - adding callback to existing search");
+            search_it->second.callbacks.push_back(callback);
+            return true;
+        }
+    } // Release pending_searches_mutex_ here before cleanup
+    
+    // Smart cleanup: only clear ping verifications from overfilled buckets (which fully filled with nodes overfiled with ping requests)
+    // Working only with ping verifications for fully filled buckets
+    // This creates space for new search nodes pings queries while preserving valid ping verifications
     {
         std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
         std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
         std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
+        std::lock_guard<std::mutex> routing_lock(routing_table_mutex_);
         
-        size_t cleared_pings = pending_pings_.size();
-        if (cleared_pings > 0) {
-            LOG_DHT_DEBUG("Clearing " << cleared_pings << " pending ping verifications before peer search");
-            
-            // Clear transaction mappings for all pending pings
-            for (const auto& ping_pair : pending_pings_) {
-                transaction_to_search_.erase(ping_pair.first);
-            }
-            
-            // Clear all ping verification data structures
-            pending_pings_.clear();
-            nodes_being_replaced_.clear();
-            candidates_being_pinged_.clear();
+        // Count pending pings per bucket
+        std::unordered_map<int, std::vector<std::string>> bucket_pending_pings;
+        for (const auto& ping_pair : pending_pings_) {
+            int bucket_idx = ping_pair.second.bucket_index;
+            bucket_pending_pings[bucket_idx].push_back(ping_pair.first);
         }
-    }
+        
+        size_t total_cleared = 0;
+        
+        // Check each bucket and clear pings from overfilled buckets
+        for (const auto& bucket_pings : bucket_pending_pings) {
+            int bucket_idx = bucket_pings.first;
+            const auto& ping_trans_ids = bucket_pings.second;
+            
+            // Get current bucket size
+            size_t bucket_size = routing_table_[bucket_idx].size();
+            size_t pending_count = ping_trans_ids.size();
+            
+            // Calculate how many free slots we need (at least ALPHA)
+            // A bucket is overfilled if: available_slots - slots_blocked_by_pings < ALPHA
+            int available_slots = static_cast<int>(K_BUCKET_SIZE) - static_cast<int>(bucket_size);
+            int slots_blocked_by_pings = static_cast<int>(pending_count);
+            int free_slots_needed = static_cast<int>(ALPHA);
+            int max_slots_by_ping = static_cast<int>(K_BUCKET_SIZE);
+            
+            // If we don't have enough free slots after accounting for pending pings
+            if (available_slots == 0 && max_slots_by_ping - slots_blocked_by_pings < free_slots_needed) {
+                // Calculate how many pings to remove to free up ALPHA slots
+                int pings_to_remove = free_slots_needed - (max_slots_by_ping - slots_blocked_by_pings);
+                pings_to_remove = (std::min)(pings_to_remove, static_cast<int>(pending_count));
+                pings_to_remove = (std::max)(pings_to_remove, 0);
+
+                if (pings_to_remove > 0) {
+                    LOG_DHT_DEBUG("Bucket " << bucket_idx << " is overfilled with ping requests: "
+                                 << "size=" << bucket_size << "/" << K_BUCKET_SIZE 
+                                 << ", pending_pings=" << pending_count
+                                 << ", available_slots=" << available_slots
+                                 << " - clearing " << pings_to_remove << " oldest ping verifications to free " << free_slots_needed << " slots");
+                    
+                    // Sort pings by age (oldest first) and remove the oldest ones
+                    std::vector<std::pair<std::string, std::chrono::steady_clock::time_point>> sorted_pings;
+                    sorted_pings.reserve(ping_trans_ids.size());
+                    for (const auto& trans_id : ping_trans_ids) {
+                        auto ping_it = pending_pings_.find(trans_id);
+                        if (ping_it != pending_pings_.end()) {
+                            sorted_pings.push_back({trans_id, ping_it->second.ping_sent_at});
+                        }
+                    }
+                    
+                    std::sort(sorted_pings.begin(), sorted_pings.end(),
+                             [](const auto& a, const auto& b) {
+                                 return a.second < b.second; // oldest first
+                             });
+                    
+                    // Remove the oldest pings
+                    for (int i = 0; i < pings_to_remove && i < static_cast<int>(sorted_pings.size()); ++i) {
+                        const auto& trans_id = sorted_pings[i].first;
+                        auto ping_it = pending_pings_.find(trans_id);
+                        if (ping_it != pending_pings_.end()) {
+                            auto age_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::steady_clock::now() - ping_it->second.ping_sent_at
+                            ).count();
+                            LOG_DHT_DEBUG("  Clearing ping from bucket " 
+                                          << ping_it->second.bucket_index << ": transaction=" << trans_id 
+                                          << ", age=" << age_seconds << "s");
+                            
+                            // Clean up transaction mapping (already holding search_lock)
+                            transaction_to_search_.erase(trans_id);
+                            
+                            // Clean up tracking sets (already holding nodes_lock)
+                            nodes_being_replaced_.erase(ping_it->second.old_node.id);
+                            candidates_being_pinged_.erase(ping_it->second.candidate_node.id);
+                            
+                            // Clean up pending ping (already holding ping_lock)
+                            pending_pings_.erase(ping_it);
+                            total_cleared++;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (total_cleared > 0) {
+            LOG_DHT_INFO("Cleared " << total_cleared << " pending ping verifications from overfilled buckets before peer search");
+        } else {
+            LOG_DHT_DEBUG("No overfilled buckets found - all buckets have sufficient free slots for peer search");
+        }
+    } // Release all locks here
     
-    std::string hash_key = node_id_to_hex(info_hash);
-    LOG_DHT_INFO("Finding peers for info hash: " << hash_key);
-    
+    // Re-acquire pending_searches_mutex_ to create the new search
     std::lock_guard<std::mutex> lock(pending_searches_mutex_);
-    
-    // Check if a search is already ongoing for this info_hash
-    auto search_it = pending_searches_.find(hash_key);
-    if (search_it != pending_searches_.end()) {
-        // Search already in progress - just add the callback to the list
-        LOG_DHT_INFO("Search already in progress for info hash " << hash_key << " - adding callback to existing search");
-        search_it->second.callbacks.push_back(callback);
-        return true;
-    }
     
     // Create new search
     PendingSearch new_search(info_hash, iteration_max);
