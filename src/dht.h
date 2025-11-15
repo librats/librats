@@ -243,6 +243,7 @@ private:
               ping_sent_at(std::chrono::steady_clock::now()), transaction_id(trans_id) {}
     };
     std::unordered_map<std::string, PingVerification> pending_pings_;  // transaction_id -> PingVerification
+    std::unordered_set<NodeId> candidates_being_pinged_; // Track candidate nodes that are currently being pinged to avoid duplicate pings
     std::unordered_map<int, std::set<std::pair<std::chrono::steady_clock::time_point, std::string>>> pings_by_bucket_; // bucket_index -> (time_point, transaction_id) to found oldest ping
     mutable std::mutex pending_pings_mutex_;
     

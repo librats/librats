@@ -1320,12 +1320,11 @@ void DhtClient::cleanup_stale_announced_peers() {
 void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const DhtNode& old_node, int bucket_index, std::string transaction_id) {
     {
         std::lock_guard<std::mutex> lock(pending_pings_mutex_);
-        for (const auto& pending : pending_pings_) {
-            if (pending.second.candidate_node.id == candidate_node.id) {
-                LOG_DHT_DEBUG("Already pinging candidate node " << node_id_to_hex(candidate_node.id) 
-                              << " - skipping duplicate ping verification");
-                return;
-            }
+        // Optimized O(1) lookup instead of O(n) iteration
+        if (candidates_being_pinged_.find(candidate_node.id) != candidates_being_pinged_.end()) {
+            LOG_DHT_DEBUG("Already pinging candidate node " << node_id_to_hex(candidate_node.id) 
+                          << " - skipping duplicate ping verification");
+            return;
         }
     }
     
@@ -1347,6 +1346,7 @@ void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const 
         pings_by_bucket_[bucket_index].insert({ping_sent_at, ping_transaction_id});
         
         nodes_being_replaced_.insert(old_node.id);
+        candidates_being_pinged_.insert(candidate_node.id);
     }
 
     // If this node addition was part of a search, map the ping transaction to the same search
@@ -1406,6 +1406,9 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
                 nodes_being_replaced_.erase(verification.old_node.id);
             }
             
+            // Remove candidate from candidates_being_pinged set
+            candidates_being_pinged_.erase(verification.candidate_node.id);
+            
             // Remove from pings_by_bucket_
             auto bucket_it = pings_by_bucket_.find(verification.bucket_index);
             if (bucket_it != pings_by_bucket_.end()) {
@@ -1459,6 +1462,7 @@ void DhtClient::cleanup_stale_ping_verifications() {
             
             // Remove the old node from nodes_being_replaced set since the ping verification failed
             nodes_being_replaced_.erase(it->second.old_node.id);
+            candidates_being_pinged_.erase(it->second.candidate_node.id);
             
             // Remove from pings_by_bucket_
             auto bucket_it = pings_by_bucket_.find(bucket_index);
@@ -1549,6 +1553,7 @@ DhtNode DhtClient::cancel_oldest_ping(int bucket_index) {
     
     // Remove the old node from nodes_being_replaced set
     nodes_being_replaced_.erase(verification.old_node.id);
+    candidates_being_pinged_.erase(verification.candidate_node.id);
     
     // Remove from pings_by_bucket_
     bucket_it->second.erase(oldest_pair);
