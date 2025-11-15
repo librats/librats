@@ -1125,6 +1125,11 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
             
             if (!peers.empty()) {
                 // We found actual peers - invoke all callbacks and mark search as finished
+                auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - pending_search.created_at
+                ).count();
+                
+                LOG_DHT_INFO("Search completed for info_hash " << hash_key << " in " << duration_ms << "ms - found " << peers.size() << " peer(s)");
                 LOG_DHT_INFO("Invoking " << pending_search.callbacks.size() << " callback(s) for info_hash " << hash_key);
                 for (const auto& callback : pending_search.callbacks) {
                     if (callback) {
@@ -1171,9 +1176,13 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     
     // Stop if we've reached max iterations (iteration_max = 0 means infinite)
     if (search.iteration_max > 0 && search.iteration_count >= search.iteration_max) {
+        auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - search.created_at
+        ).count();
+        
         LOG_DHT_DEBUG("Search iteration summary for " << hash_key << ":");
         LOG_DHT_DEBUG("  - Current iteration: " << search.iteration_count << "/" << search.iteration_max);
-        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - reached max iterations (" << search.iteration_count << "/" << search.iteration_max << ")");
+        LOG_DHT_INFO("Search completed for info_hash " << hash_key << " in " << duration_ms << "ms - reached max iterations (" << search.iteration_count << "/" << search.iteration_max << ")");
         search.is_finished = true;
         return false;  // Return false to indicate the search should be marked finished
     }
@@ -1217,6 +1226,7 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     LOG_DHT_DEBUG("  - Candidates evaluated: " << candidates_found);
     LOG_DHT_DEBUG("  - Nodes queried: " << nodes_queried);
     LOG_DHT_DEBUG("  - Already queried nodes skipped: " << (candidates_found - nodes_queried));
+    LOG_DHT_DEBUG("  - Total queried nodes: " << search.queried_nodes.size());
     LOG_DHT_DEBUG("  - Current iteration: " << search.iteration_count << "/" << search.iteration_max);
     
     // If we queried new nodes, update the search timestamp and iteration count
@@ -1236,7 +1246,11 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
     constexpr int SEARCH_STALE_TIMEOUT = 30;  // seconds
     
     if (time_since_update >= SEARCH_STALE_TIMEOUT || time_since_creation >= SEARCH_STALE_TIMEOUT) {
-        LOG_DHT_DEBUG("Stopping search for " << hash_key << " - search is stale (no progress for " 
+        auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - search.created_at
+        ).count();
+        
+        LOG_DHT_INFO("Search completed for info_hash " << hash_key << " in " << duration_ms << "ms - search is stale (no progress for " 
                       << time_since_update << "s, total time: " << time_since_creation << "s)");
         search.is_finished = true;
         return false;  // Signal to mark the search as finished
