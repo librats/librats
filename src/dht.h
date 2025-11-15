@@ -243,6 +243,7 @@ private:
               ping_sent_at(std::chrono::steady_clock::now()), transaction_id(trans_id) {}
     };
     std::unordered_map<std::string, PingVerification> pending_pings_;  // transaction_id -> PingVerification
+    std::unordered_set<NodeId> candidates_being_pinged_; // Track candidate nodes that are currently being pinged to avoid duplicate pings
     mutable std::mutex pending_pings_mutex_;
     
     // Track nodes that have pending ping verifications to avoid duplicate pings

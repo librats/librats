@@ -1305,17 +1305,6 @@ void DhtClient::cleanup_stale_announced_peers() {
 
 // Ping-before-replace eviction implementation
 void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const DhtNode& old_node, int bucket_index, std::string transaction_id) {
-    {
-        std::lock_guard<std::mutex> lock(pending_pings_mutex_);
-        for (const auto& pending : pending_pings_) {
-            if (pending.second.candidate_node.id == candidate_node.id) {
-                LOG_DHT_DEBUG("Already pinging candidate node " << node_id_to_hex(candidate_node.id) 
-                              << " - skipping duplicate ping verification");
-                return;
-            }
-        }
-    }
-    
     std::string ping_transaction_id = KrpcProtocol::generate_transaction_id();
     
     LOG_DHT_DEBUG("Initiating ping verification for candidate node " << node_id_to_hex(candidate_node.id) 
@@ -1327,8 +1316,16 @@ void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const 
     {
         std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
         std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
+
+        if (candidates_being_pinged_.find(candidate_node.id) != candidates_being_pinged_.end()) {
+            LOG_DHT_DEBUG("Already pinging candidate node " << node_id_to_hex(candidate_node.id) 
+                          << " - skipping duplicate ping verification");
+            return;
+        }
+
         pending_pings_.emplace(ping_transaction_id, PingVerification(candidate_node, old_node, bucket_index, ping_transaction_id));
         nodes_being_replaced_.insert(old_node.id);
+        candidates_being_pinged_.insert(candidate_node.id);
     }
 
     // If this node addition was part of a search, map the ping transaction to the same search
@@ -1387,6 +1384,9 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
                 std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
                 nodes_being_replaced_.erase(verification.old_node.id);
             }
+            
+            // Remove candidate from candidates_being_pinged set
+            candidates_being_pinged_.erase(verification.candidate_node.id);
             // Remove the pending ping verification
             pending_pings_.erase(it);
         }
@@ -1426,6 +1426,8 @@ void DhtClient::cleanup_stale_ping_verifications() {
             
             // Remove the old node from nodes_being_replaced set since the ping verification failed
             nodes_being_replaced_.erase(it->second.old_node.id);
+            candidates_being_pinged_.erase(it->second.candidate_node.id);
+            
             it = pending_pings_.erase(it);
         } else {
             ++it;
