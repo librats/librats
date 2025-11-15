@@ -295,6 +295,7 @@ void DhtClient::maintenance_loop() {
     auto last_bucket_refresh = std::chrono::steady_clock::now();
     auto last_ping_verification_cleanup = std::chrono::steady_clock::now();
     auto last_general_cleanup = std::chrono::steady_clock::now();
+    auto last_stats_print = std::chrono::steady_clock::now();
     
     while (running_) {
         auto now = std::chrono::steady_clock::now();
@@ -330,6 +331,79 @@ void DhtClient::maintenance_loop() {
         if (now - last_ping_verification_cleanup >= std::chrono::seconds(30)) {
             cleanup_stale_ping_verifications();
             last_ping_verification_cleanup = now;
+        }
+        
+        // Print DHT statistics every 10 seconds
+        if (now - last_stats_print >= std::chrono::seconds(10)) {
+            // Count filled buckets
+            size_t filled_buckets = 0;
+            size_t total_nodes = 0;
+            size_t max_bucket_size = 0;
+            {
+                std::lock_guard<std::mutex> lock(routing_table_mutex_);
+                for (const auto& bucket : routing_table_) {
+                    if (!bucket.empty()) {
+                        filled_buckets++;
+                        total_nodes += bucket.size();
+                        max_bucket_size = (std::max)(max_bucket_size, bucket.size());
+                    }
+                }
+            }
+            
+            size_t pending_searches = 0;
+            size_t pending_announces_count = 0;
+            size_t announced_peers_total = 0;
+            size_t announced_peers_infohashes = 0;
+            
+            {
+                std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
+                pending_searches = pending_searches_.size();
+            }
+            
+            {
+                std::lock_guard<std::mutex> announce_lock(pending_announces_mutex_);
+                pending_announces_count = pending_announces_.size();
+            }
+            
+            {
+                std::lock_guard<std::mutex> peers_lock(announced_peers_mutex_);
+                announced_peers_infohashes = announced_peers_.size();
+                for (const auto& entry : announced_peers_) {
+                    announced_peers_total += entry.second.size();
+                }
+            }
+            
+            size_t pending_pings = 0;
+            size_t nodes_being_replaced = 0;
+            {
+                std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
+                std::lock_guard<std::mutex> nodes_lock(nodes_being_replaced_mutex_);
+                pending_pings = pending_pings_.size();
+                nodes_being_replaced = nodes_being_replaced_.size();
+            }
+            
+            size_t peer_tokens_count = 0;
+            {
+                std::lock_guard<std::mutex> tokens_lock(peer_tokens_mutex_);
+                peer_tokens_count = peer_tokens_.size();
+            }
+            
+            LOG_DHT_INFO("=== DHT Global Statistics ===");
+            LOG_DHT_INFO("  Routing Table:");
+            LOG_DHT_INFO("    - Total nodes: " << total_nodes);
+            LOG_DHT_INFO("    - Filled buckets: " << filled_buckets << "/" << routing_table_.size());
+            LOG_DHT_INFO("    - Max bucket size: " << max_bucket_size << "/" << K_BUCKET_SIZE);
+            LOG_DHT_INFO("  Active Operations:");
+            LOG_DHT_INFO("    - Pending searches: " << pending_searches);
+            LOG_DHT_INFO("    - Pending announces: " << pending_announces_count);
+            LOG_DHT_INFO("    - Pending ping verifications: " << pending_pings);
+            LOG_DHT_INFO("    - Nodes being replaced: " << nodes_being_replaced);
+            LOG_DHT_INFO("  Stored Data:");
+            LOG_DHT_INFO("    - Announced peers (total): " << announced_peers_total);
+            LOG_DHT_INFO("    - Announced peers (infohashes): " << announced_peers_infohashes);
+            LOG_DHT_INFO("    - Peer tokens: " << peer_tokens_count);
+            
+            last_stats_print = now;
         }
         
         // Execute maintenance loop every 5 seconds
@@ -1124,8 +1198,14 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
                     std::chrono::steady_clock::now() - pending_search.created_at
                 ).count();
                 
-                LOG_DHT_INFO("Search completed for info_hash " << hash_key << " in " << duration_ms << "ms - found " << peers.size() << " peer(s)");
-                LOG_DHT_INFO("Invoking " << pending_search.callbacks.size() << " callback(s) for info_hash " << hash_key);
+                LOG_DHT_INFO("=== Search Completed for info_hash " << hash_key << " ===");
+                LOG_DHT_INFO("  Duration: " << duration_ms << "ms");
+                LOG_DHT_INFO("  Peers found: " << peers.size());
+                LOG_DHT_INFO("  Total nodes queried: " << pending_search.queried_nodes.size());
+                LOG_DHT_INFO("  Iterations completed: " << pending_search.iteration_count << "/" 
+                             << (pending_search.iteration_max == 0 ? "infinity" : std::to_string(pending_search.iteration_max)));
+                LOG_DHT_INFO("  Callbacks to invoke: " << pending_search.callbacks.size());
+                
                 for (const auto& callback : pending_search.callbacks) {
                     if (callback) {
                         callback(peers, pending_search.info_hash);
@@ -1175,9 +1255,12 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
             std::chrono::steady_clock::now() - search.created_at
         ).count();
         
-        LOG_DHT_DEBUG("Search iteration summary for " << hash_key << ":");
-        LOG_DHT_DEBUG("  - Current iteration: " << search.iteration_count << "/" << search.iteration_max);
-        LOG_DHT_INFO("Search completed for info_hash " << hash_key << " in " << duration_ms << "ms - reached max iterations (" << search.iteration_count << "/" << search.iteration_max << ")");
+        LOG_DHT_INFO("=== Search Completed for info_hash " << hash_key << " ===");
+        LOG_DHT_INFO("  Duration: " << duration_ms << "ms");
+        LOG_DHT_INFO("  Result: Reached max iterations (no peers found)");
+        LOG_DHT_INFO("  Total nodes queried: " << search.queried_nodes.size());
+        LOG_DHT_INFO("  Iterations completed: " << search.iteration_count << "/" << search.iteration_max);
+        
         search.is_finished = true;
         return false;  // Return false to indicate the search should be marked finished
     }
@@ -1245,8 +1328,14 @@ bool DhtClient::continue_search_iteration(PendingSearch& search) {
             std::chrono::steady_clock::now() - search.created_at
         ).count();
         
-        LOG_DHT_INFO("Search completed for info_hash " << hash_key << " in " << duration_ms << "ms - search is stale (no progress for " 
-                      << time_since_update << "s, total time: " << time_since_creation << "s)");
+        LOG_DHT_INFO("=== Search Completed for info_hash " << hash_key << " ===");
+        LOG_DHT_INFO("  Duration: " << duration_ms << "ms");
+        LOG_DHT_INFO("  Result: Search stale (no peers found)");
+        LOG_DHT_INFO("  Total nodes queried: " << search.queried_nodes.size());
+        LOG_DHT_INFO("  Iterations completed: " << search.iteration_count << "/" 
+                     << (search.iteration_max == 0 ? "infinity" : std::to_string(search.iteration_max)));
+        LOG_DHT_INFO("  Stale reason: No progress for " << time_since_update << "s (total: " << time_since_creation << "s)");
+        
         search.is_finished = true;
         return false;  // Signal to mark the search as finished
     }
