@@ -239,9 +239,10 @@ private:
         std::chrono::steady_clock::time_point ping_sent_at;
         std::string transaction_id;  // Transaction ID of the ping
         
-        PingVerification(const DhtNode& candidate, const DhtNode& old, int bucket_idx, const std::string& trans_id)
+        PingVerification(const DhtNode& candidate, const DhtNode& old, int bucket_idx, const std::string& trans_id, 
+                        const std::chrono::steady_clock::time_point& sent_at)
             : candidate_node(candidate), old_node(old), bucket_index(bucket_idx), 
-              ping_sent_at(std::chrono::steady_clock::now()), transaction_id(trans_id) {}
+              ping_sent_at(sent_at), transaction_id(trans_id) {}
     };
     std::unordered_map<std::string, PingVerification> pending_pings_;  // transaction_id -> PingVerification
     std::unordered_set<NodeId> candidates_being_pinged_; // Track candidate nodes that are currently being pinged to avoid duplicate pings

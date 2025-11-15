@@ -1338,7 +1338,7 @@ void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const 
             return;
         }
 
-        pending_pings_.emplace(ping_transaction_id, PingVerification(candidate_node, old_node, bucket_index, ping_transaction_id));
+        pending_pings_.emplace(ping_transaction_id, PingVerification(candidate_node, old_node, bucket_index, ping_transaction_id, ping_sent_at));
         
         // Add to bucket-based index for efficient oldest-ping lookup
         pings_by_bucket_[bucket_index].insert({ping_sent_at, ping_transaction_id});
