@@ -63,6 +63,8 @@ void print_help() {
     std::cout << "  bittorrent_disable - Disable BitTorrent" << std::endl;
     std::cout << "  bittorrent_status  - Show BitTorrent status" << std::endl;
     std::cout << "  torrent_add <file> <path> - Add torrent from .torrent file" << std::endl;
+    std::cout << "  torrent_add_hash <hash> <path> - Add torrent by info hash (uses DHT)" << std::endl;
+    std::cout << "  torrent_find_peers <hash> - Find peers for torrent via DHT" << std::endl;
     std::cout << "  torrent_list       - List all active torrents" << std::endl;
     std::cout << "  torrent_remove <hash> - Remove torrent by info hash" << std::endl;
     std::cout << "  torrent_info <hash> - Show torrent information" << std::endl;
@@ -701,6 +703,73 @@ int main(int argc, char* argv[]) {
                 }
             } else {
                 std::cout << "Usage: torrent_add <torrent_file> <download_path>" << std::endl;
+            }
+        }
+        else if (command == "torrent_add_hash") {
+            std::string hash_str, download_path;
+            iss >> hash_str >> download_path;
+            
+            if (!hash_str.empty() && !download_path.empty()) {
+                if (!client.is_bittorrent_enabled()) {
+                    LOG_MAIN_ERROR("BitTorrent is not enabled. Use 'bittorrent_enable' first.");
+                } else if (!client.is_dht_running()) {
+                    LOG_MAIN_ERROR("DHT is not running. BitTorrent by hash requires DHT for peer discovery.");
+                    LOG_MAIN_INFO("Start DHT with 'dht_start' and try again.");
+                } else {
+                    LOG_MAIN_INFO("Adding torrent by hash: " << hash_str);
+                    LOG_MAIN_INFO("This will use DHT to discover peers and attempt to download metadata...");
+                    auto torrent = client.add_torrent_by_hash(hash_str, download_path);
+                    if (torrent) {
+                        LOG_MAIN_INFO("Torrent added successfully (metadata received)");
+                    } else {
+                        LOG_MAIN_WARN("Metadata download initiated. DHT peer discovery in progress...");
+                        LOG_MAIN_INFO("Note: Full metadata exchange (BEP 9) requires additional implementation.");
+                        LOG_MAIN_INFO("      Once you have the .torrent file, use 'torrent_add <file> <path>'");
+                    }
+                }
+            } else {
+                std::cout << "Usage: torrent_add_hash <info_hash> <download_path>" << std::endl;
+            }
+        }
+        else if (command == "torrent_find_peers") {
+            std::string hash_str;
+            iss >> hash_str;
+            
+            if (!hash_str.empty()) {
+                if (!client.is_dht_running()) {
+                    LOG_MAIN_ERROR("DHT is not running. Use 'dht_start' first.");
+                } else {
+                    LOG_MAIN_INFO("Finding peers for torrent hash: " << hash_str);
+                    LOG_MAIN_INFO("Using DHT to discover peers...");
+                    
+                    try {
+                        librats::InfoHash info_hash = librats::hex_to_info_hash(hash_str);
+                        
+                        if (client.find_peers_by_hash(hash_str, 
+                            [hash_str](const std::vector<std::string>& peers) {
+                                LOG_MAIN_INFO("Found " << peers.size() << " peers for torrent hash " << hash_str);
+                                if (peers.empty()) {
+                                    LOG_MAIN_INFO("No peers found. The torrent may not be popular or DHT may need more time.");
+                                } else {
+                                    std::cout << "Discovered peers:" << std::endl;
+                                    for (const auto& peer : peers) {
+                                        std::cout << "  " << peer << std::endl;
+                                    }
+                                    LOG_MAIN_INFO("Note: These peers should have the torrent. You can:");
+                                    LOG_MAIN_INFO("  1. Obtain the .torrent file from one of these peers or a tracker");
+                                    LOG_MAIN_INFO("  2. Use 'torrent_add <file> <path>' to start downloading");
+                                }
+                            }, 1)) {
+                            LOG_MAIN_INFO("DHT peer search initiated");
+                        } else {
+                            LOG_MAIN_ERROR("Failed to initiate DHT peer search");
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_MAIN_ERROR("Invalid info hash format: " << e.what());
+                    }
+                }
+            } else {
+                std::cout << "Usage: torrent_find_peers <info_hash>" << std::endl;
             }
         }
         else if (command == "torrent_list") {
