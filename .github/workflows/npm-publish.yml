@@ -1,0 +1,104 @@
+name: Publish to NPM
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (leave empty for latest commit)'
+        required: false
+
+# Required for OIDC trusted publishing
+permissions:
+  id-token: write  # Required for OIDC authentication
+  contents: read   # Required to checkout code
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      
+      - name: Install CMake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+      
+      - name: Verify CMake installation
+        run: cmake --version
+      
+      # Ensure npm 11.5.1 or later for trusted publishing support
+      - name: Update npm
+        run: npm install -g npm@latest
+      
+      - name: Install dependencies
+        working-directory: nodejs
+        run: npm ci
+      
+      - name: Build native library
+        working-directory: nodejs
+        run: |
+          echo "Building librats native library..."
+          node scripts/build-librats.js
+      
+      - name: Build Node.js addon
+        working-directory: nodejs
+        run: npm run build
+      
+      - name: Run tests
+        working-directory: nodejs
+        run: npm test
+        continue-on-error: true
+      
+      - name: Verify installation
+        working-directory: nodejs
+        run: npm run verify
+        continue-on-error: true
+      
+      - name: Update version from tag (on release)
+        if: github.event_name == 'release'
+        working-directory: nodejs
+        run: |
+          VERSION="${{ github.ref_name }}"
+          # Remove 'v' prefix if present
+          VERSION="${VERSION#v}"
+          echo "Publishing version: $VERSION"
+          npm version $VERSION --no-git-tag-version --allow-same-version
+      
+      - name: Prepare package
+        working-directory: nodejs
+        run: npm run prepare
+      
+      # Trusted publishing with OIDC - no token needed!
+      # Provenance is automatically generated
+      - name: Publish to NPM (release)
+        if: github.event_name == 'release' && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'alpha')
+        working-directory: nodejs
+        run: npm publish --access public
+      
+      - name: Publish to NPM (beta)
+        if: github.event_name == 'release' && contains(github.ref_name, 'beta')
+        working-directory: nodejs
+        run: npm publish --access public --tag beta
+      
+      - name: Publish to NPM (alpha)
+        if: github.event_name == 'release' && contains(github.ref_name, 'alpha')
+        working-directory: nodejs
+        run: npm publish --access public --tag alpha
+      
+      - name: Publish to NPM (manual)
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: nodejs
+        run: npm publish --access public --tag next
+
