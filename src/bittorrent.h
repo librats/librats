@@ -426,6 +426,8 @@ public:
     // Torrent management
     std::shared_ptr<TorrentDownload> add_torrent(const std::string& torrent_file, const std::string& download_path);
     std::shared_ptr<TorrentDownload> add_torrent(const TorrentInfo& torrent_info, const std::string& download_path);
+    std::shared_ptr<TorrentDownload> add_torrent_by_hash(const InfoHash& info_hash, const std::string& download_path);
+    std::shared_ptr<TorrentDownload> add_torrent_by_hash(const std::string& info_hash_hex, const std::string& download_path);
     bool remove_torrent(const InfoHash& info_hash);
     std::shared_ptr<TorrentDownload> get_torrent(const InfoHash& info_hash);
     std::vector<std::shared_ptr<TorrentDownload>> get_all_torrents();

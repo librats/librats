@@ -1385,6 +1385,26 @@ public:
                                                   const std::string& download_path);
     
     /**
+     * Add a torrent by info hash (magnet link style - uses DHT to find peers)
+     * @param info_hash Info hash of the torrent
+     * @param download_path Directory where files will be downloaded
+     * @return Shared pointer to TorrentDownload object, or nullptr on failure
+     * @note Requires DHT to be running. Will discover peers via DHT.
+     */
+    std::shared_ptr<TorrentDownload> add_torrent_by_hash(const InfoHash& info_hash, 
+                                                          const std::string& download_path);
+    
+    /**
+     * Add a torrent by info hash hex string (magnet link style - uses DHT to find peers)
+     * @param info_hash_hex Info hash as 40-character hex string
+     * @param download_path Directory where files will be downloaded
+     * @return Shared pointer to TorrentDownload object, or nullptr on failure
+     * @note Requires DHT to be running. Will discover peers via DHT.
+     */
+    std::shared_ptr<TorrentDownload> add_torrent_by_hash(const std::string& info_hash_hex, 
+                                                          const std::string& download_path);
+    
+    /**
      * Remove a torrent by info hash
      * @param info_hash Info hash of the torrent to remove
      * @return true if torrent was removed successfully

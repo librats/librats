@@ -1688,6 +1688,83 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent(const TorrentInfo
     }
 }
 
+std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const InfoHash& info_hash, 
+                                                                        const std::string& download_path) {
+    if (!running_.load()) {
+        LOG_BT_ERROR("BitTorrent client is not running");
+        return nullptr;
+    }
+    
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_BT_ERROR("DHT client is required for adding torrents by hash. DHT is not available.");
+        return nullptr;
+    }
+    
+    LOG_BT_INFO("Adding torrent by hash: " << info_hash_to_hex(info_hash));
+    LOG_BT_INFO("This will use DHT to find peers and download metadata...");
+    
+    {
+        std::lock_guard<std::mutex> lock(torrents_mutex_);
+        
+        // Check if torrent already exists
+        if (torrents_.find(info_hash) != torrents_.end()) {
+            LOG_BT_WARN("Torrent already exists with hash: " << info_hash_to_hex(info_hash));
+            return torrents_[info_hash];
+        }
+    }
+    
+    // Use DHT to find peers for this info hash
+    LOG_BT_INFO("Discovering peers via DHT for hash: " << info_hash_to_hex(info_hash));
+    
+    // For now, we'll create a placeholder torrent info that we'll populate later
+    // In a full implementation, we would:
+    // 1. Find peers via DHT
+    // 2. Connect to those peers
+    // 3. Use the Extension Protocol (BEP 9) to request metadata
+    // 4. Once we have the metadata, create the TorrentInfo and start the download
+    
+    // This is a simplified implementation that requires the user to have the .torrent file
+    // A full metadata exchange implementation would require implementing BEP 9
+    LOG_BT_WARN("Metadata exchange (BEP 9) not yet fully implemented.");
+    LOG_BT_WARN("To download by hash, you need to first obtain the .torrent file through other means.");
+    LOG_BT_WARN("You can:");
+    LOG_BT_WARN("  1. Use DHT to find peers: dht_find <hash>");
+    LOG_BT_WARN("  2. Obtain the .torrent file from a tracker or peer");
+    LOG_BT_WARN("  3. Use torrent_add <file> <path> to add it");
+    
+    // Attempt to discover peers anyway for user information
+    dht_client_->find_peers(info_hash, [this, info_hash](const std::vector<Peer>& peers, const InfoHash& hash) {
+        LOG_BT_INFO("DHT found " << peers.size() << " peers for hash " << info_hash_to_hex(info_hash));
+        for (const auto& peer : peers) {
+            LOG_BT_INFO("  Peer: " << peer.ip << ":" << peer.port);
+        }
+        LOG_BT_INFO("Note: To complete the download, obtain the .torrent file and use torrent_add");
+    });
+    
+    return nullptr;
+}
+
+std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const std::string& info_hash_hex, 
+                                                                        const std::string& download_path) {
+    InfoHash info_hash = hex_to_info_hash(info_hash_hex);
+    
+    // Validate the parsed hash
+    bool is_zero = true;
+    for (const auto& byte : info_hash) {
+        if (byte != 0) {
+            is_zero = false;
+            break;
+        }
+    }
+    
+    if (is_zero && info_hash_hex.length() == 40) {
+        LOG_BT_ERROR("Invalid info hash format: " << info_hash_hex);
+        return nullptr;
+    }
+    
+    return add_torrent_by_hash(info_hash, download_path);
+}
+
 bool BitTorrentClient::remove_torrent(const InfoHash& info_hash) {
     std::lock_guard<std::mutex> lock(torrents_mutex_);
     

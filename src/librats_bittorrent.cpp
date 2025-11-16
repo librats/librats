@@ -75,6 +75,26 @@ std::shared_ptr<TorrentDownload> RatsClient::add_torrent(const TorrentInfo& torr
     return bittorrent_client_->add_torrent(torrent_info, download_path);
 }
 
+std::shared_ptr<TorrentDownload> RatsClient::add_torrent_by_hash(const InfoHash& info_hash, 
+                                                                   const std::string& download_path) {
+    if (!is_bittorrent_enabled()) {
+        LOG_CLIENT_ERROR("BitTorrent is not enabled. Call enable_bittorrent() first.");
+        return nullptr;
+    }
+    
+    return bittorrent_client_->add_torrent_by_hash(info_hash, download_path);
+}
+
+std::shared_ptr<TorrentDownload> RatsClient::add_torrent_by_hash(const std::string& info_hash_hex, 
+                                                                   const std::string& download_path) {
+    if (!is_bittorrent_enabled()) {
+        LOG_CLIENT_ERROR("BitTorrent is not enabled. Call enable_bittorrent() first.");
+        return nullptr;
+    }
+    
+    return bittorrent_client_->add_torrent_by_hash(info_hash_hex, download_path);
+}
+
 bool RatsClient::remove_torrent(const InfoHash& info_hash) {
     if (!is_bittorrent_enabled()) {
         return false;
