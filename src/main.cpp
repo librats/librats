@@ -57,6 +57,20 @@ void print_help() {
     std::cout << "  transfer_resume <transfer_id> - Resume a transfer" << std::endl;
     std::cout << "  transfer_cancel <transfer_id> - Cancel a transfer" << std::endl;
     std::cout << "  transfer_stats    - Show transfer statistics" << std::endl;
+#ifdef RATS_SEACH_FEATURES
+    std::cout << "\nBitTorrent Commands:" << std::endl;
+    std::cout << "  bittorrent_enable [port] - Enable BitTorrent (default port: 6881)" << std::endl;
+    std::cout << "  bittorrent_disable - Disable BitTorrent" << std::endl;
+    std::cout << "  bittorrent_status  - Show BitTorrent status" << std::endl;
+    std::cout << "  torrent_add <file> <path> - Add torrent from .torrent file" << std::endl;
+    std::cout << "  torrent_list       - List all active torrents" << std::endl;
+    std::cout << "  torrent_remove <hash> - Remove torrent by info hash" << std::endl;
+    std::cout << "  torrent_info <hash> - Show torrent information" << std::endl;
+    std::cout << "  torrent_pause <hash> - Pause a torrent download" << std::endl;
+    std::cout << "  torrent_resume <hash> - Resume a paused torrent" << std::endl;
+    std::cout << "  torrent_peers <hash> - Show connected peers for a torrent" << std::endl;
+    std::cout << "  bittorrent_stats   - Show BitTorrent statistics" << std::endl;
+#endif
     std::cout << "  quit              - Exit the program" << std::endl;
 }
 
@@ -635,6 +649,268 @@ int main(int argc, char* argv[]) {
                 std::cout << stats.dump(2) << std::endl;
             }
         }
+#ifdef RATS_SEACH_FEATURES
+        else if (command == "bittorrent_enable") {
+            int bt_port = 6881;
+            iss >> bt_port;
+            if (bt_port <= 0) bt_port = 6881;
+            
+            LOG_MAIN_INFO("Enabling BitTorrent on port " << bt_port << "...");
+            if (client.enable_bittorrent(bt_port)) {
+                LOG_MAIN_INFO("BitTorrent enabled successfully");
+            } else {
+                LOG_MAIN_ERROR("Failed to enable BitTorrent");
+            }
+        }
+        else if (command == "bittorrent_disable") {
+            if (!client.is_bittorrent_enabled()) {
+                std::cout << "BitTorrent is not enabled." << std::endl;
+            } else {
+                LOG_MAIN_INFO("Disabling BitTorrent...");
+                client.disable_bittorrent();
+                LOG_MAIN_INFO("BitTorrent disabled");
+            }
+        }
+        else if (command == "bittorrent_status") {
+            if (client.is_bittorrent_enabled()) {
+                size_t torrent_count = client.get_active_torrents_count();
+                auto stats = client.get_bittorrent_stats();
+                LOG_MAIN_INFO("BitTorrent Status: ENABLED");
+                LOG_MAIN_INFO("Active torrents: " << torrent_count);
+                LOG_MAIN_INFO("Total downloaded: " << (stats.first / 1024.0 / 1024.0) << " MB");
+                LOG_MAIN_INFO("Total uploaded: " << (stats.second / 1024.0 / 1024.0) << " MB");
+            } else {
+                LOG_MAIN_INFO("BitTorrent Status: DISABLED");
+            }
+        }
+        else if (command == "torrent_add") {
+            std::string torrent_file, download_path;
+            iss >> torrent_file >> download_path;
+            
+            if (!torrent_file.empty() && !download_path.empty()) {
+                if (!client.is_bittorrent_enabled()) {
+                    LOG_MAIN_ERROR("BitTorrent is not enabled. Use 'bittorrent_enable' first.");
+                } else {
+                    LOG_MAIN_INFO("Adding torrent: " << torrent_file);
+                    auto torrent = client.add_torrent(torrent_file, download_path);
+                    if (torrent) {
+                        LOG_MAIN_INFO("Torrent added successfully");
+                    } else {
+                        LOG_MAIN_ERROR("Failed to add torrent");
+                    }
+                }
+            } else {
+                std::cout << "Usage: torrent_add <torrent_file> <download_path>" << std::endl;
+            }
+        }
+        else if (command == "torrent_list") {
+            if (!client.is_bittorrent_enabled()) {
+                LOG_MAIN_ERROR("BitTorrent is not enabled");
+            } else {
+                auto torrents = client.get_all_torrents();
+                if (torrents.empty()) {
+                    std::cout << "No active torrents." << std::endl;
+                } else {
+                    std::cout << "Active torrents:" << std::endl;
+                    for (const auto& torrent : torrents) {
+                        const auto& info = torrent->get_torrent_info();
+                        std::cout << "  Info Hash: " << librats::info_hash_to_hex(info.get_info_hash()) << std::endl;
+                        std::cout << "    Name: " << info.get_name() << std::endl;
+                        std::cout << "    Size: " << (info.get_total_length() / 1024.0 / 1024.0) << " MB" << std::endl;
+                        std::cout << "    Downloaded: " << (torrent->get_downloaded_bytes() / 1024.0 / 1024.0) << " MB" << std::endl;
+                        std::cout << "    Uploaded: " << (torrent->get_uploaded_bytes() / 1024.0 / 1024.0) << " MB" << std::endl;
+                        std::cout << "    Progress: " << torrent->get_progress_percentage() << "%" << std::endl;
+                        std::cout << "    Peers: " << torrent->get_peer_count() << std::endl;
+                        std::cout << "    Status: ";
+                        if (torrent->is_complete()) {
+                            std::cout << "COMPLETE";
+                        } else if (torrent->is_paused()) {
+                            std::cout << "PAUSED";
+                        } else if (torrent->is_running()) {
+                            std::cout << "DOWNLOADING";
+                        } else {
+                            std::cout << "STOPPED";
+                        }
+                        std::cout << std::endl << std::endl;
+                    }
+                }
+            }
+        }
+        else if (command == "torrent_remove") {
+            std::string hash_str;
+            iss >> hash_str;
+            
+            if (!hash_str.empty()) {
+                if (!client.is_bittorrent_enabled()) {
+                    LOG_MAIN_ERROR("BitTorrent is not enabled");
+                } else {
+                    try {
+                        librats::InfoHash info_hash = librats::hex_to_info_hash(hash_str);
+                        if (client.remove_torrent(info_hash)) {
+                            LOG_MAIN_INFO("Torrent removed successfully");
+                        } else {
+                            LOG_MAIN_ERROR("Failed to remove torrent (not found or error)");
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_MAIN_ERROR("Invalid info hash format: " << e.what());
+                    }
+                }
+            } else {
+                std::cout << "Usage: torrent_remove <info_hash>" << std::endl;
+            }
+        }
+        else if (command == "torrent_info") {
+            std::string hash_str;
+            iss >> hash_str;
+            
+            if (!hash_str.empty()) {
+                if (!client.is_bittorrent_enabled()) {
+                    LOG_MAIN_ERROR("BitTorrent is not enabled");
+                } else {
+                    try {
+                        librats::InfoHash info_hash = librats::hex_to_info_hash(hash_str);
+                        auto torrent = client.get_torrent(info_hash);
+                        if (torrent) {
+                            const auto& info = torrent->get_torrent_info();
+                            std::cout << "Torrent Information:" << std::endl;
+                            std::cout << "  Info Hash: " << librats::info_hash_to_hex(info.get_info_hash()) << std::endl;
+                            std::cout << "  Name: " << info.get_name() << std::endl;
+                            std::cout << "  Total Size: " << (info.get_total_length() / 1024.0 / 1024.0) << " MB" << std::endl;
+                            std::cout << "  Piece Length: " << info.get_piece_length() << " bytes" << std::endl;
+                            std::cout << "  Piece Count: " << info.get_num_pieces() << std::endl;
+                            std::cout << "  Downloaded: " << (torrent->get_downloaded_bytes() / 1024.0 / 1024.0) << " MB" << std::endl;
+                            std::cout << "  Uploaded: " << (torrent->get_uploaded_bytes() / 1024.0 / 1024.0) << " MB" << std::endl;
+                            std::cout << "  Progress: " << torrent->get_progress_percentage() << "%" << std::endl;
+                            std::cout << "  Completed Pieces: " << torrent->get_completed_pieces() << "/" << info.get_num_pieces() << std::endl;
+                            std::cout << "  Connected Peers: " << torrent->get_peer_count() << std::endl;
+                            std::cout << "  Status: ";
+                            if (torrent->is_complete()) {
+                                std::cout << "COMPLETE";
+                            } else if (torrent->is_paused()) {
+                                std::cout << "PAUSED";
+                            } else if (torrent->is_running()) {
+                                std::cout << "DOWNLOADING";
+                            } else {
+                                std::cout << "STOPPED";
+                            }
+                            std::cout << std::endl;
+                            
+                            // Show file list
+                            const auto& files = info.get_files();
+                            if (files.size() > 1) {
+                                std::cout << "  Files:" << std::endl;
+                                for (const auto& file : files) {
+                                    std::cout << "    - " << file.path << " (" << (file.length / 1024.0 / 1024.0) << " MB)" << std::endl;
+                                }
+                            }
+                        } else {
+                            LOG_MAIN_ERROR("Torrent not found");
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_MAIN_ERROR("Invalid info hash format: " << e.what());
+                    }
+                }
+            } else {
+                std::cout << "Usage: torrent_info <info_hash>" << std::endl;
+            }
+        }
+        else if (command == "torrent_pause") {
+            std::string hash_str;
+            iss >> hash_str;
+            
+            if (!hash_str.empty()) {
+                if (!client.is_bittorrent_enabled()) {
+                    LOG_MAIN_ERROR("BitTorrent is not enabled");
+                } else {
+                    try {
+                        librats::InfoHash info_hash = librats::hex_to_info_hash(hash_str);
+                        auto torrent = client.get_torrent(info_hash);
+                        if (torrent) {
+                            torrent->pause();
+                            LOG_MAIN_INFO("Torrent paused");
+                        } else {
+                            LOG_MAIN_ERROR("Torrent not found");
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_MAIN_ERROR("Invalid info hash format: " << e.what());
+                    }
+                }
+            } else {
+                std::cout << "Usage: torrent_pause <info_hash>" << std::endl;
+            }
+        }
+        else if (command == "torrent_resume") {
+            std::string hash_str;
+            iss >> hash_str;
+            
+            if (!hash_str.empty()) {
+                if (!client.is_bittorrent_enabled()) {
+                    LOG_MAIN_ERROR("BitTorrent is not enabled");
+                } else {
+                    try {
+                        librats::InfoHash info_hash = librats::hex_to_info_hash(hash_str);
+                        auto torrent = client.get_torrent(info_hash);
+                        if (torrent) {
+                            torrent->resume();
+                            LOG_MAIN_INFO("Torrent resumed");
+                        } else {
+                            LOG_MAIN_ERROR("Torrent not found");
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_MAIN_ERROR("Invalid info hash format: " << e.what());
+                    }
+                }
+            } else {
+                std::cout << "Usage: torrent_resume <info_hash>" << std::endl;
+            }
+        }
+        else if (command == "torrent_peers") {
+            std::string hash_str;
+            iss >> hash_str;
+            
+            if (!hash_str.empty()) {
+                if (!client.is_bittorrent_enabled()) {
+                    LOG_MAIN_ERROR("BitTorrent is not enabled");
+                } else {
+                    try {
+                        librats::InfoHash info_hash = librats::hex_to_info_hash(hash_str);
+                        auto torrent = client.get_torrent(info_hash);
+                        if (torrent) {
+                            auto peers = torrent->get_connected_peers();
+                            if (peers.empty()) {
+                                std::cout << "No connected peers for this torrent." << std::endl;
+                            } else {
+                                std::cout << "Connected peers (" << peers.size() << "):" << std::endl;
+                                for (const auto& peer : peers) {
+                                    std::cout << "  " << peer.ip << ":" << peer.port << std::endl;
+                                }
+                            }
+                        } else {
+                            LOG_MAIN_ERROR("Torrent not found");
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_MAIN_ERROR("Invalid info hash format: " << e.what());
+                    }
+                }
+            } else {
+                std::cout << "Usage: torrent_peers <info_hash>" << std::endl;
+            }
+        }
+        else if (command == "bittorrent_stats") {
+            if (!client.is_bittorrent_enabled()) {
+                LOG_MAIN_ERROR("BitTorrent is not enabled");
+            } else {
+                auto stats = client.get_bittorrent_stats();
+                size_t torrent_count = client.get_active_torrents_count();
+                
+                std::cout << "BitTorrent Statistics:" << std::endl;
+                std::cout << "  Active Torrents: " << torrent_count << std::endl;
+                std::cout << "  Total Downloaded: " << (stats.first / 1024.0 / 1024.0) << " MB" << std::endl;
+                std::cout << "  Total Uploaded: " << (stats.second / 1024.0 / 1024.0) << " MB" << std::endl;
+                std::cout << "  Share Ratio: " << (stats.first > 0 ? (double)stats.second / stats.first : 0.0) << std::endl;
+            }
+        }
+#endif // RATS_SEACH_FEATURES
         else {
             std::cout << "Unknown command: " << command << std::endl;
             std::cout << "Type 'help' for available commands." << std::endl;
