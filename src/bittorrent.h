@@ -26,6 +26,7 @@ namespace librats {
 class BitTorrentClient;
 class TorrentDownload;
 class PeerConnection;
+class MetadataDownload;
 
 // Type aliases
 using InfoHash = std::array<uint8_t, 20>;
@@ -145,6 +146,23 @@ enum class MessageType : uint8_t {
     EXTENDED = 20
 };
 
+// Extended message types (BEP 10)
+enum class ExtendedMessageType : uint8_t {
+    HANDSHAKE = 0,
+    UT_METADATA = 1  // Our local ID for ut_metadata extension
+};
+
+// Metadata message types (BEP 9)
+enum class MetadataMessageType : uint8_t {
+    REQUEST = 0,
+    DATA = 1,
+    REJECT = 2
+};
+
+// Metadata constants
+constexpr size_t METADATA_PIECE_SIZE = 16384;  // 16KB metadata pieces
+constexpr size_t MAX_METADATA_SIZE = 10 * 1024 * 1024;  // 10MB max metadata size
+
 // BitTorrent peer wire protocol messages
 struct PeerMessage {
     MessageType type;
@@ -234,6 +252,15 @@ public:
     const Peer& get_peer_info() const { return peer_info_; }
     const PeerID& get_peer_id() const { return peer_id_; }
     
+    // Extension protocol (BEP 10)
+    bool supports_extensions() const { return supports_extensions_; }
+    bool supports_metadata_exchange() const { return supports_metadata_exchange_; }
+    uint8_t get_peer_metadata_extension_id() const { return peer_ut_metadata_id_; }
+    
+    // Metadata exchange (BEP 9)
+    void request_metadata_piece(uint32_t piece_index);
+    size_t get_peer_metadata_size() const { return peer_metadata_size_; }
+    
 private:
     TorrentDownload* torrent_;
     Peer peer_info_;
@@ -267,6 +294,12 @@ private:
     std::vector<uint8_t> message_buffer_;
     size_t expected_message_length_;
     
+    // Extension protocol support (BEP 10)
+    bool supports_extensions_;
+    bool supports_metadata_exchange_;
+    uint8_t peer_ut_metadata_id_;  // Peer's extension ID for ut_metadata
+    size_t peer_metadata_size_;
+    
     void connection_loop();
     bool perform_handshake();
     bool send_handshake();
@@ -286,6 +319,12 @@ private:
     void handle_request(const std::vector<uint8_t>& payload);
     void handle_piece(const std::vector<uint8_t>& payload);
     void handle_cancel(const std::vector<uint8_t>& payload);
+    void handle_extended(const std::vector<uint8_t>& payload);
+    
+    // Extended message handlers (BEP 10)
+    void handle_extended_handshake(const std::vector<uint8_t>& payload);
+    void handle_metadata_message(const std::vector<uint8_t>& payload);
+    void send_extended_handshake();
     
     // Utility
     void cleanup_expired_requests();
@@ -299,6 +338,51 @@ using PieceCompleteCallback = std::function<void(PieceIndex piece_index)>;
 using TorrentCompleteCallback = std::function<void(const std::string& torrent_name)>;
 using PeerConnectedCallback = std::function<void(const Peer& peer)>;
 using PeerDisconnectedCallback = std::function<void(const Peer& peer)>;
+using MetadataCompleteCallback = std::function<void(const TorrentInfo& torrent_info)>;
+
+// Metadata download coordinator (BEP 9)
+class MetadataDownload {
+public:
+    MetadataDownload(const InfoHash& info_hash, size_t metadata_size);
+    ~MetadataDownload();
+    
+    // Store a metadata piece from a peer
+    bool store_metadata_piece(uint32_t piece_index, const std::vector<uint8_t>& data);
+    
+    // Check if we have all metadata pieces
+    bool is_complete() const;
+    
+    // Get the reconstructed metadata
+    std::vector<uint8_t> get_metadata() const;
+    
+    // Verify metadata hash matches expected info hash
+    bool verify_metadata() const;
+    
+    // Get next piece to request
+    uint32_t get_next_piece_to_request() const;
+    
+    // Check if a piece is complete
+    bool is_piece_complete(uint32_t piece_index) const;
+    
+    // Get metadata info
+    const InfoHash& get_info_hash() const { return info_hash_; }
+    size_t get_metadata_size() const { return metadata_size_; }
+    uint32_t get_num_pieces() const { return num_pieces_; }
+    
+    // Set completion callback
+    void set_completion_callback(MetadataCompleteCallback callback) { completion_callback_ = callback; }
+    
+private:
+    InfoHash info_hash_;
+    size_t metadata_size_;
+    uint32_t num_pieces_;
+    std::vector<std::vector<uint8_t>> pieces_;
+    std::vector<bool> pieces_complete_;
+    mutable std::mutex mutex_;
+    MetadataCompleteCallback completion_callback_;
+    
+    void check_completion();
+};
 
 // Individual torrent download
 class TorrentDownload {
@@ -354,6 +438,10 @@ public:
     void announce_to_dht(DhtClient* dht_client);
     void request_peers_from_dht(DhtClient* dht_client);
     
+    // Metadata download (BEP 9)
+    MetadataDownload* get_metadata_download() const { return metadata_download_.get(); }
+    void set_metadata_download(std::shared_ptr<MetadataDownload> metadata_download) { metadata_download_ = metadata_download; }
+    
 private:
     TorrentInfo torrent_info_;
     std::string download_path_;
@@ -391,6 +479,9 @@ private:
     // Statistics
     std::atomic<uint64_t> total_downloaded_;
     std::atomic<uint64_t> total_uploaded_;
+    
+    // Metadata download (BEP 9)
+    std::shared_ptr<MetadataDownload> metadata_download_;
     
     void download_loop();
     void peer_management_loop();
@@ -455,6 +546,11 @@ public:
     void set_torrent_completed_callback(std::function<void(const InfoHash&)> callback) { torrent_completed_callback_ = callback; }
     void set_torrent_removed_callback(std::function<void(const InfoHash&)> callback) { torrent_removed_callback_ = callback; }
     
+    // Metadata download management (BEP 9)
+    std::shared_ptr<MetadataDownload> get_metadata_download(const InfoHash& info_hash);
+    void register_metadata_download(const InfoHash& info_hash, std::shared_ptr<MetadataDownload> metadata_download);
+    void complete_metadata_download(const InfoHash& info_hash, const TorrentInfo& torrent_info, const std::string& download_path);
+    
 private:
     std::atomic<bool> running_;
     int listen_port_;
@@ -463,6 +559,11 @@ private:
     // Torrents
     std::map<InfoHash, std::shared_ptr<TorrentDownload>> torrents_;
     mutable std::mutex torrents_mutex_;
+    
+    // Metadata downloads (BEP 9)
+    std::map<InfoHash, std::shared_ptr<MetadataDownload>> metadata_downloads_;
+    std::map<InfoHash, std::string> metadata_download_paths_;  // Store download path for later
+    mutable std::mutex metadata_mutex_;
     
     // DHT integration
     DhtClient* dht_client_;
