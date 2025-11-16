@@ -4,7 +4,6 @@ build2/
 cmake-build-*/
 out/
 bin/
-lib/
 
 # CMake
 CMakeCache.txt
