@@ -10,8 +10,12 @@
   "scripts": {
     "build": "node-gyp rebuild",
     "clean": "node-gyp clean",
+    "preinstall": "node scripts/build-librats.js",
     "install": "node-gyp rebuild",
+    "postinstall": "node scripts/postinstall.js",
     "test": "node test/test.js",
+    "verify": "node scripts/verify-installation.js",
+    "prepare": "node scripts/prepare-package.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -49,8 +53,16 @@
   "files": [
     "lib/**/*",
     "src/**/*",
+    "scripts/**/*",
     "binding.gyp",
-    "README.md"
+    "README.md",
+    "../src/**/*.cpp",
+    "../src/**/*.h",
+    "../src/**/*.in",
+    "../3rdparty/**/*",
+    "../CMakeLists.txt",
+    "../LICENSE",
+    "!../src/main.cpp"
   ],
   "gypfile": true
 }

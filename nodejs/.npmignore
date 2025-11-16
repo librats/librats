@@ -1,0 +1,25 @@
+# Ignore build artifacts
+build/
+build-native/
+node_modules/
+
+# Ignore test data
+test-data/
+temp_transfers/
+
+# Ignore development files
+.vscode/
+.idea/
+*.log
+*.swp
+*.swo
+*~
+
+# Keep source files for building
+!src/
+!../src/
+!../3rdparty/
+!../CMakeLists.txt
+!binding.gyp
+!scripts/
+

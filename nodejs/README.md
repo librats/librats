@@ -16,33 +16,67 @@ Node.js bindings for librats - A high-performance peer-to-peer networking librar
 
 ## Installation
 
+### Quick Install
+
+Install directly from npm:
+
+```bash
+npm install librats
+```
+
+The installation process will automatically:
+1. Download all necessary source files
+2. Build the native librats library using CMake
+3. Build the Node.js native addon
+4. Set up the bindings
+
+**No additional build steps required!**
+
 ### Prerequisites
 
-- Node.js 12.0.0 or higher
-- Build tools for your platform:
-  - **Windows**: Visual Studio Build Tools or Visual Studio Community
-  - **Linux**: `build-essential` package (`sudo apt install build-essential`)
-  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+The following build tools are required and will be used automatically during installation:
 
-### Building librats
+- **Node.js**: 20.0.0 or higher
+- **CMake**: Version 3.10 or higher ([download here](https://cmake.org/download/))
+- **C++ Compiler and Build Tools**:
+  - **Windows**: Visual Studio Build Tools 2017 or later ([download here](https://visualstudio.microsoft.com/downloads/))
+  - **Linux**: `build-essential` and `cmake` packages
+    ```bash
+    sudo apt install build-essential cmake
+    ```
+  - **macOS**: Xcode Command Line Tools
+    ```bash
+    xcode-select --install
+    ```
 
-First, build the native librats library:
+### Verifying Installation
+
+After installation, you can verify everything is working:
 
 ```bash
-# From the project root
-mkdir build && cd build
-cmake ..
-cmake --build .
+npm run verify
 ```
 
-### Installing Node.js Dependencies
+This will check that the native addon is built correctly and all features are available.
+
+### Building from Source
+
+If you're developing or need to rebuild:
 
 ```bash
-cd nodejs
+# Clone the repository
+git clone https://github.com/librats/librats.git
+cd librats/nodejs
+
+# Install (builds everything automatically)
 npm install
-```
 
-This will automatically build the native addon using `node-gyp`.
+# Verify the installation
+npm run verify
+
+# Or build manually
+npm run build
+```
 
 ## Quick Start
 
