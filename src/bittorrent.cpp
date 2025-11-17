@@ -2139,7 +2139,7 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
         LOG_BT_WARN("Metadata exchange requires connecting to peers and performing extended handshake.");
         LOG_BT_WARN("This is a complex feature that requires creating temporary peer connections.");
         LOG_BT_WARN("For now, please use a .torrent file with torrent_add command.");
-    }, 3, 6); // Use higher iteration and alpha values for better peer discovery
+    }, 0, 6); // Use higher iteration and alpha values for better peer discovery
     
     LOG_BT_INFO("Metadata download initiated for hash " << info_hash_to_hex(info_hash));
     LOG_BT_INFO("Waiting for DHT peer discovery...");
