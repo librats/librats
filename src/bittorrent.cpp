@@ -1286,16 +1286,21 @@ bool TorrentDownload::start() {
     
     LOG_BT_INFO("Starting torrent download: " << torrent_info_.get_name());
     
-    // Create directory structure
-    if (!create_directory_structure()) {
-        LOG_BT_ERROR("Failed to create directory structure");
-        return false;
-    }
-    
-    // Open files
-    if (!open_files()) {
-        LOG_BT_ERROR("Failed to open files");
-        return false;
+    // Skip file/directory operations for metadata-only downloads (empty download path)
+    if (!download_path_.empty()) {
+        // Create directory structure
+        if (!create_directory_structure()) {
+            LOG_BT_ERROR("Failed to create directory structure");
+            return false;
+        }
+        
+        // Open files
+        if (!open_files()) {
+            LOG_BT_ERROR("Failed to open files");
+            return false;
+        }
+    } else {
+        LOG_BT_DEBUG("Skipping file operations for metadata-only torrent");
     }
     
     running_ = true;
@@ -1518,6 +1523,11 @@ bool TorrentDownload::verify_piece(PieceIndex piece_index) {
 
 void TorrentDownload::write_piece_to_disk(PieceIndex piece_index) {
     std::lock_guard<std::mutex> lock(files_mutex_);
+    
+    // Skip for metadata-only torrents
+    if (download_path_.empty()) {
+        return;
+    }
     
     if (piece_index >= pieces_.size()) {
         LOG_BT_ERROR("Invalid piece index for disk write: " << piece_index);
