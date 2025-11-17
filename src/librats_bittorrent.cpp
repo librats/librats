@@ -136,6 +136,32 @@ std::pair<uint64_t, uint64_t> RatsClient::get_bittorrent_stats() const {
             bittorrent_client_->get_total_uploaded()};
 }
 
+void RatsClient::get_torrent_metadata(const InfoHash& info_hash, 
+                                      std::function<void(const TorrentInfo&, bool, const std::string&)> callback) {
+    if (!is_bittorrent_enabled()) {
+        LOG_CLIENT_ERROR("BitTorrent is not enabled. Call enable_bittorrent() first.");
+        if (callback) {
+            callback(TorrentInfo(), false, "BitTorrent is not enabled");
+        }
+        return;
+    }
+    
+    bittorrent_client_->get_torrent_metadata_by_hash(info_hash, callback);
+}
+
+void RatsClient::get_torrent_metadata(const std::string& info_hash_hex, 
+                                      std::function<void(const TorrentInfo&, bool, const std::string&)> callback) {
+    if (!is_bittorrent_enabled()) {
+        LOG_CLIENT_ERROR("BitTorrent is not enabled. Call enable_bittorrent() first.");
+        if (callback) {
+            callback(TorrentInfo(), false, "BitTorrent is not enabled");
+        }
+        return;
+    }
+    
+    bittorrent_client_->get_torrent_metadata_by_hash(info_hash_hex, callback);
+}
+
 }
 
 #endif // RATS_SEACH_FEATURES
