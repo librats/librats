@@ -556,6 +556,11 @@ public:
     void register_metadata_download(const InfoHash& info_hash, std::shared_ptr<MetadataDownload> metadata_download);
     void complete_metadata_download(const InfoHash& info_hash, const TorrentInfo& torrent_info, const std::string& download_path);
     
+    // Get torrent metadata without downloading (BEP 9)
+    using MetadataRetrievalCallback = std::function<void(const TorrentInfo& torrent_info, bool success, const std::string& error_message)>;
+    void get_torrent_metadata_by_hash(const InfoHash& info_hash, MetadataRetrievalCallback callback);
+    void get_torrent_metadata_by_hash(const std::string& info_hash_hex, MetadataRetrievalCallback callback);
+    
 private:
     std::atomic<bool> running_;
     int listen_port_;
@@ -568,6 +573,8 @@ private:
     // Metadata downloads (BEP 9)
     std::map<InfoHash, std::shared_ptr<MetadataDownload>> metadata_downloads_;
     std::map<InfoHash, std::string> metadata_download_paths_;  // Store download path for later
+    std::map<InfoHash, std::shared_ptr<TorrentDownload>> metadata_only_torrents_;  // Temporary torrents for metadata retrieval
+    std::map<InfoHash, MetadataRetrievalCallback> metadata_retrieval_callbacks_;  // Callbacks for metadata retrieval
     mutable std::mutex metadata_mutex_;
     
     // DHT integration

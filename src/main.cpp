@@ -64,6 +64,7 @@ void print_help() {
     std::cout << "  bittorrent_status  - Show BitTorrent status" << std::endl;
     std::cout << "  torrent_add <file> <path> - Add torrent from .torrent file" << std::endl;
     std::cout << "  torrent_add_hash <hash> <path> - Add torrent by info hash (uses DHT)" << std::endl;
+    std::cout << "  torrent_metadata <hash> - Get torrent metadata without downloading" << std::endl;
     std::cout << "  torrent_find_peers <hash> - Find peers for torrent via DHT" << std::endl;
     std::cout << "  torrent_list       - List all active torrents" << std::endl;
     std::cout << "  torrent_remove <hash> - Remove torrent by info hash" << std::endl;
@@ -729,6 +730,55 @@ int main(int argc, char* argv[]) {
                 }
             } else {
                 std::cout << "Usage: torrent_add_hash <info_hash> <download_path>" << std::endl;
+            }
+        }
+        else if (command == "torrent_metadata") {
+            std::string hash_str;
+            iss >> hash_str;
+            
+            if (!hash_str.empty()) {
+                if (!client.is_bittorrent_enabled()) {
+                    LOG_MAIN_ERROR("BitTorrent is not enabled. Use 'bittorrent_enable' first.");
+                } else if (!client.is_dht_running()) {
+                    LOG_MAIN_ERROR("DHT is not running. Metadata retrieval requires DHT for peer discovery.");
+                    LOG_MAIN_INFO("Start DHT with 'dht_start' and try again.");
+                } else {
+                    LOG_MAIN_INFO("Retrieving metadata for torrent hash: " << hash_str);
+                    LOG_MAIN_INFO("This will use DHT to discover peers and download metadata...");
+                    
+                    client.get_torrent_metadata(hash_str, 
+                        [hash_str](const librats::TorrentInfo& torrent_info, bool success, const std::string& error_message) {
+                            if (success) {
+                                LOG_MAIN_INFO("=== Torrent Metadata Retrieved Successfully ===");
+                                LOG_MAIN_INFO("Name: " << torrent_info.get_name());
+                                LOG_MAIN_INFO("Info Hash: " << librats::info_hash_to_hex(torrent_info.get_info_hash()));
+                                LOG_MAIN_INFO("Total Size: " << (torrent_info.get_total_length() / 1024.0 / 1024.0) << " MB");
+                                LOG_MAIN_INFO("Piece Length: " << torrent_info.get_piece_length() << " bytes");
+                                LOG_MAIN_INFO("Number of Pieces: " << torrent_info.get_num_pieces());
+                                LOG_MAIN_INFO("Number of Files: " << torrent_info.get_files().size());
+                                LOG_MAIN_INFO("Private: " << (torrent_info.is_private() ? "yes" : "no"));
+                                
+                                const auto& files = torrent_info.get_files();
+                                if (files.size() == 1) {
+                                    LOG_MAIN_INFO("Single file torrent");
+                                } else {
+                                    std::cout << "\nFiles in torrent:" << std::endl;
+                                    for (const auto& file : files) {
+                                        std::cout << "  - " << file.path << " (" << (file.length / 1024.0 / 1024.0) << " MB)" << std::endl;
+                                    }
+                                }
+                                
+                                LOG_MAIN_INFO("\nYou can now download this torrent using:");
+                                LOG_MAIN_INFO("  torrent_add_hash " << hash_str << " <download_path>");
+                            } else {
+                                LOG_MAIN_ERROR("Failed to retrieve metadata: " << error_message);
+                            }
+                        });
+                    
+                    LOG_MAIN_INFO("Metadata retrieval initiated. Waiting for DHT peer discovery...");
+                }
+            } else {
+                std::cout << "Usage: torrent_metadata <info_hash>" << std::endl;
             }
         }
         else if (command == "torrent_find_peers") {

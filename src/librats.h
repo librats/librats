@@ -1435,6 +1435,24 @@ public:
      * @return Pair of (downloaded_bytes, uploaded_bytes)
      */
     std::pair<uint64_t, uint64_t> get_bittorrent_stats() const;
+    
+    /**
+     * Get torrent metadata without downloading (requires DHT to be running)
+     * @param info_hash Info hash of the torrent
+     * @param callback Function called when metadata is retrieved (torrent_info, success, error_message)
+     * @note This only retrieves metadata via BEP 9, it does not start downloading
+     */
+    void get_torrent_metadata(const InfoHash& info_hash, 
+                             std::function<void(const TorrentInfo&, bool, const std::string&)> callback);
+    
+    /**
+     * Get torrent metadata without downloading by hex string (requires DHT to be running)
+     * @param info_hash_hex Info hash as 40-character hex string
+     * @param callback Function called when metadata is retrieved (torrent_info, success, error_message)
+     * @note This only retrieves metadata via BEP 9, it does not start downloading
+     */
+    void get_torrent_metadata(const std::string& info_hash_hex, 
+                             std::function<void(const TorrentInfo&, bool, const std::string&)> callback);
 #endif // RATS_SEACH_FEATURES
 
 private:
