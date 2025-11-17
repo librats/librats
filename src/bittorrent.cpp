@@ -245,6 +245,31 @@ bool TorrentInfo::is_valid() const {
            !files_.empty();
 }
 
+TorrentInfo TorrentInfo::create_for_metadata_exchange(const InfoHash& info_hash) {
+    TorrentInfo torrent;
+    
+    // Set the info hash directly
+    torrent.info_hash_ = info_hash;
+    
+    // Set minimal required fields to make it valid
+    torrent.name_ = "metadata_download_" + info_hash_to_hex(info_hash).substr(0, 8);
+    torrent.piece_length_ = 16384;  // Standard piece length
+    torrent.total_length_ = 1;      // Minimal length
+    torrent.private_ = false;
+    
+    // Add a dummy piece hash (will be replaced when metadata is downloaded)
+    std::array<uint8_t, 20> dummy_hash;
+    dummy_hash.fill(0);
+    torrent.piece_hashes_.push_back(dummy_hash);
+    
+    // Add a dummy file
+    torrent.files_.emplace_back("temp", 1, 0);
+    
+    LOG_BT_DEBUG("Created metadata exchange TorrentInfo for hash: " << info_hash_to_hex(info_hash));
+    
+    return torrent;
+}
+
 //=============================================================================
 // PeerMessage Implementation
 //=============================================================================
@@ -828,8 +853,28 @@ void PeerConnection::handle_extended_handshake(const std::vector<uint8_t>& paylo
             peer_metadata_size_ = static_cast<size_t>(handshake["metadata_size"].as_integer());
             LOG_BT_DEBUG("Peer has metadata size: " << peer_metadata_size_ << " bytes");
             
-            // If we are downloading metadata, start requesting pieces
+            // Check if we need to create a metadata download
             auto* metadata_download = torrent_->get_metadata_download();
+            
+            if (!metadata_download && peer_metadata_size_ > 0 && peer_metadata_size_ <= MAX_METADATA_SIZE) {
+                // Create metadata download with the correct size
+                const auto& info_hash = torrent_->get_torrent_info().get_info_hash();
+                LOG_BT_INFO("Creating metadata download for hash " << info_hash_to_hex(info_hash) 
+                           << " with size " << peer_metadata_size_ << " bytes");
+                
+                auto new_metadata_download = std::make_shared<MetadataDownload>(info_hash, peer_metadata_size_);
+                
+                // Set completion callback - need to use a custom approach since we need to call back through TorrentDownload
+                // For now, we'll leave the completion callback to be set by add_torrent_by_hash after metadata download is created
+                // The BitTorrentClient will need to monitor metadata downloads and set their callbacks appropriately
+                
+                torrent_->set_metadata_download(new_metadata_download);
+                metadata_download = new_metadata_download.get();
+                
+                LOG_BT_INFO("Metadata download created and ready");
+            }
+            
+            // If we are downloading metadata, start requesting pieces
             if (metadata_download && supports_metadata_exchange_) {
                 // Request first metadata piece
                 uint32_t next_piece = metadata_download->get_next_piece_to_request();
@@ -1901,6 +1946,20 @@ void TorrentDownload::request_peers_from_dht(DhtClient* dht_client) {
     });
 }
 
+void TorrentDownload::set_metadata_download(std::shared_ptr<MetadataDownload> metadata_download) {
+    metadata_download_ = metadata_download;
+    
+    // Set up the completion callback to forward to our metadata_complete_callback_
+    if (metadata_download_) {
+        metadata_download_->set_completion_callback([this](const TorrentInfo& torrent_info) {
+            LOG_BT_INFO("Metadata download completed, notifying callback");
+            if (metadata_complete_callback_) {
+                metadata_complete_callback_(torrent_info);
+            }
+        });
+    }
+}
+
 //=============================================================================
 // BitTorrentClient Implementation
 //=============================================================================
@@ -2089,11 +2148,41 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
         metadata_download_paths_[info_hash] = download_path;
     }
     
+    // Create a minimal TorrentInfo for metadata exchange
+    // We need a valid TorrentInfo to create peer connections, but we don't have the real metadata yet
+    TorrentInfo metadata_torrent_info = TorrentInfo::create_for_metadata_exchange(info_hash);
+    
+    // Create a temporary torrent download for metadata exchange only
+    auto metadata_torrent = std::make_shared<TorrentDownload>(metadata_torrent_info, download_path);
+    
+    // Set up metadata completion callback
+    // When metadata download completes, we'll stop the temporary torrent and create the real one
+    metadata_torrent->set_metadata_complete_callback([this, info_hash, download_path, metadata_torrent](const TorrentInfo& torrent_info) {
+        LOG_BT_INFO("Metadata download completed for " << torrent_info.get_name());
+        
+        // Stop the temporary metadata torrent
+        metadata_torrent->stop();
+        
+        // Complete the metadata download and create the real torrent
+        complete_metadata_download(info_hash, torrent_info, download_path);
+    });
+    
+    // Note: We don't create MetadataDownload here yet
+    // It will be created dynamically when we get the metadata size from a peer's extended handshake
+    // This happens in handle_extended_handshake when peer sends metadata_size
+    // When set_metadata_download() is called, it will automatically set up the completion callback chain
+    
+    // Start the metadata torrent (just for peer connections)
+    if (!metadata_torrent->start()) {
+        LOG_BT_ERROR("Failed to start metadata download torrent");
+        return nullptr;
+    }
+    
     // Use DHT to find peers for this info hash
     LOG_BT_INFO("Discovering peers via DHT for hash: " << info_hash_to_hex(info_hash));
     
     // Find peers via DHT
-    dht_client_->find_peers(info_hash, [this, info_hash, download_path](const std::vector<Peer>& peers, const InfoHash& hash) {
+    dht_client_->find_peers(info_hash, [this, info_hash, metadata_torrent](const std::vector<Peer>& peers, const InfoHash& hash) {
         LOG_BT_INFO("DHT found " << peers.size() << " peers for hash " << info_hash_to_hex(info_hash));
         
         if (peers.empty()) {
@@ -2101,50 +2190,32 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
             return;
         }
         
-        // Check if we need to create a metadata download
-        std::shared_ptr<MetadataDownload> metadata_download;
-        {
-            std::lock_guard<std::mutex> lock(metadata_mutex_);
-            auto it = metadata_downloads_.find(info_hash);
-            if (it != metadata_downloads_.end()) {
-                metadata_download = it->second;
-                LOG_BT_DEBUG("Using existing metadata download for hash " << info_hash_to_hex(info_hash));
+        // Connect to peers to get metadata
+        size_t max_peers_to_try = (std::min)(peers.size(), static_cast<size_t>(10));
+        for (size_t i = 0; i < max_peers_to_try; ++i) {
+            const auto& peer = peers[i];
+            LOG_BT_INFO("Connecting to peer " << peer.ip << ":" << peer.port << " for metadata exchange");
+            
+            // Add peer to the metadata torrent
+            // The peer connection will automatically:
+            // 1. Perform BitTorrent handshake with the info hash
+            // 2. Exchange extended handshake
+            // 3. Detect metadata support and size
+            // 4. Request metadata pieces
+            // 5. Complete metadata download via callback
+            if (!metadata_torrent->add_peer(peer)) {
+                LOG_BT_DEBUG("Failed to add peer " << peer.ip << ":" << peer.port);
             }
         }
         
-        // We need to connect to peers to get metadata size first
-        // Create a dummy TorrentInfo with just the info hash for peer connections
-        TorrentInfo dummy_torrent;
-        // We'll create a minimal TorrentDownload just for metadata exchange
-        // This is a bit of a hack, but works for now
-        
-        // Connect to the first few peers to try to get metadata
-        size_t max_peers_to_try = (std::min)(peers.size(), static_cast<size_t>(5));
-        for (size_t i = 0; i < max_peers_to_try; ++i) {
-            const auto& peer = peers[i];
-            LOG_BT_INFO("Attempting to connect to peer " << peer.ip << ":" << peer.port << " for metadata exchange");
-            
-            // For now, just log the peer info
-            // A full implementation would:
-            // 1. Connect to the peer
-            // 2. Perform BitTorrent handshake
-            // 3. Exchange extended handshake to get metadata size
-            // 4. Create MetadataDownload with the size
-            // 5. Request metadata pieces
-            // 6. When complete, create TorrentInfo and start download
-            
-            LOG_BT_INFO("  Peer: " << peer.ip << ":" << peer.port);
-        }
-        
-        LOG_BT_WARN("Metadata exchange requires connecting to peers and performing extended handshake.");
-        LOG_BT_WARN("This is a complex feature that requires creating temporary peer connections.");
-        LOG_BT_WARN("For now, please use a .torrent file with torrent_add command.");
+        LOG_BT_INFO("Connected to " << max_peers_to_try << " peers for metadata exchange");
     }, 0, 6); // Use higher iteration and alpha values for better peer discovery
     
     LOG_BT_INFO("Metadata download initiated for hash " << info_hash_to_hex(info_hash));
-    LOG_BT_INFO("Waiting for DHT peer discovery...");
+    LOG_BT_INFO("Waiting for DHT peer discovery and metadata exchange...");
+    LOG_BT_INFO("Note: Metadata download will complete asynchronously via BEP 9");
     
-    return nullptr;
+    return nullptr; // Will return the real torrent via completion callback
 }
 
 std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const std::string& info_hash_hex, 

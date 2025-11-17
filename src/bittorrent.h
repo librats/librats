@@ -115,6 +115,9 @@ public:
     // Validate torrent info
     bool is_valid() const;
     
+    // Create a minimal torrent info for metadata exchange only (BEP 9)
+    static TorrentInfo create_for_metadata_exchange(const InfoHash& info_hash);
+    
 private:
     InfoHash info_hash_;
     std::string name_;
@@ -429,6 +432,7 @@ public:
     void set_torrent_complete_callback(TorrentCompleteCallback callback) { torrent_complete_callback_ = callback; }
     void set_peer_connected_callback(PeerConnectedCallback callback) { peer_connected_callback_ = callback; }
     void set_peer_disconnected_callback(PeerDisconnectedCallback callback) { peer_disconnected_callback_ = callback; }
+    void set_metadata_complete_callback(MetadataCompleteCallback callback) { metadata_complete_callback_ = callback; }
     
     // Torrent info access
     const TorrentInfo& get_torrent_info() const { return torrent_info_; }
@@ -440,7 +444,7 @@ public:
     
     // Metadata download (BEP 9)
     MetadataDownload* get_metadata_download() const { return metadata_download_.get(); }
-    void set_metadata_download(std::shared_ptr<MetadataDownload> metadata_download) { metadata_download_ = metadata_download; }
+    void set_metadata_download(std::shared_ptr<MetadataDownload> metadata_download);
     
 private:
     TorrentInfo torrent_info_;
@@ -475,6 +479,7 @@ private:
     TorrentCompleteCallback torrent_complete_callback_;
     PeerConnectedCallback peer_connected_callback_;
     PeerDisconnectedCallback peer_disconnected_callback_;
+    MetadataCompleteCallback metadata_complete_callback_;
     
     // Statistics
     std::atomic<uint64_t> total_downloaded_;
