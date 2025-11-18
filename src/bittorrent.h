@@ -27,6 +27,7 @@ class BitTorrentClient;
 class TorrentDownload;
 class PeerConnection;
 class MetadataDownload;
+class TrackerManager;
 
 // Type aliases
 using InfoHash = std::array<uint8_t, 20>;
@@ -461,6 +462,11 @@ public:
     void announce_to_dht(DhtClient* dht_client);
     void request_peers_from_dht(DhtClient* dht_client);
     
+    // Tracker integration
+    void announce_to_trackers();
+    void request_peers_from_trackers();
+    TrackerManager* get_tracker_manager() const { return tracker_manager_.get(); }
+    
     // Metadata download (BEP 9)
     MetadataDownload* get_metadata_download() const { return metadata_download_.get(); }
     void set_metadata_download(std::shared_ptr<MetadataDownload> metadata_download);
@@ -506,6 +512,10 @@ private:
     
     // Metadata download (BEP 9)
     std::shared_ptr<MetadataDownload> metadata_download_;
+    
+    // Tracker manager
+    std::unique_ptr<TrackerManager> tracker_manager_;
+    PeerID our_peer_id_;
     
     void download_loop();
     void peer_management_loop();

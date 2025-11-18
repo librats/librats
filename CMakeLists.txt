@@ -158,6 +158,8 @@ if(RATS_SEACH_FEATURES)
         src/librats_bittorrent.cpp
         src/bittorrent.cpp
         src/bittorrent.h
+        src/tracker.cpp
+        src/tracker.h
     )
 endif()
 
@@ -307,7 +309,10 @@ if(RATS_BUILD_TESTS)
     
     # Add BitTorrent tests if RATS_SEACH_FEATURES is enabled
     if(RATS_SEACH_FEATURES)
-        list(APPEND TEST_SOURCES tests/test_bittorrent.cpp)
+        list(APPEND TEST_SOURCES 
+            tests/test_bittorrent.cpp
+            tests/test_tracker.cpp
+        )
     endif()
 
     if(RATS_BINDINGS)
