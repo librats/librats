@@ -6,8 +6,9 @@
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Release](https://img.shields.io/github/release/DEgITx/librats.svg)](https://github.com/DEgITx/librats/releases)
+[![npm](https://img.shields.io/npm/v/librats.svg)](https://www.npmjs.com/package/librats)
 
-**A high-performance, lightweight peer-to-peer networking library with C++, C, Java, Python, and Android support**
+**A high-performance, lightweight peer-to-peer networking library with C++, C, Node.js, Java, Python, and Android support**
 
 librats is a modern P2P networking library designed for **superior performance** and **simplicity**. Built from the ground up in C++17 with comprehensive language bindings, it provides enterprise-grade P2P networking capabilities with minimal overhead and maximum efficiency.
 
@@ -72,6 +73,7 @@ librats is a modern P2P networking library designed for **superior performance**
 ### **Multi-Language Support**
 - **Native C++17**: Core implementation with full feature set and maximum performance
 - **C API**: Clean C interface for legacy systems and FFI bindings
+- **Node.js Bindings**: Native addon with async/await support and full TypeScript definitions ([npm package](https://www.npmjs.com/package/librats))
 - **Java/Android**: Complete JNI wrapper with high-level Java API for Android development
 - **Python Bindings**: Full-featured Python package with ctypes wrapper and asyncio support
 - **Cross-Platform**: Consistent API across Windows, Linux, macOS, and Android platforms
@@ -416,6 +418,10 @@ int main() {
     return 0;
 }
 ```
+
+### 9. Node.js Quick Start
+
+For more Node.js examples and TypeScript usage, see the [Node.js documentation](nodejs/README.md).
 
 ## 📖 API Documentation
 
@@ -789,7 +795,7 @@ librats provides comprehensive cross-platform support with bindings for multiple
 | **C/C++** | Native Library | ✅ **Fully Supported** | **Available Now** | Core implementation with full feature set |
 | **Android (NDK)** | Native C++ | ✅ **Fully Supported** | **Available Now** | Android NDK integration with JNI bindings |
 | **Android (Java)** | JNI Wrapper | ✅ **Fully Supported** | **Available Now** | High-level Java API for Android apps |
-| **JavaScript** | Native Module | 📋 **Planned** | **Soon** | Node.js native addon with async/await support |
+| **Node.js** | Native Addon | ✅ **Fully Supported** | **Available Now** | Native addon with async/await support ([npm](https://www.npmjs.com/package/librats)) |
 | **Python** | C Extension | ✅ **Fully Supported** | **Available Now** | CPython extension with asyncio integration |
 | **Rust** | FFI Bindings | 📋 **Planned** | **Soon** | Safe Rust bindings with tokio async support |
 | **Go** | CGO Bindings | 📋 **Future** | **Soon** | CGO wrapper for Go applications |
