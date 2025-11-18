@@ -1,4 +1,5 @@
 #include "bittorrent.h"
+#include "tracker.h"
 #include "fs.h"
 #include "network_utils.h"
 #include "socket.h"
@@ -1378,10 +1379,17 @@ TorrentDownload::TorrentDownload(const TorrentInfo& torrent_info, const std::str
         pieces_.push_back(std::make_unique<PieceInfo>(i, piece_hashes[i], piece_length));
     }
     
+    // Generate peer ID
+    our_peer_id_ = generate_peer_id();
+    
+    // Create tracker manager
+    tracker_manager_ = std::make_unique<TrackerManager>(torrent_info_);
+    
     LOG_BT_INFO("Created torrent download for: " << torrent_info_.get_name());
     LOG_BT_INFO("  Download path: " << download_path_);
     LOG_BT_INFO("  Total size: " << torrent_info_.get_total_length() << " bytes");
     LOG_BT_INFO("  Number of pieces: " << num_pieces);
+    LOG_BT_INFO("  Trackers: " << tracker_manager_->get_tracker_urls().size());
 }
 
 TorrentDownload::~TorrentDownload() {
@@ -2201,6 +2209,65 @@ void TorrentDownload::request_peers_from_dht(DhtClient* dht_client) {
     });
 }
 
+void TorrentDownload::announce_to_trackers() {
+    if (!tracker_manager_) {
+        LOG_BT_WARN("No tracker manager available");
+        return;
+    }
+    
+    LOG_BT_INFO("Announcing to trackers for torrent: " << torrent_info_.get_name());
+    
+    // Prepare tracker request
+    TrackerRequest request;
+    request.info_hash = torrent_info_.get_info_hash();
+    request.peer_id = our_peer_id_;
+    request.port = 6881;  // Default BitTorrent port (should come from BitTorrentClient)
+    request.uploaded = total_uploaded_.load();
+    request.downloaded = total_downloaded_.load();
+    request.left = torrent_info_.get_total_length() - total_downloaded_.load();
+    
+    // Determine event
+    if (total_downloaded_.load() == 0 && !running_) {
+        request.event = TrackerEvent::STARTED;
+    } else if (is_complete()) {
+        request.event = TrackerEvent::COMPLETED;
+    } else {
+        request.event = TrackerEvent::NONE;
+    }
+    
+    // Announce to all trackers
+    tracker_manager_->announce(request, [this](const TrackerResponse& response, const std::string& tracker_url) {
+        if (!response.success) {
+            LOG_BT_WARN("Tracker announce failed (" << tracker_url << "): " << response.failure_reason);
+            return;
+        }
+        
+        LOG_BT_INFO("Tracker announce successful (" << tracker_url << ")");
+        LOG_BT_INFO("  Peers: " << response.peers.size() 
+                   << ", Seeders: " << response.complete 
+                   << ", Leechers: " << response.incomplete);
+        
+        // Add discovered peers
+        for (const auto& peer : response.peers) {
+            if (get_peer_count() >= MAX_PEERS_PER_TORRENT) {
+                break;
+            }
+            
+            add_peer(peer);
+        }
+    });
+}
+
+void TorrentDownload::request_peers_from_trackers() {
+    if (!tracker_manager_) {
+        LOG_BT_WARN("No tracker manager available");
+        return;
+    }
+    
+    // Same as announce - trackers provide peer lists in announce responses
+    announce_to_trackers();
+}
+
 void TorrentDownload::set_metadata_download(std::shared_ptr<MetadataDownload> metadata_download) {
     metadata_download_ = metadata_download;
     
@@ -2349,6 +2416,9 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent(const TorrentInfo
             torrents_.erase(info_hash);
             return nullptr;
         }
+        
+        // Announce to trackers
+        torrent_download->announce_to_trackers();
         
         // Announce to DHT if available
         if (dht_client_) {
