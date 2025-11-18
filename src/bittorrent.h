@@ -240,6 +240,9 @@ public:
     bool send_message(const PeerMessage& message);
     void process_messages();
     
+    // Seeding support
+    void send_bitfield();  // Send our bitfield to peer after handshake
+    
     // Piece requests
     bool request_piece_block(PieceIndex piece_index, uint32_t offset, uint32_t length);
     void cancel_request(PieceIndex piece_index, uint32_t offset, uint32_t length);
@@ -433,6 +436,7 @@ public:
     bool store_piece_block(PieceIndex piece_index, uint32_t offset, const std::vector<uint8_t>& data);
     bool verify_piece(PieceIndex piece_index);
     void write_piece_to_disk(PieceIndex piece_index);
+    bool read_piece_from_disk(PieceIndex piece_index, std::vector<uint8_t>& data);  // For seeding
     
     // Statistics and progress
     uint64_t get_downloaded_bytes() const;
@@ -507,6 +511,9 @@ private:
     void peer_management_loop();
     void schedule_piece_requests();
     void cleanup_disconnected_peers();
+    
+    // Seeding support
+    void notify_peers_have_piece(PieceIndex piece_index);  // Broadcast HAVE to all peers
     
     // File operations
     bool open_files();
