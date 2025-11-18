@@ -414,7 +414,7 @@ PeerMessage PeerMessage::create_port(uint16_t port) {
 
 PeerConnection::PeerConnection(TorrentDownload* torrent, const Peer& peer_info, socket_t socket)
     : torrent_(torrent), peer_info_(peer_info), socket_(socket), 
-      state_(PeerState::CONNECTING), should_disconnect_(false),
+      state_(PeerState::CONNECTING), should_disconnect_(false), handshake_completed_(false),
       peer_choked_(true), am_choked_(true), peer_interested_(false), 
       am_interested_(false), am_choking_(true),
       downloaded_bytes_(0), uploaded_bytes_(0), expected_message_length_(0),
@@ -422,7 +422,15 @@ PeerConnection::PeerConnection(TorrentDownload* torrent, const Peer& peer_info, 
       peer_ut_metadata_id_(0), peer_metadata_size_(0) {
     
     peer_id_.fill(0);
-    LOG_BT_DEBUG("Created peer connection to " << peer_info_.ip << ":" << peer_info_.port);
+    
+    // If socket is already provided, it means handshake is already done (incoming connection)
+    if (is_valid_socket(socket)) {
+        handshake_completed_ = true;
+        state_ = PeerState::HANDSHAKING;  // Will move to CONNECTED after extended handshake
+        LOG_BT_DEBUG("Created peer connection for incoming connection from " << peer_info_.ip << ":" << peer_info_.port);
+    } else {
+        LOG_BT_DEBUG("Created peer connection to " << peer_info_.ip << ":" << peer_info_.port);
+    }
 }
 
 PeerConnection::~PeerConnection() {
@@ -470,11 +478,17 @@ void PeerConnection::disconnect() {
 void PeerConnection::connection_loop() {
     LOG_BT_DEBUG("Starting connection loop for peer " << peer_info_.ip << ":" << peer_info_.port);
     
-    // Perform handshake
-    if (!perform_handshake()) {
-        LOG_BT_ERROR("Handshake failed with peer " << peer_info_.ip << ":" << peer_info_.port);
-        state_ = PeerState::ERROR;
-        return;
+    // Perform handshake only if not already completed (for outgoing connections)
+    if (!handshake_completed_) {
+        if (!perform_handshake()) {
+            LOG_BT_ERROR("Handshake failed with peer " << peer_info_.ip << ":" << peer_info_.port);
+            state_ = PeerState::ERROR;
+            return;
+        }
+    } else {
+        LOG_BT_DEBUG("Handshake already completed for incoming peer " << peer_info_.ip << ":" << peer_info_.port);
+        // For incoming connections, send extended handshake if needed
+        send_extended_handshake();
     }
     
     state_ = PeerState::CONNECTED;
@@ -1393,6 +1407,41 @@ bool TorrentDownload::add_peer(const Peer& peer) {
     return false;
 }
 
+bool TorrentDownload::add_peer(const Peer& peer, socket_t existing_socket) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    
+    // Check if peer already exists
+    for (const auto& conn : peer_connections_) {
+        if (conn->get_peer_info().ip == peer.ip && conn->get_peer_info().port == peer.port) {
+            LOG_BT_DEBUG("Peer already exists: " << peer.ip << ":" << peer.port);
+            close_socket(existing_socket);  // Close the duplicate incoming connection
+            return false;
+        }
+    }
+    
+    // Check peer limit
+    if (peer_connections_.size() >= MAX_PEERS_PER_TORRENT) {
+        LOG_BT_DEBUG("Peer limit reached for torrent " << torrent_info_.get_name());
+        close_socket(existing_socket);
+        return false;
+    }
+    
+    // Create peer connection with existing socket
+    auto peer_conn = std::make_unique<PeerConnection>(this, peer, existing_socket);
+    if (peer_conn->connect()) {
+        peer_connections_.push_back(std::move(peer_conn));
+        
+        if (peer_connected_callback_) {
+            peer_connected_callback_(peer);
+        }
+        
+        LOG_BT_INFO("Added incoming peer " << peer.ip << ":" << peer.port << " to torrent " << torrent_info_.get_name());
+        return true;
+    }
+    
+    return false;
+}
+
 void TorrentDownload::remove_peer(const Peer& peer) {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     
@@ -1461,6 +1510,9 @@ bool TorrentDownload::store_piece_block(PieceIndex piece_index, uint32_t offset,
         return false;
     }
     
+    // Ensure piece data buffer is allocated (lazy allocation)
+    piece->ensure_data_allocated();
+    
     // Store the block data
     std::copy(data.begin(), data.end(), piece->data.begin() + offset);
     piece->blocks_downloaded[block_index] = true;
@@ -1504,6 +1556,12 @@ bool TorrentDownload::verify_piece(PieceIndex piece_index) {
     }
     
     auto& piece = pieces_[piece_index];
+    
+    // Check that piece data is allocated
+    if (piece->data.empty()) {
+        LOG_BT_ERROR("Cannot verify piece " << piece_index << " - data not allocated");
+        return false;
+    }
     
     // Calculate SHA1 hash of piece data
     std::string calculated_hash = SHA1::hash_bytes(piece->data);
@@ -1583,6 +1641,10 @@ void TorrentDownload::write_piece_to_disk(PieceIndex piece_index) {
         LOG_BT_DEBUG("Wrote " << write_length << " bytes to file " << file_info.path 
                      << " at offset " << file_offset);
     }
+    
+    // Free piece data from memory after successful write to disk
+    piece->free_data();
+    LOG_BT_DEBUG("Freed piece " << piece_index << " data from memory after write to disk");
 }
 
 std::vector<PieceIndex> TorrentDownload::get_available_pieces() const {
@@ -2409,13 +2471,14 @@ void BitTorrentClient::handle_incoming_connection(socket_t client_socket) {
         return;
     }
     
-    // Create peer object and add to torrent
+    // Create peer object and add to torrent with the existing socket
     Peer peer_info{ip, static_cast<uint16_t>(port)};
-    if (torrent->add_peer(peer_info)) {
+    if (torrent->add_peer(peer_info, client_socket)) {
         LOG_BT_INFO("Added incoming peer: " << peer_address);
+        // Socket ownership transferred to PeerConnection
     } else {
         LOG_BT_WARN("Failed to add incoming peer: " << peer_address);
-        close_socket(client_socket);
+        // Socket already closed by add_peer in failure case
     }
 }
 

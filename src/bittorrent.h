@@ -69,7 +69,7 @@ struct PieceInfo {
         : index(idx), hash(h), length(len), verified(false) {
         uint32_t num_blocks = (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
         blocks_downloaded.resize(num_blocks, false);
-        data.resize(length);
+        // Don't pre-allocate data - allocate lazily when downloading starts
     }
     
     bool is_complete() const {
@@ -78,6 +78,19 @@ struct PieceInfo {
     
     uint32_t get_num_blocks() const {
         return static_cast<uint32_t>(blocks_downloaded.size());
+    }
+    
+    // Ensure data buffer is allocated
+    void ensure_data_allocated() {
+        if (data.empty()) {
+            data.resize(length);
+        }
+    }
+    
+    // Free data buffer after piece is written to disk
+    void free_data() {
+        data.clear();
+        data.shrink_to_fit();
     }
 };
 
@@ -271,6 +284,7 @@ private:
     PeerState state_;
     std::thread connection_thread_;
     std::atomic<bool> should_disconnect_;
+    bool handshake_completed_;  // Track if handshake is already done (for incoming connections)
     
     // Conditional variables for immediate shutdown
     std::condition_variable shutdown_cv_;
@@ -404,6 +418,7 @@ public:
     
     // Peer management
     bool add_peer(const Peer& peer);
+    bool add_peer(const Peer& peer, socket_t existing_socket);  // For incoming connections
     void remove_peer(const Peer& peer);
     size_t get_peer_count() const;
     std::vector<Peer> get_connected_peers() const;
