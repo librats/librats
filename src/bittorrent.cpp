@@ -498,6 +498,13 @@ void PeerConnection::connection_loop() {
     const auto& torrent_info = torrent_->get_torrent_info();
     peer_bitfield_.resize(torrent_info.get_num_pieces(), false);
     
+    // Send our bitfield to the peer (for seeding)
+    send_bitfield();
+    
+    // Automatically unchoke the peer (optimistic unchoking for now)
+    // In a more sophisticated implementation, we'd have choke/unchoke algorithms
+    set_choke(false);
+    
     // Main message processing loop
     while (!should_disconnect_ && state_ == PeerState::CONNECTED) {
         process_messages();
@@ -695,6 +702,13 @@ void PeerConnection::handle_unchoke() {
 void PeerConnection::handle_interested() {
     peer_interested_ = true;
     LOG_BT_DEBUG("Peer " << peer_info_.ip << ":" << peer_info_.port << " is interested");
+    
+    // Automatically unchoke interested peers (optimistic unchoking)
+    // In a more sophisticated implementation, we'd have a proper choke algorithm
+    if (am_choking_) {
+        set_choke(false);
+        LOG_BT_DEBUG("Unchoked interested peer " << peer_info_.ip << ":" << peer_info_.port);
+    }
 }
 
 void PeerConnection::handle_not_interested() {
@@ -744,8 +758,60 @@ void PeerConnection::handle_request(const std::vector<uint8_t>& payload) {
     
     LOG_BT_DEBUG("Peer " << peer_info_.ip << ":" << peer_info_.port << " requested piece " << piece_index << " offset " << offset << " length " << length);
     
-    // TODO: Handle piece requests (seeding functionality)
-    // For now, we're just downloading, not seeding
+    // Check if we're choking this peer
+    if (am_choking_) {
+        LOG_BT_DEBUG("Ignoring request from choked peer " << peer_info_.ip << ":" << peer_info_.port);
+        return;
+    }
+    
+    // Validate request parameters
+    const auto& torrent_info = torrent_->get_torrent_info();
+    if (piece_index >= torrent_info.get_num_pieces()) {
+        LOG_BT_WARN("Invalid piece index requested: " << piece_index);
+        return;
+    }
+    
+    uint32_t piece_length = torrent_info.get_piece_length(piece_index);
+    if (offset >= piece_length || offset + length > piece_length) {
+        LOG_BT_WARN("Invalid offset/length in request: offset=" << offset << " length=" << length << " piece_length=" << piece_length);
+        return;
+    }
+    
+    // Validate request length (must be power of 2, typically 16KB)
+    if (length > BLOCK_SIZE || length == 0) {
+        LOG_BT_WARN("Invalid request length: " << length);
+        return;
+    }
+    
+    // Check if we have this piece
+    if (!torrent_->is_piece_complete(piece_index)) {
+        LOG_BT_DEBUG("Don't have piece " << piece_index << " yet, can't serve to peer");
+        return;
+    }
+    
+    // Read the piece from disk
+    std::vector<uint8_t> piece_data;
+    if (!torrent_->read_piece_from_disk(piece_index, piece_data)) {
+        LOG_BT_ERROR("Failed to read piece " << piece_index << " from disk for upload");
+        return;
+    }
+    
+    // Extract the requested block
+    if (offset + length > piece_data.size()) {
+        LOG_BT_ERROR("Block exceeds piece data size: offset=" << offset << " length=" << length << " piece_size=" << piece_data.size());
+        return;
+    }
+    
+    std::vector<uint8_t> block_data(piece_data.begin() + offset, piece_data.begin() + offset + length);
+    
+    // Send the piece message
+    auto piece_msg = PeerMessage::create_piece(piece_index, offset, block_data);
+    if (send_message(piece_msg)) {
+        uploaded_bytes_ += block_data.size();
+        LOG_BT_DEBUG("Sent piece " << piece_index << " offset " << offset << " length " << length << " to peer " << peer_info_.ip << ":" << peer_info_.port);
+    } else {
+        LOG_BT_ERROR("Failed to send piece data to peer " << peer_info_.ip << ":" << peer_info_.port);
+    }
 }
 
 void PeerConnection::handle_piece(const std::vector<uint8_t>& payload) {
@@ -787,7 +853,9 @@ void PeerConnection::handle_cancel(const std::vector<uint8_t>& payload) {
     
     LOG_BT_DEBUG("Peer " << peer_info_.ip << ":" << peer_info_.port << " cancelled request for piece " << piece_index << " offset " << offset << " length " << length);
     
-    // TODO: Handle cancel requests (seeding functionality)
+    // Note: For a simple implementation, we don't queue outgoing requests
+    // If we were queuing them, we'd remove this request from the queue here
+    // For now, just acknowledge the cancel
 }
 
 void PeerConnection::handle_extended(const std::vector<uint8_t>& payload) {
@@ -838,6 +906,33 @@ void PeerConnection::send_extended_handshake() {
     send_message(message);
     
     LOG_BT_DEBUG("Sent extended handshake to peer " << peer_info_.ip << ":" << peer_info_.port);
+}
+
+void PeerConnection::send_bitfield() {
+    // Get our bitfield from the torrent
+    std::vector<bool> our_bitfield = torrent_->get_piece_bitfield();
+    
+    // Don't send empty bitfield or if we have no pieces
+    bool has_any_piece = false;
+    for (bool has_piece : our_bitfield) {
+        if (has_piece) {
+            has_any_piece = true;
+            break;
+        }
+    }
+    
+    if (!has_any_piece) {
+        LOG_BT_DEBUG("No pieces to advertise to peer " << peer_info_.ip << ":" << peer_info_.port);
+        return;
+    }
+    
+    // Create and send bitfield message
+    auto bitfield_msg = PeerMessage::create_bitfield(our_bitfield);
+    if (send_message(bitfield_msg)) {
+        LOG_BT_DEBUG("Sent bitfield to peer " << peer_info_.ip << ":" << peer_info_.port);
+    } else {
+        LOG_BT_WARN("Failed to send bitfield to peer " << peer_info_.ip << ":" << peer_info_.port);
+    }
 }
 
 void PeerConnection::handle_extended_handshake(const std::vector<uint8_t>& payload) {
@@ -1647,6 +1742,76 @@ void TorrentDownload::write_piece_to_disk(PieceIndex piece_index) {
     LOG_BT_DEBUG("Freed piece " << piece_index << " data from memory after write to disk");
 }
 
+bool TorrentDownload::read_piece_from_disk(PieceIndex piece_index, std::vector<uint8_t>& data) {
+    std::lock_guard<std::mutex> lock(files_mutex_);
+    
+    // Skip for metadata-only torrents
+    if (download_path_.empty()) {
+        return false;
+    }
+    
+    if (piece_index >= pieces_.size()) {
+        LOG_BT_ERROR("Invalid piece index for disk read: " << piece_index);
+        return false;
+    }
+    
+    // Check if piece is complete
+    if (!piece_completed_[piece_index]) {
+        LOG_BT_DEBUG("Piece " << piece_index << " is not complete, can't read from disk");
+        return false;
+    }
+    
+    auto& piece = pieces_[piece_index];
+    
+    // Allocate buffer for piece data
+    data.resize(piece->length);
+    
+    // Calculate piece offset in the torrent
+    uint64_t piece_offset = static_cast<uint64_t>(piece_index) * torrent_info_.get_piece_length();
+    uint64_t data_offset = 0;
+    
+    // Read piece data from the appropriate files
+    for (const auto& file_info : torrent_info_.get_files()) {
+        if (piece_offset >= file_info.offset + file_info.length) {
+            continue; // This piece doesn't overlap with this file
+        }
+        
+        if (piece_offset + piece->length <= file_info.offset) {
+            break; // No more files will be affected by this piece
+        }
+        
+        // Calculate overlap
+        uint64_t file_start_in_piece = (file_info.offset > piece_offset) ? 
+                                      file_info.offset - piece_offset : 0;
+        uint64_t piece_end = piece_offset + piece->length;
+        uint64_t file_end = file_info.offset + file_info.length;
+        uint64_t read_end = (std::min)(piece_end, file_end);
+        uint64_t read_length = read_end - (piece_offset + file_start_in_piece);
+        
+        if (read_length == 0) {
+            continue;
+        }
+        
+        // Calculate file offset
+        uint64_t file_offset = (piece_offset > file_info.offset) ? 
+                              piece_offset - file_info.offset : 0;
+        
+        // Read data chunk from file using fs module
+        std::string file_path = download_path_ + "/" + file_info.path;
+        void* read_buffer = data.data() + file_start_in_piece;
+        
+        if (!read_file_chunk(file_path.c_str(), file_offset, read_buffer, read_length)) {
+            LOG_BT_ERROR("Failed to read data from file: " << file_path);
+            return false;
+        }
+        
+        LOG_BT_DEBUG("Read " << read_length << " bytes from file " << file_info.path 
+                     << " at offset " << file_offset);
+    }
+    
+    return true;
+}
+
 std::vector<PieceIndex> TorrentDownload::get_available_pieces() const {
     std::lock_guard<std::mutex> lock(pieces_mutex_);
     std::vector<PieceIndex> available_pieces;
@@ -1959,9 +2124,27 @@ void TorrentDownload::on_piece_completed(PieceIndex piece_index) {
         piece_complete_callback_(piece_index);
     }
     
+    // Notify all peers that we have this piece (for seeding)
+    notify_peers_have_piece(piece_index);
+    
     LOG_BT_INFO("Piece " << piece_index << " completed. Progress: " 
                 << get_progress_percentage() << "% (" 
                 << get_completed_pieces() << "/" << torrent_info_.get_num_pieces() << " pieces)");
+}
+
+void TorrentDownload::notify_peers_have_piece(PieceIndex piece_index) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    
+    // Send HAVE message to all connected peers
+    auto have_msg = PeerMessage::create_have(piece_index);
+    
+    for (auto& peer : peer_connections_) {
+        if (peer->is_connected()) {
+            peer->send_message(have_msg);
+        }
+    }
+    
+    LOG_BT_DEBUG("Notified " << peer_connections_.size() << " peers that we have piece " << piece_index);
 }
 
 void TorrentDownload::check_torrent_completion() {
