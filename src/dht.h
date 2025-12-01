@@ -298,8 +298,7 @@ private:
     void send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash);
     void send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
     
-    void add_node(const DhtNode& node, std::string transaction_id = "", bool verify = true);
-    void on_node_added(const DhtNode& node, std::string transaction_id);
+    void add_node(const DhtNode& node, bool verify = true);
     std::vector<DhtNode> find_closest_nodes(const NodeId& target, size_t count = K_BUCKET_SIZE);
     std::vector<DhtNode> find_closest_nodes_unlocked(const NodeId& target, size_t count = K_BUCKET_SIZE);
     int get_bucket_index(const NodeId& id);
@@ -335,7 +334,7 @@ private:
     void cleanup_stale_announced_peers();
     
     // Ping-before-replace eviction management
-    void initiate_ping_verification(const DhtNode& candidate_node, const DhtNode& old_node, int bucket_index, std::string transaction_id = "");
+    void initiate_ping_verification(const DhtNode& candidate_node, const DhtNode& old_node, int bucket_index);
     void handle_ping_verification_response(const std::string& transaction_id, const NodeId& responder_id, const Peer& responder);
     void cleanup_stale_ping_verifications();
     bool perform_replacement(const DhtNode& candidate_node, const DhtNode& node_to_replace, int bucket_index);
