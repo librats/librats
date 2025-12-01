@@ -1931,8 +1931,8 @@ void RatsClient::automatic_discovery_loop() {
         }
     }
 
-    // Search immediately, incease alpha to 6 because initially we have poor ping table entries
-    search_rats_peers(5 , 6);
+    // Search immediately
+    search_rats_peers();
     
     {
         std::unique_lock<std::mutex> lock(shutdown_mutex_);

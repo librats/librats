@@ -2534,7 +2534,7 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
         }
         
         LOG_BT_INFO("Connected to " << max_peers_to_try << " peers for metadata exchange");
-    }, 0, 6); // Use higher iteration and alpha values for better peer discovery
+    });
     
     LOG_BT_INFO("Metadata download initiated for hash " << info_hash_to_hex(info_hash));
     LOG_BT_INFO("Waiting for DHT peer discovery and metadata exchange...");
@@ -2940,7 +2940,7 @@ void BitTorrentClient::get_torrent_metadata_by_hash(const InfoHash& info_hash, M
         }
         
         LOG_BT_INFO("Connected to " << max_peers_to_try << " peers for metadata retrieval");
-    }, 0, 6); // Use higher iteration and alpha values for better peer discovery
+    });
     
     LOG_BT_INFO("Metadata retrieval initiated for hash " << info_hash_to_hex(info_hash));
     LOG_BT_INFO("Waiting for DHT peer discovery and metadata exchange...");

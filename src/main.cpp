@@ -373,7 +373,7 @@ int main(int argc, char* argv[]) {
                             for (const auto& peer : peers) {
                                 LOG_MAIN_INFO("  Peer: " << peer);
                             }
-                        }, 0);
+                        });
                     if (success) {
                         LOG_MAIN_INFO("DHT peer search initiated");
                     } else {
@@ -809,7 +809,7 @@ int main(int argc, char* argv[]) {
                                     LOG_MAIN_INFO("  1. Obtain the .torrent file from one of these peers or a tracker");
                                     LOG_MAIN_INFO("  2. Use 'torrent_add <file> <path>' to start downloading");
                                 }
-                            }, 1)) {
+                            })) {
                             LOG_MAIN_INFO("DHT peer search initiated");
                         } else {
                             LOG_MAIN_ERROR("Failed to initiate DHT peer search");
