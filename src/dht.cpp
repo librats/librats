@@ -772,7 +772,7 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
         std::lock_guard<std::mutex> lock(pending_searches_mutex_);
         auto trans_it = transaction_to_search_.find(message.transaction_id);
         if (trans_it != transaction_to_search_.end()) {
-            std::string hash_key = trans_it->second;
+            const std::string& hash_key = trans_it->second.info_hash_hex;
             auto search_it = pending_searches_.find(hash_key);
             if (search_it != pending_searches_.end() && search_it->second.is_finished) {
                 LOG_DHT_DEBUG("Cleaning up finished search for info_hash " << hash_key 
@@ -1047,8 +1047,8 @@ void DhtClient::cleanup_stale_searches() {
     // Clean up stale transaction mappings (remove ones that point to non-existent searches)
     auto trans_it = transaction_to_search_.begin();
     while (trans_it != transaction_to_search_.end()) {
-        if (pending_searches_.find(trans_it->second) == pending_searches_.end()) {
-            LOG_DHT_DEBUG("Removing stale transaction mapping " << trans_it->first << " -> " << trans_it->second);
+        if (pending_searches_.find(trans_it->second.info_hash_hex) == pending_searches_.end()) {
+            LOG_DHT_DEBUG("Removing stale transaction mapping " << trans_it->first << " -> " << trans_it->second.info_hash_hex);
             trans_it = transaction_to_search_.erase(trans_it);
         } else {
             ++trans_it;
@@ -1080,10 +1080,13 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
     
     auto trans_it = transaction_to_search_.find(transaction_id);
     if (trans_it != transaction_to_search_.end()) {
-        std::string hash_key = trans_it->second;
-        auto search_it = pending_searches_.find(hash_key);
+        const auto& trans_info = trans_it->second;
+        auto search_it = pending_searches_.find(trans_info.info_hash_hex);
         if (search_it != pending_searches_.end()) {
             auto& pending_search = search_it->second;
+
+            // Add queried node to responded_nodes (it successfully responded)
+            pending_search.responded_nodes.insert(trans_info.queried_node_id);
             
             // Decrement invoke count since we received a response
             if (pending_search.invoke_count > 0) {
@@ -1091,13 +1094,13 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
             }
             
             LOG_DHT_DEBUG("Found pending search for KRPC transaction " << transaction_id 
-                          << " - received " << peers.size() << " peers for info_hash " << hash_key 
+                          << " - received " << peers.size() << " peers for info_hash " << trans_info.info_hash_hex 
                           << " from " << responder.ip << ":" << responder.port
                           << " (invoke_count now: " << pending_search.invoke_count << ")");
 
             // Log each found peer with indentation
             for (size_t i = 0; i < peers.size(); ++i) {
-                LOG_DHT_DEBUG("  [" << i << "] found peer for hash(" << hash_key << ") = " << peers[i].ip << ":" << peers[i].port);
+                LOG_DHT_DEBUG("  [" << i << "] found peer for hash(" << trans_info.info_hash_hex << ") = " << peers[i].ip << ":" << peers[i].port);
             }
             
             if (!peers.empty()) {
@@ -1106,7 +1109,7 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
                     std::chrono::steady_clock::now() - pending_search.created_at
                 ).count();
                 
-                LOG_DHT_INFO("=== Search Completed for info_hash " << hash_key << " ===");
+                LOG_DHT_INFO("=== Search Completed for info_hash " << trans_info.info_hash_hex << " ===");
                 LOG_DHT_INFO("  Duration: " << duration_ms << "ms");
                 LOG_DHT_INFO("  Peers found: " << peers.size());
                 LOG_DHT_INFO("  Total nodes queried: " << pending_search.queried_nodes.size());
@@ -1140,10 +1143,13 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
     
     auto trans_it = transaction_to_search_.find(transaction_id);
     if (trans_it != transaction_to_search_.end()) {
-        std::string hash_key = trans_it->second;
-        auto search_it = pending_searches_.find(hash_key);
+        const auto& trans_info = trans_it->second;
+        auto search_it = pending_searches_.find(trans_info.info_hash_hex);
         if (search_it != pending_searches_.end()) {
             auto& pending_search = search_it->second;
+
+            // Add queried node to responded_nodes (it successfully responded)
+            pending_search.responded_nodes.insert(trans_info.queried_node_id);
             
             // Decrement invoke count since we received a response
             if (pending_search.invoke_count > 0) {
@@ -1151,7 +1157,7 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
             }
             
             LOG_DHT_DEBUG("Processing get_peers response with " << nodes.size() 
-                          << " nodes for info_hash " << hash_key << " from " << responder.ip << ":" << responder.port
+                          << " nodes for info_hash " << trans_info.info_hash_hex << " from " << responder.ip << ":" << responder.port
                           << " (invoke_count now: " << pending_search.invoke_count << ")");
             
             // Add new nodes to search_nodes (sorted by distance)
@@ -1180,6 +1186,7 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
 void DhtClient::add_node_to_search(PendingSearch& search, const DhtNode& node) {
     // Check if node already exists in search_nodes
     if (search.known_nodes.find(node.id) != search.known_nodes.end()) {
+        LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " already known for search - skipping");
         return;
     }
     
@@ -1232,15 +1239,18 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         
         // Check if this node was already queried
         if (search.queried_nodes.find(node.id) != search.queried_nodes.end()) {
-            // Already queried - count as outstanding or result depending on status
-            // For now, just count towards results since we track invoke_count separately
+            continue;
+        }
+
+        // Check if this node has already responded
+        if (search.responded_nodes.find(node.id) != search.responded_nodes.end()) {
             results_found++;
             continue;
         }
         
         // Send query to this node
         std::string transaction_id = KrpcProtocol::generate_transaction_id();
-        transaction_to_search_[transaction_id] = hash_key;
+        transaction_to_search_[transaction_id] = SearchTransaction(hash_key, node.id);
         search.queried_nodes.insert(node.id);
         search.invoke_count++;
         
@@ -1258,12 +1268,7 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
                   << ", invoke_count=" << search.invoke_count
                   << ", queried_total=" << search.queried_nodes.size());
     
-    // Check completion condition:
-    // - No outstanding requests (invoke_count == 0)
-    // - OR we've queried all nodes in search_nodes
-    bool all_queried = (search.queried_nodes.size() >= search.search_nodes.size());
-    
-    if (search.invoke_count == 0 && all_queried) {
+    if (search.invoke_count == 0) {
         auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - search.created_at
         ).count();

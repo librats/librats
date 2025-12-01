@@ -213,6 +213,7 @@ private:
         std::vector<DhtNode> search_nodes;
         std::unordered_set<NodeId> known_nodes;  // nodes we've already added to the search
         std::unordered_set<NodeId> queried_nodes;  // nodes we've already sent queries to
+        std::unordered_set<NodeId> responded_nodes;  // nodes we've already received responses successfully
         int invoke_count;                           // number of outstanding requests
         bool is_finished;                           // whether the search is finished
 
@@ -225,7 +226,17 @@ private:
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
     std::mutex pending_searches_mutex_;  // Lock order: 2
-    std::unordered_map<std::string, std::string> transaction_to_search_; // transaction_id -> info_hash (hex)
+    
+    // Transaction tracking with queried node info for proper responded_nodes tracking
+    struct SearchTransaction {
+        std::string info_hash_hex;
+        NodeId queried_node_id;
+        
+        SearchTransaction() = default;
+        SearchTransaction(const std::string& hash, const NodeId& id)
+            : info_hash_hex(hash), queried_node_id(id) {}
+    };
+    std::unordered_map<std::string, SearchTransaction> transaction_to_search_; // transaction_id -> SearchTransaction
     
     // Peer announcement storage (BEP 5 compliant)
     struct AnnouncedPeer {
