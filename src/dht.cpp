@@ -1179,11 +1179,7 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
 
 void DhtClient::add_node_to_search(PendingSearch& search, const DhtNode& node) {
     // Check if node already exists in search_nodes
-    auto existing = std::find_if(search.search_nodes.begin(), search.search_nodes.end(),
-                                 [&node](const DhtNode& n) { return n.id == node.id; });
-    if (existing != search.search_nodes.end()) {
-        // Update last_seen time
-        existing->last_seen = node.last_seen;
+    if (search.known_nodes.find(node.id) != search.known_nodes.end()) {
         return;
     }
     
@@ -1194,6 +1190,7 @@ void DhtClient::add_node_to_search(PendingSearch& search, const DhtNode& node) {
                                        });
     
     search.search_nodes.insert(insert_pos, node);
+    search.known_nodes.insert(node.id);
     
     // Limit search_nodes size to avoid unbounded growth
     constexpr size_t MAX_SEARCH_NODES = 100;

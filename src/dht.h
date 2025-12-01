@@ -211,6 +211,7 @@ private:
         
         // Iterative search state - search_nodes is sorted by distance to info_hash (closest first)
         std::vector<DhtNode> search_nodes;
+        std::unordered_set<NodeId> known_nodes;  // nodes we've already added to the search
         std::unordered_set<NodeId> queried_nodes;  // nodes we've already sent queries to
         int invoke_count;                           // number of outstanding requests
         bool is_finished;                           // whether the search is finished
