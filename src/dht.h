@@ -113,11 +113,9 @@ public:
      * Find peers for a specific info hash
      * @param info_hash The info hash to search for
      * @param callback Callback to receive discovered peers
-     * @param iteration_max Maximum number of search iterations (default: 1, 0 = infinite)
-     * @param alpha_max Maximum DHT alpha (default: 1, usually between 3 and 6)
      * @return true if search started successfully, false otherwise
      */
-    bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback, int iteration_max = 1, int alpha_max = 1);
+    bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback);
     
     /**
      * Announce that this node is a peer for a specific info hash
@@ -213,19 +211,19 @@ private:
         std::chrono::steady_clock::time_point created_at;
         std::chrono::steady_clock::time_point updated_at;
         
-        // Iterative search state
-        std::unordered_set<std::string> queried_nodes;  // node_id as hex string
-        int iteration_count;                            // current iteration number
-        int iteration_max;                              // maximum iteration limit
-        bool is_finished;                                 // whether the search is finished
+        // Iterative search state - search_nodes is sorted by distance to info_hash (closest first)
+        std::vector<DhtNode> search_nodes;
+        std::unordered_set<NodeId> queried_nodes;  // nodes we've already sent queries to
+        int invoke_count;                           // number of outstanding requests
+        bool is_finished;                           // whether the search is finished
 
         // Callbacks to invoke when peers are found (supports multiple concurrent searches for same info_hash)
         std::vector<PeerDiscoveryCallback> callbacks;
         
-        PendingSearch(const InfoHash& hash, int max_iterations = 1)
+        PendingSearch(const InfoHash& hash)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
               updated_at(std::chrono::steady_clock::now()),
-              iteration_count(1), iteration_max(max_iterations), is_finished(false) {}
+              invoke_count(0), is_finished(false) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
     std::mutex pending_searches_mutex_;  // Lock order: 3
@@ -328,7 +326,8 @@ private:
     void cleanup_stale_searches();
     void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
-    bool continue_search_iteration(PendingSearch& search);
+    bool add_search_requests(PendingSearch& search);
+    void add_node_to_search(PendingSearch& search, const DhtNode& node);
     
     // Peer announcement storage management
     void store_announced_peer(const InfoHash& info_hash, const Peer& peer);
