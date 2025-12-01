@@ -167,18 +167,17 @@ private:
     // ============================================================================
     // When acquiring multiple mutexes, ALWAYS follow this order:
     //
-    // 1. pending_pings_mutex_           (Ping verification state)
-    // 2. nodes_being_replaced_mutex_    (Node replacement tracking)
-    // 3. pending_searches_mutex_        (Search state and transaction mappings)
-    // 4. routing_table_mutex_           (core routing data)
-    // 5. pending_announces_mutex_       (Announce state)
-    // 6. announced_peers_mutex_         (Stored peer data)
-    // 7. peer_tokens_mutex_             (Token validation data)
-    // 8. shutdown_mutex_                (Lowest priority - can be locked independently)
+    // 1. pending_pings_mutex_           (Ping verification state, nodes_being_replaced_, candidates_being_pinged_)
+    // 2. pending_searches_mutex_        (Search state and transaction mappings)
+    // 3. routing_table_mutex_           (core routing data)
+    // 4. pending_announces_mutex_       (Announce state)
+    // 5. announced_peers_mutex_         (Stored peer data)
+    // 6. peer_tokens_mutex_             (Token validation data)
+    // 7. shutdown_mutex_                (Lowest priority - can be locked independently)
     //
     // Routing table (k-buckets)
     std::vector<std::vector<DhtNode>> routing_table_;
-    mutable std::mutex routing_table_mutex_;  // Lock order: 4
+    mutable std::mutex routing_table_mutex_;  // Lock order: 3
     
     // Tokens for peers (use Peer directly as key for efficiency)
     struct PeerToken {
@@ -190,7 +189,7 @@ private:
             : token(t), created_at(std::chrono::steady_clock::now()) {}
     };
     std::unordered_map<Peer, PeerToken> peer_tokens_;
-    std::mutex peer_tokens_mutex_;  // Lock order: 7
+    std::mutex peer_tokens_mutex_;  // Lock order: 6
     
 
     // Pending announce tracking (for BEP 5 compliance)
@@ -203,13 +202,12 @@ private:
             : info_hash(hash), port(p), created_at(std::chrono::steady_clock::now()) {}
     };
     std::unordered_map<std::string, PendingAnnounce> pending_announces_;
-    std::mutex pending_announces_mutex_;  // Lock order: 5
+    std::mutex pending_announces_mutex_;  // Lock order: 4
     
     // Pending find_peers tracking (to map transaction IDs to info_hash)
     struct PendingSearch {
         InfoHash info_hash;
         std::chrono::steady_clock::time_point created_at;
-        std::chrono::steady_clock::time_point updated_at;
         
         // Iterative search state - search_nodes is sorted by distance to info_hash (closest first)
         std::vector<DhtNode> search_nodes;
@@ -222,11 +220,10 @@ private:
         
         PendingSearch(const InfoHash& hash)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
-              updated_at(std::chrono::steady_clock::now()),
               invoke_count(0), is_finished(false) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
-    std::mutex pending_searches_mutex_;  // Lock order: 3
+    std::mutex pending_searches_mutex_;  // Lock order: 2
     std::unordered_map<std::string, std::string> transaction_to_search_; // transaction_id -> info_hash (hex)
     
     // Peer announcement storage (BEP 5 compliant)
@@ -239,7 +236,7 @@ private:
     };
     // Map from info_hash (as hex string) to list of announced peers
     std::unordered_map<std::string, std::vector<AnnouncedPeer>> announced_peers_;
-    std::mutex announced_peers_mutex_;  // Lock order: 6
+    std::mutex announced_peers_mutex_;  // Lock order: 5
     
     // Ping-before-replace eviction tracking
     struct PingVerification {
@@ -247,19 +244,15 @@ private:
         DhtNode old_node;            // The existing node to potentially replace
         int bucket_index;            // Which bucket this affects
         std::chrono::steady_clock::time_point ping_sent_at;
-        std::string transaction_id;  // Transaction ID of the ping
         
-        PingVerification(const DhtNode& candidate, const DhtNode& old, int bucket_idx, const std::string& trans_id)
+        PingVerification(const DhtNode& candidate, const DhtNode& old, int bucket_idx)
             : candidate_node(candidate), old_node(old), bucket_index(bucket_idx), 
-              ping_sent_at(std::chrono::steady_clock::now()), transaction_id(trans_id) {}
+              ping_sent_at(std::chrono::steady_clock::now()) {}
     };
     std::unordered_map<std::string, PingVerification> pending_pings_;  // transaction_id -> PingVerification
     std::unordered_set<NodeId> candidates_being_pinged_; // Track candidate nodes that are currently being pinged to avoid duplicate pings
-    mutable std::mutex pending_pings_mutex_;  // Lock order: 1
-    
-    // Track nodes that have pending ping verifications to avoid duplicate pings
-    std::unordered_set<NodeId> nodes_being_replaced_;
-    mutable std::mutex nodes_being_replaced_mutex_;  // Lock order: 2
+    std::unordered_set<NodeId> nodes_being_replaced_;    // Track nodes that have pending ping verifications
+    mutable std::mutex pending_pings_mutex_;  // Lock order: 1 (protects pending_pings_, candidates_being_pinged_, nodes_being_replaced_)
     
     // Network thread
     std::thread network_thread_;
@@ -267,7 +260,7 @@ private:
     
     // Conditional variables for immediate shutdown
     std::condition_variable shutdown_cv_;
-    std::mutex shutdown_mutex_;  // Lock order: 8 (can be locked independently)
+    std::mutex shutdown_mutex_;  // Lock order: 7 (can be locked independently)
     
     // Helper functions
     void network_loop();
@@ -284,12 +277,6 @@ private:
     void handle_krpc_announce_peer(const KrpcMessage& message, const Peer& sender);
     void handle_krpc_response(const KrpcMessage& message, const Peer& sender);
     void handle_krpc_error(const KrpcMessage& message, const Peer& sender);
-    
-    // KRPC protocol sending functions
-    void send_ping(const Peer& peer);
-    void send_find_node(const Peer& peer, const NodeId& target);
-    void send_get_peers(const Peer& peer, const InfoHash& info_hash);
-    void send_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
     
     // KRPC protocol sending
     bool send_krpc_message(const KrpcMessage& message, const Peer& peer);
