@@ -211,6 +211,7 @@ private:
         
         // Iterative search state - search_nodes is sorted by distance to info_hash (closest first)
         std::vector<DhtNode> search_nodes;
+        std::vector<Peer> found_peers;          // found peers for this search
         std::unordered_set<NodeId> known_nodes;  // nodes we've already added to the search
         std::unordered_set<NodeId> queried_nodes;  // nodes we've already sent queries to
         std::unordered_set<NodeId> responded_nodes;  // nodes we've already received responses successfully

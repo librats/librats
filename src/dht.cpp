@@ -1098,35 +1098,25 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
                           << " from " << responder.ip << ":" << responder.port
                           << " (invoke_count now: " << pending_search.invoke_count << ")");
 
-            // Log each found peer with indentation
-            for (size_t i = 0; i < peers.size(); ++i) {
-                LOG_DHT_DEBUG("  [" << i << "] found peer for hash(" << trans_info.info_hash_hex << ") = " << peers[i].ip << ":" << peers[i].port);
-            }
-            
+            // Accumulate peers (with deduplication) - continue search like reference implementation
             if (!peers.empty()) {
-                // We found actual peers - invoke all callbacks and mark search as finished
-                auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - pending_search.created_at
-                ).count();
-                
-                LOG_DHT_INFO("=== Search Completed for info_hash " << trans_info.info_hash_hex << " ===");
-                LOG_DHT_INFO("  Duration: " << duration_ms << "ms");
-                LOG_DHT_INFO("  Peers found: " << peers.size());
-                LOG_DHT_INFO("  Total nodes queried: " << pending_search.queried_nodes.size());
-                LOG_DHT_INFO("  Callbacks to invoke: " << pending_search.callbacks.size());
-                
-                for (const auto& callback : pending_search.callbacks) {
-                    if (callback) {
-                        callback(peers, pending_search.info_hash);
+                for (const auto& peer : peers) {
+                    // Check if peer already exists in found_peers
+                    auto it = std::find_if(pending_search.found_peers.begin(), 
+                                           pending_search.found_peers.end(),
+                                           [&peer](const Peer& p) { 
+                                               return p.ip == peer.ip && p.port == peer.port; 
+                                           });
+                    if (it == pending_search.found_peers.end()) {
+                        pending_search.found_peers.push_back(peer);
+                        LOG_DHT_DEBUG("  [new] found peer for hash(" << trans_info.info_hash_hex << ") = " << peer.ip << ":" << peer.port);
                     }
                 }
-                
-                // Mark the search as finished (will be cleaned up at end of handle_krpc_response)
-                pending_search.is_finished = true;
-            } else {
-                // No peers found, try to continue search
-                add_search_requests(pending_search);
+                LOG_DHT_DEBUG("Accumulated " << pending_search.found_peers.size() << " total peers for info_hash " << trans_info.info_hash_hex);
             }
+            
+            // Continue search - let add_search_requests determine when to finish
+            add_search_requests(pending_search);
         }
         
         // DON'T remove the transaction mapping here - it will be removed at the end of handle_krpc_response
@@ -1222,8 +1212,8 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
     
     const int k = static_cast<int>(K_BUCKET_SIZE);  // Target number of results
     int results_found = 0;  // Nodes that have responded
-    int outstanding = 0;    // Requests in flight at the top of the list
-    int queries_sent = 0;
+    int queries_in_flight = 0;    // Requests in flight at the top of the list
+    int queries_sent = 0;   // Queries sent to nodes this round
     
     // Iterate through search_nodes (sorted by distance, closest first)
     for (auto& node : search.search_nodes) {
@@ -1236,15 +1226,16 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         if (search.invoke_count >= static_cast<int>(ALPHA)) {
             break;
         }
-        
-        // Check if this node was already queried
-        if (search.queried_nodes.find(node.id) != search.queried_nodes.end()) {
-            continue;
-        }
 
         // Check if this node has already responded
         if (search.responded_nodes.find(node.id) != search.responded_nodes.end()) {
             results_found++;
+            continue;
+        }
+        
+        // Check if this node was already queried
+        if (search.queried_nodes.find(node.id) != search.queried_nodes.end()) {
+            queries_in_flight++;
             continue;
         }
         
@@ -1260,23 +1251,34 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         send_krpc_message(message, node.peer);
         
         queries_sent++;
-        outstanding++;
     }
     
     LOG_DHT_DEBUG("Search requests summary for " << hash_key << ":"
-                  << " queries_sent=" << queries_sent
-                  << ", invoke_count=" << search.invoke_count
-                  << ", queried_total=" << search.queried_nodes.size());
+        << " * search_nodes=" << search.search_nodes.size()
+        << " * queries_sent=" << queries_sent
+        << " * queried_total=" << search.queried_nodes.size()
+        << " * invoke_count=" << search.invoke_count
+        << " * results_found=" << results_found
+        << " * queries_in_flight=" << queries_in_flight);
     
-    if (search.invoke_count == 0) {
+    if ((results_found >= k && queries_in_flight == 0) || search.invoke_count == 0) {
         auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - search.created_at
         ).count();
         
         LOG_DHT_INFO("=== Search Completed for info_hash " << hash_key << " ===");
         LOG_DHT_INFO("  Duration: " << duration_ms << "ms");
-        LOG_DHT_INFO("  Result: Exhausted all nodes (no peers found)");
         LOG_DHT_INFO("  Total nodes queried: " << search.queried_nodes.size());
+        LOG_DHT_INFO("  Total nodes responded: " << search.responded_nodes.size());
+        LOG_DHT_INFO("  Total peers found: " << search.found_peers.size());
+        LOG_DHT_INFO("  Callbacks to invoke: " << search.callbacks.size());
+        
+        // Invoke all callbacks with accumulated peers
+        for (const auto& callback : search.callbacks) {
+            if (callback) {
+                callback(search.found_peers, search.info_hash);
+            }
+        }
         
         search.is_finished = true;
         return true;
