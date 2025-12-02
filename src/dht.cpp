@@ -1262,6 +1262,10 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
 
             // Accumulate peers (with deduplication) - continue search like reference implementation
             if (!peers.empty()) {
+                // Collect only new (non-duplicate) peers for immediate callback
+                std::vector<Peer> new_peers;
+                new_peers.reserve(peers.size());
+                
                 for (const auto& peer : peers) {
                     // Check if peer already exists in found_peers
                     auto it = std::find_if(pending_search.found_peers.begin(), 
@@ -1271,9 +1275,23 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
                                            });
                     if (it == pending_search.found_peers.end()) {
                         pending_search.found_peers.push_back(peer);
+                        new_peers.push_back(peer);
                         LOG_DHT_DEBUG("  [new] found peer for hash(" << trans_info.info_hash_hex << ") = " << peer.ip << ":" << peer.port);
                     }
                 }
+                
+                // Invoke callbacks immediately with new peers (like reference implementation)
+                // This allows the caller to start using peers without waiting for search completion
+                if (!new_peers.empty()) {
+                    LOG_DHT_DEBUG("Invoking " << pending_search.callbacks.size() << " callbacks with " 
+                                  << new_peers.size() << " new peers for info_hash " << trans_info.info_hash_hex);
+                    for (const auto& callback : pending_search.callbacks) {
+                        if (callback) {
+                            callback(new_peers, pending_search.info_hash);
+                        }
+                    }
+                }
+                
                 LOG_DHT_DEBUG("Accumulated " << pending_search.found_peers.size() << " total peers for info_hash " << trans_info.info_hash_hex);
             }
             
@@ -1446,8 +1464,11 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
             continue;
         }
         
-        // Check if this node was already queried (in-flight)
+        // Check if this node was already queried
         if (flags & SearchNodeFlags::QUERIED) {
+            // Only count as in-flight if not responded yet
+            // (TIMED_OUT already handled above, RESPONDED handled above too)
+            // This case handles nodes that are QUERIED but still waiting for response
             queries_in_flight++;
             continue;
         }
