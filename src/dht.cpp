@@ -1367,6 +1367,36 @@ void DhtClient::add_node_to_search(PendingSearch& search, const DhtNode& node) {
     // Limit search_nodes size to avoid unbounded growth
     constexpr size_t MAX_SEARCH_NODES = 100;
     if (search.search_nodes.size() > MAX_SEARCH_NODES) {
+        // Before truncating, clean up counters for in-flight queries being discarded
+        for (size_t i = MAX_SEARCH_NODES; i < search.search_nodes.size(); ++i) {
+            const auto& discarded_node = search.search_nodes[i];
+            auto state_it = search.node_states.find(discarded_node.id);
+            if (state_it != search.node_states.end()) {
+                uint8_t flags = state_it->second;
+                // If queried but not responded/failed, it's in-flight
+                if ((flags & SearchNodeFlags::QUERIED) && 
+                    !(flags & (SearchNodeFlags::RESPONDED | SearchNodeFlags::TIMED_OUT))) {
+                    // Decrement invoke_count since this request is being abandoned
+                    if (search.invoke_count > 0) {
+                        search.invoke_count--;
+                        LOG_DHT_DEBUG("Decrementing invoke_count for abandoned node " 
+                                      << node_id_to_hex(discarded_node.id) 
+                                      << " (now: " << search.invoke_count << ")");
+                    }
+                    // If it had short timeout, also restore branch factor
+                    if (flags & SearchNodeFlags::SHORT_TIMEOUT) {
+                        if (search.branch_factor > static_cast<int>(ALPHA)) {
+                            search.branch_factor--;
+                            LOG_DHT_DEBUG("Decrementing branch_factor for abandoned node with short_timeout " 
+                                          << node_id_to_hex(discarded_node.id) 
+                                          << " (now: " << search.branch_factor << ")");
+                        }
+                    }
+                }
+                // Remove from node_states to avoid orphaned state
+                search.node_states.erase(state_it);
+            }
+        }
         search.search_nodes.resize(MAX_SEARCH_NODES);
     }
 }
