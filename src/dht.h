@@ -216,7 +216,9 @@ private:
         std::unordered_set<NodeId> queried_nodes;  // nodes we've already sent queries to
         std::unordered_set<NodeId> responded_nodes;  // nodes we've already received responses successfully
         std::unordered_set<NodeId> timed_out_nodes;  // nodes we've already timed out
+        std::unordered_set<NodeId> short_timeout_nodes;  // nodes that have exceeded short timeout (slot freed)
         int invoke_count;                           // number of outstanding requests
+        int branch_factor;                          // adaptive concurrency limit (starts at ALPHA)
         bool is_finished;                           // whether the search is finished
 
         // Callbacks to invoke when peers are found (supports multiple concurrent searches for same info_hash)
@@ -224,7 +226,7 @@ private:
         
         PendingSearch(const InfoHash& hash)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
-              invoke_count(0), is_finished(false) {}
+              invoke_count(0), branch_factor(ALPHA), is_finished(false) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
     std::mutex pending_searches_mutex_;  // Lock order: 2

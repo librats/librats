@@ -1070,27 +1070,38 @@ void DhtClient::cleanup_timed_out_search_requests() {
     }
     
     auto now = std::chrono::steady_clock::now();
-    auto timeout_threshold = std::chrono::seconds(10);  // 10 second timeout for individual requests
+    // - Short timeout (3s): Free up the slot by increasing branch_factor, but keep waiting for late response
+    // - Full timeout (15s): Mark node as failed and remove the transaction
+    auto short_timeout_threshold = std::chrono::seconds(3);
+    auto full_timeout_threshold = std::chrono::seconds(15);
     
-    // Collect timed out transactions
-    std::vector<std::string> timed_out_transactions;
+    // Collect transactions that need short timeout or full timeout
+    std::vector<std::string> short_timeout_transactions;
+    std::vector<std::string> full_timeout_transactions;
     
     for (const auto& [transaction_id, trans_info] : transaction_to_search_) {
-        if (now - trans_info.sent_at > timeout_threshold) {
-            timed_out_transactions.push_back(transaction_id);
+        auto elapsed = now - trans_info.sent_at;
+        
+        if (elapsed > full_timeout_threshold) {
+            full_timeout_transactions.push_back(transaction_id);
+        } else if (elapsed > short_timeout_threshold) {
+            // Check if this node already has short timeout
+            auto search_it = pending_searches_.find(trans_info.info_hash_hex);
+            if (search_it != pending_searches_.end()) {
+                auto& search = search_it->second;
+                // Only process if not already marked with short timeout
+                if (search.short_timeout_nodes.find(trans_info.queried_node_id) == search.short_timeout_nodes.end()) {
+                    short_timeout_transactions.push_back(transaction_id);
+                }
+            }
         }
     }
-    
-    if (timed_out_transactions.empty()) {
-        return;
-    }
-    
-    LOG_DHT_DEBUG("Found " << timed_out_transactions.size() << " timed out search requests");
     
     // Group by search to batch process and call add_search_requests once per search
     std::unordered_set<std::string> affected_searches;
     
-    for (const auto& transaction_id : timed_out_transactions) {
+    // Process short timeouts first - these nodes are slow but we still wait for a response
+    for (const auto& transaction_id : short_timeout_transactions) {
         auto trans_it = transaction_to_search_.find(transaction_id);
         if (trans_it == transaction_to_search_.end()) {
             continue;
@@ -1103,12 +1114,61 @@ void DhtClient::cleanup_timed_out_search_requests() {
             auto& search = search_it->second;
             
             if (!search.is_finished) {
-                // Decrement invoke count for timed out request
+                // Mark node with short timeout
+                search.short_timeout_nodes.insert(trans_info.queried_node_id);
+                
+                // Increase branch factor to allow another request (opening up a slot)
+                search.branch_factor++;
+                
+                LOG_DHT_DEBUG("Short timeout for node " << node_id_to_hex(trans_info.queried_node_id) 
+                              << " in search " << trans_info.info_hash_hex 
+                              << " - increased branch_factor to " << search.branch_factor
+                              << " (still waiting for late response)");
+                
+                affected_searches.insert(trans_info.info_hash_hex);
+            }
+        }
+        // Note: We DON'T remove the transaction - we're still waiting for a possible late response
+    }
+    
+    // Process full timeouts - these nodes have completely failed
+    for (const auto& transaction_id : full_timeout_transactions) {
+        auto trans_it = transaction_to_search_.find(transaction_id);
+        if (trans_it == transaction_to_search_.end()) {
+            continue;
+        }
+        
+        const auto& trans_info = trans_it->second;
+        auto search_it = pending_searches_.find(trans_info.info_hash_hex);
+        
+        if (search_it != pending_searches_.end()) {
+            auto& search = search_it->second;
+            
+            if (!search.is_finished) {
+                // Check if this node had short timeout (branch_factor was already increased)
+                bool had_short_timeout = search.short_timeout_nodes.find(trans_info.queried_node_id) 
+                                         != search.short_timeout_nodes.end();
+                
+                // Always decrement invoke_count on full timeout (node was still in-flight)
                 if (search.invoke_count > 0) {
                     search.invoke_count--;
-                    LOG_DHT_DEBUG("Search request timed out for node " << node_id_to_hex(trans_info.queried_node_id) 
+                }
+                
+                if (had_short_timeout) {
+                    // Restore branch factor since node fully timed out
+                    if (search.branch_factor > static_cast<int>(ALPHA)) {
+                        search.branch_factor--;
+                    }
+                    search.short_timeout_nodes.erase(trans_info.queried_node_id);
+                    
+                    LOG_DHT_DEBUG("Full timeout for node " << node_id_to_hex(trans_info.queried_node_id) 
                                   << " in search " << trans_info.info_hash_hex 
-                                  << " (invoke_count now: " << search.invoke_count << ")");
+                                  << " (had short timeout) - restored branch_factor to " << search.branch_factor
+                                  << ", invoke_count now: " << search.invoke_count);
+                } else {
+                    LOG_DHT_DEBUG("Full timeout for node " << node_id_to_hex(trans_info.queried_node_id) 
+                                  << " in search " << trans_info.info_hash_hex 
+                                  << " - invoke_count now: " << search.invoke_count);
                 }
                 
                 // Mark the node as timed out so we don't query it again
@@ -1118,11 +1178,16 @@ void DhtClient::cleanup_timed_out_search_requests() {
             }
         }
         
-        // Remove the timed out transaction
+        // Remove the fully timed out transaction
         transaction_to_search_.erase(trans_it);
     }
     
-    // Continue searches that had timed out requests
+    if (!short_timeout_transactions.empty() || !full_timeout_transactions.empty()) {
+        LOG_DHT_DEBUG("Timeout handling: " << short_timeout_transactions.size() << " short timeouts, "
+                      << full_timeout_transactions.size() << " full timeouts");
+    }
+    
+    // Continue searches that had timeout events
     for (const auto& hash_key : affected_searches) {
         auto search_it = pending_searches_.find(hash_key);
         if (search_it != pending_searches_.end() && !search_it->second.is_finished) {
@@ -1178,6 +1243,17 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
                 pending_search.invoke_count--;
             }
             
+            // If this node had short timeout, restore the branch factor (late response arrived)
+            auto short_timeout_it = pending_search.short_timeout_nodes.find(trans_info.queried_node_id);
+            if (short_timeout_it != pending_search.short_timeout_nodes.end()) {
+                if (pending_search.branch_factor > static_cast<int>(ALPHA)) {
+                    pending_search.branch_factor--;
+                }
+                pending_search.short_timeout_nodes.erase(short_timeout_it);
+                LOG_DHT_DEBUG("Late response from node " << node_id_to_hex(trans_info.queried_node_id)
+                              << " (had short timeout) - restored branch_factor to " << pending_search.branch_factor);
+            }
+            
             LOG_DHT_DEBUG("Found pending search for KRPC transaction " << transaction_id 
                           << " - received " << peers.size() << " peers for info_hash " << trans_info.info_hash_hex 
                           << " from " << responder.ip << ":" << responder.port
@@ -1229,6 +1305,17 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
             // Decrement invoke count since we received a response
             if (pending_search.invoke_count > 0) {
                 pending_search.invoke_count--;
+            }
+            
+            // If this node had short timeout, restore the branch factor (late response arrived)
+            auto short_timeout_it = pending_search.short_timeout_nodes.find(trans_info.queried_node_id);
+            if (short_timeout_it != pending_search.short_timeout_nodes.end()) {
+                if (pending_search.branch_factor > static_cast<int>(ALPHA)) {
+                    pending_search.branch_factor--;
+                }
+                pending_search.short_timeout_nodes.erase(short_timeout_it);
+                LOG_DHT_DEBUG("Late response from node " << node_id_to_hex(trans_info.queried_node_id)
+                              << " (had short timeout) - restored branch_factor to " << pending_search.branch_factor);
             }
             
             LOG_DHT_DEBUG("Processing get_peers response with " << nodes.size() 
@@ -1293,7 +1380,8 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
     LOG_DHT_DEBUG("Adding search requests for info_hash " << hash_key 
                   << " - search_nodes: " << search.search_nodes.size()
                   << ", queried: " << search.queried_nodes.size()
-                  << ", invoke_count: " << search.invoke_count);
+                  << ", invoke_count: " << search.invoke_count
+                  << ", branch_factor: " << search.branch_factor);
     
     const int k = static_cast<int>(K_BUCKET_SIZE);  // Target number of results
     int results_found = 0;  // Nodes that have responded
@@ -1327,7 +1415,8 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         
         // Check if we have capacity to send more requests
         // Important: use 'continue' not 'break' to keep counting results
-        if (search.invoke_count >= static_cast<int>(ALPHA)) {
+        // Use adaptive branch_factor (increases on short timeout, restores on response/full timeout)
+        if (search.invoke_count >= search.branch_factor) {
             continue;
         }
         
@@ -1350,8 +1439,10 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         << " * queries_sent=" << queries_sent
         << " * queried_total=" << search.queried_nodes.size()
         << " * invoke_count=" << search.invoke_count
+        << " * branch_factor=" << search.branch_factor
         << " * results_found=" << results_found
         << " * queries_in_flight=" << queries_in_flight
+        << " * short_timeout=" << search.short_timeout_nodes.size()
         << " * timed_out=" << search.timed_out_nodes.size());
     
     if ((results_found >= k && queries_in_flight == 0) || search.invoke_count == 0) {
@@ -1364,6 +1455,8 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         LOG_DHT_INFO("  Total nodes queried: " << search.queried_nodes.size());
         LOG_DHT_INFO("  Total nodes responded: " << search.responded_nodes.size());
         LOG_DHT_INFO("  Total nodes timed out: " << search.timed_out_nodes.size());
+        LOG_DHT_INFO("  Nodes with short timeout: " << search.short_timeout_nodes.size());
+        LOG_DHT_INFO("  Final branch_factor: " << search.branch_factor << " (initial: " << ALPHA << ")");
         LOG_DHT_INFO("  Total peers found: " << search.found_peers.size());
         LOG_DHT_INFO("  Callbacks to invoke: " << search.callbacks.size());
         
