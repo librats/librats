@@ -50,6 +50,17 @@ using NodeId = std::array<uint8_t, NODE_ID_SIZE>;
 using InfoHash = std::array<uint8_t, NODE_ID_SIZE>;
 
 /**
+ * Search node state flags (bitfield)
+ * Flags can be combined to track the full history of a node in a search.
+ */
+namespace SearchNodeFlags {
+    constexpr uint8_t QUERIED       = 1 << 0;  // Query has been sent to this node
+    constexpr uint8_t SHORT_TIMEOUT = 1 << 1;  // Node exceeded short timeout (slot freed, still waiting)
+    constexpr uint8_t RESPONDED     = 1 << 2;  // Node successfully responded
+    constexpr uint8_t TIMED_OUT     = 1 << 3;  // Node fully timed out (failed)
+}
+
+/**
  * DHT Node information
  */
 struct DhtNode {
@@ -212,11 +223,10 @@ private:
         // Iterative search state - search_nodes is sorted by distance to info_hash (closest first)
         std::vector<DhtNode> search_nodes;
         std::vector<Peer> found_peers;          // found peers for this search
-        std::unordered_set<NodeId> known_nodes;  // nodes we've already added to the search
-        std::unordered_set<NodeId> queried_nodes;  // nodes we've already sent queries to
-        std::unordered_set<NodeId> responded_nodes;  // nodes we've already received responses successfully
-        std::unordered_set<NodeId> timed_out_nodes;  // nodes we've already timed out
-        std::unordered_set<NodeId> short_timeout_nodes;  // nodes that have exceeded short timeout (slot freed)
+        // Single map tracking node states using SearchNodeFlags bitfield
+        // A node is "known" if it exists in this map (any flags set or value 0)
+        std::unordered_map<NodeId, uint8_t> node_states;
+        
         int invoke_count;                           // number of outstanding requests
         int branch_factor;                          // adaptive concurrency limit (starts at ALPHA)
         bool is_finished;                           // whether the search is finished
