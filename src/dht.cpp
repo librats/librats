@@ -1301,24 +1301,20 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
     int queries_sent = 0;   // Queries sent to nodes this round
     
     // Iterate through search_nodes (sorted by distance, closest first)
+    // Important: We must continue iterating to count results even when we can't send more requests
     for (auto& node : search.search_nodes) {
-        // Stop if we have enough results
+        // Stop if we have enough completed results
         if (results_found >= k) {
             break;
         }
-        
-        // Stop if we have enough outstanding requests
-        if (search.invoke_count >= static_cast<int>(ALPHA)) {
-            break;
-        }
 
-        // Check if this node has already responded
+        // Check if this node has already responded (counts toward results)
         if (search.responded_nodes.find(node.id) != search.responded_nodes.end()) {
             results_found++;
             continue;
         }
         
-        // Skip nodes that have timed out
+        // Skip nodes that have timed out (don't count as results or in-flight)
         if (search.timed_out_nodes.find(node.id) != search.timed_out_nodes.end()) {
             continue;
         }
@@ -1326,6 +1322,12 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         // Check if this node was already queried (in-flight)
         if (search.queried_nodes.find(node.id) != search.queried_nodes.end()) {
             queries_in_flight++;
+            continue;
+        }
+        
+        // Check if we have capacity to send more requests
+        // Important: use 'continue' not 'break' to keep counting results
+        if (search.invoke_count >= static_cast<int>(ALPHA)) {
             continue;
         }
         
