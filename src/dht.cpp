@@ -1072,7 +1072,7 @@ void DhtClient::cleanup_timed_out_search_requests() {
     auto now = std::chrono::steady_clock::now();
     // - Short timeout (3s): Free up the slot by increasing branch_factor, but keep waiting for late response
     // - Full timeout (15s): Mark node as failed and remove the transaction
-    auto short_timeout_threshold = std::chrono::seconds(3);
+    auto short_timeout_threshold = std::chrono::seconds(2);
     auto full_timeout_threshold = std::chrono::seconds(15);
     
     // Collect transactions that need short timeout or full timeout
