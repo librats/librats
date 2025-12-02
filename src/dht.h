@@ -215,6 +215,7 @@ private:
         std::unordered_set<NodeId> known_nodes;  // nodes we've already added to the search
         std::unordered_set<NodeId> queried_nodes;  // nodes we've already sent queries to
         std::unordered_set<NodeId> responded_nodes;  // nodes we've already received responses successfully
+        std::unordered_set<NodeId> timed_out_nodes;  // nodes we've already timed out
         int invoke_count;                           // number of outstanding requests
         bool is_finished;                           // whether the search is finished
 
@@ -232,10 +233,12 @@ private:
     struct SearchTransaction {
         std::string info_hash_hex;
         NodeId queried_node_id;
+        std::chrono::steady_clock::time_point sent_at;
         
         SearchTransaction() = default;
         SearchTransaction(const std::string& hash, const NodeId& id)
-            : info_hash_hex(hash), queried_node_id(id) {}
+            : info_hash_hex(hash), queried_node_id(id), 
+              sent_at(std::chrono::steady_clock::now()) {}
     };
     std::unordered_map<std::string, SearchTransaction> transaction_to_search_; // transaction_id -> SearchTransaction
     
@@ -323,6 +326,7 @@ private:
     
     // Pending search management
     void cleanup_stale_searches();
+    void cleanup_timed_out_search_requests();
     void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
     bool add_search_requests(PendingSearch& search);

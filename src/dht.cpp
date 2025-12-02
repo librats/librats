@@ -270,10 +270,16 @@ void DhtClient::maintenance_loop() {
     auto last_ping_verification_cleanup = std::chrono::steady_clock::now();
     auto last_general_cleanup = std::chrono::steady_clock::now();
     auto last_stats_print = std::chrono::steady_clock::now();
+    auto last_search_timeout_check = std::chrono::steady_clock::now();
     
     while (running_) {
         auto now = std::chrono::steady_clock::now();
 
+        // Check for timed out search requests every 2 seconds (frequent check)
+        if (now - last_search_timeout_check >= std::chrono::seconds(2)) {
+            cleanup_timed_out_search_requests();
+            last_search_timeout_check = now;
+        }
         
         // General cleanup operations every 1 minute (like previously)
         if (now - last_general_cleanup >= std::chrono::minutes(1)) {
@@ -379,10 +385,10 @@ void DhtClient::maintenance_loop() {
             last_stats_print = now;
         }
         
-        // Execute maintenance loop every 5 seconds
+        // Execute maintenance loop every 1 second
         {
             std::unique_lock<std::mutex> lock(shutdown_mutex_);
-            if (shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return !running_.load(); })) {
+            if (shutdown_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return !running_.load(); })) {
                 break;
             }
         }
@@ -1056,6 +1062,85 @@ void DhtClient::cleanup_stale_searches() {
     }
 }
 
+void DhtClient::cleanup_timed_out_search_requests() {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+
+    if (pending_searches_.empty()) {
+        return;
+    }
+    
+    auto now = std::chrono::steady_clock::now();
+    auto timeout_threshold = std::chrono::seconds(10);  // 10 second timeout for individual requests
+    
+    // Collect timed out transactions
+    std::vector<std::string> timed_out_transactions;
+    
+    for (const auto& [transaction_id, trans_info] : transaction_to_search_) {
+        if (now - trans_info.sent_at > timeout_threshold) {
+            timed_out_transactions.push_back(transaction_id);
+        }
+    }
+    
+    if (timed_out_transactions.empty()) {
+        return;
+    }
+    
+    LOG_DHT_DEBUG("Found " << timed_out_transactions.size() << " timed out search requests");
+    
+    // Group by search to batch process and call add_search_requests once per search
+    std::unordered_set<std::string> affected_searches;
+    
+    for (const auto& transaction_id : timed_out_transactions) {
+        auto trans_it = transaction_to_search_.find(transaction_id);
+        if (trans_it == transaction_to_search_.end()) {
+            continue;
+        }
+        
+        const auto& trans_info = trans_it->second;
+        auto search_it = pending_searches_.find(trans_info.info_hash_hex);
+        
+        if (search_it != pending_searches_.end()) {
+            auto& search = search_it->second;
+            
+            if (!search.is_finished) {
+                // Decrement invoke count for timed out request
+                if (search.invoke_count > 0) {
+                    search.invoke_count--;
+                    LOG_DHT_DEBUG("Search request timed out for node " << node_id_to_hex(trans_info.queried_node_id) 
+                                  << " in search " << trans_info.info_hash_hex 
+                                  << " (invoke_count now: " << search.invoke_count << ")");
+                }
+                
+                // Mark the node as timed out so we don't query it again
+                search.timed_out_nodes.insert(trans_info.queried_node_id);
+                
+                affected_searches.insert(trans_info.info_hash_hex);
+            }
+        }
+        
+        // Remove the timed out transaction
+        transaction_to_search_.erase(trans_it);
+    }
+    
+    // Continue searches that had timed out requests
+    for (const auto& hash_key : affected_searches) {
+        auto search_it = pending_searches_.find(hash_key);
+        if (search_it != pending_searches_.end() && !search_it->second.is_finished) {
+            LOG_DHT_DEBUG("Continuing search " << hash_key << " after timeout handling");
+            add_search_requests(search_it->second);
+        }
+    }
+    
+    // Clean up finished searches
+    for (const auto& hash_key : affected_searches) {
+        auto search_it = pending_searches_.find(hash_key);
+        if (search_it != pending_searches_.end() && search_it->second.is_finished) {
+            LOG_DHT_DEBUG("Removing finished search " << hash_key << " after timeout handling");
+            pending_searches_.erase(search_it);
+        }
+    }
+}
+
 void DhtClient::handle_get_peers_response_for_announce(const std::string& transaction_id, const Peer& responder, const std::string& token) {
     std::lock_guard<std::mutex> lock(pending_announces_mutex_);
     
@@ -1233,7 +1318,12 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
             continue;
         }
         
-        // Check if this node was already queried
+        // Skip nodes that have timed out
+        if (search.timed_out_nodes.find(node.id) != search.timed_out_nodes.end()) {
+            continue;
+        }
+        
+        // Check if this node was already queried (in-flight)
         if (search.queried_nodes.find(node.id) != search.queried_nodes.end()) {
             queries_in_flight++;
             continue;
@@ -1259,7 +1349,8 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         << " * queried_total=" << search.queried_nodes.size()
         << " * invoke_count=" << search.invoke_count
         << " * results_found=" << results_found
-        << " * queries_in_flight=" << queries_in_flight);
+        << " * queries_in_flight=" << queries_in_flight
+        << " * timed_out=" << search.timed_out_nodes.size());
     
     if ((results_found >= k && queries_in_flight == 0) || search.invoke_count == 0) {
         auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1270,6 +1361,7 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         LOG_DHT_INFO("  Duration: " << duration_ms << "ms");
         LOG_DHT_INFO("  Total nodes queried: " << search.queried_nodes.size());
         LOG_DHT_INFO("  Total nodes responded: " << search.responded_nodes.size());
+        LOG_DHT_INFO("  Total nodes timed out: " << search.timed_out_nodes.size());
         LOG_DHT_INFO("  Total peers found: " << search.found_peers.size());
         LOG_DHT_INFO("  Callbacks to invoke: " << search.callbacks.size());
         
