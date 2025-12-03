@@ -1499,11 +1499,7 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
     
     std::string hash_key = node_id_to_hex(search.info_hash);
     
-    LOG_DHT_DEBUG("Adding search requests for info_hash " << hash_key 
-                  << " - search_nodes: " << search.search_nodes.size()
-                  << ", known: " << search.node_states.size()
-                  << ", invoke_count: " << search.invoke_count
-                  << ", branch_factor: " << search.branch_factor);
+    LOG_DHT_DEBUG("Adding search requests for info_hash " << hash_key);
     
     const int k = static_cast<int>(K_BUCKET_SIZE);  // Target number of results
     int results_found = 0;       // Nodes that have responded
@@ -1565,14 +1561,16 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
         queries_sent++;
     }
     
-    LOG_DHT_DEBUG("Search requests summary for " << hash_key << ":"
-        << " * search_nodes=" << search.search_nodes.size()
-        << " * queries_sent=" << queries_sent
-        << " * invoke_count=" << search.invoke_count
-        << " * branch_factor=" << search.branch_factor
-        << " * results_found=" << results_found
-        << " * queries_in_flight=" << queries_in_flight
-        << " * timed_out=" << timed_out_count);
+    LOG_DHT_DEBUG("Search [" << hash_key << "] progress [ms: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - search.created_at).count() << "]:");
+    LOG_DHT_DEBUG(" * search_nodes: " << search.search_nodes.size());
+    LOG_DHT_DEBUG(" * queries_sent: " << queries_sent);
+    LOG_DHT_DEBUG(" * invoke_count: " << search.invoke_count);
+    LOG_DHT_DEBUG(" * branch_factor: " << search.branch_factor);
+    LOG_DHT_DEBUG(" * results_found: " << results_found);
+    LOG_DHT_DEBUG(" * queries_in_flight: " << queries_in_flight);
+    LOG_DHT_DEBUG(" * timed_out: " << timed_out_count);
+    LOG_DHT_DEBUG(" * peers_found: " << search.found_peers.size());
+    LOG_DHT_DEBUG(" * callbacks: " << search.callbacks.size());
     
     if ((results_found >= k && queries_in_flight == 0) || search.invoke_count == 0) {
         auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
