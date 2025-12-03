@@ -1115,6 +1115,14 @@ void DhtClient::cleanup_timed_out_search_requests() {
             auto& search = search_it->second;
             
             if (!search.is_finished) {
+                // Check if this node was abandoned during truncation
+                auto state_it = search.node_states.find(trans_info.queried_node_id);
+                if (state_it != search.node_states.end() && 
+                    (state_it->second & SearchNodeFlags::ABANDONED)) {
+                    // Node was abandoned, skip short timeout processing
+                    continue;
+                }
+                
                 // Mark node with short timeout (add flag, preserving existing flags)
                 search.node_states[trans_info.queried_node_id] |= SearchNodeFlags::SHORT_TIMEOUT;
                 
@@ -1148,6 +1156,15 @@ void DhtClient::cleanup_timed_out_search_requests() {
             if (!search.is_finished) {
                 // Get current flags for this node
                 uint8_t& flags = search.node_states[trans_info.queried_node_id];
+                
+                // Check if this node was abandoned during truncation
+                if (flags & SearchNodeFlags::ABANDONED) {
+                    // Node was abandoned, invoke_count already decremented
+                    // Just remove the transaction and continue
+                    transaction_to_search_.erase(trans_it);
+                    continue;
+                }
+                
                 bool had_short_timeout = flags & SearchNodeFlags::SHORT_TIMEOUT;
                 
                 // Always decrement invoke_count on full timeout (node was still in-flight)
@@ -1235,6 +1252,16 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
         if (search_it != pending_searches_.end()) {
             auto& pending_search = search_it->second;
 
+            // Check if this node was abandoned during truncation
+            auto state_it = pending_search.node_states.find(trans_info.queried_node_id);
+            if (state_it != pending_search.node_states.end() && 
+                (state_it->second & SearchNodeFlags::ABANDONED)) {
+                LOG_DHT_DEBUG("Ignoring response from abandoned node " 
+                              << node_id_to_hex(trans_info.queried_node_id)
+                              << " - invoke_count already decremented during truncation");
+                return;
+            }
+
             // Get flags for this node and mark as responded
             uint8_t& flags = pending_search.node_states[trans_info.queried_node_id];
             
@@ -1317,6 +1344,16 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
         auto search_it = pending_searches_.find(trans_info.info_hash_hex);
         if (search_it != pending_searches_.end()) {
             auto& pending_search = search_it->second;
+
+            // Check if this node was abandoned during truncation
+            auto state_it = pending_search.node_states.find(trans_info.queried_node_id);
+            if (state_it != pending_search.node_states.end() && 
+                (state_it->second & SearchNodeFlags::ABANDONED)) {
+                LOG_DHT_DEBUG("Ignoring response from abandoned node " 
+                              << node_id_to_hex(trans_info.queried_node_id)
+                              << " - invoke_count already decremented during truncation");
+                return;
+            }
 
             // Get flags for this node and mark as responded
             uint8_t& flags = pending_search.node_states[trans_info.queried_node_id];
@@ -1411,8 +1448,9 @@ void DhtClient::add_node_to_search(PendingSearch& search, const DhtNode& node) {
                         }
                     }
                 }
-                // Remove from node_states to avoid orphaned state
-                search.node_states.erase(state_it);
+                // Mark as ABANDONED instead of removing - prevents double invoke_count decrement
+                // when late response arrives (response handlers check this flag)
+                state_it->second |= SearchNodeFlags::ABANDONED;
             }
         }
         search.search_nodes.resize(MAX_SEARCH_NODES);
@@ -1509,12 +1547,13 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         ).count();
         
         // Count final stats for completion log
-        int queried_total = 0, responded_total = 0, timed_out_total = 0, short_timeout_total = 0;
+        int queried_total = 0, responded_total = 0, timed_out_total = 0, short_timeout_total = 0, abandoned_total = 0;
         for (const auto& [id, f] : search.node_states) {
             if (f & SearchNodeFlags::QUERIED) queried_total++;
             if (f & SearchNodeFlags::RESPONDED) responded_total++;
             if (f & SearchNodeFlags::TIMED_OUT) timed_out_total++;
             if (f & SearchNodeFlags::SHORT_TIMEOUT) short_timeout_total++;
+            if (f & SearchNodeFlags::ABANDONED) abandoned_total++;
         }
         
         LOG_DHT_INFO("=== Search Completed for info_hash " << hash_key << " ===");
@@ -1523,6 +1562,7 @@ bool DhtClient::add_search_requests(PendingSearch& search) {
         LOG_DHT_INFO("  Total nodes responded: " << responded_total);
         LOG_DHT_INFO("  Total nodes timed out: " << timed_out_total);
         LOG_DHT_INFO("  Nodes with short timeout: " << short_timeout_total);
+        LOG_DHT_INFO("  Nodes abandoned (truncation): " << abandoned_total);
         LOG_DHT_INFO("  Final branch_factor: " << search.branch_factor << " (initial: " << ALPHA << ")");
         LOG_DHT_INFO("  Total peers found: " << search.found_peers.size());
         LOG_DHT_INFO("  Callbacks to invoke: " << search.callbacks.size());

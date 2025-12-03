@@ -58,6 +58,7 @@ namespace SearchNodeFlags {
     constexpr uint8_t SHORT_TIMEOUT = 1 << 1;  // Node exceeded short timeout (slot freed, still waiting)
     constexpr uint8_t RESPONDED     = 1 << 2;  // Node successfully responded
     constexpr uint8_t TIMED_OUT     = 1 << 3;  // Node fully timed out (failed)
+    constexpr uint8_t ABANDONED     = 1 << 4;  // Node was discarded during search truncation
 }
 
 /**
