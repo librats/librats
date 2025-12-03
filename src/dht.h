@@ -361,6 +361,7 @@ private:
     void cleanup_timed_out_search_requests();
     void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
+    void handle_get_peers_empty_response(const std::string& transaction_id, const Peer& responder);
     bool add_search_requests(PendingSearch& search, DeferredCallbacks& deferred);
     void add_node_to_search(PendingSearch& search, const DhtNode& node);
     

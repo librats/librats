@@ -773,6 +773,11 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     else if (!message.nodes.empty()) {
         handle_get_peers_response_with_nodes(message.transaction_id, sender, message.nodes);
     }
+    else {
+        // Empty response (no peers, no nodes) - still need to mark as responded
+        // This can happen when a node has no information about the info_hash
+        handle_get_peers_empty_response(message.transaction_id, sender);
+    }
     
     // Check if this is a response to a pending announce (get_peers with token)
     if (!message.token.empty()) {
@@ -1261,6 +1266,60 @@ void DhtClient::handle_get_peers_response_for_announce(const std::string& transa
     }
 }
 
+void DhtClient::handle_get_peers_empty_response(const std::string& transaction_id, const Peer& responder) {
+    DeferredCallbacks deferred;
+    {
+        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+        auto trans_it = transaction_to_search_.find(transaction_id);
+        if (trans_it != transaction_to_search_.end()) {
+            const auto& trans_info = trans_it->second;
+            auto search_it = pending_searches_.find(trans_info.info_hash_hex);
+            if (search_it != pending_searches_.end()) {
+                auto& pending_search = search_it->second;
+
+                // Check if this node was abandoned during truncation
+                auto state_it = pending_search.node_states.find(trans_info.queried_node_id);
+                if (state_it != pending_search.node_states.end() && 
+                    (state_it->second & SearchNodeFlags::ABANDONED)) {
+                    LOG_DHT_DEBUG("Ignoring empty response from abandoned node " 
+                                  << node_id_to_hex(trans_info.queried_node_id));
+                    return;
+                }
+
+                uint8_t& flags = pending_search.node_states[trans_info.queried_node_id];
+
+                if (flags & SearchNodeFlags::RESPONDED) {
+                    LOG_DHT_DEBUG("Ignoring duplicate response from node " << node_id_to_hex(trans_info.queried_node_id));
+                    return;
+                }
+                
+                // Decrement invoke count
+                if (pending_search.invoke_count > 0) {
+                    pending_search.invoke_count--;
+                }
+                
+                // Restore branch_factor if had short timeout
+                if (flags & SearchNodeFlags::SHORT_TIMEOUT) {
+                    if (pending_search.branch_factor > static_cast<int>(ALPHA)) {
+                        pending_search.branch_factor--;
+                    }
+                }
+                
+                // Mark as responded
+                flags |= SearchNodeFlags::RESPONDED;
+                
+                LOG_DHT_DEBUG("Empty get_peers response from " << responder.ip << ":" << responder.port
+                              << " for info_hash " << trans_info.info_hash_hex
+                              << " (invoke_count now: " << pending_search.invoke_count << ")");
+                
+                // Continue search
+                add_search_requests(pending_search, deferred);
+            }
+        }
+    }
+    
+    deferred.invoke();
+}
 
 void DhtClient::handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers) {
     DeferredCallbacks deferred_immediate;   // For new peers callbacks
@@ -1287,6 +1346,13 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
 
                 // Get flags for this node and mark as responded
                 uint8_t& flags = pending_search.node_states[trans_info.queried_node_id];
+
+                // Check if already responded (duplicate response)
+                if (flags & SearchNodeFlags::RESPONDED) {
+                    LOG_DHT_DEBUG("Ignoring duplicate response from node " 
+                                << node_id_to_hex(trans_info.queried_node_id));
+                    return;
+                }
                 
                 // Decrement invoke count since we received a response
                 if (pending_search.invoke_count > 0) {
@@ -1386,6 +1452,13 @@ void DhtClient::handle_get_peers_response_with_nodes(const std::string& transact
 
                 // Get flags for this node and mark as responded
                 uint8_t& flags = pending_search.node_states[trans_info.queried_node_id];
+
+                // Check if already responded (duplicate response)
+                if (flags & SearchNodeFlags::RESPONDED) {
+                    LOG_DHT_DEBUG("Ignoring duplicate response from node " 
+                                << node_id_to_hex(trans_info.queried_node_id));
+                    return;
+                }
                 
                 // Decrement invoke count since we received a response
                 if (pending_search.invoke_count > 0) {
