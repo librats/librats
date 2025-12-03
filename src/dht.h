@@ -82,6 +82,25 @@ struct DhtNode {
 using PeerDiscoveryCallback = std::function<void(const std::vector<Peer>& peers, const InfoHash& info_hash)>;
 
 /**
+ * Deferred callbacks structure for avoiding deadlock
+ * Callbacks are collected while holding the mutex, then invoked after releasing it
+ */
+struct DeferredCallbacks {
+    std::vector<PeerDiscoveryCallback> callbacks;
+    std::vector<Peer> peers;
+    InfoHash info_hash;
+    bool should_invoke = false;
+    
+    void invoke() {
+        if (should_invoke) {
+            for (const auto& cb : callbacks) {
+                if (cb) cb(peers, info_hash);
+            }
+        }
+    }
+};
+
+/**
  * DHT Kademlia implementation
  */
 class DhtClient {
@@ -342,7 +361,7 @@ private:
     void cleanup_timed_out_search_requests();
     void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
-    bool add_search_requests(PendingSearch& search);
+    bool add_search_requests(PendingSearch& search, DeferredCallbacks& deferred);
     void add_node_to_search(PendingSearch& search, const DhtNode& node);
     
     // Peer announcement storage management
