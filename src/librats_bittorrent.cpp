@@ -1,6 +1,6 @@
 #include "librats.h"
 
-#ifdef RATS_SEACH_FEATURES
+#ifdef RATS_SEARCH_FEATURES
 
 // Logging macros for BitTorrent client
 #define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
@@ -11,7 +11,7 @@
 namespace librats {
 
 //=============================================================================
-// BitTorrent API Implementation (requires RATS_SEACH_FEATURES)
+// BitTorrent API Implementation (requires RATS_SEARCH_FEATURES)
 //=============================================================================
 
 bool RatsClient::enable_bittorrent(int listen_port) {
@@ -164,4 +164,4 @@ void RatsClient::get_torrent_metadata(const std::string& info_hash_hex,
 
 }
 
-#endif // RATS_SEACH_FEATURES
+#endif // RATS_SEARCH_FEATURES

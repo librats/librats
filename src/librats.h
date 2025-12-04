@@ -10,8 +10,8 @@
 #include "threadmanager.h"
 #include "gossipsub.h" // For ValidationResult enum and GossipSub types
 #include "file_transfer.h" // File transfer functionality
-#ifdef RATS_SEACH_FEATURES
-#include "bittorrent.h" // BitTorrent functionality (optional, requires RATS_SEACH_FEATURES)
+#ifdef RATS_SEARCH_FEATURES
+#include "bittorrent.h" // BitTorrent functionality (optional, requires RATS_SEARCH_FEATURES)
 #endif
 #include "json.hpp" // nlohmann::json
 #include <string>
@@ -1340,9 +1340,9 @@ public:
      */
     void on_directory_request(DirectoryRequestCallback callback);
 
-#ifdef RATS_SEACH_FEATURES
+#ifdef RATS_SEARCH_FEATURES
     // =========================================================================
-    // BitTorrent API (requires RATS_SEACH_FEATURES)
+    // BitTorrent API (requires RATS_SEARCH_FEATURES)
     // =========================================================================
     
     /**
@@ -1450,7 +1450,7 @@ public:
      */
     void get_torrent_metadata(const std::string& info_hash_hex, 
                              std::function<void(const TorrentInfo&, bool, const std::string&)> callback);
-#endif // RATS_SEACH_FEATURES
+#endif // RATS_SEARCH_FEATURES
 
 private:
     int listen_port_;
@@ -1531,8 +1531,8 @@ private:
     // File transfer manager
     std::unique_ptr<FileTransferManager> file_transfer_manager_;
     
-#ifdef RATS_SEACH_FEATURES
-    // BitTorrent client (optional, requires RATS_SEACH_FEATURES)
+#ifdef RATS_SEARCH_FEATURES
+    // BitTorrent client (optional, requires RATS_SEARCH_FEATURES)
     std::unique_ptr<BitTorrentClient> bittorrent_client_;
 #endif
     

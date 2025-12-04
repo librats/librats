@@ -72,7 +72,7 @@ option(RATS_BINDINGS "Enable bindings" ON)
 option(RATS_CROSSCOMPILING "Force cross-compilation flags" OFF)
 option(RATS_SHARED_LIBRARY "Build as shared library" OFF)
 option(RATS_STATIC_LIBRARY "Build as static library" ON)
-option(RATS_SEACH_FEATURES "Features related to rats-search project (like bittorrent)" OFF)
+option(RATS_SEARCH_FEATURES "Features related to rats-search project (like bittorrent)" OFF)
 
 # Validate library type options
 if(RATS_SHARED_LIBRARY AND RATS_STATIC_LIBRARY)
@@ -155,8 +155,8 @@ set(LIBRARY_SOURCES
     ${PROJECT_BINARY_DIR}/src/version.h
 )
 
-# Add BitTorrent sources if RATS_SEACH_FEATURES is enabled
-if(RATS_SEACH_FEATURES)
+# Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
+if(RATS_SEARCH_FEATURES)
     list(APPEND LIBRARY_SOURCES
         src/librats_bittorrent.cpp
         src/bittorrent.cpp
@@ -217,10 +217,10 @@ if(ANDROID)
     endif()
 endif()
 
-if(RATS_SEACH_FEATURES)
+if(RATS_SEARCH_FEATURES)
     message(STATUS "Enable rats-search features")
-    target_compile_definitions(rats PUBLIC RATS_SEACH_FEATURES)
-endif(RATS_SEACH_FEATURES)
+    target_compile_definitions(rats PUBLIC RATS_SEARCH_FEATURES)
+endif(RATS_SEARCH_FEATURES)
 
 # Create the main executable
 if(RATS_BUILD_EXAMPLES)
@@ -310,8 +310,8 @@ if(RATS_BUILD_TESTS)
         tests/test_file_transfer.cpp
     )
     
-    # Add BitTorrent tests if RATS_SEACH_FEATURES is enabled
-    if(RATS_SEACH_FEATURES)
+    # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled
+    if(RATS_SEARCH_FEATURES)
         list(APPEND TEST_SOURCES 
             tests/test_bittorrent.cpp
             tests/test_tracker.cpp

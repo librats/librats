@@ -57,7 +57,7 @@ void print_help() {
     std::cout << "  transfer_resume <transfer_id> - Resume a transfer" << std::endl;
     std::cout << "  transfer_cancel <transfer_id> - Cancel a transfer" << std::endl;
     std::cout << "  transfer_stats    - Show transfer statistics" << std::endl;
-#ifdef RATS_SEACH_FEATURES
+#ifdef RATS_SEARCH_FEATURES
     std::cout << "\nBitTorrent Commands:" << std::endl;
     std::cout << "  bittorrent_enable [port] - Enable BitTorrent (default port: 6881)" << std::endl;
     std::cout << "  bittorrent_disable - Disable BitTorrent" << std::endl;
@@ -652,7 +652,7 @@ int main(int argc, char* argv[]) {
                 std::cout << stats.dump(2) << std::endl;
             }
         }
-#ifdef RATS_SEACH_FEATURES
+#ifdef RATS_SEARCH_FEATURES
         else if (command == "bittorrent_enable") {
             int bt_port = 6881;
             iss >> bt_port;
@@ -1029,7 +1029,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  Share Ratio: " << (stats.first > 0 ? (double)stats.second / stats.first : 0.0) << std::endl;
             }
         }
-#endif // RATS_SEACH_FEATURES
+#endif // RATS_SEARCH_FEATURES
         else {
             std::cout << "Unknown command: " << command << std::endl;
             std::cout << "Type 'help' for available commands." << std::endl;
