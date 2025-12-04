@@ -1575,6 +1575,7 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
     LOG_DHT_DEBUG("Adding search requests for info_hash " << hash_key);
     
     const int k = static_cast<int>(K_BUCKET_SIZE);  // Target number of results
+    int loop_index = -1;
     int results_found = 0;       // Nodes that have responded
     int queries_in_flight = 0;   // Requests currently in flight
     int timed_out_count = 0;     // Nodes that timed out
@@ -1583,6 +1584,8 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
     // Iterate through search_nodes (sorted by distance, closest first)
     // Important: We must continue iterating to count results even when we can't send more requests
     for (auto& node : search.search_nodes) {
+        loop_index++;
+
         // Stop if we have enough completed results
         if (results_found >= k) {
             break;
@@ -1591,6 +1594,11 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
         // Get flags for this node (0 if not in map, meaning just "known")
         auto state_it = search.node_states.find(node.id);
         uint8_t flags = (state_it != search.node_states.end()) ? state_it->second : 0;
+
+        // Usually it doesn't happen, but if it does, we skip it
+        if (flags & SearchNodeFlags::ABANDONED) {
+            continue;
+        }
         
         // Check if this node has already responded (counts toward results)
         if (flags & SearchNodeFlags::RESPONDED) {
@@ -1644,6 +1652,7 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
     LOG_DHT_DEBUG(" * timed_out: " << timed_out_count);
     LOG_DHT_DEBUG(" * peers_found: " << search.found_peers.size());
     LOG_DHT_DEBUG(" * callbacks: " << search.callbacks.size());
+    LOG_DHT_DEBUG(" * loop_index: " << loop_index);
     
     if ((results_found >= k && queries_in_flight == 0) || search.invoke_count == 0) {
         auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
