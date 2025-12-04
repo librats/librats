@@ -359,6 +359,7 @@ private:
     // Pending search management
     void cleanup_stale_searches();
     void cleanup_timed_out_search_requests();
+    void cleanup_search_node_states();
     void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
     void handle_get_peers_empty_response(const std::string& transaction_id, const Peer& responder);
