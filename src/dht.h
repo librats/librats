@@ -63,15 +63,61 @@ namespace SearchNodeFlags {
 
 /**
  * DHT Node information
+ * Based on libtorrent's node_entry with fail_count and RTT tracking
  */
 struct DhtNode {
     NodeId id;
     Peer peer;
     std::chrono::steady_clock::time_point last_seen;
     
+    // Round-trip time in milliseconds (0xffff = unknown, lower is better)
+    uint16_t rtt = 0xffff;
+    
+    // Number of consecutive failures (0xff = never pinged, 0 = confirmed good)
+    uint8_t fail_count = 0xff;
+    
     DhtNode() : last_seen(std::chrono::steady_clock::now()) {}
     DhtNode(const NodeId& id, const Peer& peer)
         : id(id), peer(peer), last_seen(std::chrono::steady_clock::now()) {}
+    
+    // Has this node ever responded to us?
+    bool pinged() const { return fail_count != 0xff; }
+    
+    // Is this node confirmed good? (responded with no recent failures)
+    bool confirmed() const { return fail_count == 0; }
+    
+    // Mark node as failed (timed out)
+    void mark_failed() { 
+        if (pinged() && fail_count < 0xfe) ++fail_count; 
+    }
+    
+    // Mark node as successful (responded)
+    void mark_success() { 
+        fail_count = 0; 
+        last_seen = std::chrono::steady_clock::now();
+    }
+    
+    // Update RTT with exponential moving average
+    void update_rtt(uint16_t new_rtt) {
+        if (new_rtt == 0xffff) return;
+        if (rtt == 0xffff) {
+            rtt = new_rtt;
+        } else {
+            // Weighted average: 2/3 old + 1/3 new
+            rtt = static_cast<uint16_t>(rtt * 2 / 3 + new_rtt / 3);
+        }
+    }
+    
+    // Compare nodes: "less" means "better" node
+    // Priority: confirmed > not confirmed, then lower fail_count, then lower RTT
+    bool is_worse_than(const DhtNode& other) const {
+        // Nodes with failures are worse
+        if (fail_count != other.fail_count) {
+            return fail_count > other.fail_count;
+        }
+        // Higher RTT is worse
+        return rtt > other.rtt;
+    }
 };
 
 
@@ -288,7 +334,7 @@ private:
     
     // Ping-before-replace eviction tracking (BEP 5 compliant)
     // When a bucket is full and a new node wants to join:
-    // 1. We ping the OLDEST node in the bucket to check if it's still alive
+    // 1. We ping the WORST node in the bucket (highest RTT) to check if it's still alive
     // 2. If old node responds -> keep it, discard candidate
     // 3. If old node times out -> replace it with candidate
     struct PingVerification {
@@ -336,7 +382,7 @@ private:
     void send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash);
     void send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
     
-    void add_node(const DhtNode& node);
+    void add_node(const DhtNode& node, bool confirmed = true);
     std::vector<DhtNode> find_closest_nodes(const NodeId& target, size_t count = K_BUCKET_SIZE);
     std::vector<DhtNode> find_closest_nodes_unlocked(const NodeId& target, size_t count = K_BUCKET_SIZE);
     int get_bucket_index(const NodeId& id);

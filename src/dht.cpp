@@ -423,14 +423,15 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sen
     handle_krpc_message(*krpc_message, sender);
 }
 
-void DhtClient::add_node(const DhtNode& node) {
+void DhtClient::add_node(const DhtNode& node, bool confirmed) {
     std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
     std::lock_guard<std::mutex> lock(routing_table_mutex_);
 
     int bucket_index = get_bucket_index(node.id);
     auto& bucket = routing_table_[bucket_index];
 
-    LOG_DHT_DEBUG("Adding node " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port << " to bucket " << bucket_index);
+    LOG_DHT_DEBUG("Adding node " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port 
+                  << " to bucket " << bucket_index << " (confirmed=" << confirmed << ")");
         
     // Check if node already exists
     auto it = std::find_if(bucket.begin(), bucket.end(),
@@ -439,38 +440,67 @@ void DhtClient::add_node(const DhtNode& node) {
                           });
 
     if (it != bucket.end()) {
-        // Update existing node
+        // Update existing node - mark as successful since it contacted us
         LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " already exists in bucket " << bucket_index << ", updating");
         it->peer = node.peer;
-        it->last_seen = std::chrono::steady_clock::now();
+        if (confirmed) {
+            it->mark_success();
+        }
         return;
     }
 
     // Bucket has space - just add
     if (bucket.size() < K_BUCKET_SIZE) {
-        bucket.push_back(node);
+        DhtNode new_node = node;
+        if (confirmed) {
+            new_node.fail_count = 0;  // Node contacted us, so it's confirmed good
+        }
+        bucket.push_back(new_node);
         LOG_DHT_DEBUG("Added new node " << node_id_to_hex(node.id) << " to bucket " << bucket_index << " (size: " << bucket.size() << "/" << K_BUCKET_SIZE << ")");
         return;
     }
 
-    // Bucket is full - BEP 5: ping oldest node to check if alive
-    // Find oldest node that is not already being pinged
-    DhtNode* oldest = nullptr;
+    // Bucket is full - first check for nodes with failures (stale nodes)
+    auto worst_it = std::max_element(bucket.begin(), bucket.end(),
+        [](const DhtNode& a, const DhtNode& b) {
+            // Find node with highest fail_count
+            return a.fail_count < b.fail_count;
+        });
+    
+    if (worst_it != bucket.end() && worst_it->fail_count > 0) {
+        // Found a stale node - replace it immediately
+        LOG_DHT_DEBUG("Replacing stale node " << node_id_to_hex(worst_it->id) 
+                      << " (fail_count=" << static_cast<int>(worst_it->fail_count) << ")"
+                      << " with " << node_id_to_hex(node.id));
+        DhtNode new_node = node;
+        if (confirmed) {
+            new_node.fail_count = 0;  // Node contacted us, so it's confirmed good
+        }
+        // else: keep fail_count = 0xff (unpinged) from constructor
+        *worst_it = new_node;
+        return;
+    }
+
+    // All nodes are good - find the "worst" good node for ping verification
+    // Worst = highest RTT among nodes not already being pinged
+    DhtNode* worst = nullptr;
     for (auto& existing : bucket) {
         if (nodes_being_replaced_.find(existing.id) == nodes_being_replaced_.end()) {
-            if (!oldest || existing.last_seen < oldest->last_seen) {
-                oldest = &existing;
+            if (!worst || existing.is_worse_than(*worst)) {
+                worst = &existing;
             }
         }
     }
     
-    if (!oldest) {
+    if (!worst) {
         LOG_DHT_DEBUG("All nodes in bucket already have pending pings - dropping candidate " << node_id_to_hex(node.id));
         return;
     }
     
-    // Initiate ping to oldest node - if it doesn't respond, replace with candidate
-    initiate_ping_verification(node, *oldest, bucket_index);
+    // Initiate ping to worst node - if it doesn't respond, replace with candidate
+    LOG_DHT_DEBUG("All nodes good, pinging worst node " << node_id_to_hex(worst->id) 
+                  << " (rtt=" << worst->rtt << "ms) to verify");
+    initiate_ping_verification(node, *worst, bucket_index);
 }
 
 std::vector<DhtNode> DhtClient::find_closest_nodes(const NodeId& target, size_t count) {
@@ -734,10 +764,10 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
     add_node(sender_node);
     
-    // Add any nodes from the response
+    // Add any nodes from the response (these are nodes we heard about, not confirmed)
     for (const auto& node : message.nodes) {
         DhtNode dht_node = krpc_node_to_dht_node(node);
-        add_node(dht_node);
+        add_node(dht_node, false);  // Not confirmed - just heard about from another node
     }
     
     // Check if this is a response to a pending search (get_peers with peers)
@@ -919,6 +949,7 @@ void DhtClient::cleanup_stale_nodes() {
     
     auto now = std::chrono::steady_clock::now();
     auto stale_threshold = std::chrono::minutes(15);
+    constexpr uint8_t MAX_FAIL_COUNT = 3;  // Remove after 3 consecutive failures
     
     size_t total_removed = 0;
     
@@ -926,15 +957,22 @@ void DhtClient::cleanup_stale_nodes() {
         auto old_size = bucket.size();
         
         bucket.erase(std::remove_if(bucket.begin(), bucket.end(),
-                                   [now, stale_threshold](const DhtNode& node) {
-                                       bool should_remove = (now - node.last_seen > stale_threshold);
-                                       
-                                       if (should_remove) {
-                                           LOG_DHT_DEBUG("Removing stale node " << node_id_to_hex(node.id) 
-                                                       << " at " << node.peer.ip << ":" << node.peer.port);
+                                   [now, stale_threshold, MAX_FAIL_COUNT](const DhtNode& node) {
+                                       // Remove if too many failures
+                                       if (node.pinged() && node.fail_count >= MAX_FAIL_COUNT) {
+                                           LOG_DHT_DEBUG("Removing failed node " << node_id_to_hex(node.id) 
+                                                       << " (fail_count=" << static_cast<int>(node.fail_count) << ")");
+                                           return true;
                                        }
                                        
-                                       return should_remove;
+                                       // Remove if never responded and too old
+                                       if (!node.pinged() && now - node.last_seen > stale_threshold) {
+                                           LOG_DHT_DEBUG("Removing unresponsive node " << node_id_to_hex(node.id) 
+                                                       << " (never responded, age > 15min)");
+                                           return true;
+                                       }
+                                       
+                                       return false;
                                    }), bucket.end());
         
         total_removed += (old_size - bucket.size());
@@ -1217,6 +1255,21 @@ void DhtClient::cleanup_timed_out_search_requests() {
                     
                     // Mark the node as timed out (add flag, preserving history)
                     flags |= SearchNodeFlags::TIMED_OUT;
+                    
+                    // Mark the node as failed in routing table (BEP 5 compliance)
+                    {
+                        std::lock_guard<std::mutex> rt_lock(routing_table_mutex_);
+                        int bucket_index = get_bucket_index(trans_info.queried_node_id);
+                        auto& bucket = routing_table_[bucket_index];
+                        auto node_it = std::find_if(bucket.begin(), bucket.end(),
+                            [&trans_info](const DhtNode& n) { return n.id == trans_info.queried_node_id; });
+                        if (node_it != bucket.end()) {
+                            node_it->mark_failed();
+                            LOG_DHT_DEBUG("Marked node " << node_id_to_hex(trans_info.queried_node_id) 
+                                          << " as failed in routing table (fail_count=" 
+                                          << static_cast<int>(node_it->fail_count) << ")");
+                        }
+                    }
                     
                     affected_searches.insert(trans_info.info_hash_hex);
                 }
@@ -1825,19 +1878,26 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
         
         // BEP 5: We pinged the OLD node to check if it's still alive
         if (responder_id == verification.old_node.id) {
+            // Calculate RTT
+            auto rtt_duration = std::chrono::steady_clock::now() - verification.ping_sent_at;
+            uint16_t rtt_ms = static_cast<uint16_t>(
+                std::min(static_cast<int64_t>(0xfffe),
+                        std::chrono::duration_cast<std::chrono::milliseconds>(rtt_duration).count()));
+            
             // Old node responded - it's still alive! Keep it, discard the candidate.
             LOG_DHT_DEBUG("Old node " << node_id_to_hex(verification.old_node.id) 
-                          << " responded to ping - keeping it, discarding candidate " 
+                          << " responded to ping (rtt=" << rtt_ms << "ms) - keeping it, discarding candidate " 
                           << node_id_to_hex(verification.candidate_node.id));
             
-            // Update old node's last_seen in routing table
+            // Update old node in routing table
             {
                 std::lock_guard<std::mutex> rt_lock(routing_table_mutex_);
                 auto& bucket = routing_table_[verification.bucket_index];
                 auto node_it = std::find_if(bucket.begin(), bucket.end(),
                     [&verification](const DhtNode& n) { return n.id == verification.old_node.id; });
                 if (node_it != bucket.end()) {
-                    node_it->last_seen = std::chrono::steady_clock::now();
+                    node_it->mark_success();
+                    node_it->update_rtt(rtt_ms);
                 }
             }
             // Candidate is discarded (not added to routing table)
@@ -1866,12 +1926,11 @@ void DhtClient::cleanup_stale_ping_verifications() {
             
             // BEP 5: Old node didn't respond (timeout) - it's dead, replace with candidate!
             LOG_DHT_DEBUG("Old node " << node_id_to_hex(verification.old_node.id) 
-                          << " timed out - replacing with candidate " << node_id_to_hex(verification.candidate_node.id));
+                          << " timed out after 30s - replacing with candidate " << node_id_to_hex(verification.candidate_node.id));
             
-            // Perform the replacement
-            DhtNode updated_candidate = verification.candidate_node;
-            updated_candidate.last_seen = std::chrono::steady_clock::now();
-            perform_replacement(updated_candidate, verification.old_node, verification.bucket_index);
+            // Perform the replacement with a fresh candidate
+            DhtNode fresh_candidate = verification.candidate_node;
+            perform_replacement(fresh_candidate, verification.old_node, verification.bucket_index);
             
             // Remove tracking entries
             nodes_being_replaced_.erase(verification.old_node.id);
