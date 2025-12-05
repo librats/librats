@@ -1951,27 +1951,27 @@ void RatsClient::automatic_discovery_loop() {
     while (auto_discovery_running_.load()) {
         auto now = std::chrono::steady_clock::now();
         
-        // if (get_peer_count() == 0) {
-        //     // No peers: aggressive search and announce
-        //     if (now - last_search >= std::chrono::seconds(2)) {
-        //         search_rats_peers();
-        //         last_search = now;
-        //     }
-        //     if (now - last_announce >= std::chrono::seconds(10)) {
-        //         announce_rats_peer();
-        //         last_announce = now;
-        //     }
-        // } else {
-        //     // Peers connected: less aggressive, similar to original logic
-        //     if (now - last_search >= std::chrono::minutes(5)) {
-        //         search_rats_peers();
-        //         last_search = now;
-        //     }
-        //     if (now - last_announce >= std::chrono::minutes(10)) {
-        //         announce_rats_peer();
-        //         last_announce = now;
-        //     }
-        // }
+        if (get_peer_count() == 0) {
+            // No peers: aggressive search and announce
+            if (now - last_search >= std::chrono::seconds(5)) {
+                search_rats_peers();
+                last_search = now;
+            }
+            if (now - last_announce >= std::chrono::seconds(20)) {
+                announce_rats_peer();
+                last_announce = now;
+            }
+        } else {
+            // Peers connected: less aggressive, similar to original logic
+            if (now - last_search >= std::chrono::minutes(5)) {
+                search_rats_peers();
+                last_search = now;
+            }
+            if (now - last_announce >= std::chrono::minutes(10)) {
+                announce_rats_peer();
+                last_announce = now;
+            }
+        }
         
         // Use conditional variable for responsive shutdown
         {
@@ -2011,6 +2011,11 @@ void RatsClient::search_rats_peers() {
     LOG_CLIENT_INFO("Searching for peers using discovery hash: " << discovery_hash);
     
     InfoHash info_hash = hex_to_node_id(discovery_hash);
+
+    if (dht_client_->is_search_active(info_hash)) {
+        LOG_CLIENT_WARN("Search already in progress for info hash " << discovery_hash);
+        return;
+    }
     
     find_peers_by_hash(discovery_hash, [this, info_hash](const std::vector<std::string>& peer_addresses) {
         LOG_CLIENT_INFO("Found " << peer_addresses.size() << " peers through DHT discovery");

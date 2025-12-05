@@ -237,6 +237,24 @@ size_t DhtClient::get_pending_ping_verifications_count() const {
     return pending_pings_.size();
 }
 
+bool DhtClient::is_search_active(const InfoHash& info_hash) const {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    std::string hash_key = node_id_to_hex(info_hash);
+    auto it = pending_searches_.find(hash_key);
+    return it != pending_searches_.end() && !it->second.is_finished;
+}
+
+size_t DhtClient::get_active_searches_count() const {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    size_t count = 0;
+    for (const auto& [hash, search] : pending_searches_) {
+        if (!search.is_finished) {
+            count++;
+        }
+    }
+    return count;
+}
+
 std::vector<Peer> DhtClient::get_default_bootstrap_nodes() {
     return {
         {"router.bittorrent.com", 6881},

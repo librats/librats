@@ -221,6 +221,19 @@ public:
     size_t get_pending_ping_verifications_count() const;
     
     /**
+     * Check if a search is currently active for an info hash
+     * @param info_hash The info hash to check
+     * @return true if search is active, false otherwise
+     */
+    bool is_search_active(const InfoHash& info_hash) const;
+    
+    /**
+     * Get number of active searches
+     * @return Number of active searches
+     */
+    size_t get_active_searches_count() const;
+    
+    /**
      * Check if DHT is running
      * @return true if running, false otherwise
      */
