@@ -156,7 +156,7 @@ public:
      * @param port The UDP port to bind to (default: 6881)
      * @param bind_address The interface IP address to bind to (empty for all interfaces)
      */
-    DhtClient(int port = DHT_PORT, const std::string& bind_address = "");
+    DhtClient(int port = DHT_PORT, const std::string& bind_address = "", const std::string& data_directory = "");
     
     /**
      * Destructor
@@ -244,10 +244,29 @@ public:
      * @return Vector of bootstrap nodes
      */
     static std::vector<Peer> get_default_bootstrap_nodes();
+    
+    /**
+     * Save routing table to disk
+     * @return true if successful, false otherwise
+     */
+    bool save_routing_table();
+    
+    /**
+     * Load routing table from disk
+     * @return true if successful, false otherwise
+     */
+    bool load_routing_table();
+    
+    /**
+     * Set data directory for persistence
+     * @param directory Directory path
+     */
+    void set_data_directory(const std::string& directory);
 
 private:
     int port_;
     std::string bind_address_;
+    std::string data_directory_;
     NodeId node_id_;
     socket_t socket_;
     std::atomic<bool> running_;

@@ -2,12 +2,14 @@
 #include "network_utils.h"
 #include "logger.h"
 #include "socket.h"
+#include "json.hpp"
 #include <random>
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
 #include <cstring>
 #include <cmath>
+#include <fstream>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -26,13 +28,19 @@
 namespace librats {
 
 
-DhtClient::DhtClient(int port, const std::string& bind_address) 
-    : port_(port), bind_address_(bind_address), socket_(INVALID_SOCKET_VALUE), running_(false) {
+DhtClient::DhtClient(int port, const std::string& bind_address, const std::string& data_directory) 
+    : port_(port), bind_address_(bind_address), data_directory_(data_directory), 
+      socket_(INVALID_SOCKET_VALUE), running_(false) {
     node_id_ = generate_node_id();
     routing_table_.resize(NODE_ID_SIZE * 8);  // 160 buckets for 160-bit node IDs
     
+    if (data_directory_.empty()) {
+        data_directory_ = ".";
+    }
+    
     LOG_DHT_INFO("DHT client created with node ID: " << node_id_to_hex(node_id_) <<
-                 (bind_address_.empty() ? "" : " bind address: " + bind_address_));
+                 (bind_address_.empty() ? "" : " bind address: " + bind_address_) <<
+                 " data directory: " << data_directory_);
 }
 
 DhtClient::~DhtClient() {
@@ -65,6 +73,11 @@ bool DhtClient::start() {
     
     running_ = true;
     
+    // Load saved routing table before starting threads
+    if (load_routing_table()) {
+        LOG_DHT_INFO("Loaded routing table from disk (" << get_routing_table_size() << " nodes)");
+    }
+    
     // Start network and maintenance threads
     network_thread_ = std::thread(&DhtClient::network_loop, this);
     maintenance_thread_ = std::thread(&DhtClient::maintenance_loop, this);
@@ -89,6 +102,11 @@ void DhtClient::stop() {
     }
     if (maintenance_thread_.joinable()) {
         maintenance_thread_.join();
+    }
+    
+    // Save routing table before closing
+    if (save_routing_table()) {
+        LOG_DHT_INFO("Saved routing table to disk (" << get_routing_table_size() << " nodes)");
     }
     
     // Close socket
@@ -297,6 +315,7 @@ void DhtClient::maintenance_loop() {
     auto last_stats_print = std::chrono::steady_clock::now();
     auto last_search_timeout_check = std::chrono::steady_clock::now();
     auto last_search_node_cleanup = std::chrono::steady_clock::now();
+    auto last_routing_table_save = std::chrono::steady_clock::now();
     
     while (running_) {
         auto now = std::chrono::steady_clock::now();
@@ -349,6 +368,14 @@ void DhtClient::maintenance_loop() {
         if (now - last_stats_print >= std::chrono::seconds(10)) {
             print_statistics();
             last_stats_print = now;
+        }
+        
+        // Save routing table every 5 minutes
+        if (now - last_routing_table_save >= std::chrono::minutes(5)) {
+            if (save_routing_table()) {
+                LOG_DHT_DEBUG("Periodic routing table save completed");
+            }
+            last_routing_table_save = now;
         }
         
         // Execute maintenance loop every 1 second
@@ -2132,6 +2159,184 @@ std::string node_id_to_hex(const NodeId& id) {
         oss << std::setw(2) << static_cast<int>(byte);
     }
     return oss.str();
+}
+
+// Routing table persistence implementation
+bool DhtClient::save_routing_table() {
+    std::lock_guard<std::mutex> lock(routing_table_mutex_);
+    
+    try {
+        nlohmann::json routing_data;
+        routing_data["version"] = 1;
+        routing_data["node_id"] = node_id_to_hex(node_id_);
+        routing_data["saved_at"] = std::chrono::system_clock::now().time_since_epoch().count();
+        
+        nlohmann::json nodes_array = nlohmann::json::array();
+        
+        // Save only good nodes (confirmed with fail_count == 0)
+        size_t saved_count = 0;
+        for (const auto& bucket : routing_table_) {
+            for (const auto& node : bucket) {
+                // Only save confirmed good nodes
+                if (node.confirmed()) {
+                    nlohmann::json node_data;
+                    node_data["id"] = node_id_to_hex(node.id);
+                    node_data["ip"] = node.peer.ip;
+                    node_data["port"] = node.peer.port;
+                    
+                    // Save RTT if known
+                    if (node.rtt != 0xffff) {
+                        node_data["rtt"] = node.rtt;
+                    }
+                    
+                    nodes_array.push_back(node_data);
+                    saved_count++;
+                }
+            }
+        }
+        
+        routing_data["nodes"] = nodes_array;
+        routing_data["count"] = saved_count;
+        
+        // Determine file path
+        std::string file_path;
+        #ifdef TESTING
+            if (port_ == 0) {
+                std::ostringstream oss;
+                oss << "dht_routing_" << this << ".json";
+                file_path = oss.str();
+            } else {
+                file_path = "dht_routing_" + std::to_string(port_) + ".json";
+            }
+        #else
+            file_path = data_directory_ + "/dht_routing_" + std::to_string(port_) + ".json";
+        #endif
+        
+        // Write to file
+        std::ofstream file(file_path);
+        if (!file.is_open()) {
+            LOG_DHT_ERROR("Failed to open routing table file for writing: " << file_path);
+            return false;
+        }
+        
+        file << routing_data.dump(2);
+        file.close();
+        
+        LOG_DHT_DEBUG("Saved " << saved_count << " confirmed nodes to " << file_path);
+        return true;
+        
+    } catch (const std::exception& e) {
+        LOG_DHT_ERROR("Exception while saving routing table: " << e.what());
+        return false;
+    }
+}
+
+bool DhtClient::load_routing_table() {
+    std::lock_guard<std::mutex> lock(routing_table_mutex_);
+    
+    try {
+        // Determine file path
+        std::string file_path;
+        #ifdef TESTING
+            if (port_ == 0) {
+                std::ostringstream oss;
+                oss << "dht_routing_" << this << ".json";
+                file_path = oss.str();
+            } else {
+                file_path = "dht_routing_" + std::to_string(port_) + ".json";
+            }
+        #else
+            file_path = data_directory_ + "/dht_routing_" + std::to_string(port_) + ".json";
+        #endif
+        
+        // Check if file exists
+        std::ifstream file(file_path);
+        if (!file.is_open()) {
+            LOG_DHT_DEBUG("No saved routing table found at " << file_path);
+            return false;
+        }
+        
+        // Parse JSON
+        nlohmann::json routing_data;
+        file >> routing_data;
+        file.close();
+        
+        // Validate format
+        if (!routing_data.contains("version") || !routing_data.contains("nodes")) {
+            LOG_DHT_WARN("Invalid routing table file format");
+            return false;
+        }
+        
+        int version = routing_data["version"];
+        if (version != 1) {
+            LOG_DHT_WARN("Unsupported routing table version: " << version);
+            return false;
+        }
+        
+        // Load nodes
+        const auto& nodes_array = routing_data["nodes"];
+        size_t loaded_count = 0;
+        
+        for (const auto& node_data : nodes_array) {
+            try {
+                std::string node_id_hex = node_data["id"];
+                std::string ip = node_data["ip"];
+                int port = node_data["port"];
+                
+                NodeId node_id = hex_to_node_id(node_id_hex);
+                Peer peer(ip, port);
+                DhtNode node(node_id, peer);
+                
+                // Restore RTT if available
+                if (node_data.contains("rtt")) {
+                    node.rtt = node_data["rtt"];
+                }
+                
+                // Mark as confirmed (fail_count = 0)
+                node.fail_count = 0;
+                
+                // Add to appropriate bucket
+                int bucket_index = get_bucket_index(node.id);
+                auto& bucket = routing_table_[bucket_index];
+                
+                // Check if bucket has space
+                if (bucket.size() < K_BUCKET_SIZE) {
+                    bucket.push_back(node);
+                    loaded_count++;
+                } else {
+                    // Bucket full - try to replace a worse node
+                    auto worst_it = std::max_element(bucket.begin(), bucket.end(),
+                        [](const DhtNode& a, const DhtNode& b) {
+                            return a.is_worse_than(b);
+                        });
+                    
+                    if (worst_it != bucket.end() && worst_it->is_worse_than(node)) {
+                        *worst_it = node;
+                        loaded_count++;
+                    }
+                }
+                
+            } catch (const std::exception& e) {
+                LOG_DHT_WARN("Failed to load node from routing table: " << e.what());
+                continue;
+            }
+        }
+        
+        LOG_DHT_INFO("Loaded " << loaded_count << " nodes from routing table file");
+        return loaded_count > 0;
+        
+    } catch (const std::exception& e) {
+        LOG_DHT_ERROR("Exception while loading routing table: " << e.what());
+        return false;
+    }
+}
+
+void DhtClient::set_data_directory(const std::string& directory) {
+    data_directory_ = directory;
+    if (data_directory_.empty()) {
+        data_directory_ = ".";
+    }
+    LOG_DHT_DEBUG("Data directory set to: " << data_directory_);
 }
 
 } // namespace librats 

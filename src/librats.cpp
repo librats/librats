@@ -1754,7 +1754,7 @@ bool RatsClient::start_dht_discovery(int dht_port) {
     LOG_CLIENT_INFO("Starting DHT discovery on port " << dht_port <<
                    (bind_address_.empty() ? "" : " bound to " + bind_address_));
     
-    dht_client_ = std::make_unique<DhtClient>(dht_port, bind_address_);
+    dht_client_ = std::make_unique<DhtClient>(dht_port, bind_address_, data_directory_);
     if (!dht_client_->start()) {
         LOG_CLIENT_ERROR("Failed to start DHT client");
         dht_client_.reset();
