@@ -423,86 +423,54 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sen
     handle_krpc_message(*krpc_message, sender);
 }
 
-void DhtClient::add_node(const DhtNode& node, bool verify) {
-    bool should_initiate_ping = false;
-    DhtNode worst_node_copy;
-    int bucket_index_copy = 0;
-    
-    {
-        std::lock_guard<std::mutex> pings_lock(pending_pings_mutex_);
-        std::lock_guard<std::mutex> lock(routing_table_mutex_);
+void DhtClient::add_node(const DhtNode& node) {
+    std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
+    std::lock_guard<std::mutex> lock(routing_table_mutex_);
+
+    int bucket_index = get_bucket_index(node.id);
+    auto& bucket = routing_table_[bucket_index];
+
+    LOG_DHT_DEBUG("Adding node " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port << " to bucket " << bucket_index);
         
-        int bucket_index = get_bucket_index(node.id);
-        auto& bucket = routing_table_[bucket_index];
-        
-        LOG_DHT_DEBUG("Adding node " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port << " to bucket " << bucket_index << " (verify: " << verify << ")");
-        
-        // Check if node already exists
-        auto it = std::find_if(bucket.begin(), bucket.end(),
-                              [&node](const DhtNode& existing) {
-                                  return existing.id == node.id;
-                              });
-        
-        if (it != bucket.end()) {
-            // Update existing node
-            LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " already exists in bucket " << bucket_index << ", updating");
-            it->peer = node.peer;
-            it->last_seen = std::chrono::steady_clock::now();
-        } else {
-            // Add new node
-            if (bucket.size() < K_BUCKET_SIZE) {
-                bucket.push_back(node);
-                LOG_DHT_DEBUG("Added new node " << node_id_to_hex(node.id) << " to bucket " << bucket_index << " (size: " << bucket.size() << "/" << K_BUCKET_SIZE << ")");
-            } else {
-                // Bucket is full
-                if (!verify) {
-                    // Direct replacement without ping verification
-                    auto worst_it = std::min_element(bucket.begin(), bucket.end(),
-                                                     [](const DhtNode& a, const DhtNode& b) {
-                                                         return a.last_seen < b.last_seen;
-                                                     });
-                    
-                    LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, directly replacing oldest node " 
-                                  << node_id_to_hex(worst_it->id) << " with " << node_id_to_hex(node.id) 
-                                  << " (verify=false)");
-                    
-                    *worst_it = node;
-                } else {
-                    // Bucket is full, use ping-before-replace eviction (BEP 5)
-                    
-                    // Find the worst node that's not already being pinged for replacement
-                    auto worst_it = bucket.end();
-                    for (auto it = bucket.begin(); it != bucket.end(); ++it) {
-                        if (nodes_being_replaced_.find(it->id) == nodes_being_replaced_.end()) {
-                            if (worst_it == bucket.end() || it->last_seen < worst_it->last_seen) {
-                                worst_it = it;
-                            }
-                        }
-                    }
-                    
-                    if (worst_it == bucket.end()) {
-                        LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, but all nodes already have pending ping verifications - skipping new node " << node_id_to_hex(node.id));
-                        return;
-                    }
-                    
-                    LOG_DHT_DEBUG("Bucket " << bucket_index << " is full, initiating ping-before-replace for node " 
-                                  << node_id_to_hex(worst_it->id) << " (last_seen age: " 
-                                  << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - worst_it->last_seen).count() 
-                                  << "s) to potentially replace with " << node_id_to_hex(node.id));
-                    
-                    // Copy data for ping verification to be done outside the lock
-                    should_initiate_ping = true;
-                    worst_node_copy = *worst_it;
-                    bucket_index_copy = bucket_index;
-                }
+    // Check if node already exists
+    auto it = std::find_if(bucket.begin(), bucket.end(),
+                          [&node](const DhtNode& existing) {
+                              return existing.id == node.id;
+                          });
+
+    if (it != bucket.end()) {
+        // Update existing node
+        LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " already exists in bucket " << bucket_index << ", updating");
+        it->peer = node.peer;
+        it->last_seen = std::chrono::steady_clock::now();
+        return;
+    }
+
+    // Bucket has space - just add
+    if (bucket.size() < K_BUCKET_SIZE) {
+        bucket.push_back(node);
+        LOG_DHT_DEBUG("Added new node " << node_id_to_hex(node.id) << " to bucket " << bucket_index << " (size: " << bucket.size() << "/" << K_BUCKET_SIZE << ")");
+        return;
+    }
+
+    // Bucket is full - BEP 5: ping oldest node to check if alive
+    // Find oldest node that is not already being pinged
+    DhtNode* oldest = nullptr;
+    for (auto& existing : bucket) {
+        if (nodes_being_replaced_.find(existing.id) == nodes_being_replaced_.end()) {
+            if (!oldest || existing.last_seen < oldest->last_seen) {
+                oldest = &existing;
             }
         }
-    } // Release routing_table_mutex_ here
-    
-    // Initiate ping verification outside the routing_table_mutex_ to avoid deadlock
-    if (should_initiate_ping) {
-        initiate_ping_verification(node, worst_node_copy, bucket_index_copy);
     }
+    
+    if (!oldest) {
+        LOG_DHT_DEBUG("All nodes in bucket already have pending pings - dropping candidate " << node_id_to_hex(node.id));
+        return;
+    }
+    
+    // Initiate ping to oldest node - if it doesn't respond, replace with candidate
+    initiate_ping_verification(node, *oldest, bucket_index);
 }
 
 std::vector<DhtNode> DhtClient::find_closest_nodes(const NodeId& target, size_t count) {
@@ -673,10 +641,10 @@ void DhtClient::handle_krpc_message(const KrpcMessage& message, const Peer& send
 void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
-    // Add sender to routing table (no verification needed - they contacted us)
+    // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, false);
+    add_node(sender_node);
     
     // Respond with ping response
     auto response = KrpcProtocol::create_ping_response(message.transaction_id, node_id_);
@@ -686,10 +654,10 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender)
 void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
-    // Add sender to routing table (no verification needed - they contacted us)
+    // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, false);
+    add_node(sender_node);
     
     // Find closest nodes
     auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
@@ -703,10 +671,10 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
 void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.info_hash));
     
-    // Add sender to routing table (no verification needed - they contacted us)
+    // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, false);
+    add_node(sender_node);
     
     // Generate a token for this peer
     std::string token = generate_token(sender);
@@ -741,10 +709,10 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
         return;
     }
     
-    // Add sender to routing table (no verification needed - they contacted us)
+    // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, false);
+    add_node(sender_node);
     
     // Store the peer announcement
     Peer announcing_peer(sender.ip, message.port);
@@ -761,15 +729,15 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     // Check if this is a ping verification response before normal processing
     handle_ping_verification_response(message.transaction_id, message.response_id, sender);
     
-    // Add responder to routing table (no verification needed - they responded to us)
+    // Add responder to routing table
     KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, false);
+    add_node(sender_node);
     
-    // Add any nodes from the response (these need verification - we haven't contacted them)
+    // Add any nodes from the response
     for (const auto& node : message.nodes) {
         DhtNode dht_node = krpc_node_to_dht_node(node);
-        add_node(dht_node, true);
+        add_node(dht_node);
     }
     
     // Check if this is a response to a pending search (get_peers with peers)
@@ -1828,31 +1796,24 @@ void DhtClient::cleanup_stale_announced_peers() {
 
 // Ping-before-replace eviction implementation
 void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const DhtNode& old_node, int bucket_index) {
+    // NOTE: pending_pings_mutex_ is already held by caller (add_node)
+    
     std::string ping_transaction_id = KrpcProtocol::generate_transaction_id();
     
-    LOG_DHT_DEBUG("Initiating ping verification for candidate node " << node_id_to_hex(candidate_node.id) 
-                  << " at " << candidate_node.peer.ip << ":" << candidate_node.peer.port 
-                  << " to potentially replace old node " << node_id_to_hex(old_node.id) 
-                  << " (transaction: " << ping_transaction_id << ")");
+    LOG_DHT_DEBUG("Initiating ping verification: pinging OLD node " << node_id_to_hex(old_node.id) 
+                  << " at " << old_node.peer.ip << ":" << old_node.peer.port 
+                  << " to check if alive. Candidate " << node_id_to_hex(candidate_node.id) 
+                  << " waiting to replace if old node fails. (transaction: " << ping_transaction_id << ")");
     
-    // Store ping verification state and mark old node as being replaced
-    {
-        std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
-
-        if (candidates_being_pinged_.find(candidate_node.id) != candidates_being_pinged_.end()) {
-            LOG_DHT_DEBUG("Already pinging candidate node " << node_id_to_hex(candidate_node.id) 
-                          << " - skipping duplicate ping verification");
-            return;
-        }
-
-        pending_pings_.emplace(ping_transaction_id, PingVerification(candidate_node, old_node, bucket_index));
-        nodes_being_replaced_.insert(old_node.id);
-        candidates_being_pinged_.insert(candidate_node.id);
-    }
+    // Store ping verification state and mark old node as being pinged
+    pending_pings_.emplace(ping_transaction_id, PingVerification(candidate_node, old_node, bucket_index));
+    nodes_being_replaced_.insert(old_node.id);
     
-    // Send ping to the CANDIDATE node to verify it's alive
+    // BEP 5: Send ping to the OLD node to verify it's still alive
+    // If old node responds -> keep it, discard candidate
+    // If old node times out -> replace with candidate
     auto message = KrpcProtocol::create_ping_query(ping_transaction_id, node_id_);
-    send_krpc_message(message, candidate_node.peer);
+    send_krpc_message(message, old_node.peer);
 }
 
 void DhtClient::handle_ping_verification_response(const std::string& transaction_id, const NodeId& responder_id, const Peer& responder) {
@@ -1862,24 +1823,32 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
     if (it != pending_pings_.end()) {
         const auto& verification = it->second;
         
-        // Check if the responder node ID matches the candidate node we pinged
-        if (responder_id == verification.candidate_node.id) {
-            LOG_DHT_DEBUG("Ping verification successful for candidate node " << node_id_to_hex(verification.candidate_node.id) 
-                          << " - proceeding with replacement of old node " << node_id_to_hex(verification.old_node.id));
+        // BEP 5: We pinged the OLD node to check if it's still alive
+        if (responder_id == verification.old_node.id) {
+            // Old node responded - it's still alive! Keep it, discard the candidate.
+            LOG_DHT_DEBUG("Old node " << node_id_to_hex(verification.old_node.id) 
+                          << " responded to ping - keeping it, discarding candidate " 
+                          << node_id_to_hex(verification.candidate_node.id));
             
-            // The candidate node responded and is alive - perform the replacement
-            DhtNode updated_candidate = verification.candidate_node;
-            updated_candidate.last_seen = std::chrono::steady_clock::now();
-            perform_replacement(updated_candidate, verification.old_node, verification.bucket_index);
+            // Update old node's last_seen in routing table
+            {
+                std::lock_guard<std::mutex> rt_lock(routing_table_mutex_);
+                auto& bucket = routing_table_[verification.bucket_index];
+                auto node_it = std::find_if(bucket.begin(), bucket.end(),
+                    [&verification](const DhtNode& n) { return n.id == verification.old_node.id; });
+                if (node_it != bucket.end()) {
+                    node_it->last_seen = std::chrono::steady_clock::now();
+                }
+            }
+            // Candidate is discarded (not added to routing table)
         } else {
             LOG_DHT_WARN("Ping verification response from unexpected node " << node_id_to_hex(responder_id) 
                          << " at " << responder.ip << ":" << responder.port 
-                         << " (expected candidate node " << node_id_to_hex(verification.candidate_node.id) << ")");
+                         << " (expected old node " << node_id_to_hex(verification.old_node.id) << ")");
         }
         
         // Remove tracking entries
         nodes_being_replaced_.erase(verification.old_node.id);
-        candidates_being_pinged_.erase(verification.candidate_node.id);
         pending_pings_.erase(it);
     }
 }
@@ -1893,12 +1862,19 @@ void DhtClient::cleanup_stale_ping_verifications() {
     auto it = pending_pings_.begin();
     while (it != pending_pings_.end()) {
         if (now - it->second.ping_sent_at > timeout_threshold) {
-            LOG_DHT_DEBUG("Ping verification timed out for candidate node " << node_id_to_hex(it->second.candidate_node.id) 
-                          << " - candidate is unresponsive, keeping old node " << node_id_to_hex(it->second.old_node.id));
+            const auto& verification = it->second;
             
-            // Remove tracking entries since the ping verification failed
-            nodes_being_replaced_.erase(it->second.old_node.id);
-            candidates_being_pinged_.erase(it->second.candidate_node.id);
+            // BEP 5: Old node didn't respond (timeout) - it's dead, replace with candidate!
+            LOG_DHT_DEBUG("Old node " << node_id_to_hex(verification.old_node.id) 
+                          << " timed out - replacing with candidate " << node_id_to_hex(verification.candidate_node.id));
+            
+            // Perform the replacement
+            DhtNode updated_candidate = verification.candidate_node;
+            updated_candidate.last_seen = std::chrono::steady_clock::now();
+            perform_replacement(updated_candidate, verification.old_node, verification.bucket_index);
+            
+            // Remove tracking entries
+            nodes_being_replaced_.erase(verification.old_node.id);
             
             it = pending_pings_.erase(it);
         } else {

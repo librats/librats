@@ -198,7 +198,7 @@ private:
     // ============================================================================
     // When acquiring multiple mutexes, ALWAYS follow this order:
     //
-    // 1. pending_pings_mutex_           (Ping verification state, nodes_being_replaced_, candidates_being_pinged_)
+    // 1. pending_pings_mutex_           (Ping verification state, nodes_being_replaced_)
     // 2. pending_searches_mutex_        (Search state and transaction mappings)
     // 3. routing_table_mutex_           (core routing data)
     // 4. pending_announces_mutex_       (Announce state)
@@ -286,10 +286,14 @@ private:
     std::unordered_map<std::string, std::vector<AnnouncedPeer>> announced_peers_;
     std::mutex announced_peers_mutex_;  // Lock order: 5
     
-    // Ping-before-replace eviction tracking
+    // Ping-before-replace eviction tracking (BEP 5 compliant)
+    // When a bucket is full and a new node wants to join:
+    // 1. We ping the OLDEST node in the bucket to check if it's still alive
+    // 2. If old node responds -> keep it, discard candidate
+    // 3. If old node times out -> replace it with candidate
     struct PingVerification {
-        DhtNode candidate_node;      // The new node wanting to be added (this is what we ping)
-        DhtNode old_node;            // The existing node to potentially replace
+        DhtNode candidate_node;      // The new node waiting to be added
+        DhtNode old_node;            // The existing node we're pinging to verify it's alive
         int bucket_index;            // Which bucket this affects
         std::chrono::steady_clock::time_point ping_sent_at;
         
@@ -298,9 +302,8 @@ private:
               ping_sent_at(std::chrono::steady_clock::now()) {}
     };
     std::unordered_map<std::string, PingVerification> pending_pings_;  // transaction_id -> PingVerification
-    std::unordered_set<NodeId> candidates_being_pinged_; // Track candidate nodes that are currently being pinged to avoid duplicate pings
-    std::unordered_set<NodeId> nodes_being_replaced_;    // Track nodes that have pending ping verifications
-    mutable std::mutex pending_pings_mutex_;  // Lock order: 1 (protects pending_pings_, candidates_being_pinged_, nodes_being_replaced_)
+    std::unordered_set<NodeId> nodes_being_replaced_;    // Track old nodes that have pending ping verifications
+    mutable std::mutex pending_pings_mutex_;  // Lock order: 1 (protects pending_pings_, nodes_being_replaced_)
     
     // Network thread
     std::thread network_thread_;
@@ -333,7 +336,7 @@ private:
     void send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash);
     void send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
     
-    void add_node(const DhtNode& node, bool verify = true);
+    void add_node(const DhtNode& node);
     std::vector<DhtNode> find_closest_nodes(const NodeId& target, size_t count = K_BUCKET_SIZE);
     std::vector<DhtNode> find_closest_nodes_unlocked(const NodeId& target, size_t count = K_BUCKET_SIZE);
     int get_bucket_index(const NodeId& id);
