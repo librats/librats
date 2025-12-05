@@ -318,7 +318,7 @@ private:
               invoke_count(0), branch_factor(ALPHA), is_finished(false) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
-    std::mutex pending_searches_mutex_;  // Lock order: 2
+    mutable std::mutex pending_searches_mutex_;  // Lock order: 2
     
     // Transaction tracking with queried node info for proper responded_nodes tracking
     struct SearchTransaction {
