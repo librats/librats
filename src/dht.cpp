@@ -329,73 +329,7 @@ void DhtClient::maintenance_loop() {
         
         // Print DHT statistics every 10 seconds
         if (now - last_stats_print >= std::chrono::seconds(10)) {
-            // Count filled buckets
-            size_t filled_buckets = 0;
-            size_t total_nodes = 0;
-            size_t max_bucket_size = 0;
-            {
-                std::lock_guard<std::mutex> lock(routing_table_mutex_);
-                for (const auto& bucket : routing_table_) {
-                    if (!bucket.empty()) {
-                        filled_buckets++;
-                        total_nodes += bucket.size();
-                        max_bucket_size = (std::max)(max_bucket_size, bucket.size());
-                    }
-                }
-            }
-            
-            size_t pending_searches = 0;
-            size_t pending_announces_count = 0;
-            size_t announced_peers_total = 0;
-            size_t announced_peers_infohashes = 0;
-            
-            {
-                std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
-                pending_searches = pending_searches_.size();
-            }
-            
-            {
-                std::lock_guard<std::mutex> announce_lock(pending_announces_mutex_);
-                pending_announces_count = pending_announces_.size();
-            }
-            
-            {
-                std::lock_guard<std::mutex> peers_lock(announced_peers_mutex_);
-                announced_peers_infohashes = announced_peers_.size();
-                for (const auto& entry : announced_peers_) {
-                    announced_peers_total += entry.second.size();
-                }
-            }
-            
-            size_t pending_pings = 0;
-            size_t nodes_being_replaced = 0;
-            {
-                std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
-                pending_pings = pending_pings_.size();
-                nodes_being_replaced = nodes_being_replaced_.size();
-            }
-            
-            size_t peer_tokens_count = 0;
-            {
-                std::lock_guard<std::mutex> tokens_lock(peer_tokens_mutex_);
-                peer_tokens_count = peer_tokens_.size();
-            }
-            
-            LOG_DHT_INFO("=== DHT Global Statistics ===");
-            LOG_DHT_INFO("  Routing Table:");
-            LOG_DHT_INFO("    - Total nodes: " << total_nodes);
-            LOG_DHT_INFO("    - Filled buckets: " << filled_buckets << "/" << routing_table_.size());
-            LOG_DHT_INFO("    - Max bucket size: " << max_bucket_size << "/" << K_BUCKET_SIZE);
-            LOG_DHT_INFO("  Active Operations:");
-            LOG_DHT_INFO("    - Pending searches: " << pending_searches);
-            LOG_DHT_INFO("    - Pending announces: " << pending_announces_count);
-            LOG_DHT_INFO("    - Pending ping verifications: " << pending_pings);
-            LOG_DHT_INFO("    - Nodes being replaced: " << nodes_being_replaced);
-            LOG_DHT_INFO("  Stored Data:");
-            LOG_DHT_INFO("    - Announced peers (total): " << announced_peers_total);
-            LOG_DHT_INFO("    - Announced peers (infohashes): " << announced_peers_infohashes);
-            LOG_DHT_INFO("    - Peer tokens: " << peer_tokens_count);
-            
+            print_statistics();
             last_stats_print = now;
         }
         
@@ -1007,6 +941,189 @@ void DhtClient::cleanup_stale_peer_tokens() {
         LOG_DHT_DEBUG("Cleaned up " << (total_before - total_after) << " stale peer tokens "
                       << "(from " << total_before << " to " << total_after << ")");
     }
+}
+
+void DhtClient::print_statistics() {
+    auto now = std::chrono::steady_clock::now();
+    
+    // Routing table statistics
+    size_t filled_buckets = 0;
+    size_t total_nodes = 0;
+    size_t max_bucket_size = 0;
+    size_t confirmed_nodes = 0;
+    size_t unpinged_nodes = 0;
+    size_t failed_nodes = 0;
+    
+    // Collect all nodes for best/worst analysis
+    std::vector<std::pair<DhtNode, int>> all_nodes;  // node + bucket index
+    
+    {
+        std::lock_guard<std::mutex> lock(routing_table_mutex_);
+        for (size_t bucket_idx = 0; bucket_idx < routing_table_.size(); ++bucket_idx) {
+            const auto& bucket = routing_table_[bucket_idx];
+            if (!bucket.empty()) {
+                filled_buckets++;
+                total_nodes += bucket.size();
+                max_bucket_size = (std::max)(max_bucket_size, bucket.size());
+                
+                for (const auto& node : bucket) {
+                    all_nodes.emplace_back(node, static_cast<int>(bucket_idx));
+                    
+                    if (node.confirmed()) {
+                        confirmed_nodes++;
+                    } else if (!node.pinged()) {
+                        unpinged_nodes++;
+                    } else if (node.fail_count > 0) {
+                        failed_nodes++;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Pending searches statistics
+    size_t pending_searches = 0;
+    size_t total_search_nodes = 0;
+    size_t total_found_peers = 0;
+    size_t active_transactions = 0;
+    {
+        std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
+        pending_searches = pending_searches_.size();
+        active_transactions = transaction_to_search_.size();
+        for (const auto& [hash, search] : pending_searches_) {
+            total_search_nodes += search.search_nodes.size();
+            total_found_peers += search.found_peers.size();
+        }
+    }
+    
+    // Pending announces statistics
+    size_t pending_announces_count = 0;
+    {
+        std::lock_guard<std::mutex> announce_lock(pending_announces_mutex_);
+        pending_announces_count = pending_announces_.size();
+    }
+    
+    // Announced peers statistics
+    size_t announced_peers_total = 0;
+    size_t announced_peers_infohashes = 0;
+    {
+        std::lock_guard<std::mutex> peers_lock(announced_peers_mutex_);
+        announced_peers_infohashes = announced_peers_.size();
+        for (const auto& entry : announced_peers_) {
+            announced_peers_total += entry.second.size();
+        }
+    }
+    
+    // Ping verification statistics
+    size_t pending_pings = 0;
+    size_t nodes_being_replaced = 0;
+    {
+        std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
+        pending_pings = pending_pings_.size();
+        nodes_being_replaced = nodes_being_replaced_.size();
+    }
+    
+    // Peer tokens statistics
+    size_t peer_tokens_count = 0;
+    {
+        std::lock_guard<std::mutex> tokens_lock(peer_tokens_mutex_);
+        peer_tokens_count = peer_tokens_.size();
+    }
+    
+    // Print main statistics
+    LOG_DHT_INFO("=== DHT GLOBAL STATISTICS ===");
+    LOG_DHT_INFO("[ROUTING TABLE]");
+    LOG_DHT_INFO("  Total nodes: " << total_nodes << " (confirmed: " << confirmed_nodes 
+                 << ", unpinged: " << unpinged_nodes << ", failed: " << failed_nodes << ")");
+    LOG_DHT_INFO("  Filled buckets: " << filled_buckets << "/" << routing_table_.size() 
+                 << ", Max bucket size: " << max_bucket_size << "/" << K_BUCKET_SIZE);
+    LOG_DHT_INFO("[ACTIVE OPERATIONS]");
+    LOG_DHT_INFO("  Pending searches: " << pending_searches 
+                 << " (nodes: " << total_search_nodes << ", found peers: " << total_found_peers << ")");
+    LOG_DHT_INFO("  Active transactions: " << active_transactions);
+    LOG_DHT_INFO("  Pending announces: " << pending_announces_count);
+    LOG_DHT_INFO("  Pending ping verifications: " << pending_pings 
+                 << " (nodes being replaced: " << nodes_being_replaced << ")");
+    LOG_DHT_INFO("[STORED DATA]");
+    LOG_DHT_INFO("  Announced peers: " << announced_peers_total 
+                 << " across " << announced_peers_infohashes << " infohashes");
+    LOG_DHT_INFO("  Peer tokens: " << peer_tokens_count);
+    
+    // Best/Worst nodes analysis
+    if (!all_nodes.empty()) {
+        // Sort by quality: confirmed first, then by RTT (lower is better)
+        std::sort(all_nodes.begin(), all_nodes.end(), 
+            [](const std::pair<DhtNode, int>& a, const std::pair<DhtNode, int>& b) {
+                // Confirmed nodes are better
+                if (a.first.confirmed() != b.first.confirmed()) {
+                    return a.first.confirmed();
+                }
+                // Lower fail_count is better
+                if (a.first.fail_count != b.first.fail_count) {
+                    return a.first.fail_count < b.first.fail_count;
+                }
+                // Lower RTT is better (0xffff = unknown, treat as worst)
+                return a.first.rtt < b.first.rtt;
+            });
+        
+        // Calculate RTT statistics (excluding unknown)
+        uint32_t rtt_sum = 0;
+        uint16_t rtt_min = 0xffff;
+        uint16_t rtt_max = 0;
+        size_t rtt_count = 0;
+        for (const auto& [node, bucket_idx] : all_nodes) {
+            if (node.rtt != 0xffff) {
+                rtt_sum += node.rtt;
+                rtt_min = (std::min)(rtt_min, node.rtt);
+                rtt_max = (std::max)(rtt_max, node.rtt);
+                rtt_count++;
+            }
+        }
+        
+        LOG_DHT_INFO("[RTT STATISTICS]");
+        if (rtt_count > 0) {
+            LOG_DHT_INFO("  Known RTT nodes: " << rtt_count << "/" << total_nodes);
+            LOG_DHT_INFO("  RTT min/avg/max: " << rtt_min << "ms / " 
+                         << (rtt_sum / rtt_count) << "ms / " << rtt_max << "ms");
+        } else {
+            LOG_DHT_INFO("  No RTT data available");
+        }
+        
+        // Show top 5 best nodes
+        LOG_DHT_INFO("[TOP 5 BEST NODES]");
+        size_t best_count = (std::min)(size_t(5), all_nodes.size());
+        for (size_t i = 0; i < best_count; ++i) {
+            const auto& [node, bucket_idx] = all_nodes[i];
+            auto age_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - node.last_seen).count();
+            std::string status = node.confirmed() ? "confirmed" : 
+                                (node.pinged() ? "pinged" : "unpinged");
+            std::string rtt_str = (node.rtt == 0xffff) ? "N/A" : std::to_string(node.rtt) + "ms";
+            
+            LOG_DHT_INFO("  #" << (i + 1) << " " << node.peer.ip << ":" << node.peer.port 
+                         << " | bucket:" << bucket_idx << " rtt:" << rtt_str 
+                         << " fails:" << static_cast<int>(node.fail_count)
+                         << " " << status << " age:" << age_seconds << "s");
+        }
+        
+        // Show top 5 worst nodes
+        LOG_DHT_INFO("[TOP 5 WORST NODES]");
+        size_t worst_start = all_nodes.size() > 5 ? all_nodes.size() - 5 : 0;
+        for (size_t i = all_nodes.size(); i > worst_start; --i) {
+            const auto& [node, bucket_idx] = all_nodes[i - 1];
+            auto age_seconds = std::chrono::duration_cast<std::chrono::seconds>(now - node.last_seen).count();
+            std::string status = node.confirmed() ? "confirmed" : 
+                                (node.pinged() ? "pinged" : "unpinged");
+            std::string rtt_str = (node.rtt == 0xffff) ? "N/A" : std::to_string(node.rtt) + "ms";
+            
+            LOG_DHT_INFO("  #" << (all_nodes.size() - i + 1) << " " << node.peer.ip << ":" << node.peer.port 
+                         << " | bucket:" << bucket_idx << " rtt:" << rtt_str 
+                         << " fails:" << static_cast<int>(node.fail_count)
+                         << " " << status << " age:" << age_seconds << "s");
+        }
+    } else {
+        LOG_DHT_INFO("  No nodes in routing table");
+    }
+    LOG_DHT_INFO("=== END DHT STATISTICS ===");
 }
 
 void DhtClient::refresh_buckets() {

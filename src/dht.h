@@ -400,6 +400,7 @@ private:
     void cleanup_stale_nodes();
     void cleanup_stale_peer_tokens();
     void refresh_buckets();
+    void print_statistics();
     
     // Pending announce management
     void cleanup_stale_announces();
