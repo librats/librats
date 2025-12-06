@@ -517,14 +517,15 @@ bool UdpTrackerClient::parse_url() {
 }
 
 bool UdpTrackerClient::connect() {
-    std::lock_guard<std::mutex> lock(socket_mutex_);
-    
-    // Create UDP socket if needed
-    if (!is_valid_socket(socket_)) {
-        socket_ = create_udp_socket();
+    // Create UDP socket if needed (protected by mutex)
+    {
+        std::lock_guard<std::mutex> lock(socket_mutex_);
         if (!is_valid_socket(socket_)) {
-            LOG_TRACKER_ERROR("Failed to create UDP socket for tracker");
-            return false;
+            socket_ = create_udp_socket();
+            if (!is_valid_socket(socket_)) {
+                LOG_TRACKER_ERROR("Failed to create UDP socket for tracker");
+                return false;
+            }
         }
     }
     
@@ -533,13 +534,7 @@ bool UdpTrackerClient::connect() {
     uint32_t transaction_id = generate_transaction_id();
     std::vector<uint8_t> connect_request = build_connect_request(transaction_id);
     
-    // Send connect request
-    if (send_udp_data_to(socket_, connect_request, hostname_, port_) <= 0) {
-        LOG_TRACKER_ERROR("Failed to send connect request to UDP tracker");
-        return false;
-    }
-    
-    // Receive connect response
+    // Send connect request and receive response (send_request handles its own locking)
     std::vector<uint8_t> response = send_request(connect_request, 15000);
     
     if (response.empty()) {
