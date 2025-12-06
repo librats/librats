@@ -2535,14 +2535,24 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
     
     // Set up metadata completion callback
     // When metadata download completes, we'll stop the temporary torrent and create the real one
+    // IMPORTANT: This callback is invoked from within a PeerConnection's thread, so we must NOT
+    // call stop() directly (which would try to join the calling thread, causing a deadlock).
+    // Instead, we defer the cleanup to a detached thread.
     metadata_torrent->set_metadata_complete_callback([this, info_hash, download_path, metadata_torrent](const TorrentInfo& torrent_info) {
         LOG_BT_INFO("Metadata download completed for " << torrent_info.get_name());
         
-        // Stop the temporary metadata torrent
-        metadata_torrent->stop();
+        // Capture torrent_info by value since we're deferring to another thread
+        TorrentInfo captured_info = torrent_info;
         
-        // Complete the metadata download and create the real torrent
-        complete_metadata_download(info_hash, torrent_info, download_path);
+        // Defer stop() and cleanup to a separate thread to avoid deadlock
+        // (callback is called from PeerConnection::connection_thread_ which would try to join itself)
+        std::thread([this, info_hash, download_path, metadata_torrent, captured_info]() {
+            // Stop the temporary metadata torrent
+            metadata_torrent->stop();
+            
+            // Complete the metadata download and create the real torrent
+            complete_metadata_download(info_hash, captured_info, download_path);
+        }).detach();
     });
     
     // Note: We don't create MetadataDownload here yet
@@ -2892,38 +2902,48 @@ void BitTorrentClient::get_torrent_metadata_by_hash(const InfoHash& info_hash, M
     auto metadata_torrent = std::make_shared<TorrentDownload>(metadata_torrent_info, ""); // No download path needed
     
     // Set up metadata completion callback
+    // IMPORTANT: This callback is invoked from within a PeerConnection's thread, so we must NOT
+    // call stop() directly (which would try to join the calling thread, causing a deadlock).
+    // Instead, we defer the cleanup to a detached thread.
     metadata_torrent->set_metadata_complete_callback([this, info_hash](const TorrentInfo& torrent_info) {
         LOG_BT_INFO("Metadata retrieval completed for " << torrent_info.get_name());
         
-        MetadataRetrievalCallback user_callback;
-        std::shared_ptr<TorrentDownload> temp_torrent;
+        // Capture torrent_info by value since we're deferring to another thread
+        TorrentInfo captured_info = torrent_info;
         
-        // Get callback and cleanup
-        {
-            std::lock_guard<std::mutex> lock(metadata_mutex_);
-            auto it = metadata_retrieval_callbacks_.find(info_hash);
-            if (it != metadata_retrieval_callbacks_.end()) {
-                user_callback = it->second;
-                metadata_retrieval_callbacks_.erase(it);
+        // Defer stop() and cleanup to a separate thread to avoid deadlock
+        // (callback is called from PeerConnection::connection_thread_ which would try to join itself)
+        std::thread([this, info_hash, captured_info]() {
+            MetadataRetrievalCallback user_callback;
+            std::shared_ptr<TorrentDownload> temp_torrent;
+            
+            // Get callback and cleanup
+            {
+                std::lock_guard<std::mutex> lock(metadata_mutex_);
+                auto it = metadata_retrieval_callbacks_.find(info_hash);
+                if (it != metadata_retrieval_callbacks_.end()) {
+                    user_callback = it->second;
+                    metadata_retrieval_callbacks_.erase(it);
+                }
+                
+                // Get temporary torrent to stop it
+                auto torrent_it = metadata_only_torrents_.find(info_hash);
+                if (torrent_it != metadata_only_torrents_.end()) {
+                    temp_torrent = torrent_it->second;
+                    metadata_only_torrents_.erase(torrent_it);
+                }
             }
             
-            // Get temporary torrent to stop it
-            auto torrent_it = metadata_only_torrents_.find(info_hash);
-            if (torrent_it != metadata_only_torrents_.end()) {
-                temp_torrent = torrent_it->second;
-                metadata_only_torrents_.erase(torrent_it);
+            // Stop the temporary torrent
+            if (temp_torrent) {
+                temp_torrent->stop();
             }
-        }
-        
-        // Stop the temporary torrent
-        if (temp_torrent) {
-            temp_torrent->stop();
-        }
-        
-        // Call user callback with success
-        if (user_callback) {
-            user_callback(torrent_info, true, "");
-        }
+            
+            // Call user callback with success
+            if (user_callback) {
+                user_callback(captured_info, true, "");
+            }
+        }).detach();
     });
     
     // Store the temporary torrent
