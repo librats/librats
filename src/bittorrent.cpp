@@ -1254,9 +1254,8 @@ bool MetadataDownload::is_complete() const {
     return std::all_of(pieces_complete_.begin(), pieces_complete_.end(), [](bool complete) { return complete; });
 }
 
-std::vector<uint8_t> MetadataDownload::get_metadata() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
+std::vector<uint8_t> MetadataDownload::get_metadata_unlocked() const {
+    // Internal version - must be called with mutex_ already held
     std::vector<uint8_t> metadata;
     metadata.reserve(metadata_size_);
     
@@ -1267,8 +1266,13 @@ std::vector<uint8_t> MetadataDownload::get_metadata() const {
     return metadata;
 }
 
-bool MetadataDownload::verify_metadata() const {
+std::vector<uint8_t> MetadataDownload::get_metadata() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return get_metadata_unlocked();
+}
+
+bool MetadataDownload::verify_metadata_unlocked() const {
+    // Internal version - must be called with mutex_ already held
     
     // Reconstruct full metadata
     std::vector<uint8_t> metadata;
@@ -1300,6 +1304,11 @@ bool MetadataDownload::verify_metadata() const {
     return verified;
 }
 
+bool MetadataDownload::verify_metadata() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return verify_metadata_unlocked();
+}
+
 uint32_t MetadataDownload::get_next_piece_to_request() const {
     std::lock_guard<std::mutex> lock(mutex_);
     
@@ -1323,16 +1332,18 @@ bool MetadataDownload::is_piece_complete(uint32_t piece_index) const {
 }
 
 void MetadataDownload::check_completion() {
+    // Note: This method is called with mutex_ already held by store_metadata_piece()
+    
     // Check if all pieces are complete
     bool all_complete = std::all_of(pieces_complete_.begin(), pieces_complete_.end(), [](bool complete) { return complete; });
     
     if (all_complete) {
         LOG_BT_INFO("Metadata download complete for info hash " << info_hash_to_hex(info_hash_));
         
-        // Verify metadata
-        if (verify_metadata()) {
-            // Parse metadata into TorrentInfo
-            std::vector<uint8_t> metadata = get_metadata();
+        // Verify metadata (use unlocked version since we already hold the mutex)
+        if (verify_metadata_unlocked()) {
+            // Parse metadata into TorrentInfo (use unlocked version)
+            std::vector<uint8_t> metadata = get_metadata_unlocked();
             
             try {
                 BencodeValue info_dict = bencode::decode(metadata);

@@ -403,6 +403,10 @@ private:
     MetadataCompleteCallback completion_callback_;
     
     void check_completion();
+    
+    // Internal versions without lock (called when mutex is already held)
+    bool verify_metadata_unlocked() const;
+    std::vector<uint8_t> get_metadata_unlocked() const;
 };
 
 // Individual torrent download
