@@ -29,6 +29,31 @@ class PeerConnection;
 class MetadataDownload;
 class TrackerManager;
 
+//=============================================================================
+// LOCK ORDERING DOCUMENTATION
+//=============================================================================
+// To prevent deadlocks, always acquire locks in the following order:
+//
+// BitTorrentClient level:
+//   torrents_mutex_ -> metadata_mutex_
+//
+// TorrentDownload level:
+//   peers_mutex_ -> pieces_mutex_ -> files_mutex_
+//
+// PeerConnection level:
+//   requests_mutex_ (independent, only used within PeerConnection)
+//
+// MetadataDownload level:
+//   mutex_ (never call callbacks while holding this mutex!)
+//
+// Cross-class lock ordering:
+//   BitTorrentClient::torrents_mutex_ 
+//   -> TorrentDownload::peers_mutex_
+//   -> TorrentDownload::pieces_mutex_
+//   -> TorrentDownload::files_mutex_
+//   -> PeerConnection::requests_mutex_
+//=============================================================================
+
 // Type aliases
 using InfoHash = std::array<uint8_t, 20>;
 using PieceIndex = uint32_t;
@@ -234,8 +259,8 @@ public:
     // Connection management
     bool connect();
     void disconnect();
-    bool is_connected() const { return state_ == PeerState::CONNECTED; }
-    PeerState get_state() const { return state_; }
+    bool is_connected() const { return state_.load() == PeerState::CONNECTED; }
+    PeerState get_state() const { return state_.load(); }
     
     // Message handling
     bool send_message(const PeerMessage& message);
@@ -285,7 +310,7 @@ private:
     TorrentDownload* torrent_;
     Peer peer_info_;
     socket_t socket_;
-    PeerState state_;
+    std::atomic<PeerState> state_;  // Atomic to allow thread-safe reads without lock
     std::thread connection_thread_;
     std::atomic<bool> should_disconnect_;
     bool handshake_completed_;  // Track if handshake is already done (for incoming connections)
@@ -401,8 +426,6 @@ private:
     std::vector<bool> pieces_complete_;
     mutable std::mutex mutex_;
     MetadataCompleteCallback completion_callback_;
-    
-    void check_completion();
     
     // Internal versions without lock (called when mutex is already held)
     bool verify_metadata_unlocked() const;

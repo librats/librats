@@ -427,7 +427,7 @@ PeerConnection::PeerConnection(TorrentDownload* torrent, const Peer& peer_info, 
     // If socket is already provided, it means handshake is already done (incoming connection)
     if (is_valid_socket(socket)) {
         handshake_completed_ = true;
-        state_ = PeerState::HANDSHAKING;  // Will move to CONNECTED after extended handshake
+        state_.store(PeerState::HANDSHAKING);  // Will move to CONNECTED after extended handshake
         LOG_BT_DEBUG("Created peer connection for incoming connection from " << peer_info_.ip << ":" << peer_info_.port);
     } else {
         LOG_BT_DEBUG("Created peer connection to " << peer_info_.ip << ":" << peer_info_.port);
@@ -439,7 +439,7 @@ PeerConnection::~PeerConnection() {
 }
 
 bool PeerConnection::connect() {
-    if (state_ != PeerState::CONNECTING) {
+    if (state_.load() != PeerState::CONNECTING) {
         return false;
     }
     
@@ -449,7 +449,7 @@ bool PeerConnection::connect() {
         socket_ = create_tcp_client(peer_info_.ip, peer_info_.port, 10000); // 10-second timeout
         if (!is_valid_socket(socket_)) {
             LOG_BT_ERROR("Failed to create connection to " << peer_info_.ip << ":" << peer_info_.port);
-            state_ = PeerState::ERROR;
+            state_.store(PeerState::ERROR);
             return false;
         }
     }
@@ -473,7 +473,7 @@ void PeerConnection::disconnect() {
         connection_thread_.join();
     }
     
-    state_ = PeerState::DISCONNECTED;
+    state_.store(PeerState::DISCONNECTED);
 }
 
 void PeerConnection::connection_loop() {
@@ -483,7 +483,7 @@ void PeerConnection::connection_loop() {
     if (!handshake_completed_) {
         if (!perform_handshake()) {
             LOG_BT_ERROR("Handshake failed with peer " << peer_info_.ip << ":" << peer_info_.port);
-            state_ = PeerState::ERROR;
+            state_.store(PeerState::ERROR);
             return;
         }
     } else {
@@ -492,7 +492,7 @@ void PeerConnection::connection_loop() {
         send_extended_handshake();
     }
     
-    state_ = PeerState::CONNECTED;
+    state_.store(PeerState::CONNECTED);
     LOG_BT_INFO("Successfully connected to peer " << peer_info_.ip << ":" << peer_info_.port);
     
     // Initialize peer bitfield
@@ -507,7 +507,7 @@ void PeerConnection::connection_loop() {
     set_choke(false);
     
     // Main message processing loop
-    while (!should_disconnect_ && state_ == PeerState::CONNECTED) {
+    while (!should_disconnect_.load() && state_.load() == PeerState::CONNECTED) {
         process_messages();
         
         // Cleanup expired requests
@@ -526,7 +526,7 @@ void PeerConnection::connection_loop() {
 }
 
 bool PeerConnection::perform_handshake() {
-    state_ = PeerState::HANDSHAKING;
+    state_.store(PeerState::HANDSHAKING);
     
     if (!send_handshake()) {
         return false;
@@ -1243,35 +1243,78 @@ MetadataDownload::MetadataDownload(const InfoHash& info_hash, size_t metadata_si
 MetadataDownload::~MetadataDownload() = default;
 
 bool MetadataDownload::store_metadata_piece(uint32_t piece_index, const std::vector<uint8_t>& data) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    MetadataCompleteCallback callback_to_invoke;
+    TorrentInfo completed_torrent_info;
+    bool should_invoke_callback = false;
     
-    if (piece_index >= num_pieces_) {
-        LOG_BT_ERROR("Invalid metadata piece index: " << piece_index << " (max: " << num_pieces_ - 1 << ")");
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        if (piece_index >= num_pieces_) {
+            LOG_BT_ERROR("Invalid metadata piece index: " << piece_index << " (max: " << num_pieces_ - 1 << ")");
+            return false;
+        }
+        
+        // Calculate expected piece size
+        size_t expected_size;
+        if (piece_index == num_pieces_ - 1) {
+            // Last piece might be smaller
+            expected_size = metadata_size_ - (piece_index * METADATA_PIECE_SIZE);
+        } else {
+            expected_size = METADATA_PIECE_SIZE;
+        }
+        
+        if (data.size() != expected_size) {
+            LOG_BT_ERROR("Invalid metadata piece size for piece " << piece_index 
+                         << ": expected " << expected_size << ", got " << data.size());
+            return false;
+        }
+        
+        pieces_[piece_index] = data;
+        pieces_complete_[piece_index] = true;
+        
+        LOG_BT_DEBUG("Stored metadata piece " << piece_index << " (" << data.size() << " bytes)");
+        
+        // Check if download is complete and prepare callback data
+        // (callback will be invoked outside of lock to prevent deadlock)
+        bool all_complete = std::all_of(pieces_complete_.begin(), pieces_complete_.end(), 
+                                        [](bool complete) { return complete; });
+        
+        if (all_complete) {
+            LOG_BT_INFO("Metadata download complete for info hash " << info_hash_to_hex(info_hash_));
+            
+            // Verify metadata (use unlocked version since we already hold the mutex)
+            if (verify_metadata_unlocked()) {
+                // Parse metadata into TorrentInfo (use unlocked version)
+                std::vector<uint8_t> metadata = get_metadata_unlocked();
+                
+                try {
+                    BencodeValue info_dict = bencode::decode(metadata);
+                    
+                    // Create a fake torrent dictionary with just the info dict
+                    BencodeValue torrent_data = BencodeValue::create_dict();
+                    torrent_data["info"] = info_dict;
+                    
+                    if (completed_torrent_info.load_from_bencode(torrent_data)) {
+                        callback_to_invoke = completion_callback_;
+                        should_invoke_callback = true;
+                    } else {
+                        LOG_BT_ERROR("Failed to parse metadata into TorrentInfo");
+                    }
+                } catch (const std::exception& e) {
+                    LOG_BT_ERROR("Failed to decode metadata: " << e.what());
+                }
+            } else {
+                LOG_BT_ERROR("Metadata verification failed - hash mismatch");
+            }
+        }
+    }  // mutex_ released here
+    
+    // Invoke callback OUTSIDE of lock to prevent deadlock
+    // (as documented: "never call callbacks while holding this mutex!")
+    if (should_invoke_callback && callback_to_invoke) {
+        callback_to_invoke(completed_torrent_info);
     }
-    
-    // Calculate expected piece size
-    size_t expected_size;
-    if (piece_index == num_pieces_ - 1) {
-        // Last piece might be smaller
-        expected_size = metadata_size_ - (piece_index * METADATA_PIECE_SIZE);
-    } else {
-        expected_size = METADATA_PIECE_SIZE;
-    }
-    
-    if (data.size() != expected_size) {
-        LOG_BT_ERROR("Invalid metadata piece size for piece " << piece_index 
-                     << ": expected " << expected_size << ", got " << data.size());
-        return false;
-    }
-    
-    pieces_[piece_index] = data;
-    pieces_complete_[piece_index] = true;
-    
-    LOG_BT_DEBUG("Stored metadata piece " << piece_index << " (" << data.size() << " bytes)");
-    
-    // Check if download is complete
-    check_completion();
     
     return true;
 }
@@ -1356,45 +1399,6 @@ bool MetadataDownload::is_piece_complete(uint32_t piece_index) const {
     }
     
     return pieces_complete_[piece_index];
-}
-
-void MetadataDownload::check_completion() {
-    // Note: This method is called with mutex_ already held by store_metadata_piece()
-    
-    // Check if all pieces are complete
-    bool all_complete = std::all_of(pieces_complete_.begin(), pieces_complete_.end(), [](bool complete) { return complete; });
-    
-    if (all_complete) {
-        LOG_BT_INFO("Metadata download complete for info hash " << info_hash_to_hex(info_hash_));
-        
-        // Verify metadata (use unlocked version since we already hold the mutex)
-        if (verify_metadata_unlocked()) {
-            // Parse metadata into TorrentInfo (use unlocked version)
-            std::vector<uint8_t> metadata = get_metadata_unlocked();
-            
-            try {
-                BencodeValue info_dict = bencode::decode(metadata);
-                
-                // Create a fake torrent dictionary with just the info dict
-                BencodeValue torrent_data = BencodeValue::create_dict();
-                torrent_data["info"] = info_dict;
-                
-                TorrentInfo torrent_info;
-                if (torrent_info.load_from_bencode(torrent_data)) {
-                    // Invoke completion callback
-                    if (completion_callback_) {
-                        completion_callback_(torrent_info);
-                    }
-                } else {
-                    LOG_BT_ERROR("Failed to parse metadata into TorrentInfo");
-                }
-            } catch (const std::exception& e) {
-                LOG_BT_ERROR("Failed to decode metadata: " << e.what());
-            }
-        } else {
-            LOG_BT_ERROR("Metadata verification failed - hash mismatch");
-        }
-    }
 }
 
 //=============================================================================
@@ -1629,66 +1633,74 @@ bool TorrentDownload::is_piece_downloading(PieceIndex piece_index) const {
 }
 
 bool TorrentDownload::store_piece_block(PieceIndex piece_index, uint32_t offset, const std::vector<uint8_t>& data) {
-    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    bool piece_just_completed = false;
+    bool verification_failed = false;
     
-    if (piece_index >= pieces_.size()) {
-        LOG_BT_ERROR("Invalid piece index: " << piece_index);
-        return false;
-    }
-    
-    auto& piece = pieces_[piece_index];
-    
-    // Validate offset and data size
-    if (offset + data.size() > piece->length) {
-        LOG_BT_ERROR("Block data exceeds piece length for piece " << piece_index);
-        return false;
-    }
-    
-    // Calculate block index
-    uint32_t block_index = offset / BLOCK_SIZE;
-    if (block_index >= piece->get_num_blocks()) {
-        LOG_BT_ERROR("Invalid block index: " << block_index << " for piece " << piece_index);
-        return false;
-    }
-    
-    // Ensure piece data buffer is allocated (lazy allocation)
-    piece->ensure_data_allocated();
-    
-    // Store the block data
-    std::copy(data.begin(), data.end(), piece->data.begin() + offset);
-    piece->blocks_downloaded[block_index] = true;
-    
-    LOG_BT_DEBUG("Stored block " << block_index << " for piece " << piece_index 
-                 << " (offset: " << offset << ", size: " << data.size() << ")");
-    
-    // Check if piece is complete
-    if (piece->is_complete() && !piece->verified) {
-        LOG_BT_INFO("Piece " << piece_index << " downloaded, verifying...");
-        if (verify_piece(piece_index)) {
-            piece_completed_[piece_index] = true;
-            piece_downloading_[piece_index] = false;
-            
-            // Write piece to disk
-            write_piece_to_disk(piece_index);
-            
-            // Update statistics
-            total_downloaded_ += piece->length;
-            
-            // Notify completion
-            on_piece_completed(piece_index);
-            
-            LOG_BT_INFO("Piece " << piece_index << " verified and saved");
-            return true;
-        } else {
-            LOG_BT_ERROR("Piece " << piece_index << " verification failed, requesting re-download");
-            // Reset piece for re-download
-            std::fill(piece->blocks_downloaded.begin(), piece->blocks_downloaded.end(), false);
-            piece_downloading_[piece_index] = false;
+    {
+        std::lock_guard<std::mutex> lock(pieces_mutex_);
+        
+        if (piece_index >= pieces_.size()) {
+            LOG_BT_ERROR("Invalid piece index: " << piece_index);
             return false;
         }
+        
+        auto& piece = pieces_[piece_index];
+        
+        // Validate offset and data size
+        if (offset + data.size() > piece->length) {
+            LOG_BT_ERROR("Block data exceeds piece length for piece " << piece_index);
+            return false;
+        }
+        
+        // Calculate block index
+        uint32_t block_index = offset / BLOCK_SIZE;
+        if (block_index >= piece->get_num_blocks()) {
+            LOG_BT_ERROR("Invalid block index: " << block_index << " for piece " << piece_index);
+            return false;
+        }
+        
+        // Ensure piece data buffer is allocated (lazy allocation)
+        piece->ensure_data_allocated();
+        
+        // Store the block data
+        std::copy(data.begin(), data.end(), piece->data.begin() + offset);
+        piece->blocks_downloaded[block_index] = true;
+        
+        LOG_BT_DEBUG("Stored block " << block_index << " for piece " << piece_index 
+                     << " (offset: " << offset << ", size: " << data.size() << ")");
+        
+        // Check if piece is complete
+        if (piece->is_complete() && !piece->verified) {
+            LOG_BT_INFO("Piece " << piece_index << " downloaded, verifying...");
+            if (verify_piece(piece_index)) {
+                piece_completed_[piece_index] = true;
+                piece_downloading_[piece_index] = false;
+                
+                // Write piece to disk (files_mutex_ is after pieces_mutex_ in lock order)
+                write_piece_to_disk(piece_index);
+                
+                // Update statistics
+                total_downloaded_ += piece->length;
+                
+                piece_just_completed = true;
+                LOG_BT_INFO("Piece " << piece_index << " verified and saved");
+            } else {
+                LOG_BT_ERROR("Piece " << piece_index << " verification failed, requesting re-download");
+                // Reset piece for re-download
+                std::fill(piece->blocks_downloaded.begin(), piece->blocks_downloaded.end(), false);
+                piece_downloading_[piece_index] = false;
+                verification_failed = true;
+            }
+        }
+    }  // pieces_mutex_ released here
+    
+    // Notify completion AFTER releasing pieces_mutex_ to respect lock order:
+    // peers_mutex_ -> pieces_mutex_
+    if (piece_just_completed) {
+        on_piece_completed(piece_index);
     }
     
-    return true;
+    return !verification_failed;
 }
 
 bool TorrentDownload::verify_piece(PieceIndex piece_index) {
@@ -1789,7 +1801,9 @@ void TorrentDownload::write_piece_to_disk(PieceIndex piece_index) {
 }
 
 bool TorrentDownload::read_piece_from_disk(PieceIndex piece_index, std::vector<uint8_t>& data) {
-    std::lock_guard<std::mutex> lock(files_mutex_);
+    // Lock order: pieces_mutex_ -> files_mutex_
+    std::lock_guard<std::mutex> pieces_lock(pieces_mutex_);
+    std::lock_guard<std::mutex> files_lock(files_mutex_);
     
     // Skip for metadata-only torrents
     if (download_path_.empty()) {
@@ -2118,23 +2132,22 @@ std::vector<PieceIndex> TorrentDownload::select_pieces_for_download() {
 }
 
 PieceIndex TorrentDownload::select_rarest_piece(const std::vector<bool>& available_pieces) {
-    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    // Lock order: peers_mutex_ -> pieces_mutex_
+    std::lock_guard<std::mutex> peers_lock(peers_mutex_);
+    std::lock_guard<std::mutex> pieces_lock(pieces_mutex_);
     
     // Count how many peers have each piece
     std::vector<int> piece_counts(piece_completed_.size(), 0);
     
-    {
-        std::lock_guard<std::mutex> peers_lock(peers_mutex_);
-        for (const auto& peer : peer_connections_) {
-            if (!peer->is_connected()) {
-                continue;
-            }
-            
-            const auto& peer_bitfield = peer->get_bitfield();
-            for (size_t i = 0; i < peer_bitfield.size() && i < piece_counts.size(); ++i) {
-                if (peer_bitfield[i]) {
-                    piece_counts[i]++;
-                }
+    for (const auto& peer : peer_connections_) {
+        if (!peer->is_connected()) {
+            continue;
+        }
+        
+        const auto& peer_bitfield = peer->get_bitfield();
+        for (size_t i = 0; i < peer_bitfield.size() && i < piece_counts.size(); ++i) {
+            if (peer_bitfield[i]) {
+                piece_counts[i]++;
             }
         }
     }
