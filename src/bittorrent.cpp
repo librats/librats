@@ -899,7 +899,9 @@ void PeerConnection::handle_extended(const std::vector<uint8_t>& payload) {
     
     if (extended_id == static_cast<uint8_t>(ExtendedMessageType::HANDSHAKE)) {
         handle_extended_handshake(extended_payload);
-    } else if (extended_id == peer_ut_metadata_id_ && supports_metadata_exchange_) {
+    } else if (extended_id == static_cast<uint8_t>(ExtendedMessageType::UT_METADATA) && supports_metadata_exchange_) {
+        // Note: Peers send messages using OUR extension ID (what we advertised in our handshake),
+        // not their ID. We use peer_ut_metadata_id_ only when SENDING to them.
         handle_metadata_message(extended_payload);
     } else {
         LOG_BT_DEBUG("Unknown or unsupported extended message ID: " << static_cast<int>(extended_id));
