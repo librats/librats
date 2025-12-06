@@ -866,6 +866,206 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 cmake .. -DCMAKE_BUILD_TYPE=Release
 ```
 
+### Complete Build Configuration Options
+
+librats provides several CMake options to customize your build:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `RATS_BUILD_TESTS` | `ON` | Build unit tests with GoogleTest |
+| `RATS_ENABLE_ASAN` | `OFF` | Enable AddressSanitizer for memory debugging |
+| `RATS_BINDINGS` | `ON` | Enable C API bindings for FFI support |
+| `RATS_CROSSCOMPILING` | `OFF` | Force cross-compilation flags |
+| `RATS_SHARED_LIBRARY` | `OFF` | Build as shared library (.dll/.so/.dylib) |
+| `RATS_STATIC_LIBRARY` | `ON` | Build as static library (.a/.lib) |
+| `RATS_SEARCH_FEATURES` | `OFF` | Enable Rats Search feature (like Bittorrent / DHT spider algorithm) |
+
+**Examples:**
+
+```bash
+# Build as shared library without tests or examples
+cmake .. -DRATS_SHARED_LIBRARY=ON -DRATS_STATIC_LIBRARY=OFF \
+         -DRATS_BUILD_TESTS=OFF -DRATS_BUILD_EXAMPLES=OFF
+
+# Build with BitTorrent support and debug symbols
+cmake .. -DRATS_SEARCH_FEATURES=ON -DCMAKE_BUILD_TYPE=Debug
+
+# Cross-compile for Android (requires NDK)
+cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 \
+         -DRATS_CROSSCOMPILING=ON -DRATS_BUILD_TESTS=OFF
+```
+
+### Integrating librats Into Your Application
+
+#### Method 1: Using CMake FetchContent (Recommended)
+
+Add librats directly to your CMakeLists.txt:
+
+```cmake
+cmake_minimum_required(VERSION 3.10)
+project(MyP2PApp)
+
+set(CMAKE_CXX_STANDARD 17)
+
+# Fetch librats from GitHub
+include(FetchContent)
+FetchContent_Declare(
+    librats
+    GIT_REPOSITORY https://github.com/DEgITx/librats.git
+    GIT_TAG master  # or specify a specific version/tag
+)
+
+# Configure librats build options before making it available
+set(RATS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(RATS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(librats)
+
+# Create your application
+add_executable(my_p2p_app main.cpp)
+
+# Link against librats
+target_link_libraries(my_p2p_app PRIVATE rats)
+```
+
+#### Method 2: Using CMake add_subdirectory
+
+Clone librats into your project or as a git submodule:
+
+```bash
+# As a git submodule
+git submodule add https://github.com/DEgITx/librats.git external/librats
+
+# Or just clone it
+git clone https://github.com/DEgITx/librats.git external/librats
+```
+
+Then in your CMakeLists.txt:
+
+```cmake
+cmake_minimum_required(VERSION 3.10)
+project(MyP2PApp)
+
+set(CMAKE_CXX_STANDARD 17)
+
+# Configure librats options
+set(RATS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(RATS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+
+# Add librats subdirectory
+add_subdirectory(external/librats)
+
+# Create your application
+add_executable(my_p2p_app main.cpp)
+
+# Link against librats
+target_link_libraries(my_p2p_app PRIVATE rats)
+
+# Include directories are automatically propagated
+```
+
+#### Method 3: Using Pre-built Library
+
+If you've built librats separately:
+
+```cmake
+cmake_minimum_required(VERSION 3.10)
+project(MyP2PApp)
+
+set(CMAKE_CXX_STANDARD 17)
+
+# Specify librats location
+set(LIBRATS_DIR "/path/to/librats")
+
+# Create your application
+add_executable(my_p2p_app main.cpp)
+
+# Link against pre-built librats
+target_include_directories(my_p2p_app PRIVATE 
+    ${LIBRATS_DIR}/src
+    ${LIBRATS_DIR}/build/src
+)
+
+target_link_libraries(my_p2p_app PRIVATE 
+    ${LIBRATS_DIR}/build/lib/librats.a
+    # Add system libraries based on platform
+    $<$<PLATFORM_ID:Windows>:ws2_32 iphlpapi bcrypt>
+    Threads::Threads
+)
+
+# Find threading library
+find_package(Threads REQUIRED)
+```
+
+#### Method 4: Manual Compilation and Linking
+
+**Compile your application:**
+
+```bash
+# Linux/macOS
+g++ -std=c++17 -I/path/to/librats/src -I/path/to/librats/build/src \
+    my_app.cpp /path/to/librats/build/lib/librats.a \
+    -lpthread -o my_p2p_app
+
+# Windows (MinGW)
+g++ -std=c++17 -I/path/to/librats/src -I/path/to/librats/build/src \
+    my_app.cpp /path/to/librats/build/lib/librats.a \
+    -lws2_32 -liphlpapi -lbcrypt -o my_p2p_app.exe
+
+# Windows (MSVC)
+cl /std:c++17 /EHsc /I"C:\path\to\librats\src" /I"C:\path\to\librats\build\src" \
+   my_app.cpp "C:\path\to\librats\build\lib\rats.lib" \
+   ws2_32.lib iphlpapi.lib bcrypt.lib
+```
+
+#### Simple Integration Example
+
+```cpp
+// my_p2p_app.cpp
+#include "librats.h"
+#include <iostream>
+
+int main() {
+    // Create client on port 8080
+    librats::RatsClient client(8080);
+    
+    // Set up callbacks
+    client.set_connection_callback([](auto socket, const std::string& peer_id) {
+        std::cout << "Peer connected: " << peer_id << std::endl;
+    });
+    
+    client.set_string_data_callback([](auto socket, const std::string& peer_id, 
+                                       const std::string& message) {
+        std::cout << "Message from " << peer_id << ": " << message << std::endl;
+    });
+    
+    // Start the client
+    if (!client.start()) {
+        std::cerr << "Failed to start client" << std::endl;
+        return 1;
+    }
+    
+    std::cout << "P2P client running on port 8080" << std::endl;
+    
+    // Your application logic here
+    std::this_thread::sleep_for(std::chrono::hours(24));
+    
+    return 0;
+}
+```
+
+#### Required System Libraries
+
+When linking against librats, include these system libraries:
+
+| Platform | Required Libraries |
+|----------|-------------------|
+| **Windows** | `ws2_32`, `iphlpapi`, `bcrypt` |
+| **Linux** | `pthread` |
+| **macOS** | `pthread` |
+| **Android** | `log` |
+
 ### Running Tests
 
 ```bash
