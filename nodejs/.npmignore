@@ -17,9 +17,7 @@ temp_transfers/
 
 # Keep source files for building
 !src/
-!../src/
-!../3rdparty/
-!../CMakeLists.txt
+!native-src/
 !binding.gyp
 !scripts/
 

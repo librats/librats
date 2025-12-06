@@ -56,13 +56,7 @@
     "scripts/**/*",
     "binding.gyp",
     "README.md",
-    "../src/**/*.cpp",
-    "../src/**/*.h",
-    "../src/**/*.in",
-    "../3rdparty/**/*",
-    "../CMakeLists.txt",
-    "../LICENSE",
-    "!../src/main.cpp"
+    "native-src/**/*"
   ],
   "gypfile": true
 }

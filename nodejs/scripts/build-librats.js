@@ -12,14 +12,47 @@ const isLinux = process.platform === 'linux';
 
 // Paths
 const nodejsRoot = path.resolve(__dirname, '..');
-const projectRoot = path.resolve(__dirname, '..', '..');
-const buildDir = path.resolve(nodejsRoot, 'build-native');  // Build dir inside nodejs/
-const srcDir = path.resolve(projectRoot, 'src');
-const cmakeLists = path.resolve(projectRoot, 'CMakeLists.txt');
+const buildDir = path.resolve(nodejsRoot, 'build-native');
+
+// Determine source location:
+// 1. When installed from npm: sources are in nodejs/native-src/
+// 2. When developing locally: sources are in project root (../../ from scripts)
+let projectRoot;
+let srcDir;
+let cmakeLists;
+
+const nativeSrcDir = path.resolve(nodejsRoot, 'native-src');
+const devProjectRoot = path.resolve(__dirname, '..', '..');
+
+if (fs.existsSync(path.join(nativeSrcDir, 'CMakeLists.txt'))) {
+    // npm install scenario: use native-src directory
+    projectRoot = nativeSrcDir;
+    srcDir = path.resolve(nativeSrcDir, 'src');
+    cmakeLists = path.resolve(nativeSrcDir, 'CMakeLists.txt');
+    console.log('Using bundled source files from native-src/');
+} else if (fs.existsSync(path.join(devProjectRoot, 'CMakeLists.txt'))) {
+    // Development scenario: use parent directory
+    projectRoot = devProjectRoot;
+    srcDir = path.resolve(devProjectRoot, 'src');
+    cmakeLists = path.resolve(devProjectRoot, 'CMakeLists.txt');
+    console.log('Using source files from project root (development mode)');
+} else {
+    console.error('ERROR: Cannot find librats source files.');
+    console.error('');
+    console.error('Checked locations:');
+    console.error(`  - ${nativeSrcDir} (npm install)`);
+    console.error(`  - ${devProjectRoot} (development)`);
+    console.error('');
+    console.error('If you installed from npm, the package may be corrupted.');
+    console.error('Try: npm cache clean --force && npm install librats');
+    console.error('');
+    console.error('If you are developing locally, make sure you are in the librats repository.');
+    process.exit(1);
+}
 
 console.log('Building librats native library...');
 console.log(`Platform: ${process.platform}`);
-console.log(`Project root: ${projectRoot}`);
+console.log(`Source root: ${projectRoot}`);
 console.log(`Build directory: ${buildDir}`);
 
 // Check if CMake is installed
@@ -46,17 +79,17 @@ try {
     process.exit(1);
 }
 
-// Check if CMakeLists.txt exists
+// Verify CMakeLists.txt exists
 if (!fs.existsSync(cmakeLists)) {
-    console.error('ERROR: CMakeLists.txt not found in project root.');
-    console.error('Make sure all source files are included in the npm package.');
+    console.error('ERROR: CMakeLists.txt not found.');
+    console.error(`Expected at: ${cmakeLists}`);
     process.exit(1);
 }
 
-// Check if src directory exists
+// Verify src directory exists
 if (!fs.existsSync(srcDir)) {
     console.error('ERROR: src directory not found.');
-    console.error('Make sure all source files are included in the npm package.');
+    console.error(`Expected at: ${srcDir}`);
     process.exit(1);
 }
 
@@ -121,7 +154,9 @@ try {
         cmakeArgs.push('-G "Unix Makefiles"');
     }
 
-    const cmakeConfigCmd = `cmake ${cmakeArgs.join(' ')} ../..`;
+    // Calculate the relative path from build directory to source root
+    const relativePath = path.relative(buildDir, projectRoot);
+    const cmakeConfigCmd = `cmake ${cmakeArgs.join(' ')} "${relativePath}"`;
     exec(cmakeConfigCmd);
 
     // Build the library
@@ -191,4 +226,3 @@ try {
     
     process.exit(1);
 }
-

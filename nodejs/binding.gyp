@@ -7,6 +7,7 @@
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
+        "native-src/src",
         "../src",
         "build-native/src"
       ],
