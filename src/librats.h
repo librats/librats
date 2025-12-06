@@ -1462,10 +1462,28 @@ private:
     // NAT traversal configuration
     NatTraversalConfig nat_config_;
     
+    // =========================================================================
+    // MUTEX LOCKING ORDER - CRITICAL FOR DEADLOCK PREVENTION
+    // =========================================================================
+    // When acquiring multiple mutexes, ALWAYS follow this strict order:
+    //
+    // 1. config_mutex_              (Configuration and peer ID)
+    // 2. protocol_config_mutex_      (Protocol name and version)
+    // 3. encryption_mutex_           (Encryption settings and keys)
+    // 4. nat_mutex_                  (NAT detection and characteristics)
+    // 5. public_ip_mutex_            (Public IP address)
+    // 6. local_addresses_mutex_      (Local interface addresses)
+    // 7. ice_coordination_mutex_     (ICE coordination tracking)
+    // 8. connection_attempts_mutex_  (Connection attempt history)
+    // 9. peers_mutex_                (Peer management - most frequently locked)
+    // 10. socket_send_mutexes_mutex_ (Socket send mutex management)
+    // 11. message_handlers_mutex_    (Message handler registration)
+    // =========================================================================
+    
     // Configuration persistence
     std::string our_peer_id_;                               // Our persistent peer ID
     std::string data_directory_;                            // Directory where data files are stored
-    mutable std::mutex config_mutex_;                       // Protects configuration data
+    mutable std::mutex config_mutex_;                       // [1] Protects configuration data
     static const std::string CONFIG_FILE_NAME;             // "config.json"
     static const std::string PEERS_FILE_NAME;              // "peers.rats"
     static const std::string PEERS_EVER_FILE_NAME;         // "peers_ever.rats"
@@ -1473,31 +1491,31 @@ private:
     // Encryption state
     NoiseKey static_encryption_key_;                        // Our static encryption key
     bool encryption_enabled_;                               // Whether encryption is enabled
-    mutable std::mutex encryption_mutex_;                   // Protects encryption state
+    mutable std::mutex encryption_mutex_;                   // [3] Protects encryption state
     
     // ICE and NAT traversal
     std::unique_ptr<IceAgent> ice_agent_;                   // ICE agent for NAT traversal
     std::unique_ptr<AdvancedNatDetector> nat_detector_;     // Advanced NAT type detection
     NatType detected_nat_type_;                             // Our detected NAT type
     NatTypeInfo nat_characteristics_;                       // Detailed NAT information
-    mutable std::mutex nat_mutex_;                          // Protects NAT-related data
+    mutable std::mutex nat_mutex_;                          // [4] Protects NAT-related data
     
     // ICE coordination tracking to prevent duplicate attempts
     std::unordered_set<std::string> ice_coordination_in_progress_;  // Set of peer_ids having ICE coordination
-    mutable std::mutex ice_coordination_mutex_;                     // Protects ICE coordination state
+    mutable std::mutex ice_coordination_mutex_;                     // [7] Protects ICE coordination state
     
     // Connection attempt tracking
     std::unordered_map<std::string, std::vector<ConnectionAttemptResult>> connection_attempts_;
-    mutable std::mutex connection_attempts_mutex_;
+    mutable std::mutex connection_attempts_mutex_;          // [8] Protects connection attempts
     
     // Organized peer management using RatsPeer struct
-    mutable std::mutex peers_mutex_;
+    mutable std::mutex peers_mutex_;                        // [9] Protects peer data (most frequently locked)
     std::unordered_map<std::string, RatsPeer> peers_;          // keyed by peer_id
     std::unordered_map<socket_t, std::string> socket_to_peer_id_;  // for quick socket->peer_id lookup  
     std::unordered_map<std::string, std::string> address_to_peer_id_;  // for duplicate detection (normalized_address->peer_id)
     
     // Per-socket synchronization for thread-safe message sending
-    mutable std::mutex socket_send_mutexes_mutex_;
+    mutable std::mutex socket_send_mutexes_mutex_;          // [10] Protects socket send mutex map
     std::unordered_map<socket_t, std::shared_ptr<std::mutex>> socket_send_mutexes_;
     
     // Server and client management
@@ -1519,7 +1537,7 @@ private:
     // STUN client for public IP discovery
     std::unique_ptr<StunClient> stun_client_;
     std::string public_ip_;
-    mutable std::mutex public_ip_mutex_;
+    mutable std::mutex public_ip_mutex_;                    // [5] Protects public IP address
     
     // mDNS client for local network discovery
     std::unique_ptr<MdnsClient> mdns_client_;
@@ -1581,7 +1599,7 @@ private:
 
     // Local interface address blocking (ignore list)
     std::vector<std::string> local_interface_addresses_;
-    mutable std::mutex local_addresses_mutex_;
+    mutable std::mutex local_addresses_mutex_;              // [6] Protects local interface addresses
     void initialize_local_addresses();
     void refresh_local_addresses();
     bool is_blocked_address(const std::string& ip_address) const;
@@ -1598,7 +1616,7 @@ private:
     // Custom protocol configuration
     std::string custom_protocol_name_;          // Custom protocol name (default: "rats")
     std::string custom_protocol_version_;       // Custom protocol version (default: "1.0")
-    mutable std::mutex protocol_config_mutex_;  // Protects protocol configuration
+    mutable std::mutex protocol_config_mutex_;  // [2] Protects protocol configuration
 
     struct HandshakeMessage {
         std::string protocol;
@@ -1654,7 +1672,7 @@ private:
     };
     
     std::unordered_map<std::string, std::vector<MessageHandler>> message_handlers_;
-    mutable std::mutex message_handlers_mutex_;
+    mutable std::mutex message_handlers_mutex_;             // [11] Protects message handlers
     
     void call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data);
     void call_callback_safely(const MessageCallback& callback, const std::string& peer_id, const nlohmann::json& data);
