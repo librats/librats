@@ -185,6 +185,9 @@ else()
     add_library(rats STATIC ${LIBRARY_SOURCES})
 endif()
 
+# Enable Position Independent Code for static library (required for linking into shared objects)
+set_target_properties(rats PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Include directories
 target_include_directories(rats PUBLIC ${PROJECT_BINARY_DIR}/src src)
 
