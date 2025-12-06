@@ -597,10 +597,10 @@ void PeerConnection::process_messages() {
     if (expected_message_length_ == 0) {
         std::vector<uint8_t> length_buffer(4);
         if (read_data(length_buffer, 4)) {
-            expected_message_length_ = (length_buffer[0] << 24) | 
-                                     (length_buffer[1] << 16) | 
-                                     (length_buffer[2] << 8) | 
-                                     length_buffer[3];
+            expected_message_length_ = (static_cast<size_t>(length_buffer[0]) << 24) | 
+                                     (static_cast<size_t>(length_buffer[1]) << 16) | 
+                                     (static_cast<size_t>(length_buffer[2]) << 8) | 
+                                     static_cast<size_t>(length_buffer[3]);
             
             if (expected_message_length_ == 0) {
                 // Keep-alive message
@@ -723,7 +723,10 @@ void PeerConnection::handle_have(const std::vector<uint8_t>& payload) {
         return;
     }
     
-    PieceIndex piece_index = (payload[0] << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3];
+    PieceIndex piece_index = (static_cast<uint32_t>(payload[0]) << 24) | 
+                              (static_cast<uint32_t>(payload[1]) << 16) | 
+                              (static_cast<uint32_t>(payload[2]) << 8) | 
+                              static_cast<uint32_t>(payload[3]);
     
     if (piece_index < peer_bitfield_.size()) {
         peer_bitfield_[piece_index] = true;
@@ -753,9 +756,18 @@ void PeerConnection::handle_request(const std::vector<uint8_t>& payload) {
         return;
     }
     
-    PieceIndex piece_index = (payload[0] << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3];
-    uint32_t offset = (payload[4] << 24) | (payload[5] << 16) | (payload[6] << 8) | payload[7];
-    uint32_t length = (payload[8] << 24) | (payload[9] << 16) | (payload[10] << 8) | payload[11];
+    PieceIndex piece_index = (static_cast<uint32_t>(payload[0]) << 24) | 
+                              (static_cast<uint32_t>(payload[1]) << 16) | 
+                              (static_cast<uint32_t>(payload[2]) << 8) | 
+                              static_cast<uint32_t>(payload[3]);
+    uint32_t offset = (static_cast<uint32_t>(payload[4]) << 24) | 
+                      (static_cast<uint32_t>(payload[5]) << 16) | 
+                      (static_cast<uint32_t>(payload[6]) << 8) | 
+                      static_cast<uint32_t>(payload[7]);
+    uint32_t length = (static_cast<uint32_t>(payload[8]) << 24) | 
+                      (static_cast<uint32_t>(payload[9]) << 16) | 
+                      (static_cast<uint32_t>(payload[10]) << 8) | 
+                      static_cast<uint32_t>(payload[11]);
     
     LOG_BT_DEBUG("Peer " << peer_info_.ip << ":" << peer_info_.port << " requested piece " << piece_index << " offset " << offset << " length " << length);
     
@@ -821,8 +833,14 @@ void PeerConnection::handle_piece(const std::vector<uint8_t>& payload) {
         return;
     }
     
-    PieceIndex piece_index = (payload[0] << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3];
-    uint32_t offset = (payload[4] << 24) | (payload[5] << 16) | (payload[6] << 8) | payload[7];
+    PieceIndex piece_index = (static_cast<uint32_t>(payload[0]) << 24) | 
+                              (static_cast<uint32_t>(payload[1]) << 16) | 
+                              (static_cast<uint32_t>(payload[2]) << 8) | 
+                              static_cast<uint32_t>(payload[3]);
+    uint32_t offset = (static_cast<uint32_t>(payload[4]) << 24) | 
+                      (static_cast<uint32_t>(payload[5]) << 16) | 
+                      (static_cast<uint32_t>(payload[6]) << 8) | 
+                      static_cast<uint32_t>(payload[7]);
     
     std::vector<uint8_t> block_data(payload.begin() + 8, payload.end());
     downloaded_bytes_ += block_data.size();
@@ -848,9 +866,18 @@ void PeerConnection::handle_cancel(const std::vector<uint8_t>& payload) {
         return;
     }
     
-    PieceIndex piece_index = (payload[0] << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3];
-    uint32_t offset = (payload[4] << 24) | (payload[5] << 16) | (payload[6] << 8) | payload[7];
-    uint32_t length = (payload[8] << 24) | (payload[9] << 16) | (payload[10] << 8) | payload[11];
+    PieceIndex piece_index = (static_cast<uint32_t>(payload[0]) << 24) | 
+                              (static_cast<uint32_t>(payload[1]) << 16) | 
+                              (static_cast<uint32_t>(payload[2]) << 8) | 
+                              static_cast<uint32_t>(payload[3]);
+    uint32_t offset = (static_cast<uint32_t>(payload[4]) << 24) | 
+                      (static_cast<uint32_t>(payload[5]) << 16) | 
+                      (static_cast<uint32_t>(payload[6]) << 8) | 
+                      static_cast<uint32_t>(payload[7]);
+    uint32_t length = (static_cast<uint32_t>(payload[8]) << 24) | 
+                      (static_cast<uint32_t>(payload[9]) << 16) | 
+                      (static_cast<uint32_t>(payload[10]) << 8) | 
+                      static_cast<uint32_t>(payload[11]);
     
     LOG_BT_DEBUG("Peer " << peer_info_.ip << ":" << peer_info_.port << " cancelled request for piece " << piece_index << " offset " << offset << " length " << length);
     
