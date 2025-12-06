@@ -2044,7 +2044,7 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
             auto rtt_duration = std::chrono::steady_clock::now() - verification.ping_sent_at;
             uint16_t rtt_ms = static_cast<uint16_t>(
                 (std::min)(static_cast<int64_t>(0xfffe),
-                        std::chrono::duration_cast<std::chrono::milliseconds>(rtt_duration).count()));
+                        static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(rtt_duration).count())));
             
             // Old node responded - it's still alive! Keep it, discard the candidate.
             LOG_DHT_DEBUG("Old node " << node_id_to_hex(verification.old_node.id) 
