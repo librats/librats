@@ -88,13 +88,15 @@ struct PieceInfo {
     std::array<uint8_t, 20> hash;
     uint32_t length;
     bool verified;
-    std::vector<bool> blocks_downloaded;  // Track which blocks are downloaded
+    std::vector<bool> blocks_downloaded;  // Track which blocks are downloaded (received)
+    std::vector<bool> blocks_requested;   // Track which blocks are requested globally (sent but not received)
     std::vector<uint8_t> data;
     
     PieceInfo(PieceIndex idx, const std::array<uint8_t, 20>& h, uint32_t len)
         : index(idx), hash(h), length(len), verified(false) {
         uint32_t num_blocks = (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
         blocks_downloaded.resize(num_blocks, false);
+        blocks_requested.resize(num_blocks, false);
         // Don't pre-allocate data - allocate lazily when downloading starts
     }
     
@@ -104,6 +106,25 @@ struct PieceInfo {
     
     uint32_t get_num_blocks() const {
         return static_cast<uint32_t>(blocks_downloaded.size());
+    }
+    
+    // Check if all blocks have been requested (or downloaded)
+    bool all_blocks_requested() const {
+        for (size_t i = 0; i < blocks_downloaded.size(); ++i) {
+            if (!blocks_downloaded[i] && !blocks_requested[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    
+    // Reset requested status for blocks that weren't received (for timeout/disconnect)
+    void reset_unreceived_requests() {
+        for (size_t i = 0; i < blocks_requested.size(); ++i) {
+            if (blocks_requested[i] && !blocks_downloaded[i]) {
+                blocks_requested[i] = false;
+            }
+        }
     }
     
     // Ensure data buffer is allocated
@@ -271,6 +292,7 @@ public:
     
     // Piece requests
     bool request_piece_block(PieceIndex piece_index, uint32_t offset, uint32_t length);
+    bool is_block_requested(PieceIndex piece_index, uint32_t offset) const;
     void cancel_request(PieceIndex piece_index, uint32_t offset, uint32_t length);
     void cancel_all_requests();
     
@@ -330,7 +352,7 @@ private:
     
     // Request tracking
     std::vector<PeerRequest> pending_requests_;
-    std::mutex requests_mutex_;
+    mutable std::mutex requests_mutex_;
     
     // Statistics
     std::atomic<uint64_t> downloaded_bytes_;
@@ -465,6 +487,7 @@ public:
     bool verify_piece(PieceIndex piece_index);
     void write_piece_to_disk(PieceIndex piece_index);
     bool read_piece_from_disk(PieceIndex piece_index, std::vector<uint8_t>& data);  // For seeding
+    void reset_block_request(PieceIndex piece_index, uint32_t block_index);  // Reset timed-out block request
     
     // Statistics and progress
     uint64_t get_downloaded_bytes() const;

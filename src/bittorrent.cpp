@@ -463,6 +463,16 @@ bool PeerConnection::connect() {
 void PeerConnection::disconnect() {
     should_disconnect_ = true;
     
+    // Reset all pending block requests so they can be requested from other peers
+    {
+        std::lock_guard<std::mutex> lock(requests_mutex_);
+        for (const auto& req : pending_requests_) {
+            uint32_t block_index = req.offset / BLOCK_SIZE;
+            torrent_->reset_block_request(req.piece_index, block_index);
+        }
+        pending_requests_.clear();
+    }
+    
     if (is_valid_socket(socket_)) {
         // Force shutdown for TCP socket to ensure immediate disconnect
         close_socket(socket_, true);
@@ -1136,6 +1146,16 @@ bool PeerConnection::request_piece_block(PieceIndex piece_index, uint32_t offset
     return false;
 }
 
+bool PeerConnection::is_block_requested(PieceIndex piece_index, uint32_t offset) const {
+    std::lock_guard<std::mutex> lock(requests_mutex_);
+    for (const auto& req : pending_requests_) {
+        if (req.piece_index == piece_index && req.offset == offset) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void PeerConnection::cancel_request(PieceIndex piece_index, uint32_t offset, uint32_t length) {
     auto cancel_msg = PeerMessage::create_cancel(piece_index, offset, length);
     send_message(cancel_msg);
@@ -1185,17 +1205,36 @@ void PeerConnection::update_bitfield(const std::vector<bool>& bitfield) {
 }
 
 void PeerConnection::cleanup_expired_requests() {
-    std::lock_guard<std::mutex> lock(requests_mutex_);
+    std::vector<PeerRequest> expired_requests;
     
-    auto now = std::chrono::steady_clock::now();
-    auto timeout = std::chrono::milliseconds(REQUEST_TIMEOUT_MS);
+    {
+        std::lock_guard<std::mutex> lock(requests_mutex_);
+        
+        auto now = std::chrono::steady_clock::now();
+        auto timeout = std::chrono::milliseconds(REQUEST_TIMEOUT_MS);
+        
+        // Collect expired requests before removing them
+        for (const auto& req : pending_requests_) {
+            if (now - req.requested_at > timeout) {
+                expired_requests.push_back(req);
+            }
+        }
+        
+        pending_requests_.erase(
+            std::remove_if(pending_requests_.begin(), pending_requests_.end(),
+                [now, timeout](const PeerRequest& req) {
+                    return now - req.requested_at > timeout;
+                }),
+            pending_requests_.end());
+    }
     
-    pending_requests_.erase(
-        std::remove_if(pending_requests_.begin(), pending_requests_.end(),
-            [now, timeout](const PeerRequest& req) {
-                return now - req.requested_at > timeout;
-            }),
-        pending_requests_.end());
+    // Reset block request status for expired requests (so they can be requested again)
+    for (const auto& req : expired_requests) {
+        uint32_t block_index = req.offset / BLOCK_SIZE;
+        torrent_->reset_block_request(req.piece_index, block_index);
+        LOG_BT_DEBUG("Request timeout: piece " << req.piece_index << " block " << block_index 
+                     << " from peer " << peer_info_.ip << ":" << peer_info_.port);
+    }
 }
 
 bool PeerConnection::read_data(std::vector<uint8_t>& buffer, size_t length) {
@@ -1874,6 +1913,22 @@ bool TorrentDownload::read_piece_from_disk(PieceIndex piece_index, std::vector<u
     return true;
 }
 
+void TorrentDownload::reset_block_request(PieceIndex piece_index, uint32_t block_index) {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    
+    if (piece_index >= pieces_.size()) {
+        return;
+    }
+    
+    auto& piece = pieces_[piece_index];
+    if (block_index < piece->blocks_requested.size()) {
+        // Only reset if not already downloaded
+        if (!piece->blocks_downloaded[block_index]) {
+            piece->blocks_requested[block_index] = false;
+        }
+    }
+}
+
 std::vector<PieceIndex> TorrentDownload::get_available_pieces() const {
     std::lock_guard<std::mutex> lock(pieces_mutex_);
     std::vector<PieceIndex> available_pieces;
@@ -1893,7 +1948,8 @@ std::vector<PieceIndex> TorrentDownload::get_needed_pieces(const std::vector<boo
     
     size_t min_size = (std::min)(peer_bitfield.size(), piece_completed_.size());
     for (size_t i = 0; i < min_size; ++i) {
-        if (peer_bitfield[i] && !piece_completed_[i] && !piece_downloading_[i]) {
+        // Include pieces that are not complete (even if downloading - peer can help complete them)
+        if (peer_bitfield[i] && !piece_completed_[i]) {
             needed_pieces.push_back(static_cast<PieceIndex>(i));
         }
     }
@@ -2026,10 +2082,16 @@ void TorrentDownload::schedule_piece_requests() {
                         continue; // Already have this block
                     }
                     
+                    // Check if this block is already requested globally (from any peer)
+                    if (piece->blocks_requested[block_index]) {
+                        continue; // Already requested from another peer
+                    }
+                    
                     uint32_t offset = block_index * BLOCK_SIZE;
                     uint32_t length = (std::min)(block_size, piece->length - offset);
                     
                     if (peer->request_piece_block(piece_index, offset, length)) {
+                        piece->blocks_requested[block_index] = true;  // Mark as globally requested
                         piece_downloading_[piece_index] = true;
                         LOG_BT_DEBUG("Requested block " << block_index << " of piece " << piece_index 
                                      << " from peer " << peer->get_peer_info().ip);
@@ -2110,24 +2172,34 @@ bool TorrentDownload::create_directory_structure() {
 std::vector<PieceIndex> TorrentDownload::select_pieces_for_download() {
     std::lock_guard<std::mutex> lock(pieces_mutex_);
     
-    std::vector<PieceIndex> needed_pieces;
+    std::vector<PieceIndex> downloading_pieces;
+    std::vector<PieceIndex> new_pieces;
     
-    // Find pieces we need
+    // Find pieces we need - prioritize pieces already being downloaded
     for (PieceIndex i = 0; i < piece_completed_.size(); ++i) {
-        if (!piece_completed_[i] && !piece_downloading_[i]) {
-            needed_pieces.push_back(i);
+        if (!piece_completed_[i]) {
+            if (piece_downloading_[i]) {
+                // Prioritize completing pieces we've already started
+                downloading_pieces.push_back(i);
+            } else {
+                new_pieces.push_back(i);
+            }
         }
     }
     
-    // Implement rarest-first strategy (simplified)
+    // Implement piece selection strategy: complete existing pieces first, then start new ones
     std::vector<PieceIndex> selected_pieces;
     
-    // For now, just select the first few needed pieces
-    // In a more sophisticated implementation, we would count how many peers have each piece
-    // and prioritize rarer pieces
-    size_t max_pieces = (std::min)(needed_pieces.size(), static_cast<size_t>(10));
-    for (size_t i = 0; i < max_pieces; ++i) {
-        selected_pieces.push_back(needed_pieces[i]);
+    // First, add pieces we're already downloading (prioritize completing them)
+    for (PieceIndex piece : downloading_pieces) {
+        selected_pieces.push_back(piece);
+        if (selected_pieces.size() >= 10) break;
+    }
+    
+    // Then add new pieces if we have room
+    for (PieceIndex piece : new_pieces) {
+        if (selected_pieces.size() >= 10) break;
+        selected_pieces.push_back(piece);
     }
     
     return selected_pieces;
