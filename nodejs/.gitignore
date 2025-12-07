@@ -1,0 +1,22 @@
+# Build artifacts
+build/
+build-native/
+node_modules/
+
+# Generated native source directory (created by npm run prepare)
+native-src/
+
+# Test data
+test-data/
+temp_transfers/
+
+# IDE files
+.vscode/
+.idea/
+
+# Logs and swap files
+*.log
+*.swp
+*.swo
+*~
+
