@@ -24,7 +24,7 @@ namespace librats {
 //=============================================================================
 
 TorrentInfo::TorrentInfo() 
-    : total_length_(0), piece_length_(0), private_(false) {
+    : total_length_(0), piece_length_(0), private_(false), metadata_only_(false) {
     info_hash_.fill(0);
 }
 
@@ -252,19 +252,18 @@ TorrentInfo TorrentInfo::create_for_metadata_exchange(const InfoHash& info_hash)
     // Set the info hash directly
     torrent.info_hash_ = info_hash;
     
-    // Set minimal required fields to make it valid
+    // Mark as metadata-only (for BEP 9 metadata exchange)
+    torrent.metadata_only_ = true;
+    
+    // Set minimal required fields - these are placeholders only
+    // No pieces or files are actually downloaded for metadata-only torrents
     torrent.name_ = "metadata_download_" + info_hash_to_hex(info_hash).substr(0, 8);
-    torrent.piece_length_ = 16384;  // Standard piece length
-    torrent.total_length_ = 1;      // Minimal length
+    torrent.piece_length_ = 0;  // No real pieces
+    torrent.total_length_ = 0;  // No real content
     torrent.private_ = false;
     
-    // Add a dummy piece hash (will be replaced when metadata is downloaded)
-    std::array<uint8_t, 20> dummy_hash;
-    dummy_hash.fill(0);
-    torrent.piece_hashes_.push_back(dummy_hash);
-    
-    // Add a dummy file
-    torrent.files_.emplace_back("temp", 1, 0);
+    // No piece hashes or files - we only need the info hash for peer connections
+    // Piece downloading will be skipped for metadata-only torrents
     
     LOG_BT_DEBUG("Created metadata exchange TorrentInfo for hash: " << info_hash_to_hex(info_hash));
     
@@ -1036,9 +1035,9 @@ void PeerConnection::handle_extended_handshake(const std::vector<uint8_t>& paylo
             // Only create metadata download if:
             // 1. No existing metadata download in progress
             // 2. Peer has valid metadata size
-            // 3. Torrent doesn't already have valid metadata (prevents re-downloading for real torrents)
+            // 3. This is a metadata-only torrent (for BEP 9 metadata exchange)
             if (!metadata_download && peer_metadata_size_ > 0 && peer_metadata_size_ <= MAX_METADATA_SIZE
-                && !torrent_->get_torrent_info().is_valid()) {
+                && torrent_->get_torrent_info().is_metadata_only()) {
                 // Create metadata download with the correct size
                 const auto& info_hash = torrent_->get_torrent_info().get_info_hash();
                 LOG_BT_INFO("Creating metadata download for hash " << info_hash_to_hex(info_hash) 
@@ -1358,7 +1357,7 @@ bool PeerConnection::write_data(const std::vector<uint8_t>& data) {
 //=============================================================================
 
 MetadataDownload::MetadataDownload(const InfoHash& info_hash, size_t metadata_size)
-    : info_hash_(info_hash), metadata_size_(metadata_size) {
+    : info_hash_(info_hash), metadata_size_(metadata_size), completion_triggered_(false) {
     
     // Calculate number of pieces needed
     num_pieces_ = (metadata_size + METADATA_PIECE_SIZE - 1) / METADATA_PIECE_SIZE;
@@ -1386,6 +1385,18 @@ bool MetadataDownload::store_metadata_piece(uint32_t piece_index, const std::vec
             return false;
         }
         
+        // Skip if this piece is already complete (received from another peer)
+        if (pieces_complete_[piece_index]) {
+            LOG_BT_DEBUG("Metadata piece " << piece_index << " already received, skipping duplicate");
+            return true;
+        }
+        
+        // Skip if completion callback was already triggered
+        if (completion_triggered_) {
+            LOG_BT_DEBUG("Metadata download already completed, ignoring piece " << piece_index);
+            return true;
+        }
+        
         // Calculate expected piece size
         size_t expected_size;
         if (piece_index == num_pieces_ - 1) {
@@ -1411,7 +1422,8 @@ bool MetadataDownload::store_metadata_piece(uint32_t piece_index, const std::vec
         bool all_complete = std::all_of(pieces_complete_.begin(), pieces_complete_.end(), 
                                         [](bool complete) { return complete; });
         
-        if (all_complete) {
+        if (all_complete && !completion_triggered_) {
+            completion_triggered_ = true;  // Ensure callback is only triggered once
             LOG_BT_INFO("Metadata download complete for info hash " << info_hash_to_hex(info_hash_));
             
             // Verify metadata (use unlocked version since we already hold the mutex)
@@ -1452,7 +1464,7 @@ bool MetadataDownload::store_metadata_piece(uint32_t piece_index, const std::vec
 
 bool MetadataDownload::is_complete() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return std::all_of(pieces_complete_.begin(), pieces_complete_.end(), [](bool complete) { return complete; });
+    return completion_triggered_ || std::all_of(pieces_complete_.begin(), pieces_complete_.end(), [](bool complete) { return complete; });
 }
 
 std::vector<uint8_t> MetadataDownload::get_metadata_unlocked() const {
@@ -2121,7 +2133,11 @@ double TorrentDownload::get_upload_speed() const {
 void TorrentDownload::download_loop() {
     LOG_BT_INFO("Download loop started for torrent: " << torrent_info_.get_name());
     
-    while (running_ && !is_complete()) {
+    // For metadata-only torrents, we don't download pieces
+    // The loop just waits until stopped (metadata completion triggers stop from callback)
+    bool is_metadata_only = torrent_info_.is_metadata_only();
+    
+    while (running_ && (is_metadata_only || !is_complete())) {
         if (paused_) {
             // Use conditional variable for responsive shutdown
             {
@@ -2133,14 +2149,16 @@ void TorrentDownload::download_loop() {
             continue;
         }
         
-        // Schedule piece requests to peers
+        // Schedule piece requests to peers (skipped for metadata-only)
         schedule_piece_requests();
         
-        // Update progress
-        update_progress();
-        
-        // Check for completion
-        check_torrent_completion();
+        // Update progress (skipped for metadata-only since no pieces)
+        if (!is_metadata_only) {
+            update_progress();
+            
+            // Check for completion
+            check_torrent_completion();
+        }
         
         // Use conditional variable for responsive shutdown
         {
@@ -2157,24 +2175,30 @@ void TorrentDownload::download_loop() {
 void TorrentDownload::peer_management_loop() {
     LOG_BT_INFO("Peer management loop started for torrent: " << torrent_info_.get_name());
     
+    bool is_metadata_only = torrent_info_.is_metadata_only();
+    
     while (running_) {
         // Clean up disconnected peers
         cleanup_disconnected_peers();
         
-        // Periodically log detailed torrent state (every 10 seconds when actively downloading)
-        auto now = std::chrono::steady_clock::now();
-        bool is_actively_downloading = !is_complete() && !paused_.load();
-        
-        // Log every 10 seconds when downloading, every 30 seconds when seeding/idle
-        auto log_interval = is_actively_downloading ? std::chrono::seconds(10) : std::chrono::seconds(30);
-        
-        if (now - last_state_log_time_ > log_interval) {
-            last_state_log_time_ = now;
+        // Skip detailed state logging for metadata-only torrents
+        // (they don't have meaningful piece progress to report)
+        if (!is_metadata_only) {
+            // Periodically log detailed torrent state (every 10 seconds when actively downloading)
+            auto now = std::chrono::steady_clock::now();
+            bool is_actively_downloading = !is_complete() && !paused_.load();
             
-            // Only log detailed state if we have peers or are actively doing something
-            size_t peer_count = get_peer_count();
-            if (peer_count > 0 || is_actively_downloading) {
-                log_detailed_state();
+            // Log every 10 seconds when downloading, every 30 seconds when seeding/idle
+            auto log_interval = is_actively_downloading ? std::chrono::seconds(10) : std::chrono::seconds(30);
+            
+            if (now - last_state_log_time_ > log_interval) {
+                last_state_log_time_ = now;
+                
+                // Only log detailed state if we have peers or are actively doing something
+                size_t peer_count = get_peer_count();
+                if (peer_count > 0 || is_actively_downloading) {
+                    log_detailed_state();
+                }
             }
         }
         
@@ -2191,6 +2215,12 @@ void TorrentDownload::peer_management_loop() {
 }
 
 void TorrentDownload::schedule_piece_requests() {
+    // Skip piece scheduling for metadata-only torrents
+    // These torrents only need to exchange metadata via BEP 9, not download pieces
+    if (torrent_info_.is_metadata_only()) {
+        return;
+    }
+    
     std::lock_guard<std::mutex> lock(peers_mutex_);
     
     for (auto& peer : peer_connections_) {
@@ -2962,7 +2992,8 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
     TorrentInfo metadata_torrent_info = TorrentInfo::create_for_metadata_exchange(info_hash);
     
     // Create a temporary torrent download for metadata exchange only
-    auto metadata_torrent = std::make_shared<TorrentDownload>(metadata_torrent_info, download_path);
+    // Use empty download path since we don't download any pieces for metadata-only torrents
+    auto metadata_torrent = std::make_shared<TorrentDownload>(metadata_torrent_info, "");
     
     // Set up metadata completion callback
     // When metadata download completes, we'll stop the temporary torrent and create the real one

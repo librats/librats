@@ -178,6 +178,9 @@ public:
     // Create a minimal torrent info for metadata exchange only (BEP 9)
     static TorrentInfo create_for_metadata_exchange(const InfoHash& info_hash);
     
+    // Check if this is a metadata-only torrent (for BEP 9 metadata exchange)
+    bool is_metadata_only() const { return metadata_only_; }
+    
 private:
     InfoHash info_hash_;
     std::string name_;
@@ -188,6 +191,7 @@ private:
     std::string announce_;
     std::vector<std::string> announce_list_;
     bool private_;
+    bool metadata_only_;  // True if this is a placeholder for metadata exchange
     
     bool parse_info_dict(const BencodeValue& info_dict);
     void calculate_info_hash(const BencodeValue& info_dict);
@@ -459,6 +463,7 @@ private:
     uint32_t num_pieces_;
     std::vector<std::vector<uint8_t>> pieces_;
     std::vector<bool> pieces_complete_;
+    bool completion_triggered_;  // Ensures callback is only invoked once
     mutable std::mutex mutex_;
     MetadataCompleteCallback completion_callback_;
     
