@@ -2074,9 +2074,30 @@ void TorrentDownload::download_loop() {
 void TorrentDownload::peer_management_loop() {
     LOG_BT_INFO("Peer management loop started for torrent: " << torrent_info_.get_name());
     
+    auto last_peer_status_log = std::chrono::steady_clock::now();
+    
     while (running_) {
         // Clean up disconnected peers
         cleanup_disconnected_peers();
+        
+        // Periodically log peer status for debugging
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_peer_status_log > std::chrono::seconds(30)) {
+            last_peer_status_log = now;
+            std::lock_guard<std::mutex> lock(peers_mutex_);
+            size_t connected = 0;
+            size_t choked = 0;
+            for (const auto& peer : peer_connections_) {
+                if (peer->is_connected()) {
+                    connected++;
+                    if (peer->is_choked()) {
+                        choked++;
+                    }
+                }
+            }
+            LOG_BT_INFO("Peer status for " << torrent_info_.get_name() 
+                        << ": " << connected << " connected, " << choked << " choked");
+        }
         
         // Use conditional variable for responsive shutdown
         {
@@ -2094,14 +2115,22 @@ void TorrentDownload::schedule_piece_requests() {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     
     for (auto& peer : peer_connections_) {
-        if (!peer->is_connected() || peer->is_choked()) {
+        if (!peer->is_connected()) {
             continue;
         }
         
         // Get pieces we need that this peer has
         std::vector<PieceIndex> needed_pieces = get_needed_pieces(peer->get_bitfield());
         
-        if (needed_pieces.empty()) {
+        // IMPORTANT: Express interest BEFORE checking choke state
+        // We must send INTERESTED to get unchoked, even if we're currently choked
+        if (!needed_pieces.empty() && !peer->is_interested()) {
+            peer->set_interested(true);
+            LOG_BT_DEBUG("Expressed interest to peer " << peer->get_peer_info().ip << ":" << peer->get_peer_info().port);
+        }
+        
+        // Skip actual piece requests if we're choked or have no needed pieces
+        if (peer->is_choked() || needed_pieces.empty()) {
             continue;
         }
         
@@ -2150,11 +2179,6 @@ void TorrentDownload::schedule_piece_requests() {
                     }
                 }
             }
-        }
-        
-        // Express interest if we need pieces from this peer
-        if (!needed_pieces.empty() && !peer->is_interested()) {
-            peer->set_interested(true);
         }
     }
 }
@@ -2373,15 +2397,32 @@ void TorrentDownload::request_peers_from_dht(DhtClient* dht_client) {
     LOG_BT_INFO("Requesting peers from DHT for torrent: " << torrent_info_.get_name());
     
     dht_client->find_peers(dht_info_hash, [this](const std::vector<Peer>& peers, const InfoHash& info_hash) {
+        // Check if torrent is still running
+        if (!running_.load()) {
+            LOG_BT_DEBUG("Torrent stopped, ignoring DHT peer discovery results");
+            return;
+        }
+        
         LOG_BT_INFO("DHT discovered " << peers.size() << " peers for torrent: " << torrent_info_.get_name());
         
+        if (peers.empty()) {
+            LOG_BT_WARN("No peers found via DHT for torrent: " << torrent_info_.get_name());
+            return;
+        }
+        
+        size_t peers_added = 0;
         for (const auto& peer : peers) {
             if (get_peer_count() >= MAX_PEERS_PER_TORRENT) {
-                break; // Don't exceed peer limit
+                LOG_BT_DEBUG("Peer limit reached, stopping peer additions");
+                break;
             }
             
-            add_peer(peer);
+            if (add_peer(peer)) {
+                peers_added++;
+            }
         }
+        
+        LOG_BT_INFO("Added " << peers_added << " of " << peers.size() << " DHT peers for torrent: " << torrent_info_.get_name());
     });
 }
 
