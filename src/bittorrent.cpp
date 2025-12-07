@@ -532,7 +532,16 @@ void PeerConnection::connection_loop() {
         }
     }
     
-    LOG_BT_DEBUG("Connection loop ended for peer " << peer_info_.ip << ":" << peer_info_.port);
+    // Log reason for connection loop exit
+    PeerState exit_state = state_.load();
+    if (exit_state == PeerState::ERROR) {
+        LOG_BT_WARN("Connection loop ended for peer " << peer_info_.ip << ":" << peer_info_.port << " due to error");
+    } else if (should_disconnect_.load()) {
+        LOG_BT_DEBUG("Connection loop ended for peer " << peer_info_.ip << ":" << peer_info_.port << " - disconnect requested");
+    } else {
+        LOG_BT_DEBUG("Connection loop ended for peer " << peer_info_.ip << ":" << peer_info_.port 
+                     << " (state: " << static_cast<int>(exit_state) << ")");
+    }
 }
 
 bool PeerConnection::perform_handshake() {
@@ -603,6 +612,11 @@ bool PeerConnection::send_message(const PeerMessage& message) {
 }
 
 void PeerConnection::process_messages() {
+    // Check if we're still connected before processing
+    if (state_.load() != PeerState::CONNECTED) {
+        return;
+    }
+    
     // Try to read message length first
     if (expected_message_length_ == 0) {
         std::vector<uint8_t> length_buffer(4);
@@ -621,17 +635,24 @@ void PeerConnection::process_messages() {
             message_buffer_.clear();
             message_buffer_.reserve(expected_message_length_);
         } else {
-            return;  // No data available yet
+            return;  // No data available or connection error (state already updated)
         }
     }
     
     // Try to read the message payload
     if (expected_message_length_ > 0 && message_buffer_.size() < expected_message_length_) {
+        // Check state again in case it changed during previous read
+        if (state_.load() != PeerState::CONNECTED) {
+            return;
+        }
+        
         size_t remaining = expected_message_length_ - message_buffer_.size();
         std::vector<uint8_t> temp_buffer(remaining);
         
         if (read_data(temp_buffer, remaining)) {
             message_buffer_.insert(message_buffer_.end(), temp_buffer.begin(), temp_buffer.end());
+        } else {
+            return;  // Read failed, state already updated if error
         }
     }
     
@@ -1262,7 +1283,16 @@ bool PeerConnection::read_data(std::vector<uint8_t>& buffer, size_t length) {
     // Use the existing socket function to read exact bytes
     std::vector<uint8_t> data = receive_exact_bytes(socket_, length);
     if (data.size() != length) {
-        LOG_BT_DEBUG("Failed to read exact amount of data from socket");
+        // receive_exact_bytes returns empty on socket error or connection closed
+        // If we got 0 bytes, the socket is likely dead - mark connection as error
+        if (data.empty()) {
+            LOG_BT_DEBUG("Socket read returned empty - connection likely closed by peer " 
+                         << peer_info_.ip << ":" << peer_info_.port);
+            state_.store(PeerState::ERROR);
+        } else {
+            LOG_BT_DEBUG("Failed to read exact amount of data from socket (got " 
+                         << data.size() << " of " << length << " bytes)");
+        }
         return false;
     }
     
