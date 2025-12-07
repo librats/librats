@@ -1033,7 +1033,12 @@ void PeerConnection::handle_extended_handshake(const std::vector<uint8_t>& paylo
             // Check if we need to create a metadata download
             auto* metadata_download = torrent_->get_metadata_download();
             
-            if (!metadata_download && peer_metadata_size_ > 0 && peer_metadata_size_ <= MAX_METADATA_SIZE) {
+            // Only create metadata download if:
+            // 1. No existing metadata download in progress
+            // 2. Peer has valid metadata size
+            // 3. Torrent doesn't already have valid metadata (prevents re-downloading for real torrents)
+            if (!metadata_download && peer_metadata_size_ > 0 && peer_metadata_size_ <= MAX_METADATA_SIZE
+                && !torrent_->get_torrent_info().is_valid()) {
                 // Create metadata download with the correct size
                 const auto& info_hash = torrent_->get_torrent_info().get_info_hash();
                 LOG_BT_INFO("Creating metadata download for hash " << info_hash_to_hex(info_hash) 
