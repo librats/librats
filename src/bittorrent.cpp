@@ -445,16 +445,8 @@ bool PeerConnection::connect() {
     
     LOG_BT_INFO("Connecting to peer " << peer_info_.ip << ":" << peer_info_.port);
     
-    if (!is_valid_socket(socket_)) {
-        socket_ = create_tcp_client(peer_info_.ip, peer_info_.port, 10000); // 10-second timeout
-        if (!is_valid_socket(socket_)) {
-            LOG_BT_ERROR("Failed to create connection to " << peer_info_.ip << ":" << peer_info_.port);
-            state_.store(PeerState::ERROR);
-            return false;
-        }
-    }
-    
-    // Start connection thread
+    // Start connection thread - socket creation happens inside the thread for async behavior
+    // This prevents blocking the caller when connecting to unresponsive peers
     connection_thread_ = std::thread(&PeerConnection::connection_loop, this);
     
     return true;
@@ -488,6 +480,17 @@ void PeerConnection::disconnect() {
 
 void PeerConnection::connection_loop() {
     LOG_BT_DEBUG("Starting connection loop for peer " << peer_info_.ip << ":" << peer_info_.port);
+    
+    // Create socket if not already provided (outgoing connection)
+    // This is done in the thread to avoid blocking the caller
+    if (!is_valid_socket(socket_)) {
+        socket_ = create_tcp_client(peer_info_.ip, peer_info_.port, 5000); // 5-second timeout for faster failure
+        if (!is_valid_socket(socket_)) {
+            LOG_BT_ERROR("Failed to create connection to " << peer_info_.ip << ":" << peer_info_.port);
+            state_.store(PeerState::ERROR);
+            return;
+        }
+    }
     
     // Perform handshake only if not already completed (for outgoing connections)
     if (!handshake_completed_) {
@@ -2691,6 +2694,20 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
     
     // Find peers via DHT
     dht_client_->find_peers(info_hash, [this, info_hash, metadata_torrent](const std::vector<Peer>& peers, const InfoHash& hash) {
+        // Check if metadata torrent is still running (may have completed or been stopped)
+        if (!metadata_torrent->is_running()) {
+            LOG_BT_DEBUG("Metadata torrent already stopped, ignoring DHT peer discovery results");
+            return;
+        }
+        
+        // Check if metadata is already downloaded
+        if (auto* md = metadata_torrent->get_metadata_download()) {
+            if (md->is_complete()) {
+                LOG_BT_DEBUG("Metadata already downloaded, ignoring DHT peer discovery results");
+                return;
+            }
+        }
+        
         LOG_BT_INFO("DHT found " << peers.size() << " peers for hash " << info_hash_to_hex(info_hash));
         
         if (peers.empty()) {
@@ -2700,7 +2717,22 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
         
         // Connect to peers to get metadata
         size_t max_peers_to_try = (std::min)(peers.size(), static_cast<size_t>(10));
+        size_t peers_added = 0;
         for (size_t i = 0; i < max_peers_to_try; ++i) {
+            // Check again if metadata is complete (could have completed during loop)
+            if (auto* md = metadata_torrent->get_metadata_download()) {
+                if (md->is_complete()) {
+                    LOG_BT_DEBUG("Metadata download completed, stopping peer additions");
+                    break;
+                }
+            }
+            
+            // Check if torrent is still running
+            if (!metadata_torrent->is_running()) {
+                LOG_BT_DEBUG("Metadata torrent stopped, stopping peer additions");
+                break;
+            }
+            
             const auto& peer = peers[i];
             LOG_BT_INFO("Connecting to peer " << peer.ip << ":" << peer.port << " for metadata exchange");
             
@@ -2711,12 +2743,14 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
             // 3. Detect metadata support and size
             // 4. Request metadata pieces
             // 5. Complete metadata download via callback
-            if (!metadata_torrent->add_peer(peer)) {
+            if (metadata_torrent->add_peer(peer)) {
+                peers_added++;
+            } else {
                 LOG_BT_DEBUG("Failed to add peer " << peer.ip << ":" << peer.port);
             }
         }
         
-        LOG_BT_INFO("Connected to " << max_peers_to_try << " peers for metadata exchange");
+        LOG_BT_INFO("Added " << peers_added << " peers for metadata exchange");
     });
     
     LOG_BT_INFO("Metadata download initiated for hash " << info_hash_to_hex(info_hash));
@@ -3096,6 +3130,20 @@ void BitTorrentClient::get_torrent_metadata_by_hash(const InfoHash& info_hash, M
     
     // Find peers via DHT
     dht_client_->find_peers(info_hash, [this, info_hash, metadata_torrent](const std::vector<Peer>& peers, const InfoHash& hash) {
+        // Check if metadata torrent is still running (may have completed or been stopped)
+        if (!metadata_torrent->is_running()) {
+            LOG_BT_DEBUG("Metadata torrent already stopped, ignoring DHT peer discovery results");
+            return;
+        }
+        
+        // Check if metadata is already downloaded
+        if (auto* md = metadata_torrent->get_metadata_download()) {
+            if (md->is_complete()) {
+                LOG_BT_DEBUG("Metadata already downloaded, ignoring DHT peer discovery results");
+                return;
+            }
+        }
+        
         LOG_BT_INFO("DHT found " << peers.size() << " peers for hash " << info_hash_to_hex(info_hash));
         
         if (peers.empty()) {
@@ -3123,16 +3171,33 @@ void BitTorrentClient::get_torrent_metadata_by_hash(const InfoHash& info_hash, M
         
         // Connect to peers to get metadata
         size_t max_peers_to_try = (std::min)(peers.size(), static_cast<size_t>(10));
+        size_t peers_added = 0;
         for (size_t i = 0; i < max_peers_to_try; ++i) {
+            // Check again if metadata is complete (could have completed during loop)
+            if (auto* md = metadata_torrent->get_metadata_download()) {
+                if (md->is_complete()) {
+                    LOG_BT_DEBUG("Metadata download completed, stopping peer additions");
+                    break;
+                }
+            }
+            
+            // Check if torrent is still running
+            if (!metadata_torrent->is_running()) {
+                LOG_BT_DEBUG("Metadata torrent stopped, stopping peer additions");
+                break;
+            }
+            
             const auto& peer = peers[i];
             LOG_BT_INFO("Connecting to peer " << peer.ip << ":" << peer.port << " for metadata retrieval");
             
-            if (!metadata_torrent->add_peer(peer)) {
+            if (metadata_torrent->add_peer(peer)) {
+                peers_added++;
+            } else {
                 LOG_BT_DEBUG("Failed to add peer " << peer.ip << ":" << peer.port);
             }
         }
         
-        LOG_BT_INFO("Connected to " << max_peers_to_try << " peers for metadata retrieval");
+        LOG_BT_INFO("Added " << peers_added << " peers for metadata retrieval");
     });
     
     LOG_BT_INFO("Metadata retrieval initiated for hash " << info_hash_to_hex(info_hash));
