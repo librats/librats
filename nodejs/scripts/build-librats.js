@@ -97,6 +97,19 @@ if (!fs.existsSync(srcDir)) {
 if (!fs.existsSync(buildDir)) {
     console.log(`Creating build directory: ${buildDir}`);
     fs.mkdirSync(buildDir, { recursive: true });
+} else {
+    // Clear CMake cache if it exists to avoid source directory mismatch errors
+    const cmakeCache = path.join(buildDir, 'CMakeCache.txt');
+    if (fs.existsSync(cmakeCache)) {
+        console.log('Clearing existing CMake cache...');
+        fs.unlinkSync(cmakeCache);
+        
+        // Also remove CMakeFiles directory for a clean reconfigure
+        const cmakeFiles = path.join(buildDir, 'CMakeFiles');
+        if (fs.existsSync(cmakeFiles)) {
+            fs.rmSync(cmakeFiles, { recursive: true, force: true });
+        }
+    }
 }
 
 // Helper function to execute commands
