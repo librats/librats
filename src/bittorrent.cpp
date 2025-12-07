@@ -800,7 +800,7 @@ void PeerConnection::handle_request(const std::vector<uint8_t>& payload) {
         return;
     }
     
-    // Validate request length (must be power of 2, typically 16KB)
+    // Validate request length (up to BLOCK_SIZE, smaller is allowed for last block)
     if (length > BLOCK_SIZE || length == 0) {
         LOG_BT_WARN("Invalid request length: " << length);
         return;
@@ -1160,24 +1160,41 @@ void PeerConnection::cancel_request(PieceIndex piece_index, uint32_t offset, uin
     auto cancel_msg = PeerMessage::create_cancel(piece_index, offset, length);
     send_message(cancel_msg);
     
-    std::lock_guard<std::mutex> lock(requests_mutex_);
-    pending_requests_.erase(
-        std::remove_if(pending_requests_.begin(), pending_requests_.end(),
-            [piece_index, offset, length](const PeerRequest& req) {
-                return req.piece_index == piece_index && req.offset == offset && req.length == length;
-            }),
-        pending_requests_.end());
+    {
+        std::lock_guard<std::mutex> lock(requests_mutex_);
+        pending_requests_.erase(
+            std::remove_if(pending_requests_.begin(), pending_requests_.end(),
+                [piece_index, offset, length](const PeerRequest& req) {
+                    return req.piece_index == piece_index && req.offset == offset && req.length == length;
+                }),
+            pending_requests_.end());
+    }
+    
+    // Reset block request status so block can be requested from other peers
+    uint32_t block_index = offset / BLOCK_SIZE;
+    torrent_->reset_block_request(piece_index, block_index);
 }
 
 void PeerConnection::cancel_all_requests() {
-    std::lock_guard<std::mutex> lock(requests_mutex_);
+    std::vector<PeerRequest> requests_to_reset;
     
-    for (const auto& request : pending_requests_) {
-        auto cancel_msg = PeerMessage::create_cancel(request.piece_index, request.offset, request.length);
-        send_message(cancel_msg);
+    {
+        std::lock_guard<std::mutex> lock(requests_mutex_);
+        
+        for (const auto& request : pending_requests_) {
+            auto cancel_msg = PeerMessage::create_cancel(request.piece_index, request.offset, request.length);
+            send_message(cancel_msg);
+            requests_to_reset.push_back(request);
+        }
+        
+        pending_requests_.clear();
     }
     
-    pending_requests_.clear();
+    // Reset block request status so blocks can be requested from other peers
+    for (const auto& req : requests_to_reset) {
+        uint32_t block_index = req.offset / BLOCK_SIZE;
+        torrent_->reset_block_request(req.piece_index, block_index);
+    }
 }
 
 void PeerConnection::set_interested(bool interested) {
@@ -1727,8 +1744,9 @@ bool TorrentDownload::store_piece_block(PieceIndex piece_index, uint32_t offset,
                 LOG_BT_INFO("Piece " << piece_index << " verified and saved");
             } else {
                 LOG_BT_ERROR("Piece " << piece_index << " verification failed, requesting re-download");
-                // Reset piece for re-download
+                // Reset piece for re-download - must reset both downloaded and requested status
                 std::fill(piece->blocks_downloaded.begin(), piece->blocks_downloaded.end(), false);
+                std::fill(piece->blocks_requested.begin(), piece->blocks_requested.end(), false);
                 piece_downloading_[piece_index] = false;
                 verification_failed = true;
             }
