@@ -315,6 +315,11 @@ public:
     uint64_t get_uploaded() const { return uploaded_bytes_; }
     size_t get_pending_requests() const { return pending_requests_.size(); }
     
+    // Speed calculation (bytes per second)
+    double get_download_speed() const;
+    double get_upload_speed() const;
+    void update_speed_stats();  // Call periodically to update speed
+    
     // Peer info
     const Peer& get_peer_info() const { return peer_info_; }
     const PeerID& get_peer_id() const { return peer_id_; }
@@ -357,6 +362,14 @@ private:
     // Statistics
     std::atomic<uint64_t> downloaded_bytes_;
     std::atomic<uint64_t> uploaded_bytes_;
+    
+    // Speed tracking
+    mutable std::mutex speed_mutex_;
+    std::chrono::steady_clock::time_point last_speed_update_time_;
+    uint64_t last_speed_downloaded_;
+    uint64_t last_speed_uploaded_;
+    std::atomic<double> download_speed_;  // bytes per second
+    std::atomic<double> upload_speed_;    // bytes per second
     
     // Message buffer
     std::vector<uint8_t> message_buffer_;
@@ -496,6 +509,11 @@ public:
     uint32_t get_completed_pieces() const;
     std::vector<bool> get_piece_bitfield() const;
     
+    // Speed tracking
+    double get_download_speed() const;  // bytes per second
+    double get_upload_speed() const;    // bytes per second
+    void update_speed_stats();          // Call periodically to update speed
+    
     // Callbacks
     void set_progress_callback(ProgressCallback callback) { progress_callback_ = callback; }
     void set_piece_complete_callback(PieceCompleteCallback callback) { piece_complete_callback_ = callback; }
@@ -560,6 +578,18 @@ private:
     std::atomic<uint64_t> total_downloaded_;
     std::atomic<uint64_t> total_uploaded_;
     
+    // Speed tracking
+    mutable std::mutex speed_mutex_;
+    std::chrono::steady_clock::time_point last_speed_update_time_;
+    uint64_t last_speed_downloaded_;
+    uint64_t last_speed_uploaded_;
+    std::atomic<double> download_speed_;  // bytes per second
+    std::atomic<double> upload_speed_;    // bytes per second
+    
+    // Progress tracking (for change detection in logging)
+    double last_logged_progress_;
+    std::chrono::steady_clock::time_point last_state_log_time_;
+    
     // Metadata download (BEP 9)
     std::shared_ptr<MetadataDownload> metadata_download_;
     
@@ -588,6 +618,7 @@ private:
     void update_progress();
     void on_piece_completed(PieceIndex piece_index);
     void check_torrent_completion();
+    void log_detailed_state();  // Log detailed torrent state for debugging
 };
 
 // Main BitTorrent client

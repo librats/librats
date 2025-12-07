@@ -418,7 +418,11 @@ PeerConnection::PeerConnection(TorrentDownload* torrent, const Peer& peer_info, 
       state_(PeerState::CONNECTING), should_disconnect_(false), handshake_completed_(false),
       peer_choked_(true), am_choked_(true), peer_interested_(false), 
       am_interested_(false), am_choking_(true),
-      downloaded_bytes_(0), uploaded_bytes_(0), expected_message_length_(0),
+      downloaded_bytes_(0), uploaded_bytes_(0),
+      last_speed_update_time_(std::chrono::steady_clock::now()),
+      last_speed_downloaded_(0), last_speed_uploaded_(0),
+      download_speed_(0.0), upload_speed_(0.0),
+      expected_message_length_(0),
       supports_extensions_(false), supports_metadata_exchange_(false),
       peer_ut_metadata_id_(0), peer_metadata_size_(0) {
     
@@ -1278,6 +1282,37 @@ void PeerConnection::cleanup_expired_requests() {
     }
 }
 
+void PeerConnection::update_speed_stats() {
+    std::lock_guard<std::mutex> lock(speed_mutex_);
+    
+    auto now = std::chrono::steady_clock::now();
+    double elapsed_seconds = std::chrono::duration<double>(now - last_speed_update_time_).count();
+    
+    // Update speed every second at minimum to avoid division by very small numbers
+    if (elapsed_seconds >= 1.0) {
+        uint64_t current_downloaded = downloaded_bytes_.load();
+        uint64_t current_uploaded = uploaded_bytes_.load();
+        
+        uint64_t downloaded_delta = current_downloaded - last_speed_downloaded_;
+        uint64_t uploaded_delta = current_uploaded - last_speed_uploaded_;
+        
+        download_speed_.store(static_cast<double>(downloaded_delta) / elapsed_seconds);
+        upload_speed_.store(static_cast<double>(uploaded_delta) / elapsed_seconds);
+        
+        last_speed_downloaded_ = current_downloaded;
+        last_speed_uploaded_ = current_uploaded;
+        last_speed_update_time_ = now;
+    }
+}
+
+double PeerConnection::get_download_speed() const {
+    return download_speed_.load();
+}
+
+double PeerConnection::get_upload_speed() const {
+    return upload_speed_.load();
+}
+
 bool PeerConnection::read_data(std::vector<uint8_t>& buffer, size_t length) {
     if (!is_valid_socket(socket_)) {
         return false;
@@ -1498,7 +1533,11 @@ bool MetadataDownload::is_piece_complete(uint32_t piece_index) const {
 
 TorrentDownload::TorrentDownload(const TorrentInfo& torrent_info, const std::string& download_path)
     : torrent_info_(torrent_info), download_path_(download_path), 
-      running_(false), paused_(false), total_downloaded_(0), total_uploaded_(0) {
+      running_(false), paused_(false), total_downloaded_(0), total_uploaded_(0),
+      last_speed_update_time_(std::chrono::steady_clock::now()),
+      last_speed_downloaded_(0), last_speed_uploaded_(0),
+      download_speed_(0.0), upload_speed_(0.0),
+      last_logged_progress_(0.0), last_state_log_time_(std::chrono::steady_clock::now()) {
     
     // Initialize pieces
     uint32_t num_pieces = torrent_info_.get_num_pieces();
@@ -2035,6 +2074,45 @@ std::vector<bool> TorrentDownload::get_piece_bitfield() const {
     return piece_completed_;
 }
 
+void TorrentDownload::update_speed_stats() {
+    std::lock_guard<std::mutex> lock(speed_mutex_);
+    
+    auto now = std::chrono::steady_clock::now();
+    double elapsed_seconds = std::chrono::duration<double>(now - last_speed_update_time_).count();
+    
+    // Update speed every second at minimum to avoid division by very small numbers
+    if (elapsed_seconds >= 1.0) {
+        uint64_t current_downloaded = total_downloaded_.load();
+        uint64_t current_uploaded = total_uploaded_.load();
+        
+        uint64_t downloaded_delta = current_downloaded - last_speed_downloaded_;
+        uint64_t uploaded_delta = current_uploaded - last_speed_uploaded_;
+        
+        download_speed_.store(static_cast<double>(downloaded_delta) / elapsed_seconds);
+        upload_speed_.store(static_cast<double>(uploaded_delta) / elapsed_seconds);
+        
+        last_speed_downloaded_ = current_downloaded;
+        last_speed_uploaded_ = current_uploaded;
+        last_speed_update_time_ = now;
+    }
+    
+    // Also update speed stats for all peer connections
+    {
+        std::lock_guard<std::mutex> peers_lock(peers_mutex_);
+        for (auto& peer : peer_connections_) {
+            peer->update_speed_stats();
+        }
+    }
+}
+
+double TorrentDownload::get_download_speed() const {
+    return download_speed_.load();
+}
+
+double TorrentDownload::get_upload_speed() const {
+    return upload_speed_.load();
+}
+
 void TorrentDownload::download_loop() {
     LOG_BT_INFO("Download loop started for torrent: " << torrent_info_.get_name());
     
@@ -2074,29 +2152,25 @@ void TorrentDownload::download_loop() {
 void TorrentDownload::peer_management_loop() {
     LOG_BT_INFO("Peer management loop started for torrent: " << torrent_info_.get_name());
     
-    auto last_peer_status_log = std::chrono::steady_clock::now();
-    
     while (running_) {
         // Clean up disconnected peers
         cleanup_disconnected_peers();
         
-        // Periodically log peer status for debugging
+        // Periodically log detailed torrent state (every 10 seconds when actively downloading)
         auto now = std::chrono::steady_clock::now();
-        if (now - last_peer_status_log > std::chrono::seconds(30)) {
-            last_peer_status_log = now;
-            std::lock_guard<std::mutex> lock(peers_mutex_);
-            size_t connected = 0;
-            size_t choked = 0;
-            for (const auto& peer : peer_connections_) {
-                if (peer->is_connected()) {
-                    connected++;
-                    if (peer->is_choked()) {
-                        choked++;
-                    }
-                }
+        bool is_actively_downloading = !is_complete() && !paused_.load();
+        
+        // Log every 10 seconds when downloading, every 30 seconds when seeding/idle
+        auto log_interval = is_actively_downloading ? std::chrono::seconds(10) : std::chrono::seconds(30);
+        
+        if (now - last_state_log_time_ > log_interval) {
+            last_state_log_time_ = now;
+            
+            // Only log detailed state if we have peers or are actively doing something
+            size_t peer_count = get_peer_count();
+            if (peer_count > 0 || is_actively_downloading) {
+                log_detailed_state();
             }
-            LOG_BT_INFO("Peer status for " << torrent_info_.get_name() 
-                        << ": " << connected << " connected, " << choked << " choked");
         }
         
         // Use conditional variable for responsive shutdown
@@ -2317,13 +2391,69 @@ PieceIndex TorrentDownload::select_rarest_piece(const std::vector<bool>& availab
     return rarest_piece;
 }
 
+// Helper function to format bytes per second as human-readable string
+static std::string format_speed(double bytes_per_second) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1);
+    
+    if (bytes_per_second >= 1024 * 1024) {
+        oss << (bytes_per_second / (1024 * 1024)) << " MB/s";
+    } else if (bytes_per_second >= 1024) {
+        oss << (bytes_per_second / 1024) << " KB/s";
+    } else {
+        oss << bytes_per_second << " B/s";
+    }
+    
+    return oss.str();
+}
+
+// Helper function to format bytes as human-readable string
+static std::string format_bytes(uint64_t bytes) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2);
+    
+    if (bytes >= 1024ULL * 1024 * 1024) {
+        oss << (static_cast<double>(bytes) / (1024 * 1024 * 1024)) << " GB";
+    } else if (bytes >= 1024 * 1024) {
+        oss << (static_cast<double>(bytes) / (1024 * 1024)) << " MB";
+    } else if (bytes >= 1024) {
+        oss << (static_cast<double>(bytes) / 1024) << " KB";
+    } else {
+        oss << bytes << " B";
+    }
+    
+    return oss.str();
+}
+
 void TorrentDownload::update_progress() {
+    // Update speed statistics
+    update_speed_stats();
+    
+    uint64_t downloaded = get_downloaded_bytes();
+    uint64_t total = torrent_info_.get_total_length();
+    double percentage = get_progress_percentage();
+    
+    // Call progress callback
     if (progress_callback_) {
-        uint64_t downloaded = get_downloaded_bytes();
-        uint64_t total = torrent_info_.get_total_length();
-        double percentage = get_progress_percentage();
-        
         progress_callback_(downloaded, total, percentage);
+    }
+    
+    // Only log progress if it changed by at least 1% or we went from 0 to non-zero
+    double progress_delta = percentage - last_logged_progress_;
+    bool should_log_progress = (progress_delta >= 1.0) || 
+                                (last_logged_progress_ == 0.0 && percentage > 0.0);
+    
+    if (should_log_progress) {
+        double dl_speed = get_download_speed();
+        double ul_speed = get_upload_speed();
+        
+        LOG_BT_INFO("Progress [" << torrent_info_.get_name() << "]: " 
+                    << std::fixed << std::setprecision(1) << percentage << "% "
+                    << "(" << format_bytes(downloaded) << " / " << format_bytes(total) << ") "
+                    << "DL: " << format_speed(dl_speed) << " "
+                    << "UL: " << format_speed(ul_speed));
+        
+        last_logged_progress_ = percentage;
     }
 }
 
@@ -2335,9 +2465,11 @@ void TorrentDownload::on_piece_completed(PieceIndex piece_index) {
     // Notify all peers that we have this piece (for seeding)
     notify_peers_have_piece(piece_index);
     
+    double dl_speed = get_download_speed();
     LOG_BT_INFO("Piece " << piece_index << " completed. Progress: " 
-                << get_progress_percentage() << "% (" 
-                << get_completed_pieces() << "/" << torrent_info_.get_num_pieces() << " pieces)");
+                << std::fixed << std::setprecision(1) << get_progress_percentage() << "% (" 
+                << get_completed_pieces() << "/" << torrent_info_.get_num_pieces() << " pieces) "
+                << "@ " << format_speed(dl_speed));
 }
 
 void TorrentDownload::notify_peers_have_piece(PieceIndex piece_index) {
@@ -2360,6 +2492,136 @@ void TorrentDownload::check_torrent_completion() {
         torrent_complete_callback_(torrent_info_.get_name());
         LOG_BT_INFO("Torrent download completed: " << torrent_info_.get_name());
     }
+}
+
+void TorrentDownload::log_detailed_state() {
+    // Get current stats - be careful with lock ordering (peers_mutex_ -> pieces_mutex_)
+    uint32_t completed_pieces = 0;
+    uint32_t downloading_pieces = 0;
+    uint32_t total_pieces = 0;
+    std::vector<PieceIndex> currently_downloading;
+    
+    {
+        std::lock_guard<std::mutex> lock(pieces_mutex_);
+        total_pieces = static_cast<uint32_t>(piece_completed_.size());
+        completed_pieces = static_cast<uint32_t>(std::count(piece_completed_.begin(), piece_completed_.end(), true));
+        
+        for (size_t i = 0; i < piece_downloading_.size(); ++i) {
+            if (piece_downloading_[i] && !piece_completed_[i]) {
+                downloading_pieces++;
+                if (currently_downloading.size() < 10) {  // Limit to first 10
+                    currently_downloading.push_back(static_cast<PieceIndex>(i));
+                }
+            }
+        }
+    }
+    
+    // Get peer information
+    size_t total_peers = 0;
+    size_t connected_peers = 0;
+    size_t unchoked_peers = 0;
+    size_t interested_peers = 0;
+    std::vector<std::tuple<std::string, double, double, size_t, bool>> peer_stats;  // ip:port, dl_speed, ul_speed, pending_requests, choked
+    
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        total_peers = peer_connections_.size();
+        
+        for (const auto& peer : peer_connections_) {
+            if (peer->is_connected()) {
+                connected_peers++;
+                if (!peer->is_choked()) {
+                    unchoked_peers++;
+                }
+                if (peer->peer_is_interested()) {
+                    interested_peers++;
+                }
+                
+                std::string peer_addr = peer->get_peer_info().ip + ":" + std::to_string(peer->get_peer_info().port);
+                peer_stats.emplace_back(
+                    peer_addr,
+                    peer->get_download_speed(),
+                    peer->get_upload_speed(),
+                    peer->get_pending_requests(),
+                    peer->is_choked()
+                );
+            }
+        }
+    }
+    
+    // Calculate overall speeds
+    double dl_speed = get_download_speed();
+    double ul_speed = get_upload_speed();
+    uint64_t downloaded = get_downloaded_bytes();
+    uint64_t uploaded = get_uploaded_bytes();
+    uint64_t total_size = torrent_info_.get_total_length();
+    double progress = get_progress_percentage();
+    
+    // Calculate ETA
+    std::string eta_str = "N/A";
+    if (dl_speed > 0 && !is_complete()) {
+        uint64_t remaining = total_size - downloaded;
+        double eta_seconds = static_cast<double>(remaining) / dl_speed;
+        
+        if (eta_seconds < 60) {
+            std::ostringstream oss;
+            oss << std::fixed << std::setprecision(0) << eta_seconds << "s";
+            eta_str = oss.str();
+        } else if (eta_seconds < 3600) {
+            int minutes = static_cast<int>(eta_seconds / 60);
+            int seconds = static_cast<int>(eta_seconds) % 60;
+            std::ostringstream oss;
+            oss << minutes << "m " << seconds << "s";
+            eta_str = oss.str();
+        } else {
+            int hours = static_cast<int>(eta_seconds / 3600);
+            int minutes = static_cast<int>((static_cast<int>(eta_seconds) % 3600) / 60);
+            std::ostringstream oss;
+            oss << hours << "h " << minutes << "m";
+            eta_str = oss.str();
+        }
+    } else if (is_complete()) {
+        eta_str = "Complete";
+    }
+    
+    // Log detailed state
+    LOG_BT_INFO("=== Torrent State: " << torrent_info_.get_name() << " ===");
+    LOG_BT_INFO("  Progress: " << std::fixed << std::setprecision(1) << progress << "% "
+                << "(" << format_bytes(downloaded) << " / " << format_bytes(total_size) << ")");
+    LOG_BT_INFO("  Pieces: " << completed_pieces << "/" << total_pieces << " complete, "
+                << downloading_pieces << " downloading");
+    LOG_BT_INFO("  Speed: DL " << format_speed(dl_speed) << " | UL " << format_speed(ul_speed));
+    LOG_BT_INFO("  Uploaded: " << format_bytes(uploaded) << " | ETA: " << eta_str);
+    LOG_BT_INFO("  Peers: " << connected_peers << "/" << total_peers << " connected, "
+                << unchoked_peers << " unchoked, " << interested_peers << " interested in us");
+    
+    // Log pieces being downloaded (if any)
+    if (!currently_downloading.empty()) {
+        std::ostringstream pieces_oss;
+        pieces_oss << "  Downloading pieces: [";
+        for (size_t i = 0; i < currently_downloading.size(); ++i) {
+            if (i > 0) pieces_oss << ", ";
+            pieces_oss << currently_downloading[i];
+        }
+        if (downloading_pieces > currently_downloading.size()) {
+            pieces_oss << ", ... +" << (downloading_pieces - currently_downloading.size()) << " more";
+        }
+        pieces_oss << "]";
+        LOG_BT_INFO(pieces_oss.str());
+    }
+    
+    // Log per-peer stats if we have peers
+    if (!peer_stats.empty()) {
+        LOG_BT_INFO("  Per-peer stats:");
+        for (const auto& [addr, peer_dl, peer_ul, pending, choked] : peer_stats) {
+            LOG_BT_INFO("    " << addr << ": DL " << format_speed(peer_dl) 
+                        << " | UL " << format_speed(peer_ul)
+                        << " | Pending: " << pending 
+                        << " | " << (choked ? "CHOKED" : "unchoked"));
+        }
+    }
+    
+    LOG_BT_INFO("=== End Torrent State ===");
 }
 
 void TorrentDownload::announce_to_dht(DhtClient* dht_client) {
