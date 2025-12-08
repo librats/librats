@@ -1994,6 +1994,11 @@ void RatsClient::announce_rats_peer() {
     std::string discovery_hash = get_discovery_hash();
     LOG_CLIENT_INFO("Announcing peer for discovery hash: " << discovery_hash << " on port " << listen_port_);
     
+    if (dht_client_->is_announce_active(discovery_hash)) {
+        LOG_CLIENT_WARN("Announce already in progress for discovery hash: " << discovery_hash);
+        return;
+    }
+    
     if (announce_for_hash(discovery_hash, listen_port_)) {
         LOG_CLIENT_DEBUG("Successfully announced peer for discovery");
     } else {
