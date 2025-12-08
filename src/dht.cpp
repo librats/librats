@@ -220,23 +220,58 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port) {
         port = port_;
     }
     
-    LOG_DHT_INFO("Announcing peer for info hash: " << node_id_to_hex(info_hash) << " on port " << port);
+    std::string hash_key = node_id_to_hex(info_hash);
+    LOG_DHT_INFO("Announcing peer for info hash: " << hash_key << " on port " << port);
     
-    // First find nodes close to the info hash and send get_peers to them
-    // This is the proper BEP 5 flow: get_peers -> collect tokens -> announce_peer
-    auto closest_nodes = find_closest_nodes(info_hash, ALPHA);
-    for (const auto& node : closest_nodes) {
-            // Generate transaction ID and track this as a pending announce for KRPC
-            std::string transaction_id = KrpcProtocol::generate_transaction_id();
-            
-            {
-                std::lock_guard<std::mutex> lock(pending_announces_mutex_);
-                pending_announces_.emplace(transaction_id, PendingAnnounce(info_hash, port));
-            }
-            
-            auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
-            send_krpc_message(message, node.peer);
+    // BEP 5 compliant announce: 
+    // 1. Perform iterative Kademlia lookup (like find_peers)
+    // 2. Collect tokens from responding nodes
+    // 3. Send announce_peer to k closest nodes with their tokens
+    
+    // Get initial nodes from routing table
+    auto closest_nodes = find_closest_nodes(info_hash, K_BUCKET_SIZE);
+    
+    if (closest_nodes.empty()) {
+        LOG_DHT_WARN("No nodes in routing table to announce to for info_hash " << hash_key);
+        return false;
     }
+    
+    DeferredCallbacks deferred;
+    
+    {
+        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+        
+        // Check if a search/announce is already ongoing for this info_hash
+        auto search_it = pending_searches_.find(hash_key);
+        if (search_it != pending_searches_.end()) {
+            if (search_it->second.is_announce) {
+                LOG_DHT_INFO("Announce already in progress for info hash " << hash_key);
+                return true;
+            }
+            // Regular find_peers in progress - let it complete, then user can announce again
+            LOG_DHT_WARN("find_peers already in progress for info hash " << hash_key << " - announce will wait");
+            return false;
+        }
+        
+        // Create new search with announce flag
+        PendingSearch new_search(info_hash);
+        new_search.is_announce = true;
+        new_search.announce_port = port;
+        
+        // Initialize search_nodes with closest nodes from routing table (already sorted)
+        new_search.search_nodes = std::move(closest_nodes);
+        
+        auto insert_result = pending_searches_.emplace(hash_key, std::move(new_search));
+        PendingSearch& search_ref = insert_result.first->second;
+        
+        LOG_DHT_DEBUG("Initialized announce search with " << search_ref.search_nodes.size() << " nodes from routing table");
+        
+        // Start sending requests
+        add_search_requests(search_ref, deferred);
+    }
+    
+    // Invoke callbacks outside the lock to avoid deadlock
+    deferred.invoke();
     
     return true;
 }
@@ -262,11 +297,29 @@ bool DhtClient::is_search_active(const InfoHash& info_hash) const {
     return it != pending_searches_.end() && !it->second.is_finished;
 }
 
+bool DhtClient::is_announce_active(const InfoHash& info_hash) const {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    std::string hash_key = node_id_to_hex(info_hash);
+    auto it = pending_searches_.find(hash_key);
+    return it != pending_searches_.end() && !it->second.is_finished && it->second.is_announce;
+}
+
 size_t DhtClient::get_active_searches_count() const {
     std::lock_guard<std::mutex> lock(pending_searches_mutex_);
     size_t count = 0;
     for (const auto& [hash, search] : pending_searches_) {
         if (!search.is_finished) {
+            count++;
+        }
+    }
+    return count;
+}
+
+size_t DhtClient::get_active_announces_count() const {
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    size_t count = 0;
+    for (const auto& [hash, search] : pending_searches_) {
+        if (!search.is_finished && search.is_announce) {
             count++;
         }
     }
@@ -339,9 +392,6 @@ void DhtClient::maintenance_loop() {
             
             // Cleanup stale peer tokens
             cleanup_stale_peer_tokens();
-            
-            // Cleanup stale pending announces
-            cleanup_stale_announces();
             
             // Cleanup stale pending searches
             cleanup_stale_searches();
@@ -763,9 +813,16 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
         handle_get_peers_empty_response(message.transaction_id, sender);
     }
     
-    // Check if this is a response to a pending announce (get_peers with token)
+    // Save write token if present (needed for announce_peer after traversal completes)
     if (!message.token.empty()) {
-        handle_get_peers_response_for_announce(message.transaction_id, sender, message.token);
+        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+        auto trans_it = transaction_to_search_.find(message.transaction_id);
+        if (trans_it != transaction_to_search_.end()) {
+            auto search_it = pending_searches_.find(trans_it->second.info_hash_hex);
+            if (search_it != pending_searches_.end()) {
+                save_write_token(search_it->second, trans_it->second.queried_node_id, message.token);
+            }
+        }
     }
     
     // Clean up finished searches AFTER all response data has been processed
@@ -1028,8 +1085,10 @@ void DhtClient::print_statistics() {
     
     // Pending searches statistics
     size_t pending_searches = 0;
+    size_t pending_announces = 0;
     size_t total_search_nodes = 0;
     size_t total_found_peers = 0;
+    size_t total_write_tokens = 0;
     size_t active_transactions = 0;
     {
         std::lock_guard<std::mutex> search_lock(pending_searches_mutex_);
@@ -1038,14 +1097,11 @@ void DhtClient::print_statistics() {
         for (const auto& [hash, search] : pending_searches_) {
             total_search_nodes += search.search_nodes.size();
             total_found_peers += search.found_peers.size();
+            total_write_tokens += search.write_tokens.size();
+            if (search.is_announce) {
+                pending_announces++;
+            }
         }
-    }
-    
-    // Pending announces statistics
-    size_t pending_announces_count = 0;
-    {
-        std::lock_guard<std::mutex> announce_lock(pending_announces_mutex_);
-        pending_announces_count = pending_announces_.size();
     }
     
     // Announced peers statistics
@@ -1084,9 +1140,11 @@ void DhtClient::print_statistics() {
                  << ", Max bucket size: " << max_bucket_size << "/" << K_BUCKET_SIZE);
     LOG_DHT_INFO("[ACTIVE OPERATIONS]");
     LOG_DHT_INFO("  Pending searches: " << pending_searches 
-                 << " (nodes: " << total_search_nodes << ", found peers: " << total_found_peers << ")");
+                 << " (announces: " << pending_announces 
+                 << ", nodes: " << total_search_nodes 
+                 << ", peers: " << total_found_peers 
+                 << ", tokens: " << total_write_tokens << ")");
     LOG_DHT_INFO("  Active transactions: " << active_transactions);
-    LOG_DHT_INFO("  Pending announces: " << pending_announces_count);
     LOG_DHT_INFO("  Pending ping verifications: " << pending_pings 
                  << " (nodes being replaced: " << nodes_being_replaced << ")");
     LOG_DHT_INFO("[STORED DATA]");
@@ -1199,23 +1257,6 @@ void DhtClient::refresh_buckets() {
                     send_krpc_find_node(node.peer, random_id);
                 }
             }
-        }
-    }
-}
-
-void DhtClient::cleanup_stale_announces() {
-    std::lock_guard<std::mutex> lock(pending_announces_mutex_);
-    
-    auto now = std::chrono::steady_clock::now();
-    auto stale_threshold = std::chrono::minutes(5);  // Remove announces older than 5 minutes
-    
-    auto it = pending_announces_.begin();
-    while (it != pending_announces_.end()) {
-        if (now - it->second.created_at > stale_threshold) {
-            LOG_DHT_DEBUG("Removing stale pending announce for transaction " << it->first);
-            it = pending_announces_.erase(it);
-        } else {
-            ++it;
         }
     }
 }
@@ -1472,24 +1513,6 @@ void DhtClient::cleanup_timed_out_search_requests() {
     // Invoke all deferred callbacks outside the lock to avoid deadlock
     for (auto& deferred : all_deferred) {
         deferred.invoke();
-    }
-}
-
-void DhtClient::handle_get_peers_response_for_announce(const std::string& transaction_id, const Peer& responder, const std::string& token) {
-    std::lock_guard<std::mutex> lock(pending_announces_mutex_);
-    
-    auto it = pending_announces_.find(transaction_id);
-    if (it != pending_announces_.end()) {
-        const auto& pending_announce = it->second;
-        LOG_DHT_DEBUG("Found pending announce for transaction " << transaction_id 
-                      << " - sending announce_peer for info_hash " << node_id_to_hex(pending_announce.info_hash) 
-                      << " to " << responder.ip << ":" << responder.port);
-        
-        // Send announce_peer with the received token
-        send_krpc_announce_peer(responder, pending_announce.info_hash, pending_announce.port, token);
-        
-        // Remove the pending announce since we've handled it
-        pending_announces_.erase(it);
     }
 }
 
@@ -1796,6 +1819,86 @@ void DhtClient::add_node_to_search(PendingSearch& search, const DhtNode& node) {
     }
 }
 
+void DhtClient::save_write_token(PendingSearch& search, const NodeId& node_id, const std::string& token) {
+    // Save the write token received from a node (BEP 5 compliant)
+    // This token will be used later when sending announce_peer to this node
+    
+    if (token.empty()) {
+        return;
+    }
+    
+    // Only save token if we don't already have one from this node
+    // (first token is usually the valid one)
+    if (search.write_tokens.find(node_id) == search.write_tokens.end()) {
+        search.write_tokens[node_id] = token;
+        LOG_DHT_DEBUG("Saved write token from node " << node_id_to_hex(node_id) 
+                      << " for info_hash " << node_id_to_hex(search.info_hash)
+                      << " (total tokens: " << search.write_tokens.size() << ")");
+    }
+}
+
+void DhtClient::send_announce_to_closest_nodes(PendingSearch& search) {
+    // BEP 5: Send announce_peer to the k closest nodes that:
+    // 1. Responded to our get_peers query
+    // 2. Gave us a valid write token
+    
+    if (!search.is_announce) {
+        return;
+    }
+    
+    std::string hash_key = node_id_to_hex(search.info_hash);
+    
+    LOG_DHT_INFO("Sending announce_peer to closest nodes for info_hash " << hash_key 
+                 << " on port " << search.announce_port);
+    
+    // Collect nodes that responded and have tokens, sorted by distance (closest first)
+    std::vector<std::pair<DhtNode, std::string>> announce_targets;
+    announce_targets.reserve(K_BUCKET_SIZE);
+    
+    for (const auto& node : search.search_nodes) {
+        if (announce_targets.size() >= K_BUCKET_SIZE) {
+            break;  // We have enough targets
+        }
+        
+        // Check if node responded successfully
+        auto state_it = search.node_states.find(node.id);
+        if (state_it == search.node_states.end()) {
+            continue;
+        }
+        if (!(state_it->second & SearchNodeFlags::RESPONDED)) {
+            continue;  // Node didn't respond
+        }
+        
+        // Check if we have a token from this node
+        auto token_it = search.write_tokens.find(node.id);
+        if (token_it == search.write_tokens.end()) {
+            LOG_DHT_DEBUG("Node " << node_id_to_hex(node.id) << " responded but no token - skipping");
+            continue;  // No token from this node
+        }
+        
+        announce_targets.emplace_back(node, token_it->second);
+    }
+    
+    if (announce_targets.empty()) {
+        LOG_DHT_WARN("No nodes with tokens to announce to for info_hash " << hash_key);
+        return;
+    }
+    
+    LOG_DHT_INFO("Announcing to " << announce_targets.size() << " closest nodes with tokens");
+    
+    // Send announce_peer to each target
+    for (const auto& [node, token] : announce_targets) {
+        LOG_DHT_DEBUG("Sending announce_peer to node " << node_id_to_hex(node.id) 
+                      << " at " << node.peer.ip << ":" << node.peer.port
+                      << " with token (distance: " << get_bucket_index(node.id) << ")");
+        
+        send_krpc_announce_peer(node.peer, search.info_hash, search.announce_port, token);
+    }
+    
+    LOG_DHT_INFO("Announce completed: sent announce_peer to " << announce_targets.size() 
+                 << " nodes for info_hash " << hash_key);
+}
+
 bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& deferred) {
     // Returns true if search is done (completed or should be finished)
     
@@ -1875,7 +1978,7 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
         queries_sent++;
     }
     
-    LOG_DHT_DEBUG("Search [" << hash_key << "] progress [ms: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - search.created_at).count() << "]:");
+    LOG_DHT_DEBUG((search.is_announce ? "Announce" : "Search") << " [" << hash_key << "] progress [ms: " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - search.created_at).count() << "]:");
     LOG_DHT_DEBUG(" * search_nodes: " << search.search_nodes.size());
     LOG_DHT_DEBUG(" * queries_sent: " << queries_sent);
     LOG_DHT_DEBUG(" * invoke_count: " << search.invoke_count);
@@ -1903,7 +2006,7 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
             if (f & SearchNodeFlags::ABANDONED) abandoned_total++;
         }
         
-        LOG_DHT_INFO("=== Search Completed for info_hash " << hash_key << " ===");
+        LOG_DHT_INFO("=== " << (search.is_announce ? "Announce" : "Search") << " Completed for info_hash " << hash_key << " ===");
         LOG_DHT_INFO("  Duration: " << duration_ms << "ms");
         LOG_DHT_INFO("  Total nodes queried: " << queried_total);
         LOG_DHT_INFO("  Total nodes responded: " << responded_total);
@@ -1911,8 +2014,18 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
         LOG_DHT_INFO("  Nodes with short timeout: " << short_timeout_total);
         LOG_DHT_INFO("  Nodes abandoned (truncation): " << abandoned_total);
         LOG_DHT_INFO("  Final branch_factor: " << search.branch_factor << " (initial: " << ALPHA << ")");
-        LOG_DHT_INFO("  Total peers found: " << search.found_peers.size());
-        LOG_DHT_INFO("  Callbacks to invoke: " << search.callbacks.size());
+        if (search.is_announce) {
+            LOG_DHT_INFO("  Write tokens collected: " << search.write_tokens.size());
+            LOG_DHT_INFO("  Announce port: " << search.announce_port);
+        } else {
+            LOG_DHT_INFO("  Total peers found: " << search.found_peers.size());
+            LOG_DHT_INFO("  Callbacks to invoke: " << search.callbacks.size());
+        }
+        
+        // If this is an announce search, send announce_peer to k closest nodes with tokens
+        if (search.is_announce) {
+            send_announce_to_closest_nodes(search);
+        }
         
         // Collect callbacks for deferred invocation (avoid deadlock - don't call user callbacks while holding mutex)
         deferred.should_invoke = true;

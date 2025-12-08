@@ -228,10 +228,23 @@ public:
     bool is_search_active(const InfoHash& info_hash) const;
     
     /**
+     * Check if an announce is currently active for an info hash
+     * @param info_hash The info hash to check
+     * @return true if announce is active, false otherwise
+     */
+    bool is_announce_active(const InfoHash& info_hash) const;
+    
+    /**
      * Get number of active searches
      * @return Number of active searches
      */
     size_t get_active_searches_count() const;
+    
+    /**
+     * Get number of active announces
+     * @return Number of active announces
+     */
+    size_t get_active_announces_count() const;
     
     /**
      * Check if DHT is running
@@ -279,10 +292,9 @@ private:
     // 1. pending_pings_mutex_           (Ping verification state, nodes_being_replaced_)
     // 2. pending_searches_mutex_        (Search state and transaction mappings)
     // 3. routing_table_mutex_           (core routing data)
-    // 4. pending_announces_mutex_       (Announce state)
-    // 5. announced_peers_mutex_         (Stored peer data)
-    // 6. peer_tokens_mutex_             (Token validation data)
-    // 7. shutdown_mutex_                (Lowest priority - can be locked independently)
+    // 4. announced_peers_mutex_         (Stored peer data)
+    // 5. peer_tokens_mutex_             (Token validation data)
+    // 6. shutdown_mutex_                (Lowest priority - can be locked independently)
     //
     // Routing table (k-buckets)
     std::vector<std::vector<DhtNode>> routing_table_;
@@ -301,17 +313,6 @@ private:
     std::mutex peer_tokens_mutex_;  // Lock order: 6
     
 
-    // Pending announce tracking (for BEP 5 compliance)
-    struct PendingAnnounce {
-        InfoHash info_hash;
-        uint16_t port;
-        std::chrono::steady_clock::time_point created_at;
-        
-        PendingAnnounce(const InfoHash& hash, uint16_t p)
-            : info_hash(hash), port(p), created_at(std::chrono::steady_clock::now()) {}
-    };
-    std::unordered_map<std::string, PendingAnnounce> pending_announces_;
-    std::mutex pending_announces_mutex_;  // Lock order: 4
     
     // Pending find_peers tracking (to map transaction IDs to info_hash)
     struct PendingSearch {
@@ -332,9 +333,16 @@ private:
         // Callbacks to invoke when peers are found (supports multiple concurrent searches for same info_hash)
         std::vector<PeerDiscoveryCallback> callbacks;
         
+        // Announce support: tokens collected during traversal (BEP 5 compliant)
+        // Maps node_id -> write_token received from that node
+        std::unordered_map<NodeId, std::string> write_tokens;
+        bool is_announce;                           // true if this search is for announce_peer
+        uint16_t announce_port;                     // port to announce (only valid if is_announce)
+        
         PendingSearch(const InfoHash& hash)
             : info_hash(hash), created_at(std::chrono::steady_clock::now()), 
-              invoke_count(0), branch_factor(ALPHA), is_finished(false) {}
+              invoke_count(0), branch_factor(ALPHA), is_finished(false),
+              is_announce(false), announce_port(0) {}
     };
     std::unordered_map<std::string, PendingSearch> pending_searches_; // info_hash (hex) -> PendingSearch
     mutable std::mutex pending_searches_mutex_;  // Lock order: 2
@@ -434,10 +442,6 @@ private:
     void refresh_buckets();
     void print_statistics();
     
-    // Pending announce management
-    void cleanup_stale_announces();
-    void handle_get_peers_response_for_announce(const std::string& transaction_id, const Peer& responder, const std::string& token);
-    
     // Pending search management
     void cleanup_stale_searches();
     void cleanup_timed_out_search_requests();
@@ -445,8 +449,10 @@ private:
     void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
     void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
     void handle_get_peers_empty_response(const std::string& transaction_id, const Peer& responder);
+    void save_write_token(PendingSearch& search, const NodeId& node_id, const std::string& token);
     bool add_search_requests(PendingSearch& search, DeferredCallbacks& deferred);
     void add_node_to_search(PendingSearch& search, const DhtNode& node);
+    void send_announce_to_closest_nodes(PendingSearch& search);
     
     // Peer announcement storage management
     void store_announced_peer(const InfoHash& info_hash, const Peer& peer);
