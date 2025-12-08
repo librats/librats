@@ -1817,27 +1817,6 @@ bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::functi
     });
 }
 
-bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t port) {
-    if (!dht_client_ || !dht_client_->is_running()) {
-        LOG_CLIENT_ERROR("DHT client not running");
-        return false;
-    }
-    
-    if (content_hash.length() != 40) {  // 160-bit hash as hex string
-        LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected 40)");
-        return false;
-    }
-    
-    if (port == 0) {
-        port = listen_port_;
-    }
-    
-    LOG_CLIENT_INFO("Announcing for content hash: " << content_hash << " on port " << port);
-    
-    InfoHash info_hash = hex_to_node_id(content_hash);
-    return dht_client_->announce_peer(info_hash, port);
-}
-
 bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t port,
                                    std::function<void(const std::vector<std::string>&)> callback) {
     if (!dht_client_ || !dht_client_->is_running()) {
@@ -1854,11 +1833,12 @@ bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t por
         port = listen_port_;
     }
     
-    LOG_CLIENT_INFO("Announcing for content hash: " << content_hash << " on port " << port << " with peer callback");
+    LOG_CLIENT_INFO("Announcing for content hash: " << content_hash << " on port " << port
+                   << (callback ? " with peer callback" : ""));
     
     InfoHash info_hash = hex_to_node_id(content_hash);
     
-    // Create wrapper callback that converts Peer to string addresses
+    // Create wrapper callback that converts Peer to string addresses (if callback provided)
     PeerDiscoveryCallback peer_callback = nullptr;
     if (callback) {
         peer_callback = [callback](const std::vector<Peer>& peers, const InfoHash& hash) {
