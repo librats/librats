@@ -748,7 +748,7 @@ TEST_F(RatsCApiTest, DhtRunningAndAnnounceValidation) {
     EXPECT_GE(rats_get_dht_routing_table_size(client1), 0u);
 
     // Invalid hash length should fail
-    EXPECT_EQ(rats_announce_for_hash(client1, "deadbeef", 0), RATS_ERROR_INVALID_PARAMETER);
+    EXPECT_EQ(rats_announce_for_hash(client1, "deadbeef", 0, nullptr, nullptr), RATS_ERROR_INVALID_PARAMETER);
 
     rats_stop_dht_discovery(client1);
     EXPECT_EQ(rats_is_dht_running(client1), 0);

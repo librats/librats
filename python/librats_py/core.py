@@ -311,10 +311,30 @@ class RatsClient:
         """Check if DHT is running."""
         return bool(self._lib.lib.rats_is_dht_running(self._handle))
     
-    def announce_for_hash(self, content_hash: str, port: int) -> None:
-        """Announce availability for a specific content hash."""
+    def announce_for_hash(self, content_hash: str, port: int = 0, callback: PeersFoundCallback = None) -> None:
+        """Announce availability for a specific content hash.
+        
+        Args:
+            content_hash: The 40-character hex hash to announce for.
+            port: Port to announce (0 = use listen port).
+            callback: Optional callback to receive discovered peers during DHT traversal.
+                      Signature: callback(peer_addresses: list[str]) -> None
+        """
         content_hash_bytes = content_hash.encode('utf-8')
-        result = self._lib.lib.rats_announce_for_hash(self._handle, content_hash_bytes, port)
+        
+        c_callback = None
+        if callback:
+            def c_callback_wrapper(user_data, peer_addresses, count):
+                peers = []
+                for i in range(count):
+                    if peer_addresses[i]:
+                        peers.append(peer_addresses[i].decode('utf-8'))
+                callback(peers)
+            c_callback = PeersFoundCallbackType(c_callback_wrapper)
+            # Store reference to prevent garbage collection
+            self._peers_found_callback = c_callback
+        
+        result = self._lib.lib.rats_announce_for_hash(self._handle, content_hash_bytes, port, c_callback, None)
         check_error(result, f"Announcing for hash {content_hash}")
     
     def get_dht_routing_table_size(self) -> int:

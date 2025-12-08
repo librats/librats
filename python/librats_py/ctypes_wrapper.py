@@ -251,7 +251,7 @@ class LibratsCtypes:
         self.lib.rats_get_peer_info_json.restype = c_void_p
         
         # Enhanced DHT Discovery
-        self.lib.rats_announce_for_hash.argtypes = [c_void_p, c_char_p, c_int]
+        self.lib.rats_announce_for_hash.argtypes = [c_void_p, c_char_p, c_int, PeersFoundCallbackType, c_void_p]
         self.lib.rats_announce_for_hash.restype = c_int
         
         self.lib.rats_get_dht_routing_table_size.argtypes = [c_void_p]

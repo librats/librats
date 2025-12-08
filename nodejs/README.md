@@ -205,7 +205,7 @@ client.publishJsonToTopic('general-chat', JSON.stringify(message));
 - `startDhtDiscovery(dhtPort: number): boolean` - Start DHT discovery
 - `stopDhtDiscovery(): void` - Stop DHT discovery
 - `isDhtRunning(): boolean` - Check if DHT is running
-- `announceForHash(contentHash: string, port: number): boolean` - Announce for hash
+- `announceForHash(contentHash: string, port: number, callback?: (peers: string[]) => void): boolean` - Announce for hash with optional peer discovery callback
 
 #### Encryption
 

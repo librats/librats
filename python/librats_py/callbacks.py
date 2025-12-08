@@ -3,7 +3,7 @@ Callback type definitions for librats Python bindings.
 """
 
 from typing import Callable, Optional, Any
-from ctypes import CFUNCTYPE, c_void_p, c_char_p, c_int, c_size_t
+from ctypes import CFUNCTYPE, POINTER, c_void_p, c_char_p, c_int, c_size_t
 
 # C callback function types
 ConnectionCallbackType = CFUNCTYPE(None, c_void_p, c_char_p)
@@ -21,6 +21,7 @@ TopicMessageCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_char_p, c_char_
 TopicJsonMessageCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_char_p, c_char_p)
 TopicPeerJoinedCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_char_p)
 TopicPeerLeftCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_char_p)
+PeersFoundCallbackType = CFUNCTYPE(None, c_void_p, POINTER(c_char_p), c_int)
 
 # Python callback type hints
 ConnectionCallback = Optional[Callable[[str], None]]
@@ -38,3 +39,4 @@ TopicMessageCallback = Optional[Callable[[str, str, str], None]]
 TopicJsonMessageCallback = Optional[Callable[[str, str, dict], None]]
 TopicPeerJoinedCallback = Optional[Callable[[str, str], None]]
 TopicPeerLeftCallback = Optional[Callable[[str, str], None]]
+PeersFoundCallback = Optional[Callable[[list], None]]

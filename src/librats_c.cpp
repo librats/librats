@@ -386,13 +386,29 @@ int rats_is_dht_running(rats_client_t handle) {
     return wrap->client->is_dht_running() ? 1 : 0;
 }
 
-rats_error_t rats_announce_for_hash(rats_client_t handle, const char* content_hash, int port) {
+rats_error_t rats_announce_for_hash(rats_client_t handle, const char* content_hash, int port,
+                                    rats_peers_found_cb callback, void* user_data) {
     if (!handle || !content_hash) return RATS_ERROR_INVALID_PARAMETER;
     if (strlen(content_hash) != 40) return RATS_ERROR_INVALID_PARAMETER; // SHA1 hash must be 40 chars
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
     
     uint16_t announce_port = (port <= 0) ? 0 : static_cast<uint16_t>(port);
-    return wrap->client->announce_for_hash(std::string(content_hash), announce_port) ? 
+    
+    // Create C++ callback wrapper if C callback is provided
+    std::function<void(const std::vector<std::string>&)> cpp_callback = nullptr;
+    if (callback) {
+        cpp_callback = [callback, user_data](const std::vector<std::string>& peers) {
+            // Convert vector to C-style array
+            std::vector<const char*> c_peers;
+            c_peers.reserve(peers.size());
+            for (const auto& peer : peers) {
+                c_peers.push_back(peer.c_str());
+            }
+            callback(user_data, c_peers.data(), static_cast<int>(c_peers.size()));
+        };
+    }
+    
+    return wrap->client->announce_for_hash(std::string(content_hash), announce_port, cpp_callback) ? 
            RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
 }
 

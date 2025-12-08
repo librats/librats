@@ -82,6 +82,7 @@ typedef void (*rats_json_cb)(void* user_data, const char* peer_id, const char* j
 typedef void (*rats_disconnect_cb)(void* user_data, const char* peer_id);
 typedef void (*rats_peer_discovered_cb)(void* user_data, const char* host, int port, const char* service_name);
 typedef void (*rats_message_cb)(void* user_data, const char* peer_id, const char* message_data);
+typedef void (*rats_peers_found_cb)(void* user_data, const char** peer_addresses, int count);
 
 // Peer configuration
 RATS_API rats_error_t rats_set_max_peers(rats_client_t client, int max_peers);
@@ -106,7 +107,8 @@ RATS_API int rats_broadcast_json(rats_client_t client, const char* json_str);
 RATS_API rats_error_t rats_start_dht_discovery(rats_client_t client, int dht_port);
 RATS_API void rats_stop_dht_discovery(rats_client_t client);
 RATS_API int rats_is_dht_running(rats_client_t client);
-RATS_API rats_error_t rats_announce_for_hash(rats_client_t client, const char* content_hash, int port);
+RATS_API rats_error_t rats_announce_for_hash(rats_client_t client, const char* content_hash, int port,
+                                               rats_peers_found_cb callback, void* user_data);
 RATS_API size_t rats_get_dht_routing_table_size(rats_client_t client);
 
 // Automatic discovery

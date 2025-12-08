@@ -370,9 +370,10 @@ export class RatsClient {
    * Announce availability for a content hash
    * @param contentHash - Hash to announce for
    * @param port - Port to announce
+   * @param callback - Optional callback to receive discovered peers during DHT traversal
    * @returns true if announced successfully
    */
-  announceForHash(contentHash: string, port: number): boolean;
+  announceForHash(contentHash: string, port: number, callback?: (peers: string[]) => void): boolean;
 
   // ============ mDNS ============
 

@@ -473,7 +473,52 @@ private:
         std::string content_hash = info[0].As<Napi::String>().Utf8Value();
         int port = info[1].As<Napi::Number>().Int32Value();
         
-        rats_error_t result = rats_announce_for_hash(client_, content_hash.c_str(), port);
+        // Check if optional callback is provided
+        rats_peers_found_cb c_callback = nullptr;
+        void* callback_user_data = nullptr;
+        Napi::ThreadSafeFunction* tsfn_ptr = nullptr;
+        
+        if (info.Length() >= 3 && info[2].IsFunction()) {
+            // Create thread-safe function for callback
+            auto tsfn = new Napi::ThreadSafeFunction();
+            *tsfn = Napi::ThreadSafeFunction::New(
+                env,
+                info[2].As<Napi::Function>(),
+                "AnnounceForHashCallback",
+                0,
+                1,
+                [](Napi::Env) {} // Release callback
+            );
+            tsfn_ptr = tsfn;
+            
+            c_callback = [](void* user_data, const char** peer_addresses, int count) {
+                auto* tsfn = static_cast<Napi::ThreadSafeFunction*>(user_data);
+                if (!tsfn) return;
+                
+                // Copy peer addresses for async callback
+                std::vector<std::string>* peers = new std::vector<std::string>();
+                for (int i = 0; i < count; i++) {
+                    if (peer_addresses[i]) {
+                        peers->push_back(peer_addresses[i]);
+                    }
+                }
+                
+                tsfn->BlockingCall(peers, [](Napi::Env env, Napi::Function jsCallback, std::vector<std::string>* data) {
+                    Napi::Array arr = Napi::Array::New(env, data->size());
+                    for (size_t i = 0; i < data->size(); i++) {
+                        arr.Set(static_cast<uint32_t>(i), Napi::String::New(env, (*data)[i]));
+                    }
+                    jsCallback.Call({arr});
+                    delete data;
+                });
+                
+                tsfn->Release();
+                delete tsfn;
+            };
+            callback_user_data = tsfn_ptr;
+        }
+        
+        rats_error_t result = rats_announce_for_hash(client_, content_hash.c_str(), port, c_callback, callback_user_data);
         return Napi::Boolean::New(env, result == RATS_SUCCESS);
     }
     
