@@ -198,9 +198,10 @@ public:
      * Announce that this node is a peer for a specific info hash
      * @param info_hash The info hash to announce
      * @param port The port to announce (0 for DHT port)
+     * @param callback Optional callback to receive discovered peers during traversal
      * @return true if announcement started successfully, false otherwise
      */
-    bool announce_peer(const InfoHash& info_hash, uint16_t port = 0);
+    bool announce_peer(const InfoHash& info_hash, uint16_t port = 0, PeerDiscoveryCallback callback = nullptr);
     
     /**
      * Get our node ID

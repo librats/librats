@@ -210,7 +210,7 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
     return true;
 }
 
-bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port) {
+bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port, PeerDiscoveryCallback callback) {
     if (!running_) {
         LOG_DHT_ERROR("DHT client not running");
         return false;
@@ -257,6 +257,11 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port) {
         PendingSearch new_search(info_hash);
         new_search.is_announce = true;
         new_search.announce_port = port;
+        
+        // Add callback if provided - peers discovered during traversal will be returned through it
+        if (callback) {
+            new_search.callbacks.push_back(callback);
+        }
         
         // Initialize search_nodes with closest nodes from routing table (already sorted)
         new_search.search_nodes = std::move(closest_nodes);

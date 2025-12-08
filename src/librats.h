@@ -614,6 +614,18 @@ public:
     bool announce_for_hash(const std::string& content_hash, uint16_t port = 0);
 
     /**
+     * Announce our presence for a content hash with peer discovery callback
+     * This combines announce and find_peers - peers discovered during traversal
+     * will be returned through the callback
+     * @param content_hash Hash to announce for (40-character hex string)
+     * @param port Port to announce (default: our listen port)
+     * @param callback Function to call with discovered peers during traversal
+     * @return true if announced successfully
+     */
+    bool announce_for_hash(const std::string& content_hash, uint16_t port,
+                          std::function<void(const std::vector<std::string>&)> callback);
+
+    /**
      * Check if DHT is currently running
      * @return true if DHT is running
      */

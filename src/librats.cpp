@@ -1838,6 +1838,42 @@ bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t por
     return dht_client_->announce_peer(info_hash, port);
 }
 
+bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t port,
+                                   std::function<void(const std::vector<std::string>&)> callback) {
+    if (!dht_client_ || !dht_client_->is_running()) {
+        LOG_CLIENT_ERROR("DHT client not running");
+        return false;
+    }
+    
+    if (content_hash.length() != 40) {  // 160-bit hash as hex string
+        LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected 40)");
+        return false;
+    }
+    
+    if (port == 0) {
+        port = listen_port_;
+    }
+    
+    LOG_CLIENT_INFO("Announcing for content hash: " << content_hash << " on port " << port << " with peer callback");
+    
+    InfoHash info_hash = hex_to_node_id(content_hash);
+    
+    // Create wrapper callback that converts Peer to string addresses
+    PeerDiscoveryCallback peer_callback = nullptr;
+    if (callback) {
+        peer_callback = [callback](const std::vector<Peer>& peers, const InfoHash& hash) {
+            std::vector<std::string> peer_addresses;
+            peer_addresses.reserve(peers.size());
+            for (const auto& peer : peers) {
+                peer_addresses.push_back(peer.ip + ":" + std::to_string(peer.port));
+            }
+            callback(peer_addresses);
+        };
+    }
+    
+    return dht_client_->announce_peer(info_hash, port, peer_callback);
+}
+
 bool RatsClient::is_dht_running() const {
     return dht_client_ && dht_client_->is_running();
 }
@@ -1931,46 +1967,23 @@ void RatsClient::automatic_discovery_loop() {
         }
     }
 
-    // Search immediately
-    search_rats_peers();
-    
-    {
-        std::unique_lock<std::mutex> lock(shutdown_mutex_);
-        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(10), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
-            LOG_CLIENT_INFO("Automatic peer discovery loop stopped during search delay");
-            return;
-        }
-    }
-    
-    // Announce immediately
+    // Announce immediately - this also discovers peers during traversal
     announce_rats_peer();
 
     auto last_announce = std::chrono::steady_clock::now();
-    auto last_search = std::chrono::steady_clock::now();
     
     while (auto_discovery_running_.load()) {
         auto now = std::chrono::steady_clock::now();
         
-        if (get_peer_count() == 0) {
-            // No peers: aggressive search and announce
-            if (now - last_search >= std::chrono::seconds(5)) {
-                search_rats_peers();
-                last_search = now;
-            }
-            if (now - last_announce >= std::chrono::seconds(20)) {
-                announce_rats_peer();
-                last_announce = now;
-            }
-        } else {
-            // Peers connected: less aggressive, similar to original logic
-            if (now - last_search >= std::chrono::minutes(5)) {
-                search_rats_peers();
-                last_search = now;
-            }
-            if (now - last_announce >= std::chrono::minutes(10)) {
-                announce_rats_peer();
-                last_announce = now;
-            }
+        // Announce combines both announcing our presence and discovering peers
+        // Adjust frequency based on whether we have peers
+        auto interval = (get_peer_count() == 0) 
+            ? std::chrono::seconds(15)    // Aggressive when no peers
+            : std::chrono::minutes(10);   // Less aggressive when connected
+        
+        if (now - last_announce >= interval) {
+            announce_rats_peer();
+            last_announce = now;
         }
         
         // Use conditional variable for responsive shutdown
@@ -2001,8 +2014,28 @@ void RatsClient::announce_rats_peer() {
         return;
     }
     
-    if (announce_for_hash(discovery_hash, listen_port_)) {
-        LOG_CLIENT_DEBUG("Successfully announced peer for discovery");
+    // Use announce with callback - combines announce and find_peers in one traversal
+    // Peers discovered during traversal will be returned through the callback
+    if (announce_for_hash(discovery_hash, listen_port_, [this, info_hash](const std::vector<std::string>& peer_addresses) {
+        LOG_CLIENT_INFO("Announce discovered " << peer_addresses.size() << " peers during traversal");
+        
+        // Convert peer addresses to Peer objects for handle_dht_peer_discovery()
+        std::vector<Peer> peers;
+        peers.reserve(peer_addresses.size());
+        for (const auto& peer_address : peer_addresses) {
+            std::string ip;
+            int port;
+            if (parse_address_string(peer_address, ip, port)) {
+                peers.push_back(Peer(ip, port));
+            }
+        }
+        
+        // Auto-connect to discovered peers
+        if (!peers.empty()) {
+            handle_dht_peer_discovery(peers, info_hash);
+        }
+    })) {
+        LOG_CLIENT_DEBUG("Successfully started announce with peer discovery for discovery hash");
     } else {
         LOG_CLIENT_WARN("Failed to announce peer for discovery");
     }
