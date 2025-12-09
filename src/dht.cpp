@@ -718,10 +718,20 @@ void DhtClient::handle_krpc_message(const KrpcMessage& message, const Peer& send
 void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
+#ifdef RATS_SEARCH_FEATURES
+    // Spider mode: check if ignoring requests
+    if (spider_mode_.load() && spider_ignore_.load()) {
+        return;
+    }
+    bool no_verify = spider_mode_.load();
+#else
+    bool no_verify = false;
+#endif
+    
     // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node);
+    add_node(sender_node, true, no_verify);
     
     // Respond with ping response
     auto response = KrpcProtocol::create_ping_response(message.transaction_id, node_id_);
@@ -731,10 +741,20 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender)
 void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
+#ifdef RATS_SEARCH_FEATURES
+    // Spider mode: check if ignoring requests
+    if (spider_mode_.load() && spider_ignore_.load()) {
+        return;
+    }
+    bool no_verify = spider_mode_.load();
+#else
+    bool no_verify = false;
+#endif
+    
     // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node);
+    add_node(sender_node, true, no_verify);
     
     // Find closest nodes
     auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
@@ -748,10 +768,20 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
 void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.info_hash));
     
+#ifdef RATS_SEARCH_FEATURES
+    // Spider mode: check if ignoring requests
+    if (spider_mode_.load() && spider_ignore_.load()) {
+        return;
+    }
+    bool no_verify = spider_mode_.load();
+#else
+    bool no_verify = false;
+#endif
+    
     // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node);
+    add_node(sender_node, true, no_verify);
     
     // Generate a token for this peer
     std::string token = generate_token(sender);
@@ -778,6 +808,20 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& se
 void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC ANNOUNCE_PEER from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
+#ifdef RATS_SEARCH_FEATURES
+    bool is_spider = spider_mode_.load();
+    
+    // Spider mode: check if ignoring requests (but still process announces for callback)
+    // Note: We still want to collect announces even when ignoring other requests
+    
+    // In spider mode, skip token verification for maximum collection
+    if (!is_spider && !verify_token(sender, message.token)) {
+        LOG_DHT_WARN("Invalid token from " << sender.ip << ":" << sender.port << " for KRPC ANNOUNCE_PEER");
+        auto error = KrpcProtocol::create_error(message.transaction_id, KrpcErrorCode::ProtocolError, "Invalid token");
+        send_krpc_message(error, sender);
+        return;
+    }
+#else
     // Verify token
     if (!verify_token(sender, message.token)) {
         LOG_DHT_WARN("Invalid token from " << sender.ip << ":" << sender.port << " for KRPC ANNOUNCE_PEER");
@@ -785,15 +829,36 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
         send_krpc_message(error, sender);
         return;
     }
+    bool is_spider = false;
+#endif
     
     // Add sender to routing table
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node);
+    add_node(sender_node, true, is_spider);
+    
+    // Determine the actual port (BEP 5: implied_port support)
+    uint16_t peer_port = message.port;
     
     // Store the peer announcement
-    Peer announcing_peer(sender.ip, message.port);
+    Peer announcing_peer(sender.ip, peer_port);
     store_announced_peer(message.info_hash, announcing_peer);
+    
+#ifdef RATS_SEARCH_FEATURES
+    // Spider mode: invoke announce callback (ensured hash - peer definitely has it)
+    if (is_spider) {
+        SpiderAnnounceCallback callback;
+        {
+            std::lock_guard<std::mutex> lock(spider_callbacks_mutex_);
+            callback = spider_announce_callback_;
+        }
+        if (callback) {
+            LOG_DHT_DEBUG("Spider: invoking announce callback for info_hash " << node_id_to_hex(message.info_hash) 
+                          << " from " << announcing_peer.ip << ":" << announcing_peer.port);
+            callback(message.info_hash, announcing_peer);
+        }
+    }
+#endif
     
     // Respond with acknowledgment
     auto response = KrpcProtocol::create_announce_peer_response(message.transaction_id, node_id_);
@@ -806,15 +871,21 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     // Check if this is a ping verification response before normal processing
     handle_ping_verification_response(message.transaction_id, message.response_id, sender);
     
+#ifdef RATS_SEARCH_FEATURES
+    bool no_verify = spider_mode_.load();
+#else
+    bool no_verify = false;
+#endif
+    
     // Add responder to routing table
     KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node);
+    add_node(sender_node, true, no_verify);
     
     // Add any nodes from the response (these are nodes we heard about, not confirmed)
     for (const auto& node : message.nodes) {
         DhtNode dht_node = krpc_node_to_dht_node(node);
-        add_node(dht_node, false);  // Not confirmed - just heard about from another node
+        add_node(dht_node, false, no_verify);  // Not confirmed - just heard about from another node
     }
     
     // Check if this is a response to a pending search (get_peers with peers)
@@ -2498,5 +2569,75 @@ void DhtClient::set_data_directory(const std::string& directory) {
     }
     LOG_DHT_DEBUG("Data directory set to: " << data_directory_);
 }
+
+#ifdef RATS_SEARCH_FEATURES
+// ============================================================================
+// SPIDER MODE IMPLEMENTATION
+// ============================================================================
+
+void DhtClient::set_spider_mode(bool enable) {
+    spider_mode_.store(enable);
+    if (enable) {
+        LOG_DHT_INFO("Spider mode ENABLED - aggressive node discovery active");
+    } else {
+        LOG_DHT_INFO("Spider mode DISABLED - normal DHT operation");
+    }
+}
+
+void DhtClient::set_spider_announce_callback(SpiderAnnounceCallback callback) {
+    std::lock_guard<std::mutex> lock(spider_callbacks_mutex_);
+    spider_announce_callback_ = std::move(callback);
+    LOG_DHT_DEBUG("Spider announce callback set");
+}
+
+void DhtClient::set_spider_ignore(bool ignore) {
+    spider_ignore_.store(ignore);
+    LOG_DHT_DEBUG("Spider ignore mode set to " << (ignore ? "true" : "false"));
+}
+
+void DhtClient::spider_walk() {
+    if (!running_) {
+        return;
+    }
+    
+    // Get a random node from the routing table and send find_node
+    DhtNode target_node;
+    bool found = false;
+    
+    {
+        std::lock_guard<std::mutex> lock(routing_table_mutex_);
+        
+        // Collect all nodes from non-empty buckets
+        std::vector<DhtNode*> all_nodes;
+        for (auto& bucket : routing_table_) {
+            for (auto& node : bucket) {
+                all_nodes.push_back(&node);
+            }
+        }
+        
+        if (!all_nodes.empty()) {
+            // Pick a random node
+            static std::random_device rd;
+            static std::mt19937 gen(rd());
+            std::uniform_int_distribution<size_t> dis(0, all_nodes.size() - 1);
+            target_node = *all_nodes[dis(gen)];
+            found = true;
+        }
+    }
+    
+    if (found) {
+        // Generate a random target ID for find_node (like spider.js does)
+        NodeId random_target = generate_node_id();
+        send_krpc_find_node(target_node.peer, random_target);
+        LOG_DHT_DEBUG("Spider walk: sent find_node to " << target_node.peer.ip << ":" << target_node.peer.port);
+    } else {
+        // No nodes in routing table, bootstrap
+        LOG_DHT_DEBUG("Spider walk: no nodes in routing table, re-bootstrapping");
+        for (const auto& bootstrap : get_default_bootstrap_nodes()) {
+            send_krpc_find_node(bootstrap, node_id_);
+        }
+    }
+}
+#endif // RATS_SEARCH_FEATURES
 
 } // namespace librats 

@@ -127,6 +127,16 @@ struct DhtNode {
  */
 using PeerDiscoveryCallback = std::function<void(const std::vector<Peer>& peers, const InfoHash& info_hash)>;
 
+#ifdef RATS_SEARCH_FEATURES
+/**
+ * Spider mode callback
+ * Called when a peer announces they have a torrent (announce_peer request received)
+ * @param info_hash The info hash being announced
+ * @param peer The peer that is announcing (with the port they specified)
+ */
+using SpiderAnnounceCallback = std::function<void(const InfoHash& info_hash, const Peer& peer)>;
+#endif // RATS_SEARCH_FEATURES
+
 /**
  * Deferred callbacks structure for avoiding deadlock
  * Callbacks are collected while holding the mutex, then invoked after releasing it
@@ -252,6 +262,54 @@ public:
      * @return true if running, false otherwise
      */
     bool is_running() const { return running_; }
+    
+#ifdef RATS_SEARCH_FEATURES
+    // ============================================================================
+    // SPIDER MODE - Aggressive node discovery and announce collection
+    // ============================================================================
+    
+    /**
+     * Enable spider mode
+     * In spider mode:
+     * - Nodes are added to routing table without ping verification
+     * - All announce_peer requests from other peers are collected via callback
+     * @param enable true to enable spider mode, false to disable
+     */
+    void set_spider_mode(bool enable);
+    
+    /**
+     * Check if spider mode is enabled
+     * @return true if spider mode is enabled
+     */
+    bool is_spider_mode() const { return spider_mode_; }
+    
+    /**
+     * Set callback for announce_peer requests (spider mode)
+     * Called when other peers announce they have a torrent
+     * @param callback The callback to invoke
+     */
+    void set_spider_announce_callback(SpiderAnnounceCallback callback);
+    
+    /**
+     * Set spider ignore mode - when true, incoming requests are not processed
+     * Similar to rate limiting in the original spider implementation
+     * @param ignore true to ignore incoming requests, false to process them
+     */
+    void set_spider_ignore(bool ignore);
+    
+    /**
+     * Check if spider ignore mode is enabled
+     * @return true if ignoring incoming requests
+     */
+    bool is_spider_ignoring() const { return spider_ignore_; }
+    
+    /**
+     * Trigger a single spider walk iteration
+     * Sends find_node to a random node from the routing table
+     * Should be called from external loop at desired frequency
+     */
+    void spider_walk();
+#endif // RATS_SEARCH_FEATURES
     
     /**
      * Get default BitTorrent DHT bootstrap nodes
@@ -399,6 +457,14 @@ private:
     // Conditional variables for immediate shutdown
     std::condition_variable shutdown_cv_;
     std::mutex shutdown_mutex_;  // Lock order: 7 (can be locked independently)
+    
+#ifdef RATS_SEARCH_FEATURES
+    // Spider mode state
+    std::atomic<bool> spider_mode_{false};
+    std::atomic<bool> spider_ignore_{false};  // When true, ignore incoming requests
+    SpiderAnnounceCallback spider_announce_callback_;
+    std::mutex spider_callbacks_mutex_;  // Protects spider callbacks
+#endif // RATS_SEARCH_FEATURES
     
     // Helper functions
     void network_loop();
