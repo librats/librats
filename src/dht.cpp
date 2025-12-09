@@ -2182,9 +2182,19 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
             }
             // Candidate is discarded (not added to routing table)
         } else {
-            LOG_DHT_WARN("Ping verification response from unexpected node " << node_id_to_hex(responder_id) 
-                         << " at " << responder.ip << ":" << responder.port 
-                         << " (expected old node " << node_id_to_hex(verification.old_node.id) << ")");
+            // Different node ID responded from the same IP:port!
+            // This means the old node is gone and this IP now belongs to a different node.
+            // Replace the old node with the candidate.
+            LOG_DHT_DEBUG("Different node " << node_id_to_hex(responder_id) 
+                         << " responded from " << responder.ip << ":" << responder.port 
+                         << " (expected old node " << node_id_to_hex(verification.old_node.id) 
+                         << ") - old node is gone, replacing with candidate " 
+                         << node_id_to_hex(verification.candidate_node.id));
+            
+            // Replace old node with candidate
+            DhtNode candidate = verification.candidate_node;
+            candidate.mark_success();  // The responder just proved it's alive
+            perform_replacement(candidate, verification.old_node, verification.bucket_index);
         }
         
         // Remove tracking entries
