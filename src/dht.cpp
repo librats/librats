@@ -457,7 +457,7 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sen
     handle_krpc_message(*krpc_message, sender);
 }
 
-void DhtClient::add_node(const DhtNode& node, bool confirmed) {
+void DhtClient::add_node(const DhtNode& node, bool confirmed, bool no_verify) {
     std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
     std::lock_guard<std::mutex> lock(routing_table_mutex_);
 
@@ -515,7 +515,7 @@ void DhtClient::add_node(const DhtNode& node, bool confirmed) {
         return;
     }
 
-    // All nodes are good - find the "worst" good node for ping verification
+    // All nodes are good - find the "worst" good node for ping verification or replacement
     // Worst = highest RTT among nodes not already being pinged
     DhtNode* worst = nullptr;
     for (auto& existing : bucket) {
@@ -528,6 +528,19 @@ void DhtClient::add_node(const DhtNode& node, bool confirmed) {
     
     if (!worst) {
         LOG_DHT_DEBUG("All nodes in bucket already have pending pings - dropping candidate " << node_id_to_hex(node.id));
+        return;
+    }
+    
+    // If no_verify is set, directly replace the worst node without ping verification
+    if (no_verify) {
+        LOG_DHT_DEBUG("Force adding node " << node_id_to_hex(node.id) 
+                      << " - replacing worst node " << node_id_to_hex(worst->id) 
+                      << " (rtt=" << worst->rtt << "ms) without ping verification");
+        DhtNode new_node = node;
+        if (confirmed) {
+            new_node.fail_count = 0;
+        }
+        *worst = new_node;
         return;
     }
     
