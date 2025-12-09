@@ -2156,6 +2156,13 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
     if (it != pending_pings_.end()) {
         const auto& verification = it->second;
         
+        // Security check: Verify response comes from the IP we pinged
+        if (responder.ip != verification.old_node.peer.ip) {
+            LOG_DHT_WARN("Ping verification response from wrong IP " << responder.ip 
+                         << " (expected " << verification.old_node.peer.ip << ") - ignoring");
+            return;  // Don't remove from pending_pings_, let it timeout naturally
+        }
+        
         // BEP 5: We pinged the OLD node to check if it's still alive
         if (responder_id == verification.old_node.id) {
             // Calculate RTT
