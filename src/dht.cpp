@@ -2157,7 +2157,19 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
         const auto& verification = it->second;
         
         // Security check: Verify response comes from the IP we pinged
-        if (responder.ip != verification.old_node.peer.ip) {
+        // Normalize IPv6-mapped IPv4 addresses (::ffff:x.x.x.x -> x.x.x.x) for comparison
+        auto normalize_ip = [](const std::string& ip) -> std::string {
+            const std::string ipv4_mapped_prefix = "::ffff:";
+            if (ip.compare(0, ipv4_mapped_prefix.size(), ipv4_mapped_prefix) == 0) {
+                return ip.substr(ipv4_mapped_prefix.size());
+            }
+            return ip;
+        };
+        
+        std::string responder_ip_normalized = normalize_ip(responder.ip);
+        std::string expected_ip_normalized = normalize_ip(verification.old_node.peer.ip);
+        
+        if (responder_ip_normalized != expected_ip_normalized) {
             LOG_DHT_WARN("Ping verification response from wrong IP " << responder.ip 
                          << " (expected " << verification.old_node.peer.ip << ") - ignoring");
             return;  // Don't remove from pending_pings_, let it timeout naturally
