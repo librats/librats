@@ -277,18 +277,16 @@ endif()
 # ThreadSanitizer configuration
 if(RATS_ENABLE_TSAN)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        set(TSAN_FLAGS "-fsanitize=thread -g -O2")
+        # ThreadSanitizer should be used with optimizatins. see https://clang.llvm.org/docs/ThreadSanitizer.html
+        set(TSAN_FLAGS "-fsanitize=thread -fno-omit-frame-pointer -g -O1")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TSAN_FLAGS}")
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TSAN_FLAGS}")
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${TSAN_FLAGS}")
         set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${TSAN_FLAGS}")
         
         message(STATUS "ThreadSanitizer enabled (GCC/Clang)")
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC") # i have not idea if this works in msvc
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fsanitize=thread")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /fsanitize=thread")
-        
-        message(STATUS "ThreadSanitizer enabled (MSVC)")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+        message(FATAL_ERROR "ThreadSanitizer is not supported by (MSVC)")
     else()
         message(WARNING "ThreadSanitizer is not supported by this compiler")
     endif()
@@ -304,11 +302,8 @@ if(RATS_ENABLE_UBSAN)
         set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${UBSAN_FLAGS}")
         
         message(STATUS "UndefinedBehaviorSanitizer enabled (GCC/Clang)")
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC") # i have no idea if this works in msvc
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fsanitize=undefined")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /fsanitize=undefined")
-        
-        message(STATUS "UndefinedBehaviorSanitizer enabled (MSVC)")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+        message(FATAL_ERROR "UndefinedBehaviorSanitizer is not supported by (MSVC)")
     else()
         message(WARNING "UndefinedBehaviorSanitizer is not supported by this compiler")
     endif()
