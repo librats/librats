@@ -11,7 +11,9 @@
     #include <sysinfoapi.h>
     #include <versionhelpers.h>
     #include <intrin.h>
-    #pragma comment(lib, "version.lib")
+    #ifdef _MSC_VER
+        #pragma comment(lib, "version.lib")
+    #endif
 #elif __APPLE__
     #include <sys/utsname.h>
     #include <sys/sysctl.h>

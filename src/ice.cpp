@@ -477,8 +477,8 @@ StunAddress NatTypeDetector::get_mapped_address_different_port(const std::string
 
 IceAgent::IceAgent(IceRole role, const IceConfig& config)
     : role_(role), config_(config), running_(false), state_(IceConnectionState::NEW),
-      udp_socket_(INVALID_SOCKET_VALUE), tcp_socket_(INVALID_SOCKET_VALUE),
-      selected_pair_(IceCandidate(), IceCandidate()) {
+      selected_pair_(IceCandidate(), IceCandidate()),
+      udp_socket_(INVALID_SOCKET_VALUE), tcp_socket_(INVALID_SOCKET_VALUE) {
     
     // Initialize NAT detector
     nat_detector_ = std::make_unique<NatTypeDetector>();

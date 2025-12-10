@@ -106,7 +106,7 @@ std::vector<uint8_t> StunClient::create_binding_request() {
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, 255);
     
-    for (int i = 0; i < stun::TRANSACTION_ID_SIZE; ++i) {
+    for (size_t i = 0; i < stun::TRANSACTION_ID_SIZE; ++i) {
         request[8 + i] = static_cast<uint8_t>(dis(gen));
     }
     
@@ -226,7 +226,7 @@ void StunClient::generate_transaction_id(uint8_t* transaction_id) {
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, 255);
     
-    for (int i = 0; i < stun::TRANSACTION_ID_SIZE; ++i) {
+    for (size_t i = 0; i < stun::TRANSACTION_ID_SIZE; ++i) {
         transaction_id[i] = static_cast<uint8_t>(dis(gen));
     }
 }

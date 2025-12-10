@@ -557,7 +557,7 @@ std::vector<DhtNode> DhtClient::find_closest_nodes_unlocked(const NodeId& target
     candidates.reserve(count * 3 + K_BUCKET_SIZE * 2);
     
     // Add nodes from ideal bucket
-    if (target_bucket < routing_table_.size()) {
+    if (target_bucket >= 0 && static_cast<size_t>(target_bucket) < routing_table_.size()) {
         const auto& bucket = routing_table_[target_bucket];
         candidates.insert(candidates.end(), bucket.begin(), bucket.end());
         LOG_DHT_DEBUG("Collected " << bucket.size() << " nodes from target bucket " << target_bucket);
@@ -657,11 +657,11 @@ int DhtClient::get_bucket_index(const NodeId& id) {
     NodeId distance = xor_distance(node_id_, id);
     
     // Find the position of the most significant bit
-    for (int i = 0; i < NODE_ID_SIZE; ++i) {
+    for (size_t i = 0; i < NODE_ID_SIZE; ++i) {
         if (distance[i] != 0) {
             for (int j = 7; j >= 0; --j) {
                 if (distance[i] & (1 << j)) {
-                    return i * 8 + (7 - j);
+                    return static_cast<int>(i * 8 + (7 - j));
                 }
             }
         }
@@ -1247,9 +1247,9 @@ void DhtClient::refresh_buckets() {
             int byte_index = static_cast<int>(i / 8);
             int bit_index = static_cast<int>(i % 8);
             
-            if (byte_index < NODE_ID_SIZE) {
+            if (static_cast<size_t>(byte_index) < NODE_ID_SIZE) {
                 // Clear the target bit and higher bits
-                for (int j = byte_index; j < NODE_ID_SIZE; ++j) {
+                for (size_t j = static_cast<size_t>(byte_index); j < NODE_ID_SIZE; ++j) {
                     random_id[j] = node_id_[j];
                 }
                 

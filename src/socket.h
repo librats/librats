@@ -8,7 +8,9 @@
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
-    #pragma comment(lib, "ws2_32.lib")
+    #ifdef _MSC_VER
+        #pragma comment(lib, "ws2_32.lib")
+    #endif
     typedef SOCKET socket_t;
     #define INVALID_SOCKET_VALUE INVALID_SOCKET
     #define SOCKET_ERROR_VALUE SOCKET_ERROR
