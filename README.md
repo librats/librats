@@ -1343,9 +1343,15 @@ librats includes **industry-leading NAT traversal** that can establish P2P conne
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+We welcome contributions from the community! There are many ways to contribute:
 
-### Development Setup
+Please see our [Contributing Guide](CONTRIBUTING.md) for detailed guidelines on:
+- Code style and conventions
+- Setting up your development environment
+- Running tests
+- Submitting pull requests
+
+### Quick Start for Contributors
 
 ```bash
 git clone https://github.com/DEgITx/librats.git
