@@ -68,6 +68,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(RATS_BUILD_EXAMPLES "Build examples" ON)
 option(RATS_BUILD_TESTS "Build unit tests" ON)
 option(RATS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(RATS_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(RATS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(RATS_BINDINGS "Enable bindings" ON)
 option(RATS_CROSSCOMPILING "Force cross-compilation flags" OFF)
 option(RATS_SHARED_LIBRARY "Build as shared library" OFF)
@@ -81,6 +83,10 @@ if(RATS_SHARED_LIBRARY AND RATS_STATIC_LIBRARY)
 elseif(NOT RATS_SHARED_LIBRARY AND NOT RATS_STATIC_LIBRARY)
     message(WARNING "Neither RATS_SHARED_LIBRARY nor RATS_STATIC_LIBRARY are enabled. Defaulting to static library.")
     set(RATS_STATIC_LIBRARY ON)
+endif()
+
+if(RATS_ENABLE_TSAN AND (RATS_ENABLE_ASAN OR RATS_ENABLE_UBSAN))
+    message(FATAL_ERROR "Thread sanitizer CANT be used with another sanitizers at the same time")
 endif()
 
 # Disable tests when building shared library
@@ -267,6 +273,47 @@ if(RATS_ENABLE_ASAN)
         message(WARNING "AddressSanitizer is not supported by this compiler")
     endif()
 endif()
+
+# ThreadSanitizer configuration
+if(RATS_ENABLE_TSAN)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set(TSAN_FLAGS "-fsanitize=thread -g -O2")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TSAN_FLAGS}")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TSAN_FLAGS}")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${TSAN_FLAGS}")
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${TSAN_FLAGS}")
+        
+        message(STATUS "ThreadSanitizer enabled (GCC/Clang)")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC") # i have not idea if this works in msvc
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fsanitize=thread")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /fsanitize=thread")
+        
+        message(STATUS "ThreadSanitizer enabled (MSVC)")
+    else()
+        message(WARNING "ThreadSanitizer is not supported by this compiler")
+    endif()
+endif()
+
+# UndefinedBehaviorSanitizer configuration
+if(RATS_ENABLE_UBSAN)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set(UBSAN_FLAGS "-fsanitize=undefined -fno-omit-frame-pointer -g")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${UBSAN_FLAGS}")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${UBSAN_FLAGS}")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${UBSAN_FLAGS}")
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${UBSAN_FLAGS}")
+        
+        message(STATUS "UndefinedBehaviorSanitizer enabled (GCC/Clang)")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC") # i have no idea if this works in msvc
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fsanitize=undefined")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /fsanitize=undefined")
+        
+        message(STATUS "UndefinedBehaviorSanitizer enabled (MSVC)")
+    else()
+        message(WARNING "UndefinedBehaviorSanitizer is not supported by this compiler")
+    endif()
+endif()
+
 
 if(RATS_BUILD_TESTS)
     target_compile_definitions(rats PUBLIC TESTING)
