@@ -64,6 +64,11 @@ project(librats VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH})
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# additional checks by compiler to found errors ealy on
+add_compile_options(-Wall -Wextra -Wpedantic)
+# not show unused stuff, useful for development
+add_compile_options(-Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable)
+
 # Options
 option(RATS_BUILD_EXAMPLES "Build examples" ON)
 option(RATS_BUILD_TESTS "Build unit tests" ON)
