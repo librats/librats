@@ -25,6 +25,7 @@ namespace librats {
 MdnsClient::MdnsClient(const std::string& service_instance_name, uint16_t service_port)
     : service_instance_name_(service_instance_name),
       service_port_(service_port),
+      service_type_(LIBRATS_SERVICE_TYPE),  // Default service type
       multicast_socket_(INVALID_SOCKET_VALUE),
       running_(false),
       announcing_(false),
@@ -277,6 +278,11 @@ void MdnsClient::set_announcement_interval(std::chrono::seconds interval) {
 
 void MdnsClient::set_query_interval(std::chrono::seconds interval) {
     query_interval_ = interval;
+}
+
+void MdnsClient::set_service_type(const std::string& service_type) {
+    service_type_ = service_type;
+    LOG_MDNS_INFO("Service type set to: " << service_type_);
 }
 
 bool MdnsClient::create_multicast_socket() {
@@ -540,7 +546,7 @@ void MdnsClient::process_query(const DnsMessage& query, const std::string& sende
         bool should_respond = false;
         
         // Check if the question is asking for our service type
-        if (question.name == LIBRATS_SERVICE_TYPE && question.type == DnsRecordType::PTR) {
+        if (question.name == service_type_ && question.type == DnsRecordType::PTR) {
             should_respond = true;
         }
         
@@ -627,7 +633,7 @@ void MdnsClient::extract_service_from_response(const DnsMessage& response, const
 }
 
 bool MdnsClient::is_librats_service(const std::string& service_name) const {
-    return service_name == LIBRATS_SERVICE_TYPE;
+    return service_name == service_type_;
 }
 
 void MdnsClient::add_or_update_service(const MdnsService& service) {
@@ -668,8 +674,8 @@ DnsMessage MdnsClient::create_query_message() {
     query.header.flags = static_cast<uint16_t>(MdnsFlags::QUERY);
     query.header.question_count = 1;
     
-    // Add question for librats services
-    DnsQuestion question(LIBRATS_SERVICE_TYPE, DnsRecordType::PTR, DnsRecordClass::CLASS_IN);
+    // Add question for services with our service type
+    DnsQuestion question(service_type_, DnsRecordType::PTR, DnsRecordClass::CLASS_IN);
     query.questions.push_back(question);
     
     return query;
@@ -689,7 +695,7 @@ DnsMessage MdnsClient::create_announcement_message() {
     }
     
     // Create PTR record
-    DnsResourceRecord ptr_record = create_ptr_record(LIBRATS_SERVICE_TYPE, our_service_name);
+    DnsResourceRecord ptr_record = create_ptr_record(service_type_, our_service_name);
     announcement.answers.push_back(ptr_record);
     
     // Create SRV record
@@ -1120,11 +1126,11 @@ std::string MdnsClient::create_service_instance_name(const std::string& instance
         clean_name = "librats-node";
     }
     
-    return clean_name + "." + LIBRATS_SERVICE_TYPE;
+    return clean_name + "." + service_type_;
 }
 
 std::string MdnsClient::extract_instance_name_from_service(const std::string& service_name) {
-    size_t pos = service_name.find("." + LIBRATS_SERVICE_TYPE);
+    size_t pos = service_name.find("." + service_type_);
     if (pos != std::string::npos) {
         return service_name.substr(0, pos);
     }

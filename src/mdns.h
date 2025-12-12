@@ -152,11 +152,13 @@ public:
     // Configuration
     void set_announcement_interval(std::chrono::seconds interval);
     void set_query_interval(std::chrono::seconds interval);
+    void set_service_type(const std::string& service_type);
     
 private:
     // Core properties
     std::string service_instance_name_;
     uint16_t service_port_;
+    std::string service_type_;  // Dynamic service type (e.g., "_rats-search._tcp.local.")
     std::map<std::string, std::string> txt_records_;
     
     // Network properties

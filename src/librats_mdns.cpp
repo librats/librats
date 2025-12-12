@@ -45,6 +45,11 @@ bool RatsClient::start_mdns_discovery(const std::string& service_instance_name,
     // Create mDNS client
     mdns_client_ = std::make_unique<MdnsClient>(instance_name, listen_port_);
     
+    // Set service type based on protocol name (e.g., "_rats-search._tcp.local.")
+    std::string protocol_name = get_protocol_name();
+    std::string service_type = "_" + protocol_name + "._tcp.local.";
+    mdns_client_->set_service_type(service_type);
+    
     // Set service discovery callback
     mdns_client_->set_service_callback([this](const MdnsService& service, bool is_new) {
         handle_mdns_service_discovery(service, is_new);
