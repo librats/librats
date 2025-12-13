@@ -25,7 +25,7 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Historical peer tracking** with automatic reconnection (`peers.rats`, `peers_ever.rats`)
 
 ### **Advanced Networking**
-- **DHT Integration**: Direct access to the massive BitTorrent DHT network
+- **DHT Discovery**: Supports peer discovery over the DHT protocol. librats DHT Discovery is fully compatible with the **BitTorrent Mainline DHT** — the largest distributed hash table network in the world with **millions of active nodes**.
 - **mDNS Discovery**: Automatic local network peer discovery with service advertisement
 - **STUN Support**: Automatic NAT traversal and public IP discovery
 - **IPv4/IPv6 Dual Stack**: Full support for modern internet protocols
@@ -762,7 +762,7 @@ struct FileMetadata {
 │ Discovery & Networking Layer                                    │
 │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
 │ │ DHT (Wide-Area) │ │ mDNS (Local Net)│ │ Direct Sockets  │    │
-│ │   BitTorrent    │ │   224.0.0.251   │ │ IPv4/IPv6 Stack │    │
+│ │ BT Mainline DHT │ │   224.0.0.251   │ │ IPv4/IPv6 Stack │    │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
 ├─────────────────────────────────────────────────────────────────┤
 │ Platform Abstraction Layer                                      │
