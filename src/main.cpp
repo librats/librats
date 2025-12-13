@@ -42,6 +42,11 @@ void print_help() {
     std::cout << "  dht_find <hash>   - Find peers for content hash" << std::endl;
     std::cout << "  dht_announce <hash> [port] - Announce as peer for content hash" << std::endl;
     std::cout << "  dht_discovery_status - Show automatic rats peer discovery status" << std::endl;
+    std::cout << "  mdns_start          - Start mDNS local network discovery" << std::endl;
+    std::cout << "  mdns_stop           - Stop mDNS local network discovery" << std::endl;
+    std::cout << "  mdns_status         - Show mDNS discovery status" << std::endl;
+    std::cout << "  mdns_services       - List discovered mDNS services" << std::endl;
+    std::cout << "  mdns_query          - Manually query for mDNS services" << std::endl;
     std::cout << "  netutils [hostname] - Test network utilities" << std::endl;
     std::cout << "  netutils6 [hostname] - Test IPv6 network utilities" << std::endl;
     std::cout << "  dht_test <ip> <port> - Test DHT protocol with specific peer" << std::endl;
@@ -140,6 +145,16 @@ int main(int argc, char* argv[]) {
         }
     });
 
+    // Set up mDNS callback for local network peer discovery
+    client.set_mdns_callback([&](const std::string& host, int port, const std::string& instance_name) {
+        LOG_MAIN_INFO("mDNS discovered service: " << instance_name << " at " << host << ":" << port);
+        // Auto-connect to discovered rats peers on local network
+        if (client.get_peer_count() < client.get_max_peers()) {
+            LOG_MAIN_INFO("Attempting to connect to mDNS discovered peer...");
+            client.connect_to_peer(host, port);
+        }
+    });
+
     // Set up file transfer callbacks
     if (client.is_file_transfer_available()) {
         // Progress callback for file transfers
@@ -222,6 +237,14 @@ int main(int argc, char* argv[]) {
         LOG_MAIN_WARN("Failed to start DHT peer discovery, but continuing...");
     }
     
+    // Start mDNS discovery for local network peer discovery
+    LOG_MAIN_INFO("Starting mDNS local network discovery...");
+    if (client.start_mdns_discovery()) {
+        LOG_MAIN_INFO("mDNS local network discovery started successfully");
+    } else {
+        LOG_MAIN_WARN("Failed to start mDNS discovery, but continuing...");
+    }
+    
     // Connect to peer if specified
     if (!peer_host.empty() && peer_port > 0) {
         LOG_MAIN_INFO("Connecting to peer " << peer_host << ":" << peer_port << "...");
@@ -243,6 +266,11 @@ int main(int argc, char* argv[]) {
         }
     } else {
         LOG_MAIN_INFO("DHT peer discovery is inactive. Use 'dht_start' to enable it.");
+    }
+    if (client.is_mdns_running()) {
+        LOG_MAIN_INFO("mDNS local network discovery is active.");
+    } else {
+        LOG_MAIN_INFO("mDNS local network discovery is inactive. Use 'mdns_start' to enable it.");
     }
     print_help();
     
@@ -420,6 +448,70 @@ int main(int argc, char* argv[]) {
                 LOG_MAIN_INFO("DHT Status: RUNNING | Routing table size: " << client.get_dht_routing_table_size() << " nodes");
             } else {
                 LOG_MAIN_INFO("DHT Status: STOPPED");
+            }
+        }
+        else if (command == "mdns_start") {
+            if (client.is_mdns_running()) {
+                std::cout << "mDNS is already running." << std::endl;
+            } else {
+                LOG_MAIN_INFO("Starting mDNS local network discovery...");
+                if (client.start_mdns_discovery()) {
+                    LOG_MAIN_INFO("mDNS local network discovery started successfully");
+                } else {
+                    LOG_MAIN_ERROR("Failed to start mDNS discovery");
+                }
+            }
+        }
+        else if (command == "mdns_stop") {
+            if (!client.is_mdns_running()) {
+                std::cout << "mDNS is not running." << std::endl;
+            } else {
+                LOG_MAIN_INFO("Stopping mDNS local network discovery...");
+                client.stop_mdns_discovery();
+                LOG_MAIN_INFO("mDNS local network discovery stopped");
+            }
+        }
+        else if (command == "mdns_status") {
+            if (client.is_mdns_running()) {
+                auto services = client.get_mdns_services();
+                LOG_MAIN_INFO("mDNS Status: RUNNING | Discovered services: " << services.size());
+            } else {
+                LOG_MAIN_INFO("mDNS Status: STOPPED");
+            }
+        }
+        else if (command == "mdns_services") {
+            if (!client.is_mdns_running()) {
+                LOG_MAIN_ERROR("mDNS is not running. Use 'mdns_start' first.");
+            } else {
+                auto services = client.get_mdns_services();
+                if (services.empty()) {
+                    std::cout << "No mDNS services discovered yet." << std::endl;
+                } else {
+                    std::cout << "Discovered mDNS services (" << services.size() << "):" << std::endl;
+                    for (const auto& service : services) {
+                        std::cout << "  Service: " << service.service_name << std::endl;
+                        std::cout << "    Host: " << service.host_name << " (" << service.ip_address << ":" << service.port << ")" << std::endl;
+                        if (!service.txt_records.empty()) {
+                            std::cout << "    TXT records:" << std::endl;
+                            for (const auto& txt : service.txt_records) {
+                                std::cout << "      " << txt.first << "=" << txt.second << std::endl;
+                            }
+                        }
+                        std::cout << std::endl;
+                    }
+                }
+            }
+        }
+        else if (command == "mdns_query") {
+            if (!client.is_mdns_running()) {
+                LOG_MAIN_ERROR("mDNS is not running. Use 'mdns_start' first.");
+            } else {
+                LOG_MAIN_INFO("Querying for mDNS services...");
+                if (client.query_mdns_services()) {
+                    LOG_MAIN_INFO("mDNS query sent. Results will appear as services are discovered.");
+                } else {
+                    LOG_MAIN_ERROR("Failed to send mDNS query");
+                }
             }
         }
         else if (command == "file_send") {
@@ -1043,6 +1135,9 @@ int main(int argc, char* argv[]) {
     // Clean shutdown
     LOG_MAIN_INFO("Stopping DHT peer discovery...");
     client.stop_dht_discovery();
+    
+    LOG_MAIN_INFO("Stopping mDNS local network discovery...");
+    client.stop_mdns_discovery();
     
     client.stop();
     LOG_MAIN_INFO("RatsClient stopped. Goodbye!");
