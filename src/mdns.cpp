@@ -1100,14 +1100,18 @@ std::string MdnsClient::get_local_hostname() {
 std::string MdnsClient::get_local_ip_address() {
     auto addresses = librats::network_utils::get_local_interface_addresses();
     
-    // Prefer non-loopback IPv4 addresses
+    // Prefer non-loopback, non-APIPA IPv4 addresses
     for (const auto& addr : addresses) {
         if (addr != "127.0.0.1" && addr != "::1" && addr.find(':') == std::string::npos) {
+            // Skip APIPA addresses (169.254.x.x) - these are link-local fallback addresses
+            if (addr.rfind("169.254.", 0) == 0) {
+                continue;
+            }
             return addr;
         }
     }
     
-    // Fall back to first available address
+    // Fall back to first available address (even APIPA if that's all we have)
     if (!addresses.empty()) {
         return addresses[0];
     }
