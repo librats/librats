@@ -80,6 +80,7 @@ struct RatsPeer {
     
     RatsPeer() : handshake_state(HandshakeState::PENDING), 
                  peer_count(0), encryption_enabled(false), noise_handshake_completed(false),
+                 remote_static_key(),
                  ice_enabled(false), ice_state(IceConnectionState::NEW),
                  detected_nat_type(NatType::UNKNOWN), rtt_ms(0), packet_loss_percent(0),
                  transport_protocol("UDP") {

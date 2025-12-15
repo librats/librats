@@ -76,7 +76,7 @@ struct DhtNode {
     // Number of consecutive failures (0xff = never pinged, 0 = confirmed good)
     uint8_t fail_count = 0xff;
     
-    DhtNode() : last_seen(std::chrono::steady_clock::now()) {}
+    DhtNode() : id(), last_seen(std::chrono::steady_clock::now()) {}
     DhtNode(const NodeId& id, const Peer& peer)
         : id(id), peer(peer), last_seen(std::chrono::steady_clock::now()) {}
     

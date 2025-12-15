@@ -50,7 +50,7 @@ struct KrpcNode {
     std::string ip;
     uint16_t port;
     
-    KrpcNode() : port(0) {}
+    KrpcNode() : id(), port(0) {}
     KrpcNode(const NodeId& node_id, const std::string& ip_addr, uint16_t port_num)
         : id(node_id), ip(ip_addr), port(port_num) {}
 };
@@ -79,7 +79,7 @@ struct KrpcMessage {
     KrpcErrorCode error_code;
     std::string error_message;
     
-    KrpcMessage() : type(KrpcMessageType::Query), query_type(KrpcQueryType::Ping), port(0), error_code(KrpcErrorCode::GenericError) {}
+    KrpcMessage() : type(KrpcMessageType::Query), query_type(KrpcQueryType::Ping), sender_id(), target_id(), info_hash(), port(0), response_id(), error_code(KrpcErrorCode::GenericError) {}
 };
 
 /**
