@@ -14,6 +14,7 @@
 #include <sstream>
 #include <iomanip>
 #include <stdexcept>
+#include <string_view>
 
 #ifdef TESTING
 #define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", "[pointer: " << this << "] " << message)
@@ -1253,6 +1254,8 @@ void RatsClient::add_ignored_address(const std::string& ip_address) {
     }
 }
 
+//common localhost addresses
+static constexpr std::array<std::string_view,4> localhost_addrs{"127.0.0.1", "::1", "0.0.0.0", "::"};
 
 // Local interface address blocking methods
 void RatsClient::initialize_local_addresses() {
@@ -1264,10 +1267,9 @@ void RatsClient::initialize_local_addresses() {
     local_interface_addresses_ = network_utils::get_local_interface_addresses();
     
     // Add common localhost addresses if not already present
-    std::vector<std::string> localhost_addrs = {"127.0.0.1", "::1", "0.0.0.0", "::"};
     for (const auto& addr : localhost_addrs) {
         if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
-            local_interface_addresses_.push_back(addr);
+            local_interface_addresses_.emplace_back(addr);
         }
     }
     
@@ -1287,10 +1289,9 @@ void RatsClient::refresh_local_addresses() {
     local_interface_addresses_ = network_utils::get_local_interface_addresses();
     
     // Add common localhost addresses if not already present
-    std::vector<std::string> localhost_addrs = {"127.0.0.1", "::1", "0.0.0.0", "::"};
     for (const auto& addr : localhost_addrs) {
         if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
-            local_interface_addresses_.push_back(addr);
+            local_interface_addresses_.emplace_back(addr);
         }
     }
     
@@ -1808,7 +1809,7 @@ bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::functi
         // Convert Peer to string addresses for callback
         std::vector<std::string> peer_addresses;
         for (const auto& peer : peers) {
-            peer_addresses.push_back(peer.ip + ":" + std::to_string(peer.port));
+            peer_addresses.emplace_back(peer.ip + ":" + std::to_string(peer.port));
         }
         
         if (callback) {
