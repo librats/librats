@@ -20,6 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Set architecture (Unix)
+        if: runner.os != 'Windows'
+        run: echo "ARCH_LOWER=$(echo ${{ runner.arch }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+      
+      - name: Set architecture (Windows)
+        if: runner.os == 'Windows'
+        run: echo "ARCH_LOWER=$('${{ runner.arch }}'.ToLower())" >> $env:GITHUB_ENV
+      
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -63,9 +71,9 @@ jobs:
           cd artifacts
           if [ "${{ github.event_name }}" == "release" ]; then
             VERSION=${{ github.ref_name }}
-            zip -r librats-linux-${VERSION}.zip linux/
+            zip -r librats-linux-${{ env.ARCH_LOWER }}-${VERSION}.zip linux/
           else
-            zip -r librats-linux.zip linux/
+            zip -r librats-linux-${{ env.ARCH_LOWER }}.zip linux/
           fi
       
       - name: Prepare artifacts (Windows)
@@ -78,9 +86,9 @@ jobs:
           cd artifacts
           if ("${{ github.event_name }}" -eq "release") {
             $VERSION = "${{ github.ref_name }}"
-            7z a "librats-windows-${VERSION}.zip" windows/*
+            7z a "librats-windows-${{ env.ARCH_LOWER }}-${VERSION}.zip" windows/*
           } else {
-            7z a librats-windows.zip windows/*
+            7z a "librats-windows-${{ env.ARCH_LOWER }}.zip" windows/*
           }
       
       - name: Prepare artifacts (macOS)
@@ -93,16 +101,16 @@ jobs:
           cd artifacts
           if [ "${{ github.event_name }}" == "release" ]; then
             VERSION=${{ github.ref_name }}
-            zip -r librats-macos-${VERSION}.zip macos/
+            zip -r librats-macos-${{ env.ARCH_LOWER }}-${VERSION}.zip macos/
           else
-            zip -r librats-macos.zip macos/
+            zip -r librats-macos-${{ env.ARCH_LOWER }}.zip macos/
           fi
       
       - name: Upload artifacts (Linux)
         if: runner.os == 'Linux' && matrix.build-type == 'Release' && github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
-          name: librats-linux-${{ github.sha }}
+          name: librats-linux-${{ env.ARCH_LOWER }}-${{ github.sha }}
           path: artifacts/linux/
           retention-days: 30
       
@@ -110,7 +118,7 @@ jobs:
         if: runner.os == 'Windows' && matrix.build-type == 'Release' && github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
-          name: librats-windows-${{ github.sha }}
+          name: librats-windows-${{ env.ARCH_LOWER }}-${{ github.sha }}
           path: artifacts/windows/
           retention-days: 30
 
@@ -118,7 +126,7 @@ jobs:
         if: runner.os == 'macOS' && matrix.build-type == 'Release' && github.event_name != 'release'
         uses: actions/upload-artifact@v4
         with:
-          name: librats-macos-${{ github.sha }}
+          name: librats-macos-${{ env.ARCH_LOWER }}-${{ github.sha }}
           path: artifacts/macos/
           retention-days: 30
 
@@ -126,7 +134,7 @@ jobs:
         if: runner.os == 'Linux' && matrix.build-type == 'Release' && github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/librats-linux-${{ github.ref_name }}.zip
+          files: artifacts/librats-linux-${{ env.ARCH_LOWER }}-${{ github.ref_name }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
       
@@ -134,7 +142,7 @@ jobs:
         if: runner.os == 'Windows' && matrix.build-type == 'Release' && github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/librats-windows-${{ github.ref_name }}.zip
+          files: artifacts/librats-windows-${{ env.ARCH_LOWER }}-${{ github.ref_name }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
       
@@ -142,6 +150,6 @@ jobs:
         if: runner.os == 'macOS' && matrix.build-type == 'Release' && github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/librats-macos-${{ github.ref_name }}.zip
+          files: artifacts/librats-macos-${{ env.ARCH_LOWER }}-${{ github.ref_name }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
