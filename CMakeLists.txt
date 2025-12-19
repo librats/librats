@@ -147,6 +147,7 @@ set(LIBRARY_SOURCES
     src/fs.cpp
     src/fs.h
     src/logger.h
+    src/logger.cpp
     src/noise.cpp
     src/noise.h
     src/encrypted_socket.cpp

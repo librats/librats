@@ -34,11 +34,8 @@ enum class LogLevel {
 
 class Logger {
 public:
-    // Singleton pattern
-    static Logger& getInstance() {
-        static Logger instance;
-        return instance;
-    }
+    // Singleton pattern - implementation in logger.cpp to ensure single instance across TUs
+    static Logger& getInstance();
     
     // Delete copy constructor and assignment operator
     Logger(const Logger&) = delete;
