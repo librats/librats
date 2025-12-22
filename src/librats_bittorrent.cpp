@@ -162,6 +162,71 @@ void RatsClient::get_torrent_metadata(const std::string& info_hash_hex,
     bittorrent_client_->get_torrent_metadata_by_hash(info_hash_hex, callback);
 }
 
+//=============================================================================
+// Spider Mode API Implementation (requires RATS_SEARCH_FEATURES)
+//=============================================================================
+
+void RatsClient::set_spider_mode(bool enable) {
+    if (!dht_client_) {
+        LOG_CLIENT_WARN("DHT client not available, cannot set spider mode");
+        return;
+    }
+    
+    dht_client_->set_spider_mode(enable);
+    LOG_CLIENT_INFO("Spider mode " << (enable ? "enabled" : "disabled"));
+}
+
+bool RatsClient::is_spider_mode() const {
+    if (!dht_client_) {
+        return false;
+    }
+    return dht_client_->is_spider_mode();
+}
+
+void RatsClient::set_spider_announce_callback(SpiderAnnounceCallback callback) {
+    if (!dht_client_) {
+        LOG_CLIENT_WARN("DHT client not available, cannot set spider callback");
+        return;
+    }
+    
+    // Wrap the callback to convert types from DhtClient format to RatsClient format
+    dht_client_->set_spider_announce_callback(
+        [callback](const InfoHash& info_hash, const Peer& peer) {
+            if (callback) {
+                std::string info_hash_hex = node_id_to_hex(info_hash);
+                std::string peer_address = peer.ip + ":" + std::to_string(peer.port);
+                callback(info_hash_hex, peer_address);
+            }
+        });
+    
+    LOG_CLIENT_DEBUG("Spider announce callback set");
+}
+
+void RatsClient::set_spider_ignore(bool ignore) {
+    if (!dht_client_) {
+        LOG_CLIENT_WARN("DHT client not available, cannot set spider ignore");
+        return;
+    }
+    
+    dht_client_->set_spider_ignore(ignore);
+    LOG_CLIENT_DEBUG("Spider ignore mode " << (ignore ? "enabled" : "disabled"));
+}
+
+bool RatsClient::is_spider_ignoring() const {
+    if (!dht_client_) {
+        return false;
+    }
+    return dht_client_->is_spider_ignoring();
+}
+
+void RatsClient::spider_walk() {
+    if (!dht_client_) {
+        return;
+    }
+    
+    dht_client_->spider_walk();
+}
+
 }
 
 #endif // RATS_SEARCH_FEATURES

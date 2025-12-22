@@ -1454,6 +1454,60 @@ public:
      */
     void get_torrent_metadata(const std::string& info_hash_hex, 
                              std::function<void(const TorrentInfo&, bool, const std::string&)> callback);
+    
+    // =========================================================================
+    // Spider Mode API (requires RATS_SEARCH_FEATURES)
+    // =========================================================================
+    
+    /**
+     * Spider announce callback type
+     * Called when a peer announces they have a torrent (announce_peer request received)
+     * @param info_hash The info hash being announced (as hex string)
+     * @param peer_address The peer that is announcing (ip:port format)
+     */
+    using SpiderAnnounceCallback = std::function<void(const std::string& info_hash, const std::string& peer_address)>;
+    
+    /**
+     * Enable spider mode on DHT
+     * In spider mode:
+     * - Nodes are added to routing table without ping verification
+     * - All announce_peer requests from other peers are collected via callback
+     * @param enable true to enable spider mode, false to disable
+     */
+    void set_spider_mode(bool enable);
+    
+    /**
+     * Check if spider mode is enabled
+     * @return true if spider mode is enabled
+     */
+    bool is_spider_mode() const;
+    
+    /**
+     * Set callback for announce_peer requests (spider mode)
+     * Called when other peers announce they have a torrent
+     * @param callback The callback to invoke
+     */
+    void set_spider_announce_callback(SpiderAnnounceCallback callback);
+    
+    /**
+     * Set spider ignore mode - when true, incoming requests are not processed
+     * Useful for rate limiting in spider mode
+     * @param ignore true to ignore incoming requests, false to process them
+     */
+    void set_spider_ignore(bool ignore);
+    
+    /**
+     * Check if spider ignore mode is enabled
+     * @return true if ignoring incoming requests
+     */
+    bool is_spider_ignoring() const;
+    
+    /**
+     * Trigger a single spider walk iteration
+     * Sends find_node to a random node from the routing table
+     * Call this periodically at desired frequency to expand routing table
+     */
+    void spider_walk();
 #endif // RATS_SEARCH_FEATURES
 
 private:
