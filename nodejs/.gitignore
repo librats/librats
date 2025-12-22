@@ -20,3 +20,7 @@ temp_transfers/
 *.swo
 *~
 
+# Config files
+config.json
+dht_routing_18082.json
+peers.rats

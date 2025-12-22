@@ -2,6 +2,7 @@
   "targets": [
     {
       "target_name": "librats",
+      "product_name": "librats",
       "sources": [
         "src/librats_node.cpp"
       ],
