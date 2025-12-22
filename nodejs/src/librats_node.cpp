@@ -199,6 +199,10 @@ public:
         }
         
         int port = info[0].As<Napi::Number>().Int32Value();
+        if (port < 0 || port > 65535) {
+            Napi::RangeError::New(env, "Port number must be between 0 and 65535").ThrowAsJavaScriptException();
+            return;
+        }
         client_ = rats_create(port);
         
         if (!client_) {
@@ -208,7 +212,7 @@ public:
     }
     
     ~RatsClient() {
-        if (client_) {
+        if (client_ != nullptr) {
             // Clean up callbacks
             connection_callbacks.erase(client_);
             string_callbacks.erase(client_);
@@ -232,7 +236,9 @@ private:
     }
     
     void Stop(const Napi::CallbackInfo& info) {
-        rats_stop(client_);
+        if (client_ != nullptr) {
+            rats_stop(client_);
+        }
     }
     
     Napi::Value Connect(const Napi::CallbackInfo& info) {
