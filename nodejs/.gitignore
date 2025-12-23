@@ -22,5 +22,5 @@ temp_transfers/
 
 # Config files
 config.json
-dht_routing_18082.json
+dht_routing_*.json
 peers.rats
