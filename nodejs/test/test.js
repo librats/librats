@@ -292,19 +292,17 @@ describe('LibRats Node.js Bindings', { timeout: 10_000 }, function() {
   });
 
   describe('Error Handling', function() {
-    // Skipped test for invalid parameters due to invalid destructor in native code
-    it.skip('should handle invalid parameter value range gracefully', function() {
+    it('should handle invalid parameter value range gracefully', function() {
       assert.throws(() => {
         new RatsClient(-1); // Invalid port
       });
     });
     
-    // Skipped test for invalid parameters due to invalid destructor in native code
-    it.skip('should handle invalid parameter value type gracefully', function () {
+    it('should handle invalid parameter value type gracefully', function() {
       assert.throws(() => {
         new RatsClient('invalid'); // Invalid port type
       });
-    })
+    });
   });
 
   describe('Statistics', function() {

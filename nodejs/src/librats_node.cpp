@@ -190,7 +190,7 @@ public:
         return exports;
     }
     
-    RatsClient(const Napi::CallbackInfo& info) : Napi::ObjectWrap<RatsClient>(info) {
+    RatsClient(const Napi::CallbackInfo& info) : Napi::ObjectWrap<RatsClient>(info), client_(nullptr) {
         Napi::Env env = info.Env();
         
         if (info.Length() < 1 || !info[0].IsNumber()) {
