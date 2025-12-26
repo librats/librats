@@ -31,7 +31,8 @@ MdnsClient::MdnsClient(const std::string& service_instance_name, uint16_t servic
       announcing_(false),
       discovering_(false),
       announcement_interval_(std::chrono::seconds(60)),
-      query_interval_(std::chrono::seconds(30)) {
+      query_interval_(std::chrono::seconds(30)),
+      rng_(std::random_device{}()) {
     
     // Get local network information
     local_hostname_ = get_local_hostname();
@@ -563,10 +564,8 @@ void MdnsClient::process_query(const DnsMessage& query, const std::string& sende
             std::vector<uint8_t> packet = serialize_dns_message(response);
             
             // Add a small random delay to avoid response collisions
-            std::random_device rd;
-            std::mt19937 gen(rd());
             std::uniform_int_distribution<> dis(20, 120);
-            std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+            std::this_thread::sleep_for(std::chrono::milliseconds(dis(rng_)));
             
             send_multicast_packet(packet);
         }
@@ -580,6 +579,12 @@ void MdnsClient::process_response(const DnsMessage& response, const std::string&
 }
 
 void MdnsClient::extract_service_from_response(const DnsMessage& response, const std::string& sender_ip) {
+    // Validate raw_packet is available for DNS compression resolution
+    if (response.raw_packet.empty()) {
+        LOG_MDNS_WARN("Cannot extract service: raw_packet is empty");
+        return;
+    }
+    
     MdnsService service;
     service.ip_address = sender_ip;
     service.last_seen = std::chrono::steady_clock::now();
@@ -592,21 +597,23 @@ void MdnsClient::extract_service_from_response(const DnsMessage& response, const
     for (const auto& record : response.answers) {
         if (record.type == DnsRecordType::PTR && is_librats_service(record.name)) {
             // Extract service instance name from PTR record data
-            size_t offset = 0;
-            service.service_name = read_dns_name(record.data, offset);
+            // Use raw_packet and data_offset for proper DNS compression resolution
+            size_t offset = record.data_offset_in_packet;
+            service.service_name = read_dns_name(response.raw_packet, offset);
             has_ptr = true;
             LOG_MDNS_DEBUG("Found PTR record: " << service.service_name);
         }
         else if (record.type == DnsRecordType::SRV) {
-            // Extract SRV record data
+            // Extract SRV record data using full packet for DNS compression
             uint16_t priority, weight;
-            if (decode_srv_record(record.data, priority, weight, service.port, service.host_name)) {
+            if (decode_srv_record(response.raw_packet, record.data_offset_in_packet,
+                                  priority, weight, service.port, service.host_name)) {
                 has_srv = true;
                 LOG_MDNS_DEBUG("Found SRV record: " << service.host_name << ":" << service.port);
             }
         }
         else if (record.type == DnsRecordType::TXT) {
-            // Extract TXT record data
+            // TXT records don't use DNS compression, use data directly
             service.txt_records = decode_txt_record(record.data);
             has_txt = true;
             LOG_MDNS_DEBUG("Found TXT record with " << service.txt_records.size() << " entries");
@@ -813,10 +820,41 @@ std::vector<uint8_t> MdnsClient::serialize_dns_message(const DnsMessage& message
     return buffer;
 }
 
+bool MdnsClient::read_resource_records(const std::vector<uint8_t>& data, size_t& offset,
+                                        uint16_t count, std::vector<DnsResourceRecord>& records) {
+    records.clear();
+    records.reserve(count);
+    
+    for (uint16_t i = 0; i < count; ++i) {
+        DnsResourceRecord record;
+        record.name = read_dns_name(data, offset);
+        record.type = static_cast<DnsRecordType>(read_uint16(data, offset));
+        record.record_class = static_cast<DnsRecordClass>(read_uint16(data, offset));
+        record.ttl = read_uint32(data, offset);
+        uint16_t data_length = read_uint16(data, offset);
+        
+        if (offset + data_length > data.size()) {
+            return false;
+        }
+        
+        // Store offset for DNS compression resolution
+        record.data_offset_in_packet = offset;
+        record.data.assign(data.begin() + offset, data.begin() + offset + data_length);
+        offset += data_length;
+        
+        records.push_back(std::move(record));
+    }
+    
+    return true;
+}
+
 bool MdnsClient::deserialize_dns_message(const std::vector<uint8_t>& data, DnsMessage& message) {
     if (data.size() < 12) { // Minimum DNS header size
         return false;
     }
+    
+    // Store raw packet for DNS compression resolution
+    message.raw_packet = data;
     
     size_t offset = 0;
     
@@ -831,62 +869,24 @@ bool MdnsClient::deserialize_dns_message(const std::vector<uint8_t>& data, DnsMe
         
         // Read questions
         message.questions.clear();
+        message.questions.reserve(message.header.question_count);
         for (uint16_t i = 0; i < message.header.question_count; ++i) {
             DnsQuestion question;
             question.name = read_dns_name(data, offset);
             question.type = static_cast<DnsRecordType>(read_uint16(data, offset));
             question.record_class = static_cast<DnsRecordClass>(read_uint16(data, offset));
-            message.questions.push_back(question);
+            message.questions.push_back(std::move(question));
         }
         
-        // Read answers
-        message.answers.clear();
-        for (uint16_t i = 0; i < message.header.answer_count; ++i) {
-            DnsResourceRecord record;
-            record.name = read_dns_name(data, offset);
-            record.type = static_cast<DnsRecordType>(read_uint16(data, offset));
-            record.record_class = static_cast<DnsRecordClass>(read_uint16(data, offset));
-            record.ttl = read_uint32(data, offset);
-            uint16_t data_length = read_uint16(data, offset);
-            
-            if (offset + data_length > data.size()) {
-                return false;
-            }
-            
-            record.data.assign(data.begin() + offset, data.begin() + offset + data_length);
-            offset += data_length;
-            
-            message.answers.push_back(record);
+        // Read answers, authorities, and additionals
+        if (!read_resource_records(data, offset, message.header.answer_count, message.answers)) {
+            return false;
         }
-        
-        // Read authorities (skip for simplicity)
-        for (uint16_t i = 0; i < message.header.authority_count; ++i) {
-            read_dns_name(data, offset); // name
-            read_uint16(data, offset); // type
-            read_uint16(data, offset); // class
-            read_uint32(data, offset); // ttl
-            uint16_t data_length = read_uint16(data, offset);
-            offset += data_length;
+        if (!read_resource_records(data, offset, message.header.authority_count, message.authorities)) {
+            return false;
         }
-        
-        // Read additionals
-        message.additionals.clear();
-        for (uint16_t i = 0; i < message.header.additional_count; ++i) {
-            DnsResourceRecord record;
-            record.name = read_dns_name(data, offset);
-            record.type = static_cast<DnsRecordType>(read_uint16(data, offset));
-            record.record_class = static_cast<DnsRecordClass>(read_uint16(data, offset));
-            record.ttl = read_uint32(data, offset);
-            uint16_t data_length = read_uint16(data, offset);
-            
-            if (offset + data_length > data.size()) {
-                return false;
-            }
-            
-            record.data.assign(data.begin() + offset, data.begin() + offset + data_length);
-            offset += data_length;
-            
-            message.additionals.push_back(record);
+        if (!read_resource_records(data, offset, message.header.additional_count, message.additionals)) {
+            return false;
         }
         
         return true;
@@ -1064,18 +1064,20 @@ std::vector<uint8_t> MdnsClient::encode_srv_record(uint16_t priority, uint16_t w
     return data;
 }
 
-bool MdnsClient::decode_srv_record(const std::vector<uint8_t>& srv_data, uint16_t& priority, uint16_t& weight, uint16_t& port, std::string& target) {
-    if (srv_data.size() < 6) {
+bool MdnsClient::decode_srv_record(const std::vector<uint8_t>& full_packet, size_t data_offset,
+                                   uint16_t& priority, uint16_t& weight, uint16_t& port, std::string& target) {
+    if (data_offset + 6 > full_packet.size()) {
         return false;
     }
     
-    size_t offset = 0;
+    size_t offset = data_offset;
     
     try {
-        priority = read_uint16(srv_data, offset);
-        weight = read_uint16(srv_data, offset);
-        port = read_uint16(srv_data, offset);
-        target = read_dns_name(srv_data, offset);
+        priority = read_uint16(full_packet, offset);
+        weight = read_uint16(full_packet, offset);
+        port = read_uint16(full_packet, offset);
+        // Use full packet for proper DNS compression resolution
+        target = read_dns_name(full_packet, offset);
         return true;
     } catch (const std::exception&) {
         return false;

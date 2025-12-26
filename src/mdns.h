@@ -13,6 +13,7 @@
 #include <map>
 #include <cstdint>
 #include <condition_variable>
+#include <random>
 
 namespace librats {
 
@@ -98,10 +99,11 @@ struct DnsResourceRecord {
     DnsRecordClass record_class;
     uint32_t ttl;
     std::vector<uint8_t> data;
+    size_t data_offset_in_packet;  // Offset of data in original packet for DNS compression
     
-    DnsResourceRecord() : type(DnsRecordType::PTR), record_class(DnsRecordClass::CLASS_IN), ttl(120) {}
+    DnsResourceRecord() : type(DnsRecordType::PTR), record_class(DnsRecordClass::CLASS_IN), ttl(120), data_offset_in_packet(0) {}
     DnsResourceRecord(const std::string& n, DnsRecordType t, DnsRecordClass c, uint32_t ttl_val) 
-        : name(n), type(t), record_class(c), ttl(ttl_val) {}
+        : name(n), type(t), record_class(c), ttl(ttl_val), data_offset_in_packet(0) {}
 };
 
 // Complete DNS message structure
@@ -111,6 +113,7 @@ struct DnsMessage {
     std::vector<DnsResourceRecord> answers;
     std::vector<DnsResourceRecord> authorities;
     std::vector<DnsResourceRecord> additionals;
+    std::vector<uint8_t> raw_packet;  // Original packet for DNS compression resolution
     
     DnsMessage() = default;
 };
@@ -187,6 +190,9 @@ private:
     std::chrono::seconds announcement_interval_;
     std::chrono::seconds query_interval_;
     
+    // Random number generator for response delays
+    mutable std::mt19937 rng_;
+    
     // Socket operations
     bool create_multicast_socket();
     bool join_multicast_group();
@@ -223,6 +229,8 @@ private:
     // DNS serialization/deserialization
     std::vector<uint8_t> serialize_dns_message(const DnsMessage& message);
     bool deserialize_dns_message(const std::vector<uint8_t>& data, DnsMessage& message);
+    bool read_resource_records(const std::vector<uint8_t>& data, size_t& offset, 
+                               uint16_t count, std::vector<DnsResourceRecord>& records);
     
     // DNS name compression helpers
     void write_dns_name(std::vector<uint8_t>& buffer, const std::string& name);
@@ -238,7 +246,8 @@ private:
     
     // SRV record helpers
     std::vector<uint8_t> encode_srv_record(uint16_t priority, uint16_t weight, uint16_t port, const std::string& target);
-    bool decode_srv_record(const std::vector<uint8_t>& srv_data, uint16_t& priority, uint16_t& weight, uint16_t& port, std::string& target);
+    bool decode_srv_record(const std::vector<uint8_t>& full_packet, size_t data_offset,
+                           uint16_t& priority, uint16_t& weight, uint16_t& port, std::string& target);
     
     // Utility functions
     std::string get_local_hostname();
