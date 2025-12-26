@@ -923,8 +923,9 @@ std::string MdnsClient::read_dns_name(const std::vector<uint8_t>& buffer, size_t
     bool jumped = false;
     size_t original_offset = offset;
     int jumps = 0;
+    const int max_jumps = 10;
     
-    while (offset < buffer.size() && jumps < 10) {
+    while (offset < buffer.size() && jumps < max_jumps) {
         uint8_t length = buffer[offset++];
         
         if (length == 0) {
@@ -932,20 +933,39 @@ std::string MdnsClient::read_dns_name(const std::vector<uint8_t>& buffer, size_t
         }
         
         if ((length & 0xC0) == 0xC0) {
-            // Compression pointer
+            // Compression pointer - need one more byte
+            if (offset >= buffer.size()) {
+                LOG_MDNS_WARN("Truncated DNS compression pointer");
+                break;
+            }
+            
             if (!jumped) {
                 original_offset = offset + 1;
                 jumped = true;
             }
             
             uint16_t pointer = ((length & 0x3F) << 8) | buffer[offset++];
+            
+            // Validate pointer doesn't point beyond buffer or forward (potential loop)
+            if (pointer >= buffer.size()) {
+                LOG_MDNS_WARN("Invalid DNS compression pointer: " << pointer << " >= " << buffer.size());
+                break;
+            }
+            
             offset = pointer;
             jumps++;
             continue;
         }
         
+        // Check for invalid label length (> 63 bytes per RFC 1035)
+        if (length > 63) {
+            LOG_MDNS_WARN("Invalid DNS label length: " << static_cast<int>(length));
+            break;
+        }
+        
         if (offset + length > buffer.size()) {
-            break; // Invalid length
+            LOG_MDNS_WARN("DNS label extends beyond buffer");
+            break;
         }
         
         if (!name.empty()) {
@@ -954,6 +974,10 @@ std::string MdnsClient::read_dns_name(const std::vector<uint8_t>& buffer, size_t
         
         name.append(reinterpret_cast<const char*>(&buffer[offset]), length);
         offset += length;
+    }
+    
+    if (jumps >= max_jumps) {
+        LOG_MDNS_WARN("Too many DNS compression jumps, possible loop");
     }
     
     if (jumped) {
