@@ -573,7 +573,7 @@ void MdnsClient::process_query(const DnsMessage& query, const std::string& sende
         bool should_respond = false;
         
         // Check if the question is asking for our service type
-        if (question.name == service_type_ && question.type == DnsRecordType::PTR) {
+        if (is_librats_service(question.name) && question.type == DnsRecordType::PTR) {
             should_respond = true;
         }
         
@@ -621,13 +621,19 @@ void MdnsClient::extract_service_from_response(const DnsMessage& response, const
     
     // Process all answer records
     for (const auto& record : response.answers) {
-        if (record.type == DnsRecordType::PTR && is_librats_service(record.name)) {
-            // Extract service instance name from PTR record data
-            // Use raw_packet and data_offset for proper DNS compression resolution
-            size_t offset = record.data_offset_in_packet;
-            service.service_name = read_dns_name(response.raw_packet, offset);
-            has_ptr = true;
-            LOG_MDNS_DEBUG("Found PTR record: " << service.service_name);
+        LOG_MDNS_DEBUG("Processing record: type=" << static_cast<int>(record.type) << " name=" << record.name);
+        
+        if (record.type == DnsRecordType::PTR) {
+            // Check if this is our service type
+            if (is_librats_service(record.name)) {
+                // Extract service instance name from PTR record data
+                size_t offset = record.data_offset_in_packet;
+                service.service_name = read_dns_name(response.raw_packet, offset);
+                has_ptr = true;
+                LOG_MDNS_DEBUG("Found PTR record: " << service.service_name);
+            } else {
+                LOG_MDNS_DEBUG("Skipping PTR record - not our service type: " << record.name << " (expected: " << service_type_ << ")");
+            }
         }
         else if (record.type == DnsRecordType::SRV) {
             // Extract SRV record data using full packet for DNS compression
@@ -666,7 +672,19 @@ void MdnsClient::extract_service_from_response(const DnsMessage& response, const
 }
 
 bool MdnsClient::is_librats_service(const std::string& service_name) const {
-    return service_name == service_type_;
+    // Normalize both names - remove trailing dots for comparison
+    std::string name1 = service_name;
+    std::string name2 = service_type_;
+    
+    // Remove trailing dots
+    while (!name1.empty() && name1.back() == '.') name1.pop_back();
+    while (!name2.empty() && name2.back() == '.') name2.pop_back();
+    
+    // Case-insensitive comparison
+    std::transform(name1.begin(), name1.end(), name1.begin(), ::tolower);
+    std::transform(name2.begin(), name2.end(), name2.begin(), ::tolower);
+    
+    return name1 == name2;
 }
 
 void MdnsClient::add_or_update_service(const MdnsService& service) {
