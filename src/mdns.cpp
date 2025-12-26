@@ -337,10 +337,18 @@ bool MdnsClient::join_multicast_group() {
         return false;
     }
     
-    // Join IPv4 multicast group
+    // Get local interface address for multicast binding
+    in_addr local_interface{};
+    if (local_ip_address_.empty() || local_ip_address_ == "127.0.0.1") {
+        local_interface.s_addr = INADDR_ANY;
+    } else {
+        inet_pton(AF_INET, local_ip_address_.c_str(), &local_interface);
+    }
+    
+    // Join IPv4 multicast group on specific interface
     ip_mreq mreq{};
     inet_pton(AF_INET, MDNS_MULTICAST_IPv4.c_str(), &mreq.imr_multiaddr);
-    mreq.imr_interface.s_addr = INADDR_ANY;
+    mreq.imr_interface = local_interface;
     
     if (setsockopt(multicast_socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP, 
                    reinterpret_cast<const char*>(&mreq), sizeof(mreq)) < 0) {
@@ -350,6 +358,16 @@ bool MdnsClient::join_multicast_group() {
         LOG_MDNS_ERROR("Failed to join IPv4 multicast group (error: " << strerror(errno) << ")");
 #endif
         return false;
+    }
+    
+    // Set outgoing multicast interface (critical for Windows!)
+    if (setsockopt(multicast_socket_, IPPROTO_IP, IP_MULTICAST_IF,
+                   reinterpret_cast<const char*>(&local_interface), sizeof(local_interface)) < 0) {
+#ifdef _WIN32
+        LOG_MDNS_WARN("Failed to set multicast interface (error: " << WSAGetLastError() << ")");
+#else
+        LOG_MDNS_WARN("Failed to set multicast interface (error: " << strerror(errno) << ")");
+#endif
     }
     
     // Set multicast TTL
@@ -366,7 +384,7 @@ bool MdnsClient::join_multicast_group() {
         LOG_MDNS_WARN("Failed to disable multicast loopback");
     }
     
-    LOG_MDNS_DEBUG("Joined IPv4 multicast group: " << MDNS_MULTICAST_IPv4);
+    LOG_MDNS_INFO("Joined IPv4 multicast group: " << MDNS_MULTICAST_IPv4 << " on interface " << local_ip_address_);
     return true;
 }
 
@@ -375,9 +393,17 @@ bool MdnsClient::leave_multicast_group() {
         return false;
     }
     
+    // Use same interface as when joining
+    in_addr local_interface{};
+    if (local_ip_address_.empty() || local_ip_address_ == "127.0.0.1") {
+        local_interface.s_addr = INADDR_ANY;
+    } else {
+        inet_pton(AF_INET, local_ip_address_.c_str(), &local_interface);
+    }
+    
     ip_mreq mreq{};
     inet_pton(AF_INET, MDNS_MULTICAST_IPv4.c_str(), &mreq.imr_multiaddr);
-    mreq.imr_interface.s_addr = INADDR_ANY;
+    mreq.imr_interface = local_interface;
     
     if (setsockopt(multicast_socket_, IPPROTO_IP, IP_DROP_MEMBERSHIP, 
                    reinterpret_cast<const char*>(&mreq), sizeof(mreq)) < 0) {
