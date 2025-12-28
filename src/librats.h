@@ -1504,10 +1504,28 @@ public:
     
     /**
      * Trigger a single spider walk iteration
-     * Sends find_node to a random node from the routing table
-     * Call this periodically at desired frequency to expand routing table
+     * Sends find_node to a random node from the spider pool
+     * Call this periodically at desired frequency to discover new nodes
      */
     void spider_walk();
+    
+    /**
+     * Get the size of the spider node pool
+     * @return Number of nodes in spider pool
+     */
+    size_t get_spider_pool_size() const;
+    
+    /**
+     * Get the number of visited nodes in spider mode
+     * @return Number of visited nodes
+     */
+    size_t get_spider_visited_count() const;
+    
+    /**
+     * Clear spider state (pool and visited nodes)
+     * Useful for resetting the spider walk
+     */
+    void clear_spider_state();
 #endif // RATS_SEARCH_FEATURES
 
 private:

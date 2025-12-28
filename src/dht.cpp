@@ -723,15 +723,23 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender)
     if (spider_mode_.load() && spider_ignore_.load()) {
         return;
     }
-    bool no_verify = spider_mode_.load();
+    bool is_spider = spider_mode_.load();
 #else
-    bool no_verify = false;
+    bool is_spider = false;
 #endif
     
-    // Add sender to routing table
+    // Add sender to routing table (or spider pool in spider mode)
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, true, no_verify);
+    
+#ifdef RATS_SEARCH_FEATURES
+    if (is_spider) {
+        add_spider_node(sender_node);
+    } else
+#endif
+    {
+        add_node(sender_node, true, false);
+    }
     
     // Respond with ping response
     auto response = KrpcProtocol::create_ping_response(message.transaction_id, node_id_);
@@ -746,15 +754,23 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
     if (spider_mode_.load() && spider_ignore_.load()) {
         return;
     }
-    bool no_verify = spider_mode_.load();
+    bool is_spider = spider_mode_.load();
 #else
-    bool no_verify = false;
+    bool is_spider = false;
 #endif
     
-    // Add sender to routing table
+    // Add sender to routing table (or spider pool in spider mode)
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, true, no_verify);
+    
+#ifdef RATS_SEARCH_FEATURES
+    if (is_spider) {
+        add_spider_node(sender_node);
+    } else
+#endif
+    {
+        add_node(sender_node, true, false);
+    }
     
     // Find closest nodes
     auto closest_nodes = find_closest_nodes(message.target_id, K_BUCKET_SIZE);
@@ -773,15 +789,23 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& se
     if (spider_mode_.load() && spider_ignore_.load()) {
         return;
     }
-    bool no_verify = spider_mode_.load();
+    bool is_spider = spider_mode_.load();
 #else
-    bool no_verify = false;
+    bool is_spider = false;
 #endif
     
-    // Add sender to routing table
+    // Add sender to routing table (or spider pool in spider mode)
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, true, no_verify);
+    
+#ifdef RATS_SEARCH_FEATURES
+    if (is_spider) {
+        add_spider_node(sender_node);
+    } else
+#endif
+    {
+        add_node(sender_node, true, false);
+    }
     
     // Generate a token for this peer
     std::string token = generate_token(sender);
@@ -832,10 +856,18 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
     bool is_spider = false;
 #endif
     
-    // Add sender to routing table
+    // Add sender to routing table (or spider pool in spider mode)
     KrpcNode krpc_node(message.sender_id, sender.ip, sender.port);
     DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, true, is_spider);
+    
+#ifdef RATS_SEARCH_FEATURES
+    if (is_spider) {
+        add_spider_node(sender_node);
+    } else
+#endif
+    {
+        add_node(sender_node, true, false);
+    }
     
     // Determine the actual port (BEP 5: implied_port support)
     uint16_t peer_port = message.port;
@@ -872,20 +904,37 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     handle_ping_verification_response(message.transaction_id, message.response_id, sender);
     
 #ifdef RATS_SEARCH_FEATURES
-    bool no_verify = spider_mode_.load();
-#else
-    bool no_verify = false;
+    bool is_spider = spider_mode_.load();
+    
+    if (is_spider) {
+        // Spider mode: add nodes to spider pool, NOT to routing table
+        // This keeps the routing table stable and clean
+        KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
+        DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
+        add_spider_node(sender_node);
+        
+        // Add discovered nodes to spider pool
+        std::vector<DhtNode> discovered_nodes;
+        discovered_nodes.reserve(message.nodes.size());
+        for (const auto& node : message.nodes) {
+            discovered_nodes.push_back(krpc_node_to_dht_node(node));
+        }
+        add_spider_nodes(discovered_nodes);
+        
+        LOG_DHT_DEBUG("Spider mode: added " << (1 + message.nodes.size()) << " nodes to spider pool");
+    } else
 #endif
-    
-    // Add responder to routing table
-    KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
-    DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-    add_node(sender_node, true, no_verify);
-    
-    // Add any nodes from the response (these are nodes we heard about, not confirmed)
-    for (const auto& node : message.nodes) {
-        DhtNode dht_node = krpc_node_to_dht_node(node);
-        add_node(dht_node, false, no_verify);  // Not confirmed - just heard about from another node
+    {
+        // Normal mode: add nodes to routing table
+        KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
+        DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
+        add_node(sender_node, true, false);
+        
+        // Add any nodes from the response (these are nodes we heard about, not confirmed)
+        for (const auto& node : message.nodes) {
+            DhtNode dht_node = krpc_node_to_dht_node(node);
+            add_node(dht_node, false, false);  // Not confirmed - just heard about from another node
+        }
     }
     
     // Check if this is a response to a pending search (get_peers with peers)
@@ -1220,8 +1269,28 @@ void DhtClient::print_statistics() {
         peer_tokens_count = peer_tokens_.size();
     }
     
+    // Spider mode statistics
+#ifdef RATS_SEARCH_FEATURES
+    size_t spider_pool_size = 0;
+    size_t spider_visited_count = 0;
+    bool is_spider_active = spider_mode_.load();
+    if (is_spider_active) {
+        std::lock_guard<std::mutex> spider_lock(spider_nodes_mutex_);
+        spider_pool_size = spider_nodes_.size();
+        spider_visited_count = spider_visited_.size();
+    }
+#endif
+    
     // Print main statistics
     LOG_DHT_INFO("=== DHT GLOBAL STATISTICS ===");
+#ifdef RATS_SEARCH_FEATURES
+    if (is_spider_active) {
+        LOG_DHT_INFO("[SPIDER MODE ACTIVE]");
+        LOG_DHT_INFO("  Spider pool size: " << spider_pool_size << "/" << MAX_SPIDER_NODES);
+        LOG_DHT_INFO("  Visited nodes: " << spider_visited_count << "/" << MAX_SPIDER_VISITED);
+        LOG_DHT_INFO("  Ignore mode: " << (spider_ignore_.load() ? "ON" : "OFF"));
+    }
+#endif
     LOG_DHT_INFO("[ROUTING TABLE]");
     LOG_DHT_INFO("  Total nodes: " << total_nodes << " (confirmed: " << confirmed_nodes 
                  << ", unpinged: " << unpinged_nodes << ", failed: " << failed_nodes << ")");
@@ -2576,12 +2645,123 @@ void DhtClient::set_data_directory(const std::string& directory) {
 // ============================================================================
 
 void DhtClient::set_spider_mode(bool enable) {
-    spider_mode_.store(enable);
-    if (enable) {
-        LOG_DHT_INFO("Spider mode ENABLED - aggressive node discovery active");
-    } else {
+    bool was_enabled = spider_mode_.exchange(enable);
+    
+    if (enable && !was_enabled) {
+        LOG_DHT_INFO("Spider mode ENABLED - aggressive node discovery active (separate node pool)");
+        
+        // Initialize spider pool with nodes from routing table
+        // Lock order: routing_table_mutex_ (3) -> spider_nodes_mutex_ (4)
+        std::lock_guard<std::mutex> rt_lock(routing_table_mutex_);
+        std::lock_guard<std::mutex> spider_lock(spider_nodes_mutex_);
+        
+        spider_nodes_.clear();
+        spider_visited_.clear();
+        
+        // Seed spider pool with current routing table nodes
+        for (const auto& bucket : routing_table_) {
+            for (const auto& node : bucket) {
+                if (spider_nodes_.size() < MAX_SPIDER_NODES) {
+                    spider_nodes_.push_back(node);
+                }
+            }
+        }
+        
+        LOG_DHT_INFO("Spider pool initialized with " << spider_nodes_.size() << " nodes from routing table");
+        
+    } else if (!enable && was_enabled) {
         LOG_DHT_INFO("Spider mode DISABLED - normal DHT operation");
+        
+        // Clear spider state
+        cleanup_spider_state();
     }
+}
+
+void DhtClient::add_spider_node(const DhtNode& node) {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    
+    // Check if node already exists in pool
+    auto it = std::find_if(spider_nodes_.begin(), spider_nodes_.end(),
+                          [&node](const DhtNode& existing) {
+                              return existing.id == node.id;
+                          });
+    
+    if (it != spider_nodes_.end()) {
+        // Update existing node
+        it->peer = node.peer;
+        it->last_seen = std::chrono::steady_clock::now();
+        return;
+    }
+    
+    // Add new node if pool isn't full
+    if (spider_nodes_.size() < MAX_SPIDER_NODES) {
+        spider_nodes_.push_back(node);
+        LOG_DHT_DEBUG("Added spider node " << node_id_to_hex(node.id) << " at " 
+                      << node.peer.ip << ":" << node.peer.port 
+                      << " (pool size: " << spider_nodes_.size() << ")");
+    } else {
+        // Replace a random node (simple eviction strategy)
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        std::uniform_int_distribution<size_t> dis(0, spider_nodes_.size() - 1);
+        size_t replace_idx = dis(gen);
+        spider_nodes_[replace_idx] = node;
+        LOG_DHT_DEBUG("Replaced spider node at index " << replace_idx << " with " 
+                      << node_id_to_hex(node.id));
+    }
+}
+
+void DhtClient::add_spider_nodes(const std::vector<DhtNode>& nodes) {
+    for (const auto& node : nodes) {
+        add_spider_node(node);
+    }
+}
+
+bool DhtClient::is_spider_node_visited(const NodeId& id) const {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    return spider_visited_.find(id) != spider_visited_.end();
+}
+
+void DhtClient::mark_spider_node_visited(const NodeId& id) {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    
+    // Clean up if too many visited nodes
+    if (spider_visited_.size() >= MAX_SPIDER_VISITED) {
+        // Clear half of the visited set (simple eviction)
+        auto it = spider_visited_.begin();
+        std::advance(it, spider_visited_.size() / 2);
+        spider_visited_.erase(spider_visited_.begin(), it);
+        LOG_DHT_DEBUG("Cleaned up spider visited set, now " << spider_visited_.size() << " entries");
+    }
+    
+    spider_visited_.insert(id);
+}
+
+void DhtClient::cleanup_spider_state() {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    
+    size_t nodes_count = spider_nodes_.size();
+    size_t visited_count = spider_visited_.size();
+    
+    spider_nodes_.clear();
+    spider_visited_.clear();
+    
+    LOG_DHT_DEBUG("Cleaned up spider state: " << nodes_count << " nodes, " 
+                  << visited_count << " visited entries cleared");
+}
+
+size_t DhtClient::get_spider_pool_size() const {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    return spider_nodes_.size();
+}
+
+size_t DhtClient::get_spider_visited_count() const {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    return spider_visited_.size();
+}
+
+void DhtClient::clear_spider_state() {
+    cleanup_spider_state();
 }
 
 void DhtClient::set_spider_announce_callback(SpiderAnnounceCallback callback) {
@@ -2600,28 +2780,46 @@ void DhtClient::spider_walk() {
         return;
     }
     
-    // Get a random node from the routing table and send find_node
+    // Get a random unvisited node from the spider pool and send find_node
     DhtNode target_node;
     bool found = false;
     
     {
-        std::lock_guard<std::mutex> lock(routing_table_mutex_);
+        std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
         
-        // Collect all nodes from non-empty buckets
-        std::vector<DhtNode*> all_nodes;
-        for (auto& bucket : routing_table_) {
-            for (auto& node : bucket) {
-                all_nodes.push_back(&node);
+        if (!spider_nodes_.empty()) {
+            // Try to find an unvisited node (up to 10 attempts)
+            static std::random_device rd;
+            static std::mt19937 gen(rd());
+            
+            for (int attempt = 0; attempt < 10 && !found; ++attempt) {
+                std::uniform_int_distribution<size_t> dis(0, spider_nodes_.size() - 1);
+                size_t idx = dis(gen);
+                
+                const auto& node = spider_nodes_[idx];
+                if (spider_visited_.find(node.id) == spider_visited_.end()) {
+                    target_node = node;
+                    spider_visited_.insert(node.id);
+                    found = true;
+                }
+            }
+            
+            // If all sampled nodes are visited, just pick any random one
+            // This ensures we keep walking even when most nodes are visited
+            if (!found && !spider_nodes_.empty()) {
+                std::uniform_int_distribution<size_t> dis(0, spider_nodes_.size() - 1);
+                target_node = spider_nodes_[dis(gen)];
+                found = true;
+                LOG_DHT_DEBUG("Spider walk: all sampled nodes visited, reusing node");
             }
         }
         
-        if (!all_nodes.empty()) {
-            // Pick a random node
-            static std::random_device rd;
-            static std::mt19937 gen(rd());
-            std::uniform_int_distribution<size_t> dis(0, all_nodes.size() - 1);
-            target_node = *all_nodes[dis(gen)];
-            found = true;
+        // Clean up visited set if it's getting too large
+        if (spider_visited_.size() >= MAX_SPIDER_VISITED) {
+            auto it = spider_visited_.begin();
+            std::advance(it, spider_visited_.size() / 2);
+            spider_visited_.erase(spider_visited_.begin(), it);
+            LOG_DHT_DEBUG("Spider walk: cleaned up visited set to " << spider_visited_.size() << " entries");
         }
     }
     
@@ -2629,12 +2827,33 @@ void DhtClient::spider_walk() {
         // Generate a random target ID for find_node (like spider.js does)
         NodeId random_target = generate_node_id();
         send_krpc_find_node(target_node.peer, random_target);
-        LOG_DHT_DEBUG("Spider walk: sent find_node to " << target_node.peer.ip << ":" << target_node.peer.port);
+        LOG_DHT_DEBUG("Spider walk: sent find_node to " << target_node.peer.ip << ":" << target_node.peer.port 
+                      << " (pool: " << spider_nodes_.size() << ", visited: " << spider_visited_.size() << ")");
     } else {
-        // No nodes in routing table, bootstrap
-        LOG_DHT_DEBUG("Spider walk: no nodes in routing table, re-bootstrapping");
-        for (const auto& bootstrap : get_default_bootstrap_nodes()) {
-            send_krpc_find_node(bootstrap, node_id_);
+        // No nodes in spider pool, seed from routing table or bootstrap
+        LOG_DHT_DEBUG("Spider walk: no nodes in spider pool, seeding...");
+        
+        // First try to seed from routing table
+        // Lock order: routing_table_mutex_ (3) -> spider_nodes_mutex_ (4)
+        {
+            std::lock_guard<std::mutex> rt_lock(routing_table_mutex_);
+            std::lock_guard<std::mutex> spider_lock(spider_nodes_mutex_);
+            
+            for (const auto& bucket : routing_table_) {
+                for (const auto& node : bucket) {
+                    if (spider_nodes_.size() < MAX_SPIDER_NODES) {
+                        spider_nodes_.push_back(node);
+                    }
+                }
+            }
+        }
+        
+        // If still empty, bootstrap
+        if (spider_nodes_.empty()) {
+            LOG_DHT_DEBUG("Spider walk: routing table empty too, re-bootstrapping");
+            for (const auto& bootstrap : get_default_bootstrap_nodes()) {
+                send_krpc_find_node(bootstrap, node_id_);
+            }
         }
     }
 }

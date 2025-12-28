@@ -305,10 +305,28 @@ public:
     
     /**
      * Trigger a single spider walk iteration
-     * Sends find_node to a random node from the routing table
+     * Sends find_node to a random node from the spider pool
      * Should be called from external loop at desired frequency
      */
     void spider_walk();
+    
+    /**
+     * Get the size of the spider node pool
+     * @return Number of nodes in spider pool
+     */
+    size_t get_spider_pool_size() const;
+    
+    /**
+     * Get the number of visited nodes in spider mode
+     * @return Number of visited nodes
+     */
+    size_t get_spider_visited_count() const;
+    
+    /**
+     * Clear spider state (pool and visited nodes)
+     * Useful for resetting the spider walk
+     */
+    void clear_spider_state();
 #endif // RATS_SEARCH_FEATURES
     
     /**
@@ -351,9 +369,10 @@ private:
     // 1. pending_pings_mutex_           (Ping verification state, nodes_being_replaced_)
     // 2. pending_searches_mutex_        (Search state and transaction mappings)
     // 3. routing_table_mutex_           (core routing data)
-    // 4. announced_peers_mutex_         (Stored peer data)
-    // 5. peer_tokens_mutex_             (Token validation data)
-    // 6. shutdown_mutex_                (Lowest priority - can be locked independently)
+    // 4. spider_nodes_mutex_            (Spider mode: node pool and visited tracking) [RATS_SEARCH_FEATURES]
+    // 5. announced_peers_mutex_         (Stored peer data)
+    // 6. peer_tokens_mutex_             (Token validation data)
+    // 7. shutdown_mutex_                (Lowest priority - can be locked independently)
     //
     // Routing table (k-buckets)
     std::vector<std::vector<DhtNode>> routing_table_;
@@ -464,6 +483,20 @@ private:
     std::atomic<bool> spider_ignore_{false};  // When true, ignore incoming requests
     SpiderAnnounceCallback spider_announce_callback_;
     std::mutex spider_callbacks_mutex_;  // Protects spider callbacks
+    
+    // Spider node tracking - separate from routing table to keep it stable
+    std::vector<DhtNode> spider_nodes_;           // Pool of nodes for spider walking
+    std::unordered_set<NodeId> spider_visited_;   // Nodes we've already queried in current session
+    mutable std::mutex spider_nodes_mutex_;       // Lock order: 4 - Protects spider_nodes_ and spider_visited_
+    static constexpr size_t MAX_SPIDER_NODES = 2000;      // Max nodes to keep in spider pool
+    static constexpr size_t MAX_SPIDER_VISITED = 10000;   // Max visited nodes to track
+    
+    // Spider helper methods
+    void add_spider_node(const DhtNode& node);
+    void add_spider_nodes(const std::vector<DhtNode>& nodes);
+    bool is_spider_node_visited(const NodeId& id) const;
+    void mark_spider_node_visited(const NodeId& id);
+    void cleanup_spider_state();
 #endif // RATS_SEARCH_FEATURES
     
     // Helper functions

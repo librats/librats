@@ -227,6 +227,28 @@ void RatsClient::spider_walk() {
     dht_client_->spider_walk();
 }
 
+size_t RatsClient::get_spider_pool_size() const {
+    if (!dht_client_) {
+        return 0;
+    }
+    return dht_client_->get_spider_pool_size();
+}
+
+size_t RatsClient::get_spider_visited_count() const {
+    if (!dht_client_) {
+        return 0;
+    }
+    return dht_client_->get_spider_visited_count();
+}
+
+void RatsClient::clear_spider_state() {
+    if (!dht_client_) {
+        return;
+    }
+    dht_client_->clear_spider_state();
+    LOG_CLIENT_DEBUG("Spider state cleared");
+}
+
 }
 
 #endif // RATS_SEARCH_FEATURES
