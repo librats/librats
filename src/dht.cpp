@@ -1,4 +1,5 @@
 #include "dht.h"
+#include "crc32c.h"
 #include "network_utils.h"
 #include "logger.h"
 #include "socket.h"
@@ -28,17 +29,30 @@
 namespace librats {
 
 
-DhtClient::DhtClient(int port, const std::string& bind_address, const std::string& data_directory) 
+DhtClient::DhtClient(int port, const std::string& bind_address, 
+                     const std::string& data_directory, const std::string& external_ip) 
     : port_(port), bind_address_(bind_address), data_directory_(data_directory), 
-      socket_(INVALID_SOCKET_VALUE), running_(false) {
-    node_id_ = generate_node_id();
+      external_ip_(external_ip), socket_(INVALID_SOCKET_VALUE), running_(false) {
+    
+    // Generate node ID using BEP 42 if external IP is provided
+    if (!external_ip_.empty()) {
+        node_id_ = generate_node_id_from_ip(external_ip_);
+        LOG_DHT_INFO("DHT client created with BEP 42 node ID from IP " << external_ip_ 
+                     << ": " << node_id_to_hex(node_id_));
+    } else {
+        // Fallback to random node ID (will be updated when external IP is discovered)
+        node_id_ = generate_node_id();
+        LOG_DHT_INFO("DHT client created with random node ID: " << node_id_to_hex(node_id_) 
+                     << " (no external IP provided, may be blocked by some nodes)");
+    }
+    
     routing_table_.resize(NODE_ID_SIZE * 8);  // 160 buckets for 160-bit node IDs
     
     if (data_directory_.empty()) {
         data_directory_ = ".";
     }
     
-    LOG_DHT_INFO("DHT client created with node ID: " << node_id_to_hex(node_id_) <<
+    LOG_DHT_INFO("DHT client ready" <<
                  (bind_address_.empty() ? "" : " bind address: " + bind_address_) <<
                  " data directory: " << data_directory_);
 }
@@ -2461,6 +2475,247 @@ std::string node_id_to_hex(const NodeId& id) {
     return oss.str();
 }
 
+// ============================================================================
+// BEP 42 - DHT Security Extension
+// ============================================================================
+
+// Helper function to parse IPv4 address to bytes
+static bool parse_ipv4(const std::string& ip, uint8_t* bytes) {
+    int parts[4];
+    int count = sscanf(ip.c_str(), "%d.%d.%d.%d", &parts[0], &parts[1], &parts[2], &parts[3]);
+    if (count != 4) return false;
+    
+    for (int i = 0; i < 4; ++i) {
+        if (parts[i] < 0 || parts[i] > 255) return false;
+        bytes[i] = static_cast<uint8_t>(parts[i]);
+    }
+    return true;
+}
+
+// Helper function to parse IPv6 address to bytes
+static bool parse_ipv6(const std::string& ip, uint8_t* bytes) {
+    // Handle IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+    const std::string ipv4_mapped_prefix = "::ffff:";
+    if (ip.compare(0, ipv4_mapped_prefix.size(), ipv4_mapped_prefix) == 0) {
+        // Parse as IPv4 and put in the right place
+        std::string ipv4_part = ip.substr(ipv4_mapped_prefix.size());
+        std::fill(bytes, bytes + 10, 0);
+        bytes[10] = 0xff;
+        bytes[11] = 0xff;
+        return parse_ipv4(ipv4_part, bytes + 12);
+    }
+    
+    // Parse full IPv6 address
+    uint16_t parts[8] = {0};
+    int part_count = 0;
+    int double_colon_pos = -1;
+    
+    std::string current;
+    bool last_was_colon = false;
+    
+    for (size_t i = 0; i <= ip.length(); ++i) {
+        char c = (i < ip.length()) ? ip[i] : ':';
+        
+        if (c == ':') {
+            if (last_was_colon) {
+                if (double_colon_pos >= 0) return false; // Multiple ::
+                double_colon_pos = part_count;
+            } else if (!current.empty()) {
+                if (part_count >= 8) return false;
+                parts[part_count++] = static_cast<uint16_t>(std::stoul(current, nullptr, 16));
+                current.clear();
+            }
+            last_was_colon = true;
+        } else if (std::isxdigit(c)) {
+            current += c;
+            last_was_colon = false;
+        } else {
+            return false; // Invalid character
+        }
+    }
+    
+    // Handle :: expansion
+    if (double_colon_pos >= 0) {
+        int zeros_needed = 8 - part_count;
+        if (zeros_needed < 0) return false;
+        
+        // Shift parts after :: to the end
+        for (int i = part_count - 1; i >= double_colon_pos; --i) {
+            parts[i + zeros_needed] = parts[i];
+        }
+        // Fill with zeros
+        for (int i = 0; i < zeros_needed; ++i) {
+            parts[double_colon_pos + i] = 0;
+        }
+    } else if (part_count != 8) {
+        return false;
+    }
+    
+    // Convert to bytes
+    for (int i = 0; i < 8; ++i) {
+        bytes[i * 2] = static_cast<uint8_t>(parts[i] >> 8);
+        bytes[i * 2 + 1] = static_cast<uint8_t>(parts[i] & 0xFF);
+    }
+    
+    return true;
+}
+
+bool is_local_ip(const std::string& ip_address) {
+    uint8_t bytes[16];
+    
+    // Check IPv4
+    if (parse_ipv4(ip_address, bytes)) {
+        // 10.0.0.0/8
+        if (bytes[0] == 10) return true;
+        // 172.16.0.0/12
+        if (bytes[0] == 172 && (bytes[1] >= 16 && bytes[1] <= 31)) return true;
+        // 192.168.0.0/16
+        if (bytes[0] == 192 && bytes[1] == 168) return true;
+        // 127.0.0.0/8 (loopback)
+        if (bytes[0] == 127) return true;
+        // 169.254.0.0/16 (link-local)
+        if (bytes[0] == 169 && bytes[1] == 254) return true;
+        return false;
+    }
+    
+    // Check IPv6
+    if (parse_ipv6(ip_address, bytes)) {
+        // ::1 (loopback)
+        bool is_loopback = true;
+        for (int i = 0; i < 15; ++i) {
+            if (bytes[i] != 0) { is_loopback = false; break; }
+        }
+        if (is_loopback && bytes[15] == 1) return true;
+        
+        // fe80::/10 (link-local)
+        if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) return true;
+        
+        // fc00::/7 (unique local)
+        if ((bytes[0] & 0xfe) == 0xfc) return true;
+        
+        // ::ffff:0:0/96 (IPv4-mapped, check the IPv4 part)
+        bool is_ipv4_mapped = true;
+        for (int i = 0; i < 10; ++i) {
+            if (bytes[i] != 0) { is_ipv4_mapped = false; break; }
+        }
+        if (is_ipv4_mapped && bytes[10] == 0xff && bytes[11] == 0xff) {
+            // Check the IPv4 part
+            if (bytes[12] == 10) return true;
+            if (bytes[12] == 172 && (bytes[13] >= 16 && bytes[13] <= 31)) return true;
+            if (bytes[12] == 192 && bytes[13] == 168) return true;
+            if (bytes[12] == 127) return true;
+            if (bytes[12] == 169 && bytes[13] == 254) return true;
+        }
+        
+        return false;
+    }
+    
+    // Unknown format, assume not local
+    return false;
+}
+
+NodeId generate_node_id_from_ip_impl(const std::string& ip_address, uint32_t r) {
+    NodeId id;
+    std::fill(id.begin(), id.end(), 0);
+    
+    uint8_t ip_bytes[16];
+    int num_octets = 0;
+    
+    // BEP 42 masks for IPv4 and IPv6
+    // These masks determine which bits of the IP are used in the hash
+    static const uint8_t v4mask[] = { 0x03, 0x0f, 0x3f, 0xff };
+    static const uint8_t v6mask[] = { 0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff };
+    const uint8_t* mask = nullptr;
+    
+    // Try to parse as IPv4 first
+    if (parse_ipv4(ip_address, ip_bytes)) {
+        num_octets = 4;
+        mask = v4mask;
+    } else if (parse_ipv6(ip_address, ip_bytes)) {
+        num_octets = 8;
+        mask = v6mask;
+    } else {
+        // Invalid IP, fall back to random
+        LOG_DHT_WARN("Invalid IP address for BEP 42: " << ip_address << ", using random ID");
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(0, 255);
+        for (size_t i = 0; i < NODE_ID_SIZE; ++i) {
+            id[i] = static_cast<uint8_t>(dis(gen));
+        }
+        return id;
+    }
+    
+    // Apply mask to IP bytes
+    for (int i = 0; i < num_octets; ++i) {
+        ip_bytes[i] &= mask[i];
+    }
+    
+    // Mix in the random value (3 bits)
+    ip_bytes[0] |= static_cast<uint8_t>((r & 0x7) << 5);
+    
+    // Calculate CRC32C of the masked IP
+    uint32_t c;
+    if (num_octets == 4) {
+        // For IPv4, hash as a 32-bit value
+        uint32_t ip_val = (static_cast<uint32_t>(ip_bytes[0]) << 24) |
+                          (static_cast<uint32_t>(ip_bytes[1]) << 16) |
+                          (static_cast<uint32_t>(ip_bytes[2]) << 8) |
+                          (static_cast<uint32_t>(ip_bytes[3]));
+        c = crc32c(&ip_val, 4);
+    } else {
+        // For IPv6, hash 8 bytes
+        c = crc32c(ip_bytes, 8);
+    }
+    
+    // Set the first 3 bytes based on CRC
+    // BEP 42: first 21 bits come from the CRC
+    id[0] = static_cast<uint8_t>((c >> 24) & 0xff);
+    id[1] = static_cast<uint8_t>((c >> 16) & 0xff);
+    id[2] = static_cast<uint8_t>(((c >> 8) & 0xf8) | (std::rand() & 0x07));
+    
+    // Fill the rest with random bytes
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 255);
+    for (int i = 3; i < 19; ++i) {
+        id[i] = static_cast<uint8_t>(dis(gen));
+    }
+    
+    // Store the random value in the last byte (for verification)
+    id[19] = static_cast<uint8_t>(r & 0xff);
+    
+    return id;
+}
+
+NodeId generate_node_id_from_ip(const std::string& ip_address) {
+    // Generate a random value for BEP 42
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<uint32_t> dis(0, 0xFFFFFFFF);
+    uint32_t r = dis(gen);
+    
+    return generate_node_id_from_ip_impl(ip_address, r);
+}
+
+bool verify_node_id(const NodeId& id, const std::string& ip_address) {
+    // No need to verify local IPs
+    if (is_local_ip(ip_address)) {
+        return true;
+    }
+    
+    // Generate expected ID using the random value from id[19]
+    NodeId expected = generate_node_id_from_ip_impl(ip_address, id[19]);
+    
+    // BEP 42: Verify first 21 bits match
+    // id[0] must match exactly
+    // id[1] must match exactly
+    // id[2] top 5 bits must match (mask 0xf8)
+    return id[0] == expected[0] && 
+           id[1] == expected[1] && 
+           (id[2] & 0xf8) == (expected[2] & 0xf8);
+}
+
 // Routing table persistence implementation
 bool DhtClient::save_routing_table() {
     std::lock_guard<std::mutex> lock(routing_table_mutex_);
@@ -2637,6 +2892,29 @@ void DhtClient::set_data_directory(const std::string& directory) {
         data_directory_ = ".";
     }
     LOG_DHT_DEBUG("Data directory set to: " << data_directory_);
+}
+
+void DhtClient::set_external_ip(const std::string& external_ip) {
+    if (external_ip.empty()) {
+        LOG_DHT_WARN("Attempted to set empty external IP");
+        return;
+    }
+    
+    // Skip if IP hasn't changed
+    if (external_ip_ == external_ip) {
+        return;
+    }
+    
+    std::string old_ip = external_ip_;
+    NodeId old_id = node_id_;
+    
+    external_ip_ = external_ip;
+    node_id_ = generate_node_id_from_ip(external_ip_);
+    
+    LOG_DHT_INFO("External IP updated from " << (old_ip.empty() ? "(none)" : old_ip) 
+                 << " to " << external_ip_);
+    LOG_DHT_INFO("Node ID regenerated from " << node_id_to_hex(old_id) 
+                 << " to " << node_id_to_hex(node_id_) << " (BEP 42 compliant)");
 }
 
 #ifdef RATS_SEARCH_FEATURES

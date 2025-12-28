@@ -506,4 +506,144 @@ TEST_F(DhtTest, DataDirectoryConfigurationTest) {
     DhtClient client2(0, "", "");
     EXPECT_TRUE(client2.start());
     client2.stop();
+}
+
+// Test BEP 42 - DHT Security Extension (Node ID generation from IP)
+TEST_F(DhtTest, BEP42NodeIdGenerationTest) {
+    // Test IPv4 node ID generation
+    std::string ipv4 = "192.168.1.100";
+    NodeId id1 = generate_node_id_from_ip(ipv4);
+    
+    // Each generated ID should be valid (20 bytes)
+    EXPECT_EQ(id1.size(), NODE_ID_SIZE);
+    
+    // Generate with same IP but different random - will have different CRC
+    // because BEP 42 mixes the random value into the IP before hashing
+    NodeId id2 = generate_node_id_from_ip(ipv4);
+    EXPECT_EQ(id2.size(), NODE_ID_SIZE);
+    
+    // Both should verify against the same IP (using their stored r values)
+    EXPECT_TRUE(verify_node_id(id1, ipv4));
+    EXPECT_TRUE(verify_node_id(id2, ipv4));
+    
+    // Test with the implementation function using same random value
+    // This should produce identical CRCs
+    NodeId id3 = generate_node_id_from_ip_impl(ipv4, 42);
+    NodeId id4 = generate_node_id_from_ip_impl(ipv4, 42);
+    EXPECT_EQ(id3[0], id4[0]);
+    EXPECT_EQ(id3[1], id4[1]);
+    EXPECT_EQ(id3[2] & 0xf8, id4[2] & 0xf8);  // First 5 bits of byte 2 should match
+    EXPECT_EQ(id3[19], id4[19]);  // r value stored in last byte
+    EXPECT_EQ(id3[19], 42);       // Should store the r value
+    
+    // Test IPv6 node ID generation
+    NodeId id5 = generate_node_id_from_ip("2001:db8::1");
+    EXPECT_EQ(id5.size(), NODE_ID_SIZE);
+    
+    // Test with loopback
+    NodeId id6 = generate_node_id_from_ip("::1");
+    EXPECT_EQ(id6.size(), NODE_ID_SIZE);
+    
+    // Test public IP
+    NodeId id7 = generate_node_id_from_ip("8.8.8.8");
+    EXPECT_EQ(id7.size(), NODE_ID_SIZE);
+    EXPECT_TRUE(verify_node_id(id7, "8.8.8.8"));
+}
+
+// Test BEP 42 - Node ID verification
+TEST_F(DhtTest, BEP42NodeIdVerificationTest) {
+    // Generate a node ID from an IP and verify it
+    std::string test_ip = "8.8.8.8";
+    NodeId id = generate_node_id_from_ip(test_ip);
+    
+    // Should verify successfully against the same IP
+    EXPECT_TRUE(verify_node_id(id, test_ip));
+    
+    // Should fail verification against a different IP (usually)
+    // Note: There's a small chance this could pass due to hash collision
+    // but it's extremely unlikely for a well-designed hash
+    NodeId id_for_other = generate_node_id_from_ip("9.9.9.9");
+    // Just test that verification doesn't crash
+    bool result = verify_node_id(id_for_other, "8.8.8.8");
+    // We don't assert the result since it depends on hash values
+    (void)result;
+    
+    // Local IPs should always pass verification (BEP 42 skips local IPs)
+    NodeId random_id;
+    random_id.fill(0xFF);
+    EXPECT_TRUE(verify_node_id(random_id, "192.168.1.1"));
+    EXPECT_TRUE(verify_node_id(random_id, "10.0.0.1"));
+    EXPECT_TRUE(verify_node_id(random_id, "127.0.0.1"));
+}
+
+// Test is_local_ip function
+TEST_F(DhtTest, IsLocalIpTest) {
+    // IPv4 private ranges
+    EXPECT_TRUE(is_local_ip("10.0.0.1"));
+    EXPECT_TRUE(is_local_ip("10.255.255.255"));
+    EXPECT_TRUE(is_local_ip("172.16.0.1"));
+    EXPECT_TRUE(is_local_ip("172.31.255.255"));
+    EXPECT_TRUE(is_local_ip("192.168.0.1"));
+    EXPECT_TRUE(is_local_ip("192.168.255.255"));
+    EXPECT_TRUE(is_local_ip("127.0.0.1"));
+    EXPECT_TRUE(is_local_ip("169.254.1.1"));
+    
+    // IPv4 public addresses
+    EXPECT_FALSE(is_local_ip("8.8.8.8"));
+    EXPECT_FALSE(is_local_ip("1.1.1.1"));
+    EXPECT_FALSE(is_local_ip("208.67.222.222"));
+    
+    // IPv6 local addresses
+    EXPECT_TRUE(is_local_ip("::1"));
+    EXPECT_TRUE(is_local_ip("fe80::1"));
+    EXPECT_TRUE(is_local_ip("fc00::1"));
+    
+    // IPv6 public addresses (example)
+    EXPECT_FALSE(is_local_ip("2001:4860:4860::8888"));
+}
+
+// Test DhtClient with BEP 42 external IP
+TEST_F(DhtTest, DhtClientWithExternalIpTest) {
+    std::string external_ip = "203.0.113.50";  // Documentation IP (RFC 5737)
+    
+    DhtClient client(0, "", "", external_ip);
+    
+    // Node ID should be generated from the external IP
+    NodeId id = client.get_node_id();
+    EXPECT_EQ(id.size(), NODE_ID_SIZE);
+    
+    // Verify the node ID matches the expected format
+    EXPECT_TRUE(verify_node_id(id, external_ip));
+    
+    // Start and stop should work
+    EXPECT_TRUE(client.start());
+    EXPECT_TRUE(client.is_running());
+    client.stop();
+    EXPECT_FALSE(client.is_running());
+}
+
+// Test set_external_ip method
+TEST_F(DhtTest, SetExternalIpTest) {
+    DhtClient client(0);  // Create with random ID
+    
+    NodeId old_id = client.get_node_id();
+    std::string new_ip = "198.51.100.10";  // Documentation IP (RFC 5737)
+    
+    // Set external IP
+    client.set_external_ip(new_ip);
+    
+    NodeId new_id = client.get_node_id();
+    
+    // ID should have changed
+    EXPECT_NE(old_id, new_id);
+    
+    // New ID should verify against the new IP
+    EXPECT_TRUE(verify_node_id(new_id, new_ip));
+    
+    // External IP should be stored
+    EXPECT_EQ(client.get_external_ip(), new_ip);
+    
+    // Setting the same IP again should not change the ID
+    client.set_external_ip(new_ip);
+    EXPECT_EQ(client.get_node_id(), new_id);
 } 

@@ -1752,10 +1752,14 @@ bool RatsClient::start_dht_discovery(int dht_port) {
         return true;
     }
     
-    LOG_CLIENT_INFO("Starting DHT discovery on port " << dht_port <<
-                   (bind_address_.empty() ? "" : " bound to " + bind_address_));
+    // Get external IP for BEP 42 compliant node ID generation
+    std::string external_ip = get_public_ip();
     
-    dht_client_ = std::make_unique<DhtClient>(dht_port, bind_address_, data_directory_);
+    LOG_CLIENT_INFO("Starting DHT discovery on port " << dht_port <<
+                   (bind_address_.empty() ? "" : " bound to " + bind_address_) <<
+                   (external_ip.empty() ? "" : " with external IP " + external_ip));
+    
+    dht_client_ = std::make_unique<DhtClient>(dht_port, bind_address_, data_directory_, external_ip);
     if (!dht_client_->start()) {
         LOG_CLIENT_ERROR("Failed to start DHT client");
         dht_client_.reset();

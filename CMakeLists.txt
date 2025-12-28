@@ -120,6 +120,8 @@ set(LIBRARY_SOURCES
     src/socket.h
     src/network_utils.cpp
     src/network_utils.h
+    src/crc32c.cpp
+    src/crc32c.h
     src/dht.cpp
     src/dht.h
     src/bencode.cpp
@@ -307,6 +309,7 @@ if(RATS_BUILD_TESTS)
         tests/test_socket.cpp
         tests/test_bencode.cpp
         tests/test_sha1.cpp
+        tests/test_crc32c.cpp
         tests/test_network_utils.cpp
         tests/test_dht.cpp
         tests/test_rats_client.cpp

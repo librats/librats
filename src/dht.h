@@ -165,8 +165,11 @@ public:
      * Constructor
      * @param port The UDP port to bind to (default: 6881)
      * @param bind_address The interface IP address to bind to (empty for all interfaces)
+     * @param data_directory Directory for storing persistent data (routing table, etc.)
+     * @param external_ip External IP address for BEP 42 node ID generation (empty for random ID)
      */
-    DhtClient(int port = DHT_PORT, const std::string& bind_address = "", const std::string& data_directory = "");
+    DhtClient(int port = DHT_PORT, const std::string& bind_address = "", 
+              const std::string& data_directory = "", const std::string& external_ip = "");
     
     /**
      * Destructor
@@ -352,11 +355,25 @@ public:
      * @param directory Directory path
      */
     void set_data_directory(const std::string& directory);
+    
+    /**
+     * Set external IP address and regenerate node ID (BEP 42)
+     * Call this when the external IP is discovered (e.g., via STUN)
+     * @param external_ip The external/public IP address
+     */
+    void set_external_ip(const std::string& external_ip);
+    
+    /**
+     * Get the current external IP address
+     * @return The external IP address, or empty if not set
+     */
+    const std::string& get_external_ip() const { return external_ip_; }
 
 private:
     int port_;
     std::string bind_address_;
     std::string data_directory_;
+    std::string external_ip_;        // External IP for BEP 42 node ID generation
     NodeId node_id_;
     socket_t socket_;
     std::atomic<bool> running_;
@@ -575,6 +592,44 @@ private:
 /**
  * Utility functions
  */
+
+/**
+ * Generate a BEP 42 compliant node ID from an IP address
+ * This ensures the node ID is derived from the IP address using CRC32C,
+ * which allows other nodes to verify the ID and prevents Sybil attacks.
+ * 
+ * @param ip_address The IP address (IPv4 or IPv6) to derive the node ID from
+ * @return NodeId derived from the IP address
+ */
+NodeId generate_node_id_from_ip(const std::string& ip_address);
+
+/**
+ * Generate a BEP 42 compliant node ID from an IP address with a specific random value
+ * This is the implementation function that allows specifying the random component.
+ * 
+ * @param ip_address The IP address (IPv4 or IPv6) to derive the node ID from
+ * @param r Random value used in the generation (lowest byte stored in id[19])
+ * @return NodeId derived from the IP address
+ */
+NodeId generate_node_id_from_ip_impl(const std::string& ip_address, uint32_t r);
+
+/**
+ * Verify if a node ID is valid for a given IP address (BEP 42)
+ * This checks if the first 21 bits of the node ID match what would be
+ * generated from the IP address.
+ * 
+ * @param id The node ID to verify
+ * @param ip_address The IP address to verify against
+ * @return true if the node ID is valid for this IP, false otherwise
+ */
+bool verify_node_id(const NodeId& id, const std::string& ip_address);
+
+/**
+ * Check if an IP address is local/private (no verification needed for local IPs)
+ * @param ip_address The IP address to check
+ * @return true if the IP is local/private, false otherwise
+ */
+bool is_local_ip(const std::string& ip_address);
 
 /**
  * Convert string to NodeId

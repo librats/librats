@@ -156,6 +156,13 @@ bool RatsClient::discover_and_ignore_public_ip(const std::string& stun_server, i
     
     LOG_NAT_INFO("Discovered public IP address: " << public_address.ip << " (port: " << public_address.port << ")");
     
+    // Update DHT client with external IP for BEP 42 compliance
+    // This regenerates the node ID based on the discovered IP
+    if (dht_client_ && dht_client_->is_running()) {
+        dht_client_->set_external_ip(public_address.ip);
+        LOG_NAT_INFO("Updated DHT node ID with external IP for BEP 42 compliance");
+    }
+    
     // Add to ignore list
     add_ignored_address(public_address.ip);
     
