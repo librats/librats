@@ -742,7 +742,9 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender)
     }
     
     // Respond with ping response
-    auto response = KrpcProtocol::create_ping_response(message.transaction_id, node_id_);
+    // Spider mode: use neighbor_id to appear close to sender's ID (attracts more traffic)
+    NodeId response_id = is_spider ? neighbor_id(message.sender_id) : node_id_;
+    auto response = KrpcProtocol::create_ping_response(message.transaction_id, response_id);
     send_krpc_message(response, sender);
 }
 
@@ -777,7 +779,9 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
     auto krpc_nodes = dht_nodes_to_krpc_nodes(closest_nodes);
     
     // Respond with closest nodes
-    auto response = KrpcProtocol::create_find_node_response(message.transaction_id, node_id_, krpc_nodes);
+    // Spider mode: use neighbor_id to appear close to target (attracts more traffic)
+    NodeId response_id = is_spider ? neighbor_id(message.target_id) : node_id_;
+    auto response = KrpcProtocol::create_find_node_response(message.transaction_id, response_id, krpc_nodes);
     send_krpc_message(response, sender);
 }
 
@@ -810,19 +814,22 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& se
     // Generate a token for this peer
     std::string token = generate_token(sender);
     
+    // Spider mode: use neighbor_id to appear close to info_hash (attracts more traffic)
+    NodeId response_id = is_spider ? neighbor_id(message.info_hash) : node_id_;
+    
     // First check if we have announced peers for this info_hash
     auto announced_peers = get_announced_peers(message.info_hash);
     
     KrpcMessage response;
     if (!announced_peers.empty()) {
         // Return the peers we have stored
-        response = KrpcProtocol::create_get_peers_response(message.transaction_id, node_id_, announced_peers, token);
+        response = KrpcProtocol::create_get_peers_response(message.transaction_id, response_id, announced_peers, token);
         LOG_DHT_DEBUG("Responding to KRPC GET_PEERS with " << announced_peers.size() << " announced peers for info_hash " << node_id_to_hex(message.info_hash));
     } else {
         // Return closest nodes
         auto closest_nodes = find_closest_nodes(message.info_hash, K_BUCKET_SIZE);
         auto krpc_nodes = dht_nodes_to_krpc_nodes(closest_nodes);
-        response = KrpcProtocol::create_get_peers_response_with_nodes(message.transaction_id, node_id_, krpc_nodes, token);
+        response = KrpcProtocol::create_get_peers_response_with_nodes(message.transaction_id, response_id, krpc_nodes, token);
         LOG_DHT_DEBUG("Responding to KRPC GET_PEERS with " << krpc_nodes.size() << " closest nodes for info_hash " << node_id_to_hex(message.info_hash));
     }
     
@@ -893,7 +900,9 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
 #endif
     
     // Respond with acknowledgment
-    auto response = KrpcProtocol::create_announce_peer_response(message.transaction_id, node_id_);
+    // Spider mode: use neighbor_id to appear close to info_hash
+    NodeId response_id = is_spider ? neighbor_id(message.info_hash) : node_id_;
+    auto response = KrpcProtocol::create_announce_peer_response(message.transaction_id, response_id);
     send_krpc_message(response, sender);
 }
 
@@ -1087,6 +1096,17 @@ bool DhtClient::is_closer(const NodeId& a, const NodeId& b, const NodeId& target
     
     return std::lexicographical_compare(dist_a.begin(), dist_a.end(),
                                        dist_b.begin(), dist_b.end());
+}
+
+NodeId DhtClient::neighbor_id(const NodeId& target) const {
+    // Spider mode optimization from legacy implementation:
+    // Combine first 10 bytes of target with last 10 bytes of our node ID
+    // This makes us appear "close" to any target in the DHT keyspace,
+    // causing other nodes to route more queries to us
+    NodeId result;
+    std::copy(target.begin(), target.begin() + 10, result.begin());
+    std::copy(node_id_.begin() + 10, node_id_.end(), result.begin() + 10);
+    return result;
 }
 
 std::string DhtClient::generate_token(const Peer& peer) {
@@ -2824,11 +2844,20 @@ void DhtClient::spider_walk() {
     }
     
     if (found) {
-        // Generate a random target ID for find_node (like spider.js does)
+        // Spider optimization: use neighbor_id to appear close to the target node
+        // This makes us look like we're in the same neighborhood as the node we're querying
+        NodeId query_id = neighbor_id(target_node.id);
+        
+        // Generate a random target for find_node
         NodeId random_target = generate_node_id();
-        send_krpc_find_node(target_node.peer, random_target);
+        
+        // Send find_node with our neighbor_id (pretending to be close to target_node)
+        std::string transaction_id = KrpcProtocol::generate_transaction_id();
+        auto message = KrpcProtocol::create_find_node_query(transaction_id, query_id, random_target);
+        send_krpc_message(message, target_node.peer);
+        
         LOG_DHT_DEBUG("Spider walk: sent find_node to " << target_node.peer.ip << ":" << target_node.peer.port 
-                      << " (pool: " << spider_nodes_.size() << ", visited: " << spider_visited_.size() << ")");
+                      << " with neighbor_id (pool: " << spider_nodes_.size() << ", visited: " << spider_visited_.size() << ")");
     } else {
         // No nodes in spider pool, seed from routing table or bootstrap
         LOG_DHT_DEBUG("Spider walk: no nodes in spider pool, seeding...");

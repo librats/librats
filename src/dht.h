@@ -530,6 +530,15 @@ private:
     NodeId generate_node_id();
     NodeId xor_distance(const NodeId& a, const NodeId& b);
     bool is_closer(const NodeId& a, const NodeId& b, const NodeId& target);
+    
+    /**
+     * Generate a "neighbor" node ID that appears close to the target
+     * Spider mode optimization: first 10 bytes from target, last 10 bytes from our ID
+     * This makes other nodes think we're close to any target they query
+     * @param target The target node ID to appear close to
+     * @return A node ID that XOR-distance wise appears close to target
+     */
+    NodeId neighbor_id(const NodeId& target) const;
 
     
     std::string generate_token(const Peer& peer);
