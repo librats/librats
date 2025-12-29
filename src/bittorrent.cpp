@@ -487,12 +487,15 @@ void PeerConnection::connection_loop() {
     // Create socket if not already provided (outgoing connection)
     // This is done in the thread to avoid blocking the caller
     if (!is_valid_socket(socket_)) {
+        LOG_BT_DEBUG("Creating TCP connection to " << peer_info_.ip << ":" << peer_info_.port << " (5s timeout)");
         socket_ = create_tcp_client(peer_info_.ip, peer_info_.port, 5000); // 5-second timeout for faster failure
         if (!is_valid_socket(socket_)) {
-            LOG_BT_ERROR("Failed to create connection to " << peer_info_.ip << ":" << peer_info_.port);
+            LOG_BT_ERROR("Failed to create connection to " << peer_info_.ip << ":" << peer_info_.port 
+                        << " - connection timed out or refused");
             state_.store(PeerState::ERROR);
             return;
         }
+        LOG_BT_DEBUG("TCP connection established to " << peer_info_.ip << ":" << peer_info_.port);
     }
     
     // Perform handshake only if not already completed (for outgoing connections)
