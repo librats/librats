@@ -1455,6 +1455,33 @@ public:
     void get_torrent_metadata(const std::string& info_hash_hex, 
                              std::function<void(const TorrentInfo&, bool, const std::string&)> callback);
     
+    /**
+     * Get torrent metadata directly from a specific peer (fast path - no DHT search needed)
+     * This is more efficient when you already know a peer that has the torrent (e.g., from announce_peer)
+     * @param info_hash Info hash of the torrent
+     * @param peer_ip IP address of the peer
+     * @param peer_port Port of the peer
+     * @param callback Function called when metadata is retrieved (torrent_info, success, error_message)
+     * @note This only retrieves metadata via BEP 9, it does not start downloading
+     */
+    void get_torrent_metadata_from_peer(const InfoHash& info_hash,
+                                        const std::string& peer_ip,
+                                        uint16_t peer_port,
+                                        std::function<void(const TorrentInfo&, bool, const std::string&)> callback);
+    
+    /**
+     * Get torrent metadata directly from a specific peer by hex string (fast path)
+     * @param info_hash_hex Info hash as 40-character hex string
+     * @param peer_ip IP address of the peer
+     * @param peer_port Port of the peer
+     * @param callback Function called when metadata is retrieved (torrent_info, success, error_message)
+     * @note This only retrieves metadata via BEP 9, it does not start downloading
+     */
+    void get_torrent_metadata_from_peer(const std::string& info_hash_hex,
+                                        const std::string& peer_ip,
+                                        uint16_t peer_port,
+                                        std::function<void(const TorrentInfo&, bool, const std::string&)> callback);
+    
     // =========================================================================
     // Spider Mode API (requires RATS_SEARCH_FEATURES)
     // =========================================================================

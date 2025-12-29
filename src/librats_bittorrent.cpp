@@ -162,6 +162,38 @@ void RatsClient::get_torrent_metadata(const std::string& info_hash_hex,
     bittorrent_client_->get_torrent_metadata_by_hash(info_hash_hex, callback);
 }
 
+void RatsClient::get_torrent_metadata_from_peer(const InfoHash& info_hash,
+                                                const std::string& peer_ip,
+                                                uint16_t peer_port,
+                                                std::function<void(const TorrentInfo&, bool, const std::string&)> callback) {
+    if (!is_bittorrent_enabled()) {
+        LOG_CLIENT_ERROR("BitTorrent is not enabled. Call enable_bittorrent() first.");
+        if (callback) {
+            callback(TorrentInfo(), false, "BitTorrent is not enabled");
+        }
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Fetching metadata from peer " << peer_ip << ":" << peer_port << " (fast path)");
+    bittorrent_client_->get_torrent_metadata_from_peer(info_hash, peer_ip, peer_port, callback);
+}
+
+void RatsClient::get_torrent_metadata_from_peer(const std::string& info_hash_hex,
+                                                const std::string& peer_ip,
+                                                uint16_t peer_port,
+                                                std::function<void(const TorrentInfo&, bool, const std::string&)> callback) {
+    if (!is_bittorrent_enabled()) {
+        LOG_CLIENT_ERROR("BitTorrent is not enabled. Call enable_bittorrent() first.");
+        if (callback) {
+            callback(TorrentInfo(), false, "BitTorrent is not enabled");
+        }
+        return;
+    }
+    
+    LOG_CLIENT_INFO("Fetching metadata from peer " << peer_ip << ":" << peer_port << " (fast path, hex)");
+    bittorrent_client_->get_torrent_metadata_from_peer(info_hash_hex, peer_ip, peer_port, callback);
+}
+
 //=============================================================================
 // Spider Mode API Implementation (requires RATS_SEARCH_FEATURES)
 //=============================================================================

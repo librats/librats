@@ -3566,6 +3566,155 @@ void BitTorrentClient::get_torrent_metadata_by_hash(const std::string& info_hash
     get_torrent_metadata_by_hash(info_hash, callback);
 }
 
+void BitTorrentClient::get_torrent_metadata_from_peer(const InfoHash& info_hash, 
+                                                       const std::string& peer_ip, 
+                                                       uint16_t peer_port,
+                                                       MetadataRetrievalCallback callback) {
+    if (!running_.load()) {
+        LOG_BT_ERROR("BitTorrent client is not running");
+        if (callback) {
+            callback(TorrentInfo(), false, "BitTorrent client is not running");
+        }
+        return;
+    }
+    
+    LOG_BT_INFO("Retrieving metadata for hash " << info_hash_to_hex(info_hash) 
+               << " directly from peer " << peer_ip << ":" << peer_port);
+    
+    // Check if metadata retrieval already in progress for this hash
+    {
+        std::lock_guard<std::mutex> lock(metadata_mutex_);
+        if (metadata_only_torrents_.find(info_hash) != metadata_only_torrents_.end()) {
+            LOG_BT_DEBUG("Metadata retrieval already in progress for hash: " << info_hash_to_hex(info_hash));
+            // Just add this peer to the existing download attempt
+            auto it = metadata_only_torrents_.find(info_hash);
+            if (it != metadata_only_torrents_.end()) {
+                Peer peer{peer_ip, peer_port};
+                it->second->add_peer(peer);
+                LOG_BT_INFO("Added peer " << peer_ip << ":" << peer_port << " to existing metadata download");
+            }
+            return;
+        }
+        
+        // Store the callback
+        metadata_retrieval_callbacks_[info_hash] = callback;
+    }
+    
+    // Create a minimal TorrentInfo for metadata exchange
+    TorrentInfo metadata_torrent_info = TorrentInfo::create_for_metadata_exchange(info_hash);
+    
+    // Create a temporary torrent download for metadata exchange only
+    auto metadata_torrent = std::make_shared<TorrentDownload>(metadata_torrent_info, ""); // No download path needed
+    
+    // Set up metadata completion callback
+    // IMPORTANT: This callback is invoked from within a PeerConnection's thread, so we must NOT
+    // call stop() directly (which would try to join the calling thread, causing a deadlock).
+    // Instead, we defer the cleanup to a detached thread.
+    metadata_torrent->set_metadata_complete_callback([this, info_hash](const TorrentInfo& torrent_info) {
+        LOG_BT_INFO("Metadata retrieval (direct) completed for " << torrent_info.get_name());
+        
+        // Capture torrent_info by value since we're deferring to another thread
+        TorrentInfo captured_info = torrent_info;
+        
+        // Defer stop() and cleanup to a separate thread to avoid deadlock
+        std::thread([this, info_hash, captured_info]() {
+            MetadataRetrievalCallback user_callback;
+            std::shared_ptr<TorrentDownload> temp_torrent;
+            
+            // Get callback and cleanup
+            {
+                std::lock_guard<std::mutex> lock(metadata_mutex_);
+                auto it = metadata_retrieval_callbacks_.find(info_hash);
+                if (it != metadata_retrieval_callbacks_.end()) {
+                    user_callback = it->second;
+                    metadata_retrieval_callbacks_.erase(it);
+                }
+                
+                // Get temporary torrent to stop it
+                auto torrent_it = metadata_only_torrents_.find(info_hash);
+                if (torrent_it != metadata_only_torrents_.end()) {
+                    temp_torrent = torrent_it->second;
+                    metadata_only_torrents_.erase(torrent_it);
+                }
+            }
+            
+            // Stop the temporary torrent
+            if (temp_torrent) {
+                temp_torrent->stop();
+            }
+            
+            // Call user callback with success
+            if (user_callback) {
+                user_callback(captured_info, true, "");
+            }
+        }).detach();
+    });
+    
+    // Store the temporary torrent
+    {
+        std::lock_guard<std::mutex> lock(metadata_mutex_);
+        metadata_only_torrents_[info_hash] = metadata_torrent;
+    }
+    
+    // Start the metadata torrent (just for peer connections)
+    if (!metadata_torrent->start()) {
+        LOG_BT_ERROR("Failed to start metadata retrieval torrent");
+        
+        // Cleanup and call callback with error
+        {
+            std::lock_guard<std::mutex> lock(metadata_mutex_);
+            metadata_only_torrents_.erase(info_hash);
+            auto it = metadata_retrieval_callbacks_.find(info_hash);
+            if (it != metadata_retrieval_callbacks_.end()) {
+                if (it->second) {
+                    it->second(TorrentInfo(), false, "Failed to start metadata retrieval");
+                }
+                metadata_retrieval_callbacks_.erase(it);
+            }
+        }
+        return;
+    }
+    
+    // Directly connect to the specified peer - no DHT search needed!
+    Peer peer{peer_ip, peer_port};
+    LOG_BT_INFO("Connecting directly to peer " << peer_ip << ":" << peer_port << " for metadata exchange");
+    
+    if (metadata_torrent->add_peer(peer)) {
+        LOG_BT_INFO("Successfully initiated connection to peer " << peer_ip << ":" << peer_port);
+    } else {
+        LOG_BT_WARN("Failed to add peer " << peer_ip << ":" << peer_port << " - metadata retrieval may fail");
+        // Don't fail immediately - the peer connection might still work
+    }
+    
+    LOG_BT_INFO("Metadata retrieval (direct) initiated for hash " << info_hash_to_hex(info_hash));
+}
+
+void BitTorrentClient::get_torrent_metadata_from_peer(const std::string& info_hash_hex,
+                                                       const std::string& peer_ip,
+                                                       uint16_t peer_port,
+                                                       MetadataRetrievalCallback callback) {
+    InfoHash info_hash = hex_to_info_hash(info_hash_hex);
+    
+    // Validate the parsed hash
+    bool is_zero = true;
+    for (const auto& byte : info_hash) {
+        if (byte != 0) {
+            is_zero = false;
+            break;
+        }
+    }
+    
+    if (is_zero && info_hash_hex.length() == 40) {
+        LOG_BT_ERROR("Invalid info hash format: " << info_hash_hex);
+        if (callback) {
+            callback(TorrentInfo(), false, "Invalid info hash format");
+        }
+        return;
+    }
+    
+    get_torrent_metadata_from_peer(info_hash, peer_ip, peer_port, callback);
+}
+
 //=============================================================================
 // Utility Functions Implementation
 //=============================================================================
