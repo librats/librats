@@ -1704,7 +1704,6 @@ private:
     std::vector<std::string> local_interface_addresses_;
     mutable std::mutex local_addresses_mutex_;              // [6] Protects local interface addresses
     void initialize_local_addresses();
-    void refresh_local_addresses();
     bool is_blocked_address(const std::string& ip_address) const;
     bool should_ignore_peer(const std::string& ip, int port) const;
     static bool parse_address_string(const std::string& address_str, std::string& out_ip, int& out_port);
@@ -1737,7 +1736,6 @@ private:
     bool send_handshake_unlocked(socket_t socket, const std::string& our_peer_id);
     bool handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::string& message);
     void check_handshake_timeouts();
-    void log_handshake_completion(const RatsPeer& peer);
     void log_handshake_completion_unlocked(const RatsPeer& peer);
 
     // Automatic discovery
@@ -1745,7 +1743,6 @@ private:
     std::thread auto_discovery_thread_;
     void automatic_discovery_loop();
     void announce_rats_peer();
-    void search_rats_peers();
 
     // Message handling system
     nlohmann::json create_rats_message(const std::string& type, const nlohmann::json& payload, const std::string& sender_peer_id);
@@ -1778,7 +1775,6 @@ private:
     mutable std::mutex message_handlers_mutex_;             // [11] Protects message handlers
     
     void call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data);
-    void call_callback_safely(const MessageCallback& callback, const std::string& peer_id, const nlohmann::json& data);
     void remove_once_handlers(const std::string& message_type);
 
     // Per-socket synchronization helpers

@@ -1279,24 +1279,6 @@ void RatsClient::initialize_local_addresses() {
     }
 }
 
-void RatsClient::refresh_local_addresses() {
-    LOG_CLIENT_DEBUG("Refreshing local interface addresses");
-    
-    std::lock_guard<std::mutex> lock(local_addresses_mutex_);
-    
-    // Clear old addresses and get fresh ones
-    local_interface_addresses_.clear();
-    local_interface_addresses_ = network_utils::get_local_interface_addresses();
-    
-    // Add common localhost addresses if not already present
-    for (const auto& addr : localhost_addrs) {
-        if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
-            local_interface_addresses_.emplace_back(addr);
-        }
-    }
-    
-    LOG_CLIENT_DEBUG("Refreshed " << local_interface_addresses_.size() << " local addresses");
-}
 
 bool RatsClient::is_blocked_address(const std::string& ip_address) const {
     std::lock_guard<std::mutex> lock(local_addresses_mutex_);
@@ -1934,8 +1916,6 @@ bool RatsClient::is_automatic_discovery_running() const {
     return auto_discovery_running_.load();
 }
 
-// This function will be removed - implementation moved to end of file
-
 void RatsClient::automatic_discovery_loop() {
     LOG_CLIENT_INFO("Automatic peer discovery loop started");
     
@@ -2022,40 +2002,6 @@ void RatsClient::announce_rats_peer() {
     }
 }
 
-void RatsClient::search_rats_peers() {
-    if (!dht_client_ || !dht_client_->is_running()) {
-        LOG_CLIENT_WARN("DHT client not running, cannot search for peers");
-        return;
-    }
-    
-    std::string discovery_hash = get_discovery_hash();
-    LOG_CLIENT_INFO("Searching for peers using discovery hash: " << discovery_hash);
-    
-    InfoHash info_hash = hex_to_node_id(discovery_hash);
-
-    if (dht_client_->is_search_active(info_hash)) {
-        LOG_CLIENT_WARN("Search already in progress for info hash " << discovery_hash);
-        return;
-    }
-    
-    find_peers_by_hash(discovery_hash, [this, info_hash](const std::vector<std::string>& peer_addresses) {
-        LOG_CLIENT_INFO("Found " << peer_addresses.size() << " peers through DHT discovery");
-        
-        // Convert peer addresses back to Peer objects for handle_dht_peer_discovery()
-        std::vector<Peer> peers;
-        for (const auto& peer_address : peer_addresses) {
-            std::string ip;
-            int port;
-            if (parse_address_string(peer_address, ip, port)) {
-                peers.push_back(Peer(ip, port));
-                LOG_CLIENT_DEBUG("Discovered peer: " << peer_address);
-            }
-        }
-        
-        // Auto-connect to discovered RATS peers
-        handle_dht_peer_discovery(peers, info_hash);
-    });
-}
 
 std::string RatsClient::get_discovery_hash() const {
     std::lock_guard<std::mutex> lock(protocol_config_mutex_);
@@ -2069,8 +2015,6 @@ std::string RatsClient::get_rats_peer_discovery_hash() {
     // Compute SHA1 hash of "rats_peer_discovery_v1.0"
     return SHA1::hash("rats_peer_discovery_v1.0");
 }
-
-
 
 // =========================================================================
 // Protocol Configuration
@@ -2684,18 +2628,22 @@ bool RatsClient::parse_address_string(const std::string& address_str, std::strin
     return !out_ip.empty() && out_port > 0 && out_port <= 65535;
 }
 
-std::string get_box_separator() {
-    return supports_unicode() ? 
+// Cached formatting helpers - computed once on first use
+static const std::string& get_box_separator() {
+    static const std::string separator = supports_unicode() ? 
         "════════════════════════════════════════════════════════════════════" :
         "=====================================================================";
+    return separator;
 }
 
-std::string get_box_vertical() {
-    return supports_unicode() ? "│" : "|";
+static const std::string& get_box_vertical() {
+    static const std::string vertical = supports_unicode() ? "│" : "|";
+    return vertical;
 }
 
-std::string get_checkmark() {
-    return supports_unicode() ? "✓" : "[*]";
+static const std::string& get_checkmark() {
+    static const std::string checkmark = supports_unicode() ? "✓" : "[*]";
+    return checkmark;
 }
 
 void RatsClient::log_handshake_completion_unlocked(const RatsPeer& peer) {
@@ -2708,9 +2656,9 @@ void RatsClient::log_handshake_completion_unlocked(const RatsPeer& peer) {
     
     // Create visually appealing log output
     std::string connection_type = peer.is_outgoing ? "OUTGOING" : "INCOMING";
-    std::string separator = get_box_separator();
-    std::string vertical = get_box_vertical();
-    std::string checkmark = get_checkmark();
+    const std::string& separator = get_box_separator();
+    const std::string& vertical = get_box_vertical();
+    const std::string& checkmark = get_checkmark();
     
     LOG_CLIENT_INFO("");
     LOG_CLIENT_INFO(separator);
@@ -2726,11 +2674,6 @@ void RatsClient::log_handshake_completion_unlocked(const RatsPeer& peer) {
     
     LOG_CLIENT_INFO(separator);
     LOG_CLIENT_INFO("");
-}
-
-void RatsClient::log_handshake_completion(const RatsPeer& peer) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    log_handshake_completion_unlocked(peer);
 }
 
 } // namespace librats
