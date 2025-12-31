@@ -56,13 +56,11 @@ struct RatsPeer {
     
     HandshakeState handshake_state;         // Current handshake state
     std::string version;                    // Protocol version of remote peer
-    int peer_count;                         // Number of peers connected to remote peer
     std::chrono::steady_clock::time_point handshake_start_time; // When handshake started
     
     // Encryption-related fields
     bool encryption_enabled;                // Whether encryption is enabled for this peer
     bool noise_handshake_completed;         // Whether noise handshake is completed
-    NoiseKey remote_static_key;             // Remote peer's static public key (after handshake)
     
     // NAT traversal fields
     bool ice_enabled;                       // Whether ICE is enabled for this peer
@@ -71,19 +69,12 @@ struct RatsPeer {
     std::vector<IceCandidate> ice_candidates; // ICE candidates for this peer
     IceConnectionState ice_state;           // Current ICE connection state
     NatType detected_nat_type;              // Detected NAT type for this peer
-    std::string connection_method;          // How connection was established (direct, stun, turn, ice)
     
-    // Connection quality metrics
-    uint32_t rtt_ms;                        // Round-trip time in milliseconds
-    uint32_t packet_loss_percent;           // Packet loss percentage
-    std::string transport_protocol;         // UDP, TCP, etc.
     
     RatsPeer() : handshake_state(HandshakeState::PENDING), 
-                 peer_count(0), encryption_enabled(false), noise_handshake_completed(false),
-                 remote_static_key(),
+                 encryption_enabled(false), noise_handshake_completed(false),
                  ice_enabled(false), ice_state(IceConnectionState::NEW),
-                 detected_nat_type(NatType::UNKNOWN), rtt_ms(0), packet_loss_percent(0),
-                 transport_protocol("UDP") {
+                 detected_nat_type(NatType::UNKNOWN) {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
     }
@@ -92,11 +83,10 @@ struct RatsPeer {
              socket_t sock, const std::string& norm_addr, bool outgoing)
         : peer_id(id), ip(peer_ip), port(peer_port), socket(sock), 
           normalized_address(norm_addr), is_outgoing(outgoing),
-          handshake_state(HandshakeState::PENDING), peer_count(0),
+          handshake_state(HandshakeState::PENDING),
           encryption_enabled(false), noise_handshake_completed(false),
           ice_enabled(false), ice_state(IceConnectionState::NEW),
-          detected_nat_type(NatType::UNKNOWN), rtt_ms(0), packet_loss_percent(0),
-          transport_protocol("UDP") {
+          detected_nat_type(NatType::UNKNOWN) {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
     }
@@ -108,9 +98,6 @@ struct RatsPeer {
         return ice_state == IceConnectionState::CONNECTED || 
                ice_state == IceConnectionState::COMPLETED; 
     }
-    bool is_fully_connected() const {
-        return is_handshake_completed() && (!ice_enabled || is_ice_connected());
-    }
 };
 
 // NAT Traversal Configuration
@@ -119,7 +106,6 @@ struct NatTraversalConfig {
     bool enable_upnp;                       // Enable UPnP for port mapping
     bool enable_hole_punching;              // Enable UDP/TCP hole punching
     bool enable_turn_relay;                 // Enable TURN relay as last resort
-    bool prefer_ipv6;                       // Prefer IPv6 connections when available
     
     // ICE configuration
     std::vector<std::string> stun_servers;
@@ -127,24 +113,15 @@ struct NatTraversalConfig {
     std::vector<std::string> turn_usernames;
     std::vector<std::string> turn_passwords;
     
-    // Timeouts and limits
-    int ice_gathering_timeout_ms;
+    // Timeouts
     int ice_connectivity_timeout_ms;
-    int hole_punch_attempts;
     int turn_allocation_timeout_ms;
-    
-    // Priority settings
-    int host_candidate_priority;
-    int server_reflexive_priority;
-    int relay_candidate_priority;
     
     NatTraversalConfig() 
         : enable_ice(true), enable_upnp(false), enable_hole_punching(true),
-          enable_turn_relay(true), prefer_ipv6(false),
-          ice_gathering_timeout_ms(10000), ice_connectivity_timeout_ms(30000),
-          hole_punch_attempts(5), turn_allocation_timeout_ms(10000),
-          host_candidate_priority(65535), server_reflexive_priority(65534),
-          relay_candidate_priority(65533) {
+          enable_turn_relay(true),
+          ice_connectivity_timeout_ms(30000),
+          turn_allocation_timeout_ms(10000) {
         
         // Default STUN servers
         stun_servers.push_back("stun.l.google.com:19302");
@@ -169,8 +146,6 @@ struct ConnectionAttemptResult {
     std::chrono::milliseconds duration;
     std::string error_message;
     NatType local_nat_type;
-    NatType remote_nat_type;
-    std::vector<IceCandidate> used_candidates;
 };
 
 // Enhanced connection callbacks
@@ -1680,8 +1655,6 @@ private:
     bool attempt_hole_punch_connection(const std::string& host, int port, ConnectionAttemptResult& result);
     
     // ICE coordination helpers
-    void handle_ice_candidate_discovered(const std::string& peer_id, const IceCandidate& candidate);
-    void handle_ice_connection_state_change(const std::string& peer_id, IceConnectionState state);
     void initiate_ice_with_peer(const std::string& peer_id, const std::string& host, int port);
     
     // NAT traversal message handlers
@@ -1775,7 +1748,6 @@ private:
     mutable std::mutex message_handlers_mutex_;             // [11] Protects message handlers
     
     void call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data);
-    void remove_once_handlers(const std::string& message_type);
 
     // Per-socket synchronization helpers
     std::shared_ptr<std::mutex> get_socket_send_mutex(socket_t socket);

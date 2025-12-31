@@ -346,7 +346,6 @@ bool RatsClient::perform_tcp_connection(const std::string& host, int port, Conne
         std::lock_guard<std::mutex> lock(peers_mutex_);
         RatsPeer new_peer(peer_hash_id, host, port, peer_socket, peer_address, true);
         new_peer.encryption_enabled = is_encryption_enabled();
-        new_peer.connection_method = "direct";
         add_peer_unlocked(new_peer);
     }
     

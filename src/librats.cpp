@@ -1080,7 +1080,6 @@ bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionSt
     // Create connection attempt result to track the attempt
     ConnectionAttemptResult result;
     result.local_nat_type = detect_nat_type();
-    result.remote_nat_type = NatType::UNKNOWN;
     
     auto start_time = std::chrono::high_resolution_clock::now();
     bool success = false;
@@ -2206,21 +2205,6 @@ void RatsClient::call_message_handlers(const std::string& message_type, const st
     }
 }
 
-void RatsClient::remove_once_handlers(const std::string& message_type) {
-    std::lock_guard<std::mutex> lock(message_handlers_mutex_);
-    auto it = message_handlers_.find(message_type);
-    if (it != message_handlers_.end()) {
-        auto& handlers = it->second;
-        auto new_end = std::remove_if(handlers.begin(), handlers.end(), 
-                                     [](const MessageHandler& handler) { return handler.is_once; });
-        handlers.erase(new_end, handlers.end());
-        
-        // Remove the entire entry if no handlers remain
-        if (handlers.empty()) {
-            message_handlers_.erase(it);
-        }
-    }
-}
 
 // =========================================================================
 // Rats messages protocol / Message handling system

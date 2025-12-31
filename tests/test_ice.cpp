@@ -255,19 +255,12 @@ TEST_F(IceTest, NatTraversalConfigTest) {
     EXPECT_FALSE(config.enable_upnp);
     EXPECT_TRUE(config.enable_hole_punching);
     EXPECT_TRUE(config.enable_turn_relay);
-    EXPECT_FALSE(config.prefer_ipv6);
     
     // Test that default STUN servers are configured
     EXPECT_GT(config.stun_servers.size(), 0);
     EXPECT_TRUE(config.stun_servers[0].find("stun.l.google.com") != std::string::npos);
     
     // Test timeout defaults
-    EXPECT_EQ(config.ice_gathering_timeout_ms, 10000);
     EXPECT_EQ(config.ice_connectivity_timeout_ms, 30000);
-    EXPECT_EQ(config.hole_punch_attempts, 5);
-    
-    // Test priority defaults
-    EXPECT_EQ(config.host_candidate_priority, 65535);
-    EXPECT_EQ(config.server_reflexive_priority, 65534);
-    EXPECT_EQ(config.relay_candidate_priority, 65533);
+    EXPECT_EQ(config.turn_allocation_timeout_ms, 10000);
 } 
