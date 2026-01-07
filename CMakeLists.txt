@@ -160,6 +160,9 @@ set(LIBRARY_SOURCES
     src/gossipsub.h
     src/file_transfer.cpp
     src/file_transfer.h
+    src/distributed_storage.cpp
+    src/distributed_storage.h
+    src/librats_distributed_storage.cpp
     src/version.cpp
     src/rats_export.h
     ${PROJECT_BINARY_DIR}/src/version.h
@@ -321,6 +324,7 @@ if(RATS_BUILD_TESTS)
         tests/test_gossipsub.cpp
         tests/test_logging_api_gtest.cpp
         tests/test_file_transfer.cpp
+        tests/test_distributed_storage.cpp
     )
     
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled

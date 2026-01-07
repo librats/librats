@@ -10,6 +10,7 @@
 #include "threadmanager.h"
 #include "gossipsub.h" // For ValidationResult enum and GossipSub types
 #include "file_transfer.h" // File transfer functionality
+#include "distributed_storage.h" // Distributed key-value storage
 #ifdef RATS_SEARCH_FEATURES
 #include "bittorrent.h" // BitTorrent functionality (optional, requires RATS_SEARCH_FEATURES)
 #endif
@@ -1319,6 +1320,184 @@ public:
      */
     void on_directory_request(DirectoryRequestCallback callback);
 
+    // =========================================================================
+    // Distributed Storage API
+    // =========================================================================
+    
+    /**
+     * Get or create a distributed storage instance by name
+     * @param name Storage name (default: "default")
+     * @return Reference to the DistributedStorage instance
+     */
+    DistributedStorage& get_distributed_storage(const std::string& name = "default");
+    
+    /**
+     * Get a distributed storage instance by name (const, returns nullptr if not exists)
+     * @param name Storage name
+     * @return Pointer to DistributedStorage or nullptr if not exists
+     */
+    DistributedStorage* get_distributed_storage_ptr(const std::string& name = "default") const;
+    
+    /**
+     * Check if a distributed storage exists
+     * @param name Storage name
+     * @return true if storage exists
+     */
+    bool has_distributed_storage(const std::string& name = "default") const;
+    
+    /**
+     * Create a distributed storage with custom configuration
+     * @param name Storage name
+     * @param config Storage configuration
+     * @return Reference to the created DistributedStorage
+     */
+    DistributedStorage& create_distributed_storage(const std::string& name, 
+                                                   const DistributedStorageConfig& config);
+    
+    /**
+     * Destroy a distributed storage instance
+     * @param name Storage name
+     * @return true if storage was destroyed
+     */
+    bool destroy_distributed_storage(const std::string& name);
+    
+    /**
+     * Get all distributed storage names
+     * @return Vector of storage names
+     */
+    std::vector<std::string> get_distributed_storage_names() const;
+    
+    /**
+     * Get statistics for all distributed storages
+     * @return JSON object with statistics for all storages
+     */
+    nlohmann::json get_distributed_storage_statistics() const;
+    
+    // Convenience methods for default storage
+    /**
+     * Set a string value in distributed storage
+     * @param key Key identifier
+     * @param value String value
+     * @param storage_name Storage name (default: "default")
+     * @return true if successful
+     */
+    bool storage_set(const std::string& key, const std::string& value,
+                    const std::string& storage_name = "default");
+    
+    /**
+     * Set a JSON value in distributed storage
+     * @param key Key identifier
+     * @param value JSON value
+     * @param storage_name Storage name (default: "default")
+     * @return true if successful
+     */
+    bool storage_set(const std::string& key, const nlohmann::json& value,
+                    const std::string& storage_name = "default");
+    
+    /**
+     * Set a binary value in distributed storage
+     * @param key Key identifier
+     * @param value Binary data
+     * @param storage_name Storage name (default: "default")
+     * @return true if successful
+     */
+    bool storage_set(const std::string& key, const std::vector<uint8_t>& value,
+                    const std::string& storage_name = "default");
+    
+    /**
+     * Get a string value from distributed storage
+     * @param key Key identifier
+     * @param storage_name Storage name (default: "default")
+     * @return Value or nullopt if not found
+     */
+    std::optional<std::string> storage_get_string(const std::string& key,
+                                                   const std::string& storage_name = "default") const;
+    
+    /**
+     * Get a JSON value from distributed storage
+     * @param key Key identifier
+     * @param storage_name Storage name (default: "default")
+     * @return Value or nullopt if not found
+     */
+    std::optional<nlohmann::json> storage_get_json(const std::string& key,
+                                                    const std::string& storage_name = "default") const;
+    
+    /**
+     * Get a binary value from distributed storage
+     * @param key Key identifier
+     * @param storage_name Storage name (default: "default")
+     * @return Value or nullopt if not found
+     */
+    std::optional<std::vector<uint8_t>> storage_get_binary(const std::string& key,
+                                                            const std::string& storage_name = "default") const;
+    
+    /**
+     * Remove a key from distributed storage
+     * @param key Key identifier
+     * @param storage_name Storage name (default: "default")
+     * @return true if key was removed
+     */
+    bool storage_remove(const std::string& key, const std::string& storage_name = "default");
+    
+    /**
+     * Check if a key exists in distributed storage
+     * @param key Key identifier
+     * @param storage_name Storage name (default: "default")
+     * @return true if key exists
+     */
+    bool storage_exists(const std::string& key, const std::string& storage_name = "default") const;
+    
+    /**
+     * Get all keys from distributed storage
+     * @param prefix Optional prefix filter
+     * @param storage_name Storage name (default: "default")
+     * @return Vector of keys
+     */
+    std::vector<std::string> storage_keys(const std::string& prefix = "",
+                                           const std::string& storage_name = "default") const;
+    
+    /**
+     * Get count of entries in distributed storage
+     * @param prefix Optional prefix filter
+     * @param storage_name Storage name (default: "default")
+     * @return Number of entries
+     */
+    size_t storage_count(const std::string& prefix = "",
+                        const std::string& storage_name = "default") const;
+    
+    /**
+     * Request sync with a specific peer
+     * @param peer_id Target peer ID
+     * @param storage_name Storage name (default: "default")
+     */
+    void storage_sync_with_peer(const std::string& peer_id,
+                               const std::string& storage_name = "default");
+    
+    /**
+     * Sync storage with all connected peers
+     * @param storage_name Storage name (default: "default")
+     */
+    void storage_sync_all(const std::string& storage_name = "default");
+    
+    /**
+     * Subscribe to storage changes
+     * @param key_pattern Key pattern (supports * and ? wildcards)
+     * @param callback Function to call on changes
+     * @param storage_name Storage name (default: "default")
+     * @return Subscription ID for later removal
+     */
+    std::string storage_on_change(const std::string& key_pattern,
+                                  StorageChangeCallback callback,
+                                  const std::string& storage_name = "default");
+    
+    /**
+     * Remove a storage change subscription
+     * @param subscription_id Subscription ID
+     * @param storage_name Storage name (default: "default")
+     */
+    void storage_off_change(const std::string& subscription_id,
+                           const std::string& storage_name = "default");
+
 #ifdef RATS_SEARCH_FEATURES
     // =========================================================================
     // BitTorrent API (requires RATS_SEARCH_FEATURES)
@@ -1796,5 +1975,8 @@ RATS_API const char* rats_get_library_version_string();
 RATS_API void rats_get_library_version(int* major, int* minor, int* patch, int* build);
 RATS_API const char* rats_get_library_git_describe();
 RATS_API uint32_t rats_get_library_abi(); // packed as (major<<16)|(minor<<8)|patch
+
+// Cleanup function for distributed storages (internal use)
+void cleanup_distributed_storages_for_client(const RatsClient& client);
 
 } // namespace librats 

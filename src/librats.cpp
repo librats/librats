@@ -86,6 +86,8 @@ RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig&
 
 RatsClient::~RatsClient() {
     stop();
+    // Clean up distributed storages
+    cleanup_distributed_storages_for_client(*this);
     // Destroy modules
     destroy_modules();
 }
