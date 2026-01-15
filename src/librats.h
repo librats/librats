@@ -10,6 +10,9 @@
 #include "threadmanager.h"
 #include "gossipsub.h" // For ValidationResult enum and GossipSub types
 #include "file_transfer.h" // File transfer functionality
+#ifdef RATS_STORAGE
+#include "storage.h" // Distributed storage functionality
+#endif
 #ifdef RATS_SEARCH_FEATURES
 #include "bittorrent.h" // BitTorrent functionality (optional, requires RATS_SEARCH_FEATURES)
 #endif
@@ -1319,6 +1322,180 @@ public:
      */
     void on_directory_request(DirectoryRequestCallback callback);
 
+#ifdef RATS_STORAGE
+    // =========================================================================
+    // Distributed Storage API (requires RATS_STORAGE)
+    // =========================================================================
+    
+    /**
+     * Get the storage manager instance
+     * @return Reference to the storage manager
+     */
+    StorageManager& get_storage_manager();
+    
+    /**
+     * Check if storage is available
+     * @return true if storage manager is initialized
+     */
+    bool is_storage_available() const;
+    
+    // Put Operations
+    /**
+     * Store a string value
+     * @param key Key to store under
+     * @param value String value to store
+     * @return true if stored successfully
+     */
+    bool storage_put(const std::string& key, const std::string& value);
+    
+    /**
+     * Store a 64-bit integer value
+     * @param key Key to store under
+     * @param value Integer value to store
+     * @return true if stored successfully
+     */
+    bool storage_put(const std::string& key, int64_t value);
+    
+    /**
+     * Store a double-precision floating point value
+     * @param key Key to store under
+     * @param value Double value to store
+     * @return true if stored successfully
+     */
+    bool storage_put(const std::string& key, double value);
+    
+    /**
+     * Store binary data
+     * @param key Key to store under
+     * @param value Binary data to store
+     * @return true if stored successfully
+     */
+    bool storage_put(const std::string& key, const std::vector<uint8_t>& value);
+    
+    /**
+     * Store a JSON document
+     * @param key Key to store under
+     * @param value JSON value to store
+     * @return true if stored successfully
+     */
+    bool storage_put_json(const std::string& key, const nlohmann::json& value);
+    
+    // Get Operations
+    /**
+     * Get a string value
+     * @param key Key to retrieve
+     * @return Optional containing value if found and type matches
+     */
+    std::optional<std::string> storage_get_string(const std::string& key) const;
+    
+    /**
+     * Get a 64-bit integer value
+     * @param key Key to retrieve
+     * @return Optional containing value if found and type matches
+     */
+    std::optional<int64_t> storage_get_int(const std::string& key) const;
+    
+    /**
+     * Get a double-precision floating point value
+     * @param key Key to retrieve
+     * @return Optional containing value if found and type matches
+     */
+    std::optional<double> storage_get_double(const std::string& key) const;
+    
+    /**
+     * Get binary data
+     * @param key Key to retrieve
+     * @return Optional containing value if found and type matches
+     */
+    std::optional<std::vector<uint8_t>> storage_get_binary(const std::string& key) const;
+    
+    /**
+     * Get a JSON document
+     * @param key Key to retrieve
+     * @return Optional containing value if found and type matches
+     */
+    std::optional<nlohmann::json> storage_get_json(const std::string& key) const;
+    
+    // Delete and Query Operations
+    /**
+     * Delete a key from storage
+     * @param key Key to delete
+     * @return true if key existed and was deleted
+     */
+    bool storage_delete(const std::string& key);
+    
+    /**
+     * Check if a key exists in storage
+     * @param key Key to check
+     * @return true if key exists
+     */
+    bool storage_has(const std::string& key) const;
+    
+    /**
+     * Get all keys in storage
+     * @return Vector of all keys
+     */
+    std::vector<std::string> storage_keys() const;
+    
+    /**
+     * Get keys matching a prefix
+     * @param prefix Prefix to match
+     * @return Vector of matching keys
+     */
+    std::vector<std::string> storage_keys_with_prefix(const std::string& prefix) const;
+    
+    /**
+     * Get the number of entries in storage
+     * @return Number of entries
+     */
+    size_t storage_size() const;
+    
+    // Synchronization
+    /**
+     * Request storage sync from connected peers
+     * @return true if sync request was sent
+     */
+    bool storage_request_sync();
+    
+    /**
+     * Check if storage is synchronized
+     * @return true if initial sync is complete
+     */
+    bool is_storage_synced() const;
+    
+    // Statistics
+    /**
+     * Get storage statistics
+     * @return JSON object with storage statistics
+     */
+    nlohmann::json get_storage_statistics() const;
+    
+    /**
+     * Set storage configuration
+     * @param config Storage configuration settings
+     */
+    void set_storage_config(const StorageConfig& config);
+    
+    /**
+     * Get current storage configuration
+     * @return Current configuration settings
+     */
+    const StorageConfig& get_storage_config() const;
+    
+    // Event Handlers
+    /**
+     * Set storage change callback
+     * @param callback Function to call when storage changes
+     */
+    void on_storage_change(StorageChangeCallback callback);
+    
+    /**
+     * Set storage sync complete callback
+     * @param callback Function to call when sync completes
+     */
+    void on_storage_sync_complete(StorageSyncCompleteCallback callback);
+#endif // RATS_STORAGE
+
 #ifdef RATS_SEARCH_FEATURES
     // =========================================================================
     // BitTorrent API (requires RATS_SEARCH_FEATURES)
@@ -1627,6 +1804,11 @@ private:
     // File transfer manager
     std::unique_ptr<FileTransferManager> file_transfer_manager_;
     
+#ifdef RATS_STORAGE
+    // Distributed storage manager (optional, requires RATS_STORAGE)
+    std::unique_ptr<StorageManager> storage_manager_;
+#endif
+
 #ifdef RATS_SEARCH_FEATURES
     // BitTorrent client (optional, requires RATS_SEARCH_FEATURES)
     std::unique_ptr<BitTorrentClient> bittorrent_client_;

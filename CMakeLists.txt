@@ -82,6 +82,7 @@ option(RATS_CROSSCOMPILING "Force cross-compilation flags" OFF)
 option(RATS_SHARED_LIBRARY "Build as shared library" OFF)
 option(RATS_STATIC_LIBRARY "Build as static library" ON)
 option(RATS_SEARCH_FEATURES "Features related to rats-search project (like bittorrent)" OFF)
+option(RATS_STORAGE "Enable distributed storage module" OFF)
 
 # Validate library type options
 if(RATS_SHARED_LIBRARY AND RATS_STATIC_LIBRARY)
@@ -176,6 +177,15 @@ if(RATS_SEARCH_FEATURES)
     )
 endif()
 
+# Add Storage sources if RATS_STORAGE is enabled
+if(RATS_STORAGE)
+    list(APPEND LIBRARY_SOURCES
+        src/storage.cpp
+        src/storage.h
+        src/librats_storage.cpp
+    )
+endif()
+
 if(RATS_BINDINGS)
     list(APPEND LIBRARY_SOURCES 
         src/librats_c.cpp
@@ -234,6 +244,11 @@ if(RATS_SEARCH_FEATURES)
     message(STATUS "Enable rats-search features")
     target_compile_definitions(rats PUBLIC RATS_SEARCH_FEATURES)
 endif(RATS_SEARCH_FEATURES)
+
+if(RATS_STORAGE)
+    message(STATUS "Enable distributed storage module")
+    target_compile_definitions(rats PUBLIC RATS_STORAGE)
+endif(RATS_STORAGE)
 
 # Create the main executable
 if(RATS_BUILD_EXAMPLES)
@@ -328,6 +343,13 @@ if(RATS_BUILD_TESTS)
         list(APPEND TEST_SOURCES 
             tests/test_bittorrent.cpp
             tests/test_tracker.cpp
+        )
+    endif()
+
+    # Add Storage tests if RATS_STORAGE is enabled
+    if(RATS_STORAGE)
+        list(APPEND TEST_SOURCES 
+            tests/test_storage.cpp
         )
     endif()
 
