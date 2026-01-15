@@ -70,6 +70,15 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Topic-based Messaging**: Subscribe to topics and publish messages with automatic routing
 - **Enhanced Peer Management**: Detailed peer information with encryption and NAT traversal status
 
+### **Distributed Storage** (Optional, requires `RATS_STORAGE`)
+- **Key-Value Storage**: Simple, typed key-value storage with string, int64, double, binary, and JSON support
+- **Automatic P2P Synchronization**: Real-time sync across connected peers via GossipSub
+- **Last-Write-Wins (LWW)**: Automatic conflict resolution based on timestamps
+- **Disk Persistence**: Optional persistence to disk with efficient binary format
+- **Change Notifications**: Callbacks for storage changes (local and remote)
+- **Prefix Queries**: Find keys matching a prefix pattern
+- **Configurable**: Adjustable sync batch size, compression, and storage limits
+
 ### **Multi-Language Support**
 - **Native C++17**: Core implementation with full feature set and maximum performance
 - **C API**: Clean C interface for legacy systems and FFI bindings
@@ -419,7 +428,74 @@ int main() {
 }
 ```
 
-### 9. Node.js Quick Start
+### 9. Distributed Storage (requires `RATS_STORAGE`)
+
+```cpp
+#include "librats.h"
+#include <iostream>
+
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Start the client first
+    client.start();
+    client.start_dht_discovery();
+    
+    // Check if storage is available (requires RATS_STORAGE build flag)
+    if (!client.is_storage_available()) {
+        std::cerr << "Storage not available (rebuild with RATS_STORAGE=ON)" << std::endl;
+        return 1;
+    }
+    
+    // Store different types of data
+    client.storage_put("user:name", "Alice");
+    client.storage_put("user:age", int64_t(25));
+    client.storage_put("user:score", 98.5);
+    client.storage_put_json("user:preferences", {{"theme", "dark"}, {"notifications", true}});
+    
+    // Store binary data
+    std::vector<uint8_t> avatar_data = {0x89, 0x50, 0x4E, 0x47}; // PNG header
+    client.storage_put("user:avatar", avatar_data);
+    
+    // Read data back with type-safe getters
+    auto name = client.storage_get_string("user:name");
+    auto age = client.storage_get_int("user:age");
+    auto score = client.storage_get_double("user:score");
+    auto prefs = client.storage_get_json("user:preferences");
+    
+    if (name) std::cout << "Name: " << *name << std::endl;
+    if (age) std::cout << "Age: " << *age << std::endl;
+    if (score) std::cout << "Score: " << *score << std::endl;
+    if (prefs) std::cout << "Theme: " << (*prefs)["theme"] << std::endl;
+    
+    // Check if key exists
+    if (client.storage_has("user:name")) {
+        std::cout << "User name is stored" << std::endl;
+    }
+    
+    // Query keys by prefix
+    std::vector<std::string> user_keys = client.storage_keys_with_prefix("user:");
+    std::cout << "Found " << user_keys.size() << " user keys" << std::endl;
+    
+    // Delete a key
+    client.storage_delete("user:avatar");
+    
+    // Get storage statistics
+    auto stats = client.get_storage_statistics();
+    std::cout << "Total entries: " << stats["total_entries"] << std::endl;
+    std::cout << "Synced: " << (client.is_storage_synced() ? "Yes" : "No") << std::endl;
+    
+    // Request sync from connected peers
+    client.storage_request_sync();
+    
+    // Keep running to allow P2P sync
+    std::this_thread::sleep_for(std::chrono::minutes(1));
+    
+    return 0;
+}
+```
+
+### 10. Node.js Quick Start
 
 For more Node.js examples and TypeScript usage, see the [Node.js documentation](nodejs/README.md).
 
@@ -729,6 +805,100 @@ struct FileMetadata {
 };
 ```
 
+#### `StorageConfig` (requires `RATS_STORAGE`)
+Distributed storage configuration structure:
+
+```cpp
+struct StorageConfig {
+    std::string data_directory;      // Directory for storage files (default: "./storage")
+    std::string database_name;       // Database filename prefix (default: "rats_storage")
+    bool enable_compression;         // Enable LZ4 compression for values (default: false)
+    bool enable_sync;                // Enable network synchronization (default: true)
+    uint32_t sync_batch_size;        // Number of entries per sync batch (default: 100)
+    uint32_t compaction_threshold;   // Number of tombstones before compaction (default: 1000)
+    uint32_t max_value_size;         // Maximum value size in bytes (default: 16MB)
+    bool persist_to_disk;            // Whether to persist data to disk (default: true)
+};
+```
+
+#### `StorageEntry` (requires `RATS_STORAGE`)
+Storage entry structure representing a single key-value pair:
+
+```cpp
+struct StorageEntry {
+    std::string key;                 // Key string
+    StorageValueType type;           // Value type (BINARY, STRING, INT64, DOUBLE, JSON)
+    std::vector<uint8_t> data;       // Serialized value data
+    uint64_t timestamp_ms;           // Unix timestamp in milliseconds (for LWW)
+    std::string origin_peer_id;      // Peer that created/modified this entry
+    uint32_t checksum;               // CRC32 checksum for integrity
+    bool deleted;                    // Tombstone marker for deleted entries
+    
+    // Compare for LWW resolution (returns true if this entry wins)
+    bool wins_over(const StorageEntry& other) const;
+};
+```
+
+#### `StorageChangeEvent` (requires `RATS_STORAGE`)
+Storage change event structure passed to change callbacks:
+
+```cpp
+struct StorageChangeEvent {
+    StorageOperation operation;      // PUT or DELETE
+    std::string key;                 // Affected key
+    StorageValueType type;           // Value type (for PUT)
+    std::vector<uint8_t> old_data;   // Previous value (if any)
+    std::vector<uint8_t> new_data;   // New value (for PUT)
+    uint64_t timestamp_ms;           // Operation timestamp
+    std::string origin_peer_id;      // Peer that made the change
+    bool is_remote;                  // True if change came from another peer
+};
+```
+
+#### Storage API Methods (requires `RATS_STORAGE`)
+
+The `RatsClient` class provides the following storage methods when built with `RATS_STORAGE`:
+
+```cpp
+// Storage availability
+StorageManager& get_storage_manager();
+bool is_storage_available() const;
+
+// Put operations (store values)
+bool storage_put(const std::string& key, const std::string& value);
+bool storage_put(const std::string& key, int64_t value);
+bool storage_put(const std::string& key, double value);
+bool storage_put(const std::string& key, const std::vector<uint8_t>& value);
+bool storage_put_json(const std::string& key, const nlohmann::json& value);
+
+// Get operations (retrieve values)
+std::optional<std::string> storage_get_string(const std::string& key) const;
+std::optional<int64_t> storage_get_int(const std::string& key) const;
+std::optional<double> storage_get_double(const std::string& key) const;
+std::optional<std::vector<uint8_t>> storage_get_binary(const std::string& key) const;
+std::optional<nlohmann::json> storage_get_json(const std::string& key) const;
+
+// Delete and query operations
+bool storage_delete(const std::string& key);
+bool storage_has(const std::string& key) const;
+std::vector<std::string> storage_keys() const;
+std::vector<std::string> storage_keys_with_prefix(const std::string& prefix) const;
+size_t storage_size() const;
+
+// Synchronization
+bool storage_request_sync();
+bool is_storage_synced() const;
+
+// Statistics and configuration
+nlohmann::json get_storage_statistics() const;
+void set_storage_config(const StorageConfig& config);
+const StorageConfig& get_storage_config() const;
+
+// Event handlers
+void on_storage_change(StorageChangeCallback callback);
+void on_storage_sync_complete(StorageSyncCompleteCallback callback);
+```
+
 ## 🏢 Architecture
 
 ```
@@ -747,6 +917,10 @@ struct FileMetadata {
 │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
 │ │ Config & Peer   │ │ Topic Routing   │ │ Message Validation│   │
 │ │  Persistence    │ │ & Mesh Management│ │ & Filtering     │    │
+│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
+│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
+│ │ File Transfer   │ │Distributed Storage│ │ BitTorrent      │   │
+│ │    Manager      │ │   (RATS_STORAGE)│ │(RATS_SEARCH)    │    │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
 ├─────────────────────────────────────────────────────────────────┤
 │ NAT Traversal Layer                                             │
@@ -879,6 +1053,7 @@ librats provides several CMake options to customize your build:
 | `RATS_SHARED_LIBRARY` | `OFF` | Build as shared library (.dll/.so/.dylib) |
 | `RATS_STATIC_LIBRARY` | `ON` | Build as static library (.a/.lib) |
 | `RATS_SEARCH_FEATURES` | `OFF` | Enable Rats Search feature (like Bittorrent / DHT spider algorithm) |
+| `RATS_STORAGE` | `OFF` | Enable distributed key-value storage with P2P synchronization |
 
 **Examples:**
 
@@ -889,6 +1064,12 @@ cmake .. -DRATS_SHARED_LIBRARY=ON -DRATS_STATIC_LIBRARY=OFF \
 
 # Build with BitTorrent support and debug symbols
 cmake .. -DRATS_SEARCH_FEATURES=ON -DCMAKE_BUILD_TYPE=Debug
+
+# Build with distributed storage support
+cmake .. -DRATS_STORAGE=ON -DCMAKE_BUILD_TYPE=Release
+
+# Build with all optional features enabled
+cmake .. -DRATS_STORAGE=ON -DRATS_SEARCH_FEATURES=ON -DCMAKE_BUILD_TYPE=Release
 
 # Cross-compile for Android (requires NDK)
 cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
@@ -1255,6 +1436,7 @@ Comprehensive documentation is available:
 - **[mDNS Discovery](docs/MDNS_DISCOVERY.md)** - Local network peer discovery
 - **[Noise Encryption](docs/NOISE_ENCRYPTION.md)** - End-to-end encryption details
 - **[BitTorrent Example](docs/BITTORRENT_EXAMPLE.md)** - BitTorrent protocol implementation
+- **Distributed Storage** - Synchronized key-value storage (see API examples above, requires `RATS_STORAGE`)
 
 ## 🔧 Configuration Files
 
