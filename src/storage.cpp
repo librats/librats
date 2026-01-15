@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "crc32.h"
 #include "librats.h"
 #include "fs.h"
 #include "logger.h"
@@ -16,40 +17,6 @@
 #define LOG_STORAGE_DEBUG(message) LOG_DEBUG("storage", message)
 
 namespace librats {
-
-//=============================================================================
-// CRC32 Implementation
-//=============================================================================
-
-// CRC32 lookup table
-static uint32_t crc32_table[256];
-static bool crc32_table_initialized = false;
-
-static void init_crc32_table() {
-    if (crc32_table_initialized) return;
-    
-    for (uint32_t i = 0; i < 256; i++) {
-        uint32_t crc = i;
-        for (int j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
-        }
-        crc32_table[i] = crc;
-    }
-    crc32_table_initialized = true;
-}
-
-uint32_t storage_calculate_crc32(const void* data, size_t length) {
-    init_crc32_table();
-    
-    const uint8_t* bytes = static_cast<const uint8_t*>(data);
-    uint32_t crc = 0xFFFFFFFF;
-    
-    for (size_t i = 0; i < length; i++) {
-        crc = (crc >> 8) ^ crc32_table[(crc ^ bytes[i]) & 0xFF];
-    }
-    
-    return crc ^ 0xFFFFFFFF;
-}
 
 //=============================================================================
 // StorageEntry Implementation

@@ -180,6 +180,8 @@ endif()
 # Add Storage sources if RATS_STORAGE is enabled
 if(RATS_STORAGE)
     list(APPEND LIBRARY_SOURCES
+        src/crc32.cpp
+        src/crc32.h
         src/storage.cpp
         src/storage.h
         src/librats_storage.cpp
@@ -349,6 +351,7 @@ if(RATS_BUILD_TESTS)
     # Add Storage tests if RATS_STORAGE is enabled
     if(RATS_STORAGE)
         list(APPEND TEST_SOURCES 
+            tests/test_crc32.cpp
             tests/test_storage.cpp
         )
     endif()
