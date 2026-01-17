@@ -79,6 +79,19 @@ void print_help() {
     std::cout << "  torrent_peers <hash> - Show connected peers for a torrent" << std::endl;
     std::cout << "  bittorrent_stats   - Show BitTorrent statistics" << std::endl;
 #endif
+#ifdef RATS_STORAGE
+    std::cout << "\nDistributed Storage Commands:" << std::endl;
+    std::cout << "  storage_put <key> <value> - Store a string value" << std::endl;
+    std::cout << "  storage_get <key>     - Get a stored value" << std::endl;
+    std::cout << "  storage_delete <key>  - Delete a key" << std::endl;
+    std::cout << "  storage_has <key>     - Check if key exists" << std::endl;
+    std::cout << "  storage_list          - List all keys" << std::endl;
+    std::cout << "  storage_list <prefix> - List keys with prefix" << std::endl;
+    std::cout << "  storage_stats         - Show storage statistics" << std::endl;
+    std::cout << "  storage_sync          - Request sync from peers" << std::endl;
+    std::cout << "  storage_status        - Show sync status" << std::endl;
+    std::cout << "  storage_clear         - Clear all storage entries" << std::endl;
+#endif
     std::cout << "  quit              - Exit the program" << std::endl;
 }
 
@@ -223,6 +236,39 @@ int main(int argc, char* argv[]) {
         LOG_MAIN_WARN("File transfer manager not available");
     }
 
+#ifdef RATS_STORAGE
+    // Initialize storage manager (lazy initialization - must call get_storage_manager() first)
+    LOG_MAIN_INFO("Initializing distributed storage...");
+    client.get_storage_manager(); // This triggers lazy initialization
+    
+    // Set up storage callbacks
+    if (client.is_storage_available()) {
+        // Storage change callback
+        client.on_storage_change([](const librats::StorageChangeEvent& event) {
+            if (event.operation == librats::StorageOperation::OP_PUT) {
+                LOG_MAIN_INFO("Storage: key '" << event.key << "' updated" 
+                             << (event.is_remote ? " (from peer " + event.origin_peer_id + ")" : ""));
+            } else if (event.operation == librats::StorageOperation::OP_DELETE) {
+                LOG_MAIN_INFO("Storage: key '" << event.key << "' deleted"
+                             << (event.is_remote ? " (from peer " + event.origin_peer_id + ")" : ""));
+            }
+        });
+        
+        // Storage sync complete callback
+        client.on_storage_sync_complete([](bool success, const std::string& error_message) {
+            if (success) {
+                LOG_MAIN_INFO("Storage sync completed successfully");
+            } else {
+                LOG_MAIN_ERROR("Storage sync failed: " << error_message);
+            }
+        });
+        
+        LOG_MAIN_INFO("Storage callbacks configured");
+    } else {
+        LOG_MAIN_WARN("Storage manager not available");
+    }
+#endif
+
     // Start the client
     if (!client.start()) {
         LOG_MAIN_ERROR("Failed to start RatsClient on port " << listen_port);
@@ -272,6 +318,18 @@ int main(int argc, char* argv[]) {
     } else {
         LOG_MAIN_INFO("mDNS local network discovery is inactive. Use 'mdns_start' to enable it.");
     }
+#ifdef RATS_STORAGE
+    if (client.is_storage_available()) {
+        LOG_MAIN_INFO("Distributed storage is available. Entries: " << client.storage_size());
+        if (client.is_storage_synced()) {
+            LOG_MAIN_INFO("Storage is synced with peers.");
+        } else {
+            LOG_MAIN_INFO("Storage sync pending. Use 'storage_sync' to sync with peers.");
+        }
+    } else {
+        LOG_MAIN_INFO("Distributed storage is not available.");
+    }
+#endif
     print_help();
     
     // Add initial prompt
@@ -1122,6 +1180,170 @@ int main(int argc, char* argv[]) {
             }
         }
 #endif // RATS_SEARCH_FEATURES
+#ifdef RATS_STORAGE
+        else if (command == "storage_put") {
+            std::string key, value;
+            iss >> key;
+            std::getline(iss, value);
+            if (!value.empty()) {
+                value = value.substr(1); // Remove leading space
+            }
+            
+            if (!key.empty() && !value.empty()) {
+                if (!client.is_storage_available()) {
+                    LOG_MAIN_ERROR("Storage is not available");
+                } else {
+                    if (client.storage_put(key, value)) {
+                        LOG_MAIN_INFO("Stored key '" << key << "' with value '" << value << "'");
+                    } else {
+                        LOG_MAIN_ERROR("Failed to store key '" << key << "'");
+                    }
+                }
+            } else {
+                std::cout << "Usage: storage_put <key> <value>" << std::endl;
+            }
+        }
+        else if (command == "storage_get") {
+            std::string key;
+            iss >> key;
+            
+            if (!key.empty()) {
+                if (!client.is_storage_available()) {
+                    LOG_MAIN_ERROR("Storage is not available");
+                } else {
+                    auto value = client.storage_get_string(key);
+                    if (value) {
+                        std::cout << "Value: " << *value << std::endl;
+                    } else {
+                        // Try JSON in case it's stored as JSON
+                        auto json_value = client.storage_get_json(key);
+                        if (json_value) {
+                            std::cout << "Value (JSON): " << json_value->dump(2) << std::endl;
+                        } else {
+                            // Try int
+                            auto int_value = client.storage_get_int(key);
+                            if (int_value) {
+                                std::cout << "Value (int): " << *int_value << std::endl;
+                            } else {
+                                // Try double
+                                auto double_value = client.storage_get_double(key);
+                                if (double_value) {
+                                    std::cout << "Value (double): " << *double_value << std::endl;
+                                } else {
+                                    LOG_MAIN_ERROR("Key '" << key << "' not found or has unsupported type");
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                std::cout << "Usage: storage_get <key>" << std::endl;
+            }
+        }
+        else if (command == "storage_delete") {
+            std::string key;
+            iss >> key;
+            
+            if (!key.empty()) {
+                if (!client.is_storage_available()) {
+                    LOG_MAIN_ERROR("Storage is not available");
+                } else {
+                    if (client.storage_delete(key)) {
+                        LOG_MAIN_INFO("Deleted key '" << key << "'");
+                    } else {
+                        LOG_MAIN_ERROR("Key '" << key << "' not found");
+                    }
+                }
+            } else {
+                std::cout << "Usage: storage_delete <key>" << std::endl;
+            }
+        }
+        else if (command == "storage_has") {
+            std::string key;
+            iss >> key;
+            
+            if (!key.empty()) {
+                if (!client.is_storage_available()) {
+                    LOG_MAIN_ERROR("Storage is not available");
+                } else {
+                    bool exists = client.storage_has(key);
+                    std::cout << "Key '" << key << "': " << (exists ? "exists" : "does not exist") << std::endl;
+                }
+            } else {
+                std::cout << "Usage: storage_has <key>" << std::endl;
+            }
+        }
+        else if (command == "storage_list") {
+            std::string prefix;
+            iss >> prefix;
+            
+            if (!client.is_storage_available()) {
+                LOG_MAIN_ERROR("Storage is not available");
+            } else {
+                std::vector<std::string> keys;
+                if (prefix.empty()) {
+                    keys = client.storage_keys();
+                } else {
+                    keys = client.storage_keys_with_prefix(prefix);
+                }
+                
+                if (keys.empty()) {
+                    std::cout << "No keys found" << (prefix.empty() ? "" : " with prefix '" + prefix + "'") << std::endl;
+                } else {
+                    std::cout << "Keys (" << keys.size() << "):" << std::endl;
+                    for (const auto& key : keys) {
+                        std::cout << "  " << key << std::endl;
+                    }
+                }
+            }
+        }
+        else if (command == "storage_stats") {
+            if (!client.is_storage_available()) {
+                LOG_MAIN_ERROR("Storage is not available");
+            } else {
+                auto stats = client.get_storage_statistics();
+                std::cout << "Storage Statistics:" << std::endl;
+                std::cout << stats.dump(2) << std::endl;
+            }
+        }
+        else if (command == "storage_sync") {
+            if (!client.is_storage_available()) {
+                LOG_MAIN_ERROR("Storage is not available");
+            } else {
+                if (client.storage_request_sync()) {
+                    LOG_MAIN_INFO("Storage sync request sent to peers");
+                } else {
+                    LOG_MAIN_ERROR("Failed to send storage sync request");
+                }
+            }
+        }
+        else if (command == "storage_status") {
+            if (!client.is_storage_available()) {
+                LOG_MAIN_ERROR("Storage is not available");
+            } else {
+                bool synced = client.is_storage_synced();
+                size_t count = client.storage_size();
+                LOG_MAIN_INFO("Storage Status:");
+                LOG_MAIN_INFO("  Synced: " << (synced ? "yes" : "no"));
+                LOG_MAIN_INFO("  Entries: " << count);
+            }
+        }
+        else if (command == "storage_clear") {
+            if (!client.is_storage_available()) {
+                LOG_MAIN_ERROR("Storage is not available");
+            } else {
+                std::cout << "Are you sure you want to clear all storage? (yes/no): ";
+                std::string confirm;
+                std::getline(std::cin, confirm);
+                if (confirm == "yes") {
+                    client.get_storage_manager().clear();
+                    LOG_MAIN_INFO("Storage cleared");
+                } else {
+                    std::cout << "Operation cancelled." << std::endl;
+                }
+            }
+        }
+#endif // RATS_STORAGE
         else {
             std::cout << "Unknown command: " << command << std::endl;
             std::cout << "Type 'help' for available commands." << std::endl;
