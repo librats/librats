@@ -1,0 +1,69 @@
+/**
+ * Doxygen Awesome Sidebar Only Dark Mode Toggle
+ * https://github.com/jothepro/doxygen-awesome-css
+ * MIT License
+ */
+
+/* Dark mode toggle button in sidebar */
+#dark-mode-toggle {
+    position: fixed;
+    top: var(--spacing-large);
+    right: var(--spacing-large);
+    z-index: 1000;
+    background-color: var(--toolbar-button-background);
+    border: 1px solid var(--separator-color);
+    border-radius: var(--toolbar-button-border-radius);
+    padding: var(--spacing-small) var(--spacing-medium);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--spacing-small);
+    color: var(--toolbar-button-foreground);
+    font-size: 14px;
+    transition: all 0.15s ease-in-out;
+}
+
+#dark-mode-toggle:hover {
+    background-color: var(--toolbar-button-hover-background);
+}
+
+#dark-mode-toggle svg {
+    width: 18px;
+    height: 18px;
+}
+
+/* Sun icon (light mode) */
+#dark-mode-toggle .light-mode-icon {
+    display: block;
+}
+
+#dark-mode-toggle .dark-mode-icon {
+    display: none;
+}
+
+/* Moon icon (dark mode) */
+html.dark-mode #dark-mode-toggle .light-mode-icon {
+    display: none;
+}
+
+html.dark-mode #dark-mode-toggle .dark-mode-icon {
+    display: block;
+}
+
+/* Alternative placement in the sidebar header */
+@media screen and (min-width: 769px) {
+    #dark-mode-toggle {
+        position: absolute;
+        top: var(--spacing-medium);
+        right: var(--spacing-medium);
+    }
+}
+
+/* Mobile: place in header area */
+@media screen and (max-width: 768px) {
+    #dark-mode-toggle {
+        top: var(--spacing-small);
+        right: var(--spacing-small);
+    }
+}

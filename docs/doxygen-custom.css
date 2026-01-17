@@ -1,0 +1,237 @@
+/**
+ * Custom Doxygen styles for librats
+ * Matches the main website aesthetic
+ */
+
+/* Custom primary color to match librats branding */
+html {
+    --primary-color: #3b82f6;
+    --primary-dark-color: #2563eb;
+    --primary-light-color: #60a5fa;
+}
+
+/* Project logo styling */
+#projectlogo img {
+    max-height: 40px;
+    width: auto;
+}
+
+/* Custom header styling */
+.librats-header {
+    background: linear-gradient(135deg, var(--header-background) 0%, var(--page-background-color) 100%);
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--separator-color);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+}
+
+.librats-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.librats-header-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+    color: var(--page-foreground-color);
+    font-weight: 600;
+    font-size: 1.1em;
+}
+
+.librats-header-logo img {
+    height: 32px;
+    width: auto;
+}
+
+.librats-header-nav {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.librats-header-nav a {
+    color: var(--page-secondary-foreground-color);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    transition: all 0.15s ease-in-out;
+}
+
+.librats-header-nav a:hover {
+    background: var(--menu-focus-background);
+    color: var(--page-foreground-color);
+}
+
+.librats-header-nav a.active {
+    background: var(--menu-selected-background);
+    color: var(--primary-color);
+}
+
+.librats-header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Back to main site button */
+.back-to-site {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background: var(--primary-color);
+    color: white !important;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.15s ease-in-out;
+}
+
+.back-to-site:hover {
+    background: var(--primary-dark-color);
+    text-decoration: none;
+}
+
+.back-to-site svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* Enhanced sidebar styling */
+#side-nav {
+    background: linear-gradient(180deg, var(--side-nav-background) 0%, var(--page-background-color) 100%);
+}
+
+#projectname {
+    color: var(--primary-color);
+    font-size: 1.3em;
+}
+
+#projectbrief {
+    font-size: 0.8em;
+    opacity: 0.8;
+}
+
+/* Better code blocks */
+div.fragment {
+    background: var(--fragment-background);
+    border: 1px solid var(--separator-color);
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+html.dark-mode div.fragment {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+/* Member items with better styling */
+.memitem {
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 24px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+html.dark-mode .memitem {
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.memproto {
+    background: linear-gradient(135deg, var(--fragment-background) 0%, var(--code-background) 100%);
+}
+
+/* Better table styling */
+table.memberdecls {
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+table.memberdecls tr:first-child td {
+    border-top: 1px solid var(--separator-color);
+}
+
+/* Section headers */
+.groupheader {
+    color: var(--primary-color);
+    border-bottom: 2px solid var(--primary-color);
+    padding-bottom: 8px;
+    margin-top: 32px;
+}
+
+/* Navigation tree improvements */
+#nav-tree .selected {
+    background: var(--menu-selected-background);
+    border-radius: 4px;
+}
+
+#nav-tree a:hover {
+    background: var(--menu-focus-background);
+    border-radius: 4px;
+}
+
+/* Search box styling */
+#MSearchBox {
+    border-radius: 8px;
+    border: 1px solid var(--separator-color);
+}
+
+#MSearchBox:focus-within {
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+/* Footer styling */
+.librats-footer {
+    padding: 24px;
+    text-align: center;
+    border-top: 1px solid var(--separator-color);
+    margin-top: 48px;
+    color: var(--page-secondary-foreground-color);
+    font-size: 14px;
+}
+
+.librats-footer a {
+    color: var(--primary-color);
+}
+
+/* Responsive adjustments */
+@media screen and (max-width: 768px) {
+    .librats-header {
+        flex-direction: column;
+        gap: 12px;
+        padding: 12px;
+    }
+    
+    .librats-header-nav {
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+    
+    .back-to-site {
+        width: 100%;
+        justify-content: center;
+    }
+}
+
+/* Print styles */
+@media print {
+    .librats-header,
+    #side-nav,
+    .back-to-site,
+    doxygen-awesome-dark-mode-toggle {
+        display: none !important;
+    }
+    
+    #doc-content {
+        margin-left: 0 !important;
+    }
+}

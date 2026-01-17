@@ -29,6 +29,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       
+      - name: Install Doxygen and Graphviz
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen graphviz
+          doxygen --version
+      
+      - name: Generate API Documentation
+        run: |
+          doxygen Doxyfile
+          echo "API documentation generated in docs/api/"
+          ls -la docs/api/ || echo "No api directory found"
+      
       - name: Get latest release version
         id: get_version
         run: |

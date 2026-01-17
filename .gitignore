@@ -171,6 +171,7 @@ catch2/
 # Documentation
 docs/build/
 docs/_build/
+docs/api/
 
 # Logs
 *.log

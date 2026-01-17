@@ -1,0 +1,53 @@
+<!-- Doxygen custom header for librats -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>$title - librats API Reference</title>
+    <link rel="icon" type="image/png" href="$relpath^favicon.png" />
+    $treeview
+    $search
+    $mathjax
+    <link href="$relpath^$stylesheet" rel="stylesheet" type="text/css" />
+    $extrastylesheet
+    <script>
+        // Initialize dark mode early to prevent flash
+        (function() {
+            const savedMode = localStorage.getItem('doxygen-awesome-dark-mode');
+            const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (savedMode === 'dark' || (savedMode === null && prefersDark)) {
+                document.documentElement.classList.add('dark-mode');
+            }
+        })();
+    </script>
+</head>
+<body>
+
+<!-- Custom librats header -->
+<header class="librats-header">
+    <div class="librats-header-left">
+        <a href="$relpath^../index.html" class="librats-header-logo">
+            <img src="$relpath^logo-rat.png" alt="librats">
+            <span>librats</span>
+        </a>
+        <nav class="librats-header-nav">
+            <a href="$relpath^../index.html#features">Features</a>
+            <a href="$relpath^../index.html#quickstart">Quick Start</a>
+            <a href="$relpath^index.html" class="active">API Reference</a>
+            <a href="https://github.com/DEgITx/librats" target="_blank">GitHub</a>
+        </nav>
+    </div>
+    <div class="librats-header-right">
+        <doxygen-awesome-dark-mode-toggle></doxygen-awesome-dark-mode-toggle>
+        <a href="$relpath^../index.html" class="back-to-site">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="19" y1="12" x2="5" y2="12"></line>
+                <polyline points="12 19 5 12 12 5"></polyline>
+            </svg>
+            Back to Site
+        </a>
+    </div>
+</header>
+
+<div id="top"><!-- do not remove this div, it is closed by doxygen! -->

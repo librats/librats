@@ -1,0 +1,135 @@
+/**
+ * Doxygen Awesome Sidebar Only
+ * https://github.com/jothepro/doxygen-awesome-css
+ * MIT License
+ */
+
+html {
+    /* Hide the top title bar */
+}
+
+#titlearea {
+    display: none;
+}
+
+#side-nav {
+    min-width: 250px;
+    max-width: 350px;
+    width: 20vw;
+    overflow-y: auto;
+    overflow-x: hidden;
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    background-color: var(--side-nav-background);
+    border-right: 1px solid var(--separator-color);
+    z-index: 100;
+}
+
+#doc-content {
+    margin-left: 250px;
+    min-height: 100vh;
+}
+
+@media screen and (min-width: 1200px) {
+    #doc-content {
+        margin-left: 300px;
+    }
+    
+    #side-nav {
+        width: 300px;
+    }
+}
+
+@media screen and (max-width: 768px) {
+    #side-nav {
+        position: relative;
+        width: 100%;
+        max-width: none;
+        border-right: none;
+        border-bottom: 1px solid var(--separator-color);
+    }
+    
+    #doc-content {
+        margin-left: 0;
+    }
+}
+
+/* Navigation tree */
+#nav-tree {
+    padding: var(--spacing-large);
+}
+
+#nav-tree-contents {
+    margin: 0;
+    padding: 0;
+}
+
+.nav-tree-contents ul {
+    list-style: none;
+    padding-left: 20px;
+    margin: 0;
+}
+
+.nav-tree-contents > ul {
+    padding-left: 0;
+}
+
+.nav-tree-contents li {
+    margin: 2px 0;
+}
+
+.nav-tree-contents a {
+    display: block;
+    padding: 6px 10px;
+    border-radius: var(--border-radius-small);
+    color: var(--side-nav-foreground);
+    text-decoration: none;
+    font-size: var(--navigation-font-size);
+    transition: all 0.15s ease-in-out;
+}
+
+.nav-tree-contents a:hover {
+    background-color: var(--menu-focus-background);
+}
+
+.nav-tree-contents a.selected {
+    background-color: var(--menu-selected-background);
+    color: var(--menu-selected-foreground);
+}
+
+/* Arrow icons */
+.arrow {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    margin-right: 4px;
+    color: var(--side-nav-arrow-color);
+    cursor: pointer;
+    transition: transform 0.15s ease-in-out;
+}
+
+.arrow.open {
+    transform: rotate(90deg);
+}
+
+/* Project name in sidebar */
+#projectname {
+    font-size: 1.2em;
+    font-weight: 600;
+    padding: var(--spacing-large);
+    border-bottom: 1px solid var(--separator-color);
+    color: var(--primary-color);
+}
+
+#projectbrief {
+    font-size: 0.85em;
+    color: var(--page-secondary-foreground-color);
+    padding: 0 var(--spacing-large) var(--spacing-medium);
+}
+
+#projectnumber {
+    font-size: 0.85em;
+    color: var(--page-secondary-foreground-color);
+}
