@@ -258,6 +258,12 @@ body {
     animation: slideInUp 0.8s ease 0.4s both;
 }
 
+@media (max-width: 1185px) {
+    .hero-title {
+        font-size: 2rem;
+    }
+}
+
 .gradient-text {
     background: linear-gradient(45deg, #fbbf24, #f59e0b);
     -webkit-background-clip: text;
