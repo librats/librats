@@ -409,13 +409,12 @@ void RatsClient::management_loop() {
 void RatsClient::handle_client(socket_t client_socket, const std::string& peer_hash_id) {
     LOG_CLIENT_INFO("Started handling client: " << peer_hash_id);
     
+    // ===== INITIALIZATION =====
     bool handshake_completed = false;
     bool noise_handshake_done = false;
-    auto last_timeout_check = std::chrono::steady_clock::now();
-    
-    // Check if encryption is enabled for this connection
     bool encryption_enabled = is_encryption_enabled();
     bool is_outgoing = false;
+    auto last_timeout_check = std::chrono::steady_clock::now();
     
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -428,39 +427,40 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         }
     }
     
+    // ===== MAIN LOOP =====
     while (running_.load()) {
-        std::string data;
         
+        // ----- 1. RECEIVE DATA -----
         LOG_CLIENT_DEBUG("Receiving data from socket " << client_socket);
-        // Receive binary framed message first
         std::vector<uint8_t> received_bytes = receive_tcp_message_framed(client_socket);
         
         if (received_bytes.empty()) {
-            data = ""; // Mark as empty for existing empty check logic
-        } else {
-            // Check if peer is noise-encrypted and decrypt if necessary
-            bool peer_is_encrypted = false;
-            rats::NoiseCipherState* recv_cipher = nullptr;
+            break; // Connection closed or error
+        }
+        
+        // ----- 2. DECRYPT IF NEEDED -----
+        std::string data;
+        
+        if (noise_handshake_done) {
             std::string current_peer_id;
+            rats::NoiseCipherState* recv_cipher = nullptr;
             
-            if (noise_handshake_done) {
+            {
                 std::lock_guard<std::mutex> lock(peers_mutex_);
                 auto sock_it = socket_to_peer_id_.find(client_socket);
                 if (sock_it != socket_to_peer_id_.end()) {
                     auto peer_it = peers_.find(sock_it->second);
                     if (peer_it != peers_.end() && peer_it->second.is_noise_encrypted()) {
-                        peer_is_encrypted = true;
                         recv_cipher = peer_it->second.recv_cipher.get();
                         current_peer_id = peer_it->second.peer_id;
                     }
                 }
             }
             
-            if (peer_is_encrypted && recv_cipher) {
-                // Decrypt the received message
+            if (recv_cipher) {
                 if (received_bytes.size() < rats::NOISE_TAG_SIZE) {
                     LOG_CLIENT_ERROR("Received encrypted message too small from " << current_peer_id);
-                    break; // Connection error
+                    break;
                 }
                 
                 std::vector<uint8_t> plaintext(received_bytes.size());
@@ -472,184 +472,144 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                 
                 if (pt_len == 0) {
                     LOG_CLIENT_ERROR("Failed to decrypt message from " << current_peer_id << " - closing connection");
-                    break; // Decryption failed - connection compromised
+                    break;
                 }
                 
                 plaintext.resize(pt_len);
                 data = std::string(plaintext.begin(), plaintext.end());
                 LOG_CLIENT_DEBUG("Decrypted message from " << current_peer_id << " (" << pt_len << " bytes)");
             } else {
-                // Unencrypted path - convert bytes directly to string
                 data = std::string(received_bytes.begin(), received_bytes.end());
             }
-        }
-        
-        if (data.empty()) {
-            // Check if this is a timeout or actual connection close
-            if (!handshake_completed) {
-                // Check for handshake timeout one more time before giving up
-                auto now = std::chrono::steady_clock::now();
-                if (now - last_timeout_check >= std::chrono::seconds(1)) {
-                    check_handshake_timeouts();
-                    last_timeout_check = now;
-                    
-                    // Check if handshake has failed due to timeout
-                    std::lock_guard<std::mutex> lock(peers_mutex_);
-                    auto it = socket_to_peer_id_.find(client_socket);
-                    if (it != socket_to_peer_id_.end()) {
-                        auto peer_it = peers_.find(it->second);
-                        if (peer_it != peers_.end() && peer_it->second.is_handshake_failed()) {
-                            LOG_CLIENT_ERROR("Handshake failed for peer " << peer_hash_id);
-                            break;
-                        }
-                    }
-                }
-            }
-            break; // Connection closed or error
+        } else {
+            data = std::string(received_bytes.begin(), received_bytes.end());
         }
         
         LOG_CLIENT_DEBUG("Received data from " << peer_hash_id << ": " << data.substr(0, 50) << (data.length() > 50 ? "..." : ""));
         
-        // Check for handshake timeout and failure
+        // ----- 3. CONNECTION STATE CHECK (during handshake phase only) -----
         if (!handshake_completed) {
-            bool should_exit = false;
-            
-            {
-                std::lock_guard<std::mutex> lock(peers_mutex_);
-                auto it = socket_to_peer_id_.find(client_socket);
-                if (it != socket_to_peer_id_.end()) {
-                    auto peer_it = peers_.find(it->second);
-                    if (peer_it != peers_.end()) {
-                        const RatsPeer& peer = peer_it->second;
-                        if (peer.is_handshake_failed()) {
-                            LOG_CLIENT_ERROR("Handshake failed for peer " << peer_hash_id);
-                            should_exit = true;
-                        }
-                    }
-                }
-            }
-            
-            if (should_exit) {
-                break; // Exit loop to disconnect
-            }
-            
-            // Check for handshake timeout
             auto now = std::chrono::steady_clock::now();
             if (now - last_timeout_check >= std::chrono::seconds(1)) {
                 check_handshake_timeouts();
                 last_timeout_check = now;
             }
+            
+            // Check for handshake failure
+            bool handshake_failed = false;
+            {
+                std::lock_guard<std::mutex> lock(peers_mutex_);
+                auto sock_it = socket_to_peer_id_.find(client_socket);
+                if (sock_it != socket_to_peer_id_.end()) {
+                    auto peer_it = peers_.find(sock_it->second);
+                    if (peer_it != peers_.end() && peer_it->second.is_handshake_failed()) {
+                        handshake_failed = true;
+                    }
+                }
+            }
+            
+            if (handshake_failed) {
+                LOG_CLIENT_ERROR("Handshake failed for peer " << peer_hash_id);
+                break;
+            }
         }
         
-        // Handle handshake messages
+        // ----- 4. HANDSHAKE PHASE -----
         if (is_handshake_message(data)) {
             if (!handle_handshake_message(client_socket, peer_hash_id, data)) {
                 LOG_CLIENT_ERROR("Failed to handle handshake message from " << peer_hash_id);
-                break; // Exit loop to disconnect
+                break;
             }
             
-            // Check if handshake just completed and trigger notifications
+            // Check if handshake just completed
             if (!handshake_completed) {
                 RatsPeer peer_copy;
-                bool should_notify_connection = false;
-                bool should_broadcast_exchange = false;
+                bool just_completed = false;
                 
                 {
                     std::lock_guard<std::mutex> lock(peers_mutex_);
-                    auto it = socket_to_peer_id_.find(client_socket);
-                    if (it != socket_to_peer_id_.end()) {
-                        auto peer_it = peers_.find(it->second);
-                        if (peer_it != peers_.end()) {
-                            const RatsPeer& peer = peer_it->second;
-                            if (peer.is_handshake_completed()) {
-                                handshake_completed = true;
-                                should_notify_connection = true;
-                                should_broadcast_exchange = true;
-                                peer_copy = peer; // Copy peer data
-                                
-                                LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (peer_id: " << peer.peer_id << ")");
-                            }
+                    auto sock_it = socket_to_peer_id_.find(client_socket);
+                    if (sock_it != socket_to_peer_id_.end()) {
+                        auto peer_it = peers_.find(sock_it->second);
+                        if (peer_it != peers_.end() && peer_it->second.is_handshake_completed()) {
+                            just_completed = true;
+                            peer_copy = peer_it->second;
                         }
                     }
                 }
                 
-                // Call callbacks and methods outside of mutex to avoid deadlock
-                if (should_notify_connection) {
-                    // Perform Noise handshake if encryption is enabled
-                    if (encryption_enabled && !noise_handshake_done) {
+                // ----- POST-HANDSHAKE ACTIONS -----
+                if (just_completed) {
+                    handshake_completed = true;
+                    LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (peer_id: " << peer_copy.peer_id << ")");
+                    
+                    // Noise encryption handshake
+                    if (encryption_enabled) {
                         LOG_CLIENT_INFO("Starting Noise handshake for peer " << peer_copy.peer_id);
-                        bool noise_success = perform_noise_handshake(client_socket, peer_copy.peer_id, peer_copy.is_outgoing);
-                        if (noise_success) {
+                        if (perform_noise_handshake(client_socket, peer_copy.peer_id, peer_copy.is_outgoing)) {
                             noise_handshake_done = true;
                             LOG_CLIENT_INFO("Noise handshake successful for peer " << peer_copy.peer_id);
                         } else {
                             LOG_CLIENT_ERROR("Noise handshake failed for peer " << peer_copy.peer_id);
-                            // Continue without encryption if handshake fails
                         }
                     }
                     
+                    // Connection callback
                     if (connection_callback_) {
                         connection_callback_(client_socket, peer_copy.peer_id);
                     }
-
+                    
+                    // GossipSub notification
                     if (gossipsub_) {
                         gossipsub_->handle_peer_connected(peer_copy.peer_id);
                     }
-
+                    
 #ifdef RATS_STORAGE
-                    // Notify storage manager about new peer for synchronization
+                    // Storage manager notification
                     if (storage_manager_) {
                         storage_manager_->on_peer_connected(peer_copy.peer_id);
                     }
 #endif
                     
-                    // Broadcast peer exchange message to other peers
+                    // Peer exchange broadcast
                     broadcast_peer_exchange_message(peer_copy);
                     
-                    // Send peers request to the newly connected peer to discover more peers
+                    // Request peers from newly connected peer (outgoing only)
                     if (peer_copy.is_outgoing) {
                         send_peers_request(client_socket, peer_copy.peer_id);
                     }
                     
-                    // Initiate NAT traversal information exchange
+                    // NAT traversal info exchange
                     send_nat_info_to_peer(client_socket, peer_copy.peer_id);
                     
-                    // If ICE is enabled and this is an outgoing connection, initiate ICE coordination
+                    // ICE coordination (outgoing connections only)
                     if (ice_agent_ && ice_agent_->is_running() && peer_copy.is_outgoing) {
                         if (should_initiate_ice_coordination(peer_copy.peer_id)) {
                             mark_ice_coordination_in_progress(peer_copy.peer_id);
                             
-                            // Start ICE coordination in background thread with proper exception handling
                             add_managed_thread(std::thread([this, peer_id = peer_copy.peer_id, host = peer_copy.ip, port = peer_copy.port]() {
                                 try {
-                                    // Use conditional variable for responsive shutdown
                                     {
                                         std::unique_lock<std::mutex> lock(shutdown_mutex_);
                                         if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !running_.load(); })) {
-                                            // Clean up tracking before exit
                                             cleanup_ice_coordination_for_peer(peer_id);
-                                            return; // Exit if shutdown requested
+                                            return;
                                         }
                                     }
-                                    
-                                    // Initiate ICE coordination
                                     initiate_ice_with_peer(peer_id, host, port);
-                                    
                                 } catch (const std::exception& e) {
                                     LOG_CLIENT_ERROR("Exception in ICE coordination thread for peer " << peer_id << ": " << e.what());
                                 } catch (...) {
                                     LOG_CLIENT_ERROR("Unknown exception in ICE coordination thread for peer " << peer_id);
                                 }
-                                
-                                // Clean up tracking when done
                                 cleanup_ice_coordination_for_peer(peer_id);
                             }), "ice-coordination-" + peer_copy.peer_id.substr(0, 8));
                         } else {
-                            LOG_CLIENT_DEBUG("ICE coordination already in progress for peer " << peer_copy.peer_id << " - skipping duplicate attempt");
+                            LOG_CLIENT_DEBUG("ICE coordination already in progress for peer " << peer_copy.peer_id << " - skipping");
                         }
                     }
                     
-                    // Save configuration after a new peer connects to keep peer list current
+                    // Save configuration
                     if (running_.load()) {
                         add_managed_thread(std::thread([this]() {
                             if (running_.load()) {
@@ -660,105 +620,93 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                 }
             }
             
-            continue; // Don't process handshake messages as regular data
+            continue;
         }
         
-        // Only process regular data after handshake is completed
-        if (handshake_completed) {
-            // Convert string data to binary for header parsing
-            std::vector<uint8_t> received_data(data.begin(), data.end());
-            
-            // Try to parse message header first
-            MessageHeader header;
-            std::vector<uint8_t> payload;
-            if (parse_message_with_header(received_data, header, payload)) {
-                // Message has valid header - call appropriate callback based on type
-                std::string peer_id = get_peer_id(client_socket);
-                
-                switch (header.type) {
-                    case MessageDataType::BINARY: {
-                        LOG_CLIENT_DEBUG("Received BINARY message from " << peer_id << " (payload size: " << payload.size() << ")");
-                        // Try to handle as file transfer data first
-                        bool handled = false;
-                        if (file_transfer_manager_) {
-                            handled = file_transfer_manager_->handle_binary_data(peer_id, payload);
-                        }
-                        
-                        // If not a file transfer chunk, call user's binary callback
-                        if (!handled && binary_data_callback_) {
-                            binary_data_callback_(client_socket, peer_id, payload);
-                        }
-                        break;
-                    }
-                        
-                    case MessageDataType::STRING:
-                        LOG_CLIENT_DEBUG("Received STRING message from " << peer_id << " (payload size: " << payload.size() << ")");
-                        if (string_data_callback_) {
-                            std::string string_data(payload.begin(), payload.end());
-                            string_data_callback_(client_socket, peer_id, string_data);
-                        }
-                        break;
-                        
-                    case MessageDataType::JSON: {
-                        LOG_CLIENT_DEBUG("Received JSON message from " << peer_id << " (payload size: " << payload.size() << ")");
-                        // Parse JSON payload
-                        std::string json_string(payload.begin(), payload.end());
-                        nlohmann::json json_msg;
-                        if (parse_json_message(json_string, json_msg)) {
-                            // Check if it's a rats protocol message
-                            if (json_msg.contains("rats_protocol") && json_msg["rats_protocol"] == true) {
-                                handle_rats_message(client_socket, peer_id, json_msg);
-                            } else {
-                                // Regular JSON data - call JSON callback
-                                if (json_data_callback_) {
-                                    json_data_callback_(client_socket, peer_id, json_msg);
-                                }
-                            }
-                        } else {
-                            LOG_CLIENT_ERROR("Received invalid JSON in JSON message from " << peer_id);
-                        }
-                        break;
-                    }
-                        
-                    default:
-                        LOG_CLIENT_WARN("Received message with unknown data type " << static_cast<int>(header.type) << " from " << peer_id);
-                        break;
-                }
-            } else {
-                // No header found
-                LOG_CLIENT_WARN("No header found in message from " << peer_hash_id);
-            }
-        } else {
+        // ----- 5. DATA PROCESSING PHASE -----
+        if (!handshake_completed) {
             LOG_CLIENT_WARN("Received non-handshake data from " << peer_hash_id << " before handshake completion - ignoring");
+            continue;
         }
-    }
+        
+        std::vector<uint8_t> received_data(data.begin(), data.end());
+        MessageHeader header;
+        std::vector<uint8_t> payload;
+        
+        if (!parse_message_with_header(received_data, header, payload)) {
+            LOG_CLIENT_WARN("No header found in message from " << peer_hash_id);
+            continue;
+        }
+        
+        std::string peer_id = get_peer_id(client_socket);
+        
+        switch (header.type) {
+            case MessageDataType::BINARY: {
+                LOG_CLIENT_DEBUG("Received BINARY message from " << peer_id << " (payload size: " << payload.size() << ")");
+                bool handled = false;
+                if (file_transfer_manager_) {
+                    handled = file_transfer_manager_->handle_binary_data(peer_id, payload);
+                }
+                if (!handled && binary_data_callback_) {
+                    binary_data_callback_(client_socket, peer_id, payload);
+                }
+                break;
+            }
+            
+            case MessageDataType::STRING: {
+                LOG_CLIENT_DEBUG("Received STRING message from " << peer_id << " (payload size: " << payload.size() << ")");
+                if (string_data_callback_) {
+                    std::string string_data(payload.begin(), payload.end());
+                    string_data_callback_(client_socket, peer_id, string_data);
+                }
+                break;
+            }
+            
+            case MessageDataType::JSON: {
+                LOG_CLIENT_DEBUG("Received JSON message from " << peer_id << " (payload size: " << payload.size() << ")");
+                std::string json_string(payload.begin(), payload.end());
+                nlohmann::json json_msg;
+                if (parse_json_message(json_string, json_msg)) {
+                    if (json_msg.contains("rats_protocol") && json_msg["rats_protocol"] == true) {
+                        handle_rats_message(client_socket, peer_id, json_msg);
+                    } else if (json_data_callback_) {
+                        json_data_callback_(client_socket, peer_id, json_msg);
+                    }
+                } else {
+                    LOG_CLIENT_ERROR("Received invalid JSON in JSON message from " << peer_id);
+                }
+                break;
+            }
+            
+            default:
+                LOG_CLIENT_WARN("Received message with unknown data type " << static_cast<int>(header.type) << " from " << peer_id);
+                break;
+        }
+        
+    } // end while
     
-    // Get current peer ID before cleanup for disconnect callback
+    // ===== CLEANUP =====
     std::string current_peer_id = get_peer_id(client_socket);
     
-    // Clean up
     remove_peer(client_socket);
-
-    
     close_socket(client_socket);
     
-    // Notify disconnect callback only if handshake was completed
-    if (handshake_completed && disconnect_callback_) {
-        disconnect_callback_(client_socket, current_peer_id);
-    }
-
-    if (handshake_completed && gossipsub_) {
-        gossipsub_->handle_peer_disconnected(current_peer_id);
-    }
-    
-    // Save configuration after a validated peer disconnects to update the saved peer list
-    if (handshake_completed && running_.load()) {
-        // Save configuration in a separate thread to avoid blocking
-        add_managed_thread(std::thread([this]() {
-            if (running_.load()) {
-                save_configuration();
-            }
-        }), "config-save-disconnect");
+    if (handshake_completed) {
+        if (disconnect_callback_) {
+            disconnect_callback_(client_socket, current_peer_id);
+        }
+        
+        if (gossipsub_) {
+            gossipsub_->handle_peer_disconnected(current_peer_id);
+        }
+        
+        if (running_.load()) {
+            add_managed_thread(std::thread([this]() {
+                if (running_.load()) {
+                    save_configuration();
+                }
+            }), "config-save-disconnect");
+        }
     }
     
     LOG_CLIENT_INFO("Client disconnected: " << peer_hash_id);
