@@ -432,8 +432,57 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         std::string data;
         
         LOG_CLIENT_DEBUG("Receiving data from socket " << client_socket);
-        // Always use framed message reception for reliable large message handling
-        data = receive_tcp_string_framed(client_socket);
+        // Receive binary framed message first
+        std::vector<uint8_t> received_bytes = receive_tcp_message_framed(client_socket);
+        
+        if (received_bytes.empty()) {
+            data = ""; // Mark as empty for existing empty check logic
+        } else {
+            // Check if peer is noise-encrypted and decrypt if necessary
+            bool peer_is_encrypted = false;
+            rats::NoiseCipherState* recv_cipher = nullptr;
+            std::string current_peer_id;
+            
+            if (noise_handshake_done) {
+                std::lock_guard<std::mutex> lock(peers_mutex_);
+                auto sock_it = socket_to_peer_id_.find(client_socket);
+                if (sock_it != socket_to_peer_id_.end()) {
+                    auto peer_it = peers_.find(sock_it->second);
+                    if (peer_it != peers_.end() && peer_it->second.is_noise_encrypted()) {
+                        peer_is_encrypted = true;
+                        recv_cipher = peer_it->second.recv_cipher.get();
+                        current_peer_id = peer_it->second.peer_id;
+                    }
+                }
+            }
+            
+            if (peer_is_encrypted && recv_cipher) {
+                // Decrypt the received message
+                if (received_bytes.size() < rats::NOISE_TAG_SIZE) {
+                    LOG_CLIENT_ERROR("Received encrypted message too small from " << current_peer_id);
+                    break; // Connection error
+                }
+                
+                std::vector<uint8_t> plaintext(received_bytes.size());
+                size_t pt_len = recv_cipher->decrypt_with_ad(
+                    nullptr, 0,
+                    received_bytes.data(), received_bytes.size(),
+                    plaintext.data()
+                );
+                
+                if (pt_len == 0) {
+                    LOG_CLIENT_ERROR("Failed to decrypt message from " << current_peer_id << " - closing connection");
+                    break; // Decryption failed - connection compromised
+                }
+                
+                plaintext.resize(pt_len);
+                data = std::string(plaintext.begin(), plaintext.end());
+                LOG_CLIENT_DEBUG("Decrypted message from " << current_peer_id << " (" << pt_len << " bytes)");
+            } else {
+                // Unencrypted path - convert bytes directly to string
+                data = std::string(received_bytes.begin(), received_bytes.end());
+            }
+        }
         
         if (data.empty()) {
             // Check if this is a timeout or actual connection close
@@ -1333,7 +1382,48 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
     
     // Create message with specified header type
     std::vector<uint8_t> message_with_header = create_message_with_header(data, message_type);
-    // Use framed messages for reliable large message handling
+    
+    // Check if peer is noise-encrypted and encrypt if so
+    std::string peer_id;
+    bool use_encryption = false;
+    rats::NoiseCipherState* send_cipher = nullptr;
+    
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto sock_it = socket_to_peer_id_.find(socket);
+        if (sock_it != socket_to_peer_id_.end()) {
+            auto peer_it = peers_.find(sock_it->second);
+            if (peer_it != peers_.end() && peer_it->second.is_noise_encrypted()) {
+                peer_id = peer_it->second.peer_id;
+                send_cipher = peer_it->second.send_cipher.get();
+                use_encryption = true;
+            }
+        }
+    }
+    
+    if (use_encryption && send_cipher) {
+        // Encrypt the message before sending
+        std::vector<uint8_t> ciphertext(message_with_header.size() + rats::NOISE_TAG_SIZE);
+        size_t ct_len = send_cipher->encrypt_with_ad(
+            nullptr, 0, 
+            message_with_header.data(), message_with_header.size(), 
+            ciphertext.data()
+        );
+        
+        if (ct_len == 0) {
+            LOG_CLIENT_ERROR("Failed to encrypt message for peer: " << peer_id);
+            return false;
+        }
+        
+        ciphertext.resize(ct_len);
+        LOG_CLIENT_DEBUG("Sending encrypted message to " << peer_id << " (" << ct_len << " bytes)");
+        
+        // Send encrypted message using framed protocol
+        int sent = send_tcp_message_framed(socket, ciphertext);
+        return sent > 0;
+    }
+    
+    // Unencrypted path - use framed messages for reliable large message handling
     int sent = send_tcp_message_framed(socket, message_with_header);
     return sent > 0;
 }

@@ -1095,6 +1095,343 @@ TEST_F(RatsClientTest, MixedBinaryTextCallbacksTest) {
     client.stop();
 }
 
+// Test encrypted communication between two clients
+TEST_F(RatsClientTest, EncryptedCommunicationTest) {
+    const int server_port = 59100;
+    const int client_port = 59101;
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    // Enable encryption on both clients
+    server.set_encryption_enabled(true);
+    client.set_encryption_enabled(true);
+    
+    EXPECT_TRUE(server.is_encryption_enabled());
+    EXPECT_TRUE(client.is_encryption_enabled());
+    
+    // Test data to send
+    std::string test_message = "This is a secret encrypted message!";
+    std::vector<uint8_t> test_binary_data = {0x01, 0x02, 0x03, 0x00, 0xFF, 0xFE, 0xAA, 0x55};
+    
+    std::atomic<bool> string_received(false);
+    std::atomic<bool> binary_received(false);
+    std::string received_string;
+    std::vector<uint8_t> received_binary;
+    std::mutex data_mutex;
+    
+    // Set up callbacks on server
+    server.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        received_string = data;
+        string_received = true;
+    });
+    
+    server.set_binary_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        received_binary = data;
+        binary_received = true;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Connect client to server
+    EXPECT_TRUE(client.connect_to_peer("127.0.0.1", server_port));
+    
+    // Wait for connection with handshake
+    bool connected = wait_for_condition([&]() {
+        return server.get_peer_count() > 0 && client.get_peer_count() > 0;
+    }, 3000);
+    EXPECT_TRUE(connected);
+    
+    // Wait a bit more for noise handshake to complete
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // Verify encryption is active for the peer connection
+    auto client_peers = client.get_validated_peers();
+    EXPECT_GT(client_peers.size(), 0);
+    
+    if (client_peers.size() > 0) {
+        std::string server_peer_id = client_peers[0].peer_id;
+        
+        // Check that the peer is encrypted
+        bool peer_encrypted = client.is_peer_encrypted(server_peer_id);
+        EXPECT_TRUE(peer_encrypted) << "Peer should be encrypted after noise handshake";
+        
+        // Send encrypted string message
+        bool string_sent = client.send_string_to_peer(client_peers[0].socket, test_message);
+        EXPECT_TRUE(string_sent);
+        
+        // Send encrypted binary message
+        bool binary_sent = client.send_binary_to_peer(client_peers[0].socket, test_binary_data);
+        EXPECT_TRUE(binary_sent);
+        
+        // Wait for messages to be received and decrypted
+        bool all_received = wait_for_condition([&]() {
+            return string_received.load() && binary_received.load();
+        }, 3000);
+        EXPECT_TRUE(all_received);
+        
+        // Verify the messages were correctly encrypted/decrypted
+        {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            EXPECT_EQ(received_string, test_message);
+            EXPECT_EQ(received_binary, test_binary_data);
+        }
+    }
+    
+    server.stop();
+    client.stop();
+}
+
+// Test encrypted communication with large data
+TEST_F(RatsClientTest, EncryptedLargeDataTransferTest) {
+    const int server_port = 59102;
+    const int client_port = 59103;
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    // Enable encryption
+    server.set_encryption_enabled(true);
+    client.set_encryption_enabled(true);
+    
+    // Create large data (100KB)
+    const size_t data_size = 100 * 1024;
+    std::vector<uint8_t> large_data(data_size);
+    for (size_t i = 0; i < data_size; ++i) {
+        large_data[i] = static_cast<uint8_t>((i * 7 + i / 256) % 256);
+    }
+    
+    std::atomic<bool> data_received(false);
+    std::vector<uint8_t> received_data;
+    std::mutex data_mutex;
+    
+    server.set_binary_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        received_data = data;
+        data_received = true;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    EXPECT_TRUE(client.connect_to_peer("127.0.0.1", server_port));
+    
+    bool connected = wait_for_condition([&]() {
+        return server.get_peer_count() > 0 && client.get_peer_count() > 0;
+    }, 3000);
+    EXPECT_TRUE(connected);
+    
+    // Wait for noise handshake
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    auto peers = client.get_validated_peers();
+    EXPECT_GT(peers.size(), 0);
+    
+    if (peers.size() > 0) {
+        // Verify encryption is active
+        EXPECT_TRUE(client.is_peer_encrypted(peers[0].peer_id));
+        
+        // Send large encrypted data
+        bool sent = client.send_binary_to_peer(peers[0].socket, large_data);
+        EXPECT_TRUE(sent);
+        
+        // Wait for data with longer timeout for large transfer
+        bool received = wait_for_condition([&]() {
+            return data_received.load();
+        }, 10000);
+        EXPECT_TRUE(received);
+        
+        // Verify data integrity
+        {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            EXPECT_EQ(received_data.size(), large_data.size());
+            EXPECT_EQ(received_data, large_data);
+        }
+    }
+    
+    server.stop();
+    client.stop();
+}
+
+// Test encrypted bidirectional communication
+TEST_F(RatsClientTest, EncryptedBidirectionalCommunicationTest) {
+    const int server_port = 59104;
+    const int client_port = 59105;
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    // Enable encryption
+    server.set_encryption_enabled(true);
+    client.set_encryption_enabled(true);
+    
+    std::string client_to_server_msg = "Hello from client!";
+    std::string server_to_client_msg = "Hello from server!";
+    
+    std::atomic<bool> server_received(false);
+    std::atomic<bool> client_received(false);
+    std::string server_received_msg;
+    std::string client_received_msg;
+    std::mutex data_mutex;
+    
+    server.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        server_received_msg = data;
+        server_received = true;
+        
+        // Reply back to client
+        server.send_string_to_peer(socket, server_to_client_msg);
+    });
+    
+    client.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        client_received_msg = data;
+        client_received = true;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    EXPECT_TRUE(client.connect_to_peer("127.0.0.1", server_port));
+    
+    bool connected = wait_for_condition([&]() {
+        return server.get_peer_count() > 0 && client.get_peer_count() > 0;
+    }, 3000);
+    EXPECT_TRUE(connected);
+    
+    // Wait for noise handshake
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    auto peers = client.get_validated_peers();
+    EXPECT_GT(peers.size(), 0);
+    
+    if (peers.size() > 0) {
+        // Verify both sides are encrypted
+        EXPECT_TRUE(client.is_peer_encrypted(peers[0].peer_id));
+        
+        auto server_peers = server.get_validated_peers();
+        EXPECT_GT(server_peers.size(), 0);
+        if (server_peers.size() > 0) {
+            EXPECT_TRUE(server.is_peer_encrypted(server_peers[0].peer_id));
+        }
+        
+        // Send message from client to server
+        bool sent = client.send_string_to_peer(peers[0].socket, client_to_server_msg);
+        EXPECT_TRUE(sent);
+        
+        // Wait for bidirectional exchange
+        bool both_received = wait_for_condition([&]() {
+            return server_received.load() && client_received.load();
+        }, 3000);
+        EXPECT_TRUE(both_received);
+        
+        // Verify both messages
+        {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            EXPECT_EQ(server_received_msg, client_to_server_msg);
+            EXPECT_EQ(client_received_msg, server_to_client_msg);
+        }
+    }
+    
+    server.stop();
+    client.stop();
+}
+
+// Test mixed encrypted and unencrypted peers
+TEST_F(RatsClientTest, MixedEncryptionPeersTest) {
+    const int server_port = 59106;
+    const int encrypted_client_port = 59107;
+    const int unencrypted_client_port = 59108;
+    
+    RatsClient server(server_port);
+    RatsClient encrypted_client(encrypted_client_port);
+    RatsClient unencrypted_client(unencrypted_client_port);
+    
+    // Enable encryption only on server and one client
+    server.set_encryption_enabled(true);
+    encrypted_client.set_encryption_enabled(true);
+    // unencrypted_client has encryption disabled by default
+    
+    EXPECT_TRUE(server.is_encryption_enabled());
+    EXPECT_TRUE(encrypted_client.is_encryption_enabled());
+    EXPECT_FALSE(unencrypted_client.is_encryption_enabled());
+    
+    std::atomic<int> messages_received(0);
+    std::vector<std::string> received_messages;
+    std::mutex data_mutex;
+    
+    server.set_string_data_callback([&](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        received_messages.push_back(data);
+        messages_received++;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(encrypted_client.start());
+    EXPECT_TRUE(unencrypted_client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Connect both clients
+    EXPECT_TRUE(encrypted_client.connect_to_peer("127.0.0.1", server_port));
+    EXPECT_TRUE(unencrypted_client.connect_to_peer("127.0.0.1", server_port));
+    
+    bool all_connected = wait_for_condition([&]() {
+        return server.get_peer_count() >= 2;
+    }, 3000);
+    EXPECT_TRUE(all_connected);
+    
+    // Wait for noise handshake on encrypted connection
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // Send messages from both clients
+    auto encrypted_peers = encrypted_client.get_validated_peers();
+    auto unencrypted_peers = unencrypted_client.get_validated_peers();
+    
+    if (encrypted_peers.size() > 0) {
+        encrypted_client.send_string_to_peer(encrypted_peers[0].socket, "Encrypted message");
+    }
+    
+    if (unencrypted_peers.size() > 0) {
+        unencrypted_client.send_string_to_peer(unencrypted_peers[0].socket, "Unencrypted message");
+    }
+    
+    // Wait for both messages
+    bool both_received = wait_for_condition([&]() {
+        return messages_received.load() >= 2;
+    }, 3000);
+    EXPECT_TRUE(both_received);
+    
+    // Verify both messages were received
+    {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        EXPECT_EQ(received_messages.size(), 2);
+        
+        // Check that we received both messages (order may vary)
+        bool has_encrypted = false;
+        bool has_unencrypted = false;
+        for (const auto& msg : received_messages) {
+            if (msg == "Encrypted message") has_encrypted = true;
+            if (msg == "Unencrypted message") has_unencrypted = true;
+        }
+        EXPECT_TRUE(has_encrypted);
+        EXPECT_TRUE(has_unencrypted);
+    }
+    
+    server.stop();
+    encrypted_client.stop();
+    unencrypted_client.stop();
+}
+
 // Test binary data edge cases
 TEST_F(RatsClientTest, BinaryDataEdgeCasesTest) {
     const int server_port = 59011;
