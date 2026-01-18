@@ -129,6 +129,7 @@ set(LIBRARY_SOURCES
     src/krpc.h
     src/librats.cpp
     src/librats_logging.cpp
+    src/librats_encryption.cpp
     src/librats_file_transfer.cpp
     src/librats_gossipsub.cpp
     src/librats_nat.cpp
