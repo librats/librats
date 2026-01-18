@@ -37,13 +37,19 @@ body {
 }
 
 .nav-container {
-    max-width: 1200px;
+    max-width: 1350px;
     margin: 0 auto;
     padding: 0 20px;
     display: flex;
     justify-content: space-between;
     align-items: center;
     height: 70px;
+}
+
+@media (max-width: 1300px) {
+    .nav-container .nav-link.optional {
+        display: none;
+    }
 }
 
 .nav-logo {
@@ -2215,7 +2221,7 @@ body {
 }
 
 /* Responsive Design Menu */
-@media (max-width: 1150px) {
+@media (max-width: 1185px) {
     .hamburger {
         display: flex;
     }
@@ -2236,6 +2242,10 @@ body {
 
     .nav-menu.active {
         left: 0;
+    }
+
+    .nav-menu .nav-link.optional {
+        display: block;
     }
 
 }
