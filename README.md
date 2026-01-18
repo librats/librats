@@ -313,42 +313,6 @@ int main() {
 
 ### 6. Encryption
 
-```cpp
-#include "librats.h"
-#include <iostream>
-
-int main() {
-    librats::RatsClient client(8080);
-    
-    // Initialize encryption system
-    if (!client.initialize_encryption(true)) {
-        std::cerr << "Failed to initialize encryption" << std::endl;
-        return 1;
-    }
-    
-    // Generate a new encryption key (or load existing one)
-    std::string encryption_key = client.generate_new_encryption_key();
-    std::cout << "🔐 Generated encryption key: " << encryption_key.substr(0, 16) << "..." << std::endl;
-    
-    // Alternatively, set a specific key:
-    // client.set_encryption_key("your_64_character_hex_key_here");
-    
-    std::cout << "🔒 Encryption enabled: " << (client.is_encryption_enabled() ? "Yes" : "No") << std::endl;
-    
-    // Connection callback with encryption status
-    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
-        bool encrypted = client.is_peer_encrypted(peer_id);
-        std::cout << "🔗 Peer connected: " << peer_id 
-                  << (encrypted ? " [ENCRYPTED]" : " [UNENCRYPTED]") << std::endl;
-    });
-    
-    client.start();
-    
-    // All communications are now automatically encrypted
-    client.broadcast_string_to_peers("This message is encrypted!");
-    
-    return 0;
-}
 ```
 
 ### 7. Configuration Persistence
@@ -534,15 +498,6 @@ void once(const std::string& message_type, MessageCallback callback);
 void off(const std::string& message_type);
 void send(const std::string& message_type, const nlohmann::json& data, SendCallback callback = nullptr);
 void send(const std::string& peer_id, const std::string& message_type, const nlohmann::json& data, SendCallback callback = nullptr);
-
-// Encryption
-bool initialize_encryption(bool enable);
-void set_encryption_enabled(bool enabled);
-bool is_encryption_enabled() const;
-std::string get_encryption_key() const;
-bool set_encryption_key(const std::string& key_hex);
-std::string generate_new_encryption_key();
-bool is_peer_encrypted(const std::string& peer_id) const;
 
 // Configuration persistence
 bool load_configuration();

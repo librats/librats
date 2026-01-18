@@ -489,25 +489,6 @@ int rats_is_encryption_enabled(rats_client_t handle) {
     return wrap->client->is_encryption_enabled() ? 1 : 0;
 }
 
-char* rats_get_encryption_key(rats_client_t handle) {
-    if (!handle) return nullptr;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    return rats_strdup_owned(wrap->client->get_encryption_key());
-}
-
-rats_error_t rats_set_encryption_key(rats_client_t handle, const char* key_hex) {
-    if (!handle || !key_hex) return RATS_ERROR_INVALID_PARAMETER;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    return wrap->client->set_encryption_key(std::string(key_hex)) ? 
-           RATS_SUCCESS : RATS_ERROR_INVALID_PARAMETER;
-}
-
-char* rats_generate_encryption_key(rats_client_t handle) {
-    if (!handle) return nullptr;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    return rats_strdup_owned(wrap->client->generate_new_encryption_key());
-}
-
 // Protocol configuration
 rats_error_t rats_set_protocol_name(rats_client_t handle, const char* protocol_name) {
     if (!handle || !protocol_name) return RATS_ERROR_INVALID_PARAMETER;

@@ -328,14 +328,6 @@ bool RatsClient::perform_tcp_connection(const std::string& host, int port, Conne
         return false;
     }
     
-    // Initialize encryption if enabled
-    if (is_encryption_enabled()) {
-        if (!encrypted_communication::initialize_outgoing_connection(peer_socket)) {
-            result.error_message = "Failed to initialize encryption";
-            close_socket(peer_socket);
-            return false;
-        }
-    }
     
     // Create peer and add to management
     std::string connection_info = host + ":" + std::to_string(port);

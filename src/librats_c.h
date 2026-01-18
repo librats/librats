@@ -127,9 +127,6 @@ RATS_API rats_error_t rats_query_mdns_services(rats_client_t client);
 // Encryption
 RATS_API rats_error_t rats_set_encryption_enabled(rats_client_t client, int enabled);
 RATS_API int rats_is_encryption_enabled(rats_client_t client);
-RATS_API char* rats_get_encryption_key(rats_client_t client); // caller must free
-RATS_API rats_error_t rats_set_encryption_key(rats_client_t client, const char* key_hex);
-RATS_API char* rats_generate_encryption_key(rats_client_t client); // caller must free
 
 // Protocol configuration
 RATS_API rats_error_t rats_set_protocol_name(rats_client_t client, const char* protocol_name);

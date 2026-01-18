@@ -6,7 +6,6 @@
 #include "mdns.h"
 #include "ice.h"
 #include "logger.h"
-#include "encrypted_socket.h"
 #include "threadmanager.h"
 #include "gossipsub.h" // For ValidationResult enum and GossipSub types
 #include "file_transfer.h" // File transfer functionality
@@ -63,7 +62,8 @@ struct RatsPeer {
     
     // Encryption-related fields
     bool encryption_enabled;                // Whether encryption is enabled for this peer
-    bool noise_handshake_completed;         // Whether noise handshake is completed
+    // TODO: Re-add when implementing new Noise protocol
+    // bool noise_handshake_completed;      // Whether noise handshake is completed
     
     // NAT traversal fields
     bool ice_enabled;                       // Whether ICE is enabled for this peer
@@ -75,7 +75,7 @@ struct RatsPeer {
     
     
     RatsPeer() : handshake_state(HandshakeState::PENDING), 
-                 encryption_enabled(false), noise_handshake_completed(false),
+                 encryption_enabled(false),
                  ice_enabled(false), ice_state(IceConnectionState::NEW),
                  detected_nat_type(NatType::UNKNOWN) {
         connected_at = std::chrono::steady_clock::now();
@@ -87,7 +87,7 @@ struct RatsPeer {
         : peer_id(id), ip(peer_ip), port(peer_port), socket(sock), 
           normalized_address(norm_addr), is_outgoing(outgoing),
           handshake_state(HandshakeState::PENDING),
-          encryption_enabled(false), noise_handshake_completed(false),
+          encryption_enabled(false),
           ice_enabled(false), ice_state(IceConnectionState::NEW),
           detected_nat_type(NatType::UNKNOWN) {
         connected_at = std::chrono::steady_clock::now();
@@ -826,25 +826,6 @@ public:
      * @return true if encryption is enabled
      */
     bool is_encryption_enabled() const;
-
-    /**
-     * Get the encryption key as hex string
-     * @return Encryption key in hex format
-     */
-    std::string get_encryption_key() const;
-
-    /**
-     * Set encryption key from hex string
-     * @param key_hex Encryption key in hex format
-     * @return true if key was valid and set
-     */
-    bool set_encryption_key(const std::string& key_hex);
-
-    /**
-     * Generate a new encryption key
-     * @return New encryption key in hex format
-     */
-    std::string generate_new_encryption_key();
 
     /**
      * Check if a peer connection is encrypted
@@ -1744,7 +1725,6 @@ private:
     static const std::string PEERS_EVER_FILE_NAME;         // "peers_ever.rats"
     
     // Encryption state
-    NoiseKey static_encryption_key_;                        // Our static encryption key
     bool encryption_enabled_;                               // Whether encryption is enabled
     mutable std::mutex encryption_mutex_;                   // [3] Protects encryption state
     

@@ -135,8 +135,6 @@ INPUT                  = src/librats.h \
                          src/stun.h \
                          src/ice.h \
                          src/mdns.h \
-                         src/noise.h \
-                         src/encrypted_socket.h \
                          src/threadmanager.h \
                          src/logger.h \
                          src/socket.h \

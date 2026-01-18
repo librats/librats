@@ -674,32 +674,6 @@ TEST_F(RatsCApiTest, StatsAndPeerInfoJson) {
     rats_stop(client2);
 }
 
-// New coverage: encryption key APIs
-TEST_F(RatsCApiTest, EncryptionKeyApis) {
-    client1 = rats_create(56008);
-    ASSERT_NE(client1, nullptr);
-
-    // Generate, set, get
-    char* key = rats_generate_encryption_key(client1);
-    ASSERT_NE(key, nullptr);
-    ASSERT_GT(strlen(key), 0u);
-    EXPECT_EQ(rats_set_encryption_key(client1, key), RATS_SUCCESS);
-    char* got = rats_get_encryption_key(client1);
-    ASSERT_NE(got, nullptr);
-    ASSERT_GT(strlen(got), 0u);
-
-    // Toggle and check
-    EXPECT_EQ(rats_set_encryption_enabled(client1, 1), RATS_SUCCESS);
-    EXPECT_EQ(rats_is_encryption_enabled(client1), 1);
-    EXPECT_EQ(rats_set_encryption_enabled(client1, 0), RATS_SUCCESS);
-    EXPECT_EQ(rats_is_encryption_enabled(client1), 0);
-
-    rats_string_free(key);
-    rats_string_free(got);
-    rats_destroy(client1);
-    client1 = nullptr;
-}
-
 // New coverage: protocol name/version set/get
 TEST_F(RatsCApiTest, ProtocolConfigApis) {
     client1 = rats_create(56010);

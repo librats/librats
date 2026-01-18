@@ -90,26 +90,6 @@ bool RatsClient::load_configuration() {
             encryption_enabled_ = config.value("encryption_enabled", true);
         }
         
-        if (config.contains("encryption_key")) {
-            std::string key_hex = config.value("encryption_key", "");
-            if (!key_hex.empty()) {
-                NoiseKey loaded_key = EncryptedSocket::string_to_key(key_hex);
-                // Validate key
-                bool is_valid = false;
-                for (uint8_t byte : loaded_key) {
-                    if (byte != 0) {
-                        is_valid = true;
-                        break;
-                    }
-                }
-                if (is_valid) {
-                    static_encryption_key_ = loaded_key;
-                    LOG_CLIENT_INFO("Loaded encryption key from configuration");
-                } else {
-                    LOG_CLIENT_WARN("Invalid encryption key in configuration, using generated key");
-                }
-            }
-        }
         
         // Update last_updated timestamp
         auto now = std::chrono::high_resolution_clock::now();
@@ -149,7 +129,8 @@ bool RatsClient::save_configuration() {
         config["listen_port"] = listen_port_;
         config["max_peers"] = max_peers_;
         config["encryption_enabled"] = encryption_enabled_;
-        config["encryption_key"] = get_encryption_key();
+        // TODO: Re-add when implementing new Noise protocol
+        // config["encryption_key"] = get_encryption_key();
         
         auto now = std::chrono::high_resolution_clock::now();
         auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();

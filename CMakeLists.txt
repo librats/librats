@@ -135,7 +135,6 @@ set(LIBRARY_SOURCES
     src/librats_ice.cpp
     src/librats_mdns.cpp
     src/librats_persistence.cpp
-    src/librats_encryption.cpp
     src/librats.h
     src/sha1.cpp
     src/sha1.h
@@ -149,10 +148,6 @@ set(LIBRARY_SOURCES
     src/fs.h
     src/logger.h
     src/logger.cpp
-    src/noise.cpp
-    src/noise.h
-    src/encrypted_socket.cpp
-    src/encrypted_socket.h
     src/mdns.cpp
     src/mdns.h
     src/threadmanager.cpp
@@ -334,7 +329,6 @@ if(RATS_BUILD_TESTS)
         tests/test_config_persistence.cpp
         tests/test_main.cpp
         tests/test_message_exchange.cpp
-        tests/test_noise.cpp
         tests/test_gossipsub.cpp
         tests/test_logging_api_gtest.cpp
         tests/test_file_transfer.cpp

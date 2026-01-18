@@ -70,9 +70,7 @@ RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig&
     
     // Initialize ICE agent if enabled
     initialize_ice_agent();
-    
-    // Generate encryption key
-    static_encryption_key_ = encrypted_communication::generate_node_key();
+
     
     // Load configuration (this will generate peer ID if needed)
     load_configuration();
@@ -361,14 +359,6 @@ void RatsClient::server_loop() {
             continue;
         }
 
-        // Initialize encryption for incoming connection
-        if (is_encryption_enabled()) {
-            if (!encrypted_communication::initialize_incoming_connection(client_socket)) {
-                LOG_SERVER_ERROR("Failed to initialize encryption for incoming connection from " << normalized_peer_address);
-                close_socket(client_socket);
-                continue;
-            }
-        }
 
         // Generate unique hash ID for this incoming client
         std::string connection_info = "incoming_from_" + peer_address;
@@ -419,74 +409,22 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     LOG_CLIENT_INFO("Started handling client: " << peer_hash_id);
     
     bool handshake_completed = false;
-    bool noise_handshake_completed = false;
     auto last_timeout_check = std::chrono::steady_clock::now();
     
+    // TODO: Re-add when implementing new Noise protocol
     // Check if encryption is enabled for this connection
-    bool encryption_enabled = is_encryption_enabled();
+    // bool encryption_enabled = is_encryption_enabled();
     
     while (running_.load()) {
         std::string data;
         
+        // TODO: Re-add when implementing new Noise protocol
         // Handle encryption handshake first if enabled
-        LOG_CLIENT_DEBUG("Checking handshake state: encryption_enabled=" << encryption_enabled << ", noise_handshake_completed=" << noise_handshake_completed);
-        if (encryption_enabled && !noise_handshake_completed) {
-            LOG_CLIENT_DEBUG("Entering encryption handshake handling for socket " << client_socket);
-            // Check if noise handshake is completed
-            if (encrypted_communication::is_handshake_completed(client_socket)) {
-                noise_handshake_completed = true;
-                LOG_CLIENT_INFO("Noise handshake completed for peer " << peer_hash_id);
-                // Update peer state
-                {
-                    std::lock_guard<std::mutex> lock(peers_mutex_);
-                    auto it = socket_to_peer_id_.find(client_socket);
-                    if (it != socket_to_peer_id_.end()) {
-                        auto peer_it = peers_.find(it->second);
-                        if (peer_it != peers_.end()) {
-                            peer_it->second.noise_handshake_completed = true;
-                            // For outgoing connections, send application handshake after noise handshake completes
-                            if (peer_it->second.is_outgoing) {
-                                if (!send_handshake_unlocked(client_socket, get_our_peer_id())) {
-                                    LOG_CLIENT_ERROR("Failed to send application handshake after noise completion for peer " << peer_hash_id);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                // For responders and ongoing handshake processing, try to continue the handshake
-                LOG_CLIENT_DEBUG("Attempting to process handshake for socket " << client_socket);
-                if (!encrypted_communication::perform_handshake(client_socket)) {
-                    LOG_CLIENT_ERROR("Encryption handshake failed for peer " << peer_hash_id);
-                    break;
-                }
-                // Continue to check if handshake completed
-                continue;
-            }
-        }
+        // Currently encryption is disabled, receive data unencrypted
         
-        // Receive data (encrypted or unencrypted based on settings)
-        LOG_CLIENT_DEBUG("Receiving data: encryption_enabled=" << encryption_enabled << ", noise_handshake_completed=" << noise_handshake_completed);
-        if (encryption_enabled && noise_handshake_completed) {
-            LOG_CLIENT_DEBUG("Receiving encrypted data from socket " << client_socket);
-            auto binary_data = encrypted_communication::receive_tcp_data_encrypted(client_socket);
-            data = std::string(binary_data.begin(), binary_data.end());
-        } else if (encryption_enabled && !noise_handshake_completed) {
-            LOG_CLIENT_DEBUG("Processing handshake for socket " << client_socket);
-            // During handshake, let the encrypted socket handle data reception and processing
-            // The perform_handshake function will internally call receive_tcp_data and process handshake messages
-            if (!encrypted_communication::perform_handshake(client_socket)) {
-                LOG_CLIENT_ERROR("Encryption handshake failed for peer " << peer_hash_id);
-                break;
-            }
-            // Continue to check if handshake completed
-            continue;
-        } else {
-            LOG_CLIENT_DEBUG("Receiving unencrypted data from socket " << client_socket);
-            // Always use framed message reception for reliable large message handling
-            data = receive_tcp_string_framed(client_socket);
-        }
+        LOG_CLIENT_DEBUG("Receiving unencrypted data from socket " << client_socket);
+        // Always use framed message reception for reliable large message handling
+        data = receive_tcp_string_framed(client_socket);
         
         if (data.empty()) {
             // Check if this is a timeout or actual connection close
@@ -654,8 +592,8 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
             continue; // Don't process handshake messages as regular data
         }
         
-        // Only process regular data after handshake is completed (and noise handshake if encryption is enabled)
-        if (handshake_completed && (!encryption_enabled || noise_handshake_completed)) {
+        // Only process regular data after handshake is completed
+        if (handshake_completed) {
             // Convert string data to binary for header parsing
             std::vector<uint8_t> received_data(data.begin(), data.end());
             
@@ -729,11 +667,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     
     // Clean up
     remove_peer(client_socket);
-    
-    // Clean up encryption state
-    if (encryption_enabled) {
-        encrypted_communication::cleanup_socket(client_socket);
-    }
+
     
     close_socket(client_socket);
     
@@ -1177,12 +1111,6 @@ bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionSt
 
 void RatsClient::disconnect_peer(socket_t socket) {
     remove_peer(socket);
-    
-    // Clean up encryption state
-    if (is_encryption_enabled()) {
-        encrypted_communication::cleanup_socket(socket);
-    }
-    
     close_socket(socket);
 }
 
@@ -1383,24 +1311,9 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
     
     // Create message with specified header type
     std::vector<uint8_t> message_with_header = create_message_with_header(data, message_type);
-    
-    // Use encrypted communication if encryption is enabled
-    if (is_encryption_enabled()) {
-        // Check if handshake is completed before sending data
-        if (!encrypted_communication::is_handshake_completed(socket)) {
-            std::string type_name = (message_type == MessageDataType::BINARY) ? "binary" : 
-                                   (message_type == MessageDataType::STRING) ? "string" : "JSON";
-            LOG_CLIENT_WARN("Cannot send " << type_name << " data to socket " << socket << " - encryption handshake not completed");
-            return false;
-        }
-        
-        int sent = encrypted_communication::send_tcp_data_encrypted(socket, message_with_header);
-        return sent > 0;
-    } else {
-        // Use framed messages for reliable large message handling
-        int sent = send_tcp_message_framed(socket, message_with_header);
-        return sent > 0;
-    }
+    // Use framed messages for reliable large message handling
+    int sent = send_tcp_message_framed(socket, message_with_header);
+    return sent > 0;
 }
 
 bool RatsClient::send_string_to_peer(socket_t socket, const std::string& data) {
@@ -2665,6 +2578,36 @@ void RatsClient::log_handshake_completion_unlocked(const RatsPeer& peer) {
     
     LOG_CLIENT_INFO(separator);
     LOG_CLIENT_INFO("");
+}
+
+// =========================================================================
+// Encryption Functionality - Stub implementations
+// TODO: Re-add full implementation when implementing new Noise protocol
+// =========================================================================
+
+bool RatsClient::initialize_encryption(bool enable) {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    encryption_enabled_ = enable;
+    // TODO: Initialize Noise protocol when implemented
+    LOG_CLIENT_INFO("Encryption " << (enable ? "enabled" : "disabled") << " (stub - not yet implemented)");
+    return true;
+}
+
+void RatsClient::set_encryption_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    encryption_enabled_ = enabled;
+    LOG_CLIENT_DEBUG("Encryption set to " << (enabled ? "enabled" : "disabled") << " (stub)");
+}
+
+bool RatsClient::is_encryption_enabled() const {
+    std::lock_guard<std::mutex> lock(encryption_mutex_);
+    return encryption_enabled_;
+}
+
+bool RatsClient::is_peer_encrypted(const std::string& peer_id) const {
+    // TODO: Check actual encryption state when Noise protocol is implemented
+    (void)peer_id; // Suppress unused parameter warning
+    return false;
 }
 
 } // namespace librats
