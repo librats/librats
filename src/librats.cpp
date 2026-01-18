@@ -586,6 +586,13 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     if (gossipsub_) {
                         gossipsub_->handle_peer_connected(peer_copy.peer_id);
                     }
+
+#ifdef RATS_STORAGE
+                    // Notify storage manager about new peer for synchronization
+                    if (storage_manager_) {
+                        storage_manager_->on_peer_connected(peer_copy.peer_id);
+                    }
+#endif
                     
                     // Broadcast peer exchange message to other peers
                     broadcast_peer_exchange_message(peer_copy);
