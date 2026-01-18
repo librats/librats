@@ -159,6 +159,23 @@ set(LIBRARY_SOURCES
     src/version.cpp
     src/rats_export.h
     ${PROJECT_BINARY_DIR}/src/version.h
+
+# Cypto algorithms including Noise Protocol needed
+    src/crypto/curve25519.c
+    src/crypto/curve25519.h
+    src/crypto/chacha.c
+    src/crypto/chacha.h
+    src/crypto/poly1305.c
+    src/crypto/poly1305.h
+    src/crypto/sha256.c
+    src/crypto/sha256.h
+    src/crypto/sha512.c
+    src/crypto/sha512.h
+    src/crypto/blake2s.c
+    src/crypto/blake2s.h
+    src/crypto/blake2b.c
+    src/crypto/blake2b.h
+    src/crypto/blake2_endian.h
 )
 
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
@@ -207,6 +224,7 @@ set_target_properties(rats PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Include directories
 target_include_directories(rats PUBLIC ${PROJECT_BINARY_DIR}/src src)
+target_include_directories(rats PUBLIC ${PROJECT_SOURCE_DIR}/src/crypto)
 
 # Find and link threading support
 find_package(Threads REQUIRED)
@@ -332,6 +350,11 @@ if(RATS_BUILD_TESTS)
         tests/test_gossipsub.cpp
         tests/test_logging_api_gtest.cpp
         tests/test_file_transfer.cpp
+# Noise Protocol Crypto tests
+        tests/test_crypto_curve25519.cpp
+        tests/test_crypto_chacha_poly.cpp
+        tests/test_crypto_sha2.cpp
+        tests/test_crypto_blake2.cpp
     )
     
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled
