@@ -9,6 +9,7 @@
 #include "threadmanager.h"
 #include "gossipsub.h" // For ValidationResult enum and GossipSub types
 #include "file_transfer.h" // File transfer functionality
+#include "noise.h" // Noise Protocol encryption
 #ifdef RATS_STORAGE
 #include "storage.h" // Distributed storage functionality
 #endif
@@ -62,8 +63,10 @@ struct RatsPeer {
     
     // Encryption-related fields
     bool encryption_enabled;                // Whether encryption is enabled for this peer
-    // TODO: Re-add when implementing new Noise protocol
-    // bool noise_handshake_completed;      // Whether noise handshake is completed
+    bool noise_handshake_completed;         // Whether noise handshake is completed
+    std::shared_ptr<rats::NoiseCipherState> send_cipher;   // Cipher for sending encrypted data
+    std::shared_ptr<rats::NoiseCipherState> recv_cipher;   // Cipher for receiving encrypted data
+    std::vector<uint8_t> remote_static_key;  // Remote peer's static public key (for identity verification)
     
     // NAT traversal fields
     bool ice_enabled;                       // Whether ICE is enabled for this peer
@@ -76,6 +79,7 @@ struct RatsPeer {
     
     RatsPeer() : handshake_state(HandshakeState::PENDING), 
                  encryption_enabled(false),
+                 noise_handshake_completed(false),
                  ice_enabled(false), ice_state(IceConnectionState::NEW),
                  detected_nat_type(NatType::UNKNOWN) {
         connected_at = std::chrono::steady_clock::now();
@@ -88,10 +92,16 @@ struct RatsPeer {
           normalized_address(norm_addr), is_outgoing(outgoing),
           handshake_state(HandshakeState::PENDING),
           encryption_enabled(false),
+          noise_handshake_completed(false),
           ice_enabled(false), ice_state(IceConnectionState::NEW),
           detected_nat_type(NatType::UNKNOWN) {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
+    }
+    
+    // Check if peer has completed Noise handshake and is ready for encrypted communication
+    bool is_noise_encrypted() const { 
+        return noise_handshake_completed && send_cipher && recv_cipher; 
     }
     
     // Helper methods
@@ -833,6 +843,34 @@ public:
      * @return true if peer connection is encrypted
      */
     bool is_peer_encrypted(const std::string& peer_id) const;
+    
+    /**
+     * Set a custom static keypair for Noise Protocol
+     * If not set, a new keypair is generated automatically
+     * @param private_key 32-byte private key
+     * @return true if the keypair was set successfully
+     */
+    bool set_noise_static_keypair(const uint8_t private_key[32]);
+    
+    /**
+     * Get our Noise Protocol static public key
+     * @return 32-byte public key
+     */
+    std::vector<uint8_t> get_noise_static_public_key() const;
+    
+    /**
+     * Get the remote peer's Noise static public key
+     * @param peer_id Peer ID to query
+     * @return 32-byte public key, or empty vector if not available
+     */
+    std::vector<uint8_t> get_peer_noise_public_key(const std::string& peer_id) const;
+    
+    /**
+     * Get the handshake hash for a peer connection (for channel binding)
+     * @param peer_id Peer ID to query
+     * @return 32-byte handshake hash, or empty vector if not available
+     */
+    std::vector<uint8_t> get_peer_handshake_hash(const std::string& peer_id) const;
 
     // =========================================================================
     // Configuration Persistence
@@ -1726,6 +1764,8 @@ private:
     
     // Encryption state
     bool encryption_enabled_;                               // Whether encryption is enabled
+    rats::NoiseKeyPair noise_static_keypair_;               // Our static Noise keypair
+    bool noise_keypair_initialized_;                        // Whether keypair has been initialized
     mutable std::mutex encryption_mutex_;                   // [3] Protects encryption state
     
     // ICE and NAT traversal
@@ -1948,6 +1988,14 @@ private:
     bool is_ice_enabled() const;
     bool is_peer_ice_connected(const std::string& peer_id) const;
     void cleanup_ice_resources();
+    
+    // Noise Protocol encryption helpers
+    void initialize_noise_keypair();
+    bool perform_noise_handshake(socket_t socket, const std::string& peer_id, bool is_initiator);
+    bool send_noise_message(socket_t socket, const uint8_t* data, size_t len);
+    bool recv_noise_message(socket_t socket, std::vector<uint8_t>& out_data, int timeout_ms = 10000);
+    bool encrypt_and_send(socket_t socket, const std::string& peer_id, const std::vector<uint8_t>& plaintext);
+    bool receive_and_decrypt(socket_t socket, const std::string& peer_id, std::vector<uint8_t>& plaintext);
 };
 
 // Utility functions

@@ -167,15 +167,23 @@ set(LIBRARY_SOURCES
     src/crypto/chacha.h
     src/crypto/poly1305.c
     src/crypto/poly1305.h
+    src/crypto/chachapoly.c
+    src/crypto/chachapoly.h
     src/crypto/sha256.c
     src/crypto/sha256.h
     src/crypto/sha512.c
     src/crypto/sha512.h
+    src/crypto/hkdf.c
+    src/crypto/hkdf.h
     src/crypto/blake2s.c
     src/crypto/blake2s.h
     src/crypto/blake2b.c
     src/crypto/blake2b.h
     src/crypto/blake2_endian.h
+
+# Noise Protocol implementation
+    src/noise.cpp
+    src/noise.h
 )
 
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
@@ -355,6 +363,7 @@ if(RATS_BUILD_TESTS)
         tests/test_crypto_chacha_poly.cpp
         tests/test_crypto_sha2.cpp
         tests/test_crypto_blake2.cpp
+        tests/test_noise.cpp
     )
     
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled
