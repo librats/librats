@@ -124,11 +124,18 @@ bool RatsClient::send_noise_message(socket_t socket, const uint8_t* data, size_t
 }
 
 bool RatsClient::recv_noise_message(socket_t socket, std::vector<uint8_t>& out_data, int timeout_ms) {
-    // Set socket timeout
+    // Set socket timeout (platform-specific)
+#ifdef _WIN32
+    // Windows: SO_RCVTIMEO expects DWORD (milliseconds)
+    DWORD tv = static_cast<DWORD>(timeout_ms);
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#else
+    // Unix: SO_RCVTIMEO expects struct timeval
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
     setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+#endif
     
     // Receive length
     uint32_t network_len;
@@ -320,6 +327,17 @@ bool RatsClient::perform_noise_handshake(socket_t socket, const std::string& pee
             return false;
         }
     }
+    
+    // Reset socket timeout to infinite (0) for normal operation after handshake
+#ifdef _WIN32
+    DWORD no_timeout = 0;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&no_timeout), sizeof(no_timeout));
+#else
+    struct timeval no_timeout;
+    no_timeout.tv_sec = 0;
+    no_timeout.tv_usec = 0;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&no_timeout), sizeof(no_timeout));
+#endif
     
     return true;
 }
