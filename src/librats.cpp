@@ -427,6 +427,17 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         }
     }
     
+    // ===== SEND INITIAL HANDSHAKE FOR OUTGOING CONNECTIONS =====
+    if (is_outgoing) {
+        LOG_CLIENT_DEBUG("Sending initial handshake for outgoing connection to " << peer_hash_id);
+        if (!send_handshake(client_socket, get_our_peer_id())) {
+            LOG_CLIENT_ERROR("Failed to send initial handshake for outgoing connection to " << peer_hash_id);
+            remove_peer(client_socket);
+            close_socket(client_socket);
+            return;
+        }
+    }
+    
     // ===== MAIN LOOP =====
     while (running_.load()) {
         

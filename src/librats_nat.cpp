@@ -344,16 +344,7 @@ bool RatsClient::perform_tcp_connection(const std::string& host, int port, Conne
     // Start handling this peer
     add_managed_thread(std::thread(&RatsClient::handle_client, this, peer_socket, peer_hash_id), 
                       "direct-connect-handler-" + peer_hash_id.substr(0, 8));
-    
-    // Send handshake if not encrypted
-    if (!is_encryption_enabled()) {
-        if (!send_handshake(peer_socket, get_our_peer_id())) {
-            result.error_message = "Failed to send handshake";
-            disconnect_peer(peer_socket);
-            return false;
-        }
-    }
-    
+
     return true;
 }
 
