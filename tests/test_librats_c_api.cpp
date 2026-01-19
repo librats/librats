@@ -65,8 +65,8 @@ TEST_F(RatsCApiTest, ErrorHandling) {
     ASSERT_NE(client1, nullptr);
     
     // Test invalid parameters
-    EXPECT_EQ(rats_connect_with_strategy(nullptr, "127.0.0.1", 8080, RATS_STRATEGY_DIRECT_ONLY), RATS_ERROR_INVALID_PARAMETER);
-    EXPECT_EQ(rats_connect_with_strategy(client1, nullptr, 8080, RATS_STRATEGY_DIRECT_ONLY), RATS_ERROR_INVALID_PARAMETER);
+    EXPECT_EQ(rats_connect(nullptr, "127.0.0.1", 8080), RATS_ERROR_INVALID_HANDLE);
+    EXPECT_EQ(rats_connect(client1, nullptr, 8080), RATS_ERROR_INVALID_PARAMETER);
     EXPECT_EQ(rats_send_string(nullptr, "peer", "message"), RATS_ERROR_INVALID_HANDLE);
     EXPECT_EQ(rats_send_string(client1, nullptr, "message"), RATS_ERROR_INVALID_PARAMETER);
     EXPECT_EQ(rats_send_string(client1, "peer", nullptr), RATS_ERROR_INVALID_PARAMETER);
@@ -75,35 +75,7 @@ TEST_F(RatsCApiTest, ErrorHandling) {
     client1 = nullptr;
 }
 
-TEST_F(RatsCApiTest, ConnectionStrategies) {
-    client1 = rats_create(60000);
-    ASSERT_NE(client1, nullptr);
-    EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
-    
-    client2 = rats_create(60001);
-    ASSERT_NE(client2, nullptr);
-    EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
-    
-    // Test different connection strategies
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", 60000, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", 60000, RATS_STRATEGY_STUN_ASSISTED), RATS_SUCCESS);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", 60000, RATS_STRATEGY_ICE_FULL), RATS_SUCCESS);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", 60000, RATS_STRATEGY_AUTO_ADAPTIVE), RATS_SUCCESS);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
-    // TURN relay might fail if no TURN server is configured
-    rats_connect_with_strategy(client2, "127.0.0.1", 60000, RATS_STRATEGY_TURN_RELAY); // Don't check result
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    
-    rats_stop(client1);
-    rats_stop(client2);
-}
+// ConnectionStrategies test removed - NAT/STUN/ICE implementation was removed
 
 // Test binary data APIs (these should compile and not crash)
 TEST_F(RatsCApiTest, BinaryDataAPIs) {
@@ -264,7 +236,7 @@ TEST_F(RatsCApiTest, BasicConnectivityTest) {
     EXPECT_EQ(rats_get_peer_count(client2), 0);
     
     // Connect client2 to client1
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
     
     // Wait for connection to establish
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -315,7 +287,7 @@ TEST_F(RatsCApiTest, ConnectivityWithCallbacksTest) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
     // Connect
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
     
     // Wait for connection and callbacks
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -376,7 +348,7 @@ TEST_F(RatsCApiTest, StringCommunicationTest) {
     EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     
     // Get peer IDs for sending messages
@@ -461,7 +433,7 @@ TEST_F(RatsCApiTest, BinaryCommunicationTest) {
     EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     
     // Get peer ID and send binary data
@@ -533,7 +505,7 @@ TEST_F(RatsCApiTest, MaxPeersConfiguration) {
     EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
 
     // Connect and wait
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", 56000, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", 56000), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
     // Peer limit should be reached on server side with max 1
@@ -558,7 +530,7 @@ TEST_F(RatsCApiTest, DisconnectPeerById) {
     EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
     EXPECT_EQ(rats_get_peer_count(client1), 1);
     EXPECT_EQ(rats_get_peer_count(client2), 1);
@@ -614,7 +586,7 @@ TEST_F(RatsCApiTest, BroadcastStringAndJson) {
     EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
     EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
     // Broadcast string from server
@@ -645,7 +617,7 @@ TEST_F(RatsCApiTest, StatsAndPeerInfoJson) {
     EXPECT_EQ(rats_start(client1), RATS_SUCCESS);
     EXPECT_EQ(rats_start(client2), RATS_SUCCESS);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
     // Stats JSON should be non-empty and parseable
@@ -756,7 +728,7 @@ TEST_F(RatsCApiTest, MessageExchangePositive) {
     // Get the actual port that client1 is listening on
     int server_port = rats_get_listen_port(client1);
     
-    EXPECT_EQ(rats_connect_with_strategy(client2, "127.0.0.1", server_port, RATS_STRATEGY_DIRECT_ONLY), RATS_SUCCESS);
+    EXPECT_EQ(rats_connect(client2, "127.0.0.1", server_port), 1);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
     // Send a JSON message from client to server

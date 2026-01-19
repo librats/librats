@@ -27,9 +27,8 @@ librats is a modern P2P networking library designed for **superior performance**
 ### **Advanced Networking**
 - **DHT Discovery**: Supports peer discovery over the DHT protocol. librats DHT Discovery is fully compatible with the **BitTorrent Mainline DHT** — the largest distributed hash table network in the world with **millions of active nodes**.
 - **mDNS Discovery**: Automatic local network peer discovery with service advertisement
-- **STUN Support**: Automatic NAT traversal and public IP discovery
 - **IPv4/IPv6 Dual Stack**: Full support for modern internet protocols
-- **Multi-layer Discovery**: DHT (wide-area) + mDNS (local) + STUN (NAT traversal)
+- **Multi-layer Discovery**: DHT (wide-area) + mDNS (local)
 - **GossipSub Protocol**: Scalable publish-subscribe messaging with mesh networking
 - **Message Validation**: Configurable message validation and filtering
 - **Topic-based Communication**: Organized messaging with topic subscriptions
@@ -44,14 +43,6 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Request/Response Model**: Secure file requests with acceptance/rejection callbacks
 - **Transfer Statistics**: Comprehensive metrics including speed, ETA, and completion rates
 
-### **Comprehensive NAT Traversal**
-- **ICE (Interactive Connectivity Establishment)**: RFC 8445 compliant with full candidate gathering
-- **TURN Relay Support**: RFC 5766 compliant relay through TURN servers
-- **Advanced STUN**: Enhanced STUN client with NAT type detection and ICE support
-- **UDP/TCP Hole Punching**: Coordinated NAT traversal for maximum connectivity
-- **Automatic Strategy Selection**: Choose optimal connection method based on network conditions
-- **Real-time NAT Detection**: Detailed NAT behavior analysis and adaptation
-
 ### **Enterprise Security**
 - **Noise Protocol Encryption**: End-to-end encryption with Curve25519 + ChaCha20-Poly1305
 - **Automatic Key Management**: Keys generated, persisted, and rotated automatically
@@ -63,12 +54,12 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Event-Driven API**: Register message handlers with `on()`, `once()`, `off()` methods
 - **JSON Message Exchange**: Built-in structured communication with callbacks
 - **Promise-style Callbacks**: Modern async patterns for network operations
-- **Real-time Connection Tracking**: Monitor peer states, connection quality, and NAT traversal progress
+- **Real-time Connection Tracking**: Monitor peer states and connection quality
 - **Comprehensive Logging API**: Full control over logging levels, file rotation, and output formatting
 - **Custom Protocol Support**: Configure custom protocol names and versions
 - **Unified API Design**: Consistent patterns across P2P messaging and pub-sub
 - **Topic-based Messaging**: Subscribe to topics and publish messages with automatic routing
-- **Enhanced Peer Management**: Detailed peer information with encryption and NAT traversal status
+- **Enhanced Peer Management**: Detailed peer information with encryption status
 
 ### **Distributed Storage** (Optional, requires `RATS_STORAGE`)
 - **Key-Value Storage**: Simple, typed key-value storage with string, int64, double, binary, and JSON support
@@ -471,8 +462,8 @@ For more Node.js examples and TypeScript usage, see the [Node.js documentation](
 The main class providing comprehensive P2P networking capabilities:
 
 ```cpp
-// Enhanced constructor with NAT traversal
-RatsClient(int listen_port, int max_peers = 10, const NatTraversalConfig& config = {});
+// Constructor
+RatsClient(int listen_port, int max_peers = 10, const std::string& bind_address = "");
 
 // Core lifecycle
 bool start();
@@ -480,10 +471,8 @@ void stop();
 void shutdown_all_threads();
 bool is_running() const;
 
-// Advanced connection methods
-bool connect_to_peer(const std::string& host, int port, ConnectionStrategy strategy = AUTO_ADAPTIVE);
-bool connect_with_ice(const std::string& peer_id, const nlohmann::json& ice_offer);
-nlohmann::json create_ice_offer(const std::string& peer_id);
+// Connection methods
+bool connect_to_peer(const std::string& host, int port);
 
 // Custom protocol configuration
 void set_protocol_name(const std::string& protocol_name);
@@ -545,17 +534,6 @@ std::vector<RatsPeer> get_validated_peers() const;
 const RatsPeer* get_peer_by_id(const std::string& peer_id) const;
 std::string get_our_peer_id() const;
 
-// NAT traversal utilities
-NatType detect_nat_type();
-NatTypeInfo get_nat_characteristics();
-std::string get_public_ip() const;
-std::vector<ConnectionAttemptResult> test_connection_strategies(const std::string& host, int port, const std::vector<ConnectionStrategy>& strategies);
-
-// Enhanced callbacks
-void set_advanced_connection_callback(AdvancedConnectionCallback callback);
-void set_nat_traversal_progress_callback(NatTraversalProgressCallback callback);
-void set_ice_candidate_callback(IceCandidateDiscoveredCallback callback);
-
 // Logging Control API
 void set_logging_enabled(bool enabled);
 bool is_logging_enabled() const;
@@ -607,36 +585,6 @@ void on_directory_request(DirectoryRequestCallback callback);
 
 ### Configuration Structures
 
-#### `NatTraversalConfig`
-Comprehensive NAT traversal configuration:
-
-```cpp
-struct NatTraversalConfig {
-    bool enable_ice = true;                    // Enable ICE
-    bool enable_upnp = false;                  // Enable UPnP port mapping
-    bool enable_hole_punching = true;          // Enable hole punching
-    bool enable_turn_relay = true;             // Enable TURN relay
-    bool prefer_ipv6 = false;                  // Prefer IPv6 connections
-    
-    std::vector<std::string> stun_servers;     // STUN servers
-    std::vector<std::string> turn_servers;     // TURN servers
-    std::vector<std::string> turn_usernames;   // TURN credentials
-    std::vector<std::string> turn_passwords;
-    
-    int ice_gathering_timeout_ms = 10000;      // Timeouts
-    int ice_connectivity_timeout_ms = 30000;
-    int hole_punch_attempts = 5;
-    int turn_allocation_timeout_ms = 10000;
-    
-    // Priority settings
-    int host_candidate_priority = 65535;
-    int server_reflexive_priority = 65534;
-    int relay_candidate_priority = 65533;
-    
-    // Default includes Google STUN servers
-};
-```
-
 #### `RatsPeer`
 Comprehensive peer information structure:
 
@@ -654,32 +602,18 @@ struct RatsPeer {
     enum class HandshakeState { PENDING, SENT, COMPLETED, FAILED };
     HandshakeState handshake_state;
     std::string version;                       // Protocol version
-    int peer_count;                            // Remote peer count
     
     // Encryption state
     bool encryption_enabled;
     bool noise_handshake_completed;
-    NoiseKey remote_static_key;
-    
-    // NAT traversal state
-    bool ice_enabled;
-    std::string ice_ufrag;
-    std::string ice_pwd;
-    std::vector<IceCandidate> ice_candidates;
-    IceConnectionState ice_state;
-    NatType detected_nat_type;
-    std::string connection_method;
-    
-    // Connection quality metrics
-    uint32_t rtt_ms;
-    uint32_t packet_loss_percent;
-    std::string transport_protocol;
+    std::shared_ptr<rats::NoiseCipherState> send_cipher;
+    std::shared_ptr<rats::NoiseCipherState> recv_cipher;
+    std::vector<uint8_t> remote_static_key;
     
     // Helper methods
     bool is_handshake_completed() const;
     bool is_handshake_failed() const;
-    bool is_ice_connected() const;
-    bool is_fully_connected() const;
+    bool is_noise_encrypted() const;
 };
 ```
 
@@ -876,16 +810,6 @@ void on_storage_sync_complete(StorageSyncCompleteCallback callback);
 │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
 │ │ File Transfer   │ │Distributed Storage│ │ BitTorrent      │   │
 │ │    Manager      │ │   (RATS_STORAGE)│ │(RATS_SEARCH)    │    │
-│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
-├─────────────────────────────────────────────────────────────────┤
-│ NAT Traversal Layer                                             │
-│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │ ICE Agent       │ │ STUN Client     │ │ TURN Client     │    │
-│ │ (RFC 8445)      │ │ (RFC 5389)      │ │ (RFC 5766)      │    │
-│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
-│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │ Hole Punching   │ │ NAT Detection   │ │ Strategy Select │    │
-│ │ Coordination    │ │ & Analysis      │ │ & Fallback      │    │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
 ├─────────────────────────────────────────────────────────────────┤
 │ Discovery & Networking Layer                                    │
@@ -1383,7 +1307,6 @@ int main() {
 
 Comprehensive documentation is available:
 
-- **[NAT Traversal Guide](docs/NAT_TRAVERSAL.md)** - Complete NAT traversal documentation
 - **[File Transfer Example](docs/FILE_TRANSFER_EXAMPLE.md)** - Efficient P2P file and directory transfer
 - **[Custom Protocol Setup](docs/CUSTOM_PROTOCOL.md)** - How to configure custom protocols
 - **[Message Exchange API](docs/MESSAGE_EXCHANGE_API.md)** - Event-driven messaging system  
@@ -1444,39 +1367,12 @@ librats is **engineered for resource efficiency**, making it ideal for **low-pow
 - **Memory safety**: RAII and smart pointers throughout
 - **Cross-platform**: Consistent behavior across Windows, Linux, and macOS
 
-### **NAT Traversal Excellence**
-- **99%+ Success Rate**: Connect across virtually any NAT configuration
-- **RFC Compliant**: Follows established standards (ICE, STUN, TURN)
-- **Adaptive Strategy**: Automatically selects optimal connection method
-- **Real-time Monitoring**: Track connection attempts and quality metrics
-
 ### **Developer Experience**
 - **Simple API**: Easy to learn and integrate
 - **Modern C++**: Takes advantage of C++17 features
 - **Excellent documentation**: Comprehensive guides and examples
 - **Active development**: Regular updates and improvements
 - **Configuration persistence**: Automatic saving and loading of settings
-
-## NAT Traversal Capabilities
-
-librats includes **industry-leading NAT traversal** that can establish P2P connections across virtually any network topology:
-
-| NAT Type | Direct | STUN | ICE | TURN | Success Rate |
-|----------|--------|------|-----|------|--------------|
-| **Open Internet** | ✅ | ✅ | ✅ | ✅ | **100%** |
-| **Full Cone NAT** | ❌ | ✅ | ✅ | ✅ | **95%** |
-| **Restricted Cone** | ❌ | ✅ | ✅ | ✅ | **90%** |
-| **Port Restricted** | ❌ | ✅ | ✅ | ✅ | **85%** |
-| **Symmetric NAT** | ❌ | ❌ | ⚠️ | ✅ | **70%** |
-| **Double NAT** | ❌ | ❌ | ❌ | ✅ | **99%** |
-
-### Connection Strategies
-- **AUTO_ADAPTIVE**: Automatically selects the best connection method
-- **ICE_FULL**: Complete ICE negotiation with candidate gathering
-- **STUN_ASSISTED**: STUN-based public IP discovery and direct connection
-- **TURN_RELAY**: Fallback relay through TURN servers
-- **DIRECT_ONLY**: Try direct connection only
-
 
 ## Contributing
 

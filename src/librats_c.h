@@ -65,15 +65,6 @@ typedef enum {
     RATS_ERROR_JSON_PARSE = -7
 } rats_error_t;
 
-// Connection strategy enum
-typedef enum {
-    RATS_STRATEGY_DIRECT_ONLY = 0,
-    RATS_STRATEGY_STUN_ASSISTED = 1,
-    RATS_STRATEGY_ICE_FULL = 2,
-    RATS_STRATEGY_TURN_RELAY = 3,
-    RATS_STRATEGY_AUTO_ADAPTIVE = 4
-} rats_connection_strategy_t;
-
 // C callbacks
 typedef void (*rats_connection_cb)(void* user_data, const char* peer_id);
 typedef void (*rats_string_cb)(void* user_data, const char* peer_id, const char* message);
@@ -89,9 +80,7 @@ RATS_API rats_error_t rats_set_max_peers(rats_client_t client, int max_peers);
 RATS_API int rats_get_max_peers(rats_client_t client);
 RATS_API int rats_is_peer_limit_reached(rats_client_t client);
 
-// Advanced connection methods
-RATS_API rats_error_t rats_connect_with_strategy(rats_client_t client, const char* host, int port, 
-                                                    rats_connection_strategy_t strategy);
+// Connection methods
 RATS_API rats_error_t rats_disconnect_peer_by_id(rats_client_t client, const char* peer_id);
 
 // Binary data operations
@@ -205,18 +194,8 @@ RATS_API void rats_set_topic_peer_joined_callback(rats_client_t client, const ch
 RATS_API void rats_set_topic_peer_left_callback(rats_client_t client, const char* topic, rats_topic_peer_left_cb cb, void* user_data);
 RATS_API void rats_clear_topic_callbacks(rats_client_t client, const char* topic);
 
-// NAT Traversal and STUN
-RATS_API rats_error_t rats_discover_and_ignore_public_ip(rats_client_t client, const char* stun_server, int stun_port);
-RATS_API char* rats_get_public_ip(rats_client_t client); // caller must free
-RATS_API int rats_detect_nat_type(rats_client_t client); // Returns NAT type as integer
-RATS_API char* rats_get_nat_characteristics_json(rats_client_t client); // caller must free
+// Address blocking
 RATS_API void rats_add_ignored_address(rats_client_t client, const char* ip_address);
-RATS_API char* rats_get_nat_traversal_statistics_json(rats_client_t client); // caller must free
-
-// ICE coordination
-RATS_API char* rats_create_ice_offer(rats_client_t client, const char* peer_id); // caller must free JSON string
-RATS_API rats_error_t rats_connect_with_ice(rats_client_t client, const char* peer_id, const char* ice_offer_json);
-RATS_API rats_error_t rats_handle_ice_answer(rats_client_t client, const char* peer_id, const char* ice_answer_json);
 
 // Configuration persistence
 RATS_API rats_error_t rats_load_configuration(rats_client_t client);

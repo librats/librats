@@ -18,7 +18,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from librats_py import RatsClient, RatsError, ConnectionStrategy
+    from librats_py import RatsClient, RatsError
     LIBRATS_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: Could not import librats_py: {e}")

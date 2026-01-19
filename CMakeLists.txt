@@ -132,8 +132,6 @@ set(LIBRARY_SOURCES
     src/librats_encryption.cpp
     src/librats_file_transfer.cpp
     src/librats_gossipsub.cpp
-    src/librats_nat.cpp
-    src/librats_ice.cpp
     src/librats_mdns.cpp
     src/librats_persistence.cpp
     src/librats.h
@@ -141,10 +139,6 @@ set(LIBRARY_SOURCES
     src/sha1.h
     src/os.cpp
     src/os.h
-    src/stun.cpp
-    src/stun.h
-    src/ice.cpp
-    src/ice.h
     src/fs.cpp
     src/fs.h
     src/logger.h
@@ -350,8 +344,6 @@ if(RATS_BUILD_TESTS)
         tests/test_dht.cpp
         tests/test_rats_client.cpp
         tests/test_os.cpp
-        tests/test_stun.cpp
-        tests/test_ice.cpp
         tests/test_fs.cpp
         tests/test_config_persistence.cpp
         tests/test_main.cpp

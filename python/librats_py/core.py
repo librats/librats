@@ -9,8 +9,8 @@ from typing import Optional, List, Dict, Any, Callable
 from ctypes import c_void_p, c_char_p, create_string_buffer, byref, cast, c_int, string_at
 
 from .ctypes_wrapper import get_librats
-from .enums import RatsError as ErrorCode, ConnectionStrategy, LogLevel, VersionInfo
-from .exceptions import RatsError, check_error
+from .enums import RatsError as ErrorCode, LogLevel, VersionInfo
+from .exceptions import RatsError, RatsConnectionError, check_error
 from .callbacks import *
 
 
@@ -81,24 +81,21 @@ class RatsClient:
         """Check if the client is currently running."""
         return self._running
     
-    def connect(self, host: str, port: int, 
-                strategy: ConnectionStrategy = ConnectionStrategy.AUTO_ADAPTIVE) -> None:
+    def connect(self, host: str, port: int) -> None:
         """
-        Connect to a peer.
+        Connect to a peer via direct TCP connection.
         
         Args:
             host: Target host/IP address
             port: Target port
-            strategy: Connection strategy to use
             
         Raises:
             RatsError: If connection fails
         """
         host_bytes = host.encode('utf-8')
-        result = self._lib.lib.rats_connect_with_strategy(
-            self._handle, host_bytes, port, strategy.value
-        )
-        check_error(result, f"Connecting to {host}:{port}")
+        result = self._lib.lib.rats_connect(self._handle, host_bytes, port)
+        if result != 1:
+            raise RatsConnectionError(f"Failed to connect to {host}:{port}")
     
     def disconnect_peer(self, peer_id: str) -> None:
         """
@@ -823,95 +820,11 @@ class RatsClient:
         except json.JSONDecodeError:
             return {}
     
-    # NAT Traversal and STUN
-    def discover_and_ignore_public_ip(self, stun_server: str = "stun.l.google.com", 
-                                     stun_port: int = 19302) -> None:
-        """Discover public IP via STUN and add it to ignore list."""
-        stun_server_bytes = stun_server.encode('utf-8')
-        result = self._lib.lib.rats_discover_and_ignore_public_ip(
-            self._handle, stun_server_bytes, stun_port
-        )
-        check_error(result, f"Discovering public IP via {stun_server}:{stun_port}")
-    
-    def get_public_ip(self) -> str:
-        """Get the discovered public IP address."""
-        result = self._lib.lib.rats_get_public_ip(self._handle)
-        if not result:
-            return ""
-        ip = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return ip
-    
-    def detect_nat_type(self) -> int:
-        """Detect NAT type and return as integer."""
-        return self._lib.lib.rats_detect_nat_type(self._handle)
-    
-    def get_nat_characteristics(self) -> Dict[str, Any]:
-        """Get NAT characteristics information."""
-        result = self._lib.lib.rats_get_nat_characteristics_json(self._handle)
-        if not result:
-            return {}
-        
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return {}
-    
+    # Address blocking
     def add_ignored_address(self, ip_address: str) -> None:
         """Add an IP address to the ignore list."""
         ip_address_bytes = ip_address.encode('utf-8')
         self._lib.lib.rats_add_ignored_address(self._handle, ip_address_bytes)
-    
-    def get_nat_traversal_statistics(self) -> Dict[str, Any]:
-        """Get NAT traversal statistics."""
-        result = self._lib.lib.rats_get_nat_traversal_statistics_json(self._handle)
-        if not result:
-            return {}
-        
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return {}
-    
-    # ICE coordination
-    def create_ice_offer(self, peer_id: str) -> Dict[str, Any]:
-        """Create an ICE offer for a peer."""
-        peer_id_bytes = peer_id.encode('utf-8')
-        result = self._lib.lib.rats_create_ice_offer(self._handle, peer_id_bytes)
-        if not result:
-            return {}
-        
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return {}
-    
-    def connect_with_ice(self, peer_id: str, ice_offer: Dict[str, Any]) -> None:
-        """Connect to a peer using ICE."""
-        peer_id_bytes = peer_id.encode('utf-8')
-        ice_offer_json = json.dumps(ice_offer).encode('utf-8')
-        result = self._lib.lib.rats_connect_with_ice(
-            self._handle, peer_id_bytes, ice_offer_json
-        )
-        check_error(result, f"Connecting with ICE to peer {peer_id}")
-    
-    def handle_ice_answer(self, peer_id: str, ice_answer: Dict[str, Any]) -> None:
-        """Handle an ICE answer from a peer."""
-        peer_id_bytes = peer_id.encode('utf-8')
-        ice_answer_json = json.dumps(ice_answer).encode('utf-8')
-        result = self._lib.lib.rats_handle_ice_answer(
-            self._handle, peer_id_bytes, ice_answer_json
-        )
-        check_error(result, f"Handling ICE answer from peer {peer_id}")
     
     # Configuration persistence
     def load_configuration(self) -> None:

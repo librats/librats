@@ -2,7 +2,7 @@
  * LibRats Node.js Bindings - TypeScript Definitions
  * 
  * High-performance peer-to-peer networking library with support for DHT, GossipSub,
- * file transfer, NAT traversal, and more.
+ * file transfer, and more.
  */
 
 /**
@@ -13,22 +13,6 @@ export interface VersionInfo {
   minor: number;
   patch: number;
   build: number;
-}
-
-/**
- * Connection strategy options for connecting to peers
- */
-export enum ConnectionStrategy {
-  /** Direct connection only, no NAT traversal */
-  DIRECT_ONLY = 0,
-  /** STUN-assisted connection */
-  STUN_ASSISTED = 1,
-  /** Full ICE negotiation with STUN and connection checks */
-  ICE_FULL = 2,
-  /** TURN relay connection */
-  TURN_RELAY = 3,
-  /** Automatic strategy selection based on network conditions */
-  AUTO_ADAPTIVE = 4
 }
 
 /**
@@ -83,15 +67,6 @@ export class RatsClient {
    * @returns true if connection initiated successfully
    */
   connect(host: string, port: number): boolean;
-
-  /**
-   * Connect to a peer with a specific connection strategy
-   * @param host - IP address or hostname of the peer
-   * @param port - Port number of the peer
-   * @param strategy - Connection strategy to use
-   * @returns true if connection initiated successfully
-   */
-  connectWithStrategy(host: string, port: number, strategy: ConnectionStrategy): boolean;
 
   /**
    * Disconnect from a peer

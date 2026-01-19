@@ -13,7 +13,7 @@ from ctypes import (
 from typing import Optional
 
 from .callbacks import *
-from .enums import RatsError, ConnectionStrategy
+from .enums import RatsError
 
 
 class LibratsNotFoundError(Exception):
@@ -151,10 +151,7 @@ class LibratsCtypes:
         self.lib.rats_is_peer_limit_reached.argtypes = [c_void_p]
         self.lib.rats_is_peer_limit_reached.restype = c_int
         
-        # Advanced connection methods
-        self.lib.rats_connect_with_strategy.argtypes = [c_void_p, c_char_p, c_int, c_int]
-        self.lib.rats_connect_with_strategy.restype = c_int
-        
+        # Connection methods
         self.lib.rats_disconnect_peer_by_id.argtypes = [c_void_p, c_char_p]
         self.lib.rats_disconnect_peer_by_id.restype = c_int
         
@@ -392,34 +389,9 @@ class LibratsCtypes:
         self.lib.rats_set_peer_discovered_callback.argtypes = [c_void_p, PeerDiscoveredCallbackType, c_void_p]
         self.lib.rats_set_peer_discovered_callback.restype = None
         
-        # NAT Traversal and STUN
-        self.lib.rats_discover_and_ignore_public_ip.argtypes = [c_void_p, c_char_p, c_int]
-        self.lib.rats_discover_and_ignore_public_ip.restype = c_int
-        
-        self.lib.rats_get_public_ip.argtypes = [c_void_p]
-        self.lib.rats_get_public_ip.restype = c_void_p
-        
-        self.lib.rats_detect_nat_type.argtypes = [c_void_p]
-        self.lib.rats_detect_nat_type.restype = c_int
-        
-        self.lib.rats_get_nat_characteristics_json.argtypes = [c_void_p]
-        self.lib.rats_get_nat_characteristics_json.restype = c_void_p
-        
+        # Address blocking
         self.lib.rats_add_ignored_address.argtypes = [c_void_p, c_char_p]
         self.lib.rats_add_ignored_address.restype = None
-        
-        self.lib.rats_get_nat_traversal_statistics_json.argtypes = [c_void_p]
-        self.lib.rats_get_nat_traversal_statistics_json.restype = c_void_p
-        
-        # ICE coordination
-        self.lib.rats_create_ice_offer.argtypes = [c_void_p, c_char_p]
-        self.lib.rats_create_ice_offer.restype = c_void_p
-        
-        self.lib.rats_connect_with_ice.argtypes = [c_void_p, c_char_p, c_char_p]
-        self.lib.rats_connect_with_ice.restype = c_int
-        
-        self.lib.rats_handle_ice_answer.argtypes = [c_void_p, c_char_p, c_char_p]
-        self.lib.rats_handle_ice_answer.restype = c_int
         
         # Configuration persistence
         self.lib.rats_load_configuration.argtypes = [c_void_p]

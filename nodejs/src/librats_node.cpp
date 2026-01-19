@@ -164,11 +164,7 @@ public:
             InstanceMethod("getFileTransferProgress", &RatsClient::GetFileTransferProgress),
             InstanceMethod("getFileTransferStatistics", &RatsClient::GetFileTransferStatistics),
             
-            // NAT Traversal methods
-            InstanceMethod("discoverPublicIp", &RatsClient::DiscoverPublicIp),
-            InstanceMethod("getPublicIp", &RatsClient::GetPublicIp),
-            InstanceMethod("detectNatType", &RatsClient::DetectNatType),
-            InstanceMethod("getNatCharacteristics", &RatsClient::GetNatCharacteristics),
+            // Address blocking
             InstanceMethod("addIgnoredAddress", &RatsClient::AddIgnoredAddress),
             
             // Callback methods
@@ -960,52 +956,7 @@ private:
         return result;
     }
     
-    // NAT Traversal methods
-    Napi::Value DiscoverPublicIp(const Napi::CallbackInfo& info) {
-        Napi::Env env = info.Env();
-        
-        const char* stun_server = "stun.l.google.com";
-        int stun_port = 19302;
-        
-        if (info.Length() > 0 && info[0].IsString()) {
-            std::string server = info[0].As<Napi::String>().Utf8Value();
-            stun_server = server.c_str();
-        }
-        
-        if (info.Length() > 1 && info[1].IsNumber()) {
-            stun_port = info[1].As<Napi::Number>().Int32Value();
-        }
-        
-        rats_error_t result = rats_discover_and_ignore_public_ip(client_, stun_server, stun_port);
-        return Napi::Boolean::New(env, result == RATS_SUCCESS);
-    }
-    
-    Napi::Value GetPublicIp(const Napi::CallbackInfo& info) {
-        Napi::Env env = info.Env();
-        char* public_ip = rats_get_public_ip(client_);
-        if (!public_ip) return env.Null();
-        
-        Napi::String result = Napi::String::New(env, public_ip);
-        rats_string_free(public_ip);
-        return result;
-    }
-    
-    Napi::Value DetectNatType(const Napi::CallbackInfo& info) {
-        Napi::Env env = info.Env();
-        int nat_type = rats_detect_nat_type(client_);
-        return Napi::Number::New(env, nat_type);
-    }
-    
-    Napi::Value GetNatCharacteristics(const Napi::CallbackInfo& info) {
-        Napi::Env env = info.Env();
-        char* characteristics_json = rats_get_nat_characteristics_json(client_);
-        if (!characteristics_json) return env.Null();
-        
-        Napi::String result = Napi::String::New(env, characteristics_json);
-        rats_string_free(characteristics_json);
-        return result;
-    }
-    
+    // Address blocking
     void AddIgnoredAddress(const Napi::CallbackInfo& info) {
         if (info.Length() < 1 || !info[0].IsString()) {
             Napi::TypeError::New(info.Env(), "Expected ip_address (string)").ThrowAsJavaScriptException();

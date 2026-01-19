@@ -49,38 +49,23 @@ const std::string RatsClient::PEERS_EVER_FILE_NAME = "peers_ever.rats";
 // Constructor and Destructor
 // =========================================================================
 
-RatsClient::RatsClient(int listen_port, int max_peers, const NatTraversalConfig& nat_config, const std::string& bind_address) 
+RatsClient::RatsClient(int listen_port, int max_peers, const std::string& bind_address) 
     : listen_port_(listen_port), 
       bind_address_(bind_address),
       max_peers_(max_peers),
       server_socket_(INVALID_SOCKET_VALUE),
       running_(false),
-      nat_config_(nat_config),
       data_directory_("."),
       encryption_enabled_(false),
       noise_keypair_initialized_(false),
-      detected_nat_type_(NatType::UNKNOWN),
       custom_protocol_name_("rats"),
       custom_protocol_version_("1.0"),
       auto_discovery_running_(false) {
-    // Initialize STUN client
-    stun_client_ = std::make_unique<StunClient>();
-    
-    // Initialize NAT detector for advanced NAT characteristics detection
-    nat_detector_ = std::make_unique<AdvancedNatDetector>();
-    
-    // Initialize ICE agent if enabled
-    initialize_ice_agent();
-
-    
     // Load configuration (this will generate peer ID if needed)
     load_configuration();
     
     // Initialize modules
     initialize_modules();
-    
-    // Initialize NAT traversal
-    initialize_nat_traversal();
 }
 
 RatsClient::~RatsClient() {
@@ -155,11 +140,6 @@ bool RatsClient::start() {
     
     // Initialize local interface addresses for connection blocking
     initialize_local_addresses();
-    
-    // Discover public IP address via STUN and add to ignore list
-    if (!discover_and_ignore_public_ip()) {
-        LOG_CLIENT_WARN("Failed to discover public IP via STUN - continuing without it");
-    }
     
     // Create dual-stack server socket (supports both IPv4 and IPv6)
    server_socket_ = create_tcp_server(listen_port_, 5, bind_address_);
@@ -237,9 +217,6 @@ void RatsClient::stop() {
     
     // Stop mDNS discovery
     stop_mdns_discovery();
-    
-    // Cleanup ICE resources
-    cleanup_ice_resources();
     
     // Close server socket to break accept loop
     if (is_valid_socket(server_socket_)) {
@@ -588,36 +565,6 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     // Request peers from newly connected peer (outgoing only)
                     if (peer_copy.is_outgoing) {
                         send_peers_request(client_socket, peer_copy.peer_id);
-                    }
-                    
-                    // NAT traversal info exchange
-                    send_nat_info_to_peer(client_socket, peer_copy.peer_id);
-                    
-                    // ICE coordination (outgoing connections only)
-                    if (ice_agent_ && ice_agent_->is_running() && peer_copy.is_outgoing) {
-                        if (should_initiate_ice_coordination(peer_copy.peer_id)) {
-                            mark_ice_coordination_in_progress(peer_copy.peer_id);
-                            
-                            add_managed_thread(std::thread([this, peer_id = peer_copy.peer_id, host = peer_copy.ip, port = peer_copy.port]() {
-                                try {
-                                    {
-                                        std::unique_lock<std::mutex> lock(shutdown_mutex_);
-                                        if (shutdown_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !running_.load(); })) {
-                                            cleanup_ice_coordination_for_peer(peer_id);
-                                            return;
-                                        }
-                                    }
-                                    initiate_ice_with_peer(peer_id, host, port);
-                                } catch (const std::exception& e) {
-                                    LOG_CLIENT_ERROR("Exception in ICE coordination thread for peer " << peer_id << ": " << e.what());
-                                } catch (...) {
-                                    LOG_CLIENT_ERROR("Unknown exception in ICE coordination thread for peer " << peer_id);
-                                }
-                                cleanup_ice_coordination_for_peer(peer_id);
-                            }), "ice-coordination-" + peer_copy.peer_id.substr(0, 8));
-                        } else {
-                            LOG_CLIENT_DEBUG("ICE coordination already in progress for peer " << peer_copy.peer_id << " - skipping");
-                        }
                     }
                     
                     // Save configuration
@@ -1051,103 +998,59 @@ void RatsClient::check_handshake_timeouts() {
 // Connection Management
 // =========================================================================
 
-bool RatsClient::connect_to_peer(const std::string& host, int port, ConnectionStrategy strategy) {
+bool RatsClient::connect_to_peer(const std::string& host, int port) {
     if (!running_.load()) {
         LOG_CLIENT_ERROR("RatsClient is not running");
         return false;
     }
     
-    LOG_CLIENT_INFO("Connecting to peer " << host << ":" << port << " using strategy: " << static_cast<int>(strategy));
+    LOG_CLIENT_INFO("Connecting to peer " << host << ":" << port);
     
-    // Create connection attempt result to track the attempt
-    ConnectionAttemptResult result;
-    result.local_nat_type = detect_nat_type();
-    
-    auto start_time = std::chrono::high_resolution_clock::now();
-    bool success = false;
-    
-    // Execute connection strategy
-    switch (strategy) {
-        case ConnectionStrategy::DIRECT_ONLY:
-            success = attempt_direct_connection(host, port, result);
-            result.method = "direct";
-            break;
-            
-        case ConnectionStrategy::STUN_ASSISTED:
-            success = attempt_stun_assisted_connection(host, port, result);
-            result.method = "stun";
-            break;
-            
-        case ConnectionStrategy::ICE_FULL:
-            success = attempt_ice_connection(host, port, result);
-            result.method = "ice";
-            break;
-            
-        case ConnectionStrategy::TURN_RELAY:
-            success = attempt_turn_relay_connection(host, port, result);
-            result.method = "turn";
-            break;
-            
-        case ConnectionStrategy::AUTO_ADAPTIVE:
-            // Select best strategy based on NAT type
-            std::string best_strategy = select_best_connection_strategy(host, port);
-            result.method = best_strategy;
-            
-            if (best_strategy == "direct") {
-                success = attempt_direct_connection(host, port, result);
-            } else if (best_strategy == "stun") {
-                success = attempt_stun_assisted_connection(host, port, result);
-            } else if (best_strategy == "ice") {
-                success = attempt_ice_connection(host, port, result);
-            } else if (best_strategy == "turn") {
-                success = attempt_turn_relay_connection(host, port, result);
-            } else {
-                success = attempt_hole_punch_connection(host, port, result);
-            }
-            break;
+    // Check if we should ignore this address (self-connection prevention)
+    if (should_ignore_peer(host, port)) {
+        LOG_CLIENT_DEBUG("Ignoring connection to blocked address: " << host << ":" << port);
+        return false;
     }
     
-    auto end_time = std::chrono::high_resolution_clock::now();
-    result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    result.success = success;
-    
-    // Log connection attempt result
-    LOG_CLIENT_INFO("Connection attempt to " << host << ":" << port << " via " << result.method 
-                   << " completed: " << (success ? "SUCCESS" : "FAILED") 
-                   << " in " << result.duration.count() << "ms");
-    
-    if (!result.error_message.empty()) {
-        LOG_CLIENT_DEBUG("Error details: " << result.error_message);
+    // Check if we're already connected
+    std::string normalized_address = normalize_peer_address(host, port);
+    if (is_already_connected_to_address(normalized_address)) {
+        LOG_CLIENT_DEBUG("Already connected to " << host << ":" << port);
+        return true;  // Consider it a success since we're already connected
     }
     
-    // Update connection statistics
-    std::string peer_address = normalize_peer_address(host, port);
-    update_connection_statistics(peer_address, result);
-    
-    // Call advanced connection callback if set
-    if (success && advanced_connection_callback_) {
-        // Find the socket for this connection to pass to callback
-        socket_t connected_socket = INVALID_SOCKET_VALUE;
-        std::string peer_id;
-        
-        {
-            std::lock_guard<std::mutex> lock(peers_mutex_);
-            auto addr_it = address_to_peer_id_.find(peer_address);
-            if (addr_it != address_to_peer_id_.end()) {
-                auto peer_it = peers_.find(addr_it->second);
-                if (peer_it != peers_.end()) {
-                    connected_socket = peer_it->second.socket;
-                    peer_id = peer_it->second.peer_id;
-                }
-            }
-        }
-        
-        if (is_valid_socket(connected_socket)) {
-            advanced_connection_callback_(connected_socket, peer_id, result);
-        }
+    // Check peer limit
+    if (is_peer_limit_reached()) {
+        LOG_CLIENT_WARN("Peer limit reached, cannot connect to " << host << ":" << port);
+        return false;
     }
     
-    return success;
+    // Create TCP connection with timeout
+    socket_t client_socket = create_tcp_client(host, port, 10000);  // 10 second timeout
+    if (!is_valid_socket(client_socket)) {
+        LOG_CLIENT_ERROR("Failed to connect to " << host << ":" << port);
+        return false;
+    }
+    
+    LOG_CLIENT_INFO("Successfully connected to " << host << ":" << port);
+    
+    // Generate peer hash ID
+    std::string peer_hash_id = generate_peer_hash_id(client_socket, normalized_address);
+    
+    // Create RatsPeer object for outgoing connection
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        RatsPeer new_peer(peer_hash_id, host, static_cast<uint16_t>(port), client_socket, normalized_address, true); // true = outgoing connection
+        new_peer.encryption_enabled = is_encryption_enabled();
+        add_peer_unlocked(new_peer);
+    }
+    
+    // Start a thread to handle this client
+    LOG_CLIENT_DEBUG("Starting thread for outgoing connection " << peer_hash_id);
+    add_managed_thread(std::thread(&RatsClient::handle_client, this, client_socket, peer_hash_id), 
+                      "client-handler-" + peer_hash_id.substr(0, 8));
+    
+    return true;
 }
 
 void RatsClient::disconnect_peer(socket_t socket) {
@@ -1206,9 +1109,6 @@ void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
         
         // Clean up socket-specific mutex
         cleanup_socket_send_mutex(peer_socket);
-
-        // Clean up ICE coordination tracking for this peer
-        cleanup_ice_coordination_for_peer(peer_id_copy);
     }
 }
 
@@ -1710,19 +1610,6 @@ void RatsClient::set_json_data_callback(JsonDataCallback callback) {
 
 void RatsClient::set_disconnect_callback(DisconnectCallback callback) {
     disconnect_callback_ = callback;
-}
-
-// NAT Traversal and ICE Callback Registration
-void RatsClient::set_advanced_connection_callback(AdvancedConnectionCallback callback) {
-    advanced_connection_callback_ = callback;
-}
-
-void RatsClient::set_nat_traversal_progress_callback(NatTraversalProgressCallback callback) {
-    nat_progress_callback_ = callback;
-}
-
-void RatsClient::set_ice_candidate_callback(IceCandidateDiscoveredCallback callback) {
-    ice_candidate_callback_ = callback;
 }
 
 // =========================================================================
@@ -2245,23 +2132,6 @@ void RatsClient::handle_rats_message(socket_t socket, const std::string& peer_ha
         else if (message_type == "peers_response") {
             handle_peers_response_message(socket, peer_hash_id, payload);
         }
-        // ICE coordination messages
-        else if (message_type == "ice_offer") {
-            handle_ice_offer_message(socket, peer_hash_id, payload);
-        }
-        else if (message_type == "ice_answer") {
-            handle_ice_answer_message(socket, peer_hash_id, payload);
-        }
-        else if (message_type == "ice_candidate") {
-            handle_ice_candidate_message(socket, peer_hash_id, payload);
-        }
-        // NAT traversal coordination messages
-        else if (message_type == "hole_punch_coordination") {
-            handle_hole_punch_coordination_message(socket, peer_hash_id, payload);
-        }
-        else if (message_type == "nat_info_exchange") {
-            handle_nat_info_exchange_message(socket, peer_hash_id, payload);
-        }
         // Custom message types are now handled by registered handlers above
         // No need for else clause - all message types are valid if they have registered handlers
         
@@ -2526,7 +2396,6 @@ nlohmann::json RatsClient::get_connection_statistics() const {
     stats["listen_port"] = listen_port_;
     stats["our_peer_id"] = get_our_peer_id();
     stats["encryption_enabled"] = is_encryption_enabled();
-    stats["public_ip"] = get_public_ip();
     
     // DHT statistics
     if (dht_client_ && dht_client_->is_running()) {

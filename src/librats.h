@@ -2,9 +2,7 @@
 
 #include "socket.h"
 #include "dht.h"
-#include "stun.h"
 #include "mdns.h"
-#include "ice.h"
 #include "logger.h"
 #include "threadmanager.h"
 #include "gossipsub.h" // For ValidationResult enum and GossipSub types
@@ -33,9 +31,6 @@
 #include "rats_export.h"
 
 namespace librats {
-
-// Forward declarations
-class IceAgent;
 
 /**
  * RatsPeer struct - comprehensive information about a connected rats peer
@@ -68,20 +63,9 @@ struct RatsPeer {
     std::shared_ptr<rats::NoiseCipherState> recv_cipher;   // Cipher for receiving encrypted data
     std::vector<uint8_t> remote_static_key;  // Remote peer's static public key (for identity verification)
     
-    // NAT traversal fields
-    bool ice_enabled;                       // Whether ICE is enabled for this peer
-    std::string ice_ufrag;                  // ICE username fragment
-    std::string ice_pwd;                    // ICE password
-    std::vector<IceCandidate> ice_candidates; // ICE candidates for this peer
-    IceConnectionState ice_state;           // Current ICE connection state
-    NatType detected_nat_type;              // Detected NAT type for this peer
-    
-    
     RatsPeer() : handshake_state(HandshakeState::PENDING), 
                  encryption_enabled(false),
-                 noise_handshake_completed(false),
-                 ice_enabled(false), ice_state(IceConnectionState::NEW),
-                 detected_nat_type(NatType::UNKNOWN) {
+                 noise_handshake_completed(false) {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
     }
@@ -92,9 +76,7 @@ struct RatsPeer {
           normalized_address(norm_addr), is_outgoing(outgoing),
           handshake_state(HandshakeState::PENDING),
           encryption_enabled(false),
-          noise_handshake_completed(false),
-          ice_enabled(false), ice_state(IceConnectionState::NEW),
-          detected_nat_type(NatType::UNKNOWN) {
+          noise_handshake_completed(false) {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
     }
@@ -107,64 +89,7 @@ struct RatsPeer {
     // Helper methods
     bool is_handshake_completed() const { return handshake_state == HandshakeState::COMPLETED; }
     bool is_handshake_failed() const { return handshake_state == HandshakeState::FAILED; }
-    bool is_ice_connected() const { 
-        return ice_state == IceConnectionState::CONNECTED || 
-               ice_state == IceConnectionState::COMPLETED; 
-    }
 };
-
-// NAT Traversal Configuration
-struct NatTraversalConfig {
-    bool enable_ice;                        // Enable ICE for NAT traversal
-    bool enable_upnp;                       // Enable UPnP for port mapping
-    bool enable_hole_punching;              // Enable UDP/TCP hole punching
-    bool enable_turn_relay;                 // Enable TURN relay as last resort
-    
-    // ICE configuration
-    std::vector<std::string> stun_servers;
-    std::vector<std::string> turn_servers;
-    std::vector<std::string> turn_usernames;
-    std::vector<std::string> turn_passwords;
-    
-    // Timeouts
-    int ice_connectivity_timeout_ms;
-    int turn_allocation_timeout_ms;
-    
-    NatTraversalConfig() 
-        : enable_ice(true), enable_upnp(false), enable_hole_punching(true),
-          enable_turn_relay(true),
-          ice_connectivity_timeout_ms(30000),
-          turn_allocation_timeout_ms(10000) {
-        
-        // Default STUN servers
-        stun_servers.push_back("stun.l.google.com:19302");
-        stun_servers.push_back("stun1.l.google.com:19302");
-        stun_servers.push_back("stun.stunprotocol.org:3478");
-    }
-};
-
-// Connection establishment strategies
-enum class ConnectionStrategy {
-    DIRECT_ONLY,        // Try direct connection only
-    STUN_ASSISTED,      // Use STUN for public IP discovery
-    ICE_FULL,           // Full ICE with candidate gathering
-    TURN_RELAY,         // Force TURN relay usage
-    AUTO_ADAPTIVE       // Automatically choose best strategy
-};
-
-// Connection attempt result
-struct ConnectionAttemptResult {
-    bool success;
-    std::string method;                     // "direct", "stun", "ice", "turn", "hole_punch"
-    std::chrono::milliseconds duration;
-    std::string error_message;
-    NatType local_nat_type;
-};
-
-// Enhanced connection callbacks
-using AdvancedConnectionCallback = std::function<void(socket_t, const std::string&, const ConnectionAttemptResult&)>;
-using NatTraversalProgressCallback = std::function<void(const std::string&, const std::string&)>; // peer_id, status
-using IceCandidateDiscoveredCallback = std::function<void(const std::string&, const IceCandidate&)>; // peer_id, candidate
 
 /**
  * Message data types for librats message headers
@@ -241,7 +166,7 @@ struct MessageHeader {
 };
 
 /**
- * Enhanced RatsClient with comprehensive NAT traversal capabilities
+ * RatsClient - Core peer-to-peer networking client
  */
 class RATS_API RatsClient : public ThreadManager {
 public:
@@ -264,10 +189,9 @@ public:
      * Constructor
      * @param listen_port Port to listen on for incoming connections
      * @param max_peers Maximum number of concurrent peers (default: 10)
-     * @param nat_config NAT traversal configuration
      * @param bind_address Interface IP address to bind to (empty for all interfaces)
      */
-    RatsClient(int listen_port, int max_peers = 10, const NatTraversalConfig& nat_config = NatTraversalConfig(), const std::string& bind_address = "");
+    RatsClient(int listen_port, int max_peers = 10, const std::string& bind_address = "");
     
     /**
      * Destructor
@@ -318,37 +242,12 @@ public:
     // =========================================================================
     
     /**
-     * Connect to a peer with automatic NAT traversal
+     * Connect to a peer via direct TCP connection
      * @param host Target host/IP address
      * @param port Target port
-     * @param strategy Connection strategy to use
      * @return true if connection initiated successfully
      */
-    bool connect_to_peer(const std::string& host, int port, 
-                        ConnectionStrategy strategy = ConnectionStrategy::AUTO_ADAPTIVE);
-    
-    /**
-     * Connect to a peer using ICE coordination
-     * @param peer_id Target peer ID
-     * @param ice_offer ICE offer from remote peer
-     * @return true if ICE connection initiated successfully
-     */
-    bool connect_with_ice(const std::string& peer_id, const nlohmann::json& ice_offer);
-    
-    /**
-     * Create ICE offer for a peer
-     * @param peer_id Target peer ID
-     * @return ICE offer JSON that can be sent to the peer
-     */
-    nlohmann::json create_ice_offer(const std::string& peer_id);
-    
-    /**
-     * Handle ICE answer from a peer
-     * @param peer_id Source peer ID
-     * @param ice_answer ICE answer from the peer
-     * @return true if successfully processed
-     */
-    bool handle_ice_answer(const std::string& peer_id, const nlohmann::json& ice_answer);
+    bool connect_to_peer(const std::string& host, int port);
     
     /**
      * Disconnect from a specific peer
@@ -525,12 +424,6 @@ public:
      * @param callback Function to call on new connections
      */
     void set_connection_callback(ConnectionCallback callback);
-    
-    /**
-     * Set advanced connection callback with NAT traversal info
-     * @param callback Function to call on new connections with detailed info
-     */
-    void set_advanced_connection_callback(AdvancedConnectionCallback callback);
 
     /**
      * Set binary data callback (called when binary data is received)
@@ -555,18 +448,6 @@ public:
      * @param callback Function to call on disconnections
      */
     void set_disconnect_callback(DisconnectCallback callback);
-    
-    /**
-     * Set NAT traversal progress callback
-     * @param callback Function to call with NAT traversal progress updates
-     */
-    void set_nat_traversal_progress_callback(NatTraversalProgressCallback callback);
-    
-    /**
-     * Set ICE candidate discovered callback
-     * @param callback Function to call when ICE candidates are discovered
-     */
-    void set_ice_candidate_callback(IceCandidateDiscoveredCallback callback);
 
     // =========================================================================
     // Peer Discovery Methods
@@ -685,57 +566,11 @@ public:
      */
     static std::string get_rats_peer_discovery_hash();
 
-    // =========================================================================
-    // NAT Traversal and STUN Functionality
-    // =========================================================================
-    
     /**
-     * Discover public IP address using STUN and add to ignore list
-     * @param stun_server STUN server hostname (default: Google STUN)
-     * @param stun_port STUN server port (default: 19302)
-     * @return true if successful, false otherwise
-     */
-    bool discover_and_ignore_public_ip(const std::string& stun_server = "stun.l.google.com", int stun_port = 19302);
-    
-    /**
-     * Detect NAT type using STUN servers
-     * @return Detected NAT type
-     */
-    NatType detect_nat_type();
-    
-    /**
-     * Get detailed NAT characteristics
-     * @return Detailed NAT information
-     */
-    NatTypeInfo get_nat_characteristics();
-    
-    /**
-     * Get the discovered public IP address
-     * @return Public IP address string or empty if not discovered
-     */
-    std::string get_public_ip() const;
-    
-    /**
-     * Add an IP address to the ignore list
+     * Add an IP address to the ignore list (for blocking connections to self)
      * @param ip_address IP address to ignore
      */
     void add_ignored_address(const std::string& ip_address);
-    
-    /**
-     * Perform coordinated hole punching with a peer
-     * @param peer_ip Peer IP address
-     * @param peer_port Peer port
-     * @param coordination_data Coordination data from peer
-     * @return true if successful
-     */
-    bool coordinate_hole_punching(const std::string& peer_ip, uint16_t peer_port,
-                                 const nlohmann::json& coordination_data);
-    
-    /**
-     * Get NAT traversal statistics
-     * @return JSON object with NAT traversal statistics
-     */
-    nlohmann::json get_nat_traversal_statistics() const;
 
     // =========================================================================
     // Protocol Configuration
@@ -1733,9 +1568,6 @@ private:
     socket_t server_socket_;
     std::atomic<bool> running_;
     
-    // NAT traversal configuration
-    NatTraversalConfig nat_config_;
-    
     // =========================================================================
     // MUTEX LOCKING ORDER - CRITICAL FOR DEADLOCK PREVENTION
     // =========================================================================
@@ -1744,14 +1576,10 @@ private:
     // 1. config_mutex_              (Configuration and peer ID)
     // 2. protocol_config_mutex_      (Protocol name and version)
     // 3. encryption_mutex_           (Encryption settings and keys)
-    // 4. nat_mutex_                  (NAT detection and characteristics)
-    // 5. public_ip_mutex_            (Public IP address)
-    // 6. local_addresses_mutex_      (Local interface addresses)
-    // 7. ice_coordination_mutex_     (ICE coordination tracking)
-    // 8. connection_attempts_mutex_  (Connection attempt history)
-    // 9. peers_mutex_                (Peer management - most frequently locked)
-    // 10. socket_send_mutexes_mutex_ (Socket send mutex management)
-    // 11. message_handlers_mutex_    (Message handler registration)
+    // 4. local_addresses_mutex_      (Local interface addresses)
+    // 5. peers_mutex_                (Peer management - most frequently locked)
+    // 6. socket_send_mutexes_mutex_ (Socket send mutex management)
+    // 7. message_handlers_mutex_    (Message handler registration)
     // =========================================================================
     
     // Configuration persistence
@@ -1768,29 +1596,14 @@ private:
     bool noise_keypair_initialized_;                        // Whether keypair has been initialized
     mutable std::mutex encryption_mutex_;                   // [3] Protects encryption state
     
-    // ICE and NAT traversal
-    std::unique_ptr<IceAgent> ice_agent_;                   // ICE agent for NAT traversal
-    std::unique_ptr<AdvancedNatDetector> nat_detector_;     // Advanced NAT type detection
-    NatType detected_nat_type_;                             // Our detected NAT type
-    NatTypeInfo nat_characteristics_;                       // Detailed NAT information
-    mutable std::mutex nat_mutex_;                          // [4] Protects NAT-related data
-    
-    // ICE coordination tracking to prevent duplicate attempts
-    std::unordered_set<std::string> ice_coordination_in_progress_;  // Set of peer_ids having ICE coordination
-    mutable std::mutex ice_coordination_mutex_;                     // [7] Protects ICE coordination state
-    
-    // Connection attempt tracking
-    std::unordered_map<std::string, std::vector<ConnectionAttemptResult>> connection_attempts_;
-    mutable std::mutex connection_attempts_mutex_;          // [8] Protects connection attempts
-    
     // Organized peer management using RatsPeer struct
-    mutable std::mutex peers_mutex_;                        // [9] Protects peer data (most frequently locked)
+    mutable std::mutex peers_mutex_;                        // [5] Protects peer data (most frequently locked)
     std::unordered_map<std::string, RatsPeer> peers_;          // keyed by peer_id
     std::unordered_map<socket_t, std::string> socket_to_peer_id_;  // for quick socket->peer_id lookup  
     std::unordered_map<std::string, std::string> address_to_peer_id_;  // for duplicate detection (normalized_address->peer_id)
     
     // Per-socket synchronization for thread-safe message sending
-    mutable std::mutex socket_send_mutexes_mutex_;          // [10] Protects socket send mutex map
+    mutable std::mutex socket_send_mutexes_mutex_;          // [6] Protects socket send mutex map
     std::unordered_map<socket_t, std::shared_ptr<std::mutex>> socket_send_mutexes_;
     
     // Server and client management
@@ -1798,21 +1611,13 @@ private:
     std::thread management_thread_;
     
     ConnectionCallback connection_callback_;
-    AdvancedConnectionCallback advanced_connection_callback_;
     BinaryDataCallback binary_data_callback_;
     StringDataCallback string_data_callback_;
     JsonDataCallback json_data_callback_;
     DisconnectCallback disconnect_callback_;
-    NatTraversalProgressCallback nat_progress_callback_;
-    IceCandidateDiscoveredCallback ice_candidate_callback_;
     
     // DHT client for peer discovery
     std::unique_ptr<DhtClient> dht_client_;
-    
-    // STUN client for public IP discovery
-    std::unique_ptr<StunClient> stun_client_;
-    std::string public_ip_;
-    mutable std::mutex public_ip_mutex_;                    // [5] Protects public IP address
     
     // mDNS client for local network discovery
     std::unique_ptr<MdnsClient> mdns_client_;
@@ -1849,25 +1654,7 @@ private:
     std::vector<uint8_t> create_message_with_header(const std::vector<uint8_t>& payload, MessageDataType type);
     bool parse_message_with_header(const std::vector<uint8_t>& message, MessageHeader& header, std::vector<uint8_t>& payload) const;
     
-    // Enhanced connection establishment
-    bool attempt_direct_connection(const std::string& host, int port, ConnectionAttemptResult& result);
-    bool attempt_stun_assisted_connection(const std::string& host, int port, ConnectionAttemptResult& result);
-    bool attempt_ice_connection(const std::string& host, int port, ConnectionAttemptResult& result);
-    bool attempt_turn_relay_connection(const std::string& host, int port, ConnectionAttemptResult& result);
-    bool attempt_hole_punch_connection(const std::string& host, int port, ConnectionAttemptResult& result);
-    
-    // ICE coordination helpers
-    void initiate_ice_with_peer(const std::string& peer_id, const std::string& host, int port);
-    
-    // NAT traversal message handlers
-    void handle_ice_offer_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
-    void handle_ice_answer_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
-    void handle_ice_candidate_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
-    void handle_hole_punch_coordination_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
-    void handle_nat_info_exchange_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
-    void send_nat_info_to_peer(socket_t socket, const std::string& peer_id);
-    
-    // New peer management methods using RatsPeer
+    // Peer management methods using RatsPeer
     void add_peer(const RatsPeer& peer);
     void add_peer_unlocked(const RatsPeer& peer);  // Assumes peers_mutex_ is already locked
     void remove_peer_by_id(const std::string& peer_id);
@@ -1877,7 +1664,7 @@ private:
 
     // Local interface address blocking (ignore list)
     std::vector<std::string> local_interface_addresses_;
-    mutable std::mutex local_addresses_mutex_;              // [6] Protects local interface addresses
+    mutable std::mutex local_addresses_mutex_;              // [4] Protects local interface addresses
     void initialize_local_addresses();
     bool is_blocked_address(const std::string& ip_address) const;
     bool should_ignore_peer(const std::string& ip, int port) const;
@@ -1947,7 +1734,7 @@ private:
     };
     
     std::unordered_map<std::string, std::vector<MessageHandler>> message_handlers_;
-    mutable std::mutex message_handlers_mutex_;             // [11] Protects message handlers
+    mutable std::mutex message_handlers_mutex_;             // [7] Protects message handlers
     
     void call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data);
 
@@ -1965,29 +1752,6 @@ private:
     bool save_peers_to_file();
     bool append_peer_to_historical_file(const RatsPeer& peer);
     int load_and_reconnect_historical_peers();
-    
-    // NAT traversal helpers
-    void initialize_nat_traversal();
-    void detect_and_cache_nat_type();
-    void update_connection_statistics(const std::string& peer_id, const ConnectionAttemptResult& result);
-    std::string select_best_connection_strategy(const std::string& host, int port);
-    NatType map_characteristics_to_nat_type(const NatTypeInfo& characteristics);
-    void log_nat_detection_results();
-    bool perform_tcp_connection(const std::string& host, int port, ConnectionAttemptResult& result);
-    
-    // ICE coordination helpers
-    void initialize_ice_agent();
-    void setup_ice_callbacks();
-    void update_peer_ice_info(socket_t socket, const nlohmann::json& payload);
-    void add_candidate_to_peer(socket_t socket, const IceCandidate& candidate);
-    bool should_initiate_ice_coordination(const std::string& peer_id);
-    void mark_ice_coordination_in_progress(const std::string& peer_id);
-    void remove_ice_coordination_tracking(const std::string& peer_id);
-    void cleanup_ice_coordination_for_peer(const std::string& peer_id);
-    nlohmann::json get_ice_statistics() const;
-    bool is_ice_enabled() const;
-    bool is_peer_ice_connected(const std::string& peer_id) const;
-    void cleanup_ice_resources();
     
     // Noise Protocol encryption helpers
     void initialize_noise_keypair();

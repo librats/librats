@@ -292,26 +292,6 @@ int rats_is_peer_limit_reached(rats_client_t handle) {
     return wrap->client->is_peer_limit_reached() ? 1 : 0;
 }
 
-// Advanced connection methods
-rats_error_t rats_connect_with_strategy(rats_client_t handle, const char* host, int port, 
-                                        rats_connection_strategy_t strategy) {
-    if (!handle || !host) return RATS_ERROR_INVALID_PARAMETER;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    
-    ConnectionStrategy cpp_strategy;
-    switch (strategy) {
-        case RATS_STRATEGY_DIRECT_ONLY: cpp_strategy = ConnectionStrategy::DIRECT_ONLY; break;
-        case RATS_STRATEGY_STUN_ASSISTED: cpp_strategy = ConnectionStrategy::STUN_ASSISTED; break;
-        case RATS_STRATEGY_ICE_FULL: cpp_strategy = ConnectionStrategy::ICE_FULL; break;
-        case RATS_STRATEGY_TURN_RELAY: cpp_strategy = ConnectionStrategy::TURN_RELAY; break;
-        case RATS_STRATEGY_AUTO_ADAPTIVE: cpp_strategy = ConnectionStrategy::AUTO_ADAPTIVE; break;
-        default: return RATS_ERROR_INVALID_PARAMETER;
-    }
-    
-    return wrap->client->connect_to_peer(std::string(host), port, cpp_strategy) ? 
-           RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
-}
-
 rats_error_t rats_disconnect_peer_by_id(rats_client_t handle, const char* peer_id) {
     if (!handle || !peer_id) return RATS_ERROR_INVALID_PARAMETER;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
@@ -1137,92 +1117,12 @@ void rats_clear_topic_callbacks(rats_client_t handle, const char* topic) {
     wrap->client->off_topic(topic_str);
 }
 
-// ===================== NAT TRAVERSAL AND STUN =====================
-
-rats_error_t rats_discover_and_ignore_public_ip(rats_client_t handle, const char* stun_server, int stun_port) {
-    if (!handle) return RATS_ERROR_INVALID_HANDLE;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    
-    std::string server = stun_server ? std::string(stun_server) : "stun.l.google.com";
-    int port = (stun_port > 0) ? stun_port : 19302;
-    
-    return wrap->client->discover_and_ignore_public_ip(server, port) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
-}
-
-char* rats_get_public_ip(rats_client_t handle) {
-    if (!handle) return nullptr;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    std::string public_ip = wrap->client->get_public_ip();
-    return public_ip.empty() ? nullptr : rats_strdup_owned(public_ip);
-}
-
-int rats_detect_nat_type(rats_client_t handle) {
-    if (!handle) return 0; // UNKNOWN
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    return static_cast<int>(wrap->client->detect_nat_type());
-}
-
-char* rats_get_nat_characteristics_json(rats_client_t handle) {
-    if (!handle) return nullptr;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    auto characteristics = wrap->client->get_nat_characteristics();
-    
-    // Convert NatTypeInfo to JSON manually
-    nlohmann::json nat_json;
-    nat_json["has_nat"] = characteristics.has_nat;
-    nat_json["filtering_behavior"] = static_cast<int>(characteristics.filtering_behavior);
-    nat_json["mapping_behavior"] = static_cast<int>(characteristics.mapping_behavior);
-    nat_json["preserves_port"] = characteristics.preserves_port;
-    nat_json["hairpin_support"] = characteristics.hairpin_support;
-    nat_json["description"] = characteristics.description;
-    
-    return rats_strdup_owned(nat_json.dump());
-}
+// ===================== ADDRESS BLOCKING =====================
 
 void rats_add_ignored_address(rats_client_t handle, const char* ip_address) {
     if (!handle || !ip_address) return;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
     wrap->client->add_ignored_address(std::string(ip_address));
-}
-
-char* rats_get_nat_traversal_statistics_json(rats_client_t handle) {
-    if (!handle) return nullptr;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    auto stats = wrap->client->get_nat_traversal_statistics();
-    return rats_strdup_owned(stats.dump());
-}
-
-// ===================== ICE COORDINATION =====================
-
-char* rats_create_ice_offer(rats_client_t handle, const char* peer_id) {
-    if (!handle || !peer_id) return nullptr;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    auto offer = wrap->client->create_ice_offer(std::string(peer_id));
-    return rats_strdup_owned(offer.dump());
-}
-
-rats_error_t rats_connect_with_ice(rats_client_t handle, const char* peer_id, const char* ice_offer_json) {
-    if (!handle || !peer_id || !ice_offer_json) return RATS_ERROR_INVALID_PARAMETER;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    
-    try {
-        nlohmann::json offer = nlohmann::json::parse(ice_offer_json);
-        return wrap->client->connect_with_ice(std::string(peer_id), offer) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
-    } catch (const nlohmann::json::exception&) {
-        return RATS_ERROR_JSON_PARSE;
-    }
-}
-
-rats_error_t rats_handle_ice_answer(rats_client_t handle, const char* peer_id, const char* ice_answer_json) {
-    if (!handle || !peer_id || !ice_answer_json) return RATS_ERROR_INVALID_PARAMETER;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    
-    try {
-        nlohmann::json answer = nlohmann::json::parse(ice_answer_json);
-        return wrap->client->handle_ice_answer(std::string(peer_id), answer) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
-    } catch (const nlohmann::json::exception&) {
-        return RATS_ERROR_JSON_PARSE;
-    }
 }
 
 // ===================== CONFIGURATION PERSISTENCE =====================

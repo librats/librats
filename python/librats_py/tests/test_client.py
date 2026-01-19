@@ -15,7 +15,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from librats_py import RatsClient, RatsError, ConnectionStrategy, LogLevel
+    from librats_py import RatsClient, RatsError, LogLevel
     from librats_py.exceptions import RatsInvalidParameterError, RatsNotRunningError
 except ImportError as e:
     print(f"Warning: Could not import librats_py: {e}")
@@ -252,14 +252,6 @@ class TestRatsClient(unittest.TestCase):
 
 class TestEnumsAndExceptions(unittest.TestCase):
     """Test enums and exceptions."""
-    
-    def test_connection_strategy_enum(self):
-        """Test ConnectionStrategy enum."""
-        self.assertEqual(ConnectionStrategy.DIRECT_ONLY.value, 0)
-        self.assertEqual(ConnectionStrategy.STUN_ASSISTED.value, 1)
-        self.assertEqual(ConnectionStrategy.ICE_FULL.value, 2)
-        self.assertEqual(ConnectionStrategy.TURN_RELAY.value, 3)
-        self.assertEqual(ConnectionStrategy.AUTO_ADAPTIVE.value, 4)
     
     def test_log_level_enum(self):
         """Test LogLevel enum."""

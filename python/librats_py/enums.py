@@ -17,15 +17,6 @@ class RatsError(IntEnum):
     JSON_PARSE = -7
 
 
-class ConnectionStrategy(IntEnum):
-    """Connection establishment strategies."""
-    DIRECT_ONLY = 0
-    STUN_ASSISTED = 1
-    ICE_FULL = 2
-    TURN_RELAY = 3
-    AUTO_ADAPTIVE = 4
-
-
 class MessageDataType(IntEnum):
     """Message data types for librats messages."""
     BINARY = 1
@@ -51,17 +42,6 @@ class LogLevel(IntEnum):
     INFO = 1
     WARN = 2
     ERROR = 3
-
-
-class NatType(IntEnum):
-    """NAT type detection results."""
-    UNKNOWN = 0
-    OPEN_INTERNET = 1
-    FULL_CONE = 2
-    RESTRICTED_CONE = 3
-    PORT_RESTRICTED_CONE = 4
-    SYMMETRIC = 5
-    UDP_BLOCKED = 6
 
 
 # Version information helper

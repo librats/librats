@@ -116,7 +116,7 @@ client.start()                    # Start the client
 client.stop()                     # Stop the client
 client.is_running() -> bool       # Check if running
 
-client.connect(host: str, port: int, strategy: ConnectionStrategy = AUTO_ADAPTIVE)
+client.connect(host: str, port: int)
 client.disconnect_peer(peer_id: str)
 ```
 
@@ -193,16 +193,6 @@ client.set_json_callback(callback: Callable[[str, dict], None])
 ```
 
 ### Enums
-
-#### ConnectionStrategy
-
-```python
-ConnectionStrategy.DIRECT_ONLY      # Direct connection only
-ConnectionStrategy.STUN_ASSISTED    # Use STUN for NAT traversal
-ConnectionStrategy.ICE_FULL         # Full ICE with candidate gathering
-ConnectionStrategy.TURN_RELAY       # Force TURN relay usage
-ConnectionStrategy.AUTO_ADAPTIVE    # Automatically choose best strategy
-```
 
 #### LogLevel
 
