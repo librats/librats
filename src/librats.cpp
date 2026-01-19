@@ -859,7 +859,18 @@ bool RatsClient::send_handshake_unlocked(socket_t socket, const std::string& our
     std::string handshake_msg = create_handshake_message("handshake", our_peer_id);
     LOG_CLIENT_DEBUG("Sending handshake to socket " << socket << ": " << handshake_msg);
     
-    if (!send_string_to_peer(socket, handshake_msg)) {
+    // Send handshake directly without going through send_binary_to_peer
+    // (which would cause deadlock by trying to lock peers_mutex_ again).
+    // Handshakes are always unencrypted since they happen before noise handshake.
+    std::vector<uint8_t> binary_data(handshake_msg.begin(), handshake_msg.end());
+    std::vector<uint8_t> message_with_header = create_message_with_header(binary_data, MessageDataType::STRING);
+    
+    // Get socket-specific mutex for thread-safe sending
+    auto socket_mutex = get_socket_send_mutex(socket);
+    std::lock_guard<std::mutex> send_lock(*socket_mutex);
+    
+    int sent = send_tcp_message_framed(socket, message_with_header);
+    if (sent <= 0) {
         LOG_CLIENT_ERROR("Failed to send handshake to socket " << socket);
         return false;
     }
