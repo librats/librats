@@ -147,7 +147,12 @@ bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr
             return false;
         }
         
-        // Connection succeeded
+        // Connection succeeded - restore socket to blocking mode
+        if (!set_socket_blocking(socket)) {
+            LOG_SOCKET_WARN("Failed to restore socket to blocking mode after connection");
+            // Continue anyway - some operations may still work
+        }
+        
         LOG_SOCKET_DEBUG("Connection succeeded within timeout");
         return true;
     }
@@ -1360,6 +1365,30 @@ bool set_socket_nonblocking(socket_t socket) {
 #endif
     
     LOG_SOCKET_DEBUG("Socket set to non-blocking mode");
+    return true;
+}
+
+bool set_socket_blocking(socket_t socket) {
+#ifdef _WIN32
+    unsigned long mode = 0;
+    if (ioctlsocket(socket, FIONBIO, &mode) != 0) {
+        LOG_SOCKET_ERROR("Failed to set socket to blocking mode");
+        return false;
+    }
+#else
+    int flags = fcntl(socket, F_GETFL, 0);
+    if (flags == -1) {
+        LOG_SOCKET_ERROR("Failed to get socket flags");
+        return false;
+    }
+    
+    if (fcntl(socket, F_SETFL, flags & ~O_NONBLOCK) == -1) {
+        LOG_SOCKET_ERROR("Failed to set socket to blocking mode");
+        return false;
+    }
+#endif
+    
+    LOG_SOCKET_DEBUG("Socket set to blocking mode");
     return true;
 }
 

@@ -285,6 +285,13 @@ bool is_valid_socket(socket_t socket);
 bool set_socket_nonblocking(socket_t socket);
 
 /**
+ * Set socket to blocking mode
+ * @param socket The socket handle
+ * @return true if successful, false otherwise
+ */
+bool set_socket_blocking(socket_t socket);
+
+/**
  * Check if a socket is a TCP socket
  * @param socket The socket handle to check
  * @return true if TCP socket, false otherwise
