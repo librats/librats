@@ -1582,27 +1582,36 @@ private:
     // 7. message_handlers_mutex_    (Message handler registration)
     // =========================================================================
     
-    // Configuration persistence
+    // [1] Configuration persistence (protected by config_mutex_)
+    mutable std::mutex config_mutex_;                       // [1] Protects configuration data
     std::string our_peer_id_;                               // Our persistent peer ID
     std::string data_directory_;                            // Directory where data files are stored
-    mutable std::mutex config_mutex_;                       // [1] Protects configuration data
     static const std::string CONFIG_FILE_NAME;             // "config.json"
     static const std::string PEERS_FILE_NAME;              // "peers.rats"
     static const std::string PEERS_EVER_FILE_NAME;         // "peers_ever.rats"
     
-    // Encryption state
+    // [2] Custom protocol configuration (protected by protocol_config_mutex_)
+    mutable std::mutex protocol_config_mutex_;              // [2] Protects protocol configuration
+    std::string custom_protocol_name_;                      // Custom protocol name (default: "rats")
+    std::string custom_protocol_version_;                   // Custom protocol version (default: "1.0")
+    
+    // [3] Encryption state (protected by encryption_mutex_)
+    mutable std::mutex encryption_mutex_;                   // [3] Protects encryption state
     bool encryption_enabled_;                               // Whether encryption is enabled
     rats::NoiseKeyPair noise_static_keypair_;               // Our static Noise keypair
     bool noise_keypair_initialized_;                        // Whether keypair has been initialized
-    mutable std::mutex encryption_mutex_;                   // [3] Protects encryption state
     
-    // Organized peer management using RatsPeer struct
+    // [4] Local interface address blocking (protected by local_addresses_mutex_)
+    mutable std::mutex local_addresses_mutex_;              // [4] Protects local interface addresses
+    std::vector<std::string> local_interface_addresses_;
+    
+    // [5] Organized peer management using RatsPeer struct (protected by peers_mutex_)
     mutable std::mutex peers_mutex_;                        // [5] Protects peer data (most frequently locked)
     std::unordered_map<std::string, RatsPeer> peers_;          // keyed by peer_id
     std::unordered_map<socket_t, std::string> socket_to_peer_id_;  // for quick socket->peer_id lookup  
     std::unordered_map<std::string, std::string> address_to_peer_id_;  // for duplicate detection (normalized_address->peer_id)
     
-    // Per-socket synchronization for thread-safe message sending
+    // [6] Per-socket synchronization for thread-safe message sending (protected by socket_send_mutexes_mutex_)
     mutable std::mutex socket_send_mutexes_mutex_;          // [6] Protects socket send mutex map
     std::unordered_map<socket_t, std::shared_ptr<std::mutex>> socket_send_mutexes_;
     
@@ -1661,10 +1670,14 @@ private:
     void remove_peer_by_id_unlocked(const std::string& peer_id);  // Assumes peers_mutex_ is already locked
     bool is_already_connected_to_address(const std::string& normalized_address) const;
     std::string normalize_peer_address(const std::string& ip, int port) const;
+    
+    // Data transmission helper - assumes peers_mutex_ is already locked or peer data is cached
+    bool send_binary_to_peer_unlocked(socket_t socket, const std::vector<uint8_t>& data, 
+                                       MessageDataType message_type, 
+                                       rats::NoiseCipherState* send_cipher,
+                                       const std::string& peer_id_for_logging);
 
-    // Local interface address blocking (ignore list)
-    std::vector<std::string> local_interface_addresses_;
-    mutable std::mutex local_addresses_mutex_;              // [4] Protects local interface addresses
+    // Local interface address blocking helper functions
     void initialize_local_addresses();
     bool is_blocked_address(const std::string& ip_address) const;
     bool should_ignore_peer(const std::string& ip, int port) const;
@@ -1676,11 +1689,6 @@ private:
     // Handshake protocol
     static constexpr const char* RATS_PROTOCOL_VERSION = "1.0";
     static constexpr int HANDSHAKE_TIMEOUT_SECONDS = 10;
-
-    // Custom protocol configuration
-    std::string custom_protocol_name_;          // Custom protocol name (default: "rats")
-    std::string custom_protocol_version_;       // Custom protocol version (default: "1.0")
-    mutable std::mutex protocol_config_mutex_;  // [2] Protects protocol configuration
 
     struct HandshakeMessage {
         std::string protocol;
@@ -1725,16 +1733,16 @@ private:
 
     int broadcast_rats_message(const nlohmann::json& message, const std::string& exclude_peer_id = "");
     int broadcast_rats_message_to_validated_peers(const nlohmann::json& message, const std::string& exclude_peer_id = "");
-    // Message exchange API implementation
+    
+    // [7] Message exchange API implementation (protected by message_handlers_mutex_)
+    mutable std::mutex message_handlers_mutex_;             // [7] Protects message handlers
     struct MessageHandler {
         MessageCallback callback;
         bool is_once;
         
         MessageHandler(MessageCallback cb, bool once) : callback(cb), is_once(once) {}
     };
-    
     std::unordered_map<std::string, std::vector<MessageHandler>> message_handlers_;
-    mutable std::mutex message_handlers_mutex_;             // [7] Protects message handlers
     
     void call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data);
 

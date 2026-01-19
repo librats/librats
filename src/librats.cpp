@@ -55,11 +55,15 @@ RatsClient::RatsClient(int listen_port, int max_peers, const std::string& bind_a
       max_peers_(max_peers),
       server_socket_(INVALID_SOCKET_VALUE),
       running_(false),
+      // [1] Configuration persistence
       data_directory_("."),
-      encryption_enabled_(false),
-      noise_keypair_initialized_(false),
+      // [2] Custom protocol configuration
       custom_protocol_name_("rats"),
       custom_protocol_version_("1.0"),
+      // [3] Encryption state
+      encryption_enabled_(false),
+      noise_keypair_initialized_(false),
+      // Automatic discovery
       auto_discovery_running_(false) {
     // Load configuration (this will generate peer ID if needed)
     load_configuration();
@@ -1240,7 +1244,12 @@ bool RatsClient::parse_message_with_header(const std::vector<uint8_t>& message, 
     return true;
 }
 
-bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data, MessageDataType message_type) {
+// Unlocked version - assumes peers_mutex_ is already locked or peer data is cached
+// Takes pre-cached encryption data to avoid locking peers_mutex_ inside
+bool RatsClient::send_binary_to_peer_unlocked(socket_t socket, const std::vector<uint8_t>& data, 
+                                               MessageDataType message_type,
+                                               rats::NoiseCipherState* send_cipher,
+                                               const std::string& peer_id_for_logging) {
     if (!running_.load()) {
         return false;
     }
@@ -1253,25 +1262,7 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
     // Create message with specified header type
     std::vector<uint8_t> message_with_header = create_message_with_header(data, message_type);
     
-    // Check if peer is noise-encrypted and encrypt if so
-    std::string peer_id;
-    bool use_encryption = false;
-    rats::NoiseCipherState* send_cipher = nullptr;
-    
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        auto sock_it = socket_to_peer_id_.find(socket);
-        if (sock_it != socket_to_peer_id_.end()) {
-            auto peer_it = peers_.find(sock_it->second);
-            if (peer_it != peers_.end() && peer_it->second.is_noise_encrypted()) {
-                peer_id = peer_it->second.peer_id;
-                send_cipher = peer_it->second.send_cipher.get();
-                use_encryption = true;
-            }
-        }
-    }
-    
-    if (use_encryption && send_cipher) {
+    if (send_cipher) {
         // Encrypt the message before sending
         std::vector<uint8_t> ciphertext(message_with_header.size() + rats::NOISE_TAG_SIZE);
         size_t ct_len = send_cipher->encrypt_with_ad(
@@ -1281,12 +1272,12 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
         );
         
         if (ct_len == 0) {
-            LOG_CLIENT_ERROR("Failed to encrypt message for peer: " << peer_id);
+            LOG_CLIENT_ERROR("Failed to encrypt message for peer: " << peer_id_for_logging);
             return false;
         }
         
         ciphertext.resize(ct_len);
-        LOG_CLIENT_DEBUG("Sending encrypted message to " << peer_id << " (" << ct_len << " bytes)");
+        LOG_CLIENT_DEBUG("Sending encrypted message to " << peer_id_for_logging << " (" << ct_len << " bytes)");
         
         // Send encrypted message using framed protocol
         int sent = send_tcp_message_framed(socket, ciphertext);
@@ -1296,6 +1287,33 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
     // Unencrypted path - use framed messages for reliable large message handling
     int sent = send_tcp_message_framed(socket, message_with_header);
     return sent > 0;
+}
+
+bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data, MessageDataType message_type) {
+    if (!running_.load()) {
+        return false;
+    }
+    
+    // Cache peer encryption data under lock, then release lock before sending
+    std::string peer_id;
+    rats::NoiseCipherState* send_cipher = nullptr;
+    
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto sock_it = socket_to_peer_id_.find(socket);
+        if (sock_it != socket_to_peer_id_.end()) {
+            auto peer_it = peers_.find(sock_it->second);
+            if (peer_it != peers_.end()) {
+                peer_id = peer_it->second.peer_id;
+                if (peer_it->second.is_noise_encrypted()) {
+                    send_cipher = peer_it->second.send_cipher.get();
+                }
+            }
+        }
+    }
+    
+    // Call unlocked version with cached data (peers_mutex_ is released)
+    return send_binary_to_peer_unlocked(socket, data, message_type, send_cipher, peer_id);
 }
 
 bool RatsClient::send_string_to_peer(socket_t socket, const std::string& data) {
@@ -1323,7 +1341,10 @@ bool RatsClient::send_binary_to_peer_id(const std::string& peer_hash_id, const s
         return false;
     }
     
-    return send_binary_to_peer(it->second.socket, data, message_type);
+    // Use unlocked version since we already hold peers_mutex_
+    const RatsPeer& peer = it->second;
+    rats::NoiseCipherState* send_cipher = peer.is_noise_encrypted() ? peer.send_cipher.get() : nullptr;
+    return send_binary_to_peer_unlocked(peer.socket, data, message_type, send_cipher, peer.peer_id);
 }
 
 bool RatsClient::send_string_to_peer_id(const std::string& peer_hash_id, const std::string& data) {
@@ -1368,7 +1389,9 @@ int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data, Mess
         const RatsPeer& peer = pair.second;
         // Only send to peers that have completed handshake
         if (peer.is_handshake_completed()) {
-            if (send_binary_to_peer(peer.socket, data, message_type)) {
+            // Use unlocked version since we already hold peers_mutex_
+            rats::NoiseCipherState* send_cipher = peer.is_noise_encrypted() ? peer.send_cipher.get() : nullptr;
+            if (send_binary_to_peer_unlocked(peer.socket, data, message_type, send_cipher, peer.peer_id)) {
                 sent_count++;
             }
         }
@@ -2188,6 +2211,16 @@ void RatsClient::handle_peer_exchange_message(socket_t socket, const std::string
 
 // General broadcasting functions
 int RatsClient::broadcast_rats_message(const nlohmann::json& message, const std::string& exclude_peer_id) {
+    // Serialize JSON once before iterating
+    std::string json_string;
+    try {
+        json_string = message.dump();
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to serialize JSON message for broadcast: " << e.what());
+        return 0;
+    }
+    std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
+    
     int sent_count = 0;
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -2198,7 +2231,9 @@ int RatsClient::broadcast_rats_message(const nlohmann::json& message, const std:
                 continue;
             }
             
-            if (send_json_to_peer(peer.socket, message)) {
+            // Use unlocked version since we already hold peers_mutex_
+            rats::NoiseCipherState* send_cipher = peer.is_noise_encrypted() ? peer.send_cipher.get() : nullptr;
+            if (send_binary_to_peer_unlocked(peer.socket, binary_data, MessageDataType::JSON, send_cipher, peer.peer_id)) {
                 sent_count++;
             }
         }
@@ -2207,6 +2242,16 @@ int RatsClient::broadcast_rats_message(const nlohmann::json& message, const std:
 }
 
 int RatsClient::broadcast_rats_message_to_validated_peers(const nlohmann::json& message, const std::string& exclude_peer_id) {
+    // Serialize JSON once before iterating
+    std::string json_string;
+    try {
+        json_string = message.dump();
+    } catch (const nlohmann::json::exception& e) {
+        LOG_CLIENT_ERROR("Failed to serialize JSON message for broadcast: " << e.what());
+        return 0;
+    }
+    std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
+    
     int sent_count = 0;
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -2218,7 +2263,9 @@ int RatsClient::broadcast_rats_message_to_validated_peers(const nlohmann::json& 
                 continue;
             }
             
-            if (send_json_to_peer(peer.socket, message)) {
+            // Use unlocked version since we already hold peers_mutex_
+            rats::NoiseCipherState* send_cipher = peer.is_noise_encrypted() ? peer.send_cipher.get() : nullptr;
+            if (send_binary_to_peer_unlocked(peer.socket, binary_data, MessageDataType::JSON, send_cipher, peer.peer_id)) {
                 sent_count++;
             }
         }
