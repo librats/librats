@@ -310,13 +310,6 @@ Java_com_librats_RatsClient_nativeConnect(JNIEnv* env, jobject thiz, jlong clien
 }
 
 JNIEXPORT jint JNICALL
-Java_com_librats_RatsClient_nativeConnectWithStrategy(JNIEnv* env, jobject thiz, jlong client_ptr, jstring host, jint port, jint strategy) {
-    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
-    std::string host_str = javaStringToCString(env, host);
-    return rats_connect_with_strategy(client, host_str.c_str(), port, static_cast<rats_connection_strategy_t>(strategy));
-}
-
-JNIEXPORT jint JNICALL
 Java_com_librats_RatsClient_nativeBroadcastString(JNIEnv* env, jobject thiz, jlong client_ptr, jstring message) {
     rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
     std::string message_str = javaStringToCString(env, message);
@@ -560,20 +553,54 @@ Java_com_librats_RatsClient_nativeIsEncryptionEnabled(JNIEnv* env, jobject thiz,
     return rats_is_encryption_enabled(client) != 0;
 }
 
-JNIEXPORT jstring JNICALL
-Java_com_librats_RatsClient_nativeGenerateEncryptionKey(JNIEnv* env, jobject thiz, jlong client_ptr) {
+// Enhanced Encryption API
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsClient_nativeInitializeEncryption(JNIEnv* env, jobject thiz, jlong client_ptr, jboolean enable) {
     rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
-    char* key = rats_generate_encryption_key(client);
+    return rats_initialize_encryption(client, enable ? 1 : 0);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_librats_RatsClient_nativeIsPeerEncrypted(JNIEnv* env, jobject thiz, jlong client_ptr, jstring peer_id) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string peer_id_str = javaStringToCString(env, peer_id);
+    return rats_is_peer_encrypted(client, peer_id_str.c_str()) != 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsClient_nativeSetNoiseStaticKeypair(JNIEnv* env, jobject thiz, jlong client_ptr, jstring private_key_hex) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string key_str = javaStringToCString(env, private_key_hex);
+    return rats_set_noise_static_keypair(client, key_str.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_librats_RatsClient_nativeGetNoiseStaticPublicKey(JNIEnv* env, jobject thiz, jlong client_ptr) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    char* key = rats_get_noise_static_public_key(client);
     jstring result = createJavaString(env, key);
     if (key) rats_string_free(key);
     return result;
 }
 
-JNIEXPORT jint JNICALL
-Java_com_librats_RatsClient_nativeSetEncryptionKey(JNIEnv* env, jobject thiz, jlong client_ptr, jstring key) {
+JNIEXPORT jstring JNICALL
+Java_com_librats_RatsClient_nativeGetPeerNoisePublicKey(JNIEnv* env, jobject thiz, jlong client_ptr, jstring peer_id) {
     rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
-    std::string key_str = javaStringToCString(env, key);
-    return rats_set_encryption_key(client, key_str.c_str());
+    std::string peer_id_str = javaStringToCString(env, peer_id);
+    char* key = rats_get_peer_noise_public_key(client, peer_id_str.c_str());
+    jstring result = createJavaString(env, key);
+    if (key) rats_string_free(key);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_librats_RatsClient_nativeGetPeerHandshakeHash(JNIEnv* env, jobject thiz, jlong client_ptr, jstring peer_id) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string peer_id_str = javaStringToCString(env, peer_id);
+    char* hash = rats_get_peer_handshake_hash(client, peer_id_str.c_str());
+    jstring result = createJavaString(env, hash);
+    if (hash) rats_string_free(hash);
+    return result;
 }
 
 // DHT Discovery

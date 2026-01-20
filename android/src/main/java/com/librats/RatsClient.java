@@ -24,13 +24,6 @@ public class RatsClient {
     
     private long nativeClientPtr = 0;
     
-    // Connection strategies
-    public static final int STRATEGY_DIRECT_ONLY = 0;
-    public static final int STRATEGY_STUN_ASSISTED = 1;
-    public static final int STRATEGY_ICE_FULL = 2;
-    public static final int STRATEGY_TURN_RELAY = 3;
-    public static final int STRATEGY_AUTO_ADAPTIVE = 4;
-    
     // Error codes
     public static final int SUCCESS = 0;
     public static final int ERROR_INVALID_HANDLE = -1;
@@ -89,7 +82,7 @@ public class RatsClient {
     }
     
     /**
-     * Connects to a peer using the default strategy.
+     * Connects to a peer.
      * 
      * @param host The hostname or IP address of the peer
      * @param port The port number of the peer
@@ -97,18 +90,6 @@ public class RatsClient {
      */
     public int connect(String host, int port) {
         return nativeConnect(nativeClientPtr, host, port);
-    }
-    
-    /**
-     * Connects to a peer using a specific connection strategy.
-     * 
-     * @param host The hostname or IP address of the peer
-     * @param port The port number of the peer
-     * @param strategy The connection strategy to use (STRATEGY_*)
-     * @return SUCCESS on success, error code on failure
-     */
-    public int connectWithStrategy(String host, int port, int strategy) {
-        return nativeConnectWithStrategy(nativeClientPtr, host, port, strategy);
     }
     
     /**
@@ -1150,7 +1131,6 @@ public class RatsClient {
     private native void nativeStop(long clientPtr);
     
     private native int nativeConnect(long clientPtr, String host, int port);
-    private native int nativeConnectWithStrategy(long clientPtr, String host, int port, int strategy);
     private native int nativeSendString(long clientPtr, String peerId, String message);
     private native int nativeBroadcastString(long clientPtr, String message);
     private native int nativeSendBinary(long clientPtr, String peerId, byte[] data);
