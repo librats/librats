@@ -50,6 +50,16 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Perfect Forward Secrecy**: Session keys are ephemeral and secure
 - **Configurable Encryption**: Enable/disable on demand with `set_encryption_enabled()`
 
+### **NAT Traversal (ICE/STUN/TURN)**
+- **ICE-lite Implementation**: RFC 5245 compliant NAT traversal for P2P connectivity
+- **STUN Support**: Discover public IP address through STUN servers (compatible with Google's public STUN servers)
+- **TURN Relay**: Fallback relay connectivity when direct P2P connection fails
+- **Automatic Candidate Gathering**: Host, server-reflexive, and relay candidates
+- **Connectivity Checks**: Automatic NAT traversal with candidate pair prioritization
+- **Trickle ICE**: Support for incremental candidate exchange
+- **Public Address Discovery**: Simple API to discover your public IP address
+- **Event-Driven API**: Callbacks for gathering state, connection state, and candidate events
+
 ### **Modern Developer Experience**
 - **Event-Driven API**: Register message handlers with `on()`, `once()`, `off()` methods
 - **JSON Message Exchange**: Built-in structured communication with callbacks
@@ -304,9 +314,190 @@ int main() {
 
 ### 6. Encryption
 
+```cpp
+#include "librats.h"
+#include <iostream>
+
+int main() {
+    librats::RatsClient client(8080);
+    
+    // Enable Noise Protocol encryption - that's it!
+    client.initialize_encryption(true);
+    
+    client.set_connection_callback([](socket_t socket, const std::string& peer_id) {
+        std::cout << "🔒 Peer connected (encrypted): " << peer_id.substr(0, 16) << std::endl;
+    });
+    
+    client.set_string_data_callback([](socket_t socket, const std::string& peer_id, const std::string& message) {
+        std::cout << "💬 Message from " << peer_id.substr(0, 8) << ": " << message << std::endl;
+    });
+    
+    client.start();
+    
+    std::cout << "🐀 Encrypted P2P client running on port 8080" << std::endl;
+    
+    // All messages are automatically encrypted with Noise Protocol
+    // (Curve25519 key exchange + ChaCha20-Poly1305 encryption)
+    client.broadcast_string_to_peers("This message is end-to-end encrypted!");
+    
+    std::this_thread::sleep_for(std::chrono::minutes(1));
+    return 0;
+}
 ```
 
-### 7. Configuration Persistence
+### 7. NAT Traversal (ICE/STUN/TURN)
+
+```cpp
+#include "librats.h"
+#include <iostream>
+
+int main() {
+    librats::RatsClient client(8080);
+    
+    client.start();
+    
+    // =========================================================================
+    // Simple Public Address Discovery
+    // =========================================================================
+    
+    // Quick way to discover your public IP address
+    auto public_addr = client.discover_public_address("stun.l.google.com", 19302, 5000);
+    if (public_addr) {
+        std::cout << "🌐 Your public address: " << public_addr->address 
+                  << ":" << public_addr->port << std::endl;
+    } else {
+        std::cout << "❌ Could not discover public address" << std::endl;
+    }
+    
+    // =========================================================================
+    // Full ICE Setup for NAT Traversal
+    // =========================================================================
+    
+    // Add STUN servers for public address discovery
+    client.add_stun_server("stun.l.google.com", 19302);
+    client.add_stun_server("stun1.l.google.com", 19302);
+    
+    // Add TURN server for relay fallback (when direct connection fails)
+    // client.add_turn_server("turn.example.com", 3478, "username", "password");
+    
+    // Configure ICE settings
+    librats::IceConfig ice_config;
+    ice_config.gather_host_candidates = true;      // Local interface addresses
+    ice_config.gather_srflx_candidates = true;     // Public addresses via STUN
+    ice_config.gather_relay_candidates = false;    // TURN relay (requires TURN server)
+    ice_config.gathering_timeout_ms = 5000;        // 5 second timeout
+    client.set_ice_config(ice_config);
+    
+    // Set up ICE event callbacks
+    client.on_ice_gathering_state_changed([](librats::IceGatheringState state) {
+        switch (state) {
+            case librats::IceGatheringState::New:
+                std::cout << "📡 ICE: Not started" << std::endl;
+                break;
+            case librats::IceGatheringState::Gathering:
+                std::cout << "📡 ICE: Gathering candidates..." << std::endl;
+                break;
+            case librats::IceGatheringState::Complete:
+                std::cout << "📡 ICE: Gathering complete!" << std::endl;
+                break;
+        }
+    });
+    
+    client.on_ice_connection_state_changed([](librats::IceConnectionState state) {
+        switch (state) {
+            case librats::IceConnectionState::Checking:
+                std::cout << "🔄 ICE: Checking connectivity..." << std::endl;
+                break;
+            case librats::IceConnectionState::Connected:
+                std::cout << "✅ ICE: Connected!" << std::endl;
+                break;
+            case librats::IceConnectionState::Completed:
+                std::cout << "✅ ICE: Connection established!" << std::endl;
+                break;
+            case librats::IceConnectionState::Failed:
+                std::cout << "❌ ICE: Connection failed" << std::endl;
+                break;
+            default:
+                break;
+        }
+    });
+    
+    // Callback for each new candidate (trickle ICE)
+    client.on_ice_new_candidate([](const librats::IceCandidate& candidate) {
+        std::cout << "🆕 New candidate: " << candidate.type_string() 
+                  << " " << candidate.address << ":" << candidate.port << std::endl;
+        
+        // In a real app, send this to remote peer via signaling channel
+        std::string sdp = candidate.to_sdp_attribute();
+        std::cout << "   SDP: " << sdp << std::endl;
+    });
+    
+    // Callback when all candidates gathered
+    client.on_ice_candidates_gathered([](const std::vector<librats::IceCandidate>& candidates) {
+        std::cout << "📋 Gathered " << candidates.size() << " candidates:" << std::endl;
+        for (const auto& c : candidates) {
+            std::cout << "   - " << c.type_string() << ": " 
+                      << c.address << ":" << c.port << std::endl;
+        }
+    });
+    
+    // Callback when best candidate pair is selected
+    client.on_ice_selected_pair([](const librats::IceCandidatePair& pair) {
+        std::cout << "🎯 Selected pair: " << std::endl;
+        std::cout << "   Local:  " << pair.local.address << ":" << pair.local.port << std::endl;
+        std::cout << "   Remote: " << pair.remote.address << ":" << pair.remote.port << std::endl;
+    });
+    
+    // Start gathering ICE candidates
+    if (client.gather_ice_candidates()) {
+        std::cout << "🚀 Started ICE candidate gathering" << std::endl;
+    }
+    
+    // Wait for gathering to complete
+    while (!client.is_ice_gathering_complete()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    // Get our local candidates
+    auto local_candidates = client.get_ice_candidates();
+    std::cout << "📤 Send these candidates to remote peer:" << std::endl;
+    for (const auto& c : local_candidates) {
+        std::cout << c.to_sdp_attribute() << std::endl;
+    }
+    
+    // In a real app, receive remote candidates via signaling and add them:
+    // std::vector<std::string> remote_sdp_lines = { /* from signaling */ };
+    // client.add_remote_ice_candidates_from_sdp(remote_sdp_lines);
+    // client.end_of_remote_ice_candidates();  // Signal end of trickle ICE
+    
+    // Start connectivity checks
+    // client.start_ice_checks();
+    
+    // Check if connected
+    if (client.is_ice_connected()) {
+        auto selected = client.get_ice_selected_pair();
+        if (selected) {
+            std::cout << "🔗 Connected via: " 
+                      << selected->local.address << ":" << selected->local.port
+                      << " -> " 
+                      << selected->remote.address << ":" << selected->remote.port 
+                      << std::endl;
+        }
+    }
+    
+    // Restart ICE if needed (e.g., network change)
+    // client.restart_ice();
+    
+    // Clean up
+    // client.close_ice();
+    
+    std::this_thread::sleep_for(std::chrono::minutes(1));
+    
+    return 0;
+}
+```
+
+### 8. Configuration Persistence
 
 ```cpp
 #include "librats.h"
@@ -347,7 +538,7 @@ int main() {
 }
 ```
 
-### 8. Logging Configuration
+### 9. Logging Configuration
 
 ```cpp
 #include "librats.h"
@@ -383,7 +574,7 @@ int main() {
 }
 ```
 
-### 9. Distributed Storage (requires `RATS_STORAGE`)
+### 10. Distributed Storage (requires `RATS_STORAGE`)
 
 ```cpp
 #include "librats.h"
@@ -450,7 +641,7 @@ int main() {
 }
 ```
 
-### 10. Node.js Quick Start
+### 11. Node.js Quick Start
 
 For more Node.js examples and TypeScript usage, see the [Node.js documentation](nodejs/README.md).
 
@@ -581,6 +772,62 @@ void on_file_transfer_request(FileTransferRequestCallback callback);
 void on_directory_transfer_progress(DirectoryTransferProgressCallback callback);
 void on_file_request(FileRequestCallback callback);
 void on_directory_request(DirectoryRequestCallback callback);
+
+// ICE/NAT Traversal API
+IceManager& get_ice_manager();
+bool is_ice_available() const;
+
+// ICE Server Configuration
+void add_stun_server(const std::string& host, uint16_t port = 3478);
+void add_turn_server(const std::string& host, uint16_t port,
+                     const std::string& username, const std::string& password);
+void clear_ice_servers();
+
+// ICE Candidate Gathering
+bool gather_ice_candidates();
+std::vector<IceCandidate> get_ice_candidates() const;
+bool is_ice_gathering_complete() const;
+
+// Public Address Discovery
+std::optional<std::pair<std::string, uint16_t>> get_public_address() const;
+std::optional<StunMappedAddress> discover_public_address(
+    const std::string& server = "stun.l.google.com",
+    uint16_t port = 19302, int timeout_ms = 5000);
+
+// Remote Candidates (from signaling)
+void add_remote_ice_candidate(const IceCandidate& candidate);
+void add_remote_ice_candidates_from_sdp(const std::vector<std::string>& sdp_lines);
+void end_of_remote_ice_candidates();
+
+// ICE Connectivity
+void start_ice_checks();
+IceConnectionState get_ice_connection_state() const;
+IceGatheringState get_ice_gathering_state() const;
+bool is_ice_connected() const;
+std::optional<IceCandidatePair> get_ice_selected_pair() const;
+
+// ICE Event Callbacks
+void on_ice_candidates_gathered(IceCandidatesCallback callback);
+void on_ice_new_candidate(IceNewCandidateCallback callback);
+void on_ice_gathering_state_changed(IceGatheringStateCallback callback);
+void on_ice_connection_state_changed(IceConnectionStateCallback callback);
+void on_ice_selected_pair(IceSelectedPairCallback callback);
+
+// ICE Configuration and Lifecycle
+void set_ice_config(const IceConfig& config);
+const IceConfig& get_ice_config() const;
+void close_ice();
+void restart_ice();
+
+// Encryption API
+bool initialize_encryption(bool enable);
+void set_encryption_enabled(bool enabled);
+bool is_encryption_enabled() const;
+bool is_peer_encrypted(const std::string& peer_id) const;
+bool set_noise_static_keypair(const uint8_t private_key[32]);
+std::vector<uint8_t> get_noise_static_public_key() const;
+std::vector<uint8_t> get_peer_noise_public_key(const std::string& peer_id) const;
+std::vector<uint8_t> get_peer_handshake_hash(const std::string& peer_id) const;
 ```
 
 ### Configuration Structures
@@ -691,6 +938,116 @@ struct FileMetadata {
     uint64_t last_modified;         // Last modification timestamp
     std::string mime_type;          // MIME type of the file
     std::string checksum;           // Full file checksum
+};
+```
+
+#### `StunMappedAddress`
+Structure returned by STUN public address discovery:
+
+```cpp
+struct StunMappedAddress {
+    StunAddressFamily family;   // IPv4 or IPv6
+    std::string address;        // Public IP address
+    uint16_t port;              // Mapped port number
+    
+    bool is_valid() const;      // Check if address is valid
+};
+```
+
+#### `IceConfig`
+ICE configuration structure for NAT traversal:
+
+```cpp
+struct IceConfig {
+    std::vector<IceServer> ice_servers;     // STUN/TURN servers
+    bool gather_host_candidates = true;      // Gather local interface addresses
+    bool gather_srflx_candidates = true;     // Gather public addresses via STUN
+    bool gather_relay_candidates = false;    // Gather TURN relay addresses
+    int gathering_timeout_ms = 5000;         // Candidate gathering timeout
+    int check_timeout_ms = 500;              // Connectivity check timeout per attempt
+    int check_max_retries = 5;               // Max connectivity check retries
+    std::string software = "librats";        // Software attribute for STUN
+    
+    // Helper methods
+    void add_stun_server(const std::string& host, uint16_t port = 3478);
+    void add_turn_server(const std::string& host, uint16_t port,
+                         const std::string& username, const std::string& password);
+};
+```
+
+#### `IceCandidate`
+ICE candidate structure representing a network endpoint:
+
+```cpp
+struct IceCandidate {
+    IceCandidateType type;          // Host, ServerReflexive, PeerReflexive, Relay
+    std::string foundation;          // Unique identifier for candidate
+    uint32_t component_id;           // Component ID (typically 1)
+    IceTransportProtocol transport;  // UDP or TCP
+    uint32_t priority;               // Candidate priority
+    std::string address;             // IP address
+    uint16_t port;                   // Port number
+    std::string related_address;     // Related address (for srflx/relay)
+    uint16_t related_port;           // Related port
+    
+    // Helper methods
+    std::string to_sdp_attribute() const;   // Format as SDP "a=candidate:..."
+    static std::optional<IceCandidate> from_sdp_attribute(const std::string& sdp);
+    std::string type_string() const;        // "host", "srflx", "prflx", "relay"
+    std::string address_string() const;     // "ip:port" format
+    
+    // Priority calculation (RFC 5245)
+    static uint32_t compute_priority(IceCandidateType type, 
+                                     uint32_t local_preference = 65535,
+                                     uint32_t component_id = 1);
+};
+```
+
+#### `IceCandidatePair`
+ICE candidate pair representing a local-remote connection attempt:
+
+```cpp
+struct IceCandidatePair {
+    IceCandidate local;              // Local candidate
+    IceCandidate remote;             // Remote candidate
+    IceCandidatePairState state;     // Frozen, Waiting, InProgress, Succeeded, Failed
+    uint64_t priority;               // Pair priority
+    bool nominated;                  // Nominated for use
+    int check_count;                 // Number of checks performed
+    
+    std::string key() const;         // Unique identifier for the pair
+    
+    // Priority calculation (RFC 5245)
+    static uint64_t compute_priority(uint32_t controlling_priority,
+                                     uint32_t controlled_priority,
+                                     bool is_controlling);
+};
+```
+
+#### `IceConnectionState`
+ICE connection state enumeration:
+
+```cpp
+enum class IceConnectionState {
+    New,            // Initial state
+    Gathering,      // Gathering candidates
+    Checking,       // Performing connectivity checks
+    Connected,      // At least one valid pair found
+    Completed,      // ICE processing complete
+    Failed,         // ICE processing failed
+    Disconnected,   // Connection lost
+    Closed          // ICE agent closed
+};
+```
+
+#### `IceGatheringState`
+ICE gathering state enumeration:
+
+```cpp
+enum class IceGatheringState {
+    New,            // Not started
+    Gathering,      // Gathering in progress
+    Complete        // Gathering complete
 };
 ```
 
@@ -814,9 +1171,12 @@ void on_storage_sync_complete(StorageSyncCompleteCallback callback);
 ├─────────────────────────────────────────────────────────────────┤
 │ Discovery & Networking Layer                                    │
 │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │ DHT (Wide-Area) │ │ mDNS (Local Net)│ │ Direct Sockets  │    │
-│ │ BT Mainline DHT │ │   224.0.0.251   │ │ IPv4/IPv6 Stack │    │
+│ │ DHT (Wide-Area) │ │ mDNS (Local Net)│ │ ICE/STUN/TURN   │    │
+│ │ BT Mainline DHT │ │   224.0.0.251   │ │  NAT Traversal  │    │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
+│ ┌─────────────────────────────────────────────────────────┐    │
+│ │           Direct Sockets - IPv4/IPv6 Stack              │    │
+│ └─────────────────────────────────────────────────────────┘    │
 ├─────────────────────────────────────────────────────────────────┤
 │ Platform Abstraction Layer                                      │
 │ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │

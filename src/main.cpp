@@ -62,6 +62,15 @@ void print_help() {
     std::cout << "  transfer_resume <transfer_id> - Resume a transfer" << std::endl;
     std::cout << "  transfer_cancel <transfer_id> - Cancel a transfer" << std::endl;
     std::cout << "  transfer_stats    - Show transfer statistics" << std::endl;
+    std::cout << "\nNAT Traversal (STUN/ICE) Commands:" << std::endl;
+    std::cout << "  stun_discover [server] [port] - Discover public IP via STUN" << std::endl;
+    std::cout << "  stun_add <host> [port]   - Add a STUN server" << std::endl;
+    std::cout << "  turn_add <host> <port> <user> <pass> - Add a TURN server" << std::endl;
+    std::cout << "  ice_servers_clear        - Clear all ICE servers" << std::endl;
+    std::cout << "  ice_gather               - Start gathering ICE candidates" << std::endl;
+    std::cout << "  ice_candidates           - List gathered ICE candidates" << std::endl;
+    std::cout << "  ice_status               - Show ICE status" << std::endl;
+    std::cout << "  ice_public_ip            - Show discovered public IP" << std::endl;
 #ifdef RATS_SEARCH_FEATURES
     std::cout << "\nBitTorrent Commands:" << std::endl;
     std::cout << "  bittorrent_enable [port] - Enable BitTorrent (default port: 6881)" << std::endl;
@@ -800,6 +809,136 @@ int main(int argc, char* argv[]) {
                 auto stats = client.get_file_transfer_statistics();
                 std::cout << "File Transfer Statistics:" << std::endl;
                 std::cout << stats.dump(2) << std::endl;
+            }
+        }
+        // =========================================================================
+        // NAT Traversal (STUN/ICE) Commands
+        // =========================================================================
+        else if (command == "stun_discover") {
+            std::string server = "stun.l.google.com";
+            int port = 19302;
+            iss >> server >> port;
+            if (port <= 0) port = 19302;
+            
+            LOG_MAIN_INFO("Discovering public IP via STUN server: " << server << ":" << port);
+            auto result = client.discover_public_address(server, static_cast<uint16_t>(port), 5000);
+            if (result) {
+                LOG_MAIN_INFO("=== Public Address Discovered ===");
+                LOG_MAIN_INFO("Public IP: " << result->address);
+                LOG_MAIN_INFO("Public Port: " << result->port);
+                LOG_MAIN_INFO("Full Address: " << result->to_string());
+            } else {
+                LOG_MAIN_ERROR("Failed to discover public address via STUN");
+            }
+        }
+        else if (command == "stun_add") {
+            std::string host;
+            int port = 3478;
+            iss >> host >> port;
+            
+            if (!host.empty()) {
+                if (port <= 0) port = 3478;
+                client.add_stun_server(host, static_cast<uint16_t>(port));
+                LOG_MAIN_INFO("Added STUN server: " << host << ":" << port);
+            } else {
+                std::cout << "Usage: stun_add <host> [port]" << std::endl;
+                std::cout << "Example: stun_add stun.l.google.com 19302" << std::endl;
+            }
+        }
+        else if (command == "turn_add") {
+            std::string host, username, password;
+            int port = 3478;
+            iss >> host >> port >> username >> password;
+            
+            if (!host.empty() && !username.empty() && !password.empty() && port > 0) {
+                client.add_turn_server(host, static_cast<uint16_t>(port), username, password);
+                LOG_MAIN_INFO("Added TURN server: " << host << ":" << port << " (user: " << username << ")");
+            } else {
+                std::cout << "Usage: turn_add <host> <port> <username> <password>" << std::endl;
+                std::cout << "Example: turn_add turn.example.com 3478 myuser mypassword" << std::endl;
+            }
+        }
+        else if (command == "ice_servers_clear") {
+            client.clear_ice_servers();
+            LOG_MAIN_INFO("Cleared all ICE (STUN/TURN) servers");
+        }
+        else if (command == "ice_gather") {
+            LOG_MAIN_INFO("Starting ICE candidate gathering...");
+            if (client.gather_ice_candidates()) {
+                LOG_MAIN_INFO("ICE candidate gathering started");
+                LOG_MAIN_INFO("Use 'ice_status' to check progress and 'ice_candidates' to see results");
+            } else {
+                LOG_MAIN_ERROR("Failed to start ICE candidate gathering");
+            }
+        }
+        else if (command == "ice_candidates") {
+            auto candidates = client.get_ice_candidates();
+            if (candidates.empty()) {
+                std::cout << "No ICE candidates gathered yet." << std::endl;
+                std::cout << "Use 'ice_gather' to start candidate gathering." << std::endl;
+            } else {
+                std::cout << "ICE Candidates (" << candidates.size() << "):" << std::endl;
+                for (const auto& c : candidates) {
+                    std::cout << "  Type: " << c.type_string() << std::endl;
+                    std::cout << "    Address: " << c.address_string() << std::endl;
+                    std::cout << "    Priority: " << c.priority << std::endl;
+                    std::cout << "    Foundation: " << c.foundation << std::endl;
+                    if (!c.related_address.empty()) {
+                        std::cout << "    Related: " << c.related_address << ":" << c.related_port << std::endl;
+                    }
+                    std::cout << "    SDP: " << c.to_sdp_attribute() << std::endl;
+                    std::cout << std::endl;
+                }
+            }
+        }
+        else if (command == "ice_status") {
+            std::cout << "=== ICE Status ===" << std::endl;
+            
+            // Gathering state
+            auto gathering_state = client.get_ice_gathering_state();
+            std::cout << "Gathering State: ";
+            switch (gathering_state) {
+                case librats::IceGatheringState::New: std::cout << "NEW"; break;
+                case librats::IceGatheringState::Gathering: std::cout << "GATHERING"; break;
+                case librats::IceGatheringState::Complete: std::cout << "COMPLETE"; break;
+            }
+            std::cout << std::endl;
+            
+            // Connection state
+            auto connection_state = client.get_ice_connection_state();
+            std::cout << "Connection State: ";
+            switch (connection_state) {
+                case librats::IceConnectionState::New: std::cout << "NEW"; break;
+                case librats::IceConnectionState::Gathering: std::cout << "GATHERING"; break;
+                case librats::IceConnectionState::Checking: std::cout << "CHECKING"; break;
+                case librats::IceConnectionState::Connected: std::cout << "CONNECTED"; break;
+                case librats::IceConnectionState::Completed: std::cout << "COMPLETED"; break;
+                case librats::IceConnectionState::Failed: std::cout << "FAILED"; break;
+                case librats::IceConnectionState::Disconnected: std::cout << "DISCONNECTED"; break;
+                case librats::IceConnectionState::Closed: std::cout << "CLOSED"; break;
+            }
+            std::cout << std::endl;
+            
+            // Candidates count
+            auto candidates = client.get_ice_candidates();
+            std::cout << "Local Candidates: " << candidates.size() << std::endl;
+            
+            // Public address
+            auto public_addr = client.get_public_address();
+            if (public_addr) {
+                std::cout << "Public Address: " << public_addr->first << ":" << public_addr->second << std::endl;
+            } else {
+                std::cout << "Public Address: Not discovered" << std::endl;
+            }
+        }
+        else if (command == "ice_public_ip") {
+            auto public_addr = client.get_public_address();
+            if (public_addr) {
+                LOG_MAIN_INFO("Public IP: " << public_addr->first);
+                LOG_MAIN_INFO("Public Port: " << public_addr->second);
+            } else {
+                std::cout << "Public address not discovered yet." << std::endl;
+                std::cout << "Use 'stun_discover' for quick discovery or 'ice_gather' for full ICE." << std::endl;
             }
         }
 #ifdef RATS_SEARCH_FEATURES
