@@ -8,9 +8,10 @@
 #include "poly1305.h"
 #include <string.h>
 
-/* Convert 64-bit nonce counter to 12-byte Noise nonce format */
+/* Write 64-bit nonce counter to 12-byte Noise nonce format (currently unused, reserved for future use) */
+/* Noise protocol nonce format: 4 bytes zeros + 8 bytes little-endian counter */
+#if 0
 static void make_nonce(uint8_t out[12], uint64_t n) {
-    /* Noise protocol nonce format: 4 bytes zeros + 8 bytes little-endian counter */
     out[0] = 0;
     out[1] = 0;
     out[2] = 0;
@@ -24,6 +25,7 @@ static void make_nonce(uint8_t out[12], uint64_t n) {
     out[10] = (uint8_t)(n >> 48);
     out[11] = (uint8_t)(n >> 56);
 }
+#endif
 
 /* Write 64-bit value in little-endian */
 static void write_le64(uint8_t *p, uint64_t v) {
