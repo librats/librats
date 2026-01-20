@@ -179,6 +179,15 @@ set(LIBRARY_SOURCES
 # Noise Protocol implementation
     src/noise.cpp
     src/noise.h
+
+# NAT traversal (STUN/TURN/ICE)
+    src/stun.cpp
+    src/stun.h
+    src/turn.cpp
+    src/turn.h
+    src/ice.cpp
+    src/ice.h
+    src/librats_ice.cpp
 )
 
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
@@ -357,6 +366,10 @@ if(RATS_BUILD_TESTS)
         tests/test_crypto_sha2.cpp
         tests/test_crypto_blake2.cpp
         tests/test_noise.cpp
+# NAT traversal tests (STUN/TURN/ICE)
+        tests/test_stun.cpp
+        tests/test_turn.cpp
+        tests/test_ice.cpp
     )
     
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled

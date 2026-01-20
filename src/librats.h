@@ -8,6 +8,7 @@
 #include "gossipsub.h" // For ValidationResult enum and GossipSub types
 #include "file_transfer.h" // File transfer functionality
 #include "noise.h" // Noise Protocol encryption
+#include "ice.h"   // ICE-lite NAT traversal
 #ifdef RATS_STORAGE
 #include "storage.h" // Distributed storage functionality
 #endif
@@ -1176,6 +1177,189 @@ public:
      */
     void on_directory_request(DirectoryRequestCallback callback);
 
+    // =========================================================================
+    // ICE (NAT Traversal) API
+    // =========================================================================
+    
+    /**
+     * Get the ICE manager instance
+     * @return Reference to the ICE manager
+     */
+    IceManager& get_ice_manager();
+    
+    /**
+     * Check if ICE is available
+     * @return true if ICE manager is initialized
+     */
+    bool is_ice_available() const;
+    
+    // Server Configuration
+    /**
+     * Add a STUN server for NAT traversal
+     * @param host STUN server hostname or IP
+     * @param port STUN server port (default: 3478)
+     */
+    void add_stun_server(const std::string& host, uint16_t port = STUN_DEFAULT_PORT);
+    
+    /**
+     * Add a TURN server for relay-based NAT traversal
+     * @param host TURN server hostname or IP
+     * @param port TURN server port (default: 3478)
+     * @param username TURN username
+     * @param password TURN password
+     */
+    void add_turn_server(const std::string& host, uint16_t port,
+                         const std::string& username, const std::string& password);
+    
+    /**
+     * Clear all ICE (STUN/TURN) servers
+     */
+    void clear_ice_servers();
+    
+    // Candidate Gathering
+    /**
+     * Start gathering ICE candidates
+     * This discovers our public address and generates connection candidates
+     * @return true if gathering started successfully
+     */
+    bool gather_ice_candidates();
+    
+    /**
+     * Get our local ICE candidates
+     * Call after gathering is complete
+     * @return Vector of ICE candidates
+     */
+    std::vector<IceCandidate> get_ice_candidates() const;
+    
+    /**
+     * Check if ICE candidate gathering is complete
+     * @return true if gathering is complete
+     */
+    bool is_ice_gathering_complete() const;
+    
+    // Public Address Discovery
+    /**
+     * Get our public IP address (discovered via STUN)
+     * @return Pair of (IP, port) or nullopt if not discovered
+     */
+    std::optional<std::pair<std::string, uint16_t>> get_public_address() const;
+    
+    /**
+     * Perform a simple STUN binding request to discover public address
+     * This is a convenience method that doesn't require full ICE setup
+     * @param server STUN server hostname
+     * @param port STUN server port (default: 3478)
+     * @param timeout_ms Timeout in milliseconds (default: 5000)
+     * @return Mapped address or nullopt on failure
+     */
+    std::optional<StunMappedAddress> discover_public_address(
+        const std::string& server = "stun.l.google.com",
+        uint16_t port = 19302,
+        int timeout_ms = 5000);
+    
+    // Remote Candidates
+    /**
+     * Add a remote ICE candidate (received from peer via signaling)
+     * @param candidate Remote candidate to add
+     */
+    void add_remote_ice_candidate(const IceCandidate& candidate);
+    
+    /**
+     * Add remote ICE candidates from SDP attribute lines
+     * @param sdp_lines Vector of SDP candidate lines
+     */
+    void add_remote_ice_candidates_from_sdp(const std::vector<std::string>& sdp_lines);
+    
+    /**
+     * Signal end of remote candidates (trickle ICE complete)
+     */
+    void end_of_remote_ice_candidates();
+    
+    // Connectivity
+    /**
+     * Start ICE connectivity checks
+     */
+    void start_ice_checks();
+    
+    /**
+     * Get current ICE connection state
+     * @return ICE connection state
+     */
+    IceConnectionState get_ice_connection_state() const;
+    
+    /**
+     * Get ICE gathering state
+     * @return ICE gathering state
+     */
+    IceGatheringState get_ice_gathering_state() const;
+    
+    /**
+     * Check if ICE is connected
+     * @return true if ICE connection is established
+     */
+    bool is_ice_connected() const;
+    
+    /**
+     * Get the selected ICE candidate pair
+     * @return Selected candidate pair or nullopt
+     */
+    std::optional<IceCandidatePair> get_ice_selected_pair() const;
+    
+    // ICE Event Callbacks
+    /**
+     * Set callback for ICE candidates gathered
+     * @param callback Function called with all candidates when gathering completes
+     */
+    void on_ice_candidates_gathered(IceCandidatesCallback callback);
+    
+    /**
+     * Set callback for new ICE candidate (trickle ICE)
+     * @param callback Function called when each new candidate is discovered
+     */
+    void on_ice_new_candidate(IceNewCandidateCallback callback);
+    
+    /**
+     * Set callback for ICE gathering state changes
+     * @param callback Function called when gathering state changes
+     */
+    void on_ice_gathering_state_changed(IceGatheringStateCallback callback);
+    
+    /**
+     * Set callback for ICE connection state changes
+     * @param callback Function called when connection state changes
+     */
+    void on_ice_connection_state_changed(IceConnectionStateCallback callback);
+    
+    /**
+     * Set callback for ICE selected pair
+     * @param callback Function called when a candidate pair is selected
+     */
+    void on_ice_selected_pair(IceSelectedPairCallback callback);
+    
+    // ICE Configuration
+    /**
+     * Set ICE configuration
+     * @param config ICE configuration settings
+     */
+    void set_ice_config(const IceConfig& config);
+    
+    /**
+     * Get current ICE configuration
+     * @return Current ICE configuration
+     */
+    const IceConfig& get_ice_config() const;
+    
+    // ICE Lifecycle
+    /**
+     * Close ICE manager and release resources
+     */
+    void close_ice();
+    
+    /**
+     * Restart ICE (re-gather candidates and restart checks)
+     */
+    void restart_ice();
+
 #ifdef RATS_STORAGE
     // =========================================================================
     // Distributed Storage API (requires RATS_STORAGE)
@@ -1637,6 +1821,9 @@ private:
     
     // File transfer manager
     std::unique_ptr<FileTransferManager> file_transfer_manager_;
+    
+    // ICE manager for NAT traversal
+    std::unique_ptr<IceManager> ice_manager_;
     
 #ifdef RATS_STORAGE
     // Distributed storage manager (optional, requires RATS_STORAGE)

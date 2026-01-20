@@ -1089,65 +1089,9 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Peer&
 }
 
 int send_udp_data_to(socket_t socket, const std::vector<uint8_t>& data, const std::string& hostname, int port) {
-    LOG_SOCKET_DEBUG("Sending " << data.size() << " bytes to " << hostname << ":" << port);
-    
-    // Validate port number
-    if (port < 0 || port > 65535) {
-        LOG_SOCKET_ERROR("Invalid port number: " << port << " (must be 0-65535)");
-        return -1;
-    }
-    
-    // Resolve hostname to IP address
-    std::string resolved_ip = network_utils::resolve_hostname(hostname);
-    if (resolved_ip.empty()) {
-        LOG_SOCKET_ERROR("Failed to resolve hostname: " << hostname);
-        return -1;
-    }
-    
-    // Check if it's an IPv6 address
-    if (network_utils::is_valid_ipv6(resolved_ip)) {
-        // Handle IPv6 address
-        sockaddr_in6 addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin6_family = AF_INET6;
-        addr.sin6_port = htons(port);
-        
-        if (inet_pton(AF_INET6, resolved_ip.c_str(), &addr.sin6_addr) <= 0) {
-            LOG_SOCKET_ERROR("Invalid IPv6 address: " << resolved_ip);
-            return -1;
-        }
-
-        int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0, 
-                               (struct sockaddr*)&addr, sizeof(addr));
-        if (bytes_sent == SOCKET_ERROR_VALUE) {
-            LOG_SOCKET_ERROR("Failed to send UDP data to IPv6 " << resolved_ip << ":" << port);
-            return -1;
-        }
-        
-        LOG_SOCKET_DEBUG("Successfully sent " << bytes_sent << " bytes to IPv6 " << resolved_ip << ":" << port);
-        return bytes_sent;
-    } else {
-        // Handle IPv4 address
-        sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        
-        if (inet_pton(AF_INET, resolved_ip.c_str(), &addr.sin_addr) <= 0) {
-            LOG_SOCKET_ERROR("Invalid IPv4 address: " << resolved_ip);
-            return -1;
-        }
-
-        int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0, 
-                               (struct sockaddr*)&addr, sizeof(addr));
-        if (bytes_sent == SOCKET_ERROR_VALUE) {
-            LOG_SOCKET_ERROR("Failed to send UDP data to " << resolved_ip << ":" << port);
-            return -1;
-        }
-        
-        LOG_SOCKET_DEBUG("Successfully sent " << bytes_sent << " bytes to " << resolved_ip << ":" << port);
-        return bytes_sent;
-    }
+    // Delegate to send_udp_data with Peer struct for consistent dual-stack handling
+    Peer peer(hostname, static_cast<uint16_t>(port));
+    return send_udp_data(socket, data, peer);
 }
 
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer& sender_peer) {
@@ -1196,13 +1140,27 @@ std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer&
         
         LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from " << sender_peer.ip << ":" << sender_peer.port);
     } else if (sender_addr.ss_family == AF_INET6) {
-        char sender_ip[INET6_ADDRSTRLEN];
         struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&sender_addr;
-        inet_ntop(AF_INET6, &addr_in6->sin6_addr, sender_ip, INET6_ADDRSTRLEN);
-        sender_peer.ip = sender_ip;
-        sender_peer.port = ntohs(addr_in6->sin6_port);
         
-        LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from IPv6 [" << sender_peer.ip << "]:" << sender_peer.port);
+        // Check if this is an IPv4-mapped IPv6 address (::ffff:x.x.x.x)
+        if (IN6_IS_ADDR_V4MAPPED(&addr_in6->sin6_addr)) {
+            // Extract the IPv4 address from the last 4 bytes
+            char ip_str[INET_ADDRSTRLEN];
+            struct in_addr ipv4_addr;
+            memcpy(&ipv4_addr, &addr_in6->sin6_addr.s6_addr[12], 4);
+            inet_ntop(AF_INET, &ipv4_addr, ip_str, INET_ADDRSTRLEN);
+            sender_peer.ip = ip_str;
+            sender_peer.port = ntohs(addr_in6->sin6_port);
+            
+            LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from IPv4-mapped " << sender_peer.ip << ":" << sender_peer.port);
+        } else {
+            char ip_str[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, INET6_ADDRSTRLEN);
+            sender_peer.ip = ip_str;
+            sender_peer.port = ntohs(addr_in6->sin6_port);
+            
+            LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from IPv6 [" << sender_peer.ip << "]:" << sender_peer.port);
+        }
     } else {
         LOG_SOCKET_WARN("Received UDP data from unknown address family");
         sender_peer.ip = "unknown";
@@ -1287,14 +1245,29 @@ std::vector<uint8_t> receive_udp_data_with_timeout(socket_t socket, size_t buffe
         
         LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from " << ip_str << ":" << ntohs(addr_in->sin_port));
     } else if (sender_addr.ss_family == AF_INET6) {
-        char ip_str[INET6_ADDRSTRLEN];
         struct sockaddr_in6* addr_in6 = (struct sockaddr_in6*)&sender_addr;
-        inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, INET6_ADDRSTRLEN);
         
-        if (sender_ip) *sender_ip = ip_str;
-        if (sender_port) *sender_port = ntohs(addr_in6->sin6_port);
-        
-        LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from IPv6 [" << ip_str << "]:" << ntohs(addr_in6->sin6_port));
+        // Check if this is an IPv4-mapped IPv6 address (::ffff:x.x.x.x)
+        if (IN6_IS_ADDR_V4MAPPED(&addr_in6->sin6_addr)) {
+            // Extract the IPv4 address from the last 4 bytes
+            char ip_str[INET_ADDRSTRLEN];
+            struct in_addr ipv4_addr;
+            memcpy(&ipv4_addr, &addr_in6->sin6_addr.s6_addr[12], 4);
+            inet_ntop(AF_INET, &ipv4_addr, ip_str, INET_ADDRSTRLEN);
+            
+            if (sender_ip) *sender_ip = ip_str;
+            if (sender_port) *sender_port = ntohs(addr_in6->sin6_port);
+            
+            LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from IPv4-mapped " << ip_str << ":" << ntohs(addr_in6->sin6_port));
+        } else {
+            char ip_str[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, INET6_ADDRSTRLEN);
+            
+            if (sender_ip) *sender_ip = ip_str;
+            if (sender_port) *sender_port = ntohs(addr_in6->sin6_port);
+            
+            LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from IPv6 [" << ip_str << "]:" << ntohs(addr_in6->sin6_port));
+        }
     } else {
         LOG_SOCKET_WARN("Received UDP data from unknown address family");
         if (sender_ip) *sender_ip = "unknown";
