@@ -95,11 +95,11 @@ if (fs.existsSync(path.join(projectRoot, 'version.rc.in'))) {
     );
 }
 
-// Copy src/ directory (only .cpp, .h, .hpp, .in files, excluding main.cpp)
+// Copy src/ directory (only .c, .cpp, .h, .hpp, .in files, excluding main.cpp)
 console.log('  Copying src/ directory...');
 const srcFilter = (name) => {
     if (name === 'main.cpp') return false;
-    return name.endsWith('.cpp') || name.endsWith('.h') || 
+    return name.endsWith('.c') || name.endsWith('.cpp') || name.endsWith('.h') || 
            name.endsWith('.hpp') || name.endsWith('.in');
 };
 copyDir(
