@@ -535,8 +535,9 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     handshake_completed = true;
                     LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (peer_id: " << peer_copy.peer_id << ")");
                     
-                    // Noise encryption handshake
-                    if (encryption_enabled) {
+                    // Noise encryption handshake - only if BOTH sides support encryption
+                    // peer_copy.encryption_enabled is already negotiated in handle_handshake_message()
+                    if (peer_copy.encryption_enabled) {
                         LOG_CLIENT_INFO("Starting Noise handshake for peer " << peer_copy.peer_id);
                         if (perform_noise_handshake(client_socket, peer_copy.peer_id, peer_copy.is_outgoing)) {
                             noise_handshake_done = true;
@@ -544,6 +545,8 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                         } else {
                             LOG_CLIENT_ERROR("Noise handshake failed for peer " << peer_copy.peer_id);
                         }
+                    } else {
+                        LOG_CLIENT_DEBUG("Skipping Noise handshake for peer " << peer_copy.peer_id << " - encryption not negotiated");
                     }
                     
                     // Connection callback
@@ -689,6 +692,7 @@ std::string RatsClient::create_handshake_message(const std::string& message_type
     handshake_msg["peer_id"] = our_peer_id;
     handshake_msg["message_type"] = message_type;
     handshake_msg["timestamp"] = timestamp;
+    handshake_msg["encryption_enabled"] = is_encryption_enabled();
     
     return handshake_msg.dump();
 }
@@ -708,6 +712,8 @@ bool RatsClient::parse_handshake_message(const std::string& message, HandshakeMe
         out_msg.message_type = json_msg.value("message_type", "");
         // Tolerate missing timestamp to avoid hard dependency on remote system clock
         out_msg.timestamp = json_msg.value("timestamp", static_cast<int64_t>(0));
+        // Parse encryption_enabled (default to false for backward compatibility)
+        out_msg.encryption_enabled = json_msg.value("encryption_enabled", false);
         
         return true;
         
@@ -930,6 +936,16 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
 
     // Store remote peer information
     peer.version = handshake_msg.version;
+    
+    // Determine if encryption should be used for this connection
+    // Encryption is enabled only if BOTH sides support it
+    bool local_encryption = is_encryption_enabled();
+    bool remote_encryption = handshake_msg.encryption_enabled;
+    peer.encryption_enabled = local_encryption && remote_encryption;
+    
+    LOG_CLIENT_INFO("Encryption negotiation: local=" << local_encryption 
+                    << ", remote=" << remote_encryption 
+                    << ", result=" << peer.encryption_enabled);
     
     // Simplified handshake logic - just one message type
     if (peer.handshake_state == RatsPeer::HandshakeState::PENDING) {
