@@ -65,8 +65,9 @@ TEST_F(RatsCApiTest, ErrorHandling) {
     ASSERT_NE(client1, nullptr);
     
     // Test invalid parameters
-    EXPECT_EQ(rats_connect(nullptr, "127.0.0.1", 8080), RATS_ERROR_INVALID_HANDLE);
-    EXPECT_EQ(rats_connect(client1, nullptr, 8080), RATS_ERROR_INVALID_PARAMETER);
+    // Note: rats_connect returns 0 on failure, 1 on success (not error codes)
+    EXPECT_EQ(rats_connect(nullptr, "127.0.0.1", 8080), 0);
+    EXPECT_EQ(rats_connect(client1, nullptr, 8080), 0);
     EXPECT_EQ(rats_send_string(nullptr, "peer", "message"), RATS_ERROR_INVALID_HANDLE);
     EXPECT_EQ(rats_send_string(client1, nullptr, "message"), RATS_ERROR_INVALID_PARAMETER);
     EXPECT_EQ(rats_send_string(client1, "peer", nullptr), RATS_ERROR_INVALID_PARAMETER);
