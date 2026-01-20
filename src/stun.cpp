@@ -1056,7 +1056,7 @@ std::optional<StunMessage> StunClient::send_request(socket_t socket,
         LOG_STUN_DEBUG("Sent STUN request (attempt " << (attempt + 1) << ", RTO: " << rto << "ms)");
         
         // Wait for response with current RTO
-        int wait_time = std::min(rto, timeout_ms - total_time);
+        int wait_time = (std::min)(rto, timeout_ms - total_time);
         std::string sender_ip;
         int sender_port;
         
@@ -1074,7 +1074,7 @@ std::optional<StunMessage> StunClient::send_request(socket_t socket,
         }
         
         // Double RTO for next attempt (RFC 5389)
-        rto = std::min(rto * 2, 16000);  // Cap at 16 seconds
+        rto = (std::min)(rto * 2, 16000);  // Cap at 16 seconds
     }
     
     return std::nullopt;

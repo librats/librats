@@ -190,8 +190,8 @@ uint64_t IceCandidatePair::compute_priority(uint32_t controlling_priority,
     uint64_t g = controlling_priority;
     uint64_t d = controlled_priority;
     
-    uint64_t min_val = std::min(g, d);
-    uint64_t max_val = std::max(g, d);
+    uint64_t min_val = (std::min)(g, d);
+    uint64_t max_val = (std::max)(g, d);
     
     return (min_val << 32) + (max_val << 1) + (g > d ? 1 : 0);
 }
