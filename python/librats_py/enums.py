@@ -44,6 +44,33 @@ class LogLevel(IntEnum):
     ERROR = 3
 
 
+class IceConnectionState(IntEnum):
+    """ICE connection states."""
+    NEW = 0
+    GATHERING = 1
+    CHECKING = 2
+    CONNECTED = 3
+    COMPLETED = 4
+    FAILED = 5
+    DISCONNECTED = 6
+    CLOSED = 7
+
+
+class IceGatheringState(IntEnum):
+    """ICE gathering states."""
+    NEW = 0
+    GATHERING = 1
+    COMPLETE = 2
+
+
+class IceCandidateType(IntEnum):
+    """ICE candidate types."""
+    HOST = 0
+    SRFLX = 1
+    PRFLX = 2
+    RELAY = 3
+
+
 # Version information helper
 class VersionInfo:
     """Version information container."""

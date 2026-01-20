@@ -179,21 +179,31 @@ class LibratsCtypes:
         self.lib.rats_is_dht_running.argtypes = [c_void_p]
         self.lib.rats_is_dht_running.restype = c_int
         
-        # Encryption
+        # Basic Encryption
         self.lib.rats_set_encryption_enabled.argtypes = [c_void_p, c_int]
         self.lib.rats_set_encryption_enabled.restype = c_int
         
         self.lib.rats_is_encryption_enabled.argtypes = [c_void_p]
         self.lib.rats_is_encryption_enabled.restype = c_int
         
-        self.lib.rats_get_encryption_key.argtypes = [c_void_p]
-        self.lib.rats_get_encryption_key.restype = c_void_p
+        # Enhanced Encryption API
+        self.lib.rats_initialize_encryption.argtypes = [c_void_p, c_int]
+        self.lib.rats_initialize_encryption.restype = c_int
         
-        self.lib.rats_set_encryption_key.argtypes = [c_void_p, c_char_p]
-        self.lib.rats_set_encryption_key.restype = c_int
+        self.lib.rats_is_peer_encrypted.argtypes = [c_void_p, c_char_p]
+        self.lib.rats_is_peer_encrypted.restype = c_int
         
-        self.lib.rats_generate_encryption_key.argtypes = [c_void_p]
-        self.lib.rats_generate_encryption_key.restype = c_void_p
+        self.lib.rats_set_noise_static_keypair.argtypes = [c_void_p, c_char_p]
+        self.lib.rats_set_noise_static_keypair.restype = c_int
+        
+        self.lib.rats_get_noise_static_public_key.argtypes = [c_void_p]
+        self.lib.rats_get_noise_static_public_key.restype = c_void_p
+        
+        self.lib.rats_get_peer_noise_public_key.argtypes = [c_void_p, c_char_p]
+        self.lib.rats_get_peer_noise_public_key.restype = c_void_p
+        
+        self.lib.rats_get_peer_handshake_hash.argtypes = [c_void_p, c_char_p]
+        self.lib.rats_get_peer_handshake_hash.restype = c_void_p
         
         # File Transfer
         self.lib.rats_send_file.argtypes = [c_void_p, c_char_p, c_char_p, c_char_p]
@@ -454,6 +464,62 @@ class LibratsCtypes:
         
         self.lib.rats_clear_log_file.argtypes = [c_void_p]
         self.lib.rats_clear_log_file.restype = None
+        
+        # ===================== ICE (NAT TRAVERSAL) API =====================
+        
+        self.lib.rats_is_ice_available.argtypes = [c_void_p]
+        self.lib.rats_is_ice_available.restype = c_int
+        
+        self.lib.rats_add_stun_server.argtypes = [c_void_p, c_char_p, c_uint16]
+        self.lib.rats_add_stun_server.restype = None
+        
+        self.lib.rats_add_turn_server.argtypes = [c_void_p, c_char_p, c_uint16, c_char_p, c_char_p]
+        self.lib.rats_add_turn_server.restype = None
+        
+        self.lib.rats_clear_ice_servers.argtypes = [c_void_p]
+        self.lib.rats_clear_ice_servers.restype = None
+        
+        self.lib.rats_gather_ice_candidates.argtypes = [c_void_p]
+        self.lib.rats_gather_ice_candidates.restype = c_int
+        
+        self.lib.rats_get_ice_candidates_json.argtypes = [c_void_p]
+        self.lib.rats_get_ice_candidates_json.restype = c_void_p
+        
+        self.lib.rats_is_ice_gathering_complete.argtypes = [c_void_p]
+        self.lib.rats_is_ice_gathering_complete.restype = c_int
+        
+        self.lib.rats_get_public_address.argtypes = [c_void_p]
+        self.lib.rats_get_public_address.restype = c_void_p
+        
+        self.lib.rats_discover_public_address.argtypes = [c_void_p, c_char_p, c_uint16, c_int]
+        self.lib.rats_discover_public_address.restype = c_void_p
+        
+        self.lib.rats_add_remote_ice_candidate.argtypes = [c_void_p, c_char_p]
+        self.lib.rats_add_remote_ice_candidate.restype = None
+        
+        self.lib.rats_end_of_remote_ice_candidates.argtypes = [c_void_p]
+        self.lib.rats_end_of_remote_ice_candidates.restype = None
+        
+        self.lib.rats_start_ice_checks.argtypes = [c_void_p]
+        self.lib.rats_start_ice_checks.restype = None
+        
+        self.lib.rats_get_ice_connection_state.argtypes = [c_void_p]
+        self.lib.rats_get_ice_connection_state.restype = c_int
+        
+        self.lib.rats_get_ice_gathering_state.argtypes = [c_void_p]
+        self.lib.rats_get_ice_gathering_state.restype = c_int
+        
+        self.lib.rats_is_ice_connected.argtypes = [c_void_p]
+        self.lib.rats_is_ice_connected.restype = c_int
+        
+        self.lib.rats_get_ice_selected_pair_json.argtypes = [c_void_p]
+        self.lib.rats_get_ice_selected_pair_json.restype = c_void_p
+        
+        self.lib.rats_close_ice.argtypes = [c_void_p]
+        self.lib.rats_close_ice.restype = None
+        
+        self.lib.rats_restart_ice.argtypes = [c_void_p]
+        self.lib.rats_restart_ice.restype = None
 
 
 # Global instance

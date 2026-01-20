@@ -208,6 +208,110 @@ RATS_API int rats_save_historical_peers(rats_client_t client);
 RATS_API void rats_clear_historical_peers(rats_client_t client);
 RATS_API char** rats_get_historical_peer_ids(rats_client_t client, int* count); // caller must free array and strings
 
+// ===================== ENHANCED ENCRYPTION API =====================
+
+// Initialize encryption system
+RATS_API rats_error_t rats_initialize_encryption(rats_client_t client, int enable);
+
+// Check if a specific peer connection is encrypted
+RATS_API int rats_is_peer_encrypted(rats_client_t client, const char* peer_id);
+
+// Set custom Noise Protocol static keypair (32-byte private key as hex string)
+RATS_API rats_error_t rats_set_noise_static_keypair(rats_client_t client, const char* private_key_hex);
+
+// Get our Noise Protocol static public key (returns 64-char hex string, caller must free)
+RATS_API char* rats_get_noise_static_public_key(rats_client_t client);
+
+// Get remote peer's Noise static public key (returns 64-char hex string, caller must free)
+RATS_API char* rats_get_peer_noise_public_key(rats_client_t client, const char* peer_id);
+
+// Get handshake hash for channel binding (returns 64-char hex string, caller must free)
+RATS_API char* rats_get_peer_handshake_hash(rats_client_t client, const char* peer_id);
+
+// ===================== ICE (NAT TRAVERSAL) API =====================
+
+// ICE connection states
+typedef enum {
+    RATS_ICE_STATE_NEW = 0,
+    RATS_ICE_STATE_GATHERING = 1,
+    RATS_ICE_STATE_CHECKING = 2,
+    RATS_ICE_STATE_CONNECTED = 3,
+    RATS_ICE_STATE_COMPLETED = 4,
+    RATS_ICE_STATE_FAILED = 5,
+    RATS_ICE_STATE_DISCONNECTED = 6,
+    RATS_ICE_STATE_CLOSED = 7
+} rats_ice_connection_state_t;
+
+// ICE gathering states
+typedef enum {
+    RATS_ICE_GATHERING_NEW = 0,
+    RATS_ICE_GATHERING_GATHERING = 1,
+    RATS_ICE_GATHERING_COMPLETE = 2
+} rats_ice_gathering_state_t;
+
+// ICE candidate types
+typedef enum {
+    RATS_ICE_CANDIDATE_HOST = 0,
+    RATS_ICE_CANDIDATE_SRFLX = 1,
+    RATS_ICE_CANDIDATE_PRFLX = 2,
+    RATS_ICE_CANDIDATE_RELAY = 3
+} rats_ice_candidate_type_t;
+
+// ICE callbacks
+typedef void (*rats_ice_candidates_cb)(void* user_data, const char* candidates_json);
+typedef void (*rats_ice_new_candidate_cb)(void* user_data, const char* candidate_sdp);
+typedef void (*rats_ice_gathering_state_cb)(void* user_data, rats_ice_gathering_state_t state);
+typedef void (*rats_ice_connection_state_cb)(void* user_data, rats_ice_connection_state_t state);
+typedef void (*rats_ice_selected_pair_cb)(void* user_data, const char* local_candidate_json, const char* remote_candidate_json);
+
+// Check if ICE is available
+RATS_API int rats_is_ice_available(rats_client_t client);
+
+// Server configuration
+RATS_API void rats_add_stun_server(rats_client_t client, const char* host, uint16_t port);
+RATS_API void rats_add_turn_server(rats_client_t client, const char* host, uint16_t port,
+                                    const char* username, const char* password);
+RATS_API void rats_clear_ice_servers(rats_client_t client);
+
+// Candidate gathering
+RATS_API int rats_gather_ice_candidates(rats_client_t client);
+RATS_API char* rats_get_ice_candidates_json(rats_client_t client); // caller must free
+RATS_API int rats_is_ice_gathering_complete(rats_client_t client);
+
+// Public address discovery
+RATS_API char* rats_get_public_address(rats_client_t client); // returns "ip:port" string, caller must free
+RATS_API char* rats_discover_public_address(rats_client_t client, const char* stun_server, 
+                                             uint16_t port, int timeout_ms); // caller must free
+
+// Remote candidates
+RATS_API void rats_add_remote_ice_candidate(rats_client_t client, const char* candidate_sdp);
+RATS_API void rats_add_remote_ice_candidates_from_sdp(rats_client_t client, 
+                                                       const char** sdp_lines, int count);
+RATS_API void rats_end_of_remote_ice_candidates(rats_client_t client);
+
+// Connectivity
+RATS_API void rats_start_ice_checks(rats_client_t client);
+RATS_API rats_ice_connection_state_t rats_get_ice_connection_state(rats_client_t client);
+RATS_API rats_ice_gathering_state_t rats_get_ice_gathering_state(rats_client_t client);
+RATS_API int rats_is_ice_connected(rats_client_t client);
+RATS_API char* rats_get_ice_selected_pair_json(rats_client_t client); // caller must free
+
+// ICE callbacks
+RATS_API void rats_set_ice_candidates_gathered_callback(rats_client_t client, 
+                                                         rats_ice_candidates_cb cb, void* user_data);
+RATS_API void rats_set_ice_new_candidate_callback(rats_client_t client,
+                                                   rats_ice_new_candidate_cb cb, void* user_data);
+RATS_API void rats_set_ice_gathering_state_callback(rats_client_t client,
+                                                     rats_ice_gathering_state_cb cb, void* user_data);
+RATS_API void rats_set_ice_connection_state_callback(rats_client_t client,
+                                                      rats_ice_connection_state_cb cb, void* user_data);
+RATS_API void rats_set_ice_selected_pair_callback(rats_client_t client,
+                                                   rats_ice_selected_pair_cb cb, void* user_data);
+
+// ICE lifecycle
+RATS_API void rats_close_ice(rats_client_t client);
+RATS_API void rats_restart_ice(rats_client_t client);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

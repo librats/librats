@@ -238,24 +238,6 @@ public class RatsClient {
         return nativeIsEncryptionEnabled(nativeClientPtr);
     }
     
-    /**
-     * Generates a new encryption key for this client.
-     * 
-     * @return The generated encryption key as a hex string
-     */
-    public String generateEncryptionKey() {
-        return nativeGenerateEncryptionKey(nativeClientPtr);
-    }
-    
-    /**
-     * Sets the encryption key for this client.
-     * 
-     * @param key The encryption key as a hex string
-     * @return SUCCESS on success, error code on failure
-     */
-    public int setEncryptionKey(String key) {
-        return nativeSetEncryptionKey(nativeClientPtr, key);
-    }
     
     /**
      * Starts DHT discovery on the specified port.
@@ -511,39 +493,252 @@ public class RatsClient {
         return nativeGetNatTraversalStatisticsJson(nativeClientPtr);
     }
     
-    // ===================== ICE COORDINATION =====================
+    // ===================== ICE (NAT TRAVERSAL) API =====================
+    
+    // ICE connection states
+    public static final int ICE_STATE_NEW = 0;
+    public static final int ICE_STATE_GATHERING = 1;
+    public static final int ICE_STATE_CHECKING = 2;
+    public static final int ICE_STATE_CONNECTED = 3;
+    public static final int ICE_STATE_COMPLETED = 4;
+    public static final int ICE_STATE_FAILED = 5;
+    public static final int ICE_STATE_DISCONNECTED = 6;
+    public static final int ICE_STATE_CLOSED = 7;
+    
+    // ICE gathering states
+    public static final int ICE_GATHERING_NEW = 0;
+    public static final int ICE_GATHERING_GATHERING = 1;
+    public static final int ICE_GATHERING_COMPLETE = 2;
     
     /**
-     * Creates an ICE offer for a peer.
+     * Checks if ICE is available.
      * 
-     * @param peerId Target peer ID
-     * @return ICE offer as JSON string
+     * @return true if ICE is available, false otherwise
      */
-    public String createIceOffer(String peerId) {
-        return nativeCreateIceOffer(nativeClientPtr, peerId);
+    public boolean isIceAvailable() {
+        return nativeIsIceAvailable(nativeClientPtr);
     }
     
     /**
-     * Connects to a peer using ICE coordination.
+     * Adds a STUN server for NAT traversal.
      * 
-     * @param peerId Target peer ID
-     * @param iceOfferJson ICE offer from remote peer
+     * @param host STUN server hostname or IP
+     * @param port STUN server port (default: 3478)
+     */
+    public void addStunServer(String host, int port) {
+        nativeAddStunServer(nativeClientPtr, host, port);
+    }
+    
+    /**
+     * Adds a TURN server for relay-based NAT traversal.
+     * 
+     * @param host TURN server hostname or IP
+     * @param port TURN server port
+     * @param username TURN username
+     * @param password TURN password
+     */
+    public void addTurnServer(String host, int port, String username, String password) {
+        nativeAddTurnServer(nativeClientPtr, host, port, username, password);
+    }
+    
+    /**
+     * Clears all ICE (STUN/TURN) servers.
+     */
+    public void clearIceServers() {
+        nativeClearIceServers(nativeClientPtr);
+    }
+    
+    /**
+     * Starts gathering ICE candidates.
+     * 
+     * @return true if gathering started successfully
+     */
+    public boolean gatherIceCandidates() {
+        return nativeGatherIceCandidates(nativeClientPtr);
+    }
+    
+    /**
+     * Gets local ICE candidates as JSON string.
+     * 
+     * @return JSON array of ICE candidates
+     */
+    public String getIceCandidatesJson() {
+        return nativeGetIceCandidatesJson(nativeClientPtr);
+    }
+    
+    /**
+     * Checks if ICE candidate gathering is complete.
+     * 
+     * @return true if gathering is complete
+     */
+    public boolean isIceGatheringComplete() {
+        return nativeIsIceGatheringComplete(nativeClientPtr);
+    }
+    
+    /**
+     * Gets the public address discovered via STUN.
+     * 
+     * @return "ip:port" string or null if not discovered
+     */
+    public String getIcePublicAddress() {
+        return nativeGetIcePublicAddress(nativeClientPtr);
+    }
+    
+    /**
+     * Performs a simple STUN binding request to discover public address.
+     * 
+     * @param stunServer STUN server hostname (null for default)
+     * @param port STUN server port (0 for default)
+     * @param timeoutMs Timeout in milliseconds
+     * @return "ip:port" string or null on failure
+     */
+    public String discoverPublicAddress(String stunServer, int port, int timeoutMs) {
+        return nativeDiscoverPublicAddress(nativeClientPtr, stunServer, port, timeoutMs);
+    }
+    
+    /**
+     * Adds a remote ICE candidate from SDP.
+     * 
+     * @param candidateSdp Candidate as SDP attribute string
+     */
+    public void addRemoteIceCandidate(String candidateSdp) {
+        nativeAddRemoteIceCandidate(nativeClientPtr, candidateSdp);
+    }
+    
+    /**
+     * Adds remote ICE candidates from SDP attribute lines.
+     * 
+     * @param sdpLines Array of SDP candidate lines
+     */
+    public void addRemoteIceCandidatesFromSdp(String[] sdpLines) {
+        nativeAddRemoteIceCandidatesFromSdp(nativeClientPtr, sdpLines);
+    }
+    
+    /**
+     * Signals end of remote ICE candidates (trickle ICE complete).
+     */
+    public void endOfRemoteIceCandidates() {
+        nativeEndOfRemoteIceCandidates(nativeClientPtr);
+    }
+    
+    /**
+     * Starts ICE connectivity checks.
+     */
+    public void startIceChecks() {
+        nativeStartIceChecks(nativeClientPtr);
+    }
+    
+    /**
+     * Gets current ICE connection state.
+     * 
+     * @return ICE connection state constant
+     */
+    public int getIceConnectionState() {
+        return nativeGetIceConnectionState(nativeClientPtr);
+    }
+    
+    /**
+     * Gets ICE gathering state.
+     * 
+     * @return ICE gathering state constant
+     */
+    public int getIceGatheringState() {
+        return nativeGetIceGatheringState(nativeClientPtr);
+    }
+    
+    /**
+     * Checks if ICE is connected.
+     * 
+     * @return true if ICE connection is established
+     */
+    public boolean isIceConnected() {
+        return nativeIsIceConnected(nativeClientPtr);
+    }
+    
+    /**
+     * Gets the selected ICE candidate pair as JSON.
+     * 
+     * @return JSON object with local and remote candidates
+     */
+    public String getIceSelectedPairJson() {
+        return nativeGetIceSelectedPairJson(nativeClientPtr);
+    }
+    
+    /**
+     * Closes ICE manager and releases resources.
+     */
+    public void closeIce() {
+        nativeCloseIce(nativeClientPtr);
+    }
+    
+    /**
+     * Restarts ICE (re-gather candidates and restart checks).
+     */
+    public void restartIce() {
+        nativeRestartIce(nativeClientPtr);
+    }
+    
+    // ===================== ENHANCED ENCRYPTION API =====================
+    
+    /**
+     * Initializes encryption system.
+     * 
+     * @param enable Whether to enable encryption
      * @return SUCCESS on success, error code on failure
      */
-    public int connectWithIce(String peerId, String iceOfferJson) {
-        return nativeConnectWithIce(nativeClientPtr, peerId, iceOfferJson);
+    public int initializeEncryption(boolean enable) {
+        return nativeInitializeEncryption(nativeClientPtr, enable);
     }
     
     /**
-     * Handles an ICE answer from a peer.
+     * Checks if a specific peer connection is encrypted.
      * 
-     * @param peerId Source peer ID
-     * @param iceAnswerJson ICE answer from the peer
+     * @param peerId The peer ID to check
+     * @return true if peer connection is encrypted
+     */
+    public boolean isPeerEncrypted(String peerId) {
+        return nativeIsPeerEncrypted(nativeClientPtr, peerId);
+    }
+    
+    /**
+     * Sets a custom Noise Protocol static keypair.
+     * 
+     * @param privateKeyHex 64-char hex string (32-byte private key)
      * @return SUCCESS on success, error code on failure
      */
-    public int handleIceAnswer(String peerId, String iceAnswerJson) {
-        return nativeHandleIceAnswer(nativeClientPtr, peerId, iceAnswerJson);
+    public int setNoiseStaticKeypair(String privateKeyHex) {
+        return nativeSetNoiseStaticKeypair(nativeClientPtr, privateKeyHex);
     }
+    
+    /**
+     * Gets our Noise Protocol static public key.
+     * 
+     * @return 64-char hex string (32-byte public key) or null
+     */
+    public String getNoiseStaticPublicKey() {
+        return nativeGetNoiseStaticPublicKey(nativeClientPtr);
+    }
+    
+    /**
+     * Gets the remote peer's Noise static public key.
+     * 
+     * @param peerId Peer ID to query
+     * @return 64-char hex string or null if not available
+     */
+    public String getPeerNoisePublicKey(String peerId) {
+        return nativeGetPeerNoisePublicKey(nativeClientPtr, peerId);
+    }
+    
+    /**
+     * Gets the handshake hash for a peer connection (for channel binding).
+     * 
+     * @param peerId Peer ID to query
+     * @return 64-char hex string or null if not available
+     */
+    public String getPeerHandshakeHash(String peerId) {
+        return nativeGetPeerHandshakeHash(nativeClientPtr, peerId);
+    }
+    
     
     // ===================== AUTOMATIC DISCOVERY =====================
     
@@ -971,8 +1166,6 @@ public class RatsClient {
     
     private native int nativeSetEncryptionEnabled(long clientPtr, boolean enabled);
     private native boolean nativeIsEncryptionEnabled(long clientPtr);
-    private native String nativeGenerateEncryptionKey(long clientPtr);
-    private native int nativeSetEncryptionKey(long clientPtr, String key);
     
     private native int nativeStartDhtDiscovery(long clientPtr, int dhtPort);
     private native void nativeStopDhtDiscovery(long clientPtr);
@@ -1020,10 +1213,35 @@ public class RatsClient {
     private native void nativeAddIgnoredAddress(long clientPtr, String ipAddress);
     private native String nativeGetNatTraversalStatisticsJson(long clientPtr);
     
-    // ICE coordination
-    private native String nativeCreateIceOffer(long clientPtr, String peerId);
-    private native int nativeConnectWithIce(long clientPtr, String peerId, String iceOfferJson);
-    private native int nativeHandleIceAnswer(long clientPtr, String peerId, String iceAnswerJson);
+    // ICE (NAT Traversal) API
+    private native boolean nativeIsIceAvailable(long clientPtr);
+    private native void nativeAddStunServer(long clientPtr, String host, int port);
+    private native void nativeAddTurnServer(long clientPtr, String host, int port, String username, String password);
+    private native void nativeClearIceServers(long clientPtr);
+    private native boolean nativeGatherIceCandidates(long clientPtr);
+    private native String nativeGetIceCandidatesJson(long clientPtr);
+    private native boolean nativeIsIceGatheringComplete(long clientPtr);
+    private native String nativeGetIcePublicAddress(long clientPtr);
+    private native String nativeDiscoverPublicAddress(long clientPtr, String stunServer, int port, int timeoutMs);
+    private native void nativeAddRemoteIceCandidate(long clientPtr, String candidateSdp);
+    private native void nativeAddRemoteIceCandidatesFromSdp(long clientPtr, String[] sdpLines);
+    private native void nativeEndOfRemoteIceCandidates(long clientPtr);
+    private native void nativeStartIceChecks(long clientPtr);
+    private native int nativeGetIceConnectionState(long clientPtr);
+    private native int nativeGetIceGatheringState(long clientPtr);
+    private native boolean nativeIsIceConnected(long clientPtr);
+    private native String nativeGetIceSelectedPairJson(long clientPtr);
+    private native void nativeCloseIce(long clientPtr);
+    private native void nativeRestartIce(long clientPtr);
+    
+    // Enhanced Encryption API
+    private native int nativeInitializeEncryption(long clientPtr, boolean enable);
+    private native boolean nativeIsPeerEncrypted(long clientPtr, String peerId);
+    private native int nativeSetNoiseStaticKeypair(long clientPtr, String privateKeyHex);
+    private native String nativeGetNoiseStaticPublicKey(long clientPtr);
+    private native String nativeGetPeerNoisePublicKey(long clientPtr, String peerId);
+    private native String nativeGetPeerHandshakeHash(long clientPtr, String peerId);
+    
     
     // Automatic discovery
     private native void nativeStartAutomaticPeerDiscovery(long clientPtr);

@@ -1,11 +1,13 @@
 #include "librats_c.h"
 #include "librats.h"
 #include "logger.h"
+#include "ice.h"
 #include <stdlib.h>
 #include <string.h>
 #include <algorithm>
 #include <cctype>
 #include <unordered_map>
+#include <cstdio>
 
 using namespace librats;
 
@@ -1207,6 +1209,344 @@ char** rats_get_historical_peer_ids(rats_client_t handle, int* count) {
     }
     
     return peer_ids;
+}
+
+// ===================== ENHANCED ENCRYPTION API =====================
+
+rats_error_t rats_initialize_encryption(rats_client_t handle, int enable) {
+    if (!handle) return RATS_ERROR_INVALID_HANDLE;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->initialize_encryption(enable != 0) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+int rats_is_peer_encrypted(rats_client_t handle, const char* peer_id) {
+    if (!handle || !peer_id) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_peer_encrypted(std::string(peer_id)) ? 1 : 0;
+}
+
+rats_error_t rats_set_noise_static_keypair(rats_client_t handle, const char* private_key_hex) {
+    if (!handle || !private_key_hex) return RATS_ERROR_INVALID_PARAMETER;
+    if (strlen(private_key_hex) != 64) return RATS_ERROR_INVALID_PARAMETER; // 32 bytes = 64 hex chars
+    
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    // Convert hex string to bytes
+    uint8_t private_key[32];
+    for (int i = 0; i < 32; i++) {
+        unsigned int byte;
+        if (sscanf(private_key_hex + i * 2, "%02x", &byte) != 1) {
+            return RATS_ERROR_INVALID_PARAMETER;
+        }
+        private_key[i] = static_cast<uint8_t>(byte);
+    }
+    
+    return wrap->client->set_noise_static_keypair(private_key) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+}
+
+static std::string bytes_to_hex(const std::vector<uint8_t>& bytes) {
+    std::string hex;
+    hex.reserve(bytes.size() * 2);
+    for (uint8_t b : bytes) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x", b);
+        hex += buf;
+    }
+    return hex;
+}
+
+char* rats_get_noise_static_public_key(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto key = wrap->client->get_noise_static_public_key();
+    if (key.empty()) return nullptr;
+    return rats_strdup_owned(bytes_to_hex(key));
+}
+
+char* rats_get_peer_noise_public_key(rats_client_t handle, const char* peer_id) {
+    if (!handle || !peer_id) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto key = wrap->client->get_peer_noise_public_key(std::string(peer_id));
+    if (key.empty()) return nullptr;
+    return rats_strdup_owned(bytes_to_hex(key));
+}
+
+char* rats_get_peer_handshake_hash(rats_client_t handle, const char* peer_id) {
+    if (!handle || !peer_id) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    auto hash = wrap->client->get_peer_handshake_hash(std::string(peer_id));
+    if (hash.empty()) return nullptr;
+    return rats_strdup_owned(bytes_to_hex(hash));
+}
+
+// ===================== ICE (NAT TRAVERSAL) API =====================
+
+int rats_is_ice_available(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_ice_available() ? 1 : 0;
+}
+
+void rats_add_stun_server(rats_client_t handle, const char* host, uint16_t port) {
+    if (!handle || !host) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->add_stun_server(std::string(host), port);
+}
+
+void rats_add_turn_server(rats_client_t handle, const char* host, uint16_t port,
+                          const char* username, const char* password) {
+    if (!handle || !host || !username || !password) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->add_turn_server(std::string(host), port, 
+                                  std::string(username), std::string(password));
+}
+
+void rats_clear_ice_servers(rats_client_t handle) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->clear_ice_servers();
+}
+
+int rats_gather_ice_candidates(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->gather_ice_candidates() ? 1 : 0;
+}
+
+char* rats_get_ice_candidates_json(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    auto candidates = wrap->client->get_ice_candidates();
+    nlohmann::json candidates_json = nlohmann::json::array();
+    
+    for (const auto& c : candidates) {
+        nlohmann::json cj;
+        cj["type"] = static_cast<int>(c.type);
+        cj["foundation"] = c.foundation;
+        cj["component_id"] = c.component_id;
+        cj["transport"] = static_cast<int>(c.transport);
+        cj["priority"] = c.priority;
+        cj["address"] = c.address;
+        cj["port"] = c.port;
+        cj["related_address"] = c.related_address;
+        cj["related_port"] = c.related_port;
+        cj["sdp"] = c.to_sdp_attribute();
+        candidates_json.push_back(cj);
+    }
+    
+    return rats_strdup_owned(candidates_json.dump());
+}
+
+int rats_is_ice_gathering_complete(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_ice_gathering_complete() ? 1 : 0;
+}
+
+char* rats_get_public_address(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    auto addr = wrap->client->get_public_address();
+    if (!addr.has_value()) return nullptr;
+    
+    std::string result = addr->first + ":" + std::to_string(addr->second);
+    return rats_strdup_owned(result);
+}
+
+char* rats_discover_public_address(rats_client_t handle, const char* stun_server, 
+                                   uint16_t port, int timeout_ms) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::string server = stun_server ? std::string(stun_server) : "stun.l.google.com";
+    uint16_t server_port = (port > 0) ? port : 19302;
+    int timeout = (timeout_ms > 0) ? timeout_ms : 5000;
+    
+    auto addr = wrap->client->discover_public_address(server, server_port, timeout);
+    if (!addr.has_value()) return nullptr;
+    
+    std::string result = addr->address + ":" + std::to_string(addr->port);
+    return rats_strdup_owned(result);
+}
+
+void rats_add_remote_ice_candidate(rats_client_t handle, const char* candidate_sdp) {
+    if (!handle || !candidate_sdp) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    auto candidate = IceCandidate::from_sdp_attribute(std::string(candidate_sdp));
+    if (candidate.has_value()) {
+        wrap->client->add_remote_ice_candidate(candidate.value());
+    }
+}
+
+void rats_add_remote_ice_candidates_from_sdp(rats_client_t handle, 
+                                             const char** sdp_lines, int count) {
+    if (!handle || !sdp_lines || count <= 0) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    std::vector<std::string> lines;
+    for (int i = 0; i < count; i++) {
+        if (sdp_lines[i]) {
+            lines.push_back(std::string(sdp_lines[i]));
+        }
+    }
+    
+    wrap->client->add_remote_ice_candidates_from_sdp(lines);
+}
+
+void rats_end_of_remote_ice_candidates(rats_client_t handle) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->end_of_remote_ice_candidates();
+}
+
+void rats_start_ice_checks(rats_client_t handle) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->start_ice_checks();
+}
+
+rats_ice_connection_state_t rats_get_ice_connection_state(rats_client_t handle) {
+    if (!handle) return RATS_ICE_STATE_CLOSED;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return static_cast<rats_ice_connection_state_t>(wrap->client->get_ice_connection_state());
+}
+
+rats_ice_gathering_state_t rats_get_ice_gathering_state(rats_client_t handle) {
+    if (!handle) return RATS_ICE_GATHERING_NEW;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return static_cast<rats_ice_gathering_state_t>(wrap->client->get_ice_gathering_state());
+}
+
+int rats_is_ice_connected(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_ice_connected() ? 1 : 0;
+}
+
+char* rats_get_ice_selected_pair_json(rats_client_t handle) {
+    if (!handle) return nullptr;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    auto pair = wrap->client->get_ice_selected_pair();
+    if (!pair.has_value()) return nullptr;
+    
+    nlohmann::json pair_json;
+    
+    nlohmann::json local_json;
+    local_json["type"] = static_cast<int>(pair->local.type);
+    local_json["address"] = pair->local.address;
+    local_json["port"] = pair->local.port;
+    local_json["priority"] = pair->local.priority;
+    local_json["sdp"] = pair->local.to_sdp_attribute();
+    
+    nlohmann::json remote_json;
+    remote_json["type"] = static_cast<int>(pair->remote.type);
+    remote_json["address"] = pair->remote.address;
+    remote_json["port"] = pair->remote.port;
+    remote_json["priority"] = pair->remote.priority;
+    remote_json["sdp"] = pair->remote.to_sdp_attribute();
+    
+    pair_json["local"] = local_json;
+    pair_json["remote"] = remote_json;
+    pair_json["state"] = static_cast<int>(pair->state);
+    pair_json["priority"] = pair->priority;
+    pair_json["nominated"] = pair->nominated;
+    
+    return rats_strdup_owned(pair_json.dump());
+}
+
+void rats_set_ice_candidates_gathered_callback(rats_client_t handle,
+                                               rats_ice_candidates_cb cb, void* user_data) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    if (cb) {
+        wrap->client->on_ice_candidates_gathered([cb, user_data](const std::vector<IceCandidate>& candidates) {
+            nlohmann::json candidates_json = nlohmann::json::array();
+            for (const auto& c : candidates) {
+                nlohmann::json cj;
+                cj["sdp"] = c.to_sdp_attribute();
+                cj["address"] = c.address;
+                cj["port"] = c.port;
+                cj["type"] = static_cast<int>(c.type);
+                candidates_json.push_back(cj);
+            }
+            cb(user_data, candidates_json.dump().c_str());
+        });
+    }
+}
+
+void rats_set_ice_new_candidate_callback(rats_client_t handle,
+                                         rats_ice_new_candidate_cb cb, void* user_data) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    if (cb) {
+        wrap->client->on_ice_new_candidate([cb, user_data](const IceCandidate& candidate) {
+            cb(user_data, candidate.to_sdp_attribute().c_str());
+        });
+    }
+}
+
+void rats_set_ice_gathering_state_callback(rats_client_t handle,
+                                           rats_ice_gathering_state_cb cb, void* user_data) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    if (cb) {
+        wrap->client->on_ice_gathering_state_changed([cb, user_data](IceGatheringState state) {
+            cb(user_data, static_cast<rats_ice_gathering_state_t>(state));
+        });
+    }
+}
+
+void rats_set_ice_connection_state_callback(rats_client_t handle,
+                                            rats_ice_connection_state_cb cb, void* user_data) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    if (cb) {
+        wrap->client->on_ice_connection_state_changed([cb, user_data](IceConnectionState state) {
+            cb(user_data, static_cast<rats_ice_connection_state_t>(state));
+        });
+    }
+}
+
+void rats_set_ice_selected_pair_callback(rats_client_t handle,
+                                         rats_ice_selected_pair_cb cb, void* user_data) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    
+    if (cb) {
+        wrap->client->on_ice_selected_pair([cb, user_data](const IceCandidatePair& pair) {
+            nlohmann::json local_json;
+            local_json["sdp"] = pair.local.to_sdp_attribute();
+            local_json["address"] = pair.local.address;
+            local_json["port"] = pair.local.port;
+            
+            nlohmann::json remote_json;
+            remote_json["sdp"] = pair.remote.to_sdp_attribute();
+            remote_json["address"] = pair.remote.address;
+            remote_json["port"] = pair.remote.port;
+            
+            cb(user_data, local_json.dump().c_str(), remote_json.dump().c_str());
+        });
+    }
+}
+
+void rats_close_ice(rats_client_t handle) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->close_ice();
+}
+
+void rats_restart_ice(rats_client_t handle) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->restart_ice();
 }
 
 } // extern "C"

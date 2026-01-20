@@ -132,12 +132,37 @@ public:
             InstanceMethod("isMdnsRunning", &RatsClient::IsMdnsRunning),
             InstanceMethod("queryMdnsServices", &RatsClient::QueryMdnsServices),
             
-            // Encryption methods
+            // Basic Encryption methods
             InstanceMethod("setEncryptionEnabled", &RatsClient::SetEncryptionEnabled),
             InstanceMethod("isEncryptionEnabled", &RatsClient::IsEncryptionEnabled),
-            InstanceMethod("getEncryptionKey", &RatsClient::GetEncryptionKey),
-            InstanceMethod("setEncryptionKey", &RatsClient::SetEncryptionKey),
-            InstanceMethod("generateEncryptionKey", &RatsClient::GenerateEncryptionKey),
+            
+            // Enhanced Encryption methods
+            InstanceMethod("initializeEncryption", &RatsClient::InitializeEncryption),
+            InstanceMethod("isPeerEncrypted", &RatsClient::IsPeerEncrypted),
+            InstanceMethod("setNoiseStaticKeypair", &RatsClient::SetNoiseStaticKeypair),
+            InstanceMethod("getNoiseStaticPublicKey", &RatsClient::GetNoiseStaticPublicKey),
+            InstanceMethod("getPeerNoisePublicKey", &RatsClient::GetPeerNoisePublicKey),
+            InstanceMethod("getPeerHandshakeHash", &RatsClient::GetPeerHandshakeHash),
+            
+            // ICE (NAT Traversal) methods
+            InstanceMethod("isIceAvailable", &RatsClient::IsIceAvailable),
+            InstanceMethod("addStunServer", &RatsClient::AddStunServer),
+            InstanceMethod("addTurnServer", &RatsClient::AddTurnServer),
+            InstanceMethod("clearIceServers", &RatsClient::ClearIceServers),
+            InstanceMethod("gatherIceCandidates", &RatsClient::GatherIceCandidates),
+            InstanceMethod("getIceCandidates", &RatsClient::GetIceCandidates),
+            InstanceMethod("isIceGatheringComplete", &RatsClient::IsIceGatheringComplete),
+            InstanceMethod("getPublicAddress", &RatsClient::GetPublicAddress),
+            InstanceMethod("discoverPublicAddress", &RatsClient::DiscoverPublicAddress),
+            InstanceMethod("addRemoteIceCandidate", &RatsClient::AddRemoteIceCandidate),
+            InstanceMethod("endOfRemoteIceCandidates", &RatsClient::EndOfRemoteIceCandidates),
+            InstanceMethod("startIceChecks", &RatsClient::StartIceChecks),
+            InstanceMethod("getIceConnectionState", &RatsClient::GetIceConnectionState),
+            InstanceMethod("getIceGatheringState", &RatsClient::GetIceGatheringState),
+            InstanceMethod("isIceConnected", &RatsClient::IsIceConnected),
+            InstanceMethod("getIceSelectedPair", &RatsClient::GetIceSelectedPair),
+            InstanceMethod("closeIce", &RatsClient::CloseIce),
+            InstanceMethod("restartIce", &RatsClient::RestartIce),
             
             // GossipSub methods
             InstanceMethod("isGossipsubAvailable", &RatsClient::IsGossipsubAvailable),
@@ -580,37 +605,243 @@ private:
         return Napi::Boolean::New(env, enabled != 0);
     }
     
-    Napi::Value GetEncryptionKey(const Napi::CallbackInfo& info) {
-        Napi::Env env = info.Env();
-        char* key = rats_get_encryption_key(client_);
-        if (!key) return env.Null();
-        
-        Napi::String result = Napi::String::New(env, key);
-        rats_string_free(key);
-        return result;
-    }
+    // ===================== ENHANCED ENCRYPTION METHODS =====================
     
-    Napi::Value SetEncryptionKey(const Napi::CallbackInfo& info) {
+    Napi::Value InitializeEncryption(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
         
-        if (info.Length() < 1 || !info[0].IsString()) {
-            Napi::TypeError::New(env, "Expected key_hex (string)").ThrowAsJavaScriptException();
+        if (info.Length() < 1 || !info[0].IsBoolean()) {
+            Napi::TypeError::New(env, "Expected enable (boolean)").ThrowAsJavaScriptException();
             return env.Null();
         }
         
-        std::string key_hex = info[0].As<Napi::String>().Utf8Value();
-        rats_error_t result = rats_set_encryption_key(client_, key_hex.c_str());
+        bool enable = info[0].As<Napi::Boolean>().Value();
+        rats_error_t result = rats_initialize_encryption(client_, enable ? 1 : 0);
         return Napi::Boolean::New(env, result == RATS_SUCCESS);
     }
     
-    Napi::Value GenerateEncryptionKey(const Napi::CallbackInfo& info) {
+    Napi::Value IsPeerEncrypted(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
-        char* key = rats_generate_encryption_key(client_);
+        
+        if (info.Length() < 1 || !info[0].IsString()) {
+            Napi::TypeError::New(env, "Expected peer_id (string)").ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        
+        std::string peer_id = info[0].As<Napi::String>().Utf8Value();
+        int encrypted = rats_is_peer_encrypted(client_, peer_id.c_str());
+        return Napi::Boolean::New(env, encrypted != 0);
+    }
+    
+    Napi::Value SetNoiseStaticKeypair(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        
+        if (info.Length() < 1 || !info[0].IsString()) {
+            Napi::TypeError::New(env, "Expected private_key_hex (string)").ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        
+        std::string private_key_hex = info[0].As<Napi::String>().Utf8Value();
+        rats_error_t result = rats_set_noise_static_keypair(client_, private_key_hex.c_str());
+        return Napi::Boolean::New(env, result == RATS_SUCCESS);
+    }
+    
+    Napi::Value GetNoiseStaticPublicKey(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        char* key = rats_get_noise_static_public_key(client_);
         if (!key) return env.Null();
         
         Napi::String result = Napi::String::New(env, key);
         rats_string_free(key);
         return result;
+    }
+    
+    Napi::Value GetPeerNoisePublicKey(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        
+        if (info.Length() < 1 || !info[0].IsString()) {
+            Napi::TypeError::New(env, "Expected peer_id (string)").ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        
+        std::string peer_id = info[0].As<Napi::String>().Utf8Value();
+        char* key = rats_get_peer_noise_public_key(client_, peer_id.c_str());
+        if (!key) return env.Null();
+        
+        Napi::String result = Napi::String::New(env, key);
+        rats_string_free(key);
+        return result;
+    }
+    
+    Napi::Value GetPeerHandshakeHash(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        
+        if (info.Length() < 1 || !info[0].IsString()) {
+            Napi::TypeError::New(env, "Expected peer_id (string)").ThrowAsJavaScriptException();
+            return env.Null();
+        }
+        
+        std::string peer_id = info[0].As<Napi::String>().Utf8Value();
+        char* hash = rats_get_peer_handshake_hash(client_, peer_id.c_str());
+        if (!hash) return env.Null();
+        
+        Napi::String result = Napi::String::New(env, hash);
+        rats_string_free(hash);
+        return result;
+    }
+    
+    // ===================== ICE (NAT TRAVERSAL) METHODS =====================
+    
+    Napi::Value IsIceAvailable(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        int available = rats_is_ice_available(client_);
+        return Napi::Boolean::New(env, available != 0);
+    }
+    
+    void AddStunServer(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsString()) {
+            Napi::TypeError::New(info.Env(), "Expected host (string)").ThrowAsJavaScriptException();
+            return;
+        }
+        
+        std::string host = info[0].As<Napi::String>().Utf8Value();
+        uint16_t port = 3478;
+        if (info.Length() > 1 && info[1].IsNumber()) {
+            port = static_cast<uint16_t>(info[1].As<Napi::Number>().Uint32Value());
+        }
+        
+        rats_add_stun_server(client_, host.c_str(), port);
+    }
+    
+    void AddTurnServer(const Napi::CallbackInfo& info) {
+        if (info.Length() < 4 || !info[0].IsString() || !info[1].IsNumber() ||
+            !info[2].IsString() || !info[3].IsString()) {
+            Napi::TypeError::New(info.Env(), "Expected host, port, username, password").ThrowAsJavaScriptException();
+            return;
+        }
+        
+        std::string host = info[0].As<Napi::String>().Utf8Value();
+        uint16_t port = static_cast<uint16_t>(info[1].As<Napi::Number>().Uint32Value());
+        std::string username = info[2].As<Napi::String>().Utf8Value();
+        std::string password = info[3].As<Napi::String>().Utf8Value();
+        
+        rats_add_turn_server(client_, host.c_str(), port, username.c_str(), password.c_str());
+    }
+    
+    void ClearIceServers(const Napi::CallbackInfo& info) {
+        rats_clear_ice_servers(client_);
+    }
+    
+    Napi::Value GatherIceCandidates(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        int result = rats_gather_ice_candidates(client_);
+        return Napi::Boolean::New(env, result != 0);
+    }
+    
+    Napi::Value GetIceCandidates(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        char* candidates_json = rats_get_ice_candidates_json(client_);
+        if (!candidates_json) return env.Null();
+        
+        Napi::String result = Napi::String::New(env, candidates_json);
+        rats_string_free(candidates_json);
+        return result;
+    }
+    
+    Napi::Value IsIceGatheringComplete(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        int complete = rats_is_ice_gathering_complete(client_);
+        return Napi::Boolean::New(env, complete != 0);
+    }
+    
+    Napi::Value GetPublicAddress(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        char* address = rats_get_public_address(client_);
+        if (!address) return env.Null();
+        
+        Napi::String result = Napi::String::New(env, address);
+        rats_string_free(address);
+        return result;
+    }
+    
+    Napi::Value DiscoverPublicAddress(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        
+        const char* server = nullptr;
+        uint16_t port = 0;
+        int timeout_ms = 5000;
+        
+        if (info.Length() > 0 && info[0].IsString()) {
+            std::string server_str = info[0].As<Napi::String>().Utf8Value();
+            server = server_str.c_str();
+        }
+        if (info.Length() > 1 && info[1].IsNumber()) {
+            port = static_cast<uint16_t>(info[1].As<Napi::Number>().Uint32Value());
+        }
+        if (info.Length() > 2 && info[2].IsNumber()) {
+            timeout_ms = info[2].As<Napi::Number>().Int32Value();
+        }
+        
+        char* address = rats_discover_public_address(client_, server, port, timeout_ms);
+        if (!address) return env.Null();
+        
+        Napi::String result = Napi::String::New(env, address);
+        rats_string_free(address);
+        return result;
+    }
+    
+    void AddRemoteIceCandidate(const Napi::CallbackInfo& info) {
+        if (info.Length() < 1 || !info[0].IsString()) {
+            Napi::TypeError::New(info.Env(), "Expected candidate_sdp (string)").ThrowAsJavaScriptException();
+            return;
+        }
+        
+        std::string candidate_sdp = info[0].As<Napi::String>().Utf8Value();
+        rats_add_remote_ice_candidate(client_, candidate_sdp.c_str());
+    }
+    
+    void EndOfRemoteIceCandidates(const Napi::CallbackInfo& info) {
+        rats_end_of_remote_ice_candidates(client_);
+    }
+    
+    void StartIceChecks(const Napi::CallbackInfo& info) {
+        rats_start_ice_checks(client_);
+    }
+    
+    Napi::Value GetIceConnectionState(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        rats_ice_connection_state_t state = rats_get_ice_connection_state(client_);
+        return Napi::Number::New(env, static_cast<int>(state));
+    }
+    
+    Napi::Value GetIceGatheringState(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        rats_ice_gathering_state_t state = rats_get_ice_gathering_state(client_);
+        return Napi::Number::New(env, static_cast<int>(state));
+    }
+    
+    Napi::Value IsIceConnected(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        int connected = rats_is_ice_connected(client_);
+        return Napi::Boolean::New(env, connected != 0);
+    }
+    
+    Napi::Value GetIceSelectedPair(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        char* pair_json = rats_get_ice_selected_pair_json(client_);
+        if (!pair_json) return env.Null();
+        
+        Napi::String result = Napi::String::New(env, pair_json);
+        rats_string_free(pair_json);
+        return result;
+    }
+    
+    void CloseIce(const Napi::CallbackInfo& info) {
+        rats_close_ice(client_);
+    }
+    
+    void RestartIce(const Napi::CallbackInfo& info) {
+        rats_restart_ice(client_);
     }
     
     // GossipSub methods
@@ -1144,14 +1375,32 @@ Napi::Object InitConstants(Napi::Env env) {
     errors.Set("JSON_PARSE", Napi::Number::New(env, RATS_ERROR_JSON_PARSE));
     constants.Set("ERRORS", errors);
     
-    // Connection strategies
-    Napi::Object strategies = Napi::Object::New(env);
-    strategies.Set("DIRECT_ONLY", Napi::Number::New(env, RATS_STRATEGY_DIRECT_ONLY));
-    strategies.Set("STUN_ASSISTED", Napi::Number::New(env, RATS_STRATEGY_STUN_ASSISTED));
-    strategies.Set("ICE_FULL", Napi::Number::New(env, RATS_STRATEGY_ICE_FULL));
-    strategies.Set("TURN_RELAY", Napi::Number::New(env, RATS_STRATEGY_TURN_RELAY));
-    strategies.Set("AUTO_ADAPTIVE", Napi::Number::New(env, RATS_STRATEGY_AUTO_ADAPTIVE));
-    constants.Set("CONNECTION_STRATEGIES", strategies);
+    // ICE connection states
+    Napi::Object iceStates = Napi::Object::New(env);
+    iceStates.Set("NEW", Napi::Number::New(env, RATS_ICE_STATE_NEW));
+    iceStates.Set("GATHERING", Napi::Number::New(env, RATS_ICE_STATE_GATHERING));
+    iceStates.Set("CHECKING", Napi::Number::New(env, RATS_ICE_STATE_CHECKING));
+    iceStates.Set("CONNECTED", Napi::Number::New(env, RATS_ICE_STATE_CONNECTED));
+    iceStates.Set("COMPLETED", Napi::Number::New(env, RATS_ICE_STATE_COMPLETED));
+    iceStates.Set("FAILED", Napi::Number::New(env, RATS_ICE_STATE_FAILED));
+    iceStates.Set("DISCONNECTED", Napi::Number::New(env, RATS_ICE_STATE_DISCONNECTED));
+    iceStates.Set("CLOSED", Napi::Number::New(env, RATS_ICE_STATE_CLOSED));
+    constants.Set("ICE_CONNECTION_STATES", iceStates);
+    
+    // ICE gathering states
+    Napi::Object iceGatheringStates = Napi::Object::New(env);
+    iceGatheringStates.Set("NEW", Napi::Number::New(env, RATS_ICE_GATHERING_NEW));
+    iceGatheringStates.Set("GATHERING", Napi::Number::New(env, RATS_ICE_GATHERING_GATHERING));
+    iceGatheringStates.Set("COMPLETE", Napi::Number::New(env, RATS_ICE_GATHERING_COMPLETE));
+    constants.Set("ICE_GATHERING_STATES", iceGatheringStates);
+    
+    // ICE candidate types
+    Napi::Object iceCandidateTypes = Napi::Object::New(env);
+    iceCandidateTypes.Set("HOST", Napi::Number::New(env, RATS_ICE_CANDIDATE_HOST));
+    iceCandidateTypes.Set("SRFLX", Napi::Number::New(env, RATS_ICE_CANDIDATE_SRFLX));
+    iceCandidateTypes.Set("PRFLX", Napi::Number::New(env, RATS_ICE_CANDIDATE_PRFLX));
+    iceCandidateTypes.Set("RELAY", Napi::Number::New(env, RATS_ICE_CANDIDATE_RELAY));
+    constants.Set("ICE_CANDIDATE_TYPES", iceCandidateTypes);
     
     return constants;
 }

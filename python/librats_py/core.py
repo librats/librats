@@ -422,7 +422,7 @@ class RatsClient:
         self._lib.lib.rats_string_free(result)
         return protocol_version
     
-    # Encryption
+    # Basic Encryption
     def set_encryption_enabled(self, enabled: bool) -> None:
         """Enable or disable encryption."""
         result = self._lib.lib.rats_set_encryption_enabled(self._handle, int(enabled))
@@ -432,29 +432,160 @@ class RatsClient:
         """Check if encryption is enabled."""
         return bool(self._lib.lib.rats_is_encryption_enabled(self._handle))
     
-    def get_encryption_key(self) -> str:
-        """Get the encryption key as hex string."""
-        result = self._lib.lib.rats_get_encryption_key(self._handle)
+    # Enhanced Encryption API
+    def initialize_encryption(self, enable: bool) -> None:
+        """Initialize encryption system."""
+        result = self._lib.lib.rats_initialize_encryption(self._handle, int(enable))
+        check_error(result, "Initializing encryption")
+    
+    def is_peer_encrypted(self, peer_id: str) -> bool:
+        """Check if a specific peer connection is encrypted."""
+        peer_id_bytes = peer_id.encode('utf-8')
+        return bool(self._lib.lib.rats_is_peer_encrypted(self._handle, peer_id_bytes))
+    
+    def set_noise_static_keypair(self, private_key_hex: str) -> None:
+        """Set custom Noise Protocol static keypair (32-byte private key as hex string)."""
+        key_bytes = private_key_hex.encode('utf-8')
+        result = self._lib.lib.rats_set_noise_static_keypair(self._handle, key_bytes)
+        check_error(result, "Setting Noise static keypair")
+    
+    def get_noise_static_public_key(self) -> str:
+        """Get our Noise Protocol static public key as hex string."""
+        result = self._lib.lib.rats_get_noise_static_public_key(self._handle)
         if not result:
             return ""
         key = string_at(result).decode('utf-8')
         self._lib.lib.rats_string_free(result)
         return key
     
-    def set_encryption_key(self, key_hex: str) -> None:
-        """Set encryption key from hex string."""
-        key_bytes = key_hex.encode('utf-8')
-        result = self._lib.lib.rats_set_encryption_key(self._handle, key_bytes)
-        check_error(result, "Setting encryption key")
-    
-    def generate_encryption_key(self) -> str:
-        """Generate a new encryption key."""
-        result = self._lib.lib.rats_generate_encryption_key(self._handle)
+    def get_peer_noise_public_key(self, peer_id: str) -> str:
+        """Get remote peer's Noise static public key as hex string."""
+        peer_id_bytes = peer_id.encode('utf-8')
+        result = self._lib.lib.rats_get_peer_noise_public_key(self._handle, peer_id_bytes)
         if not result:
             return ""
         key = string_at(result).decode('utf-8')
         self._lib.lib.rats_string_free(result)
         return key
+    
+    def get_peer_handshake_hash(self, peer_id: str) -> str:
+        """Get handshake hash for channel binding as hex string."""
+        peer_id_bytes = peer_id.encode('utf-8')
+        result = self._lib.lib.rats_get_peer_handshake_hash(self._handle, peer_id_bytes)
+        if not result:
+            return ""
+        hash_hex = string_at(result).decode('utf-8')
+        self._lib.lib.rats_string_free(result)
+        return hash_hex
+    
+    # ICE (NAT Traversal) API
+    def is_ice_available(self) -> bool:
+        """Check if ICE is available."""
+        return bool(self._lib.lib.rats_is_ice_available(self._handle))
+    
+    def add_stun_server(self, host: str, port: int = 3478) -> None:
+        """Add a STUN server for NAT traversal."""
+        host_bytes = host.encode('utf-8')
+        self._lib.lib.rats_add_stun_server(self._handle, host_bytes, port)
+    
+    def add_turn_server(self, host: str, port: int, username: str, password: str) -> None:
+        """Add a TURN server for relay-based NAT traversal."""
+        host_bytes = host.encode('utf-8')
+        username_bytes = username.encode('utf-8')
+        password_bytes = password.encode('utf-8')
+        self._lib.lib.rats_add_turn_server(self._handle, host_bytes, port,
+                                           username_bytes, password_bytes)
+    
+    def clear_ice_servers(self) -> None:
+        """Clear all ICE (STUN/TURN) servers."""
+        self._lib.lib.rats_clear_ice_servers(self._handle)
+    
+    def gather_ice_candidates(self) -> bool:
+        """Start gathering ICE candidates."""
+        return bool(self._lib.lib.rats_gather_ice_candidates(self._handle))
+    
+    def get_ice_candidates(self) -> List[Dict[str, Any]]:
+        """Get local ICE candidates."""
+        result = self._lib.lib.rats_get_ice_candidates_json(self._handle)
+        if not result:
+            return []
+        json_str = string_at(result).decode('utf-8')
+        self._lib.lib.rats_string_free(result)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return []
+    
+    def is_ice_gathering_complete(self) -> bool:
+        """Check if ICE candidate gathering is complete."""
+        return bool(self._lib.lib.rats_is_ice_gathering_complete(self._handle))
+    
+    def get_public_address(self) -> Optional[str]:
+        """Get public address discovered via STUN (ip:port format)."""
+        result = self._lib.lib.rats_get_public_address(self._handle)
+        if not result:
+            return None
+        address = string_at(result).decode('utf-8')
+        self._lib.lib.rats_string_free(result)
+        return address
+    
+    def discover_public_address(self, stun_server: str = "stun.l.google.com",
+                                port: int = 19302, timeout_ms: int = 5000) -> Optional[str]:
+        """Perform a simple STUN binding request to discover public address."""
+        server_bytes = stun_server.encode('utf-8')
+        result = self._lib.lib.rats_discover_public_address(
+            self._handle, server_bytes, port, timeout_ms
+        )
+        if not result:
+            return None
+        address = string_at(result).decode('utf-8')
+        self._lib.lib.rats_string_free(result)
+        return address
+    
+    def add_remote_ice_candidate(self, candidate_sdp: str) -> None:
+        """Add a remote ICE candidate from SDP."""
+        candidate_bytes = candidate_sdp.encode('utf-8')
+        self._lib.lib.rats_add_remote_ice_candidate(self._handle, candidate_bytes)
+    
+    def end_of_remote_ice_candidates(self) -> None:
+        """Signal end of remote ICE candidates (trickle ICE complete)."""
+        self._lib.lib.rats_end_of_remote_ice_candidates(self._handle)
+    
+    def start_ice_checks(self) -> None:
+        """Start ICE connectivity checks."""
+        self._lib.lib.rats_start_ice_checks(self._handle)
+    
+    def get_ice_connection_state(self) -> int:
+        """Get current ICE connection state."""
+        return self._lib.lib.rats_get_ice_connection_state(self._handle)
+    
+    def get_ice_gathering_state(self) -> int:
+        """Get ICE gathering state."""
+        return self._lib.lib.rats_get_ice_gathering_state(self._handle)
+    
+    def is_ice_connected(self) -> bool:
+        """Check if ICE is connected."""
+        return bool(self._lib.lib.rats_is_ice_connected(self._handle))
+    
+    def get_ice_selected_pair(self) -> Optional[Dict[str, Any]]:
+        """Get the selected ICE candidate pair."""
+        result = self._lib.lib.rats_get_ice_selected_pair_json(self._handle)
+        if not result:
+            return None
+        json_str = string_at(result).decode('utf-8')
+        self._lib.lib.rats_string_free(result)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return None
+    
+    def close_ice(self) -> None:
+        """Close ICE manager and release resources."""
+        self._lib.lib.rats_close_ice(self._handle)
+    
+    def restart_ice(self) -> None:
+        """Restart ICE (re-gather candidates and restart checks)."""
+        self._lib.lib.rats_restart_ice(self._handle)
     
     # Message Exchange API
     def on_message(self, message_type: str, callback: MessageCallback) -> None:
