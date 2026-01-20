@@ -38,6 +38,39 @@ export enum ErrorCodes {
 }
 
 /**
+ * ICE connection states
+ */
+export enum IceConnectionState {
+  NEW = 0,
+  GATHERING = 1,
+  CHECKING = 2,
+  CONNECTED = 3,
+  COMPLETED = 4,
+  FAILED = 5,
+  DISCONNECTED = 6,
+  CLOSED = 7
+}
+
+/**
+ * ICE gathering states
+ */
+export enum IceGatheringState {
+  NEW = 0,
+  GATHERING = 1,
+  COMPLETE = 2
+}
+
+/**
+ * ICE candidate types
+ */
+export enum IceCandidateType {
+  HOST = 0,
+  SRFLX = 1,
+  PRFLX = 2,
+  RELAY = 3
+}
+
+/**
  * Main RatsClient class for peer-to-peer networking
  */
 export class RatsClient {
@@ -75,6 +108,12 @@ export class RatsClient {
   disconnect(peerId: string): void;
 
   // ============ Information ============
+
+  /**
+   * Get the port the client is listening on
+   * @returns Listen port number
+   */
+  getListenPort(): number;
 
   /**
    * Get the number of connected peers
@@ -251,6 +290,13 @@ export class RatsClient {
    */
   resumeFileTransfer(transferId: string): boolean;
 
+  /**
+   * Get file transfer progress information as JSON string
+   * @param transferId - ID of the transfer to query
+   * @returns JSON string with progress info, or null if not found
+   */
+  getFileTransferProgress(transferId: string): string | null;
+
   // ============ GossipSub ============
 
   /**
@@ -315,6 +361,12 @@ export class RatsClient {
    */
   getTopicPeers(topic: string): string[];
 
+  /**
+   * Get GossipSub statistics as JSON string
+   * @returns JSON string with statistics, or null if unavailable
+   */
+  getGossipsubStatistics(): string | null;
+
   // ============ DHT ============
 
   /**
@@ -370,6 +422,20 @@ export class RatsClient {
    */
   isMdnsRunning(): boolean;
 
+  /**
+   * Query for mDNS services
+   * @returns true if query sent successfully
+   */
+  queryMdnsServices(): boolean;
+
+  // ============ Address Blocking ============
+
+  /**
+   * Add an IP address to the ignore list
+   * @param ipAddress - IP address to ignore
+   */
+  addIgnoredAddress(ipAddress: string): void;
+
   // ============ Encryption ============
 
   /**
@@ -386,23 +452,157 @@ export class RatsClient {
   isEncryptionEnabled(): boolean;
 
   /**
-   * Generate a new encryption key
-   * @returns Hex-encoded encryption key, or null if failed
+   * Initialize encryption system
+   * @param enable - Whether to enable encryption
+   * @returns true if initialized successfully
    */
-  generateEncryptionKey(): string | null;
+  initializeEncryption(enable: boolean): boolean;
 
   /**
-   * Set the encryption key
-   * @param keyHex - Hex-encoded encryption key
+   * Check if a specific peer connection is encrypted
+   * @param peerId - Peer ID to check
+   * @returns true if peer connection is encrypted
+   */
+  isPeerEncrypted(peerId: string): boolean;
+
+  /**
+   * Set custom Noise Protocol static keypair
+   * @param privateKeyHex - 32-byte private key as 64-char hex string
    * @returns true if set successfully
    */
-  setEncryptionKey(keyHex: string): boolean;
+  setNoiseStaticKeypair(privateKeyHex: string): boolean;
 
   /**
-   * Get the current encryption key
-   * @returns Hex-encoded encryption key, or null if not set
+   * Get our Noise Protocol static public key
+   * @returns 64-char hex string, or null if not available
    */
-  getEncryptionKey(): string | null;
+  getNoiseStaticPublicKey(): string | null;
+
+  /**
+   * Get remote peer's Noise static public key
+   * @param peerId - Peer ID to query
+   * @returns 64-char hex string, or null if not available
+   */
+  getPeerNoisePublicKey(peerId: string): string | null;
+
+  /**
+   * Get handshake hash for channel binding
+   * @param peerId - Peer ID to query
+   * @returns 64-char hex string, or null if not available
+   */
+  getPeerHandshakeHash(peerId: string): string | null;
+
+  // ============ ICE (NAT Traversal) ============
+
+  /**
+   * Check if ICE is available
+   * @returns true if ICE is available
+   */
+  isIceAvailable(): boolean;
+
+  /**
+   * Add a STUN server for NAT traversal
+   * @param host - STUN server hostname or IP
+   * @param port - STUN server port (default: 3478)
+   */
+  addStunServer(host: string, port?: number): void;
+
+  /**
+   * Add a TURN server for relay-based NAT traversal
+   * @param host - TURN server hostname or IP
+   * @param port - TURN server port
+   * @param username - TURN username
+   * @param password - TURN password
+   */
+  addTurnServer(host: string, port: number, username: string, password: string): void;
+
+  /**
+   * Clear all ICE (STUN/TURN) servers
+   */
+  clearIceServers(): void;
+
+  /**
+   * Start gathering ICE candidates
+   * @returns true if gathering started successfully
+   */
+  gatherIceCandidates(): boolean;
+
+  /**
+   * Get local ICE candidates as JSON string
+   * @returns JSON string of candidates, or null if unavailable
+   */
+  getIceCandidates(): string | null;
+
+  /**
+   * Check if ICE candidate gathering is complete
+   * @returns true if gathering is complete
+   */
+  isIceGatheringComplete(): boolean;
+
+  /**
+   * Get public address discovered via STUN
+   * @returns Address string (ip:port), or null if not discovered
+   */
+  getPublicAddress(): string | null;
+
+  /**
+   * Perform a simple STUN binding request to discover public address
+   * @param stunServer - STUN server hostname (default: "stun.l.google.com")
+   * @param port - STUN server port (default: 19302)
+   * @param timeoutMs - Timeout in milliseconds (default: 5000)
+   * @returns Address string (ip:port), or null on failure
+   */
+  discoverPublicAddress(stunServer?: string, port?: number, timeoutMs?: number): string | null;
+
+  /**
+   * Add a remote ICE candidate from SDP
+   * @param candidateSdp - SDP candidate string
+   */
+  addRemoteIceCandidate(candidateSdp: string): void;
+
+  /**
+   * Signal end of remote ICE candidates (trickle ICE complete)
+   */
+  endOfRemoteIceCandidates(): void;
+
+  /**
+   * Start ICE connectivity checks
+   */
+  startIceChecks(): void;
+
+  /**
+   * Get current ICE connection state
+   * @returns ICE connection state value
+   */
+  getIceConnectionState(): number;
+
+  /**
+   * Get ICE gathering state
+   * @returns ICE gathering state value
+   */
+  getIceGatheringState(): number;
+
+  /**
+   * Check if ICE is connected
+   * @returns true if ICE connection is established
+   */
+  isIceConnected(): boolean;
+
+  /**
+   * Get the selected ICE candidate pair as JSON string
+   * @returns JSON string of selected pair, or null if unavailable
+   */
+  getIceSelectedPair(): string | null;
+
+  /**
+   * Close ICE manager and release resources
+   */
+  closeIce(): void;
+
+  /**
+   * Restart ICE (re-gather candidates and restart checks)
+   */
+  restartIce(): void;
 
   // ============ Configuration Persistence ============
 

@@ -102,7 +102,6 @@ public:
             InstanceMethod("start", &RatsClient::Start),
             InstanceMethod("stop", &RatsClient::Stop),
             InstanceMethod("connect", &RatsClient::Connect),
-            InstanceMethod("connectWithStrategy", &RatsClient::ConnectWithStrategy),
             InstanceMethod("disconnect", &RatsClient::Disconnect),
             InstanceMethod("broadcastString", &RatsClient::BroadcastString),
             InstanceMethod("sendString", &RatsClient::SendString),
@@ -275,22 +274,6 @@ private:
         
         int result = rats_connect(client_, host.c_str(), port);
         return Napi::Boolean::New(env, result == 1);
-    }
-    
-    Napi::Value ConnectWithStrategy(const Napi::CallbackInfo& info) {
-        Napi::Env env = info.Env();
-        
-        if (info.Length() < 3 || !info[0].IsString() || !info[1].IsNumber() || !info[2].IsNumber()) {
-            Napi::TypeError::New(env, "Expected host (string), port (number), and strategy (number)").ThrowAsJavaScriptException();
-            return env.Null();
-        }
-        
-        std::string host = info[0].As<Napi::String>().Utf8Value();
-        int port = info[1].As<Napi::Number>().Int32Value();
-        rats_connection_strategy_t strategy = static_cast<rats_connection_strategy_t>(info[2].As<Napi::Number>().Int32Value());
-        
-        rats_error_t result = rats_connect_with_strategy(client_, host.c_str(), port, strategy);
-        return Napi::Boolean::New(env, result == RATS_SUCCESS);
     }
     
     void Disconnect(const Napi::CallbackInfo& info) {
