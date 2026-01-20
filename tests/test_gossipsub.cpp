@@ -334,4 +334,174 @@ TEST_F(GossipSubTest, HighFrequencyPublishing) {
     EXPECT_GE(messages_received.load(), num_messages * 0.8); // At least 80% delivery rate
 }
 
- 
+// Test fixture for GossipSub with encryption enabled
+class GossipSubWithEncryptionTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        // Create two RatsClient instances with encryption enabled
+        client1_ = std::make_unique<RatsClient>(8091);
+        client2_ = std::make_unique<RatsClient>(8092);
+        
+        // Enable encryption on both clients BEFORE starting
+        ASSERT_TRUE(client1_->initialize_encryption(true));
+        ASSERT_TRUE(client2_->initialize_encryption(true));
+        
+        // Start both clients
+        ASSERT_TRUE(client1_->start());
+        ASSERT_TRUE(client2_->start());
+        
+        // Connect the clients
+        ASSERT_TRUE(client2_->connect_to_peer("127.0.0.1", 8091));
+        
+        // Wait for connection and Noise handshake to complete
+        // With encryption, we need a bit more time for the Noise handshake
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    
+    void TearDown() override {
+        if (client1_) {
+            client1_->stop();
+        }
+        if (client2_) {
+            client2_->stop();
+        }
+    }
+    
+    std::unique_ptr<RatsClient> client1_;
+    std::unique_ptr<RatsClient> client2_;
+};
+
+// Test that GossipSub works correctly when encryption is enabled
+// This is a regression test for the bug where GossipSub would fail to send
+// messages to peers that hadn't completed the Noise handshake yet
+TEST_F(GossipSubWithEncryptionTest, BasicPublishingWithEncryption) {
+    // Verify encryption is enabled
+    ASSERT_TRUE(client1_->is_encryption_enabled());
+    ASSERT_TRUE(client2_->is_encryption_enabled());
+    
+    // Verify GossipSub is available
+    ASSERT_TRUE(client1_->is_gossipsub_available());
+    ASSERT_TRUE(client2_->is_gossipsub_available());
+    
+    // Verify peer connection is encrypted
+    auto peers1 = client1_->get_validated_peers();
+    ASSERT_EQ(peers1.size(), 1);
+    EXPECT_TRUE(client1_->is_peer_encrypted(peers1[0].peer_id));
+    
+    auto peers2 = client2_->get_validated_peers();
+    ASSERT_EQ(peers2.size(), 1);
+    EXPECT_TRUE(client2_->is_peer_encrypted(peers2[0].peer_id));
+    
+    // Get GossipSub instances
+    auto& gossipsub1 = client1_->get_gossipsub();
+    auto& gossipsub2 = client2_->get_gossipsub();
+    
+    // Test subscription
+    std::string test_topic = "encrypted-topic";
+    ASSERT_TRUE(gossipsub1.subscribe(test_topic));
+    ASSERT_TRUE(gossipsub2.subscribe(test_topic));
+    
+    // Verify subscription status
+    ASSERT_TRUE(gossipsub1.is_subscribed(test_topic));
+    ASSERT_TRUE(gossipsub2.is_subscribed(test_topic));
+    
+    // Wait for mesh to stabilize
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // Set up message handler
+    std::atomic<int> messages_received{0};
+    std::string last_message;
+    
+    gossipsub2.set_message_handler(test_topic, [&](const std::string& topic, const std::string& message, const std::string& sender) {
+        last_message = message;
+        messages_received++;
+    });
+    
+    // Publish a message from client1
+    std::string test_message = "Hello encrypted GossipSub!";
+    ASSERT_TRUE(gossipsub1.publish(test_topic, test_message));
+    
+    // Wait for message propagation
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    
+    // Verify message was received
+    EXPECT_EQ(messages_received.load(), 1);
+    EXPECT_EQ(last_message, test_message);
+}
+
+// Test that subscribing to a topic during connection setup works with encryption
+// This tests the race condition where GossipSub tries to broadcast before handshake completes
+TEST_F(GossipSubWithEncryptionTest, SubscriptionBroadcastWithEncryption) {
+    auto& gossipsub1 = client1_->get_gossipsub();
+    auto& gossipsub2 = client2_->get_gossipsub();
+    
+    // Subscribe to topics on both clients (this triggers broadcast_gossipsub_message)
+    std::string topic1 = "broadcast-test-topic-1";
+    std::string topic2 = "broadcast-test-topic-2";
+    
+    ASSERT_TRUE(gossipsub1.subscribe(topic1));
+    ASSERT_TRUE(gossipsub1.subscribe(topic2));
+    ASSERT_TRUE(gossipsub2.subscribe(topic1));
+    
+    // Wait for subscription broadcasts to complete
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // Verify subscriptions are working
+    EXPECT_TRUE(gossipsub1.is_subscribed(topic1));
+    EXPECT_TRUE(gossipsub1.is_subscribed(topic2));
+    EXPECT_TRUE(gossipsub2.is_subscribed(topic1));
+    
+    // Test message exchange
+    std::atomic<int> messages_received{0};
+    gossipsub2.set_message_handler(topic1, [&](const std::string& topic, const std::string& message, const std::string& sender) {
+        messages_received++;
+    });
+    
+    ASSERT_TRUE(gossipsub1.publish(topic1, std::string("Test message")));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    
+    EXPECT_EQ(messages_received.load(), 1);
+}
+
+// Test that bidirectional message exchange works with encryption
+TEST_F(GossipSubWithEncryptionTest, BidirectionalMessagingWithEncryption) {
+    auto& gossipsub1 = client1_->get_gossipsub();
+    auto& gossipsub2 = client2_->get_gossipsub();
+    
+    std::string topic = "bidirectional-topic";
+    ASSERT_TRUE(gossipsub1.subscribe(topic));
+    ASSERT_TRUE(gossipsub2.subscribe(topic));
+    
+    // Wait for mesh to stabilize
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // Set up message handlers for both clients
+    std::atomic<int> messages_at_client1{0};
+    std::atomic<int> messages_at_client2{0};
+    std::string last_message_client1, last_message_client2;
+    
+    gossipsub1.set_message_handler(topic, [&](const std::string& t, const std::string& msg, const std::string& sender) {
+        last_message_client1 = msg;
+        messages_at_client1++;
+    });
+    
+    gossipsub2.set_message_handler(topic, [&](const std::string& t, const std::string& msg, const std::string& sender) {
+        last_message_client2 = msg;
+        messages_at_client2++;
+    });
+    
+    // Client1 sends to Client2
+    ASSERT_TRUE(gossipsub1.publish(topic, std::string("Message from Client1")));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    EXPECT_EQ(messages_at_client2.load(), 1);
+    EXPECT_EQ(last_message_client2, "Message from Client1");
+    
+    // Client2 sends back to Client1
+    ASSERT_TRUE(gossipsub2.publish(topic, std::string("Message from Client2")));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    EXPECT_EQ(messages_at_client1.load(), 1);
+    EXPECT_EQ(last_message_client1, "Message from Client2");
+}
+

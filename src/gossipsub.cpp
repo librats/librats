@@ -715,11 +715,13 @@ bool GossipSub::broadcast_gossipsub_message(GossipSubMessageType type, const nlo
     message["type"] = gossipsub_message_type_to_string(type);
     message["payload"] = payload;
     
-    // Get all connected peers
-    auto all_peers = rats_client_.get_all_peers();
+    // Get validated peers only (those with completed handshake)
+    // This is important when encryption is enabled - we must wait for the
+    // Noise handshake to complete before sending messages
+    auto validated_peers = rats_client_.get_validated_peers();
     bool any_sent = false;
     
-    for (const auto& peer : all_peers) {
+    for (const auto& peer : validated_peers) {
         if (exclude.count(peer.peer_id) == 0) {
             try {
                 rats_client_.send(peer.peer_id, "gossipsub", message);
