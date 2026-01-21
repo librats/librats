@@ -29,6 +29,7 @@ librats is a modern P2P networking library designed for **superior performance**
 - **mDNS Discovery**: Automatic local network peer discovery with service advertisement
 - **IPv4/IPv6 Dual Stack**: Full support for modern internet protocols
 - **Multi-layer Discovery**: DHT (wide-area) + mDNS (local)
+- **Automatic Reconnection**: Smart reconnection system with configurable retry intervals, stable peer detection, and exponential backoff (enabled by default)
 - **GossipSub Protocol**: Scalable publish-subscribe messaging with mesh networking
 - **Message Validation**: Configurable message validation and filtering
 - **Topic-based Communication**: Organized messaging with topic subscriptions
@@ -828,9 +829,46 @@ bool set_noise_static_keypair(const uint8_t private_key[32]);
 std::vector<uint8_t> get_noise_static_public_key() const;
 std::vector<uint8_t> get_peer_noise_public_key(const std::string& peer_id) const;
 std::vector<uint8_t> get_peer_handshake_hash(const std::string& peer_id) const;
+
+// Automatic Reconnection API (enabled by default)
+void set_reconnect_enabled(bool enabled);
+bool is_reconnect_enabled() const;
+void set_reconnect_config(const ReconnectConfig& config);
+const ReconnectConfig& get_reconnect_config() const;
+size_t get_reconnect_queue_size() const;
+void clear_reconnect_queue();
+std::vector<ReconnectInfo> get_reconnect_queue() const;
 ```
 
 ### Configuration Structures
+
+#### `ReconnectConfig`
+Automatic reconnection configuration structure:
+
+```cpp
+struct ReconnectConfig {
+    int max_attempts = 3;                                      // Maximum reconnection attempts
+    std::vector<int> retry_intervals_seconds = {5, 30, 120};   // Intervals between attempts
+    int stable_connection_threshold_seconds = 60;              // Duration to be considered "stable"
+    int stable_first_retry_seconds = 2;                        // First retry for stable peers (faster)
+    bool enabled = true;                                       // Auto-reconnection enabled by default
+};
+```
+
+#### `ReconnectInfo`
+Information about a peer pending reconnection:
+
+```cpp
+struct ReconnectInfo {
+    std::string peer_id;                                       // Peer ID for identification
+    std::string ip;                                            // IP address to reconnect to
+    uint16_t port;                                             // Port number
+    int attempt_count;                                         // Current reconnection attempt number
+    std::chrono::milliseconds connection_duration;             // How long peer was connected
+    bool is_stable;                                            // Was this a stable connection?
+    std::chrono::steady_clock::time_point next_attempt_time;   // When to attempt next reconnection
+};
+```
 
 #### `RatsPeer`
 Comprehensive peer information structure:
