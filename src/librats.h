@@ -93,6 +93,41 @@ struct RatsPeer {
 };
 
 /**
+ * ReconnectConfig - Configuration for automatic peer reconnection
+ */
+struct ReconnectConfig {
+    int max_attempts = 3;                                      // Maximum number of reconnection attempts
+    std::vector<int> retry_intervals_seconds = {5, 30, 120};   // Intervals between attempts (5s, 30s, 2min)
+    int stable_connection_threshold_seconds = 60;              // Connection duration to be considered "stable" (1 minute)
+    int stable_first_retry_seconds = 2;                        // First retry interval for stable peers (faster)
+    bool enabled = true;                                       // Whether auto-reconnection is enabled
+};
+
+/**
+ * ReconnectInfo - Information about a peer pending reconnection
+ */
+struct ReconnectInfo {
+    std::string peer_id;                                       // Peer ID for identification
+    std::string ip;                                            // IP address to reconnect to
+    uint16_t port;                                             // Port number
+    int attempt_count;                                         // Current number of reconnection attempts
+    std::chrono::steady_clock::time_point next_attempt_time;   // When to attempt next reconnection
+    std::chrono::milliseconds connection_duration;             // How long the peer was connected before disconnect
+    bool is_stable;                                            // Whether this was a "stable" connection
+    
+    ReconnectInfo() : port(0), attempt_count(0), connection_duration(0), is_stable(false) {
+        next_attempt_time = std::chrono::steady_clock::now();
+    }
+    
+    ReconnectInfo(const std::string& id, const std::string& peer_ip, uint16_t peer_port,
+                  std::chrono::milliseconds duration, bool stable)
+        : peer_id(id), ip(peer_ip), port(peer_port), attempt_count(0),
+          connection_duration(duration), is_stable(stable) {
+        next_attempt_time = std::chrono::steady_clock::now();
+    }
+};
+
+/**
  * Message data types for librats message headers
  */
 enum class MessageDataType : uint8_t {
@@ -415,6 +450,51 @@ public:
      * @return true if at limit, false otherwise
      */
     bool is_peer_limit_reached() const;
+
+    // =========================================================================
+    // Automatic Reconnection
+    // =========================================================================
+    
+    /**
+     * Enable or disable automatic reconnection to disconnected peers
+     * @param enabled Whether auto-reconnection should be enabled
+     */
+    void set_reconnect_enabled(bool enabled);
+    
+    /**
+     * Check if automatic reconnection is enabled
+     * @return true if auto-reconnection is enabled
+     */
+    bool is_reconnect_enabled() const;
+    
+    /**
+     * Set reconnection configuration
+     * @param config Reconnection configuration settings
+     */
+    void set_reconnect_config(const ReconnectConfig& config);
+    
+    /**
+     * Get current reconnection configuration
+     * @return Current reconnection configuration
+     */
+    const ReconnectConfig& get_reconnect_config() const;
+    
+    /**
+     * Get the number of peers pending reconnection
+     * @return Number of peers in reconnection queue
+     */
+    size_t get_reconnect_queue_size() const;
+    
+    /**
+     * Clear all pending reconnection attempts
+     */
+    void clear_reconnect_queue();
+    
+    /**
+     * Get information about peers pending reconnection
+     * @return Vector of ReconnectInfo for all pending reconnections
+     */
+    std::vector<ReconnectInfo> get_reconnect_queue() const;
 
     // =========================================================================
     // Callback Registration
@@ -1764,6 +1844,7 @@ private:
     // 5. peers_mutex_                (Peer management - most frequently locked)
     // 6. socket_send_mutexes_mutex_ (Socket send mutex management)
     // 7. message_handlers_mutex_    (Message handler registration)
+    // 8. reconnect_mutex_           (Reconnection queue management)
     // =========================================================================
     
     // [1] Configuration persistence (protected by config_mutex_)
@@ -1933,6 +2014,18 @@ private:
     std::unordered_map<std::string, std::vector<MessageHandler>> message_handlers_;
     
     void call_message_handlers(const std::string& message_type, const std::string& peer_id, const nlohmann::json& data);
+
+    // [8] Automatic reconnection system (protected by reconnect_mutex_)
+    mutable std::mutex reconnect_mutex_;                    // [8] Protects reconnection queue
+    std::unordered_map<std::string, ReconnectInfo> reconnect_queue_;  // keyed by peer_id
+    ReconnectConfig reconnect_config_;                      // Reconnection configuration
+    std::unordered_set<std::string> manual_disconnect_peers_;  // Peers that were manually disconnected (don't reconnect)
+    
+    // Reconnection helper methods
+    void schedule_reconnect(const RatsPeer& peer);
+    void process_reconnect_queue();
+    void remove_from_reconnect_queue(const std::string& peer_id);
+    int get_retry_interval_seconds(int attempt, bool is_stable) const;
 
     // Per-socket synchronization helpers
     std::shared_ptr<std::mutex> get_socket_send_mutex(socket_t socket);

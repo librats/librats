@@ -128,6 +128,7 @@ set(LIBRARY_SOURCES
     src/krpc.cpp
     src/krpc.h
     src/librats.cpp
+    src/librats_reconnection.cpp
     src/librats_logging.cpp
     src/librats_encryption.cpp
     src/librats_file_transfer.cpp
@@ -360,6 +361,7 @@ if(RATS_BUILD_TESTS)
         tests/test_gossipsub.cpp
         tests/test_logging_api_gtest.cpp
         tests/test_file_transfer.cpp
+        tests/test_reconnection.cpp
 # Noise Protocol Crypto tests
         tests/test_crypto_curve25519.cpp
         tests/test_crypto_chacha_poly.cpp

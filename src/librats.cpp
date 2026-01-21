@@ -228,6 +228,13 @@ void RatsClient::stop() {
         server_socket_ = INVALID_SOCKET_VALUE;
     }
     
+    // Clear reconnection queue to prevent reconnection attempts during shutdown
+    {
+        std::lock_guard<std::mutex> lock(reconnect_mutex_);
+        reconnect_queue_.clear();
+        manual_disconnect_peers_.clear();
+    }
+    
     // Close all peer connections
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -368,18 +375,35 @@ void RatsClient::server_loop() {
 void RatsClient::management_loop() {
     LOG_CLIENT_INFO("Management loop started");
     
+    auto last_thread_cleanup = std::chrono::steady_clock::now();
+    const auto thread_cleanup_interval = std::chrono::seconds(30);
+    
     while (running_.load()) {
-        std::unique_lock<std::mutex> lock(shutdown_mutex_);
-        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(30), [this] { return !running_.load(); })) {
-            break; // Exit if shutdown requested
+        // Wait for 2 seconds or until shutdown (for responsive reconnection processing)
+        {
+            std::unique_lock<std::mutex> lock(shutdown_mutex_);
+            if (shutdown_cv_.wait_for(lock, std::chrono::seconds(2), [this] { return !running_.load(); })) {
+                break; // Exit if shutdown requested
+            }
         }
         
-        // Periodically cleanup finished threads
+        // Process reconnection queue
         try {
-            cleanup_finished_threads();
-            LOG_CLIENT_DEBUG("Periodic thread cleanup completed. Active threads: " << get_active_thread_count());
+            process_reconnect_queue();
         } catch (const std::exception& e) {
-            LOG_CLIENT_ERROR("Exception during thread cleanup: " << e.what());
+            LOG_CLIENT_ERROR("Exception during reconnect queue processing: " << e.what());
+        }
+        
+        // Periodically cleanup finished threads (every 30 seconds)
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_thread_cleanup >= thread_cleanup_interval) {
+            try {
+                cleanup_finished_threads();
+                LOG_CLIENT_DEBUG("Periodic thread cleanup completed. Active threads: " << get_active_thread_count());
+            } catch (const std::exception& e) {
+                LOG_CLIENT_ERROR("Exception during thread cleanup: " << e.what());
+            }
+            last_thread_cleanup = now;
         }
     }
     
@@ -535,6 +559,9 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                     handshake_completed = true;
                     LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (peer_id: " << peer_copy.peer_id << ")");
                     
+                    // Remove from reconnection queue if present (successful connection)
+                    remove_from_reconnect_queue(peer_copy.peer_id);
+                    
                     // Noise encryption handshake - only if BOTH sides support encryption
                     // peer_copy.encryption_enabled is already negotiated in handle_handshake_message()
                     if (peer_copy.encryption_enabled) {
@@ -653,6 +680,22 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
     // ===== CLEANUP =====
     std::string current_peer_id = get_peer_id(client_socket);
     
+    // Save peer info for potential reconnection BEFORE removing from peers list
+    RatsPeer peer_copy_for_reconnect;
+    bool should_schedule_reconnect = false;
+    
+    if (handshake_completed) {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto sock_it = socket_to_peer_id_.find(client_socket);
+        if (sock_it != socket_to_peer_id_.end()) {
+            auto peer_it = peers_.find(sock_it->second);
+            if (peer_it != peers_.end()) {
+                peer_copy_for_reconnect = peer_it->second;
+                should_schedule_reconnect = true;
+            }
+        }
+    }
+    
     remove_peer(client_socket);
     close_socket(client_socket);
     
@@ -663,6 +706,11 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         
         if (gossipsub_) {
             gossipsub_->handle_peer_disconnected(current_peer_id);
+        }
+        
+        // Schedule reconnection if we have valid peer info
+        if (should_schedule_reconnect && running_.load()) {
+            schedule_reconnect(peer_copy_for_reconnect);
         }
         
         if (running_.load()) {
@@ -1074,14 +1122,32 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
 }
 
 void RatsClient::disconnect_peer(socket_t socket) {
+    // Mark as manually disconnected to prevent auto-reconnection
+    std::string peer_id = get_peer_id(socket);
+    if (!peer_id.empty()) {
+        std::lock_guard<std::mutex> lock(reconnect_mutex_);
+        manual_disconnect_peers_.insert(peer_id);
+        // Also remove from reconnection queue if present
+        reconnect_queue_.erase(peer_id);
+    }
+    
     remove_peer(socket);
     close_socket(socket);
 }
 
 void RatsClient::disconnect_peer_by_id(const std::string& peer_id) {
+    // Mark as manually disconnected to prevent auto-reconnection
+    {
+        std::lock_guard<std::mutex> lock(reconnect_mutex_);
+        manual_disconnect_peers_.insert(peer_id);
+        // Also remove from reconnection queue if present
+        reconnect_queue_.erase(peer_id);
+    }
+    
     socket_t socket = get_peer_socket_by_id(peer_id);
     if (is_valid_socket(socket)) {
-        disconnect_peer(socket);
+        remove_peer(socket);
+        close_socket(socket);
     }
 }
 
@@ -2483,6 +2549,14 @@ nlohmann::json RatsClient::get_connection_statistics() const {
     
     // mDNS statistics
     stats["mdns_running"] = is_mdns_running();
+    
+    // Reconnection statistics
+    {
+        std::lock_guard<std::mutex> lock(reconnect_mutex_);
+        stats["reconnect_enabled"] = reconnect_config_.enabled;
+        stats["reconnect_queue_size"] = reconnect_queue_.size();
+        stats["reconnect_max_attempts"] = reconnect_config_.max_attempts;
+    }
     
     return stats;
 }
