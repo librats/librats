@@ -6,6 +6,8 @@
 #include <random>
 #include <algorithm>
 #include <cstring>
+#include <thread>
+#include <atomic>
 
 #define LOG_TRACKER_DEBUG(message) LOG_DEBUG("tracker", message)
 #define LOG_TRACKER_INFO(message)  LOG_INFO("tracker", message)
@@ -1104,6 +1106,155 @@ void TrackerManager::sort_trackers_by_priority() {
             }
             return a->get_last_announce_time() < b->get_last_announce_time();
         });
+}
+
+//=============================================================================
+// Simple Scrape API Implementation
+//=============================================================================
+
+std::vector<std::string> get_default_trackers() {
+    // Common open trackers that support UDP scrape
+    return {
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://tracker.openbittorrent.com:6969/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://exodus.desync.com:6969/announce",
+        "udp://tracker.tiny-vps.com:6969/announce",
+        "udp://tracker.moeking.me:6969/announce",
+        "udp://opentracker.i2p.rocks:6969/announce"
+    };
+}
+
+void scrape_tracker(const std::string& tracker_url, 
+                    const std::string& info_hash_hex,
+                    ScrapeCallback callback,
+                    int timeout_ms) {
+    ScrapeResult result;
+    result.tracker = tracker_url;
+    
+    // Validate hash
+    if (info_hash_hex.length() != 40) {
+        result.error = "Invalid hash length (expected 40 hex characters)";
+        if (callback) callback(result);
+        return;
+    }
+    
+    // Convert hex to InfoHash
+    InfoHash info_hash = hex_to_info_hash(info_hash_hex);
+    
+    // Check if hash conversion was successful
+    bool all_zero = true;
+    for (auto b : info_hash) {
+        if (b != 0) {
+            all_zero = false;
+            break;
+        }
+    }
+    if (all_zero) {
+        result.error = "Invalid hash format";
+        if (callback) callback(result);
+        return;
+    }
+    
+    // Create appropriate tracker client
+    std::shared_ptr<TrackerClient> client;
+    
+    if (tracker_url.substr(0, 6) == "udp://") {
+        client = std::make_shared<UdpTrackerClient>(tracker_url);
+    } else if (tracker_url.substr(0, 4) == "http") {
+        client = std::make_shared<HttpTrackerClient>(tracker_url);
+    } else {
+        result.error = "Unsupported tracker protocol";
+        if (callback) callback(result);
+        return;
+    }
+    
+    // Perform scrape
+    std::vector<InfoHash> hashes = {info_hash};
+    
+    bool success = client->scrape(hashes, [&result, callback](const TrackerResponse& response, const std::string& url) {
+        result.tracker = url;
+        if (response.success) {
+            result.seeders = response.complete;
+            result.leechers = response.incomplete;
+            result.completed = response.downloaded;
+            result.success = true;
+        } else {
+            result.error = response.failure_reason.empty() ? "Scrape failed" : response.failure_reason;
+        }
+    });
+    
+    if (!success && !result.success) {
+        if (result.error.empty()) {
+            result.error = "Failed to scrape tracker";
+        }
+    }
+    
+    if (callback) callback(result);
+}
+
+void scrape_multiple_trackers(const std::string& info_hash_hex,
+                              ScrapeCallback callback,
+                              int timeout_ms) {
+    // Validate hash first
+    if (info_hash_hex.length() != 40) {
+        ScrapeResult result;
+        result.error = "Invalid hash length (expected 40 hex characters)";
+        if (callback) callback(result);
+        return;
+    }
+    
+    std::vector<std::string> trackers = get_default_trackers();
+    
+    if (trackers.empty()) {
+        ScrapeResult result;
+        result.error = "No trackers available";
+        if (callback) callback(result);
+        return;
+    }
+    
+    // Track best result
+    ScrapeResult best_result;
+    std::mutex result_mutex;
+    std::atomic<int> pending{static_cast<int>(trackers.size())};
+    std::atomic<bool> has_success{false};
+    
+    // Create threads to scrape each tracker concurrently
+    std::vector<std::thread> threads;
+    threads.reserve(trackers.size());
+    
+    for (const auto& tracker_url : trackers) {
+        threads.emplace_back([&, tracker_url]() {
+            scrape_tracker(tracker_url, info_hash_hex, [&](const ScrapeResult& result) {
+                std::lock_guard<std::mutex> lock(result_mutex);
+                
+                // Update best result if this one is better
+                if (result.success) {
+                    if (!has_success.load() || result.seeders > best_result.seeders) {
+                        best_result = result;
+                        has_success.store(true);
+                    }
+                }
+                
+                pending--;
+            }, timeout_ms);
+        });
+    }
+    
+    // Wait for all threads to complete
+    for (auto& t : threads) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    
+    // Return best result
+    if (!has_success.load()) {
+        best_result.error = "No tracker responded successfully";
+    }
+    
+    if (callback) callback(best_result);
 }
 
 } // namespace librats

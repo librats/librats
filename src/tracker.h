@@ -264,5 +264,56 @@ private:
 std::string tracker_event_to_string(TrackerEvent event);
 TrackerEvent string_to_tracker_event(const std::string& event_str);
 
+//=============================================================================
+// Simple Scrape API - for getting seeders/leechers without full TorrentInfo
+//=============================================================================
+
+/**
+ * @brief Simple scrape result structure
+ */
+struct ScrapeResult {
+    uint32_t seeders = 0;      // Number of seeders (complete)
+    uint32_t leechers = 0;     // Number of leechers (incomplete)
+    uint32_t completed = 0;    // Number of times downloaded
+    std::string tracker;       // Tracker URL that responded
+    bool success = false;      // Whether the scrape succeeded
+    std::string error;         // Error message if failed
+};
+
+/**
+ * @brief Callback for simple scrape operations
+ */
+using ScrapeCallback = std::function<void(const ScrapeResult&)>;
+
+// Note: hex_to_info_hash is declared in bittorrent.h
+
+/**
+ * @brief Scrape a single tracker for torrent statistics
+ * @param tracker_url Full tracker URL (udp://... or http://...)
+ * @param info_hash_hex 40-character hex string of info hash
+ * @param callback Callback with scrape result
+ * @param timeout_ms Timeout in milliseconds (default: 15000)
+ */
+void scrape_tracker(const std::string& tracker_url, 
+                    const std::string& info_hash_hex,
+                    ScrapeCallback callback,
+                    int timeout_ms = 15000);
+
+/**
+ * @brief Scrape multiple default trackers and return best result
+ * @param info_hash_hex 40-character hex string of info hash
+ * @param callback Callback with best scrape result
+ * @param timeout_ms Timeout per tracker in milliseconds (default: 10000)
+ */
+void scrape_multiple_trackers(const std::string& info_hash_hex,
+                              ScrapeCallback callback,
+                              int timeout_ms = 10000);
+
+/**
+ * @brief Get list of default public trackers
+ * @return Vector of tracker URLs
+ */
+std::vector<std::string> get_default_trackers();
+
 } // namespace librats
 
