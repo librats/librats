@@ -826,6 +826,66 @@ body {
     font-weight: 600;
 }
 
+/* Network Traffic Section */
+.network-traffic-section {
+    margin-top: 60px;
+    padding-top: 40px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.network-traffic-section .comparison-header {
+    margin-bottom: 30px;
+}
+
+.traffic-metric {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 24px;
+}
+
+.traffic-card {
+    max-width: 400px;
+    text-align: center;
+}
+
+.traffic-card .metric-icon {
+    margin: 0 auto 16px auto;
+    background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+}
+
+.traffic-value {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.traffic-number {
+    font-size: 2.5rem;
+    font-weight: 800;
+    color: #3b82f6;
+    line-height: 1;
+}
+
+.traffic-unit {
+    font-size: 1rem;
+    color: #6b7280;
+    font-weight: 500;
+}
+
+.traffic-description {
+    text-align: center;
+    max-width: 700px;
+    margin: 0 auto;
+    color: #6b7280;
+    line-height: 1.7;
+}
+
+.traffic-description strong {
+    color: #3b82f6;
+}
+
 /* NAT Traversal Section */
 .nat-traversal {
     padding: 120px 0;
@@ -3043,5 +3103,17 @@ body {
 
     .section-title {
         color: #f9fafb;
+    }
+
+    .traffic-description {
+        color: #9ca3af;
+    }
+
+    .traffic-unit {
+        color: #9ca3af;
+    }
+
+    .network-traffic-section {
+        border-top-color: rgba(255, 255, 255, 0.1);
     }
 }

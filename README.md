@@ -1751,6 +1751,14 @@ librats is **engineered for resource efficiency**, making it ideal for **low-pow
 | **CPU Usage (idle)** | 0-1% | 15-25% | **15-25x less** |
 | **CPU Usage (peak)** | 1-2% | 80-100% | **5-16x less** |
 
+### Network Traffic (DHT Discovery)
+
+| Metric | Traffic |
+|--------|---------|
+| **DHT Discovery (idle)** | ~350-450 bytes/sec |
+
+The DHT discovery process uses minimal network bandwidth — only **350-450 bytes per second** during continuous peer discovery. This ultra-low network footprint makes librats ideal for bandwidth-constrained environments, mobile devices, and applications where network efficiency is critical.
+
 ## Why Choose librats?
 
 ### **Performance**
