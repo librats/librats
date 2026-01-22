@@ -39,6 +39,7 @@ class TrackerManager;
 //
 // TorrentDownload level:
 //   peers_mutex_ -> pieces_mutex_ -> files_mutex_
+//   metadata_download_mutex_ (independent, short-lived operations only)
 //
 // PeerConnection level:
 //   requests_mutex_ (independent, only used within PeerConnection)
@@ -48,10 +49,14 @@ class TrackerManager;
 //
 // Cross-class lock ordering:
 //   BitTorrentClient::torrents_mutex_ 
+//   -> BitTorrentClient::metadata_mutex_
 //   -> TorrentDownload::peers_mutex_
 //   -> TorrentDownload::pieces_mutex_
 //   -> TorrentDownload::files_mutex_
 //   -> PeerConnection::requests_mutex_
+//
+// IMPORTANT: Never call TorrentDownload methods that acquire peers_mutex_
+//            while holding metadata_mutex_!
 //=============================================================================
 
 // Type aliases
@@ -540,9 +545,10 @@ public:
     void request_peers_from_trackers();
     TrackerManager* get_tracker_manager() const { return tracker_manager_.get(); }
     
-    // Metadata download (BEP 9)
-    MetadataDownload* get_metadata_download() const { return metadata_download_.get(); }
-    void set_metadata_download(std::shared_ptr<MetadataDownload> metadata_download);
+    // Metadata download (BEP 9) - thread-safe access
+    MetadataDownload* get_metadata_download() const;
+    std::shared_ptr<MetadataDownload> get_metadata_download_shared() const;
+    bool set_metadata_download(std::shared_ptr<MetadataDownload> metadata_download);  // Returns false if already set
     
 private:
     TorrentInfo torrent_info_;
@@ -595,8 +601,9 @@ private:
     double last_logged_progress_;
     std::chrono::steady_clock::time_point last_state_log_time_;
     
-    // Metadata download (BEP 9)
+    // Metadata download (BEP 9) - protected by metadata_download_mutex_
     std::shared_ptr<MetadataDownload> metadata_download_;
+    mutable std::mutex metadata_download_mutex_;
     
     // Tracker manager
     std::unique_ptr<TrackerManager> tracker_manager_;
@@ -717,7 +724,7 @@ private:
     std::map<InfoHash, std::shared_ptr<MetadataDownload>> metadata_downloads_;
     std::map<InfoHash, std::string> metadata_download_paths_;  // Store download path for later
     std::map<InfoHash, std::shared_ptr<TorrentDownload>> metadata_only_torrents_;  // Temporary torrents for metadata retrieval
-    std::map<InfoHash, MetadataRetrievalCallback> metadata_retrieval_callbacks_;  // Callbacks for metadata retrieval
+    std::map<InfoHash, std::vector<MetadataRetrievalCallback>> metadata_retrieval_callbacks_;  // Multiple callbacks per hash
     mutable std::mutex metadata_mutex_;
     
     // DHT integration
