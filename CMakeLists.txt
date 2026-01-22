@@ -77,6 +77,7 @@ endif()
 option(RATS_BUILD_EXAMPLES "Build examples" ON)
 option(RATS_BUILD_TESTS "Build unit tests" ON)
 option(RATS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(RATS_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(RATS_BINDINGS "Enable bindings" ON)
 option(RATS_CROSSCOMPILING "Force cross-compilation flags" OFF)
 option(RATS_SHARED_LIBRARY "Build as shared library" OFF)
@@ -301,6 +302,11 @@ set_target_properties(rats PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin
 )
 
+# Sanitizer configuration - ASAN and TSAN are mutually exclusive
+if(RATS_ENABLE_ASAN AND RATS_ENABLE_TSAN)
+    message(FATAL_ERROR "AddressSanitizer and ThreadSanitizer cannot be enabled simultaneously")
+endif()
+
 # AddressSanitizer configuration
 if(RATS_ENABLE_ASAN)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -318,6 +324,21 @@ if(RATS_ENABLE_ASAN)
         message(STATUS "AddressSanitizer enabled (MSVC)")
     else()
         message(WARNING "AddressSanitizer is not supported by this compiler")
+    endif()
+endif()
+
+# ThreadSanitizer configuration
+if(RATS_ENABLE_TSAN)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set(TSAN_FLAGS "-fsanitize=thread -fno-omit-frame-pointer -g")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TSAN_FLAGS}")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${TSAN_FLAGS}")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${TSAN_FLAGS}")
+        set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${TSAN_FLAGS}")
+        
+        message(STATUS "ThreadSanitizer enabled (GCC/Clang)")
+    else()
+        message(WARNING "ThreadSanitizer is only supported by GCC/Clang compilers")
     endif()
 endif()
 
