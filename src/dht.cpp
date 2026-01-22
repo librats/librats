@@ -2803,6 +2803,8 @@ void DhtClient::spider_walk() {
     // Get a random unvisited node from the spider pool and send find_node
     DhtNode target_node;
     bool found = false;
+    size_t pool_size = 0;      // Cache sizes under lock for logging
+    size_t visited_size = 0;
     
     {
         std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
@@ -2841,6 +2843,10 @@ void DhtClient::spider_walk() {
             spider_visited_.erase(spider_visited_.begin(), it);
             LOG_DHT_DEBUG("Spider walk: cleaned up visited set to " << spider_visited_.size() << " entries");
         }
+        
+        // Cache sizes for logging outside the lock
+        pool_size = spider_nodes_.size();
+        visited_size = spider_visited_.size();
     }
     
     if (found) {
@@ -2857,7 +2863,7 @@ void DhtClient::spider_walk() {
         send_krpc_message(message, target_node.peer);
         
         LOG_DHT_DEBUG("Spider walk: sent find_node to " << target_node.peer.ip << ":" << target_node.peer.port 
-                      << " with neighbor_id (pool: " << spider_nodes_.size() << ", visited: " << spider_visited_.size() << ")");
+                      << " with neighbor_id (pool: " << pool_size << ", visited: " << visited_size << ")");
     } else {
         // No nodes in spider pool, seed from routing table or bootstrap
         LOG_DHT_DEBUG("Spider walk: no nodes in spider pool, seeding...");
@@ -2875,10 +2881,13 @@ void DhtClient::spider_walk() {
                     }
                 }
             }
+            
+            // Cache size for check outside the lock
+            pool_size = spider_nodes_.size();
         }
         
         // If still empty, bootstrap
-        if (spider_nodes_.empty()) {
+        if (pool_size == 0) {
             LOG_DHT_DEBUG("Spider walk: routing table empty too, re-bootstrapping");
             for (const auto& bootstrap : get_default_bootstrap_nodes()) {
                 send_krpc_find_node(bootstrap, node_id_);
