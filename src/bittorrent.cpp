@@ -1,6 +1,7 @@
 #include "bittorrent.h"
 #include "tracker.h"
 #include "fs.h"
+#include "disk_io.h"
 #include "network_utils.h"
 #include "socket.h"
 #include <algorithm>
@@ -1588,6 +1589,17 @@ TorrentDownload::TorrentDownload(const TorrentInfo& torrent_info, const std::str
         pieces_.push_back(std::make_unique<PieceInfo>(i, piece_hashes[i], piece_length));
     }
     
+    // Build file mappings for async disk I/O
+    const auto& files = torrent_info_.get_files();
+    file_mappings_.reserve(files.size());
+    for (const auto& file : files) {
+        FileMappingInfo mapping;
+        mapping.path = file.path;
+        mapping.length = file.length;
+        mapping.torrent_offset = file.offset;
+        file_mappings_.push_back(mapping);
+    }
+    
     // Generate peer ID
     our_peer_id_ = generate_peer_id();
     
@@ -1801,8 +1813,13 @@ bool TorrentDownload::is_piece_downloading(PieceIndex piece_index) const {
 }
 
 bool TorrentDownload::store_piece_block(PieceIndex piece_index, uint32_t offset, const std::vector<uint8_t>& data) {
-    bool piece_just_completed = false;
-    bool verification_failed = false;
+    // Skip for metadata-only torrents
+    if (download_path_.empty()) {
+        return true;
+    }
+    
+    uint32_t block_index = 0;
+    bool should_verify = false;
     
     {
         std::lock_guard<std::mutex> lock(pieces_mutex_);
@@ -1821,221 +1838,241 @@ bool TorrentDownload::store_piece_block(PieceIndex piece_index, uint32_t offset,
         }
         
         // Calculate block index
-        uint32_t block_index = offset / BLOCK_SIZE;
+        block_index = offset / BLOCK_SIZE;
         if (block_index >= piece->get_num_blocks()) {
             LOG_BT_ERROR("Invalid block index: " << block_index << " for piece " << piece_index);
             return false;
         }
         
-        // Ensure piece data buffer is allocated (lazy allocation)
-        piece->ensure_data_allocated();
+        // Skip if block already downloaded
+        if (piece->blocks_downloaded[block_index]) {
+            LOG_BT_DEBUG("Block " << block_index << " already downloaded for piece " << piece_index);
+            return true;
+        }
         
-        // Store the block data
-        std::copy(data.begin(), data.end(), piece->data.begin() + offset);
+        // Mark block as downloaded (received from peer)
         piece->blocks_downloaded[block_index] = true;
+        piece_downloading_[piece_index] = true;
         
-        LOG_BT_DEBUG("Stored block " << block_index << " for piece " << piece_index 
+        LOG_BT_DEBUG("Received block " << block_index << " for piece " << piece_index 
                      << " (offset: " << offset << ", size: " << data.size() << ")");
+    }  // pieces_mutex_ released here before disk I/O
+    
+    // Write block to disk asynchronously - this is the key change for memory efficiency!
+    // Block data is written immediately, not buffered in memory.
+    DiskIO::instance().async_write_block(
+        download_path_,
+        file_mappings_,
+        piece_index,
+        torrent_info_.get_piece_length(),  // Standard piece length
+        offset,
+        data,
+        [this, piece_index, block_index](bool success) {
+            on_block_written(piece_index, block_index, success);
+        }
+    );
+    
+    return true;
+}
+
+void TorrentDownload::on_block_written(PieceIndex piece_index, uint32_t block_index, bool success) {
+    if (!success) {
+        LOG_BT_ERROR("Failed to write block " << block_index << " of piece " << piece_index << " to disk");
         
-        // Check if piece is complete
-        if (piece->is_complete() && !piece->verified) {
-            LOG_BT_INFO("Piece " << piece_index << " downloaded, verifying...");
-            if (verify_piece(piece_index)) {
+        // Reset block status so it can be re-requested
+        std::lock_guard<std::mutex> lock(pieces_mutex_);
+        if (piece_index < pieces_.size()) {
+            auto& piece = pieces_[piece_index];
+            if (block_index < piece->blocks_downloaded.size()) {
+                piece->blocks_downloaded[block_index] = false;
+                piece->blocks_requested[block_index] = false;
+            }
+        }
+        return;
+    }
+    
+    bool should_verify = false;
+    
+    {
+        std::lock_guard<std::mutex> lock(pieces_mutex_);
+        
+        if (piece_index >= pieces_.size()) {
+            return;
+        }
+        
+        auto& piece = pieces_[piece_index];
+        
+        if (block_index < piece->blocks_written.size()) {
+            piece->blocks_written[block_index] = true;
+        }
+        
+        // Check if all blocks are written and piece isn't already verified/pending
+        if (piece->is_fully_written() && !piece->verified && !piece->hash_pending.load()) {
+            piece->hash_pending.store(true);
+            should_verify = true;
+            LOG_BT_INFO("Piece " << piece_index << " fully written to disk, starting verification...");
+        }
+    }
+    
+    // Start async verification if all blocks are written
+    if (should_verify) {
+        verify_piece_async(piece_index);
+    }
+}
+
+void TorrentDownload::verify_piece_async(PieceIndex piece_index) {
+    if (download_path_.empty()) {
+        return;
+    }
+    
+    uint32_t piece_length = torrent_info_.get_piece_length(piece_index);
+    
+    // Use async hash operation - reads piece from disk and computes SHA1
+    DiskIO::instance().async_hash_piece(
+        download_path_,
+        file_mappings_,
+        piece_index,
+        torrent_info_.get_piece_length(),  // Standard piece length
+        piece_length,                       // Actual piece length (may be smaller for last piece)
+        [this, piece_index](bool success, const std::string& calculated_hash) {
+            on_piece_hash_complete(piece_index, success, calculated_hash);
+        }
+    );
+}
+
+void TorrentDownload::on_piece_hash_complete(PieceIndex piece_index, bool success, const std::string& calculated_hash) {
+    bool piece_verified = false;
+    bool verification_failed = false;
+    
+    {
+        std::lock_guard<std::mutex> lock(pieces_mutex_);
+        
+        if (piece_index >= pieces_.size()) {
+            return;
+        }
+        
+        auto& piece = pieces_[piece_index];
+        piece->hash_pending.store(false);
+        
+        if (!success) {
+            LOG_BT_ERROR("Failed to hash piece " << piece_index << " from disk");
+            verification_failed = true;
+        } else {
+            // Compare calculated hash with expected hash
+            std::string expected_hash = piece->get_hash_hex();
+            
+            if (calculated_hash == expected_hash) {
+                piece->verified = true;
                 piece_completed_[piece_index] = true;
                 piece_downloading_[piece_index] = false;
-                
-                // Write piece to disk (files_mutex_ is after pieces_mutex_ in lock order)
-                write_piece_to_disk(piece_index);
                 
                 // Update statistics
                 total_downloaded_ += piece->length;
                 
-                piece_just_completed = true;
-                LOG_BT_INFO("Piece " << piece_index << " verified and saved");
+                piece_verified = true;
+                LOG_BT_INFO("Piece " << piece_index << " verified successfully");
             } else {
-                LOG_BT_ERROR("Piece " << piece_index << " verification failed, requesting re-download");
-                // Reset piece for re-download - must reset both downloaded and requested status
-                std::fill(piece->blocks_downloaded.begin(), piece->blocks_downloaded.end(), false);
-                std::fill(piece->blocks_requested.begin(), piece->blocks_requested.end(), false);
-                piece_downloading_[piece_index] = false;
+                LOG_BT_ERROR("Piece " << piece_index << " hash mismatch!");
+                LOG_BT_ERROR("  Expected: " << expected_hash);
+                LOG_BT_ERROR("  Got:      " << calculated_hash);
                 verification_failed = true;
             }
         }
+        
+        if (verification_failed) {
+            LOG_BT_ERROR("Piece " << piece_index << " verification failed, requesting re-download");
+            piece->reset_for_redownload();
+            piece_downloading_[piece_index] = false;
+        }
     }  // pieces_mutex_ released here
     
-    // Notify completion AFTER releasing pieces_mutex_ to respect lock order:
-    // peers_mutex_ -> pieces_mutex_
-    if (piece_just_completed) {
+    // Notify completion AFTER releasing pieces_mutex_
+    if (piece_verified) {
         on_piece_completed(piece_index);
     }
-    
-    return !verification_failed;
 }
 
-bool TorrentDownload::verify_piece(PieceIndex piece_index) {
-    if (piece_index >= pieces_.size()) {
-        return false;
-    }
-    
-    auto& piece = pieces_[piece_index];
-    
-    // Check that piece data is allocated
-    if (piece->data.empty()) {
-        LOG_BT_ERROR("Cannot verify piece " << piece_index << " - data not allocated");
-        return false;
-    }
-    
-    // Calculate SHA1 hash of piece data
-    std::string calculated_hash = SHA1::hash_bytes(piece->data);
-    
-    // Convert stored hash to hex string for comparison
-    std::ostringstream stored_hash_hex;
-    for (size_t i = 0; i < piece->hash.size(); ++i) {
-        stored_hash_hex << std::setfill('0') << std::setw(2) << std::hex << static_cast<int>(piece->hash[i]);
-    }
-    
-    bool verified = (calculated_hash == stored_hash_hex.str());
-    piece->verified = verified;
-    
-    LOG_BT_DEBUG("Piece " << piece_index << " verification: " << (verified ? "PASSED" : "FAILED"));
-    return verified;
-}
-
-void TorrentDownload::write_piece_to_disk(PieceIndex piece_index) {
-    std::lock_guard<std::mutex> lock(files_mutex_);
-    
-    // Skip for metadata-only torrents
-    if (download_path_.empty()) {
-        return;
-    }
-    
-    if (piece_index >= pieces_.size()) {
-        LOG_BT_ERROR("Invalid piece index for disk write: " << piece_index);
-        return;
-    }
-    
-    auto& piece = pieces_[piece_index];
-    if (!piece->verified) {
-        LOG_BT_ERROR("Attempting to write unverified piece " << piece_index << " to disk");
-        return;
-    }
-    
-    // Calculate piece offset in the torrent
-    uint64_t piece_offset = static_cast<uint64_t>(piece_index) * torrent_info_.get_piece_length();
-    
-    // Write piece data to the appropriate files
-    for (const auto& file_info : torrent_info_.get_files()) {
-        if (piece_offset >= file_info.offset + file_info.length) {
-            continue; // This piece doesn't overlap with this file
-        }
-        
-        if (piece_offset + piece->length <= file_info.offset) {
-            break; // No more files will be affected by this piece
-        }
-        
-        // Calculate overlap
-        uint64_t file_start_in_piece = (file_info.offset > piece_offset) ? 
-                                      file_info.offset - piece_offset : 0;
-        uint64_t piece_end = piece_offset + piece->length;
-        uint64_t file_end = file_info.offset + file_info.length;
-        uint64_t write_end = (std::min)(piece_end, file_end);
-        uint64_t write_length = write_end - (piece_offset + file_start_in_piece);
-        
-        if (write_length == 0) {
-            continue;
-        }
-        
-        // Calculate file offset
-        uint64_t file_offset = (piece_offset > file_info.offset) ? 
-                              piece_offset - file_info.offset : 0;
-        
-        // Write data chunk to file using fs module
-        std::string file_path = download_path_ + "/" + file_info.path;
-        const void* write_data = piece->data.data() + file_start_in_piece;
-        
-        if (!write_file_chunk(file_path.c_str(), file_offset, write_data, write_length)) {
-            LOG_BT_ERROR("Failed to write data to file: " << file_path);
-            continue;
-        }
-        
-        LOG_BT_DEBUG("Wrote " << write_length << " bytes to file " << file_info.path 
-                     << " at offset " << file_offset);
-    }
-    
-    // Free piece data from memory after successful write to disk
-    piece->free_data();
-    LOG_BT_DEBUG("Freed piece " << piece_index << " data from memory after write to disk");
+std::vector<FileMappingInfo> TorrentDownload::get_file_mappings() const {
+    return file_mappings_;
 }
 
 bool TorrentDownload::read_piece_from_disk(PieceIndex piece_index, std::vector<uint8_t>& data) {
-    // Lock order: pieces_mutex_ -> files_mutex_
-    std::lock_guard<std::mutex> pieces_lock(pieces_mutex_);
-    std::lock_guard<std::mutex> files_lock(files_mutex_);
-    
     // Skip for metadata-only torrents
     if (download_path_.empty()) {
         return false;
     }
     
-    if (piece_index >= pieces_.size()) {
-        LOG_BT_ERROR("Invalid piece index for disk read: " << piece_index);
-        return false;
-    }
+    uint32_t piece_length = 0;
     
-    // Check if piece is complete
-    if (!piece_completed_[piece_index]) {
-        LOG_BT_DEBUG("Piece " << piece_index << " is not complete, can't read from disk");
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(pieces_mutex_);
+        
+        if (piece_index >= pieces_.size()) {
+            LOG_BT_ERROR("Invalid piece index for disk read: " << piece_index);
+            return false;
+        }
+        
+        // Check if piece is complete
+        if (!piece_completed_[piece_index]) {
+            LOG_BT_DEBUG("Piece " << piece_index << " is not complete, can't read from disk");
+            return false;
+        }
+        
+        piece_length = pieces_[piece_index]->length;
     }
-    
-    auto& piece = pieces_[piece_index];
     
     // Allocate buffer for piece data
-    data.resize(piece->length);
+    data.resize(piece_length);
     
     // Calculate piece offset in the torrent
     uint64_t piece_offset = static_cast<uint64_t>(piece_index) * torrent_info_.get_piece_length();
     
     // Read piece data from the appropriate files
-    for (const auto& file_info : torrent_info_.get_files()) {
-        if (piece_offset >= file_info.offset + file_info.length) {
-            continue; // This piece doesn't overlap with this file
-        }
+    size_t data_offset = 0;
+    size_t remaining = piece_length;
+    
+    for (const auto& file_mapping : file_mappings_) {
+        if (remaining == 0) break;
         
-        if (piece_offset + piece->length <= file_info.offset) {
-            break; // No more files will be affected by this piece
-        }
+        uint64_t file_end = file_mapping.torrent_offset + file_mapping.length;
         
-        // Calculate overlap
-        uint64_t file_start_in_piece = (file_info.offset > piece_offset) ? 
-                                      file_info.offset - piece_offset : 0;
-        uint64_t piece_end = piece_offset + piece->length;
-        uint64_t file_end = file_info.offset + file_info.length;
-        uint64_t read_end = (std::min)(piece_end, file_end);
-        uint64_t read_length = read_end - (piece_offset + file_start_in_piece);
-        
-        if (read_length == 0) {
+        // Check if we've passed this file entirely
+        if (piece_offset + data_offset >= file_end) {
             continue;
         }
         
-        // Calculate file offset
-        uint64_t file_offset = (piece_offset > file_info.offset) ? 
-                              piece_offset - file_info.offset : 0;
+        // Check if we haven't reached this file yet
+        if (piece_offset + data_offset + remaining <= file_mapping.torrent_offset) {
+            break;
+        }
         
-        // Read data chunk from file using fs module
-        std::string file_path = download_path_ + "/" + file_info.path;
-        void* read_buffer = data.data() + file_start_in_piece;
+        // Calculate overlap with this file
+        uint64_t read_start = std::max(piece_offset + data_offset, file_mapping.torrent_offset);
+        uint64_t read_end_torrent = std::min(piece_offset + data_offset + remaining, file_end);
+        size_t read_length = static_cast<size_t>(read_end_torrent - read_start);
+        
+        if (read_length == 0) continue;
+        
+        // Calculate file offset
+        uint64_t file_offset = read_start - file_mapping.torrent_offset;
+        
+        // Read data chunk from file
+        std::string file_path = download_path_ + "/" + file_mapping.path;
+        void* read_buffer = data.data() + (read_start - piece_offset);
         
         if (!read_file_chunk(file_path.c_str(), file_offset, read_buffer, read_length)) {
             LOG_BT_ERROR("Failed to read data from file: " << file_path);
             return false;
         }
         
-        LOG_BT_DEBUG("Read " << read_length << " bytes from file " << file_info.path 
+        LOG_BT_DEBUG("Read " << read_length << " bytes from file " << file_mapping.path 
                      << " at offset " << file_offset);
+        
+        data_offset += read_length;
+        remaining -= read_length;
     }
     
-    return true;
+    return remaining == 0;
 }
 
 void TorrentDownload::reset_block_request(PieceIndex piece_index, uint32_t block_index) {

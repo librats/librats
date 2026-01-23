@@ -5,6 +5,7 @@
 #include "socket.h"
 #include "dht.h"
 #include "logger.h"
+#include "disk_io.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -92,25 +93,40 @@ struct FileInfo {
 };
 
 // Piece information
+// NOTE: Piece data is NO LONGER stored in memory. Blocks are written directly to disk
+// as they arrive, significantly reducing memory usage.
 struct PieceInfo {
     PieceIndex index;
     std::array<uint8_t, 20> hash;
     uint32_t length;
     bool verified;
-    std::vector<bool> blocks_downloaded;  // Track which blocks are downloaded (received)
+    std::atomic<bool> hash_pending;       // True if async hash is in progress
+    std::vector<bool> blocks_downloaded;  // Track which blocks are downloaded (written to disk)
     std::vector<bool> blocks_requested;   // Track which blocks are requested globally (sent but not received)
-    std::vector<uint8_t> data;
+    std::vector<bool> blocks_written;     // Track which blocks are confirmed written to disk
     
     PieceInfo(PieceIndex idx, const std::array<uint8_t, 20>& h, uint32_t len)
-        : index(idx), hash(h), length(len), verified(false) {
+        : index(idx), hash(h), length(len), verified(false), hash_pending(false) {
         uint32_t num_blocks = (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
         blocks_downloaded.resize(num_blocks, false);
         blocks_requested.resize(num_blocks, false);
-        // Don't pre-allocate data - allocate lazily when downloading starts
+        blocks_written.resize(num_blocks, false);
     }
+    
+    // Copy constructor (needed because of atomic)
+    PieceInfo(const PieceInfo& other)
+        : index(other.index), hash(other.hash), length(other.length),
+          verified(other.verified), hash_pending(other.hash_pending.load()),
+          blocks_downloaded(other.blocks_downloaded),
+          blocks_requested(other.blocks_requested),
+          blocks_written(other.blocks_written) {}
     
     bool is_complete() const {
         return std::all_of(blocks_downloaded.begin(), blocks_downloaded.end(), [](bool b) { return b; });
+    }
+    
+    bool is_fully_written() const {
+        return std::all_of(blocks_written.begin(), blocks_written.end(), [](bool b) { return b; });
     }
     
     uint32_t get_num_blocks() const {
@@ -136,17 +152,25 @@ struct PieceInfo {
         }
     }
     
-    // Ensure data buffer is allocated
-    void ensure_data_allocated() {
-        if (data.empty()) {
-            data.resize(length);
-        }
+    // Reset piece for re-download (after verification failure)
+    void reset_for_redownload() {
+        std::fill(blocks_downloaded.begin(), blocks_downloaded.end(), false);
+        std::fill(blocks_requested.begin(), blocks_requested.end(), false);
+        std::fill(blocks_written.begin(), blocks_written.end(), false);
+        verified = false;
+        hash_pending.store(false);
     }
     
-    // Free data buffer after piece is written to disk
-    void free_data() {
-        data.clear();
-        data.shrink_to_fit();
+    // Get hash as hex string for comparison
+    std::string get_hash_hex() const {
+        std::string result;
+        result.reserve(40);
+        static const char hex_chars[] = "0123456789abcdef";
+        for (uint8_t byte : hash) {
+            result += hex_chars[(byte >> 4) & 0xF];
+            result += hex_chars[byte & 0xF];
+        }
+        return result;
     }
 };
 
@@ -508,12 +532,14 @@ public:
     std::vector<PieceIndex> get_available_pieces() const;
     std::vector<PieceIndex> get_needed_pieces(const std::vector<bool>& peer_bitfield) const;
     
-    // Piece data handling
+    // Piece data handling - blocks are written directly to disk for memory efficiency
     bool store_piece_block(PieceIndex piece_index, uint32_t offset, const std::vector<uint8_t>& data);
-    bool verify_piece(PieceIndex piece_index);
-    void write_piece_to_disk(PieceIndex piece_index);
+    void verify_piece_async(PieceIndex piece_index);  // Async hash verification via DiskIO
     bool read_piece_from_disk(PieceIndex piece_index, std::vector<uint8_t>& data);  // For seeding
     void reset_block_request(PieceIndex piece_index, uint32_t block_index);  // Reset timed-out block request
+    
+    // Get file mapping info for disk I/O
+    std::vector<FileMappingInfo> get_file_mappings() const;
     
     // Statistics and progress
     uint64_t get_downloaded_bytes() const;
@@ -577,8 +603,9 @@ private:
     std::condition_variable shutdown_cv_;
     std::mutex shutdown_mutex_;
     
-    // File handling (using fs module, no persistent handles needed)
+    // File handling (using async disk I/O)
     mutable std::mutex files_mutex_;
+    std::vector<FileMappingInfo> file_mappings_;  // Cached file mappings for disk I/O
     
     // Callbacks
     ProgressCallback progress_callback_;
@@ -625,6 +652,10 @@ private:
     bool open_files();
     void close_files();
     bool create_directory_structure();
+    
+    // Async disk I/O callbacks
+    void on_block_written(PieceIndex piece_index, uint32_t block_index, bool success);
+    void on_piece_hash_complete(PieceIndex piece_index, bool success, const std::string& calculated_hash);
     
     // Piece selection strategy
     std::vector<PieceIndex> select_pieces_for_download();

@@ -198,6 +198,8 @@ if(RATS_SEARCH_FEATURES)
         src/librats_bittorrent.cpp
         src/bittorrent.cpp
         src/bittorrent.h
+        src/disk_io.cpp
+        src/disk_io.h
         src/tracker.cpp
         src/tracker.h
     )
@@ -400,6 +402,7 @@ if(RATS_BUILD_TESTS)
         list(APPEND TEST_SOURCES 
             tests/test_bittorrent.cpp
             tests/test_tracker.cpp
+            tests/test_disk_io.cpp
         )
     endif()
 
