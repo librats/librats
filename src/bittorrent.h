@@ -357,11 +357,10 @@ private:
     
     // Peer state
     PeerID peer_id_;
-    bool peer_choked_;
-    bool am_choked_;
-    bool peer_interested_;
-    bool am_interested_;
-    bool am_choking_;
+    bool peer_choked_;      // Peer is choking us (we can't request from them)
+    bool peer_interested_;  // Peer is interested in our pieces
+    bool am_interested_;    // We are interested in peer's pieces
+    bool am_choking_;       // We are choking peer (they can't request from us)
     std::vector<bool> peer_bitfield_;
     
     // Request tracking
@@ -608,6 +607,7 @@ private:
     // Tracker manager
     std::unique_ptr<TrackerManager> tracker_manager_;
     PeerID our_peer_id_;
+    bool first_tracker_announce_;  // Track if this is the first announce (for STARTED event)
     
     void download_loop();
     void peer_management_loop();

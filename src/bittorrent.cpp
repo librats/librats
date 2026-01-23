@@ -415,7 +415,7 @@ PeerMessage PeerMessage::create_port(uint16_t port) {
 PeerConnection::PeerConnection(TorrentDownload* torrent, const Peer& peer_info, socket_t socket)
     : torrent_(torrent), peer_info_(peer_info), socket_(socket), 
       state_(PeerState::CONNECTING), should_disconnect_(false), handshake_completed_(false),
-      peer_choked_(true), am_choked_(true), peer_interested_(false), 
+      peer_choked_(true), peer_interested_(false), 
       am_interested_(false), am_choking_(true),
       downloaded_bytes_(0), uploaded_bytes_(0),
       last_speed_update_time_(std::chrono::steady_clock::now()),
@@ -458,14 +458,19 @@ bool PeerConnection::connect() {
 void PeerConnection::disconnect() {
     should_disconnect_ = true;
     
-    // Reset all pending block requests so they can be requested from other peers
+    // Collect pending requests while holding requests_mutex_, then reset them outside
+    // to avoid lock order inversion (requests_mutex_ -> pieces_mutex_)
+    std::vector<PeerRequest> requests_to_reset;
     {
         std::lock_guard<std::mutex> lock(requests_mutex_);
-        for (const auto& req : pending_requests_) {
-            uint32_t block_index = req.offset / BLOCK_SIZE;
-            torrent_->reset_block_request(req.piece_index, block_index);
-        }
+        requests_to_reset = std::move(pending_requests_);
         pending_requests_.clear();
+    }
+    
+    // Reset block requests OUTSIDE of requests_mutex_ to respect lock ordering
+    for (const auto& req : requests_to_reset) {
+        uint32_t block_index = req.offset / BLOCK_SIZE;
+        torrent_->reset_block_request(req.piece_index, block_index);
     }
     
     if (is_valid_socket(socket_)) {
@@ -883,12 +888,12 @@ void PeerConnection::handle_piece(const std::vector<uint8_t>& payload) {
                       static_cast<uint32_t>(payload[7]);
     
     std::vector<uint8_t> block_data(payload.begin() + 8, payload.end());
-    downloaded_bytes_ += block_data.size();
     
     LOG_BT_DEBUG("Received piece " << piece_index << " offset " << offset << " length " << block_data.size() << " from peer " << peer_info_.ip << ":" << peer_info_.port);
     
-    // Store the piece block
+    // Store the piece block - only count downloaded bytes on success
     if (torrent_->store_piece_block(piece_index, offset, block_data)) {
+        downloaded_bytes_ += block_data.size();
         // Remove corresponding request
         std::lock_guard<std::mutex> lock(requests_mutex_);
         pending_requests_.erase(
@@ -1557,7 +1562,8 @@ TorrentDownload::TorrentDownload(const TorrentInfo& torrent_info, const std::str
       last_speed_update_time_(std::chrono::steady_clock::now()),
       last_speed_downloaded_(0), last_speed_uploaded_(0),
       download_speed_(0.0), upload_speed_(0.0),
-      last_logged_progress_(0.0), last_state_log_time_(std::chrono::steady_clock::now()) {
+      last_logged_progress_(0.0), last_state_log_time_(std::chrono::steady_clock::now()),
+      first_tracker_announce_(true) {
     
     // Initialize pieces
     uint32_t num_pieces = torrent_info_.get_num_pieces();
@@ -1614,6 +1620,7 @@ bool TorrentDownload::start() {
     
     running_ = true;
     paused_ = false;
+    first_tracker_announce_ = true;  // Reset for STARTED event on first announce
     
     // Start download threads
     download_thread_ = std::thread(&TorrentDownload::download_loop, this);
@@ -2743,9 +2750,13 @@ void TorrentDownload::announce_to_trackers() {
     request.downloaded = total_downloaded_.load();
     request.left = torrent_info_.get_total_length() - total_downloaded_.load();
     
-    // Determine event
-    if (total_downloaded_.load() == 0 && !running_) {
+    // Determine event (per BEP 3)
+    // STARTED - must be sent on first announce to tracker
+    // COMPLETED - must be sent when download completes
+    // STOPPED - should be sent when gracefully leaving (handled in stop())
+    if (first_tracker_announce_) {
         request.event = TrackerEvent::STARTED;
+        first_tracker_announce_ = false;
     } else if (is_complete()) {
         request.event = TrackerEvent::COMPLETED;
     } else {
@@ -3036,10 +3047,12 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
         // Defer stop() and cleanup to a separate thread to avoid deadlock
         // (callback is called from PeerConnection::connection_thread_ which would try to join itself)
         std::thread([this, info_hash, download_path, metadata_torrent, captured_info]() {
-            // Stop the temporary metadata torrent first
+            // Stop the temporary metadata torrent first (safe - metadata_torrent is shared_ptr)
             metadata_torrent->stop();
             
             // Check if client is still running before accessing its data
+            // NOTE: This is a best-effort check. The client may be destroyed between
+            // this check and subsequent operations, but this reduces the window significantly.
             if (!running_.load()) {
                 LOG_BT_DEBUG("BitTorrent client stopped, skipping metadata download completion");
                 return;
@@ -3278,6 +3291,12 @@ void BitTorrentClient::handle_incoming_connections() {
 }
 
 void BitTorrentClient::handle_incoming_connection(socket_t client_socket) {
+    // Early exit if client is shutting down to prevent use-after-free
+    if (!running_.load()) {
+        close_socket(client_socket);
+        return;
+    }
+    
     LOG_BT_DEBUG("Handling incoming BitTorrent connection");
     
     InfoHash info_hash;
