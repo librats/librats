@@ -70,12 +70,16 @@ constexpr size_t BLOCK_SIZE = 16384;  // 16KB standard block size
 constexpr size_t MAX_PIECE_SIZE = 2 * 1024 * 1024;  // 2MB max piece size
 constexpr size_t HANDSHAKE_TIMEOUT_MS = 30000;  // 30 seconds
 constexpr size_t REQUEST_TIMEOUT_MS = 60000;    // 60 seconds
+constexpr size_t CONNECTION_TIMEOUT_MS = 5000;  // 5 seconds for TCP connect
 constexpr size_t MAX_REQUESTS_PER_PEER = 10;    // Maximum concurrent requests per peer
 constexpr size_t MAX_PEERS_PER_TORRENT = 50;    // Maximum peers per torrent
+constexpr size_t MAX_PIECES_TO_SELECT = 10;     // Maximum pieces to select for download at once
+constexpr size_t MAX_PEERS_FOR_METADATA = 10;   // Maximum peers to try for metadata exchange
 
 // BitTorrent protocol constants
 constexpr uint8_t BITTORRENT_PROTOCOL_ID[] = "BitTorrent protocol";
 constexpr size_t BITTORRENT_PROTOCOL_ID_LENGTH = 19;
+constexpr size_t HANDSHAKE_SIZE = 68;           // Fixed BitTorrent handshake size
 
 // File information structure
 struct FileInfo {
@@ -624,7 +628,6 @@ private:
     
     // Piece selection strategy
     std::vector<PieceIndex> select_pieces_for_download();
-    PieceIndex select_rarest_piece(const std::vector<bool>& available_pieces);
     
     // Progress tracking
     void update_progress();

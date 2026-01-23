@@ -3,14 +3,11 @@
 #include "fs.h"
 #include "network_utils.h"
 #include "socket.h"
-#include <iostream>
 #include <algorithm>
 #include <random>
 #include <sstream>
 #include <iomanip>
 #include <cstring>
-#include <climits>
-#include <cerrno>  // For errno on POSIX systems
 
 #define LOG_BT_DEBUG(message) LOG_DEBUG("bittorrent", message)
 #define LOG_BT_INFO(message)  LOG_INFO("bittorrent", message)
@@ -18,6 +15,20 @@
 #define LOG_BT_ERROR(message) LOG_ERROR("bittorrent", message)
 
 namespace librats {
+
+//=============================================================================
+// Internal Helper Functions
+//=============================================================================
+
+// Helper to check if an InfoHash is valid (not all zeros)
+static bool is_valid_info_hash(const InfoHash& hash) {
+    for (const auto& byte : hash) {
+        if (byte != 0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 //=============================================================================
 // TorrentInfo Implementation
@@ -492,8 +503,8 @@ void PeerConnection::connection_loop() {
     // Create socket if not already provided (outgoing connection)
     // This is done in the thread to avoid blocking the caller
     if (!is_valid_socket(socket_)) {
-        LOG_BT_DEBUG("Creating TCP connection to " << peer_info_.ip << ":" << peer_info_.port << " (5s timeout)");
-        socket_ = create_tcp_client(peer_info_.ip, peer_info_.port, 5000); // 5-second timeout for faster failure
+        LOG_BT_DEBUG("Creating TCP connection to " << peer_info_.ip << ":" << peer_info_.port << " (" << CONNECTION_TIMEOUT_MS << "ms timeout)");
+        socket_ = create_tcp_client(peer_info_.ip, peer_info_.port, CONNECTION_TIMEOUT_MS);
         if (!is_valid_socket(socket_)) {
             LOG_BT_ERROR("Failed to create connection to " << peer_info_.ip << ":" << peer_info_.port 
                         << " - connection timed out or refused");
@@ -585,9 +596,9 @@ bool PeerConnection::send_handshake() {
 }
 
 bool PeerConnection::receive_handshake() {
-    std::vector<uint8_t> handshake_data(68);  // Fixed handshake size
+    std::vector<uint8_t> handshake_data(HANDSHAKE_SIZE);
     
-    if (!read_data(handshake_data, 68)) {
+    if (!read_data(handshake_data, HANDSHAKE_SIZE)) {
         LOG_BT_ERROR("Failed to read handshake from peer");
         return false;
     }
@@ -1911,8 +1922,6 @@ void TorrentDownload::write_piece_to_disk(PieceIndex piece_index) {
     
     // Calculate piece offset in the torrent
     uint64_t piece_offset = static_cast<uint64_t>(piece_index) * torrent_info_.get_piece_length();
-    uint64_t remaining_data = piece->length;
-    uint64_t data_offset = 0;
     
     // Write piece data to the appropriate files
     for (const auto& file_info : torrent_info_.get_files()) {
@@ -1986,7 +1995,6 @@ bool TorrentDownload::read_piece_from_disk(PieceIndex piece_index, std::vector<u
     
     // Calculate piece offset in the torrent
     uint64_t piece_offset = static_cast<uint64_t>(piece_index) * torrent_info_.get_piece_length();
-    uint64_t data_offset = 0;
     
     // Read piece data from the appropriate files
     for (const auto& file_info : torrent_info_.get_files()) {
@@ -2387,53 +2395,16 @@ std::vector<PieceIndex> TorrentDownload::select_pieces_for_download() {
     // First, add pieces we're already downloading (prioritize completing them)
     for (PieceIndex piece : downloading_pieces) {
         selected_pieces.push_back(piece);
-        if (selected_pieces.size() >= 10) break;
+        if (selected_pieces.size() >= MAX_PIECES_TO_SELECT) break;
     }
     
     // Then add new pieces if we have room
     for (PieceIndex piece : new_pieces) {
-        if (selected_pieces.size() >= 10) break;
+        if (selected_pieces.size() >= MAX_PIECES_TO_SELECT) break;
         selected_pieces.push_back(piece);
     }
     
     return selected_pieces;
-}
-
-PieceIndex TorrentDownload::select_rarest_piece(const std::vector<bool>& available_pieces) {
-    // Lock order: peers_mutex_ -> pieces_mutex_
-    std::lock_guard<std::mutex> peers_lock(peers_mutex_);
-    std::lock_guard<std::mutex> pieces_lock(pieces_mutex_);
-    
-    // Count how many peers have each piece
-    std::vector<int> piece_counts(piece_completed_.size(), 0);
-    
-    for (const auto& peer : peer_connections_) {
-        if (!peer->is_connected()) {
-            continue;
-        }
-        
-        const auto& peer_bitfield = peer->get_bitfield();
-        for (size_t i = 0; i < peer_bitfield.size() && i < piece_counts.size(); ++i) {
-            if (peer_bitfield[i]) {
-                piece_counts[i]++;
-            }
-        }
-    }
-    
-    // Find the rarest piece we need and is available
-    int min_count = INT_MAX;
-    PieceIndex rarest_piece = static_cast<PieceIndex>(-1);
-    
-    for (size_t i = 0; i < available_pieces.size() && i < piece_completed_.size(); ++i) {
-        if (available_pieces[i] && !piece_completed_[i] && !piece_downloading_[i]) {
-            if (piece_counts[i] < min_count) {
-                min_count = piece_counts[i];
-                rarest_piece = static_cast<PieceIndex>(i);
-            }
-        }
-    }
-    
-    return rarest_piece;
 }
 
 // Helper function to format bytes per second as human-readable string
@@ -2554,7 +2525,7 @@ void TorrentDownload::log_detailed_state() {
         for (size_t i = 0; i < piece_downloading_.size(); ++i) {
             if (piece_downloading_[i] && !piece_completed_[i]) {
                 downloading_pieces++;
-                if (currently_downloading.size() < 10) {  // Limit to first 10
+                if (currently_downloading.size() < MAX_PIECES_TO_SELECT) {
                     currently_downloading.push_back(static_cast<PieceIndex>(i));
                 }
             }
@@ -3107,7 +3078,7 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const Inf
         }
         
         // Connect to peers to get metadata
-        size_t max_peers_to_try = (std::min)(peers.size(), static_cast<size_t>(10));
+        size_t max_peers_to_try = (std::min)(peers.size(), MAX_PEERS_FOR_METADATA);
         size_t peers_added = 0;
         for (size_t i = 0; i < max_peers_to_try; ++i) {
             // Check again if metadata is complete (could have completed during loop)
@@ -3155,16 +3126,7 @@ std::shared_ptr<TorrentDownload> BitTorrentClient::add_torrent_by_hash(const std
                                                                         const std::string& download_path) {
     InfoHash info_hash = hex_to_info_hash(info_hash_hex);
     
-    // Validate the parsed hash
-    bool is_zero = true;
-    for (const auto& byte : info_hash) {
-        if (byte != 0) {
-            is_zero = false;
-            break;
-        }
-    }
-    
-    if (is_zero && info_hash_hex.length() == 40) {
+    if (!is_valid_info_hash(info_hash) && info_hash_hex.length() == 40) {
         LOG_BT_ERROR("Invalid info hash format: " << info_hash_hex);
         return nullptr;
     }
@@ -3351,10 +3313,10 @@ void BitTorrentClient::handle_incoming_connection(socket_t client_socket) {
 
 bool BitTorrentClient::perform_incoming_handshake(socket_t socket, InfoHash& info_hash, PeerID& peer_id) {
     // Receive handshake
-    std::vector<uint8_t> handshake_data(68); // Fixed handshake size
-    std::string received_data = receive_tcp_string(socket, 68);
+    std::vector<uint8_t> handshake_data(HANDSHAKE_SIZE);
+    std::string received_data = receive_tcp_string(socket, HANDSHAKE_SIZE);
     
-    if (received_data.length() != 68) {
+    if (received_data.length() != HANDSHAKE_SIZE) {
         LOG_BT_ERROR("Invalid handshake size received: " << received_data.length());
         return false;
     }
@@ -3594,7 +3556,7 @@ void BitTorrentClient::get_torrent_metadata_by_hash(const InfoHash& info_hash, M
         }
         
         // Connect to peers to get metadata
-        size_t max_peers_to_try = (std::min)(peers.size(), static_cast<size_t>(10));
+        size_t max_peers_to_try = (std::min)(peers.size(), MAX_PEERS_FOR_METADATA);
         size_t peers_added = 0;
         for (size_t i = 0; i < max_peers_to_try; ++i) {
             // Check again if metadata is complete (could have completed during loop)
@@ -3631,16 +3593,7 @@ void BitTorrentClient::get_torrent_metadata_by_hash(const InfoHash& info_hash, M
 void BitTorrentClient::get_torrent_metadata_by_hash(const std::string& info_hash_hex, MetadataRetrievalCallback callback) {
     InfoHash info_hash = hex_to_info_hash(info_hash_hex);
     
-    // Validate the parsed hash
-    bool is_zero = true;
-    for (const auto& byte : info_hash) {
-        if (byte != 0) {
-            is_zero = false;
-            break;
-        }
-    }
-    
-    if (is_zero && info_hash_hex.length() == 40) {
+    if (!is_valid_info_hash(info_hash) && info_hash_hex.length() == 40) {
         LOG_BT_ERROR("Invalid info hash format: " << info_hash_hex);
         if (callback) {
             callback(TorrentInfo(), false, "Invalid info hash format");
@@ -3806,16 +3759,7 @@ void BitTorrentClient::get_torrent_metadata_from_peer(const std::string& info_ha
                                                        MetadataRetrievalCallback callback) {
     InfoHash info_hash = hex_to_info_hash(info_hash_hex);
     
-    // Validate the parsed hash
-    bool is_zero = true;
-    for (const auto& byte : info_hash) {
-        if (byte != 0) {
-            is_zero = false;
-            break;
-        }
-    }
-    
-    if (is_zero && info_hash_hex.length() == 40) {
+    if (!is_valid_info_hash(info_hash) && info_hash_hex.length() == 40) {
         LOG_BT_ERROR("Invalid info hash format: " << info_hash_hex);
         if (callback) {
             callback(TorrentInfo(), false, "Invalid info hash format");
@@ -3894,7 +3838,12 @@ PeerID generate_peer_id() {
 }
 
 std::vector<uint8_t> create_handshake_message(const InfoHash& info_hash, const PeerID& peer_id) {
-    std::vector<uint8_t> handshake(68);
+    // Handshake layout: [1 byte pstrlen][19 bytes protocol][8 bytes reserved][20 bytes info_hash][20 bytes peer_id]
+    constexpr size_t RESERVED_OFFSET = 1 + BITTORRENT_PROTOCOL_ID_LENGTH;  // 20
+    constexpr size_t INFO_HASH_OFFSET = RESERVED_OFFSET + 8;                // 28
+    constexpr size_t PEER_ID_OFFSET = INFO_HASH_OFFSET + 20;                // 48
+    
+    std::vector<uint8_t> handshake(HANDSHAKE_SIZE);
     
     // Protocol identifier length
     handshake[0] = BITTORRENT_PROTOCOL_ID_LENGTH;
@@ -3903,19 +3852,23 @@ std::vector<uint8_t> create_handshake_message(const InfoHash& info_hash, const P
     std::copy_n(BITTORRENT_PROTOCOL_ID, BITTORRENT_PROTOCOL_ID_LENGTH, handshake.begin() + 1);
     
     // Reserved bytes (8 bytes of zeros)
-    std::fill_n(handshake.begin() + 20, 8, 0);
+    std::fill_n(handshake.begin() + RESERVED_OFFSET, 8, 0);
     
     // Info hash (20 bytes)
-    std::copy(info_hash.begin(), info_hash.end(), handshake.begin() + 28);
+    std::copy(info_hash.begin(), info_hash.end(), handshake.begin() + INFO_HASH_OFFSET);
     
     // Peer ID (20 bytes)
-    std::copy(peer_id.begin(), peer_id.end(), handshake.begin() + 48);
+    std::copy(peer_id.begin(), peer_id.end(), handshake.begin() + PEER_ID_OFFSET);
     
     return handshake;
 }
 
 bool parse_handshake_message(const std::vector<uint8_t>& data, InfoHash& info_hash, PeerID& peer_id) {
-    if (data.size() != 68) {
+    // Handshake layout: [1 byte pstrlen][19 bytes protocol][8 bytes reserved][20 bytes info_hash][20 bytes peer_id]
+    constexpr size_t INFO_HASH_OFFSET = 1 + BITTORRENT_PROTOCOL_ID_LENGTH + 8;  // 28
+    constexpr size_t PEER_ID_OFFSET = INFO_HASH_OFFSET + 20;                     // 48
+    
+    if (data.size() != HANDSHAKE_SIZE) {
         return false;
     }
     
@@ -3931,10 +3884,10 @@ bool parse_handshake_message(const std::vector<uint8_t>& data, InfoHash& info_ha
     }
     
     // Extract info hash
-    std::copy(data.begin() + 28, data.begin() + 48, info_hash.begin());
+    std::copy(data.begin() + INFO_HASH_OFFSET, data.begin() + PEER_ID_OFFSET, info_hash.begin());
     
     // Extract peer ID
-    std::copy(data.begin() + 48, data.begin() + 68, peer_id.begin());
+    std::copy(data.begin() + PEER_ID_OFFSET, data.begin() + HANDSHAKE_SIZE, peer_id.begin());
     
     return true;
 }
