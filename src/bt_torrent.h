@@ -14,6 +14,7 @@
 #include "bt_piece_picker.h"
 #include "bt_peer_connection.h"
 #include "bt_choker.h"
+#include "disk_io.h"
 
 #include <memory>
 #include <vector>
@@ -382,6 +383,13 @@ private:
     void request_pieces();
     void run_choker();
     void update_stats();
+    
+    // Disk I/O helpers
+    std::vector<FileMappingInfo> get_file_mappings() const;
+    void write_piece_to_disk(uint32_t piece, const std::vector<uint8_t>& data);
+    void read_piece_from_disk(uint32_t piece, BtPeerConnection* peer, 
+                               uint32_t begin, uint32_t length);
+    void verify_piece_hash(uint32_t piece);
     
     //=========================================================================
     // Data Members

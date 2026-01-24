@@ -1,4 +1,5 @@
 #include "bt_torrent.h"
+#include "disk_io.h"
 #include <algorithm>
 
 namespace librats {
@@ -393,8 +394,10 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
             
         case BtMessageType::Request:
             // Peer is requesting a block from us
-            if (msg.request && !peer->am_choking()) {
-                // TODO: Read from disk and send
+            if (msg.request && !peer->am_choking() && have_pieces_.get_bit(msg.request->piece_index)) {
+                // Read from disk and send piece data to peer
+                read_piece_from_disk(msg.request->piece_index, peer, 
+                                    msg.request->begin, msg.request->length);
             }
             break;
             
@@ -436,9 +439,12 @@ void Torrent::on_piece_received(uint32_t piece, uint32_t begin,
     bool piece_complete = picker_->mark_finished(block);
     
     if (piece_complete) {
-        // Verify hash
-        // TODO: Actually hash and verify
-        on_piece_verified(piece, true);
+        // Write piece to disk first, then verify hash
+        auto& buffer = piece_buffers_[piece];
+        write_piece_to_disk(piece, buffer);
+        
+        // Verify hash asynchronously (callback will call on_piece_verified)
+        verify_piece_hash(piece);
     }
 }
 
@@ -449,9 +455,7 @@ void Torrent::on_piece_verified(uint32_t piece, bool valid) {
         picker_->mark_have(piece);
         have_pieces_.set_bit(piece);
         
-        // Write to disk
-        // TODO: Async disk write
-        
+        // Piece already written to disk before verification
         // Clear buffer
         piece_buffers_.erase(piece);
         
@@ -574,6 +578,119 @@ void Torrent::update_stats() {
         uint64_t remaining = stats_.total_size - stats_.bytes_done;
         stats_.eta = std::chrono::seconds(remaining / stats_.download_rate);
     }
+}
+
+//=============================================================================
+// Disk I/O Helpers
+//=============================================================================
+
+std::vector<FileMappingInfo> Torrent::get_file_mappings() const {
+    std::vector<FileMappingInfo> mappings;
+    
+    if (!info_) return mappings;
+    
+    const auto& files = info_->files().files();
+    mappings.reserve(files.size());
+    
+    for (const auto& file : files) {
+        FileMappingInfo mapping;
+        mapping.path = file.path;
+        mapping.length = static_cast<uint64_t>(file.size);
+        mapping.torrent_offset = static_cast<uint64_t>(file.offset);
+        mappings.push_back(mapping);
+    }
+    
+    return mappings;
+}
+
+void Torrent::write_piece_to_disk(uint32_t piece, const std::vector<uint8_t>& data) {
+    if (!info_) return;
+    
+    auto mappings = get_file_mappings();
+    auto weak_self = weak_from_this();
+    
+    DiskIO::instance().async_write_block(
+        config_.save_path,
+        mappings,
+        piece,
+        info_->piece_length(),
+        0,  // write entire piece from offset 0
+        data,
+        [weak_self, piece](bool success) {
+            auto self = weak_self.lock();
+            if (!self) return;
+            
+            if (!success) {
+                // Handle write error
+                if (self->on_error_) {
+                    self->on_error_(self.get(), "Failed to write piece " + std::to_string(piece));
+                }
+            }
+        }
+    );
+}
+
+void Torrent::read_piece_from_disk(uint32_t piece, BtPeerConnection* peer,
+                                    uint32_t begin, uint32_t length) {
+    if (!info_) return;
+    
+    auto mappings = get_file_mappings();
+    auto weak_self = weak_from_this();
+    uint32_t actual_length = info_->piece_size(piece);
+    
+    DiskIO::instance().async_read_piece(
+        config_.save_path,
+        mappings,
+        piece,
+        info_->piece_length(),
+        actual_length,
+        [weak_self, peer, piece, begin, length](bool success, const std::vector<uint8_t>& data) {
+            auto self = weak_self.lock();
+            if (!self) return;
+            
+            if (success && data.size() >= begin + length) {
+                // Send the requested block to peer
+                peer->send_piece(piece, begin, data.data() + begin, length);
+            }
+        }
+    );
+}
+
+void Torrent::verify_piece_hash(uint32_t piece) {
+    if (!info_) return;
+    
+    auto mappings = get_file_mappings();
+    auto weak_self = weak_from_this();
+    uint32_t actual_length = info_->piece_size(piece);
+    
+    DiskIO::instance().async_hash_piece(
+        config_.save_path,
+        mappings,
+        piece,
+        info_->piece_length(),
+        actual_length,
+        [weak_self, piece](bool success, const std::string& calculated_hash) {
+            auto self = weak_self.lock();
+            if (!self) return;
+            
+            if (!success) {
+                self->on_piece_verified(piece, false);
+                return;
+            }
+            
+            // Compare with expected hash
+            auto expected_hash = self->info_->piece_hash(piece);
+            std::string expected_hex;
+            for (uint8_t b : expected_hash) {
+                char hex[3];
+                snprintf(hex, sizeof(hex), "%02x", b);
+                expected_hex += hex;
+            }
+            
+            bool valid = (calculated_hash == expected_hex);
+            self->on_piece_verified(piece, valid);
+        }
+    );
 }
 
 } // namespace librats
