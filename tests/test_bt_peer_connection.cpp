@@ -1,0 +1,447 @@
+#include <gtest/gtest.h>
+#include "bt_peer_connection.h"
+
+using namespace librats;
+
+//=============================================================================
+// Helper Functions
+//=============================================================================
+
+BtInfoHash make_test_hash() {
+    BtInfoHash hash{};
+    for (size_t i = 0; i < 20; ++i) {
+        hash[i] = static_cast<uint8_t>(i);
+    }
+    return hash;
+}
+
+PeerID make_test_peer_id() {
+    return generate_peer_id("-TS0001-");
+}
+
+//=============================================================================
+// Construction Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, Construction) {
+    auto hash = make_test_hash();
+    auto peer_id = make_test_peer_id();
+    
+    BtPeerConnection conn(hash, peer_id, 100);
+    
+    EXPECT_EQ(conn.state(), PeerConnectionState::Disconnected);
+    EXPECT_EQ(conn.socket(), -1);
+    EXPECT_FALSE(conn.is_connected());
+    EXPECT_TRUE(conn.am_choking());
+    EXPECT_FALSE(conn.am_interested());
+    EXPECT_TRUE(conn.peer_choking());
+    EXPECT_FALSE(conn.peer_interested());
+}
+
+TEST(BtPeerConnectionTest, SetAddress) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    
+    conn.set_address("192.168.1.100", 6881);
+    
+    EXPECT_EQ(conn.ip(), "192.168.1.100");
+    EXPECT_EQ(conn.port(), 6881);
+}
+
+TEST(BtPeerConnectionTest, SetSocket) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    
+    conn.set_socket(42);
+    
+    EXPECT_EQ(conn.socket(), 42);
+    EXPECT_EQ(conn.state(), PeerConnectionState::Handshaking);
+}
+
+//=============================================================================
+// State Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, StateToString) {
+    EXPECT_STREQ(peer_state_to_string(PeerConnectionState::Disconnected), "Disconnected");
+    EXPECT_STREQ(peer_state_to_string(PeerConnectionState::Connecting), "Connecting");
+    EXPECT_STREQ(peer_state_to_string(PeerConnectionState::Handshaking), "Handshaking");
+    EXPECT_STREQ(peer_state_to_string(PeerConnectionState::Connected), "Connected");
+    EXPECT_STREQ(peer_state_to_string(PeerConnectionState::Closing), "Closing");
+}
+
+TEST(BtPeerConnectionTest, StateCallback) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    
+    PeerConnectionState last_state = PeerConnectionState::Disconnected;
+    conn.set_state_callback([&last_state](BtPeerConnection*, PeerConnectionState state) {
+        last_state = state;
+    });
+    
+    conn.set_socket(42);
+    EXPECT_EQ(last_state, PeerConnectionState::Handshaking);
+}
+
+//=============================================================================
+// Handshake Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, StartHandshake) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    conn.start_handshake();
+    
+    EXPECT_TRUE(conn.has_send_data());
+    
+    // Get the handshake data
+    std::vector<uint8_t> buffer(68);
+    size_t len = conn.get_send_data(buffer.data(), buffer.size());
+    
+    EXPECT_EQ(len, 68);  // Handshake is 68 bytes
+    
+    // Validate it's a valid handshake
+    auto hs = BtHandshake::decode(buffer);
+    ASSERT_TRUE(hs.has_value());
+    EXPECT_EQ(hs->info_hash, make_test_hash());
+}
+
+TEST(BtPeerConnectionTest, ReceiveHandshake) {
+    auto our_hash = make_test_hash();
+    auto our_id = make_test_peer_id();
+    
+    BtPeerConnection conn(our_hash, our_id, 100);
+    conn.set_socket(42);
+    
+    bool handshake_received = false;
+    Handshake received_hs;
+    
+    conn.set_handshake_callback([&](BtPeerConnection*, const Handshake& hs) {
+        handshake_received = true;
+        received_hs = hs;
+    });
+    
+    // Create a valid handshake from "peer"
+    PeerID peer_id{};
+    for (size_t i = 0; i < 20; ++i) peer_id[i] = static_cast<uint8_t>(100 + i);
+    
+    auto hs_data = BtHandshake::encode_with_extensions(our_hash, peer_id);
+    
+    // Feed to connection
+    conn.on_receive(hs_data.data(), hs_data.size());
+    
+    EXPECT_TRUE(handshake_received);
+    EXPECT_EQ(received_hs.peer_id, peer_id);
+    EXPECT_EQ(conn.state(), PeerConnectionState::Connected);
+    EXPECT_EQ(conn.peer_id(), peer_id);
+}
+
+TEST(BtPeerConnectionTest, HandshakeMismatch) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    bool error_received = false;
+    conn.set_error_callback([&](BtPeerConnection*, const std::string&) {
+        error_received = true;
+    });
+    
+    // Create handshake with different info hash
+    BtInfoHash wrong_hash{};
+    wrong_hash[0] = 0xFF;  // Different
+    
+    auto hs_data = BtHandshake::encode(wrong_hash, make_test_peer_id());
+    conn.on_receive(hs_data.data(), hs_data.size());
+    
+    EXPECT_TRUE(error_received);
+    EXPECT_EQ(conn.state(), PeerConnectionState::Disconnected);
+}
+
+//=============================================================================
+// Message Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, SendChoke) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    EXPECT_TRUE(conn.am_choking());
+    
+    conn.send_unchoke();
+    EXPECT_FALSE(conn.am_choking());
+    
+    conn.send_choke();
+    EXPECT_TRUE(conn.am_choking());
+}
+
+TEST(BtPeerConnectionTest, SendInterested) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    EXPECT_FALSE(conn.am_interested());
+    
+    conn.send_interested();
+    EXPECT_TRUE(conn.am_interested());
+    
+    conn.send_not_interested();
+    EXPECT_FALSE(conn.am_interested());
+}
+
+TEST(BtPeerConnectionTest, ReceiveMessages) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // First receive handshake to get connected
+    auto hs_data = BtHandshake::encode(our_hash, make_test_peer_id());
+    conn.on_receive(hs_data.data(), hs_data.size());
+    ASSERT_EQ(conn.state(), PeerConnectionState::Connected);
+    
+    std::vector<BtMessage> received_msgs;
+    conn.set_message_callback([&](BtPeerConnection*, const BtMessage& msg) {
+        received_msgs.push_back(msg);
+    });
+    
+    // Send unchoke message
+    auto unchoke = BtMessageEncoder::encode_unchoke();
+    conn.on_receive(unchoke.data(), unchoke.size());
+    
+    ASSERT_EQ(received_msgs.size(), 1);
+    EXPECT_EQ(received_msgs[0].type, BtMessageType::Unchoke);
+    EXPECT_FALSE(conn.peer_choking());
+}
+
+TEST(BtPeerConnectionTest, ReceiveHave) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Handshake
+    auto hs_data = BtHandshake::encode(our_hash, make_test_peer_id());
+    conn.on_receive(hs_data.data(), hs_data.size());
+    
+    EXPECT_FALSE(conn.peer_has_piece(42));
+    
+    // Receive HAVE message
+    auto have = BtMessageEncoder::encode_have(42);
+    conn.on_receive(have.data(), have.size());
+    
+    EXPECT_TRUE(conn.peer_has_piece(42));
+}
+
+TEST(BtPeerConnectionTest, ReceiveBitfield) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Handshake
+    auto hs_data = BtHandshake::encode(our_hash, make_test_peer_id());
+    conn.on_receive(hs_data.data(), hs_data.size());
+    
+    // Create and send bitfield
+    Bitfield bf(100);
+    bf.set_bit(0);
+    bf.set_bit(50);
+    bf.set_bit(99);
+    
+    auto bf_msg = BtMessageEncoder::encode_bitfield(bf);
+    conn.on_receive(bf_msg.data(), bf_msg.size());
+    
+    EXPECT_TRUE(conn.peer_has_piece(0));
+    EXPECT_TRUE(conn.peer_has_piece(50));
+    EXPECT_TRUE(conn.peer_has_piece(99));
+    EXPECT_FALSE(conn.peer_has_piece(1));
+}
+
+//=============================================================================
+// Request Tracking Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, PendingRequests) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    EXPECT_EQ(conn.pending_requests(), 0);
+    
+    conn.add_pending_request(RequestMessage(5, 0, 16384));
+    conn.add_pending_request(RequestMessage(5, 16384, 16384));
+    
+    EXPECT_EQ(conn.pending_requests(), 2);
+    
+    conn.remove_pending_request(RequestMessage(5, 0, 16384));
+    EXPECT_EQ(conn.pending_requests(), 1);
+    
+    conn.clear_pending_requests();
+    EXPECT_EQ(conn.pending_requests(), 0);
+}
+
+TEST(BtPeerConnectionTest, CanRequest) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Peer is choking us initially
+    EXPECT_FALSE(conn.can_request());
+    
+    // Simulate receiving unchoke
+    auto our_hash = make_test_hash();
+    auto hs = BtHandshake::encode(our_hash, make_test_peer_id());
+    conn.on_receive(hs.data(), hs.size());
+    
+    auto unchoke = BtMessageEncoder::encode_unchoke();
+    conn.on_receive(unchoke.data(), unchoke.size());
+    
+    EXPECT_TRUE(conn.can_request());
+    
+    // Fill up request queue
+    conn.set_max_pending_requests(2);
+    conn.add_pending_request(RequestMessage(0, 0, 16384));
+    conn.add_pending_request(RequestMessage(0, 16384, 16384));
+    
+    EXPECT_FALSE(conn.can_request());
+}
+
+//=============================================================================
+// Send Buffer Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, SendBuffer) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    EXPECT_FALSE(conn.has_send_data());
+    
+    conn.send_interested();
+    EXPECT_TRUE(conn.has_send_data());
+    
+    std::vector<uint8_t> buffer(100);
+    size_t len = conn.get_send_data(buffer.data(), buffer.size());
+    EXPECT_EQ(len, 5);  // Interested message is 5 bytes
+    
+    // Data still there until marked as sent
+    EXPECT_TRUE(conn.has_send_data());
+    
+    conn.mark_sent(5);
+    EXPECT_FALSE(conn.has_send_data());
+}
+
+TEST(BtPeerConnectionTest, PartialSend) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    conn.start_handshake();
+    
+    // Get first half
+    std::vector<uint8_t> buffer(34);
+    size_t len = conn.get_send_data(buffer.data(), 34);
+    EXPECT_EQ(len, 34);
+    
+    conn.mark_sent(34);
+    EXPECT_TRUE(conn.has_send_data());
+    
+    // Get second half
+    len = conn.get_send_data(buffer.data(), 34);
+    EXPECT_EQ(len, 34);
+    
+    conn.mark_sent(34);
+    EXPECT_FALSE(conn.has_send_data());
+}
+
+//=============================================================================
+// Statistics Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, Statistics) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Initial stats
+    EXPECT_EQ(conn.stats().bytes_downloaded, 0);
+    EXPECT_EQ(conn.stats().bytes_uploaded, 0);
+    EXPECT_EQ(conn.stats().messages_sent, 0);
+    EXPECT_EQ(conn.stats().messages_received, 0);
+    
+    // Handshake
+    auto hs = BtHandshake::encode(our_hash, make_test_peer_id());
+    conn.on_receive(hs.data(), hs.size());
+    
+    // Send some messages
+    conn.send_interested();
+    conn.send_have(10);
+    
+    EXPECT_EQ(conn.stats().messages_sent, 2);
+    
+    // Receive messages
+    auto interested = BtMessageEncoder::encode_interested();
+    conn.on_receive(interested.data(), interested.size());
+    
+    EXPECT_EQ(conn.stats().messages_received, 1);
+}
+
+TEST(BtPeerConnectionTest, DownloadStats) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Handshake
+    auto hs = BtHandshake::encode(our_hash, make_test_peer_id());
+    conn.on_receive(hs.data(), hs.size());
+    
+    // Receive piece data
+    std::vector<uint8_t> data(1000, 0xAB);
+    auto piece_msg = BtMessageEncoder::encode_piece(0, 0, data.data(), data.size());
+    conn.on_receive(piece_msg.data(), piece_msg.size());
+    
+    EXPECT_EQ(conn.stats().bytes_downloaded, 1000);
+    EXPECT_EQ(conn.stats().pieces_received, 1);
+}
+
+//=============================================================================
+// Move Semantics Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, MoveConstructor) {
+    BtPeerConnection conn1(make_test_hash(), make_test_peer_id(), 100);
+    conn1.set_socket(42);
+    conn1.set_address("1.2.3.4", 6881);
+    
+    BtPeerConnection conn2(std::move(conn1));
+    
+    EXPECT_EQ(conn2.socket(), 42);
+    EXPECT_EQ(conn2.ip(), "1.2.3.4");
+    EXPECT_EQ(conn2.port(), 6881);
+    
+    // Original should be invalidated
+    EXPECT_EQ(conn1.socket(), -1);
+    EXPECT_EQ(conn1.state(), PeerConnectionState::Disconnected);
+}
+
+TEST(BtPeerConnectionTest, MoveAssignment) {
+    BtPeerConnection conn1(make_test_hash(), make_test_peer_id(), 100);
+    conn1.set_socket(42);
+    
+    BtPeerConnection conn2(make_test_hash(), make_test_peer_id(), 50);
+    conn2 = std::move(conn1);
+    
+    EXPECT_EQ(conn2.socket(), 42);
+    EXPECT_EQ(conn1.socket(), -1);
+}
+
+//=============================================================================
+// Close Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, Close) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Handshake to get connected
+    auto hs = BtHandshake::encode(our_hash, make_test_peer_id());
+    conn.on_receive(hs.data(), hs.size());
+    EXPECT_EQ(conn.state(), PeerConnectionState::Connected);
+    
+    conn.close();
+    
+    EXPECT_EQ(conn.state(), PeerConnectionState::Disconnected);
+    EXPECT_EQ(conn.socket(), -1);
+    EXPECT_EQ(conn.pending_requests(), 0);
+}

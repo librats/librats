@@ -946,19 +946,21 @@ void UdpTrackerClient::write_int64_be(uint8_t* data, int64_t value) {
 //=============================================================================
 
 TrackerManager::TrackerManager(const TorrentInfo& torrent_info)
-    : info_hash_(torrent_info.get_info_hash()), announce_interval_(1800) {
+    : info_hash_(torrent_info.info_hash()), announce_interval_(1800) {
     
-    LOG_TRACKER_INFO("Creating tracker manager for torrent: " << torrent_info.get_name());
+    LOG_TRACKER_INFO("Creating tracker manager for torrent: " << torrent_info.name());
     
     // Add primary announce URL
-    if (!torrent_info.get_announce().empty()) {
-        add_tracker(torrent_info.get_announce());
+    if (!torrent_info.announce().empty()) {
+        add_tracker(torrent_info.announce());
     }
     
-    // Add announce list
-    for (const auto& tracker_url : torrent_info.get_announce_list()) {
-        if (tracker_url != torrent_info.get_announce()) {
-            add_tracker(tracker_url);
+    // Add announce list (each tier is a vector of tracker URLs)
+    for (const auto& tier : torrent_info.announce_list()) {
+        for (const auto& tracker_url : tier) {
+            if (tracker_url != torrent_info.announce()) {
+                add_tracker(tracker_url);
+            }
         }
     }
     

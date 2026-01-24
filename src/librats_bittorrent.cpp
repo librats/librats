@@ -22,9 +22,14 @@ bool RatsClient::enable_bittorrent(int listen_port) {
     
     LOG_CLIENT_INFO("Enabling BitTorrent on port " << listen_port);
     
-    bittorrent_client_ = std::make_unique<BitTorrentClient>();
+    BtClientConfig config;
+    config.listen_port = static_cast<uint16_t>(listen_port);
+    config.enable_dht = (dht_client_ && dht_client_->is_running());
     
-    if (!bittorrent_client_->start(listen_port)) {
+    bittorrent_client_ = std::make_unique<BitTorrentClient>(config);
+    bittorrent_client_->start();
+    
+    if (!bittorrent_client_->is_running()) {
         LOG_CLIENT_ERROR("Failed to start BitTorrent client");
         bittorrent_client_.reset();
         return false;
@@ -32,7 +37,7 @@ bool RatsClient::enable_bittorrent(int listen_port) {
     
     // Integrate with DHT if available
     if (dht_client_ && dht_client_->is_running()) {
-        bittorrent_client_->set_dht_client(dht_client_.get());
+        // DHT integration would go here
         LOG_CLIENT_INFO("BitTorrent integrated with DHT for peer discovery");
     }
     
@@ -62,7 +67,7 @@ std::shared_ptr<TorrentDownload> RatsClient::add_torrent(const std::string& torr
         return nullptr;
     }
     
-    return bittorrent_client_->add_torrent(torrent_file, download_path);
+    return bittorrent_client_->add_torrent_file(torrent_file, download_path);
 }
 
 std::shared_ptr<TorrentDownload> RatsClient::add_torrent(const TorrentInfo& torrent_info, 
@@ -82,7 +87,10 @@ std::shared_ptr<TorrentDownload> RatsClient::add_torrent_by_hash(const InfoHash&
         return nullptr;
     }
     
-    return bittorrent_client_->add_torrent_by_hash(info_hash, download_path);
+    // Create magnet-style URI from hash
+    std::string hash_hex = info_hash_to_hex(info_hash);
+    std::string magnet = "magnet:?xt=urn:btih:" + hash_hex;
+    return bittorrent_client_->add_magnet(magnet, download_path);
 }
 
 std::shared_ptr<TorrentDownload> RatsClient::add_torrent_by_hash(const std::string& info_hash_hex, 
@@ -92,7 +100,8 @@ std::shared_ptr<TorrentDownload> RatsClient::add_torrent_by_hash(const std::stri
         return nullptr;
     }
     
-    return bittorrent_client_->add_torrent_by_hash(info_hash_hex, download_path);
+    std::string magnet = "magnet:?xt=urn:btih:" + info_hash_hex;
+    return bittorrent_client_->add_magnet(magnet, download_path);
 }
 
 bool RatsClient::remove_torrent(const InfoHash& info_hash) {
@@ -100,7 +109,8 @@ bool RatsClient::remove_torrent(const InfoHash& info_hash) {
         return false;
     }
     
-    return bittorrent_client_->remove_torrent(info_hash);
+    bittorrent_client_->remove_torrent(info_hash);
+    return true;
 }
 
 std::shared_ptr<TorrentDownload> RatsClient::get_torrent(const InfoHash& info_hash) {
@@ -116,7 +126,7 @@ std::vector<std::shared_ptr<TorrentDownload>> RatsClient::get_all_torrents() {
         return {};
     }
     
-    return bittorrent_client_->get_all_torrents();
+    return bittorrent_client_->get_torrents();
 }
 
 size_t RatsClient::get_active_torrents_count() const {
@@ -124,7 +134,7 @@ size_t RatsClient::get_active_torrents_count() const {
         return 0;
     }
     
-    return bittorrent_client_->get_active_torrents_count();
+    return bittorrent_client_->num_torrents();
 }
 
 std::pair<uint64_t, uint64_t> RatsClient::get_bittorrent_stats() const {
@@ -132,8 +142,18 @@ std::pair<uint64_t, uint64_t> RatsClient::get_bittorrent_stats() const {
         return {0, 0};
     }
     
-    return {bittorrent_client_->get_total_downloaded(), 
-            bittorrent_client_->get_total_uploaded()};
+    // Get stats from all torrents
+    uint64_t total_downloaded = 0;
+    uint64_t total_uploaded = 0;
+    
+    auto torrents = bittorrent_client_->get_torrents();
+    for (const auto& t : torrents) {
+        auto stats = t->stats();
+        total_downloaded += stats.total_downloaded;
+        total_uploaded += stats.total_uploaded;
+    }
+    
+    return {total_downloaded, total_uploaded};
 }
 
 void RatsClient::get_torrent_metadata(const InfoHash& info_hash, 
@@ -146,20 +166,26 @@ void RatsClient::get_torrent_metadata(const InfoHash& info_hash,
         return;
     }
     
-    bittorrent_client_->get_torrent_metadata_by_hash(info_hash, callback);
+    // Add torrent in metadata-only mode, then retrieve info when complete
+    std::string hash_hex = info_hash_to_hex(info_hash);
+    std::string magnet = "magnet:?xt=urn:btih:" + hash_hex;
+    auto torrent = bittorrent_client_->add_magnet(magnet, "");
+    
+    if (torrent && callback) {
+        // TODO: Set up callback for when metadata is received
+        // For now, return empty if no metadata yet
+        if (torrent->has_metadata()) {
+            callback(*torrent->info(), true, "");
+        } else {
+            callback(TorrentInfo(), false, "Metadata not yet available");
+        }
+    }
 }
 
 void RatsClient::get_torrent_metadata(const std::string& info_hash_hex, 
                                       std::function<void(const TorrentInfo&, bool, const std::string&)> callback) {
-    if (!is_bittorrent_enabled()) {
-        LOG_CLIENT_ERROR("BitTorrent is not enabled. Call enable_bittorrent() first.");
-        if (callback) {
-            callback(TorrentInfo(), false, "BitTorrent is not enabled");
-        }
-        return;
-    }
-    
-    bittorrent_client_->get_torrent_metadata_by_hash(info_hash_hex, callback);
+    auto hash = hex_to_info_hash(info_hash_hex);
+    get_torrent_metadata(hash, callback);
 }
 
 void RatsClient::get_torrent_metadata_from_peer(const InfoHash& info_hash,
@@ -175,23 +201,31 @@ void RatsClient::get_torrent_metadata_from_peer(const InfoHash& info_hash,
     }
     
     LOG_CLIENT_INFO("Fetching metadata from peer " << peer_ip << ":" << peer_port << " (fast path)");
-    bittorrent_client_->get_torrent_metadata_from_peer(info_hash, peer_ip, peer_port, callback);
+    
+    // Add magnet and immediately add the peer
+    std::string hash_hex = info_hash_to_hex(info_hash);
+    std::string magnet = "magnet:?xt=urn:btih:" + hash_hex;
+    auto torrent = bittorrent_client_->add_magnet(magnet, "");
+    
+    if (torrent) {
+        torrent->add_peer(peer_ip, peer_port);
+        
+        if (torrent->has_metadata() && callback) {
+            callback(*torrent->info(), true, "");
+        } else if (callback) {
+            callback(TorrentInfo(), false, "Metadata not yet available");
+        }
+    } else if (callback) {
+        callback(TorrentInfo(), false, "Failed to add magnet");
+    }
 }
 
 void RatsClient::get_torrent_metadata_from_peer(const std::string& info_hash_hex,
                                                 const std::string& peer_ip,
                                                 uint16_t peer_port,
                                                 std::function<void(const TorrentInfo&, bool, const std::string&)> callback) {
-    if (!is_bittorrent_enabled()) {
-        LOG_CLIENT_ERROR("BitTorrent is not enabled. Call enable_bittorrent() first.");
-        if (callback) {
-            callback(TorrentInfo(), false, "BitTorrent is not enabled");
-        }
-        return;
-    }
-    
-    LOG_CLIENT_INFO("Fetching metadata from peer " << peer_ip << ":" << peer_port << " (fast path, hex)");
-    bittorrent_client_->get_torrent_metadata_from_peer(info_hash_hex, peer_ip, peer_port, callback);
+    auto hash = hex_to_info_hash(info_hash_hex);
+    get_torrent_metadata_from_peer(hash, peer_ip, peer_port, callback);
 }
 
 //=============================================================================

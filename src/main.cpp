@@ -1039,21 +1039,23 @@ int main(int argc, char* argv[]) {
                         [hash_str](const librats::TorrentInfo& torrent_info, bool success, const std::string& error_message) {
                             if (success) {
                                 LOG_MAIN_INFO("=== Torrent Metadata Retrieved Successfully ===");
-                                LOG_MAIN_INFO("Name: " << torrent_info.get_name());
-                                LOG_MAIN_INFO("Info Hash: " << librats::info_hash_to_hex(torrent_info.get_info_hash()));
-                                LOG_MAIN_INFO("Total Size: " << (torrent_info.get_total_length() / 1024.0 / 1024.0) << " MB");
-                                LOG_MAIN_INFO("Piece Length: " << torrent_info.get_piece_length() << " bytes");
-                                LOG_MAIN_INFO("Number of Pieces: " << torrent_info.get_num_pieces());
-                                LOG_MAIN_INFO("Number of Files: " << torrent_info.get_files().size());
+                                LOG_MAIN_INFO("Name: " << torrent_info.name());
+                                LOG_MAIN_INFO("Info Hash: " << librats::info_hash_to_hex(torrent_info.info_hash()));
+                                LOG_MAIN_INFO("Total Size: " << (torrent_info.total_size() / 1024.0 / 1024.0) << " MB");
+                                LOG_MAIN_INFO("Piece Length: " << torrent_info.piece_length() << " bytes");
+                                LOG_MAIN_INFO("Number of Pieces: " << torrent_info.num_pieces());
+                                LOG_MAIN_INFO("Number of Files: " << torrent_info.num_files());
                                 LOG_MAIN_INFO("Private: " << (torrent_info.is_private() ? "yes" : "no"));
                                 
-                                const auto& files = torrent_info.get_files();
-                                if (files.size() == 1) {
+                                size_t file_count = torrent_info.num_files();
+                                if (file_count == 1) {
                                     LOG_MAIN_INFO("Single file torrent");
                                 } else {
                                     std::cout << "\nFiles in torrent:" << std::endl;
-                                    for (const auto& file : files) {
-                                        std::cout << "  - " << file.path << " (" << (file.length / 1024.0 / 1024.0) << " MB)" << std::endl;
+                                    const auto& file_storage = torrent_info.files();
+                                    for (size_t i = 0; i < file_count; ++i) {
+                                        const auto& file = file_storage.file_at(i);
+                                        std::cout << "  - " << file.path << " (" << (file.size / 1024.0 / 1024.0) << " MB)" << std::endl;
                                     }
                                 }
                                 
@@ -1121,25 +1123,16 @@ int main(int argc, char* argv[]) {
                 } else {
                     std::cout << "Active torrents:" << std::endl;
                     for (const auto& torrent : torrents) {
-                        const auto& info = torrent->get_torrent_info();
-                        std::cout << "  Info Hash: " << librats::info_hash_to_hex(info.get_info_hash()) << std::endl;
-                        std::cout << "    Name: " << info.get_name() << std::endl;
-                        std::cout << "    Size: " << (info.get_total_length() / 1024.0 / 1024.0) << " MB" << std::endl;
-                        std::cout << "    Downloaded: " << (torrent->get_downloaded_bytes() / 1024.0 / 1024.0) << " MB" << std::endl;
-                        std::cout << "    Uploaded: " << (torrent->get_uploaded_bytes() / 1024.0 / 1024.0) << " MB" << std::endl;
-                        std::cout << "    Progress: " << torrent->get_progress_percentage() << "%" << std::endl;
-                        std::cout << "    Peers: " << torrent->get_peer_count() << std::endl;
-                        std::cout << "    Status: ";
-                        if (torrent->is_complete()) {
-                            std::cout << "COMPLETE";
-                        } else if (torrent->is_paused()) {
-                            std::cout << "PAUSED";
-                        } else if (torrent->is_running()) {
-                            std::cout << "DOWNLOADING";
-                        } else {
-                            std::cout << "STOPPED";
-                        }
-                        std::cout << std::endl << std::endl;
+                        auto torrent_stats = torrent->stats();
+                        std::cout << "  Info Hash: " << torrent->info_hash_hex() << std::endl;
+                        std::cout << "    Name: " << torrent->name() << std::endl;
+                        std::cout << "    Size: " << (torrent_stats.total_size / 1024.0 / 1024.0) << " MB" << std::endl;
+                        std::cout << "    Downloaded: " << (torrent_stats.total_downloaded / 1024.0 / 1024.0) << " MB" << std::endl;
+                        std::cout << "    Uploaded: " << (torrent_stats.total_uploaded / 1024.0 / 1024.0) << " MB" << std::endl;
+                        std::cout << "    Progress: " << (torrent_stats.progress * 100.0f) << "%" << std::endl;
+                        std::cout << "    Peers: " << torrent->num_peers() << std::endl;
+                        std::cout << "    Status: " << torrent_state_to_string(torrent->state()) << std::endl;
+                        std::cout << std::endl;
                     }
                 }
             }
@@ -1179,38 +1172,21 @@ int main(int argc, char* argv[]) {
                         librats::InfoHash info_hash = librats::hex_to_info_hash(hash_str);
                         auto torrent = client.get_torrent(info_hash);
                         if (torrent) {
-                            const auto& info = torrent->get_torrent_info();
+                            auto torrent_stats = torrent->stats();
                             std::cout << "Torrent Information:" << std::endl;
-                            std::cout << "  Info Hash: " << librats::info_hash_to_hex(info.get_info_hash()) << std::endl;
-                            std::cout << "  Name: " << info.get_name() << std::endl;
-                            std::cout << "  Total Size: " << (info.get_total_length() / 1024.0 / 1024.0) << " MB" << std::endl;
-                            std::cout << "  Piece Length: " << info.get_piece_length() << " bytes" << std::endl;
-                            std::cout << "  Piece Count: " << info.get_num_pieces() << std::endl;
-                            std::cout << "  Downloaded: " << (torrent->get_downloaded_bytes() / 1024.0 / 1024.0) << " MB" << std::endl;
-                            std::cout << "  Uploaded: " << (torrent->get_uploaded_bytes() / 1024.0 / 1024.0) << " MB" << std::endl;
-                            std::cout << "  Progress: " << torrent->get_progress_percentage() << "%" << std::endl;
-                            std::cout << "  Completed Pieces: " << torrent->get_completed_pieces() << "/" << info.get_num_pieces() << std::endl;
-                            std::cout << "  Connected Peers: " << torrent->get_peer_count() << std::endl;
-                            std::cout << "  Status: ";
-                            if (torrent->is_complete()) {
-                                std::cout << "COMPLETE";
-                            } else if (torrent->is_paused()) {
-                                std::cout << "PAUSED";
-                            } else if (torrent->is_running()) {
-                                std::cout << "DOWNLOADING";
-                            } else {
-                                std::cout << "STOPPED";
+                            std::cout << "  Info Hash: " << torrent->info_hash_hex() << std::endl;
+                            std::cout << "  Name: " << torrent->name() << std::endl;
+                            std::cout << "  Total Size: " << (torrent_stats.total_size / 1024.0 / 1024.0) << " MB" << std::endl;
+                            if (torrent->info()) {
+                                std::cout << "  Piece Length: " << torrent->info()->piece_length() << " bytes" << std::endl;
+                                std::cout << "  Piece Count: " << torrent->info()->num_pieces() << std::endl;
                             }
-                            std::cout << std::endl;
-                            
-                            // Show file list
-                            const auto& files = info.get_files();
-                            if (files.size() > 1) {
-                                std::cout << "  Files:" << std::endl;
-                                for (const auto& file : files) {
-                                    std::cout << "    - " << file.path << " (" << (file.length / 1024.0 / 1024.0) << " MB)" << std::endl;
-                                }
-                            }
+                            std::cout << "  Downloaded: " << (torrent_stats.total_downloaded / 1024.0 / 1024.0) << " MB" << std::endl;
+                            std::cout << "  Uploaded: " << (torrent_stats.total_uploaded / 1024.0 / 1024.0) << " MB" << std::endl;
+                            std::cout << "  Progress: " << (torrent_stats.progress * 100.0f) << "%" << std::endl;
+                            std::cout << "  Completed Pieces: " << torrent_stats.pieces_done << "/" << torrent_stats.pieces_total << std::endl;
+                            std::cout << "  Connected Peers: " << torrent->num_peers() << std::endl;
+                            std::cout << "  Status: " << torrent_state_to_string(torrent->state()) << std::endl;
                         } else {
                             LOG_MAIN_ERROR("Torrent not found");
                         }
@@ -1284,13 +1260,13 @@ int main(int argc, char* argv[]) {
                         librats::InfoHash info_hash = librats::hex_to_info_hash(hash_str);
                         auto torrent = client.get_torrent(info_hash);
                         if (torrent) {
-                            auto peers = torrent->get_connected_peers();
-                            if (peers.empty()) {
+                            auto peer_conns = torrent->peers();
+                            if (peer_conns.empty()) {
                                 std::cout << "No connected peers for this torrent." << std::endl;
                             } else {
-                                std::cout << "Connected peers (" << peers.size() << "):" << std::endl;
-                                for (const auto& peer : peers) {
-                                    std::cout << "  " << peer.ip << ":" << peer.port << std::endl;
+                                std::cout << "Connected peers (" << peer_conns.size() << "):" << std::endl;
+                                for (const auto* peer : peer_conns) {
+                                    std::cout << "  " << peer->ip() << ":" << peer->port() << std::endl;
                                 }
                             }
                         } else {

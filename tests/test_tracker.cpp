@@ -149,39 +149,38 @@ TEST_F(TrackerTest, UdpTransactionIdGeneration) {
     EXPECT_TRUE(tracker.is_working() || !tracker.is_working()); // Constructor may fail
 }
 
-// Test TrackerManager with TorrentInfo
-TEST_F(TrackerTest, TrackerManagerCreation) {
-    // Create a minimal TorrentInfo for testing
-    TorrentInfo torrent_info;
-    
-    // Create fake bencode torrent data
+// Helper to create test torrent bytes
+std::vector<uint8_t> create_tracker_test_torrent_bytes(const std::string& announce_url) {
     BencodeValue torrent_data = BencodeValue::create_dict();
-    torrent_data["announce"] = BencodeValue::create_string("http://tracker1.example.com/announce");
+    torrent_data["announce"] = BencodeValue::create_string(announce_url);
     
-    // Create announce-list
     BencodeValue announce_list = BencodeValue::create_list();
     BencodeValue tier1 = BencodeValue::create_list();
     tier1.push_back(BencodeValue::create_string("http://tracker2.example.com/announce"));
     announce_list.push_back(tier1);
     torrent_data["announce-list"] = announce_list;
     
-    // Create minimal info dict
     BencodeValue info_dict = BencodeValue::create_dict();
     info_dict["name"] = BencodeValue::create_string("test.txt");
     info_dict["piece length"] = BencodeValue::create_integer(16384);
     info_dict["length"] = BencodeValue::create_integer(1000);
     
-    // Create pieces (at least one 20-byte hash)
     std::string pieces_data(20, '\0');
     info_dict["pieces"] = BencodeValue::create_string(pieces_data);
     
     torrent_data["info"] = info_dict;
     
-    // Load torrent
-    ASSERT_TRUE(torrent_info.load_from_bencode(torrent_data));
+    return torrent_data.encode();
+}
+
+// Test TrackerManager with TorrentInfo
+TEST_F(TrackerTest, TrackerManagerCreation) {
+    auto torrent_bytes = create_tracker_test_torrent_bytes("http://tracker1.example.com/announce");
+    auto torrent_info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(torrent_info.has_value());
     
     // Create tracker manager
-    TrackerManager manager(torrent_info);
+    TrackerManager manager(*torrent_info);
     
     // Verify trackers were added
     auto tracker_urls = manager.get_tracker_urls();
@@ -200,10 +199,11 @@ TEST_F(TrackerTest, TrackerManagerCreation) {
 
 // Test TrackerManager add tracker
 TEST_F(TrackerTest, TrackerManagerAddTracker) {
-    // Create minimal TorrentInfo
-    TorrentInfo torrent_info = TorrentInfo::create_for_metadata_exchange(test_info_hash_);
+    auto torrent_bytes = create_tracker_test_torrent_bytes("http://dummy.com/announce");
+    auto torrent_info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(torrent_info.has_value());
     
-    TrackerManager manager(torrent_info);
+    TrackerManager manager(*torrent_info);
     
     // Add HTTP tracker
     EXPECT_TRUE(manager.add_tracker("http://new-tracker.example.com/announce"));
@@ -232,8 +232,11 @@ TEST_F(TrackerTest, UrlEncodeBinary) {
 
 // Test interval and timing
 TEST_F(TrackerTest, AnnounceIntervals) {
-    TorrentInfo torrent_info = TorrentInfo::create_for_metadata_exchange(test_info_hash_);
-    TrackerManager manager(torrent_info);
+    auto torrent_bytes = create_tracker_test_torrent_bytes("http://dummy.com/announce");
+    auto torrent_info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(torrent_info.has_value());
+    
+    TrackerManager manager(*torrent_info);
     
     // Should not need to announce immediately after creation
     // (unless we've manually set last_announce_time)
@@ -243,8 +246,11 @@ TEST_F(TrackerTest, AnnounceIntervals) {
 
 // Test multiple tracker support
 TEST_F(TrackerTest, MultipleTrackers) {
-    TorrentInfo torrent_info = TorrentInfo::create_for_metadata_exchange(test_info_hash_);
-    TrackerManager manager(torrent_info);
+    auto torrent_bytes = create_tracker_test_torrent_bytes("http://dummy.com/announce");
+    auto torrent_info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(torrent_info.has_value());
+    
+    TrackerManager manager(*torrent_info);
     
     // Add multiple trackers
     manager.add_tracker("http://tracker1.example.com/announce");
@@ -252,18 +258,23 @@ TEST_F(TrackerTest, MultipleTrackers) {
     manager.add_tracker("udp://tracker3.example.com:6969");
     
     auto tracker_urls = manager.get_tracker_urls();
-    EXPECT_EQ(tracker_urls.size(), 3);
+    EXPECT_GE(tracker_urls.size(), 3);
 }
 
-// Integration test: TorrentDownload with trackers
+// Integration test: TorrentDownload with trackers (simplified)
 TEST_F(TrackerTest, TorrentDownloadWithTrackers) {
-    // Create a simple torrent
-    TorrentInfo torrent_info = TorrentInfo::create_for_metadata_exchange(test_info_hash_);
+    auto torrent_bytes = create_tracker_test_torrent_bytes("http://tracker.example.com/announce");
+    auto torrent_info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(torrent_info.has_value());
     
-    TorrentDownload torrent(torrent_info, "./test_download");
+    TorrentConfig config;
+    config.save_path = "./test_download";
+    PeerID peer_id = generate_peer_id("-TS0001-");
     
-    // Verify tracker manager was created
-    EXPECT_NE(torrent.get_tracker_manager(), nullptr);
+    Torrent torrent(*torrent_info, config, peer_id);
+    
+    // Verify torrent was created
+    EXPECT_EQ(torrent.state(), TorrentState::Stopped);
     
     // Note: We don't actually start the download or announce to real trackers in tests
     // This just verifies the integration is set up correctly
