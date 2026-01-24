@@ -1,4 +1,5 @@
 #include "bt_peer_connection.h"
+#include "bencode.h"
 #include "logger.h"
 #include <algorithm>
 #include <cstring>
@@ -52,6 +53,9 @@ BtPeerConnection::BtPeerConnection(const BtInfoHash& info_hash,
     , peer_id_{}
     , handshake_received_(false)
     , handshake_sent_(false)
+    , extension_handshake_received_(false)
+    , peer_metadata_size_(0)
+    , peer_ut_metadata_id_(0)
     , am_choking_(true)
     , am_interested_(false)
     , peer_choking_(true)
@@ -78,6 +82,9 @@ BtPeerConnection::BtPeerConnection(BtPeerConnection&& other) noexcept
     , peer_extensions_(other.peer_extensions_)
     , handshake_received_(other.handshake_received_)
     , handshake_sent_(other.handshake_sent_)
+    , extension_handshake_received_(other.extension_handshake_received_)
+    , peer_metadata_size_(other.peer_metadata_size_)
+    , peer_ut_metadata_id_(other.peer_ut_metadata_id_)
     , am_choking_(other.am_choking_)
     , am_interested_(other.am_interested_)
     , peer_choking_(other.peer_choking_)
@@ -113,6 +120,9 @@ BtPeerConnection& BtPeerConnection::operator=(BtPeerConnection&& other) noexcept
         peer_extensions_ = other.peer_extensions_;
         handshake_received_ = other.handshake_received_;
         handshake_sent_ = other.handshake_sent_;
+        extension_handshake_received_ = other.extension_handshake_received_;
+        peer_metadata_size_ = other.peer_metadata_size_;
+        peer_ut_metadata_id_ = other.peer_ut_metadata_id_;
         am_choking_ = other.am_choking_;
         am_interested_ = other.am_interested_;
         peer_choking_ = other.peer_choking_;
@@ -394,6 +404,13 @@ void BtPeerConnection::handle_message(const BtMessage& msg) {
             peer_pieces_.clear_all();
             break;
             
+        case BtMessageType::Extended:
+            // Parse extension handshake (ext_id=0) and store data for late callback registration
+            if (msg.extension_id == 0 && !msg.extension_payload.empty()) {
+                parse_extension_handshake(msg.extension_payload);
+            }
+            break;
+            
         default:
             break;
     }
@@ -401,6 +418,46 @@ void BtPeerConnection::handle_message(const BtMessage& msg) {
     // Notify callback
     if (on_message_) {
         on_message_(this, msg);
+    }
+}
+
+void BtPeerConnection::parse_extension_handshake(const std::vector<uint8_t>& payload) {
+    // Parse the bencoded extension handshake to extract metadata info
+    // This data is stored so Torrent can access it even if callback wasn't set yet
+    
+    BencodeValue decoded;
+    try {
+        decoded = BencodeDecoder::decode(payload);
+    } catch (...) {
+        LOG_DEBUG("BtPeerConn", "Failed to decode extension handshake from " + ip_);
+        return;
+    }
+    
+    if (!decoded.is_dict()) {
+        return;
+    }
+    
+    const auto& dict = decoded.as_dict();
+    extension_handshake_received_ = true;
+    
+    // Extract metadata_size if present
+    auto metadata_size_it = dict.find("metadata_size");
+    if (metadata_size_it != dict.end() && metadata_size_it->second.is_integer()) {
+        peer_metadata_size_ = static_cast<size_t>(metadata_size_it->second.as_integer());
+        LOG_DEBUG("BtPeerConn", "Peer " + ip_ + " has metadata_size=" + 
+                  std::to_string(peer_metadata_size_));
+    }
+    
+    // Extract ut_metadata message ID from 'm' dictionary
+    auto m_it = dict.find("m");
+    if (m_it != dict.end() && m_it->second.is_dict()) {
+        const auto& m = m_it->second.as_dict();
+        auto ut_metadata_it = m.find("ut_metadata");
+        if (ut_metadata_it != m.end() && ut_metadata_it->second.is_integer()) {
+            peer_ut_metadata_id_ = static_cast<uint8_t>(ut_metadata_it->second.as_integer());
+            LOG_DEBUG("BtPeerConn", "Peer " + ip_ + " ut_metadata_id=" + 
+                      std::to_string(peer_ut_metadata_id_));
+        }
     }
 }
 

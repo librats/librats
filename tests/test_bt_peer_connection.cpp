@@ -445,3 +445,112 @@ TEST(BtPeerConnectionTest, Close) {
     EXPECT_EQ(conn.socket(), -1);
     EXPECT_EQ(conn.pending_requests(), 0);
 }
+
+//=============================================================================
+// Extension Handshake Storage Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, ExtensionHandshakeInitialState) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    
+    // Initial state should indicate no extension handshake received
+    EXPECT_FALSE(conn.extension_handshake_received());
+    EXPECT_EQ(conn.peer_metadata_size(), 0);
+    EXPECT_EQ(conn.peer_ut_metadata_id(), 0);
+}
+
+TEST(BtPeerConnectionTest, ExtensionHandshakeParsing) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // First receive BT handshake with extension protocol support
+    auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
+    conn.on_receive(hs.data(), hs.size());
+    ASSERT_EQ(conn.state(), PeerConnectionState::Connected);
+    
+    // Create extension handshake (bencode keys must be in lexicographic order!)
+    // {"m": {"ut_metadata": 3}, "metadata_size": 12345}
+    // In bencode: d1:md11:ut_metadatai3ee13:metadata_sizei12345ee
+    std::string ext_hs = "d1:md11:ut_metadatai3ee13:metadata_sizei12345ee";
+    std::vector<uint8_t> ext_payload(ext_hs.begin(), ext_hs.end());
+    
+    // Create extended message with extension_id=0 (handshake)
+    auto ext_msg = BtMessageEncoder::encode_extended(0, ext_payload);
+    conn.on_receive(ext_msg.data(), ext_msg.size());
+    
+    // Verify extension handshake data was parsed and stored
+    EXPECT_TRUE(conn.extension_handshake_received());
+    EXPECT_EQ(conn.peer_metadata_size(), 12345);
+    EXPECT_EQ(conn.peer_ut_metadata_id(), 3);
+}
+
+TEST(BtPeerConnectionTest, ExtensionHandshakeWithoutMetadata) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // BT handshake
+    auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
+    conn.on_receive(hs.data(), hs.size());
+    
+    // Extension handshake without metadata_size (peer doesn't have metadata)
+    // Just has ut_metadata ID: d1:md11:ut_metadatai2eee
+    std::string ext_hs = "d1:md11:ut_metadatai2eee";
+    std::vector<uint8_t> ext_payload(ext_hs.begin(), ext_hs.end());
+    
+    auto ext_msg = BtMessageEncoder::encode_extended(0, ext_payload);
+    conn.on_receive(ext_msg.data(), ext_msg.size());
+    
+    EXPECT_TRUE(conn.extension_handshake_received());
+    EXPECT_EQ(conn.peer_metadata_size(), 0);  // Not provided
+    EXPECT_EQ(conn.peer_ut_metadata_id(), 2);
+}
+
+TEST(BtPeerConnectionTest, ExtensionHandshakeNoUtMetadata) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // BT handshake
+    auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
+    conn.on_receive(hs.data(), hs.size());
+    
+    // Extension handshake with metadata_size but no ut_metadata
+    // {"m": {"ut_pex": 1}, "metadata_size": 5000}
+    // In bencode: d1:md6:ut_pexi1ee13:metadata_sizei5000ee
+    std::string ext_hs = "d1:md6:ut_pexi1ee13:metadata_sizei5000ee";
+    std::vector<uint8_t> ext_payload(ext_hs.begin(), ext_hs.end());
+    
+    auto ext_msg = BtMessageEncoder::encode_extended(0, ext_payload);
+    conn.on_receive(ext_msg.data(), ext_msg.size());
+    
+    EXPECT_TRUE(conn.extension_handshake_received());
+    EXPECT_EQ(conn.peer_metadata_size(), 5000);
+    EXPECT_EQ(conn.peer_ut_metadata_id(), 0);  // Not provided
+}
+
+TEST(BtPeerConnectionTest, ExtensionHandshakeMovedConnection) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn1(our_hash, make_test_peer_id(), 100);
+    conn1.set_socket(42);
+    
+    // BT handshake + extension handshake
+    auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
+    conn1.on_receive(hs.data(), hs.size());
+    
+    // {"m": {"ut_metadata": 5}, "metadata_size": 99999}
+    // In bencode: d1:md11:ut_metadatai5ee13:metadata_sizei99999ee
+    std::string ext_hs = "d1:md11:ut_metadatai5ee13:metadata_sizei99999ee";
+    std::vector<uint8_t> ext_payload(ext_hs.begin(), ext_hs.end());
+    auto ext_msg = BtMessageEncoder::encode_extended(0, ext_payload);
+    conn1.on_receive(ext_msg.data(), ext_msg.size());
+    
+    // Move the connection
+    BtPeerConnection conn2(std::move(conn1));
+    
+    // Extension handshake data should be preserved
+    EXPECT_TRUE(conn2.extension_handshake_received());
+    EXPECT_EQ(conn2.peer_metadata_size(), 99999);
+    EXPECT_EQ(conn2.peer_ut_metadata_id(), 5);
+}

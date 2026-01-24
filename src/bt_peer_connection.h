@@ -282,6 +282,25 @@ public:
     const ExtensionFlags& peer_extensions() const { return peer_extensions_; }
     
     //=========================================================================
+    // Extension Handshake Data (stored for late callback registration)
+    //=========================================================================
+    
+    /**
+     * @brief Check if we've received the peer's extension handshake
+     */
+    bool extension_handshake_received() const { return extension_handshake_received_; }
+    
+    /**
+     * @brief Get peer's metadata size (from extension handshake, 0 if not available)
+     */
+    size_t peer_metadata_size() const { return peer_metadata_size_; }
+    
+    /**
+     * @brief Get peer's ut_metadata message ID (from extension handshake, 0 if not supported)
+     */
+    uint8_t peer_ut_metadata_id() const { return peer_ut_metadata_id_; }
+    
+    //=========================================================================
     // Sending Messages
     //=========================================================================
     
@@ -410,6 +429,7 @@ private:
     void process_handshake();
     void process_messages();
     void handle_message(const BtMessage& msg);
+    void parse_extension_handshake(const std::vector<uint8_t>& payload);
     
     //=========================================================================
     // Data Members
@@ -432,6 +452,11 @@ private:
     ExtensionFlags peer_extensions_;
     bool handshake_received_;
     bool handshake_sent_;
+    
+    // Extension handshake data (stored for late callback registration)
+    bool extension_handshake_received_;
+    size_t peer_metadata_size_;
+    uint8_t peer_ut_metadata_id_;
     
     // Protocol state
     bool am_choking_;

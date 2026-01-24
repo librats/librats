@@ -438,8 +438,23 @@ void Torrent::on_peer_connected(BtPeerConnection* peer) {
         peer->send_bitfield(picker_->get_have_bitfield());
     }
     
-    // For magnet links without metadata, we'll request metadata after extension handshake
-    // The request_metadata() is called from tick() or when we receive the extension handshake response
+    // Check if peer already received extension handshake before we set up callbacks
+    // This happens because network data arrives before Torrent takes ownership
+    if (state_ == TorrentState::DownloadingMetadata && 
+        peer->extension_handshake_received() && 
+        peer->peer_metadata_size() > 0 && 
+        peer->peer_ut_metadata_id() != 0) {
+        
+        LOG_DEBUG("Torrent", "Peer " + peer->ip() + 
+                  " already has extension handshake data: metadata_size=" + 
+                  std::to_string(peer->peer_metadata_size()) + 
+                  " ut_metadata_id=" + std::to_string(peer->peer_ut_metadata_id()));
+        
+        // Store peer's metadata info and request metadata
+        peer_metadata_size_[peer] = peer->peer_metadata_size();
+        peer_ut_metadata_id_[peer] = peer->peer_ut_metadata_id();
+        request_metadata(peer);
+    }
 }
 
 void Torrent::on_peer_disconnected(BtPeerConnection* peer) {
