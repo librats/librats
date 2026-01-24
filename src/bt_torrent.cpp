@@ -96,7 +96,7 @@ void Torrent::start() {
     
     if (!info_) {
         set_state(TorrentState::DownloadingMetadata);
-    } else if (config_.seed_mode || is_complete()) {
+    } else if (config_.seed_mode || is_complete_unlocked()) {
         set_state(TorrentState::Seeding);
         choker_.set_seed_mode(true);
     } else {
@@ -129,7 +129,7 @@ void Torrent::resume() {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (state_ == TorrentState::Paused) {
-        if (is_complete()) {
+        if (is_complete_unlocked()) {
             set_state(TorrentState::Seeding);
         } else {
             set_state(TorrentState::Downloading);
@@ -165,11 +165,19 @@ bool Torrent::is_active() const {
 
 bool Torrent::is_complete() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return is_complete_unlocked();
+}
+
+bool Torrent::is_complete_unlocked() const {
     return picker_ && picker_->is_complete();
 }
 
 bool Torrent::has_metadata() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return has_metadata_unlocked();
+}
+
+bool Torrent::has_metadata_unlocked() const {
     return info_ != nullptr && info_->has_metadata();
 }
 

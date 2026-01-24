@@ -438,8 +438,8 @@ TEST(BtTorrentInfoTest, SetMetadata) {
 }
 
 TEST(BtTorrentInfoTest, SetMetadataWrongHash) {
-    // Create a magnet with one hash
-    std::string magnet = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000";
+    // Create a magnet with a non-zero hash that won't match any torrent
+    std::string magnet = "magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678";
     auto info = TorrentInfo::from_magnet(magnet);
     ASSERT_TRUE(info.has_value());
     
@@ -447,6 +447,9 @@ TEST(BtTorrentInfoTest, SetMetadataWrongHash) {
     auto other_torrent = create_minimal_torrent();
     auto other_info = TorrentInfo::from_bytes(other_torrent);
     ASSERT_TRUE(other_info.has_value());
+    
+    // Make sure the hashes are different
+    EXPECT_NE(info->info_hash(), other_info->info_hash());
     
     // This should fail - hash doesn't match
     bool success = info->set_metadata(other_info->info_dict_bytes());

@@ -361,20 +361,33 @@ TEST(BtIntegrationTest, FullDownloadSimulation) {
     EXPECT_EQ(picker.num_have(), 0);
     EXPECT_EQ(picker.num_want(), 5);
     
-    // Simulate downloading all pieces
-    for (uint32_t i = 0; i < 5; ++i) {
-        auto blocks = picker.pick_pieces(peer_bf, 2, peer);
-        EXPECT_FALSE(blocks.empty());
+    // Download all pieces - keep picking until we have them all
+    uint32_t pieces_completed = 0;
+    size_t iterations = 0;
+    const size_t max_iterations = 100;  // Prevent infinite loop
+    
+    while (pieces_completed < 5 && iterations < max_iterations) {
+        ++iterations;
+        
+        // Pick blocks
+        auto blocks = picker.pick_pieces(peer_bf, 4, peer);
+        
+        if (blocks.empty()) {
+            // No more blocks to pick - all pieces should be complete
+            break;
+        }
         
         // Mark all blocks as finished
         for (const auto& req : blocks) {
-            picker.mark_finished(req.block);
+            bool piece_complete = picker.mark_finished(req.block);
+            if (piece_complete) {
+                picker.mark_have(req.block.piece_index);
+                ++pieces_completed;
+            }
         }
-        
-        // Mark piece as have
-        picker.mark_have(i);
     }
     
+    EXPECT_EQ(pieces_completed, 5);
     EXPECT_TRUE(picker.is_complete());
     EXPECT_EQ(picker.num_have(), 5);
     EXPECT_EQ(picker.num_want(), 0);

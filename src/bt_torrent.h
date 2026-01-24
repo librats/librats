@@ -370,6 +370,10 @@ private:
     //=========================================================================
     
     void set_state(TorrentState new_state);
+    
+    // Unlocked versions (call when mutex is already held)
+    bool is_complete_unlocked() const;
+    bool has_metadata_unlocked() const;
     void on_peer_connected(BtPeerConnection* peer);
     void on_peer_disconnected(BtPeerConnection* peer);
     void on_peer_message(BtPeerConnection* peer, const BtMessage& msg);
