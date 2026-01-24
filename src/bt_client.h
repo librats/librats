@@ -268,6 +268,21 @@ public:
     bool dht_running() const { return dht_running_; }
     
     /**
+     * @brief Set an external DHT client to use instead of creating one
+     * 
+     * Must be called before start(). The external DHT client's lifecycle
+     * is managed by the caller - BtClient will not start or stop it.
+     * 
+     * @param dht External DHT client (must remain valid while BtClient is running)
+     */
+    void set_external_dht(DhtClient* dht);
+    
+    /**
+     * @brief Get the DHT client (internal or external)
+     */
+    DhtClient* get_dht_client() { return external_dht_ ? external_dht_ : dht_client_.get(); }
+    
+    /**
      * @brief Add DHT bootstrap node
      */
     void add_dht_node(const std::string& host, uint16_t port);
@@ -328,8 +343,11 @@ private:
     
     std::thread tick_thread_;
     
-    // DHT client
+    // DHT client (owned, if not using external)
     std::unique_ptr<DhtClient> dht_client_;
+    
+    // External DHT client (non-owning pointer, lifecycle managed externally)
+    DhtClient* external_dht_ = nullptr;
     
     // Network manager
     std::unique_ptr<BtNetworkManager> network_manager_;

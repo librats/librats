@@ -28,6 +28,16 @@ BtClient::~BtClient() {
     stop();
 }
 
+void BtClient::set_external_dht(DhtClient* dht) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (running_) {
+        LOG_WARN("BtClient", "Cannot set external DHT while client is running");
+        return;
+    }
+    external_dht_ = dht;
+    LOG_DEBUG("BtClient", "External DHT client set");
+}
+
 //=============================================================================
 // Lifecycle
 //=============================================================================
@@ -78,18 +88,30 @@ void BtClient::start() {
     
     // Start DHT if enabled
     if (config_.enable_dht) {
-        dht_client_ = std::make_unique<DhtClient>(config_.listen_port, "");
-        
-        if (dht_client_->start()) {
-            // Bootstrap with default nodes
-            auto bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
-            dht_client_->bootstrap(bootstrap_nodes);
-            dht_running_ = true;
-            
-            LOG_INFO("BtClient", "DHT started with " + 
-                     std::to_string(bootstrap_nodes.size()) + " bootstrap nodes");
+        if (external_dht_) {
+            // Use external DHT client - check if it's already running
+            if (external_dht_->is_running()) {
+                dht_running_ = true;
+                LOG_INFO("BtClient", "Using external DHT client with " + 
+                         std::to_string(external_dht_->get_routing_table_size()) + " nodes");
+            } else {
+                LOG_WARN("BtClient", "External DHT client provided but not running");
+            }
         } else {
-            LOG_ERROR("BtClient", "Failed to start DHT");
+            // Create and start our own DHT client
+            dht_client_ = std::make_unique<DhtClient>(config_.listen_port, "");
+            
+            if (dht_client_->start()) {
+                // Bootstrap with default nodes
+                auto bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
+                dht_client_->bootstrap(bootstrap_nodes);
+                dht_running_ = true;
+                
+                LOG_INFO("BtClient", "DHT started with " + 
+                         std::to_string(bootstrap_nodes.size()) + " bootstrap nodes");
+            } else {
+                LOG_ERROR("BtClient", "Failed to start DHT");
+            }
         }
     }
     
@@ -132,11 +154,12 @@ void BtClient::stop() {
         network_manager_.reset();
     }
     
-    // Stop DHT
+    // Stop DHT (only if we own it - not external)
     if (dht_client_) {
         dht_client_->stop();
         dht_client_.reset();
     }
+    // Note: external_dht_ is not stopped - lifecycle managed by caller
     
     // Clear tracker managers
     tracker_managers_.clear();
@@ -395,21 +418,24 @@ size_t BtClient::total_peers() const {
 //=============================================================================
 
 void BtClient::add_dht_node(const std::string& host, uint16_t port) {
-    if (dht_client_) {
+    DhtClient* dht = external_dht_ ? external_dht_ : dht_client_.get();
+    if (dht) {
         std::vector<Peer> nodes = {{host, port}};
-        dht_client_->bootstrap(nodes);
+        dht->bootstrap(nodes);
     }
 }
 
 size_t BtClient::dht_node_count() const {
-    if (dht_client_) {
-        return dht_client_->get_routing_table_size();
+    DhtClient* dht = external_dht_ ? external_dht_ : dht_client_.get();
+    if (dht) {
+        return dht->get_routing_table_size();
     }
     return 0;
 }
 
 void BtClient::announce_to_dht(const BtInfoHash& info_hash) {
-    if (!dht_client_ || !dht_running_) {
+    DhtClient* dht = external_dht_ ? external_dht_ : dht_client_.get();
+    if (!dht || !dht_running_) {
         return;
     }
     
@@ -419,7 +445,7 @@ void BtClient::announce_to_dht(const BtInfoHash& info_hash) {
     
     uint16_t port = network_manager_ ? network_manager_->listen_port() : config_.listen_port;
     
-    dht_client_->announce_peer(dht_hash, port, 
+    dht->announce_peer(dht_hash, port, 
         [this, info_hash](const std::vector<Peer>& peers, const InfoHash&) {
             on_dht_peers_found(peers, info_hash);
         }
@@ -427,14 +453,15 @@ void BtClient::announce_to_dht(const BtInfoHash& info_hash) {
 }
 
 void BtClient::find_peers_dht(const BtInfoHash& info_hash) {
-    if (!dht_client_ || !dht_running_) {
+    DhtClient* dht = external_dht_ ? external_dht_ : dht_client_.get();
+    if (!dht || !dht_running_) {
         return;
     }
     
     InfoHash dht_hash;
     std::copy(info_hash.begin(), info_hash.end(), dht_hash.begin());
     
-    dht_client_->find_peers(dht_hash, 
+    dht->find_peers(dht_hash, 
         [this, info_hash](const std::vector<Peer>& peers, const InfoHash&) {
             on_dht_peers_found(peers, info_hash);
         }

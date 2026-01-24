@@ -27,18 +27,20 @@ bool RatsClient::enable_bittorrent(int listen_port) {
     config.enable_dht = (dht_client_ && dht_client_->is_running());
     
     bittorrent_client_ = std::make_unique<BitTorrentClient>(config);
+    
+    // Reuse librats DHT client instead of creating a new one
+    if (dht_client_ && dht_client_->is_running()) {
+        bittorrent_client_->set_external_dht(dht_client_.get());
+        LOG_CLIENT_INFO("BitTorrent will reuse librats DHT client with " 
+                        << dht_client_->get_routing_table_size() << " nodes");
+    }
+    
     bittorrent_client_->start();
     
     if (!bittorrent_client_->is_running()) {
         LOG_CLIENT_ERROR("Failed to start BitTorrent client");
         bittorrent_client_.reset();
         return false;
-    }
-    
-    // Integrate with DHT if available
-    if (dht_client_ && dht_client_->is_running()) {
-        // DHT integration would go here
-        LOG_CLIENT_INFO("BitTorrent integrated with DHT for peer discovery");
     }
     
     LOG_CLIENT_INFO("BitTorrent enabled successfully");
