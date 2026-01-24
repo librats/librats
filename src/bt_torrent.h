@@ -309,6 +309,28 @@ public:
      */
     std::vector<BtPeerConnection*> peers() const;
     
+    /**
+     * @brief Get pending peers to connect to
+     * @return List of (ip, port) pairs
+     */
+    std::vector<std::pair<std::string, uint16_t>> get_pending_peers() const;
+    
+    /**
+     * @brief Clear pending peers
+     */
+    void clear_pending_peers();
+    
+    /**
+     * @brief Add an established connection
+     * Called by BtClient when network manager establishes a connection
+     */
+    void add_connection(std::unique_ptr<BtPeerConnection> connection);
+    
+    /**
+     * @brief Remove a connection by pointer
+     */
+    void remove_connection(BtPeerConnection* connection);
+    
     //=========================================================================
     // Configuration
     //=========================================================================

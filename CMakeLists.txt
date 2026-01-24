@@ -221,6 +221,8 @@ if(RATS_SEARCH_FEATURES)
         src/bt_torrent.cpp
         src/bt_client.h
         src/bt_client.cpp
+        src/bt_network.h
+        src/bt_network.cpp
         src/disk_io.cpp
         src/disk_io.h
         src/tracker.cpp

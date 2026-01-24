@@ -251,6 +251,73 @@ std::vector<BtPeerConnection*> Torrent::peers() const {
     return result;
 }
 
+std::vector<std::pair<std::string, uint16_t>> Torrent::get_pending_peers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_peers_;
+}
+
+void Torrent::clear_pending_peers() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_peers_.clear();
+}
+
+void Torrent::add_connection(std::unique_ptr<BtPeerConnection> connection) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!connection) return;
+    
+    // Remove from pending if present
+    auto it = std::remove_if(pending_peers_.begin(), pending_peers_.end(),
+        [&](const auto& p) {
+            return p.first == connection->ip() && p.second == connection->port();
+        });
+    pending_peers_.erase(it, pending_peers_.end());
+    
+    // Setup callbacks
+    BtPeerConnection* conn_ptr = connection.get();
+    
+    connection->set_message_callback(
+        [this](BtPeerConnection* peer, const BtMessage& msg) {
+            on_peer_message(peer, msg);
+        }
+    );
+    
+    connection->set_state_callback(
+        [this](BtPeerConnection* peer, PeerConnectionState state) {
+            if (state == PeerConnectionState::Disconnected ||
+                state == PeerConnectionState::Closing) {
+                on_peer_disconnected(peer);
+            } else if (state == PeerConnectionState::Connected) {
+                on_peer_connected(peer);
+            }
+        }
+    );
+    
+    // Add to picker for availability tracking
+    if (picker_ && connection->is_connected()) {
+        picker_->add_peer(conn_ptr, connection->peer_pieces());
+    }
+    
+    connections_.push_back(std::move(connection));
+    
+    // Notify peer we're connected
+    on_peer_connected(conn_ptr);
+}
+
+void Torrent::remove_connection(BtPeerConnection* connection) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto it = std::find_if(connections_.begin(), connections_.end(),
+        [connection](const auto& conn) {
+            return conn.get() == connection;
+        });
+    
+    if (it != connections_.end()) {
+        on_peer_disconnected(connection);
+        connections_.erase(it);
+    }
+}
+
 //=============================================================================
 // Configuration
 //=============================================================================

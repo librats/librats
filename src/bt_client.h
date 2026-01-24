@@ -11,6 +11,9 @@
 #include "bt_types.h"
 #include "bt_torrent.h"
 #include "bt_torrent_info.h"
+#include "bt_network.h"
+#include "dht.h"
+#include "tracker.h"
 
 #include <memory>
 #include <vector>
@@ -282,6 +285,25 @@ public:
      */
     size_t dht_node_count() const;
     
+    /**
+     * @brief Announce torrent to DHT
+     */
+    void announce_to_dht(const BtInfoHash& info_hash);
+    
+    /**
+     * @brief Find peers for torrent via DHT
+     */
+    void find_peers_dht(const BtInfoHash& info_hash);
+    
+    //=========================================================================
+    // Network
+    //=========================================================================
+    
+    /**
+     * @brief Get the network manager
+     */
+    BtNetworkManager* network_manager() { return network_manager_.get(); }
+    
 private:
     //=========================================================================
     // Internal Methods
@@ -289,6 +311,14 @@ private:
     
     void tick_loop();
     Torrent::Ptr create_torrent(const TorrentInfo& info, const std::string& save_path);
+    void on_dht_peers_found(const std::vector<Peer>& peers, const InfoHash& info_hash);
+    void on_peer_connected(const BtInfoHash& info_hash, 
+                           std::unique_ptr<BtPeerConnection> connection,
+                           socket_t socket, bool is_incoming);
+    void on_peer_disconnected(const BtInfoHash& info_hash, BtPeerConnection* connection);
+    void on_peer_data(const BtInfoHash& info_hash, BtPeerConnection* connection, socket_t socket);
+    void connect_pending_peers();
+    void announce_torrents_to_trackers();
     
     //=========================================================================
     // Data Members
@@ -305,6 +335,19 @@ private:
     std::unordered_map<BtInfoHash, Torrent::Ptr, InfoHashHash> torrents_;
     
     std::thread tick_thread_;
+    
+    // DHT client
+    std::unique_ptr<DhtClient> dht_client_;
+    
+    // Network manager
+    std::unique_ptr<BtNetworkManager> network_manager_;
+    
+    // Tracker managers per torrent
+    std::unordered_map<BtInfoHash, std::unique_ptr<TrackerManager>, InfoHashHash> tracker_managers_;
+    
+    // Announce timing
+    std::chrono::steady_clock::time_point last_dht_announce_;
+    std::chrono::steady_clock::time_point last_tracker_announce_;
     
     // Callbacks
     TorrentAddedCallback on_torrent_added_;
