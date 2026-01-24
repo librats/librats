@@ -150,6 +150,9 @@ public:
     /// Callback for errors
     using ErrorCallback = std::function<void(Torrent*, const std::string&)>;
     
+    /// Callback for metadata received (for magnet links)
+    using MetadataCallback = std::function<void(Torrent*, bool success)>;
+    
     //=========================================================================
     // Construction
     //=========================================================================
@@ -363,6 +366,7 @@ public:
     void set_piece_callback(PieceCallback cb) { on_piece_complete_ = std::move(cb); }
     void set_complete_callback(CompleteCallback cb) { on_complete_ = std::move(cb); }
     void set_error_callback(ErrorCallback cb) { on_error_ = std::move(cb); }
+    void set_metadata_callback(MetadataCallback cb) { on_metadata_received_ = std::move(cb); }
     
     //=========================================================================
     // Metadata (for magnet links)
@@ -468,6 +472,7 @@ private:
     PieceCallback on_piece_complete_;
     CompleteCallback on_complete_;
     ErrorCallback on_error_;
+    MetadataCallback on_metadata_received_;
     
     // Metadata exchange (for magnet links)
     std::vector<uint8_t> metadata_buffer_;

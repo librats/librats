@@ -1041,8 +1041,19 @@ void Torrent::on_metadata_complete() {
         peer_ut_metadata_id_.clear();
         
         // State transition happens in set_metadata()
+        
+        // Notify callback that metadata was received successfully
+        if (on_metadata_received_) {
+            on_metadata_received_(this, true);
+        }
     } else {
         LOG_ERROR("Torrent", "Metadata validation failed");
+        
+        // Notify callback of failure
+        if (on_metadata_received_) {
+            on_metadata_received_(this, false);
+        }
+        
         // Could retry from other peers
         metadata_buffer_.clear();
         metadata_pieces_received_.clear();

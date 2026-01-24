@@ -173,14 +173,34 @@ void RatsClient::get_torrent_metadata(const InfoHash& info_hash,
     std::string magnet = "magnet:?xt=urn:btih:" + hash_hex;
     auto torrent = bittorrent_client_->add_magnet(magnet, "");
     
-    if (torrent && callback) {
-        // TODO: Set up callback for when metadata is received
-        // For now, return empty if no metadata yet
-        if (torrent->has_metadata()) {
-            callback(*torrent->info(), true, "");
-        } else {
-            callback(TorrentInfo(), false, "Metadata not yet available");
+    if (!torrent) {
+        if (callback) {
+            callback(TorrentInfo(), false, "Failed to add magnet link");
         }
+        return;
+    }
+    
+    // If metadata is already available, return immediately
+    if (torrent->has_metadata()) {
+        if (callback) {
+            callback(*torrent->info(), true, "");
+        }
+        return;
+    }
+    
+    // Set up async callback for when metadata is received
+    if (callback) {
+        torrent->set_metadata_callback(
+            [callback](Torrent* t, bool success) {
+                if (success && t->info()) {
+                    callback(*t->info(), true, "");
+                } else {
+                    callback(TorrentInfo(), false, "Failed to download metadata");
+                }
+            }
+        );
+        
+        LOG_CLIENT_INFO("Waiting for metadata download for " << hash_hex.substr(0, 8) << "...");
     }
 }
 
@@ -209,16 +229,38 @@ void RatsClient::get_torrent_metadata_from_peer(const InfoHash& info_hash,
     std::string magnet = "magnet:?xt=urn:btih:" + hash_hex;
     auto torrent = bittorrent_client_->add_magnet(magnet, "");
     
-    if (torrent) {
-        torrent->add_peer(peer_ip, peer_port);
-        
-        if (torrent->has_metadata() && callback) {
-            callback(*torrent->info(), true, "");
-        } else if (callback) {
-            callback(TorrentInfo(), false, "Metadata not yet available");
+    if (!torrent) {
+        if (callback) {
+            callback(TorrentInfo(), false, "Failed to add magnet");
         }
-    } else if (callback) {
-        callback(TorrentInfo(), false, "Failed to add magnet");
+        return;
+    }
+    
+    // Add the specific peer for direct connection
+    torrent->add_peer(peer_ip, peer_port);
+    
+    // If metadata is already available, return immediately
+    if (torrent->has_metadata()) {
+        if (callback) {
+            callback(*torrent->info(), true, "");
+        }
+        return;
+    }
+    
+    // Set up async callback for when metadata is received
+    if (callback) {
+        torrent->set_metadata_callback(
+            [callback, peer_ip, peer_port](Torrent* t, bool success) {
+                if (success && t->info()) {
+                    callback(*t->info(), true, "");
+                } else {
+                    callback(TorrentInfo(), false, 
+                             "Failed to download metadata from " + peer_ip + ":" + std::to_string(peer_port));
+                }
+            }
+        );
+        
+        LOG_CLIENT_INFO("Waiting for metadata from " << peer_ip << ":" << peer_port);
     }
 }
 

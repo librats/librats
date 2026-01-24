@@ -923,6 +923,40 @@ TEST(BtIntegrationTest, TorrentMagnetState) {
 // Integration Test: Full Connection Flow
 //=============================================================================
 
+TEST(BtIntegrationTest, MetadataCallbackSetup) {
+    // Test that metadata callback can be set and is stored
+    BtInfoHash hash;
+    std::fill(hash.begin(), hash.end(), 0xCC);
+    
+    PeerID peer_id;
+    std::fill(peer_id.begin(), peer_id.end(), 0xDD);
+    
+    TorrentConfig config;
+    config.save_path = "/tmp/meta_callback_test";
+    
+    // Create from magnet
+    auto info_opt = TorrentInfo::from_magnet(
+        "magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc&dn=CallbackTest"
+    );
+    ASSERT_TRUE(info_opt.has_value());
+    
+    Torrent torrent(*info_opt, config, peer_id);
+    
+    // Set metadata callback
+    std::atomic<bool> callback_invoked{false};
+    torrent.set_metadata_callback(
+        [&callback_invoked](Torrent*, bool) {
+            callback_invoked = true;
+        }
+    );
+    
+    // The callback should be stored (we can't easily test invocation without real peers)
+    // But we can verify the torrent is in the right state
+    torrent.start();
+    EXPECT_EQ(torrent.state(), TorrentState::DownloadingMetadata);
+    EXPECT_FALSE(torrent.has_metadata());
+}
+
 TEST(BtIntegrationTest, ConnectionHandshakeFlow) {
     init_socket_library();
     
