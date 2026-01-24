@@ -1393,16 +1393,26 @@ TEST_F(RatsClientTest, MixedEncryptionPeersTest) {
     // Wait for noise handshake on encrypted connection
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     
-    // Send messages from both clients
+    // Send messages from both clients to the SERVER (not to each other)
+    // Due to peer exchange, clients may also connect to each other, so we need to 
+    // find the specific peer that's the server by looking for the server's port
     auto encrypted_peers = encrypted_client.get_validated_peers();
     auto unencrypted_peers = unencrypted_client.get_validated_peers();
     
-    if (encrypted_peers.size() > 0) {
-        encrypted_client.send_string_to_peer(encrypted_peers[0].socket, "Encrypted message");
+    // Find the server peer in encrypted_client's peer list
+    for (const auto& peer : encrypted_peers) {
+        if (peer.port == server_port) {
+            encrypted_client.send_string_to_peer(peer.socket, "Encrypted message");
+            break;
+        }
     }
     
-    if (unencrypted_peers.size() > 0) {
-        unencrypted_client.send_string_to_peer(unencrypted_peers[0].socket, "Unencrypted message");
+    // Find the server peer in unencrypted_client's peer list
+    for (const auto& peer : unencrypted_peers) {
+        if (peer.port == server_port) {
+            unencrypted_client.send_string_to_peer(peer.socket, "Unencrypted message");
+            break;
+        }
     }
     
     // Wait for both messages
