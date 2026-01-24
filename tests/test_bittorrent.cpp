@@ -697,4 +697,180 @@ TEST_F(BitTorrentTest, ZeroLengthEdgeCases) {
     librats::PieceInfo piece(0, std::array<uint8_t, 20>{}, 0);
     EXPECT_EQ(piece.get_num_blocks(), 0);
     EXPECT_TRUE(piece.is_complete()); // Zero-length piece is complete by default
+}
+
+// Test PieceInfo peer_count tracking (for rarest-first selection)
+TEST_F(BitTorrentTest, PieceInfoPeerCount) {
+    std::array<uint8_t, 20> test_hash;
+    test_hash.fill(0xAB);
+    
+    librats::PieceInfo piece(0, test_hash, 262144);
+    
+    // Initial peer count should be 0
+    EXPECT_EQ(piece.peer_count.load(), 0);
+    
+    // Increment peer count
+    piece.peer_count.fetch_add(1);
+    EXPECT_EQ(piece.peer_count.load(), 1);
+    
+    piece.peer_count.fetch_add(1);
+    EXPECT_EQ(piece.peer_count.load(), 2);
+    
+    // Decrement peer count
+    piece.peer_count.fetch_sub(1);
+    EXPECT_EQ(piece.peer_count.load(), 1);
+    
+    // Copy constructor should preserve peer_count
+    librats::PieceInfo piece_copy(piece);
+    EXPECT_EQ(piece_copy.peer_count.load(), 1);
+}
+
+// Test PieceInfo reset clears peer_count appropriately
+TEST_F(BitTorrentTest, PieceInfoResetForRedownload) {
+    std::array<uint8_t, 20> test_hash;
+    test_hash.fill(0xAB);
+    
+    librats::PieceInfo piece(0, test_hash, 262144);
+    
+    // Set some state
+    piece.peer_count.store(5);
+    piece.blocks_downloaded[0] = true;
+    piece.blocks_requested[0] = true;
+    piece.verified = true;
+    
+    // Reset for re-download
+    piece.reset_for_redownload();
+    
+    // peer_count should NOT be reset (it's about connected peers, not download state)
+    EXPECT_EQ(piece.peer_count.load(), 5);
+    
+    // But download state should be reset
+    EXPECT_FALSE(piece.blocks_downloaded[0]);
+    EXPECT_FALSE(piece.blocks_requested[0]);
+    EXPECT_FALSE(piece.verified);
+}
+
+// Test piece selection with availability-based sorting
+TEST_F(BitTorrentTest, PieceSelectionRarestFirst) {
+    // Create a torrent with 10 pieces
+    auto torrent_bencode = create_test_torrent_bencode("test.bin", 10 * 262144, 262144);
+    
+    librats::TorrentInfo torrent_info;
+    EXPECT_TRUE(torrent_info.load_from_bencode(torrent_bencode));
+    EXPECT_EQ(torrent_info.get_num_pieces(), 10);
+    
+    // Create TorrentDownload with empty path (won't actually write files)
+    librats::TorrentDownload torrent(torrent_info, test_dir_);
+    
+    // Simulate different availability for pieces
+    // Piece 0: 5 peers have it
+    // Piece 1: 2 peers have it (rare!)
+    // Piece 2: 10 peers have it
+    // Piece 3: 1 peer has it (rarest!)
+    // Rest: 0 peers have them
+    for (int i = 0; i < 5; ++i) torrent.increment_piece_availability(0);
+    for (int i = 0; i < 2; ++i) torrent.increment_piece_availability(1);
+    for (int i = 0; i < 10; ++i) torrent.increment_piece_availability(2);
+    for (int i = 0; i < 1; ++i) torrent.increment_piece_availability(3);
+    
+    // Check availability values
+    EXPECT_EQ(torrent.get_piece_availability(0), 5);
+    EXPECT_EQ(torrent.get_piece_availability(1), 2);
+    EXPECT_EQ(torrent.get_piece_availability(2), 10);
+    EXPECT_EQ(torrent.get_piece_availability(3), 1);
+    EXPECT_EQ(torrent.get_piece_availability(4), 0);  // No peers have this
+}
+
+// Test availability increment and decrement
+TEST_F(BitTorrentTest, PieceAvailabilityIncrementDecrement) {
+    auto torrent_bencode = create_test_torrent_bencode("test.bin", 5 * 262144, 262144);
+    
+    librats::TorrentInfo torrent_info;
+    EXPECT_TRUE(torrent_info.load_from_bencode(torrent_bencode));
+    
+    librats::TorrentDownload torrent(torrent_info, test_dir_);
+    
+    // Initial availability should be 0
+    for (uint32_t i = 0; i < 5; ++i) {
+        EXPECT_EQ(torrent.get_piece_availability(i), 0);
+    }
+    
+    // Increment some pieces
+    torrent.increment_piece_availability(0);
+    torrent.increment_piece_availability(0);
+    torrent.increment_piece_availability(2);
+    
+    EXPECT_EQ(torrent.get_piece_availability(0), 2);
+    EXPECT_EQ(torrent.get_piece_availability(1), 0);
+    EXPECT_EQ(torrent.get_piece_availability(2), 1);
+    
+    // Decrement
+    torrent.decrement_piece_availability(0);
+    EXPECT_EQ(torrent.get_piece_availability(0), 1);
+    
+    // Decrement should not go below 0
+    torrent.decrement_piece_availability(1);  // Already 0
+    EXPECT_EQ(torrent.get_piece_availability(1), 0);
+}
+
+// Test batch availability update (for bitfield)
+TEST_F(BitTorrentTest, PieceAvailabilityBatchUpdate) {
+    auto torrent_bencode = create_test_torrent_bencode("test.bin", 8 * 262144, 262144);
+    
+    librats::TorrentInfo torrent_info;
+    EXPECT_TRUE(torrent_info.load_from_bencode(torrent_bencode));
+    
+    librats::TorrentDownload torrent(torrent_info, test_dir_);
+    
+    // Simulate a peer's bitfield: [1,0,1,1,0,0,1,0]
+    std::vector<bool> peer_bitfield = {true, false, true, true, false, false, true, false};
+    
+    // Increment availability for this peer's pieces
+    torrent.update_piece_availability(peer_bitfield, true);
+    
+    EXPECT_EQ(torrent.get_piece_availability(0), 1);
+    EXPECT_EQ(torrent.get_piece_availability(1), 0);
+    EXPECT_EQ(torrent.get_piece_availability(2), 1);
+    EXPECT_EQ(torrent.get_piece_availability(3), 1);
+    EXPECT_EQ(torrent.get_piece_availability(4), 0);
+    EXPECT_EQ(torrent.get_piece_availability(5), 0);
+    EXPECT_EQ(torrent.get_piece_availability(6), 1);
+    EXPECT_EQ(torrent.get_piece_availability(7), 0);
+    
+    // Simulate second peer with different bitfield: [0,1,1,0,1,0,1,1]
+    std::vector<bool> peer2_bitfield = {false, true, true, false, true, false, true, true};
+    torrent.update_piece_availability(peer2_bitfield, true);
+    
+    EXPECT_EQ(torrent.get_piece_availability(0), 1);  // Only peer 1
+    EXPECT_EQ(torrent.get_piece_availability(1), 1);  // Only peer 2
+    EXPECT_EQ(torrent.get_piece_availability(2), 2);  // Both peers
+    EXPECT_EQ(torrent.get_piece_availability(6), 2);  // Both peers
+    
+    // Simulate peer 1 disconnecting
+    torrent.update_piece_availability(peer_bitfield, false);
+    
+    EXPECT_EQ(torrent.get_piece_availability(0), 0);  // Peer 1 had it
+    EXPECT_EQ(torrent.get_piece_availability(1), 1);  // Only peer 2 had it
+    EXPECT_EQ(torrent.get_piece_availability(2), 1);  // Peer 2 still has it
+    EXPECT_EQ(torrent.get_piece_availability(6), 1);  // Peer 2 still has it
+}
+
+// Test that invalid piece index is handled gracefully
+TEST_F(BitTorrentTest, PieceAvailabilityInvalidIndex) {
+    auto torrent_bencode = create_test_torrent_bencode("test.bin", 3 * 262144, 262144);
+    
+    librats::TorrentInfo torrent_info;
+    EXPECT_TRUE(torrent_info.load_from_bencode(torrent_bencode));
+    
+    librats::TorrentDownload torrent(torrent_info, test_dir_);
+    
+    // Invalid indices should return 0 and not crash
+    EXPECT_EQ(torrent.get_piece_availability(999), 0);
+    
+    // Increment/decrement on invalid index should not crash
+    torrent.increment_piece_availability(999);
+    torrent.decrement_piece_availability(999);
+    
+    // Values should still be valid for real pieces
+    EXPECT_EQ(torrent.get_piece_availability(0), 0);
 } 

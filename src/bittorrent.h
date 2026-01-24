@@ -101,12 +101,13 @@ struct PieceInfo {
     uint32_t length;
     bool verified;
     std::atomic<bool> hash_pending;       // True if async hash is in progress
+    std::atomic<uint32_t> peer_count;     // Number of connected peers that have this piece (for rarest-first)
     std::vector<bool> blocks_downloaded;  // Track which blocks are downloaded (written to disk)
     std::vector<bool> blocks_requested;   // Track which blocks are requested globally (sent but not received)
     std::vector<bool> blocks_written;     // Track which blocks are confirmed written to disk
     
     PieceInfo(PieceIndex idx, const std::array<uint8_t, 20>& h, uint32_t len)
-        : index(idx), hash(h), length(len), verified(false), hash_pending(false) {
+        : index(idx), hash(h), length(len), verified(false), hash_pending(false), peer_count(0) {
         uint32_t num_blocks = (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
         blocks_downloaded.resize(num_blocks, false);
         blocks_requested.resize(num_blocks, false);
@@ -117,6 +118,7 @@ struct PieceInfo {
     PieceInfo(const PieceInfo& other)
         : index(other.index), hash(other.hash), length(other.length),
           verified(other.verified), hash_pending(other.hash_pending.load()),
+          peer_count(other.peer_count.load()),
           blocks_downloaded(other.blocks_downloaded),
           blocks_requested(other.blocks_requested),
           blocks_written(other.blocks_written) {}
@@ -390,6 +392,7 @@ private:
     bool am_interested_;    // We are interested in peer's pieces
     bool am_choking_;       // We are choking peer (they can't request from us)
     std::vector<bool> peer_bitfield_;
+    bool bitfield_received_;  // True if we've received a bitfield (for availability tracking cleanup)
     
     // Request tracking
     std::vector<PeerRequest> pending_requests_;
@@ -531,6 +534,12 @@ public:
     bool is_piece_downloading(PieceIndex piece_index) const;
     std::vector<PieceIndex> get_available_pieces() const;
     std::vector<PieceIndex> get_needed_pieces(const std::vector<bool>& peer_bitfield) const;
+    
+    // Piece availability tracking (for rarest-first selection)
+    void increment_piece_availability(PieceIndex piece_index);
+    void decrement_piece_availability(PieceIndex piece_index);
+    void update_piece_availability(const std::vector<bool>& peer_bitfield, bool increment);
+    uint32_t get_piece_availability(PieceIndex piece_index) const;
     
     // Piece data handling - blocks are written directly to disk for memory efficiency
     bool store_piece_block(PieceIndex piece_index, uint32_t offset, const std::vector<uint8_t>& data);

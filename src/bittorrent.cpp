@@ -429,6 +429,7 @@ PeerConnection::PeerConnection(TorrentDownload* torrent, const Peer& peer_info, 
       state_(PeerState::CONNECTING), should_disconnect_(false), handshake_completed_(false),
       peer_choked_(true), peer_interested_(false), 
       am_interested_(false), am_choking_(true),
+      bitfield_received_(false),
       downloaded_bytes_(0), uploaded_bytes_(0),
       last_speed_update_time_(std::chrono::steady_clock::now()),
       last_speed_downloaded_(0), last_speed_uploaded_(0),
@@ -483,6 +484,12 @@ void PeerConnection::disconnect() {
     for (const auto& req : requests_to_reset) {
         uint32_t block_index = req.offset / BLOCK_SIZE;
         torrent_->reset_block_request(req.piece_index, block_index);
+    }
+    
+    // Decrement piece availability for all pieces this peer had
+    if (bitfield_received_ && !peer_bitfield_.empty()) {
+        torrent_->update_piece_availability(peer_bitfield_, false);
+        bitfield_received_ = false;
     }
     
     if (is_valid_socket(socket_)) {
@@ -786,7 +793,11 @@ void PeerConnection::handle_have(const std::vector<uint8_t>& payload) {
                               static_cast<uint32_t>(payload[3]);
     
     if (piece_index < peer_bitfield_.size()) {
-        peer_bitfield_[piece_index] = true;
+        // Only increment availability if this is a new piece for this peer
+        if (!peer_bitfield_[piece_index]) {
+            peer_bitfield_[piece_index] = true;
+            torrent_->increment_piece_availability(piece_index);
+        }
         LOG_BT_DEBUG("Peer " << peer_info_.ip << ":" << peer_info_.port << " has piece " << piece_index);
     }
 }
@@ -794,6 +805,11 @@ void PeerConnection::handle_have(const std::vector<uint8_t>& payload) {
 void PeerConnection::handle_bitfield(const std::vector<uint8_t>& payload) {
     const auto& torrent_info = torrent_->get_torrent_info();
     uint32_t num_pieces = torrent_info.get_num_pieces();
+    
+    // If we already had a bitfield, decrement old availability first
+    if (bitfield_received_ && !peer_bitfield_.empty()) {
+        torrent_->update_piece_availability(peer_bitfield_, false);
+    }
     
     peer_bitfield_.clear();
     peer_bitfield_.resize(num_pieces, false);
@@ -803,6 +819,10 @@ void PeerConnection::handle_bitfield(const std::vector<uint8_t>& payload) {
         size_t bit_index = 7 - (i % 8);
         peer_bitfield_[i] = (payload[byte_index] & (1 << bit_index)) != 0;
     }
+    
+    // Update availability for the new bitfield
+    torrent_->update_piece_availability(peer_bitfield_, true);
+    bitfield_received_ = true;
     
     LOG_BT_DEBUG("Received bitfield from peer " << peer_info_.ip << ":" << peer_info_.port);
 }
@@ -2119,6 +2139,48 @@ std::vector<PieceIndex> TorrentDownload::get_needed_pieces(const std::vector<boo
     return needed_pieces;
 }
 
+void TorrentDownload::increment_piece_availability(PieceIndex piece_index) {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    if (piece_index < pieces_.size()) {
+        pieces_[piece_index]->peer_count.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void TorrentDownload::decrement_piece_availability(PieceIndex piece_index) {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    if (piece_index < pieces_.size()) {
+        uint32_t current = pieces_[piece_index]->peer_count.load(std::memory_order_relaxed);
+        if (current > 0) {
+            pieces_[piece_index]->peer_count.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+}
+
+void TorrentDownload::update_piece_availability(const std::vector<bool>& peer_bitfield, bool increment) {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    size_t min_size = (std::min)(peer_bitfield.size(), pieces_.size());
+    for (size_t i = 0; i < min_size; ++i) {
+        if (peer_bitfield[i]) {
+            if (increment) {
+                pieces_[i]->peer_count.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                uint32_t current = pieces_[i]->peer_count.load(std::memory_order_relaxed);
+                if (current > 0) {
+                    pieces_[i]->peer_count.fetch_sub(1, std::memory_order_relaxed);
+                }
+            }
+        }
+    }
+}
+
+uint32_t TorrentDownload::get_piece_availability(PieceIndex piece_index) const {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    if (piece_index < pieces_.size()) {
+        return pieces_[piece_index]->peer_count.load(std::memory_order_relaxed);
+    }
+    return 0;
+}
+
 uint64_t TorrentDownload::get_downloaded_bytes() const {
     return total_downloaded_.load();
 }
@@ -2411,34 +2473,92 @@ bool TorrentDownload::create_directory_structure() {
 std::vector<PieceIndex> TorrentDownload::select_pieces_for_download() {
     std::lock_guard<std::mutex> lock(pieces_mutex_);
     
-    std::vector<PieceIndex> downloading_pieces;
-    std::vector<PieceIndex> new_pieces;
+    // Structure to hold piece info for sorting
+    struct PieceCandidate {
+        PieceIndex index;
+        uint32_t availability;    // Number of peers that have this piece
+        uint32_t blocks_done;     // Number of blocks already downloaded/requested
+        uint32_t total_blocks;    // Total blocks in piece
+        bool is_partial;          // True if we've started downloading this piece
+        
+        // Sort order:
+        // 1. Partial pieces first (sorted by completion %, descending - complete nearly-done first)
+        // 2. Then non-partial pieces sorted by availability (ascending - rarest first)
+        // 3. Within same availability, prefer pieces with some blocks requested (keeps parallel downloads together)
+        bool operator<(const PieceCandidate& other) const {
+            // Partial pieces always come first
+            if (is_partial != other.is_partial) {
+                return is_partial;
+            }
+            
+            if (is_partial) {
+                // For partial pieces, prefer the one closest to completion
+                float pct = (total_blocks > 0) ? static_cast<float>(blocks_done) / total_blocks : 0.0f;
+                float other_pct = (other.total_blocks > 0) ? static_cast<float>(other.blocks_done) / other.total_blocks : 0.0f;
+                if (pct != other_pct) {
+                    return pct > other_pct;  // Higher completion first
+                }
+            }
+            
+            // For non-partial pieces, use rarest-first (lower availability = higher priority)
+            // Pieces with 0 availability are skipped (no peer has them)
+            if (availability != other.availability) {
+                return availability < other.availability;
+            }
+            
+            // Tie-breaker: lower index first (for deterministic behavior)
+            return index < other.index;
+        }
+    };
     
-    // Find pieces we need - prioritize pieces already being downloaded
-    for (PieceIndex i = 0; i < piece_completed_.size(); ++i) {
-        if (!piece_completed_[i]) {
-            if (piece_downloading_[i]) {
-                // Prioritize completing pieces we've already started
-                downloading_pieces.push_back(i);
-            } else {
-                new_pieces.push_back(i);
+    std::vector<PieceCandidate> candidates;
+    candidates.reserve(pieces_.size());
+    
+    for (PieceIndex i = 0; i < pieces_.size(); ++i) {
+        if (piece_completed_[i]) {
+            continue;  // Skip completed pieces
+        }
+        
+        auto& piece = pieces_[i];
+        uint32_t availability = piece->peer_count.load(std::memory_order_relaxed);
+        
+        // Skip pieces that no connected peer has (can't download them)
+        // But include partial pieces even if availability is 0 (peer may reconnect)
+        bool is_partial = piece_downloading_[i] || piece->is_complete();
+        if (availability == 0 && !is_partial) {
+            continue;
+        }
+        
+        // Count downloaded/requested blocks
+        uint32_t blocks_done = 0;
+        for (size_t b = 0; b < piece->blocks_downloaded.size(); ++b) {
+            if (piece->blocks_downloaded[b] || piece->blocks_requested[b]) {
+                ++blocks_done;
             }
         }
+        
+        PieceCandidate candidate;
+        candidate.index = i;
+        candidate.availability = availability;
+        candidate.blocks_done = blocks_done;
+        candidate.total_blocks = piece->get_num_blocks();
+        candidate.is_partial = is_partial;
+        
+        candidates.push_back(candidate);
     }
     
-    // Implement piece selection strategy: complete existing pieces first, then start new ones
+    // Sort candidates by our priority order
+    std::sort(candidates.begin(), candidates.end());
+    
+    // Select top N pieces
     std::vector<PieceIndex> selected_pieces;
+    selected_pieces.reserve(MAX_PIECES_TO_SELECT);
     
-    // First, add pieces we're already downloading (prioritize completing them)
-    for (PieceIndex piece : downloading_pieces) {
-        selected_pieces.push_back(piece);
-        if (selected_pieces.size() >= MAX_PIECES_TO_SELECT) break;
-    }
-    
-    // Then add new pieces if we have room
-    for (PieceIndex piece : new_pieces) {
-        if (selected_pieces.size() >= MAX_PIECES_TO_SELECT) break;
-        selected_pieces.push_back(piece);
+    for (const auto& candidate : candidates) {
+        if (selected_pieces.size() >= MAX_PIECES_TO_SELECT) {
+            break;
+        }
+        selected_pieces.push_back(candidate.index);
     }
     
     return selected_pieces;
@@ -2554,6 +2674,13 @@ void TorrentDownload::log_detailed_state() {
     uint32_t total_pieces = 0;
     std::vector<PieceIndex> currently_downloading;
     
+    // Availability stats
+    uint32_t min_availability = UINT32_MAX;
+    uint32_t max_availability = 0;
+    uint64_t total_availability = 0;
+    uint32_t pieces_with_availability = 0;
+    uint32_t rarest_piece = 0;
+    
     {
         std::lock_guard<std::mutex> lock(pieces_mutex_);
         total_pieces = static_cast<uint32_t>(piece_completed_.size());
@@ -2564,6 +2691,22 @@ void TorrentDownload::log_detailed_state() {
                 downloading_pieces++;
                 if (currently_downloading.size() < MAX_PIECES_TO_SELECT) {
                     currently_downloading.push_back(static_cast<PieceIndex>(i));
+                }
+            }
+            
+            // Calculate availability stats for incomplete pieces
+            if (!piece_completed_[i] && i < pieces_.size()) {
+                uint32_t avail = pieces_[i]->peer_count.load(std::memory_order_relaxed);
+                if (avail > 0) {
+                    pieces_with_availability++;
+                    total_availability += avail;
+                    if (avail < min_availability) {
+                        min_availability = avail;
+                        rarest_piece = static_cast<uint32_t>(i);
+                    }
+                    if (avail > max_availability) {
+                        max_availability = avail;
+                    }
                 }
             }
         }
@@ -2647,6 +2790,16 @@ void TorrentDownload::log_detailed_state() {
     LOG_BT_INFO("  Uploaded: " << format_bytes(uploaded) << " | ETA: " << eta_str);
     LOG_BT_INFO("  Peers: " << connected_peers << "/" << total_peers << " connected, "
                 << unchoked_peers << " unchoked, " << interested_peers << " interested in us");
+    
+    // Log availability stats (for rarest-first piece selection)
+    if (pieces_with_availability > 0) {
+        double avg_availability = static_cast<double>(total_availability) / pieces_with_availability;
+        LOG_BT_INFO("  Availability: min=" << min_availability << " (piece " << rarest_piece << "), "
+                    << "max=" << max_availability << ", avg=" << std::fixed << std::setprecision(1) << avg_availability
+                    << " (" << pieces_with_availability << " pieces available)");
+    } else {
+        LOG_BT_INFO("  Availability: No pieces available from peers yet");
+    }
     
     // Log pieces being downloaded (if any)
     if (!currently_downloading.empty()) {
