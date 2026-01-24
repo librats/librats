@@ -600,31 +600,32 @@ void BtNetworkManager::handle_incoming_connection(socket_t client_socket,
     // The peer already sent handshake, process it
     connection->on_receive(handshake_buf, 68);
     
-    // Add to active connections
+    BtInfoHash info_hash_copy = handshake->info_hash;
+    
+    // For incoming connections, invoke callback immediately (handshake is already complete)
+    // We pass ownership of the connection to the callback
+    if (on_peer_connected_) {
+        on_peer_connected_(info_hash_copy, std::move(connection), 
+                           client_socket, true);
+    }
+    
+    // Add socket to active connections for tracking (without the connection object)
     ActiveConnection active;
     active.socket = client_socket;
-    active.info_hash = handshake->info_hash;
+    active.info_hash = info_hash_copy;
     active.is_incoming = true;
+    active.callback_invoked = true;  // Already invoked above
     active.connected_at = std::chrono::steady_clock::now();
     active.last_activity = active.connected_at;
-    
-    BtPeerConnection* conn_ptr = connection.get();
-    active.connection = std::move(connection);
+    // Note: connection is null now since we moved it to the callback
     
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
         active_connections_[client_socket] = std::move(active);
     }
     
-    // Notify callback
-    if (on_peer_connected_) {
-        auto& conn = active_connections_[client_socket];
-        on_peer_connected_(conn.info_hash, std::move(conn.connection), 
-                           client_socket, true);
-    }
-    
     LOG_INFO("BtNetwork", "Accepted peer " + peer_addr + " for torrent " + 
-             info_hash_to_hex(handshake->info_hash).substr(0, 8) + "...");
+             info_hash_to_hex(info_hash_copy).substr(0, 8) + "...");
 }
 
 void BtNetworkManager::process_active_connections() {
@@ -692,7 +693,23 @@ void BtNetworkManager::handle_peer_data(ActiveConnection& conn) {
         conn.connection->on_receive(buffer, static_cast<size_t>(n));
     }
     
-    // Notify callback
+    // Check if connection just completed handshake (for outgoing connections)
+    // and we haven't invoked the callback yet
+    if (!conn.callback_invoked && conn.connection && conn.connection->is_connected()) {
+        conn.callback_invoked = true;
+        
+        LOG_DEBUG("BtNetwork", "Handshake complete with " + conn.connection->ip() + 
+                  ", invoking callback");
+        
+        // Invoke on_peer_connected callback
+        // Note: We pass ownership of the connection to the callback
+        if (on_peer_connected_) {
+            on_peer_connected_(conn.info_hash, std::move(conn.connection), 
+                               conn.socket, conn.is_incoming);
+        }
+    }
+    
+    // Notify data callback (only if connection is still owned by us)
     if (on_peer_data_ && conn.connection) {
         on_peer_data_(conn.info_hash, conn.connection.get(), conn.socket);
     }

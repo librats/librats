@@ -1,6 +1,11 @@
 #include "bt_torrent.h"
+#include "bt_extension.h"
+#include "bencode.h"
 #include "disk_io.h"
+#include "logger.h"
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 
 namespace librats {
 
@@ -95,7 +100,8 @@ void Torrent::start() {
     last_stats_update_ = std::chrono::steady_clock::now();
     last_choker_run_ = std::chrono::steady_clock::now();
     
-    if (!info_) {
+    if (!info_ || !info_->has_metadata()) {
+        // No metadata yet - need to download it from peers
         set_state(TorrentState::DownloadingMetadata);
     } else if (config_.seed_mode || is_complete_unlocked()) {
         set_state(TorrentState::Seeding);
@@ -266,6 +272,9 @@ void Torrent::add_connection(std::unique_ptr<BtPeerConnection> connection) {
     
     if (!connection) return;
     
+    LOG_DEBUG("Torrent", "Adding connection from " + connection->ip() + ":" + 
+              std::to_string(connection->port()));
+    
     // Remove from pending if present
     auto it = std::remove_if(pending_peers_.begin(), pending_peers_.end(),
         [&](const auto& p) {
@@ -300,7 +309,7 @@ void Torrent::add_connection(std::unique_ptr<BtPeerConnection> connection) {
     
     connections_.push_back(std::move(connection));
     
-    // Notify peer we're connected
+    // Notify peer we're connected and setup extension handshake
     on_peer_connected(conn_ptr);
 }
 
@@ -416,10 +425,21 @@ void Torrent::tick() {
 //=============================================================================
 
 void Torrent::on_peer_connected(BtPeerConnection* peer) {
-    // Send bitfield
+    LOG_DEBUG("Torrent", "Peer " + peer->ip() + " connected, has_metadata=" + 
+              (has_metadata_unlocked() ? "true" : "false"));
+    
+    // Send extension handshake if peer supports it
+    if (peer->peer_extensions().extension_protocol) {
+        send_extension_handshake(peer);
+    }
+    
+    // Send bitfield if we have pieces
     if (picker_ && picker_->num_have() > 0) {
         peer->send_bitfield(picker_->get_have_bitfield());
     }
+    
+    // For magnet links without metadata, we'll request metadata after extension handshake
+    // The request_metadata() is called from tick() or when we receive the extension handshake response
 }
 
 void Torrent::on_peer_disconnected(BtPeerConnection* peer) {
@@ -470,6 +490,7 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
             
         case BtMessageType::Unchoke:
             // Peer unchoked us - can start requesting
+            LOG_DEBUG("Torrent", "Peer " + peer->ip() + " unchoked us");
             break;
             
         case BtMessageType::Choke:
@@ -477,6 +498,11 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
             if (picker_) {
                 picker_->cancel_peer_requests(peer);
             }
+            break;
+            
+        case BtMessageType::Extended:
+            // Handle extension protocol messages
+            on_extension_message(peer, msg.extension_id, msg.extension_payload);
             break;
             
         default:
@@ -758,6 +784,269 @@ void Torrent::verify_piece_hash(uint32_t piece) {
             self->on_piece_verified(piece, valid);
         }
     );
+}
+
+//=============================================================================
+// Extension Protocol Methods
+//=============================================================================
+
+void Torrent::send_extension_handshake(BtPeerConnection* peer) {
+    // Create extension handshake
+    BencodeValue handshake = BencodeValue::create_dict();
+    
+    // Build 'm' dictionary with extension name -> message ID
+    BencodeValue m = BencodeValue::create_dict();
+    m["ut_metadata"] = BencodeValue(static_cast<int64_t>(1));  // Our ID for ut_metadata
+    m["ut_pex"] = BencodeValue(static_cast<int64_t>(2));       // Our ID for ut_pex
+    handshake["m"] = m;
+    
+    // Add metadata_size if we have metadata
+    if (info_ && info_->has_metadata()) {
+        // We'd need the raw info dict size here
+        // For now, skip this - we're mainly interested in receiving metadata
+    }
+    
+    // Add client ID
+    handshake["v"] = BencodeValue("librats/1.0");
+    
+    // Encode and send as extended message ID 0 (handshake)
+    auto payload = handshake.encode();
+    peer->send_extended(0, payload);
+    
+    LOG_DEBUG("Torrent", "Sent extension handshake to " + peer->ip());
+}
+
+void Torrent::on_extension_message(BtPeerConnection* peer, uint8_t ext_id, 
+                                    const std::vector<uint8_t>& payload) {
+    if (ext_id == 0) {
+        // Extension handshake
+        on_extension_handshake(peer, payload);
+    } else {
+        // Regular extension message
+        // We need to look up what extension this corresponds to based on what
+        // the peer told us in their handshake
+        // For now, try to handle as ut_metadata if we're downloading metadata
+        if (state_ == TorrentState::DownloadingMetadata) {
+            on_metadata_message(peer, payload);
+        }
+    }
+}
+
+void Torrent::on_extension_handshake(BtPeerConnection* peer, 
+                                      const std::vector<uint8_t>& payload) {
+    BencodeValue decoded;
+    try {
+        decoded = BencodeDecoder::decode(payload);
+    } catch (...) {
+        LOG_WARN("Torrent", "Failed to decode extension handshake from " + peer->ip());
+        return;
+    }
+    
+    if (!decoded.is_dict()) {
+        return;
+    }
+    
+    const auto& dict = decoded.as_dict();
+    
+    // Extract metadata_size if present (for magnet links)
+    auto metadata_size_it = dict.find("metadata_size");
+    if (metadata_size_it != dict.end() && metadata_size_it->second.is_integer()) {
+        size_t metadata_size = static_cast<size_t>(metadata_size_it->second.as_integer());
+        LOG_INFO("Torrent", "Peer " + peer->ip() + " has metadata, size=" + 
+                 std::to_string(metadata_size));
+        
+        // If we're downloading metadata, store this info and start requesting
+        if (state_ == TorrentState::DownloadingMetadata && metadata_size > 0) {
+            // Store metadata size for this peer
+            peer_metadata_size_[peer] = metadata_size;
+            
+            // Parse the peer's ut_metadata ID from 'm' dict
+            auto m_it = dict.find("m");
+            if (m_it != dict.end() && m_it->second.is_dict()) {
+                const auto& m = m_it->second.as_dict();
+                auto ut_meta_it = m.find("ut_metadata");
+                if (ut_meta_it != m.end() && ut_meta_it->second.is_integer()) {
+                    uint8_t peer_ut_metadata_id = static_cast<uint8_t>(ut_meta_it->second.as_integer());
+                    peer_ut_metadata_id_[peer] = peer_ut_metadata_id;
+                    
+                    LOG_DEBUG("Torrent", "Peer " + peer->ip() + " ut_metadata ID = " + 
+                              std::to_string(peer_ut_metadata_id));
+                    
+                    // Start requesting metadata pieces
+                    request_metadata(peer);
+                }
+            }
+        }
+    }
+    
+    LOG_DEBUG("Torrent", "Received extension handshake from " + peer->ip());
+}
+
+void Torrent::request_metadata(BtPeerConnection* peer) {
+    if (has_metadata_unlocked()) {
+        return;  // Already have metadata
+    }
+    
+    auto size_it = peer_metadata_size_.find(peer);
+    auto id_it = peer_ut_metadata_id_.find(peer);
+    
+    if (size_it == peer_metadata_size_.end() || id_it == peer_ut_metadata_id_.end()) {
+        return;  // Don't have peer's metadata info
+    }
+    
+    size_t metadata_size = size_it->second;
+    uint8_t peer_ut_id = id_it->second;
+    
+    // Calculate number of pieces (16KB each)
+    uint32_t num_pieces = static_cast<uint32_t>((metadata_size + BT_METADATA_PIECE_SIZE - 1) / BT_METADATA_PIECE_SIZE);
+    
+    // Initialize metadata buffer if needed
+    if (metadata_buffer_.empty()) {
+        metadata_buffer_.resize(metadata_size);
+        metadata_pieces_received_.resize(num_pieces, false);
+    }
+    
+    // Request pieces we don't have yet
+    for (uint32_t piece = 0; piece < num_pieces; ++piece) {
+        if (!metadata_pieces_received_[piece]) {
+            // Create request message
+            BencodeValue req = BencodeValue::create_dict();
+            req["msg_type"] = BencodeValue(static_cast<int64_t>(0));  // Request
+            req["piece"] = BencodeValue(static_cast<int64_t>(piece));
+            
+            auto req_payload = req.encode();
+            peer->send_extended(peer_ut_id, req_payload);
+            
+            LOG_DEBUG("Torrent", "Requesting metadata piece " + std::to_string(piece) + 
+                      " from " + peer->ip());
+            break;  // Request one piece at a time for now
+        }
+    }
+}
+
+void Torrent::on_metadata_message(BtPeerConnection* peer,
+                                   const std::vector<uint8_t>& payload) {
+    // Parse the bencoded message
+    BencodeValue decoded;
+    try {
+        decoded = BencodeDecoder::decode(payload);
+    } catch (...) {
+        return;
+    }
+    
+    if (!decoded.is_dict()) {
+        return;
+    }
+    
+    const auto& dict = decoded.as_dict();
+    
+    auto msg_type_it = dict.find("msg_type");
+    if (msg_type_it == dict.end() || !msg_type_it->second.is_integer()) {
+        return;
+    }
+    
+    int msg_type = static_cast<int>(msg_type_it->second.as_integer());
+    
+    if (msg_type == 1) {  // Data
+        auto piece_it = dict.find("piece");
+        if (piece_it == dict.end() || !piece_it->second.is_integer()) {
+            return;
+        }
+        
+        uint32_t piece = static_cast<uint32_t>(piece_it->second.as_integer());
+        
+        // Find where the data starts (after the bencoded dict)
+        size_t dict_end = find_bencode_end(payload);
+        if (dict_end >= payload.size()) {
+            return;
+        }
+        
+        // Copy data to buffer
+        size_t offset = static_cast<size_t>(piece) * BT_METADATA_PIECE_SIZE;
+        size_t data_size = payload.size() - dict_end;
+        
+        if (offset + data_size <= metadata_buffer_.size()) {
+            std::memcpy(metadata_buffer_.data() + offset, payload.data() + dict_end, data_size);
+            
+            if (piece < metadata_pieces_received_.size()) {
+                metadata_pieces_received_[piece] = true;
+            }
+            
+            LOG_DEBUG("Torrent", "Received metadata piece " + std::to_string(piece) + 
+                      " (" + std::to_string(data_size) + " bytes)");
+            
+            // Check if we have all pieces
+            bool complete = true;
+            for (bool received : metadata_pieces_received_) {
+                if (!received) {
+                    complete = false;
+                    break;
+                }
+            }
+            
+            if (complete) {
+                on_metadata_complete();
+            } else {
+                // Request next piece
+                request_metadata(peer);
+            }
+        }
+    } else if (msg_type == 2) {  // Reject
+        LOG_DEBUG("Torrent", "Peer " + peer->ip() + " rejected metadata request");
+    }
+}
+
+size_t Torrent::find_bencode_end(const std::vector<uint8_t>& data) {
+    // Find the end of a bencoded dictionary
+    int depth = 0;
+    for (size_t i = 0; i < data.size(); ++i) {
+        if (data[i] == 'd' || data[i] == 'l') {
+            ++depth;
+        } else if (data[i] == 'e') {
+            --depth;
+            if (depth == 0) {
+                return i + 1;
+            }
+        } else if (std::isdigit(data[i])) {
+            // Skip string
+            size_t len = 0;
+            while (i < data.size() && std::isdigit(data[i])) {
+                len = len * 10 + (data[i] - '0');
+                ++i;
+            }
+            if (i < data.size() && data[i] == ':') {
+                i += len;  // Skip the string content
+            }
+        } else if (data[i] == 'i') {
+            // Skip integer
+            while (i < data.size() && data[i] != 'e') {
+                ++i;
+            }
+        }
+    }
+    return data.size();
+}
+
+void Torrent::on_metadata_complete() {
+    LOG_INFO("Torrent", "Metadata download complete!");
+    
+    // Validate and set metadata
+    if (set_metadata(metadata_buffer_)) {
+        LOG_INFO("Torrent", "Metadata validated, starting download of " + name_);
+        
+        // Clear metadata tracking data
+        metadata_buffer_.clear();
+        metadata_pieces_received_.clear();
+        peer_metadata_size_.clear();
+        peer_ut_metadata_id_.clear();
+        
+        // State transition happens in set_metadata()
+    } else {
+        LOG_ERROR("Torrent", "Metadata validation failed");
+        // Could retry from other peers
+        metadata_buffer_.clear();
+        metadata_pieces_received_.clear();
+    }
 }
 
 } // namespace librats

@@ -413,6 +413,18 @@ private:
                                uint32_t begin, uint32_t length);
     void verify_piece_hash(uint32_t piece);
     
+    // Extension protocol helpers
+    void send_extension_handshake(BtPeerConnection* peer);
+    void on_extension_message(BtPeerConnection* peer, uint8_t ext_id, 
+                               const std::vector<uint8_t>& payload);
+    void on_extension_handshake(BtPeerConnection* peer, 
+                                 const std::vector<uint8_t>& payload);
+    void request_metadata(BtPeerConnection* peer);
+    void on_metadata_message(BtPeerConnection* peer, 
+                              const std::vector<uint8_t>& payload);
+    void on_metadata_complete();
+    size_t find_bencode_end(const std::vector<uint8_t>& data);
+    
     //=========================================================================
     // Data Members
     //=========================================================================
@@ -456,6 +468,12 @@ private:
     PieceCallback on_piece_complete_;
     CompleteCallback on_complete_;
     ErrorCallback on_error_;
+    
+    // Metadata exchange (for magnet links)
+    std::vector<uint8_t> metadata_buffer_;
+    std::vector<bool> metadata_pieces_received_;
+    std::unordered_map<BtPeerConnection*, size_t> peer_metadata_size_;
+    std::unordered_map<BtPeerConnection*, uint8_t> peer_ut_metadata_id_;
 };
 
 } // namespace librats

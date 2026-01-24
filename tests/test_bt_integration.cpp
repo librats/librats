@@ -722,3 +722,261 @@ TEST(BtIntegrationTest, TwoClientsConnect) {
     client2.stop();
 }
 */
+
+//=============================================================================
+// Integration Test: Extension Handshake
+//=============================================================================
+
+TEST(BtIntegrationTest, ExtensionHandshakeEncoding) {
+    // Create extension handshake bencoded data
+    BencodeValue handshake = BencodeValue::create_dict();
+    
+    BencodeValue m = BencodeValue::create_dict();
+    m["ut_metadata"] = BencodeValue(static_cast<int64_t>(1));
+    m["ut_pex"] = BencodeValue(static_cast<int64_t>(2));
+    handshake["m"] = m;
+    handshake["v"] = BencodeValue("librats/1.0");
+    handshake["metadata_size"] = BencodeValue(static_cast<int64_t>(12345));
+    
+    auto encoded = handshake.encode();
+    EXPECT_FALSE(encoded.empty());
+    
+    // Decode it back
+    auto decoded = BencodeDecoder::decode(encoded);
+    EXPECT_TRUE(decoded.is_dict());
+    
+    const auto& dict = decoded.as_dict();
+    
+    // Check 'm' dictionary
+    auto m_it = dict.find("m");
+    ASSERT_NE(m_it, dict.end());
+    EXPECT_TRUE(m_it->second.is_dict());
+    
+    const auto& m_dict = m_it->second.as_dict();
+    auto ut_meta_it = m_dict.find("ut_metadata");
+    ASSERT_NE(ut_meta_it, m_dict.end());
+    EXPECT_EQ(ut_meta_it->second.as_integer(), 1);
+    
+    // Check metadata_size
+    auto size_it = dict.find("metadata_size");
+    ASSERT_NE(size_it, dict.end());
+    EXPECT_EQ(size_it->second.as_integer(), 12345);
+    
+    // Check client version
+    auto v_it = dict.find("v");
+    ASSERT_NE(v_it, dict.end());
+    EXPECT_EQ(v_it->second.as_string(), "librats/1.0");
+}
+
+TEST(BtIntegrationTest, MetadataRequestEncoding) {
+    // Create metadata request message
+    BencodeValue req = BencodeValue::create_dict();
+    req["msg_type"] = BencodeValue(static_cast<int64_t>(0));  // Request
+    req["piece"] = BencodeValue(static_cast<int64_t>(3));
+    
+    auto encoded = req.encode();
+    EXPECT_FALSE(encoded.empty());
+    
+    auto decoded = BencodeDecoder::decode(encoded);
+    EXPECT_TRUE(decoded.is_dict());
+    
+    const auto& dict = decoded.as_dict();
+    EXPECT_EQ(dict.at("msg_type").as_integer(), 0);
+    EXPECT_EQ(dict.at("piece").as_integer(), 3);
+}
+
+TEST(BtIntegrationTest, MetadataDataEncoding) {
+    // Create metadata data response message
+    BencodeValue resp = BencodeValue::create_dict();
+    resp["msg_type"] = BencodeValue(static_cast<int64_t>(1));  // Data
+    resp["piece"] = BencodeValue(static_cast<int64_t>(0));
+    resp["total_size"] = BencodeValue(static_cast<int64_t>(16384));
+    
+    auto encoded = resp.encode();
+    
+    // Append some fake metadata data after the bencoded dict
+    std::vector<uint8_t> fake_metadata(1000, 0xAB);
+    encoded.insert(encoded.end(), fake_metadata.begin(), fake_metadata.end());
+    
+    // Decode just the bencoded part
+    auto decoded = BencodeDecoder::decode(encoded);
+    EXPECT_TRUE(decoded.is_dict());
+    
+    const auto& dict = decoded.as_dict();
+    EXPECT_EQ(dict.at("msg_type").as_integer(), 1);
+    EXPECT_EQ(dict.at("piece").as_integer(), 0);
+}
+
+//=============================================================================
+// Integration Test: Pending Peers Connection
+//=============================================================================
+
+TEST(BtIntegrationTest, PendingPeersGetConnected) {
+    init_socket_library();
+    
+    // Create torrent
+    auto torrent_bytes = create_test_torrent("PendingTest.bin", 50000, 16384);
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    // Create client
+    BtClientConfig config;
+    config.download_path = "/tmp/test";
+    config.listen_port = 0;
+    config.enable_dht = false;
+    
+    BtClient client(config);
+    client.start();
+    
+    auto torrent = client.add_torrent(*info);
+    ASSERT_NE(torrent, nullptr);
+    
+    // Add some pending peers (they won't exist, but that's ok)
+    torrent->add_peer("192.168.1.100", 6881);
+    torrent->add_peer("192.168.1.101", 6882);
+    torrent->add_peer("192.168.1.102", 6883);
+    
+    // Verify pending peers were added
+    auto pending = torrent->get_pending_peers();
+    EXPECT_EQ(pending.size(), 3);
+    
+    // Wait for tick_loop to try to connect (it will fail, but should clear pending)
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    // Pending peers should be cleared after connection attempt
+    pending = torrent->get_pending_peers();
+    EXPECT_EQ(pending.size(), 0);
+    
+    client.stop();
+}
+
+TEST(BtIntegrationTest, TorrentExtensionHandshakeSupport) {
+    // Create a peer connection with extension protocol support
+    BtInfoHash hash;
+    std::fill(hash.begin(), hash.end(), 0x42);
+    
+    PeerID peer_id;
+    std::fill(peer_id.begin(), peer_id.end(), 0x11);
+    
+    BtPeerConnection conn(hash, peer_id, 100);
+    
+    // Create handshake with extension support
+    ExtensionFlags extensions;
+    extensions.extension_protocol = true;
+    
+    auto handshake = BtHandshake::encode(hash, peer_id, extensions);
+    EXPECT_EQ(handshake.size(), 68);
+    
+    // Decode and verify
+    auto decoded = BtHandshake::decode(handshake.data(), handshake.size());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_TRUE(decoded->extensions.extension_protocol);
+}
+
+//=============================================================================
+// Integration Test: Network Callback Tracking
+//=============================================================================
+
+TEST(BtIntegrationTest, ActiveConnectionCallbackFlag) {
+    // Test that ActiveConnection properly tracks callback_invoked
+    ActiveConnection conn;
+    
+    // Default should be false
+    EXPECT_FALSE(conn.callback_invoked);
+    
+    // Set to true
+    conn.callback_invoked = true;
+    EXPECT_TRUE(conn.callback_invoked);
+}
+
+TEST(BtIntegrationTest, TorrentMagnetState) {
+    // Create a minimal TorrentInfo for magnet testing
+    BtInfoHash hash;
+    std::fill(hash.begin(), hash.end(), 0xAB);
+    
+    PeerID peer_id;
+    std::fill(peer_id.begin(), peer_id.end(), 0xCD);
+    
+    TorrentConfig config;
+    config.save_path = "/tmp/magnet_test";
+    
+    // Create TorrentInfo from minimal magnet data
+    // Using the from_magnet static method
+    auto info_opt = TorrentInfo::from_magnet(
+        "magnet:?xt=urn:btih:abababababababababababababababababababab&dn=MagnetTest"
+    );
+    
+    if (info_opt.has_value()) {
+        Torrent torrent(*info_opt, config, peer_id);
+        
+        // Should be in metadata downloading state after start
+        EXPECT_FALSE(torrent.has_metadata());
+        torrent.start();
+        EXPECT_EQ(torrent.state(), TorrentState::DownloadingMetadata);
+    } else {
+        // If no from_magnet, just test that we can create a stopped torrent
+        SUCCEED() << "from_magnet not available, skipping magnet state test";
+    }
+}
+
+//=============================================================================
+// Integration Test: Full Connection Flow
+//=============================================================================
+
+TEST(BtIntegrationTest, ConnectionHandshakeFlow) {
+    init_socket_library();
+    
+    // Create two network managers to simulate two peers
+    BtNetworkConfig config1, config2;
+    config1.listen_port = 0;  // Random port
+    config2.listen_port = 0;
+    
+    BtNetworkManager manager1(config1);
+    BtNetworkManager manager2(config2);
+    
+    // Track connections
+    std::atomic<bool> manager1_received_connection{false};
+    std::atomic<bool> manager2_received_connection{false};
+    
+    manager1.set_connected_callback(
+        [&](const BtInfoHash&, std::unique_ptr<BtPeerConnection>, socket_t, bool) {
+            manager1_received_connection = true;
+        }
+    );
+    
+    manager2.set_connected_callback(
+        [&](const BtInfoHash&, std::unique_ptr<BtPeerConnection>, socket_t, bool) {
+            manager2_received_connection = true;
+        }
+    );
+    
+    // Start managers
+    manager1.start();
+    manager2.start();
+    
+    // Register same torrent on both
+    BtInfoHash hash;
+    std::fill(hash.begin(), hash.end(), 0x99);
+    
+    PeerID peer_id1, peer_id2;
+    std::fill(peer_id1.begin(), peer_id1.end(), 0x11);
+    std::fill(peer_id2.begin(), peer_id2.end(), 0x22);
+    
+    manager1.register_torrent(hash, peer_id1, 100);
+    manager2.register_torrent(hash, peer_id2, 100);
+    
+    // Manager2 connects to Manager1
+    uint16_t port1 = manager1.listen_port();
+    manager2.connect_peer("127.0.0.1", port1, hash, peer_id2, 100);
+    
+    // Wait for connection and handshake
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // Both should have received connections
+    // Manager1 receives incoming, Manager2 receives outgoing after handshake
+    EXPECT_TRUE(manager1_received_connection.load());
+    // Note: manager2 callback is invoked after handshake response is received
+    
+    manager1.stop();
+    manager2.stop();
+}

@@ -476,8 +476,19 @@ void BtClient::on_dht_peers_found(const std::vector<Peer>& peers, const InfoHash
         return;
     }
     
+    // Build peer list string for logging (show up to 5 peers)
+    std::string peer_list;
+    size_t show_count = std::min(peers.size(), static_cast<size_t>(5));
+    for (size_t i = 0; i < show_count; ++i) {
+        if (i > 0) peer_list += ", ";
+        peer_list += peers[i].ip + ":" + std::to_string(peers[i].port);
+    }
+    if (peers.size() > 5) {
+        peer_list += ", ...";
+    }
+    
     LOG_INFO("BtClient", "DHT found " + std::to_string(peers.size()) + " peers for " +
-             node_id_to_hex(info_hash).substr(0, 8) + "...");
+             node_id_to_hex(info_hash).substr(0, 8) + "...: " + peer_list);
     
     BtInfoHash bt_hash;
     std::copy(info_hash.begin(), info_hash.end(), bt_hash.begin());
@@ -510,9 +521,12 @@ void BtClient::on_peer_connected(const BtInfoHash& info_hash,
              std::to_string(connection->port()) + 
              (is_incoming ? " (incoming)" : " (outgoing)"));
     
-    // The torrent will take ownership of the connection
-    // For now, just add the peer to the torrent's pending list
-    // TODO: Better integration with torrent peer management
+    // Store socket in connection for later use
+    connection->set_socket(static_cast<int>(socket));
+    
+    // Hand connection to torrent - it will manage from here
+    // Torrent will setup callbacks and send extension handshake
+    torrent->add_connection(std::move(connection));
 }
 
 void BtClient::on_peer_disconnected(const BtInfoHash& info_hash, 
@@ -621,24 +635,34 @@ void BtClient::tick_loop() {
                 torrent->tick();
             }
             
-            // Connect pending peers
+            // Connect pending peers (for both magnet and regular torrents)
             for (auto& [hash, torrent] : torrents_) {
                 if (!torrent->is_active()) continue;
-                if (!torrent->has_metadata()) continue;
                 
-                auto info = torrent->info();
-                if (!info) continue;
+                auto pending = torrent->get_pending_peers();
+                if (pending.empty()) continue;
                 
-                // Get peers and connect
-                auto peers = torrent->peers();
-                size_t connected = peers.size();
+                size_t connected = torrent->num_peers();
                 size_t max_conn = config_.max_connections_per_torrent;
                 
-                // If we need more peers and have pending, connect them
-                if (connected < max_conn && network_manager_) {
-                    // Torrent has pending_peers_ but we need to access them
-                    // For now, rely on DHT/tracker announcements filling add_peer
+                // Connect to pending peers
+                for (const auto& [ip, port] : pending) {
+                    if (connected >= max_conn) break;
+                    
+                    // For magnet links without metadata, num_pieces is 0
+                    uint32_t num_pieces = 0;
+                    if (torrent->has_metadata() && torrent->info()) {
+                        num_pieces = torrent->info()->num_pieces();
+                    }
+                    
+                    if (network_manager_->connect_peer(ip, port, hash, peer_id_, num_pieces)) {
+                        LOG_DEBUG("BtClient", "Connecting to peer " + ip + ":" + std::to_string(port));
+                        ++connected;
+                    }
                 }
+                
+                // Clear pending peers after attempting connections
+                torrent->clear_pending_peers();
             }
         }
         

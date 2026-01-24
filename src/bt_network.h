@@ -70,12 +70,14 @@ struct ActiveConnection {
     std::unique_ptr<BtPeerConnection> connection;
     BtInfoHash info_hash;
     bool is_incoming;
+    bool callback_invoked;  ///< Whether on_peer_connected callback was invoked
     std::chrono::steady_clock::time_point connected_at;
     std::chrono::steady_clock::time_point last_activity;
     
     ActiveConnection() 
         : socket(INVALID_SOCKET_VALUE), 
           is_incoming(false),
+          callback_invoked(false),
           connected_at(std::chrono::steady_clock::now()),
           last_activity(std::chrono::steady_clock::now()) {}
 };
