@@ -63,7 +63,7 @@ struct DiskJob {
     
     // Piece info for read/hash operations
     uint32_t piece_length;
-    uint32_t piece_offset_in_torrent;  // Absolute offset in torrent
+    uint64_t piece_offset_in_torrent;  // Absolute offset in torrent (uint64 to support large torrents >4GB)
     
     // Callbacks (only one is set based on job type)
     WriteCompleteCallback write_callback;

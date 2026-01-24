@@ -68,9 +68,7 @@ void DiskIOThread::async_write_block(
     job.download_path = download_path;
     job.data = data;  // Copy the data
     job.piece_length = piece_length_standard;
-    job.piece_offset_in_torrent = static_cast<uint32_t>(
-        static_cast<uint64_t>(piece_index) * piece_length_standard
-    );
+    job.piece_offset_in_torrent = static_cast<uint64_t>(piece_index) * piece_length_standard;
     job.write_callback = callback;
     
     // Store file mappings with full info
@@ -99,9 +97,7 @@ void DiskIOThread::async_read_piece(
     job.piece_index = piece_index;
     job.download_path = download_path;
     job.piece_length = actual_piece_length;
-    job.piece_offset_in_torrent = static_cast<uint32_t>(
-        static_cast<uint64_t>(piece_index) * piece_length_standard
-    );
+    job.piece_offset_in_torrent = static_cast<uint64_t>(piece_index) * piece_length_standard;
     job.read_callback = callback;
     
     // Store file mappings with full info
@@ -129,9 +125,7 @@ void DiskIOThread::async_hash_piece(
     job.piece_index = piece_index;
     job.download_path = download_path;
     job.piece_length = actual_piece_length;
-    job.piece_offset_in_torrent = static_cast<uint32_t>(
-        static_cast<uint64_t>(piece_index) * piece_length_standard
-    );
+    job.piece_offset_in_torrent = static_cast<uint64_t>(piece_index) * piece_length_standard;
     job.hash_callback = callback;
     
     // Store file mappings with full info
