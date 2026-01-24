@@ -67,7 +67,7 @@ struct PeerConnectRequest {
  */
 struct ActiveConnection {
     socket_t socket;
-    std::unique_ptr<BtPeerConnection> connection;
+    std::shared_ptr<BtPeerConnection> connection;
     BtInfoHash info_hash;
     bool is_incoming;
     bool callback_invoked;  ///< Whether on_peer_connected callback was invoked
@@ -107,7 +107,7 @@ struct PendingConnection {
  */
 using PeerConnectedCallback = std::function<void(
     const BtInfoHash& info_hash,
-    std::unique_ptr<BtPeerConnection> connection,
+    std::shared_ptr<BtPeerConnection> connection,
     socket_t socket,
     bool is_incoming
 )>;

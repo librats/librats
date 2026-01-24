@@ -327,7 +327,7 @@ public:
      * @brief Add an established connection
      * Called by BtClient when network manager establishes a connection
      */
-    void add_connection(std::unique_ptr<BtPeerConnection> connection);
+    void add_connection(std::shared_ptr<BtPeerConnection> connection);
     
     /**
      * @brief Remove a connection by pointer
@@ -456,7 +456,7 @@ private:
     std::unordered_map<uint32_t, std::vector<uint8_t>> piece_buffers_;
     
     // Peers
-    std::vector<std::unique_ptr<BtPeerConnection>> connections_;
+    std::vector<std::shared_ptr<BtPeerConnection>> connections_;
     std::vector<std::pair<std::string, uint16_t>> pending_peers_;
     
     // Choking

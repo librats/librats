@@ -59,9 +59,9 @@ void BtClient::start() {
     
     // Set network callbacks
     network_manager_->set_connected_callback(
-        [this](const BtInfoHash& hash, std::unique_ptr<BtPeerConnection> conn, 
+        [this](const BtInfoHash& hash, std::shared_ptr<BtPeerConnection> conn, 
                socket_t sock, bool incoming) {
-            on_peer_connected(hash, std::move(conn), sock, incoming);
+            on_peer_connected(hash, conn, sock, incoming);
         }
     );
     
@@ -506,7 +506,7 @@ void BtClient::on_dht_peers_found(const std::vector<Peer>& peers, const InfoHash
 //=============================================================================
 
 void BtClient::on_peer_connected(const BtInfoHash& info_hash,
-                                  std::unique_ptr<BtPeerConnection> connection,
+                                  std::shared_ptr<BtPeerConnection> connection,
                                   socket_t socket, bool is_incoming) {
     auto torrent = get_torrent(info_hash);
     if (!torrent) {
@@ -525,8 +525,9 @@ void BtClient::on_peer_connected(const BtInfoHash& info_hash,
     connection->set_socket(static_cast<int>(socket));
     
     // Hand connection to torrent - it will manage from here
+    // Both network manager and torrent share ownership via shared_ptr
     // Torrent will setup callbacks and send extension handshake
-    torrent->add_connection(std::move(connection));
+    torrent->add_connection(connection);
 }
 
 void BtClient::on_peer_disconnected(const BtInfoHash& info_hash, 

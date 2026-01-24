@@ -308,6 +308,8 @@ void BtNetworkManager::process_connect_queue() {
 #endif
         
         if (result == 0 || in_progress) {
+            LOG_DEBUG("BtNetwork", "Connecting to " + request.ip + ":" + std::to_string(request.port));
+            
             PendingConnection pending;
             pending.socket = sock;
             pending.request = std::move(request);
@@ -315,8 +317,6 @@ void BtNetworkManager::process_connect_queue() {
             
             std::lock_guard<std::mutex> lock(pending_mutex_);
             pending_connections_.push_back(std::move(pending));
-            
-            LOG_DEBUG("BtNetwork", "Connecting to " + request.ip + ":" + std::to_string(request.port));
         } else {
             LOG_DEBUG("BtNetwork", "Connect failed immediately for " + request.ip);
             close_socket(sock);
@@ -420,7 +420,7 @@ void BtNetworkManager::handle_connection_established(PendingConnection& pending)
              std::to_string(pending.request.port));
     
     // Create peer connection
-    auto connection = std::make_unique<BtPeerConnection>(
+    auto connection = std::make_shared<BtPeerConnection>(
         pending.request.info_hash,
         pending.request.our_peer_id,
         pending.request.num_pieces
@@ -454,7 +454,7 @@ void BtNetworkManager::handle_connection_established(PendingConnection& pending)
     active.is_incoming = false;
     active.connected_at = std::chrono::steady_clock::now();
     active.last_activity = active.connected_at;
-    active.connection = std::move(connection);
+    active.connection = connection;  // shared_ptr - both network manager and torrent can hold it
     
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
@@ -588,7 +588,7 @@ void BtNetworkManager::handle_incoming_connection(socket_t client_socket,
     uint16_t port = static_cast<uint16_t>(std::stoi(peer_addr.substr(colon + 1)));
     
     // Create peer connection
-    auto connection = std::make_unique<BtPeerConnection>(
+    auto connection = std::make_shared<BtPeerConnection>(
         handshake->info_hash,
         reg.our_peer_id,
         reg.num_pieces
@@ -602,26 +602,26 @@ void BtNetworkManager::handle_incoming_connection(socket_t client_socket,
     
     BtInfoHash info_hash_copy = handshake->info_hash;
     
-    // For incoming connections, invoke callback immediately (handshake is already complete)
-    // We pass ownership of the connection to the callback
-    if (on_peer_connected_) {
-        on_peer_connected_(info_hash_copy, std::move(connection), 
-                           client_socket, true);
-    }
-    
-    // Add socket to active connections for tracking (without the connection object)
+    // Add socket to active connections for tracking
+    // Connection is shared_ptr so both network manager and torrent can access it
     ActiveConnection active;
     active.socket = client_socket;
     active.info_hash = info_hash_copy;
     active.is_incoming = true;
-    active.callback_invoked = true;  // Already invoked above
+    active.callback_invoked = true;  // Will invoke below
     active.connected_at = std::chrono::steady_clock::now();
     active.last_activity = active.connected_at;
-    // Note: connection is null now since we moved it to the callback
+    active.connection = connection;  // Keep shared ownership
     
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
         active_connections_[client_socket] = std::move(active);
+    }
+    
+    // For incoming connections, invoke callback immediately (handshake is already complete)
+    // Pass shared_ptr - both network manager and torrent will hold a reference
+    if (on_peer_connected_) {
+        on_peer_connected_(info_hash_copy, connection, client_socket, true);
     }
     
     LOG_INFO("BtNetwork", "Accepted peer " + peer_addr + " for torrent " + 
@@ -702,14 +702,14 @@ void BtNetworkManager::handle_peer_data(ActiveConnection& conn) {
                   ", invoking callback");
         
         // Invoke on_peer_connected callback
-        // Note: We pass ownership of the connection to the callback
+        // Pass shared_ptr - both network manager and torrent share ownership
         if (on_peer_connected_) {
-            on_peer_connected_(conn.info_hash, std::move(conn.connection), 
+            on_peer_connected_(conn.info_hash, conn.connection, 
                                conn.socket, conn.is_incoming);
         }
     }
     
-    // Notify data callback (only if connection is still owned by us)
+    // Notify data callback - connection is always valid (shared ownership)
     if (on_peer_data_ && conn.connection) {
         on_peer_data_(conn.info_hash, conn.connection.get(), conn.socket);
     }

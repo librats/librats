@@ -973,13 +973,13 @@ TEST(BtIntegrationTest, ConnectionHandshakeFlow) {
     std::atomic<bool> manager2_received_connection{false};
     
     manager1.set_connected_callback(
-        [&](const BtInfoHash&, std::unique_ptr<BtPeerConnection>, socket_t, bool) {
+        [&](const BtInfoHash&, std::shared_ptr<BtPeerConnection>, socket_t, bool) {
             manager1_received_connection = true;
         }
     );
     
     manager2.set_connected_callback(
-        [&](const BtInfoHash&, std::unique_ptr<BtPeerConnection>, socket_t, bool) {
+        [&](const BtInfoHash&, std::shared_ptr<BtPeerConnection>, socket_t, bool) {
             manager2_received_connection = true;
         }
     );

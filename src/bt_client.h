@@ -320,7 +320,7 @@ private:
     Torrent::Ptr create_torrent(const TorrentInfo& info, const std::string& save_path);
     void on_dht_peers_found(const std::vector<Peer>& peers, const InfoHash& info_hash);
     void on_peer_connected(const BtInfoHash& info_hash, 
-                           std::unique_ptr<BtPeerConnection> connection,
+                           std::shared_ptr<BtPeerConnection> connection,
                            socket_t socket, bool is_incoming);
     void on_peer_disconnected(const BtInfoHash& info_hash, BtPeerConnection* connection);
     void on_peer_data(const BtInfoHash& info_hash, BtPeerConnection* connection, socket_t socket);

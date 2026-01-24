@@ -179,7 +179,7 @@ TEST_F(BtNetworkTest, SetCallbacks) {
     std::atomic<bool> data_called{false};
     
     manager.set_connected_callback([&](const BtInfoHash&, 
-                                        std::unique_ptr<BtPeerConnection>, 
+                                        std::shared_ptr<BtPeerConnection>, 
                                         socket_t, bool) {
         connected_called = true;
     });
@@ -226,7 +226,7 @@ TEST_F(BtNetworkTest, LoopbackConnection) {
     std::atomic<bool> client_got_connection{false};
     
     server.set_connected_callback([&](const BtInfoHash& h, 
-                                       std::unique_ptr<BtPeerConnection> conn, 
+                                       std::shared_ptr<BtPeerConnection> conn, 
                                        socket_t, bool incoming) {
         EXPECT_EQ(h, hash);
         EXPECT_TRUE(incoming);
@@ -234,7 +234,7 @@ TEST_F(BtNetworkTest, LoopbackConnection) {
     });
     
     client.set_connected_callback([&](const BtInfoHash& h, 
-                                       std::unique_ptr<BtPeerConnection> conn, 
+                                       std::shared_ptr<BtPeerConnection> conn, 
                                        socket_t, bool incoming) {
         EXPECT_EQ(h, hash);
         EXPECT_FALSE(incoming);

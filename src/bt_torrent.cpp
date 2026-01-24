@@ -267,7 +267,7 @@ void Torrent::clear_pending_peers() {
     pending_peers_.clear();
 }
 
-void Torrent::add_connection(std::unique_ptr<BtPeerConnection> connection) {
+void Torrent::add_connection(std::shared_ptr<BtPeerConnection> connection) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!connection) return;
@@ -307,7 +307,7 @@ void Torrent::add_connection(std::unique_ptr<BtPeerConnection> connection) {
         picker_->add_peer(conn_ptr, connection->peer_pieces());
     }
     
-    connections_.push_back(std::move(connection));
+    connections_.push_back(connection);  // shared_ptr - just copy
     
     // Notify peer we're connected and setup extension handshake
     on_peer_connected(conn_ptr);
