@@ -84,6 +84,20 @@ using PeerID = std::array<uint8_t, BT_PEER_ID_SIZE>;
 /// Note: Reuses InfoHash from dht.h when available
 using BtInfoHash = std::array<uint8_t, BT_INFO_HASH_SIZE>;
 
+/**
+ * @brief Hash function for BtInfoHash in unordered containers
+ */
+struct InfoHashHash {
+    size_t operator()(const BtInfoHash& hash) const {
+        // Simple hash - combine first few bytes
+        size_t result = 0;
+        for (size_t i = 0; i < std::min(sizeof(size_t), hash.size()); ++i) {
+            result = (result << 8) | hash[i];
+        }
+        return result;
+    }
+};
+
 //=============================================================================
 // Peer ID Generation (BEP 20)
 //=============================================================================

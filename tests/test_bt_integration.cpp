@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <thread>
+#include <chrono>
+#include <atomic>
 #include "bt_types.h"
 #include "bt_bitfield.h"
 #include "bt_file_storage.h"
@@ -12,7 +15,9 @@
 #include "bt_choker.h"
 #include "bt_torrent.h"
 #include "bt_client.h"
+#include "bt_network.h"
 #include "bencode.h"
+#include "socket.h"
 
 using namespace librats;
 
@@ -278,8 +283,11 @@ TEST(BtIntegrationTest, TorrentFromMagnet) {
 }
 
 TEST(BtIntegrationTest, ClientBasicOperations) {
+    init_socket_library();
+    
     BtClientConfig config;
     config.download_path = "/tmp/downloads";
+    config.listen_port = 0;  // Use random port to avoid conflicts
     config.enable_dht = false;  // Disable for testing
     
     BtClient client(config);
@@ -440,4 +448,275 @@ TEST(BtIntegrationTest, PeerConnectionStateFlow) {
     
     conn.close();
     EXPECT_EQ(conn.state(), PeerConnectionState::Disconnected);
+}
+
+//=============================================================================
+// Network Integration Tests
+//=============================================================================
+
+TEST(BtIntegrationTest, ClientWithNetworkManager) {
+    init_socket_library();
+    
+    BtClientConfig config;
+    config.download_path = "/tmp/downloads";
+    config.listen_port = 0;  // Random port
+    config.enable_dht = false;  // Disable DHT for this test
+    
+    BtClient client(config);
+    
+    EXPECT_FALSE(client.is_running());
+    
+    client.start();
+    EXPECT_TRUE(client.is_running());
+    
+    // Check network manager is available
+    auto* network_mgr = client.network_manager();
+    ASSERT_NE(network_mgr, nullptr);
+    EXPECT_TRUE(network_mgr->is_running());
+    EXPECT_GT(network_mgr->listen_port(), 0);
+    
+    client.stop();
+    EXPECT_FALSE(client.is_running());
+}
+
+TEST(BtIntegrationTest, ClientListenPort) {
+    init_socket_library();
+    
+    BtClientConfig config;
+    config.download_path = "/tmp/downloads";
+    config.listen_port = 0;  // Let system assign
+    config.enable_dht = false;
+    
+    BtClient client(config);
+    client.start();
+    
+    uint16_t port = client.listen_port();
+    EXPECT_GT(port, 0);
+    EXPECT_NE(port, 6881);  // Should be different since we asked for random
+    
+    client.stop();
+}
+
+TEST(BtIntegrationTest, TorrentPendingPeers) {
+    auto torrent_bytes = create_test_torrent("TestPeers.bin", 100000, 32768);
+    
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    TorrentConfig config;
+    config.save_path = "/tmp/downloads";
+    
+    PeerID our_id = generate_peer_id("-LR0001-");
+    
+    Torrent torrent(*info, config, our_id);
+    torrent.start();
+    
+    // Add some peers
+    torrent.add_peer("192.168.1.1", 6881);
+    torrent.add_peer("192.168.1.2", 6882);
+    torrent.add_peer("192.168.1.3", 6883);
+    
+    // Get pending peers
+    auto pending = torrent.get_pending_peers();
+    EXPECT_EQ(pending.size(), 3);
+    
+    // Check peer data
+    bool found1 = false, found2 = false, found3 = false;
+    for (const auto& peer : pending) {
+        if (peer.first == "192.168.1.1" && peer.second == 6881) found1 = true;
+        if (peer.first == "192.168.1.2" && peer.second == 6882) found2 = true;
+        if (peer.first == "192.168.1.3" && peer.second == 6883) found3 = true;
+    }
+    EXPECT_TRUE(found1);
+    EXPECT_TRUE(found2);
+    EXPECT_TRUE(found3);
+    
+    // Clear pending
+    torrent.clear_pending_peers();
+    pending = torrent.get_pending_peers();
+    EXPECT_EQ(pending.size(), 0);
+    
+    torrent.stop();
+}
+
+TEST(BtIntegrationTest, TorrentAddConnection) {
+    auto torrent_bytes = create_test_torrent("TestConn.bin", 100000, 32768);
+    
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    TorrentConfig config;
+    config.save_path = "/tmp/downloads";
+    
+    PeerID our_id = generate_peer_id("-LR0001-");
+    
+    Torrent torrent(*info, config, our_id);
+    torrent.start();
+    
+    EXPECT_EQ(torrent.num_peers(), 0);
+    
+    // Create a mock connection
+    auto connection = std::make_unique<BtPeerConnection>(
+        info->info_hash(),
+        our_id,
+        info->num_pieces()
+    );
+    
+    connection->set_address("10.0.0.1", 6881);
+    
+    // Add to torrent
+    torrent.add_connection(std::move(connection));
+    
+    EXPECT_EQ(torrent.num_peers(), 1);
+    
+    auto peers = torrent.peers();
+    ASSERT_EQ(peers.size(), 1);
+    EXPECT_EQ(peers[0]->ip(), "10.0.0.1");
+    EXPECT_EQ(peers[0]->port(), 6881);
+    
+    torrent.stop();
+}
+
+TEST(BtIntegrationTest, TorrentRemoveConnection) {
+    auto torrent_bytes = create_test_torrent("TestRemove.bin", 100000, 32768);
+    
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    TorrentConfig config;
+    config.save_path = "/tmp/downloads";
+    
+    PeerID our_id = generate_peer_id("-LR0001-");
+    
+    Torrent torrent(*info, config, our_id);
+    torrent.start();
+    
+    // Add two connections
+    auto conn1 = std::make_unique<BtPeerConnection>(
+        info->info_hash(), our_id, info->num_pieces());
+    conn1->set_address("10.0.0.1", 6881);
+    
+    auto conn2 = std::make_unique<BtPeerConnection>(
+        info->info_hash(), our_id, info->num_pieces());
+    conn2->set_address("10.0.0.2", 6882);
+    
+    BtPeerConnection* conn1_ptr = conn1.get();
+    
+    torrent.add_connection(std::move(conn1));
+    torrent.add_connection(std::move(conn2));
+    
+    EXPECT_EQ(torrent.num_peers(), 2);
+    
+    // Remove first connection
+    torrent.remove_connection(conn1_ptr);
+    
+    EXPECT_EQ(torrent.num_peers(), 1);
+    
+    auto peers = torrent.peers();
+    ASSERT_EQ(peers.size(), 1);
+    EXPECT_EQ(peers[0]->ip(), "10.0.0.2");
+    
+    torrent.stop();
+}
+
+//=============================================================================
+// DHT Integration Tests (with DHT disabled for speed)
+//=============================================================================
+
+TEST(BtIntegrationTest, ClientDhtDisabled) {
+    init_socket_library();
+    
+    BtClientConfig config;
+    config.download_path = "/tmp/downloads";
+    config.listen_port = 0;
+    config.enable_dht = false;
+    
+    BtClient client(config);
+    client.start();
+    
+    EXPECT_FALSE(client.dht_running());
+    EXPECT_EQ(client.dht_node_count(), 0);
+    
+    client.stop();
+}
+
+TEST(BtIntegrationTest, ClientAddTorrentRegistersWithNetwork) {
+    init_socket_library();
+    
+    BtClientConfig config;
+    config.download_path = "/tmp/downloads";
+    config.listen_port = 0;
+    config.enable_dht = false;
+    
+    BtClient client(config);
+    client.start();
+    
+    auto torrent_bytes = create_test_torrent("NetTest.bin", 50000);
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    auto torrent = client.add_torrent(*info);
+    ASSERT_NE(torrent, nullptr);
+    
+    // Torrent should be registered with network manager
+    // (verified by network manager accepting connections for this hash)
+    EXPECT_EQ(client.num_torrents(), 1);
+    
+    client.remove_torrent(info->info_hash());
+    EXPECT_EQ(client.num_torrents(), 0);
+    
+    client.stop();
+}
+
+//=============================================================================
+// Full Client-to-Client Communication Test
+//=============================================================================
+
+TEST(BtIntegrationTest, DISABLED_TwoClientsConnect) {
+    // This test is disabled by default as it requires full network
+    // Enable it for manual integration testing
+    
+    init_socket_library();
+    
+    // Create shared torrent
+    auto torrent_bytes = create_test_torrent("SharedTorrent.bin", 100000, 32768);
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    // Client 1 (seeder)
+    BtClientConfig config1;
+    config1.download_path = "/tmp/client1";
+    config1.listen_port = 0;
+    config1.enable_dht = false;
+    
+    BtClient client1(config1);
+    client1.start();
+    
+    auto torrent1 = client1.add_torrent(*info);
+    ASSERT_NE(torrent1, nullptr);
+    
+    // Client 2 (leecher)
+    BtClientConfig config2;
+    config2.download_path = "/tmp/client2";
+    config2.listen_port = 0;
+    config2.enable_dht = false;
+    
+    BtClient client2(config2);
+    client2.start();
+    
+    auto torrent2 = client2.add_torrent(*info);
+    ASSERT_NE(torrent2, nullptr);
+    
+    // Client2 connects to Client1
+    uint16_t client1_port = client1.listen_port();
+    torrent2->add_peer("127.0.0.1", client1_port);
+    
+    // Wait for connection
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    
+    // Check connection established
+    EXPECT_GT(torrent1->num_peers() + torrent2->num_peers(), 0);
+    
+    client1.stop();
+    client2.stop();
 }

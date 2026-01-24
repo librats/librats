@@ -1,4 +1,5 @@
 #include "bt_client.h"
+#include "tracker.h"
 #include "logger.h"
 
 #include <chrono>

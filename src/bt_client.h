@@ -13,7 +13,6 @@
 #include "bt_torrent_info.h"
 #include "bt_network.h"
 #include "dht.h"
-#include "tracker.h"
 
 #include <memory>
 #include <vector>
@@ -25,20 +24,8 @@
 
 namespace librats {
 
-//=============================================================================
-// InfoHashHash for unordered_map
-//=============================================================================
-
-struct InfoHashHash {
-    size_t operator()(const BtInfoHash& hash) const {
-        // Simple hash - combine first few bytes
-        size_t result = 0;
-        for (size_t i = 0; i < std::min(sizeof(size_t), hash.size()); ++i) {
-            result = (result << 8) | hash[i];
-        }
-        return result;
-    }
-};
+// Forward declarations
+class TrackerManager;
 
 //=============================================================================
 // Client Configuration
@@ -227,9 +214,14 @@ public:
     const PeerID& peer_id() const { return peer_id_; }
     
     /**
-     * @brief Get listen port
+     * @brief Get listen port (actual port when running, configured port otherwise)
      */
-    uint16_t listen_port() const { return config_.listen_port; }
+    uint16_t listen_port() const { 
+        if (network_manager_ && network_manager_->is_running()) {
+            return network_manager_->listen_port();
+        }
+        return config_.listen_port; 
+    }
     
     //=========================================================================
     // Callbacks

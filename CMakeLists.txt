@@ -436,6 +436,7 @@ if(RATS_BUILD_TESTS)
             tests/test_bt_handshake.cpp
             tests/test_bt_peer_connection.cpp
             tests/test_bt_extension.cpp
+            tests/test_bt_network.cpp
             tests/test_bt_integration.cpp
         )
     endif()
