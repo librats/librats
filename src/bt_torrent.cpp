@@ -455,8 +455,13 @@ void Torrent::on_peer_disconnected(BtPeerConnection* peer) {
 }
 
 void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
+    // Log all message types for debugging
     switch (msg.type) {
         case BtMessageType::Bitfield:
+            if (msg.bitfield) {
+                LOG_DEBUG("Torrent", "on_peer_message: Bitfield from " + peer->ip() + 
+                          ", bits_set=" + std::to_string(msg.bitfield->count()));
+            }
             if (msg.bitfield && picker_) {
                 picker_->add_peer(peer, *msg.bitfield);
                 
@@ -468,6 +473,8 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
             break;
             
         case BtMessageType::Have:
+            LOG_DEBUG("Torrent", "on_peer_message: Have piece=" + std::to_string(msg.have_piece) + 
+                      " from " + peer->ip());
             if (picker_) {
                 picker_->peer_has_piece(peer, msg.have_piece);
             }
@@ -475,12 +482,20 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
             
         case BtMessageType::Piece:
             if (msg.piece) {
+                LOG_DEBUG("Torrent", "on_peer_message: Piece idx=" + std::to_string(msg.piece->piece_index) + 
+                          " begin=" + std::to_string(msg.piece->begin) + 
+                          " len=" + std::to_string(msg.piece->data.size()) + " from " + peer->ip());
                 on_piece_received(msg.piece->piece_index, msg.piece->begin, msg.piece->data);
             }
             break;
             
         case BtMessageType::Request:
             // Peer is requesting a block from us
+            if (msg.request) {
+                LOG_DEBUG("Torrent", "on_peer_message: Request piece=" + std::to_string(msg.request->piece_index) + 
+                          " begin=" + std::to_string(msg.request->begin) + 
+                          " len=" + std::to_string(msg.request->length) + " from " + peer->ip());
+            }
             if (msg.request && !peer->am_choking() && have_pieces_.get_bit(msg.request->piece_index)) {
                 // Read from disk and send piece data to peer
                 read_piece_from_disk(msg.request->piece_index, peer, 
@@ -490,22 +505,34 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
             
         case BtMessageType::Unchoke:
             // Peer unchoked us - can start requesting
-            LOG_DEBUG("Torrent", "Peer " + peer->ip() + " unchoked us");
+            LOG_DEBUG("Torrent", "on_peer_message: Unchoke from " + peer->ip());
             break;
             
         case BtMessageType::Choke:
             // Peer choked us - stop requesting
+            LOG_DEBUG("Torrent", "on_peer_message: Choke from " + peer->ip());
             if (picker_) {
                 picker_->cancel_peer_requests(peer);
             }
             break;
             
+        case BtMessageType::Interested:
+            LOG_DEBUG("Torrent", "on_peer_message: Interested from " + peer->ip());
+            break;
+            
+        case BtMessageType::NotInterested:
+            LOG_DEBUG("Torrent", "on_peer_message: NotInterested from " + peer->ip());
+            break;
+            
         case BtMessageType::Extended:
+            LOG_DEBUG("Torrent", "on_peer_message: Extended ext_id=" + std::to_string(msg.extension_id) + 
+                      " payload=" + std::to_string(msg.extension_payload.size()) + " bytes from " + peer->ip());
             // Handle extension protocol messages
             on_extension_message(peer, msg.extension_id, msg.extension_payload);
             break;
             
         default:
+            LOG_DEBUG("Torrent", "on_peer_message: Unknown type from " + peer->ip());
             break;
     }
 }
@@ -818,8 +845,13 @@ void Torrent::send_extension_handshake(BtPeerConnection* peer) {
 
 void Torrent::on_extension_message(BtPeerConnection* peer, uint8_t ext_id, 
                                     const std::vector<uint8_t>& payload) {
+    LOG_DEBUG("Torrent", "on_extension_message: ext_id=" + std::to_string(ext_id) + 
+              " payload=" + std::to_string(payload.size()) + " bytes from " + peer->ip() +
+              " (state=" + std::string(torrent_state_to_string(state_)) + ")");
+    
     if (ext_id == 0) {
         // Extension handshake
+        LOG_DEBUG("Torrent", "Processing extension handshake from " + peer->ip());
         on_extension_handshake(peer, payload);
     } else {
         // Regular extension message
@@ -827,7 +859,10 @@ void Torrent::on_extension_message(BtPeerConnection* peer, uint8_t ext_id,
         // the peer told us in their handshake
         // For now, try to handle as ut_metadata if we're downloading metadata
         if (state_ == TorrentState::DownloadingMetadata) {
+            LOG_DEBUG("Torrent", "Processing as ut_metadata message from " + peer->ip());
             on_metadata_message(peer, payload);
+        } else {
+            LOG_DEBUG("Torrent", "Ignoring extension message (not in DownloadingMetadata state)");
         }
     }
 }
@@ -884,6 +919,7 @@ void Torrent::on_extension_handshake(BtPeerConnection* peer,
 
 void Torrent::request_metadata(BtPeerConnection* peer) {
     if (has_metadata_unlocked()) {
+        LOG_DEBUG("Torrent", "request_metadata: already have metadata, skipping");
         return;  // Already have metadata
     }
     
@@ -891,6 +927,9 @@ void Torrent::request_metadata(BtPeerConnection* peer) {
     auto id_it = peer_ut_metadata_id_.find(peer);
     
     if (size_it == peer_metadata_size_.end() || id_it == peer_ut_metadata_id_.end()) {
+        LOG_DEBUG("Torrent", "request_metadata: no metadata info for peer " + peer->ip() + 
+                  " (size_found=" + (size_it != peer_metadata_size_.end() ? "yes" : "no") +
+                  ", id_found=" + (id_it != peer_ut_metadata_id_.end() ? "yes" : "no") + ")");
         return;  // Don't have peer's metadata info
     }
     
@@ -926,15 +965,20 @@ void Torrent::request_metadata(BtPeerConnection* peer) {
 
 void Torrent::on_metadata_message(BtPeerConnection* peer,
                                    const std::vector<uint8_t>& payload) {
+    LOG_DEBUG("Torrent", "on_metadata_message: " + std::to_string(payload.size()) + 
+              " bytes from " + peer->ip());
+    
     // Parse the bencoded message
     BencodeValue decoded;
     try {
         decoded = BencodeDecoder::decode(payload);
     } catch (...) {
+        LOG_WARN("Torrent", "Failed to decode metadata message from " + peer->ip());
         return;
     }
     
     if (!decoded.is_dict()) {
+        LOG_WARN("Torrent", "Metadata message is not a dict from " + peer->ip());
         return;
     }
     
@@ -942,10 +986,13 @@ void Torrent::on_metadata_message(BtPeerConnection* peer,
     
     auto msg_type_it = dict.find("msg_type");
     if (msg_type_it == dict.end() || !msg_type_it->second.is_integer()) {
+        LOG_WARN("Torrent", "Metadata message missing msg_type from " + peer->ip());
         return;
     }
     
     int msg_type = static_cast<int>(msg_type_it->second.as_integer());
+    LOG_DEBUG("Torrent", "on_metadata_message: msg_type=" + std::to_string(msg_type) + 
+              " (0=request, 1=data, 2=reject) from " + peer->ip());
     
     if (msg_type == 1) {  // Data
         auto piece_it = dict.find("piece");

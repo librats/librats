@@ -1,4 +1,5 @@
 #include "bt_peer_connection.h"
+#include "logger.h"
 #include <algorithm>
 #include <cstring>
 
@@ -154,6 +155,7 @@ void BtPeerConnection::set_address(const std::string& ip, uint16_t port) {
 void BtPeerConnection::start_handshake() {
     if (handshake_sent_) return;
     
+    LOG_DEBUG("BtPeerConn", "Sending handshake to " + ip_);
     auto hs = BtHandshake::encode_with_extensions(our_info_hash_, our_peer_id_);
     queue_send(hs);
     handshake_sent_ = true;
@@ -194,6 +196,9 @@ void BtPeerConnection::on_receive(const uint8_t* data, size_t length) {
     recv_buffer_.insert(recv_buffer_.end(), data, data + length);
     stats_.last_message_at = std::chrono::steady_clock::now();
     
+    LOG_DEBUG("BtPeerConn", "on_receive: " + std::to_string(length) + " bytes from " + ip_ + 
+              ", buffer now " + std::to_string(recv_buffer_.size()) + " bytes");
+    
     // Process handshake first
     if (!handshake_received_) {
         process_handshake();
@@ -207,11 +212,14 @@ void BtPeerConnection::on_receive(const uint8_t* data, size_t length) {
 
 void BtPeerConnection::process_handshake() {
     if (recv_buffer_.size() < BT_HANDSHAKE_SIZE) {
+        LOG_DEBUG("BtPeerConn", "process_handshake: waiting for more data, have " + 
+                  std::to_string(recv_buffer_.size()) + "/" + std::to_string(BT_HANDSHAKE_SIZE) + " bytes");
         return;  // Wait for more data
     }
     
     auto hs = BtHandshake::decode(recv_buffer_.data(), recv_buffer_.size());
     if (!hs) {
+        LOG_ERROR("BtPeerConn", "Invalid handshake from " + ip_);
         if (on_error_) {
             on_error_(this, "Invalid handshake");
         }
@@ -221,6 +229,7 @@ void BtPeerConnection::process_handshake() {
     
     // Verify info hash matches
     if (hs->info_hash != our_info_hash_) {
+        LOG_ERROR("BtPeerConn", "Info hash mismatch from " + ip_);
         if (on_error_) {
             on_error_(this, "Info hash mismatch");
         }
@@ -233,6 +242,17 @@ void BtPeerConnection::process_handshake() {
     peer_id_ = hs->peer_id;
     peer_extensions_ = hs->extensions;
     handshake_received_ = true;
+    
+    // Format peer_id for logging (first 8 chars, printable only)
+    std::string peer_id_str;
+    for (size_t i = 0; i < 8 && i < peer_id_.size(); ++i) {
+        char c = static_cast<char>(peer_id_[i]);
+        peer_id_str += (c >= 32 && c < 127) ? c : '.';
+    }
+    
+    LOG_INFO("BtPeerConn", "Handshake received from " + ip_ + ", peer_id=" + peer_id_str + 
+             ", ext_protocol=" + (hs->extensions.extension_protocol ? "yes" : "no") +
+             ", fast=" + (hs->extensions.fast ? "yes" : "no"));
     
     // Remove handshake from buffer
     recv_buffer_.erase(recv_buffer_.begin(), recv_buffer_.begin() + BT_HANDSHAKE_SIZE);
@@ -263,6 +283,7 @@ void BtPeerConnection::process_messages() {
         
         // Check for keep-alive
         if (BtMessageDecoder::is_keepalive(recv_buffer_.data(), recv_buffer_.size())) {
+            LOG_DEBUG("BtPeerConn", "Received keep-alive from " + ip_);
             recv_buffer_.erase(recv_buffer_.begin(), recv_buffer_.begin() + 4);
             continue;
         }
@@ -274,6 +295,9 @@ void BtPeerConnection::process_messages() {
         if (msg) {
             handle_message(*msg);
             ++stats_.messages_received;
+        } else {
+            LOG_WARN("BtPeerConn", "Failed to decode message from " + ip_ + 
+                     ", msg_len=" + std::to_string(msg_len));
         }
         
         // Remove processed message
@@ -282,6 +306,42 @@ void BtPeerConnection::process_messages() {
 }
 
 void BtPeerConnection::handle_message(const BtMessage& msg) {
+    // Log message details based on type
+    std::string log_detail;
+    switch (msg.type) {
+        case BtMessageType::Have:
+            log_detail = " piece=" + std::to_string(msg.have_piece);
+            break;
+        case BtMessageType::Bitfield:
+            if (msg.bitfield) {
+                log_detail = " bits=" + std::to_string(msg.bitfield->count());
+            }
+            break;
+        case BtMessageType::Request:
+            if (msg.request) {
+                log_detail = " piece=" + std::to_string(msg.request->piece_index) +
+                             " begin=" + std::to_string(msg.request->begin) +
+                             " len=" + std::to_string(msg.request->length);
+            }
+            break;
+        case BtMessageType::Piece:
+            if (msg.piece) {
+                log_detail = " piece=" + std::to_string(msg.piece->piece_index) +
+                             " begin=" + std::to_string(msg.piece->begin) +
+                             " len=" + std::to_string(msg.piece->data.size());
+            }
+            break;
+        case BtMessageType::Extended:
+            log_detail = " ext_id=" + std::to_string(msg.extension_id) +
+                         " payload=" + std::to_string(msg.extension_payload.size()) + " bytes";
+            break;
+        default:
+            break;
+    }
+    
+    LOG_DEBUG("BtPeerConn", "handle_message: " + std::string(message_type_to_string(msg.type)) + 
+              " from " + ip_ + log_detail);
+    
     switch (msg.type) {
         case BtMessageType::Choke:
             peer_choking_ = true;
@@ -371,6 +431,8 @@ void BtPeerConnection::mark_sent(size_t bytes) {
 
 void BtPeerConnection::queue_send(const std::vector<uint8_t>& data) {
     send_buffer_.insert(send_buffer_.end(), data.begin(), data.end());
+    LOG_DEBUG("BtPeerConn", "queue_send: " + std::to_string(data.size()) + " bytes to " + ip_ + 
+              ", buffer now " + std::to_string(send_buffer_.size()) + " bytes");
 }
 
 //=============================================================================
@@ -386,40 +448,48 @@ bool BtPeerConnection::peer_has_piece(uint32_t piece) const {
 //=============================================================================
 
 void BtPeerConnection::send_choke() {
+    LOG_DEBUG("BtPeerConn", "send_choke to " + ip_);
     am_choking_ = true;
     queue_send(BtMessageEncoder::encode_choke());
     ++stats_.messages_sent;
 }
 
 void BtPeerConnection::send_unchoke() {
+    LOG_DEBUG("BtPeerConn", "send_unchoke to " + ip_);
     am_choking_ = false;
     queue_send(BtMessageEncoder::encode_unchoke());
     ++stats_.messages_sent;
 }
 
 void BtPeerConnection::send_interested() {
+    LOG_DEBUG("BtPeerConn", "send_interested to " + ip_);
     am_interested_ = true;
     queue_send(BtMessageEncoder::encode_interested());
     ++stats_.messages_sent;
 }
 
 void BtPeerConnection::send_not_interested() {
+    LOG_DEBUG("BtPeerConn", "send_not_interested to " + ip_);
     am_interested_ = false;
     queue_send(BtMessageEncoder::encode_not_interested());
     ++stats_.messages_sent;
 }
 
 void BtPeerConnection::send_have(uint32_t piece_index) {
+    LOG_DEBUG("BtPeerConn", "send_have piece=" + std::to_string(piece_index) + " to " + ip_);
     queue_send(BtMessageEncoder::encode_have(piece_index));
     ++stats_.messages_sent;
 }
 
 void BtPeerConnection::send_bitfield(const Bitfield& bitfield) {
+    LOG_DEBUG("BtPeerConn", "send_bitfield bits=" + std::to_string(bitfield.count()) + " to " + ip_);
     queue_send(BtMessageEncoder::encode_bitfield(bitfield));
     ++stats_.messages_sent;
 }
 
 void BtPeerConnection::send_request(uint32_t piece, uint32_t begin, uint32_t length) {
+    LOG_DEBUG("BtPeerConn", "send_request piece=" + std::to_string(piece) + 
+              " begin=" + std::to_string(begin) + " len=" + std::to_string(length) + " to " + ip_);
     queue_send(BtMessageEncoder::encode_request(piece, begin, length));
     ++stats_.messages_sent;
     
@@ -428,6 +498,8 @@ void BtPeerConnection::send_request(uint32_t piece, uint32_t begin, uint32_t len
 
 void BtPeerConnection::send_piece(uint32_t piece, uint32_t begin, 
                                    const uint8_t* data, size_t length) {
+    LOG_DEBUG("BtPeerConn", "send_piece piece=" + std::to_string(piece) + 
+              " begin=" + std::to_string(begin) + " len=" + std::to_string(length) + " to " + ip_);
     queue_send(BtMessageEncoder::encode_piece(piece, begin, data, length));
     stats_.bytes_uploaded += length;
     ++stats_.pieces_sent;
@@ -435,6 +507,8 @@ void BtPeerConnection::send_piece(uint32_t piece, uint32_t begin,
 }
 
 void BtPeerConnection::send_cancel(uint32_t piece, uint32_t begin, uint32_t length) {
+    LOG_DEBUG("BtPeerConn", "send_cancel piece=" + std::to_string(piece) + 
+              " begin=" + std::to_string(begin) + " len=" + std::to_string(length) + " to " + ip_);
     queue_send(BtMessageEncoder::encode_cancel(piece, begin, length));
     ++stats_.messages_sent;
     
@@ -442,11 +516,14 @@ void BtPeerConnection::send_cancel(uint32_t piece, uint32_t begin, uint32_t leng
 }
 
 void BtPeerConnection::send_keepalive() {
+    LOG_DEBUG("BtPeerConn", "send_keepalive to " + ip_);
     queue_send(BtMessageEncoder::encode_keepalive());
 }
 
 void BtPeerConnection::send_extended(uint8_t extension_id, 
                                       const std::vector<uint8_t>& payload) {
+    LOG_DEBUG("BtPeerConn", "send_extended ext_id=" + std::to_string(extension_id) + 
+              " payload=" + std::to_string(payload.size()) + " bytes to " + ip_);
     queue_send(BtMessageEncoder::encode_extended(extension_id, payload));
     ++stats_.messages_sent;
 }

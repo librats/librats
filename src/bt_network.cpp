@@ -185,14 +185,27 @@ bool BtNetworkManager::send_to_peer(socket_t socket, const std::vector<uint8_t>&
         return false;
     }
     
+    // Find peer IP for logging
+    std::string peer_ip = "unknown";
+    {
+        std::lock_guard<std::mutex> lock(connections_mutex_);
+        auto it = active_connections_.find(socket);
+        if (it != active_connections_.end() && it->second.connection) {
+            peer_ip = it->second.connection->ip();
+        }
+    }
+    
     int sent = send(socket, reinterpret_cast<const char*>(data.data()), 
                     static_cast<int>(data.size()), 0);
     
     if (sent <= 0) {
-        LOG_DEBUG("BtNetwork", "Send failed, closing connection");
+        LOG_DEBUG("BtNetwork", "send_to_peer: send failed to " + peer_ip + ", closing connection");
         close_connection(socket);
         return false;
     }
+    
+    LOG_DEBUG("BtNetwork", "send_to_peer: sent " + std::to_string(sent) + "/" + 
+              std::to_string(data.size()) + " bytes to " + peer_ip);
     
     return sent == static_cast<int>(data.size());
 }
@@ -331,6 +344,8 @@ void BtNetworkManager::process_pending_connects() {
         return;
     }
     
+    LOG_DEBUG("BtNetwork", "process_pending_connects: " + std::to_string(pending_connections_.size()) + " pending");
+    
     auto now = std::chrono::steady_clock::now();
     
     // Build fd_set for select
@@ -357,6 +372,10 @@ void BtNetworkManager::process_pending_connects() {
     // Non-blocking select
     struct timeval tv = {0, 0};
     int ready = select(static_cast<int>(max_fd + 1), nullptr, &write_fds, &error_fds, &tv);
+    
+    if (ready > 0) {
+        LOG_DEBUG("BtNetwork", "process_pending_connects: select() returned " + std::to_string(ready) + " ready");
+    }
     
     if (ready <= 0) {
         // Check for timeouts
@@ -438,14 +457,20 @@ void BtNetworkManager::handle_connection_established(PendingConnection& pending)
         extensions
     );
     
+    LOG_DEBUG("BtNetwork", "Sending handshake (" + std::to_string(handshake.size()) + 
+              " bytes) to " + pending.request.ip);
+    
     int sent = send(pending.socket, reinterpret_cast<const char*>(handshake.data()),
                     static_cast<int>(handshake.size()), 0);
     
     if (sent != static_cast<int>(handshake.size())) {
-        LOG_ERROR("BtNetwork", "Failed to send handshake");
+        LOG_ERROR("BtNetwork", "Failed to send handshake to " + pending.request.ip + 
+                  " (sent " + std::to_string(sent) + "/" + std::to_string(handshake.size()) + ")");
         close_socket(pending.socket);
         return;
     }
+    
+    LOG_DEBUG("BtNetwork", "Handshake sent successfully to " + pending.request.ip);
     
     // Add to active connections
     ActiveConnection active;
@@ -573,14 +598,19 @@ void BtNetworkManager::handle_incoming_connection(socket_t client_socket,
         extensions
     );
     
+    LOG_DEBUG("BtNetwork", "Sending handshake response (" + std::to_string(our_handshake.size()) + 
+              " bytes) to " + peer_addr);
+    
     int sent = send(client_socket, reinterpret_cast<const char*>(our_handshake.data()),
                     static_cast<int>(our_handshake.size()), 0);
     
     if (sent != static_cast<int>(our_handshake.size())) {
-        LOG_ERROR("BtNetwork", "Failed to send handshake response");
+        LOG_ERROR("BtNetwork", "Failed to send handshake response to " + peer_addr);
         close_socket(client_socket);
         return;
     }
+    
+    LOG_DEBUG("BtNetwork", "Handshake response sent successfully to " + peer_addr);
     
     // Parse peer address
     size_t colon = peer_addr.find(':');
@@ -679,12 +709,18 @@ void BtNetworkManager::handle_peer_data(ActiveConnection& conn) {
     
     if (n <= 0) {
         // Connection closed or error
+        std::string peer_ip = conn.connection ? conn.connection->ip() : "unknown";
+        LOG_DEBUG("BtNetwork", "handle_peer_data: recv returned " + std::to_string(n) + 
+                  " from " + peer_ip + " (closing)");
         if (on_peer_disconnected_ && conn.connection) {
             on_peer_disconnected_(conn.info_hash, conn.connection.get());
         }
         close_socket(conn.socket);
         return;
     }
+    
+    std::string peer_ip = conn.connection ? conn.connection->ip() : "unknown";
+    LOG_DEBUG("BtNetwork", "handle_peer_data: recv " + std::to_string(n) + " bytes from " + peer_ip);
     
     conn.last_activity = std::chrono::steady_clock::now();
     
