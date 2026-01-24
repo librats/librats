@@ -12,57 +12,132 @@
 namespace librats {
 
 //=============================================================================
-// DiskIOThread Implementation
+// DiskIOThreadPool Implementation
 //=============================================================================
 
-DiskIOThread::DiskIOThread()
-    : running_(false), total_bytes_written_(0), total_bytes_read_(0) {
+DiskIOThreadPool::DiskIOThreadPool(const DiskIOConfig& config)
+    : config_(config)
+    , running_(false)
+    , num_write_threads_(config.num_write_threads)
+    , num_read_threads_(config.num_read_threads)
+    , total_bytes_written_(0)
+    , total_bytes_read_(0)
+    , jobs_completed_(0) {
 }
 
-DiskIOThread::~DiskIOThread() {
+DiskIOThreadPool::~DiskIOThreadPool() {
     stop();
 }
 
-bool DiskIOThread::start() {
+bool DiskIOThreadPool::start() {
     if (running_.load()) {
         return true;
     }
     
     running_.store(true);
-    worker_thread_ = std::thread(&DiskIOThread::worker_loop, this);
     
-    LOG_DISK_INFO("Disk I/O thread started");
+    // Start worker threads
+    start_write_threads(num_write_threads_.load());
+    start_read_threads(num_read_threads_.load());
+    
+    LOG_DISK_INFO("Disk I/O thread pool started with " 
+                  << num_write_threads_.load() << " write threads and "
+                  << num_read_threads_.load() << " read threads");
     return true;
 }
 
-void DiskIOThread::stop() {
+void DiskIOThreadPool::stop() {
     if (!running_.load()) {
         return;
     }
     
     running_.store(false);
     
-    // Wake up worker thread
-    queue_cv_.notify_all();
+    // Wake up all waiting threads
+    write_cv_.notify_all();
+    read_cv_.notify_all();
     
-    if (worker_thread_.joinable()) {
-        worker_thread_.join();
-    }
+    // Wait for all threads to finish
+    stop_write_threads();
+    stop_read_threads();
     
-    LOG_DISK_INFO("Disk I/O thread stopped");
+    LOG_DISK_INFO("Disk I/O thread pool stopped. Total jobs completed: " << jobs_completed_.load());
 }
 
-void DiskIOThread::async_write_block(
+void DiskIOThreadPool::set_num_write_threads(int count) {
+    if (count < 1) count = 1;
+    int old_count = num_write_threads_.exchange(count);
+    
+    if (!running_.load()) return;
+    
+    if (count > old_count) {
+        // Start additional threads
+        start_write_threads(count - old_count);
+    }
+    // Note: Reducing threads happens naturally when threads check the count
+}
+
+void DiskIOThreadPool::set_num_read_threads(int count) {
+    if (count < 1) count = 1;
+    int old_count = num_read_threads_.exchange(count);
+    
+    if (!running_.load()) return;
+    
+    if (count > old_count) {
+        // Start additional threads
+        start_read_threads(count - old_count);
+    }
+}
+
+void DiskIOThreadPool::start_write_threads(int count) {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    for (int i = 0; i < count; ++i) {
+        write_threads_.emplace_back(&DiskIOThreadPool::write_worker_loop, this);
+    }
+}
+
+void DiskIOThreadPool::start_read_threads(int count) {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    for (int i = 0; i < count; ++i) {
+        read_threads_.emplace_back(&DiskIOThreadPool::read_worker_loop, this);
+    }
+}
+
+void DiskIOThreadPool::stop_write_threads() {
+    for (auto& t : write_threads_) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    write_threads_.clear();
+}
+
+void DiskIOThreadPool::stop_read_threads() {
+    for (auto& t : read_threads_) {
+        if (t.joinable()) {
+            t.join();
+        }
+    }
+    read_threads_.clear();
+}
+
+//=============================================================================
+// Async Job Submission
+//=============================================================================
+
+void DiskIOThreadPool::async_write_block(
     const std::string& download_path,
     const std::vector<FileMappingInfo>& files,
     uint32_t piece_index,
     uint32_t piece_length_standard,
     uint32_t block_offset,
     const std::vector<uint8_t>& data,
-    WriteCompleteCallback callback)
+    WriteCompleteCallback callback,
+    DiskJobPriority priority)
 {
     DiskJob job;
     job.type = DiskJobType::WRITE_BLOCK;
+    job.priority = priority;
     job.piece_index = piece_index;
     job.offset = block_offset;
     job.download_path = download_path;
@@ -70,116 +145,133 @@ void DiskIOThread::async_write_block(
     job.piece_length = piece_length_standard;
     job.piece_offset_in_torrent = static_cast<uint64_t>(piece_index) * piece_length_standard;
     job.write_callback = callback;
-    
-    // Store file mappings with full info
     job.file_mappings = files;
     
     {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        job_queue_.push(std::move(job));
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        write_queue_.push(std::move(job));
     }
-    queue_cv_.notify_one();
+    write_cv_.notify_one();
     
     LOG_DISK_DEBUG("Queued write block: piece " << piece_index << " offset " << block_offset 
                    << " size " << data.size());
 }
 
-void DiskIOThread::async_read_piece(
+void DiskIOThreadPool::async_read_piece(
     const std::string& download_path,
     const std::vector<FileMappingInfo>& files,
     uint32_t piece_index,
     uint32_t piece_length_standard,
     uint32_t actual_piece_length,
-    ReadCompleteCallback callback)
+    ReadCompleteCallback callback,
+    DiskJobPriority priority)
 {
     DiskJob job;
     job.type = DiskJobType::READ_PIECE;
+    job.priority = priority;
     job.piece_index = piece_index;
     job.download_path = download_path;
     job.piece_length = actual_piece_length;
     job.piece_offset_in_torrent = static_cast<uint64_t>(piece_index) * piece_length_standard;
     job.read_callback = callback;
-    
-    // Store file mappings with full info
     job.file_mappings = files;
     
     {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        job_queue_.push(std::move(job));
+        std::lock_guard<std::mutex> lock(read_mutex_);
+        read_queue_.push(std::move(job));
     }
-    queue_cv_.notify_one();
+    read_cv_.notify_one();
     
     LOG_DISK_DEBUG("Queued read piece: piece " << piece_index << " length " << actual_piece_length);
 }
 
-void DiskIOThread::async_hash_piece(
+void DiskIOThreadPool::async_hash_piece(
     const std::string& download_path,
     const std::vector<FileMappingInfo>& files,
     uint32_t piece_index,
     uint32_t piece_length_standard,
     uint32_t actual_piece_length,
-    HashCompleteCallback callback)
+    HashCompleteCallback callback,
+    DiskJobPriority priority)
 {
     DiskJob job;
     job.type = DiskJobType::HASH_PIECE;
+    job.priority = priority;
     job.piece_index = piece_index;
     job.download_path = download_path;
     job.piece_length = actual_piece_length;
     job.piece_offset_in_torrent = static_cast<uint64_t>(piece_index) * piece_length_standard;
     job.hash_callback = callback;
-    
-    // Store file mappings with full info
     job.file_mappings = files;
     
     {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        job_queue_.push(std::move(job));
+        std::lock_guard<std::mutex> lock(read_mutex_);
+        read_queue_.push(std::move(job));
     }
-    queue_cv_.notify_one();
+    read_cv_.notify_one();
     
     LOG_DISK_DEBUG("Queued hash piece: piece " << piece_index << " length " << actual_piece_length);
 }
 
-void DiskIOThread::async_flush(FlushCompleteCallback callback) {
+void DiskIOThreadPool::async_flush(FlushCompleteCallback callback) {
+    // Flush goes to write queue with high priority
     DiskJob job;
     job.type = DiskJobType::FLUSH;
+    job.priority = DiskJobPriority::HIGH;
     job.flush_callback = callback;
     
     {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        job_queue_.push(std::move(job));
+        std::lock_guard<std::mutex> lock(write_mutex_);
+        write_queue_.push(std::move(job));
     }
-    queue_cv_.notify_one();
+    write_cv_.notify_one();
     
     LOG_DISK_DEBUG("Queued flush operation");
 }
 
-size_t DiskIOThread::get_pending_jobs() const {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    return job_queue_.size();
+//=============================================================================
+// Statistics
+//=============================================================================
+
+size_t DiskIOThreadPool::get_pending_write_jobs() const {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    return write_queue_.size();
 }
 
-void DiskIOThread::worker_loop() {
-    LOG_DISK_INFO("Disk I/O worker loop started");
+size_t DiskIOThreadPool::get_pending_read_jobs() const {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    return read_queue_.size();
+}
+
+size_t DiskIOThreadPool::get_total_pending_jobs() const {
+    return get_pending_write_jobs() + get_pending_read_jobs();
+}
+
+//=============================================================================
+// Worker Loops
+//=============================================================================
+
+void DiskIOThreadPool::write_worker_loop() {
+    LOG_DISK_DEBUG("Write worker thread started");
     
     while (running_.load()) {
         DiskJob job;
         
         {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
+            std::unique_lock<std::mutex> lock(write_mutex_);
             
             // Wait for a job or shutdown
-            queue_cv_.wait(lock, [this] {
-                return !job_queue_.empty() || !running_.load();
+            write_cv_.wait(lock, [this] {
+                return !write_queue_.empty() || !running_.load();
             });
             
-            if (!running_.load() && job_queue_.empty()) {
+            if (!running_.load() && write_queue_.empty()) {
                 break;
             }
             
-            if (!job_queue_.empty()) {
-                job = std::move(job_queue_.front());
-                job_queue_.pop();
+            if (!write_queue_.empty()) {
+                job = std::move(const_cast<DiskJob&>(write_queue_.top()));
+                write_queue_.pop();
             } else {
                 continue;
             }
@@ -190,22 +282,70 @@ void DiskIOThread::worker_loop() {
             case DiskJobType::WRITE_BLOCK:
                 execute_write_block(job);
                 break;
+            case DiskJobType::FLUSH:
+                execute_flush(job);
+                break;
+            default:
+                LOG_DISK_WARN("Invalid job type in write queue: " << static_cast<int>(job.type));
+                break;
+        }
+        
+        jobs_completed_++;
+    }
+    
+    LOG_DISK_DEBUG("Write worker thread ended");
+}
+
+void DiskIOThreadPool::read_worker_loop() {
+    LOG_DISK_DEBUG("Read worker thread started");
+    
+    while (running_.load()) {
+        DiskJob job;
+        
+        {
+            std::unique_lock<std::mutex> lock(read_mutex_);
+            
+            // Wait for a job or shutdown
+            read_cv_.wait(lock, [this] {
+                return !read_queue_.empty() || !running_.load();
+            });
+            
+            if (!running_.load() && read_queue_.empty()) {
+                break;
+            }
+            
+            if (!read_queue_.empty()) {
+                job = std::move(const_cast<DiskJob&>(read_queue_.top()));
+                read_queue_.pop();
+            } else {
+                continue;
+            }
+        }
+        
+        // Execute the job outside the lock
+        switch (job.type) {
             case DiskJobType::READ_PIECE:
                 execute_read_piece(job);
                 break;
             case DiskJobType::HASH_PIECE:
                 execute_hash_piece(job);
                 break;
-            case DiskJobType::FLUSH:
-                execute_flush(job);
+            default:
+                LOG_DISK_WARN("Invalid job type in read queue: " << static_cast<int>(job.type));
                 break;
         }
+        
+        jobs_completed_++;
     }
     
-    LOG_DISK_INFO("Disk I/O worker loop ended");
+    LOG_DISK_DEBUG("Read worker thread ended");
 }
 
-std::vector<std::tuple<std::string, uint64_t, size_t>> DiskIOThread::map_to_files(
+//=============================================================================
+// File Mapping Helper
+//=============================================================================
+
+std::vector<std::tuple<std::string, uint64_t, size_t>> DiskIOThreadPool::map_to_files(
     const std::string& download_path,
     const std::vector<FileMappingInfo>& files,
     uint64_t torrent_offset,
@@ -254,7 +394,11 @@ std::vector<std::tuple<std::string, uint64_t, size_t>> DiskIOThread::map_to_file
     return result;
 }
 
-void DiskIOThread::execute_write_block(const DiskJob& job) {
+//=============================================================================
+// Job Execution
+//=============================================================================
+
+void DiskIOThreadPool::execute_write_block(const DiskJob& job) {
     bool success = true;
     
     // Calculate absolute torrent offset for this block
@@ -284,7 +428,7 @@ void DiskIOThread::execute_write_block(const DiskJob& job) {
     }
 }
 
-void DiskIOThread::execute_read_piece(const DiskJob& job) {
+void DiskIOThreadPool::execute_read_piece(const DiskJob& job) {
     std::vector<uint8_t> data(job.piece_length);
     bool success = true;
     
@@ -315,7 +459,7 @@ void DiskIOThread::execute_read_piece(const DiskJob& job) {
     }
 }
 
-void DiskIOThread::execute_hash_piece(const DiskJob& job) {
+void DiskIOThreadPool::execute_hash_piece(const DiskJob& job) {
     std::vector<uint8_t> data(job.piece_length);
     bool success = true;
     
@@ -349,7 +493,7 @@ void DiskIOThread::execute_hash_piece(const DiskJob& job) {
     }
 }
 
-void DiskIOThread::execute_flush(const DiskJob& job) {
+void DiskIOThreadPool::execute_flush(const DiskJob& job) {
     // On most systems, writes are already flushed when write_file_chunk returns
     // For additional safety, we could call fsync() here, but it's costly
     
@@ -361,15 +505,97 @@ void DiskIOThread::execute_flush(const DiskJob& job) {
 }
 
 //=============================================================================
+// Legacy DiskIOThread Implementation (wrapper around DiskIOThreadPool)
+//=============================================================================
+
+DiskIOThread::DiskIOThread()
+    : pool_(std::make_unique<DiskIOThreadPool>()) {
+}
+
+DiskIOThread::~DiskIOThread() {
+    stop();
+}
+
+bool DiskIOThread::start() {
+    return pool_->start();
+}
+
+void DiskIOThread::stop() {
+    pool_->stop();
+}
+
+bool DiskIOThread::is_running() const {
+    return pool_->is_running();
+}
+
+void DiskIOThread::async_write_block(
+    const std::string& download_path,
+    const std::vector<FileMappingInfo>& files,
+    uint32_t piece_index,
+    uint32_t piece_length_standard,
+    uint32_t block_offset,
+    const std::vector<uint8_t>& data,
+    WriteCompleteCallback callback)
+{
+    pool_->async_write_block(download_path, files, piece_index, piece_length_standard,
+                             block_offset, data, callback);
+}
+
+void DiskIOThread::async_read_piece(
+    const std::string& download_path,
+    const std::vector<FileMappingInfo>& files,
+    uint32_t piece_index,
+    uint32_t piece_length_standard,
+    uint32_t actual_piece_length,
+    ReadCompleteCallback callback)
+{
+    pool_->async_read_piece(download_path, files, piece_index, piece_length_standard,
+                            actual_piece_length, callback);
+}
+
+void DiskIOThread::async_hash_piece(
+    const std::string& download_path,
+    const std::vector<FileMappingInfo>& files,
+    uint32_t piece_index,
+    uint32_t piece_length_standard,
+    uint32_t actual_piece_length,
+    HashCompleteCallback callback)
+{
+    pool_->async_hash_piece(download_path, files, piece_index, piece_length_standard,
+                            actual_piece_length, callback);
+}
+
+void DiskIOThread::async_flush(FlushCompleteCallback callback) {
+    pool_->async_flush(callback);
+}
+
+size_t DiskIOThread::get_pending_jobs() const {
+    return pool_->get_total_pending_jobs();
+}
+
+uint64_t DiskIOThread::get_total_bytes_written() const {
+    return pool_->get_total_bytes_written();
+}
+
+uint64_t DiskIOThread::get_total_bytes_read() const {
+    return pool_->get_total_bytes_read();
+}
+
+//=============================================================================
 // DiskIO Singleton Implementation
 //=============================================================================
 
-std::unique_ptr<DiskIOThread> DiskIO::instance_;
+std::unique_ptr<DiskIOThreadPool> DiskIO::instance_;
 std::once_flag DiskIO::init_flag_;
+DiskIOConfig DiskIO::config_;
 
-DiskIOThread& DiskIO::instance() {
+void DiskIO::configure(const DiskIOConfig& config) {
+    config_ = config;
+}
+
+DiskIOThreadPool& DiskIO::instance() {
     std::call_once(init_flag_, []() {
-        instance_ = std::make_unique<DiskIOThread>();
+        instance_ = std::make_unique<DiskIOThreadPool>(config_);
         instance_->start();
     });
     return *instance_;

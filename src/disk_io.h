@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <queue>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -13,7 +14,7 @@
 namespace librats {
 
 // Forward declaration
-class DiskIOThread;
+class DiskIOThreadPool;
 
 //=============================================================================
 // Disk Job Types
@@ -24,6 +25,13 @@ enum class DiskJobType {
     READ_PIECE,     // Read an entire piece from disk
     HASH_PIECE,     // Read piece from disk and compute hash
     FLUSH           // Ensure all pending writes are complete
+};
+
+// Job priority (lower = higher priority)
+enum class DiskJobPriority {
+    HIGH = 0,       // Critical operations (e.g., flush, urgent reads)
+    NORMAL = 1,     // Standard operations
+    LOW = 2         // Background operations (e.g., hash verification)
 };
 
 // Completion callback types
@@ -48,6 +56,7 @@ struct FileMappingInfo {
 
 struct DiskJob {
     DiskJobType type;
+    DiskJobPriority priority;
     
     // Job identification
     uint32_t piece_index;
@@ -71,12 +80,148 @@ struct DiskJob {
     HashCompleteCallback hash_callback;
     FlushCompleteCallback flush_callback;
     
-    DiskJob() : type(DiskJobType::WRITE_BLOCK), piece_index(0), block_index(0), 
+    DiskJob() : type(DiskJobType::WRITE_BLOCK), priority(DiskJobPriority::NORMAL),
+                piece_index(0), block_index(0), 
                 offset(0), piece_length(0), piece_offset_in_torrent(0) {}
+    
+    // For priority queue ordering
+    bool operator<(const DiskJob& other) const {
+        return static_cast<int>(priority) > static_cast<int>(other.priority);
+    }
 };
 
 //=============================================================================
-// DiskIOThread - Handles all disk I/O asynchronously
+// DiskIOThreadPool Configuration
+//=============================================================================
+
+struct DiskIOConfig {
+    int num_write_threads = 1;      // Number of threads for write operations
+    int num_read_threads = 2;       // Number of threads for read/hash operations
+    int max_pending_jobs = 1000;    // Maximum pending jobs before blocking
+    bool enable_coalescing = true;  // Coalesce adjacent write operations
+    
+    DiskIOConfig() = default;
+};
+
+//=============================================================================
+// DiskIOThreadPool - Multi-threaded disk I/O handler
+//=============================================================================
+
+class DiskIOThreadPool {
+public:
+    explicit DiskIOThreadPool(const DiskIOConfig& config = DiskIOConfig());
+    ~DiskIOThreadPool();
+    
+    // Start/stop the thread pool
+    bool start();
+    void stop();
+    bool is_running() const { return running_.load(); }
+    
+    // Configuration
+    void set_num_write_threads(int count);
+    void set_num_read_threads(int count);
+    int get_num_write_threads() const { return num_write_threads_.load(); }
+    int get_num_read_threads() const { return num_read_threads_.load(); }
+    
+    // Queue a write operation (writes block immediately to disk)
+    void async_write_block(
+        const std::string& download_path,
+        const std::vector<FileMappingInfo>& files,
+        uint32_t piece_index,
+        uint32_t piece_length_standard,  // Standard piece length from torrent
+        uint32_t block_offset,           // Offset within piece
+        const std::vector<uint8_t>& data,
+        WriteCompleteCallback callback,
+        DiskJobPriority priority = DiskJobPriority::NORMAL
+    );
+    
+    // Queue a piece read operation (reads entire piece from disk)
+    void async_read_piece(
+        const std::string& download_path,
+        const std::vector<FileMappingInfo>& files,
+        uint32_t piece_index,
+        uint32_t piece_length_standard,
+        uint32_t actual_piece_length,    // May be smaller for last piece
+        ReadCompleteCallback callback,
+        DiskJobPriority priority = DiskJobPriority::NORMAL
+    );
+    
+    // Queue a piece hash operation (reads piece and computes SHA1)
+    void async_hash_piece(
+        const std::string& download_path,
+        const std::vector<FileMappingInfo>& files,
+        uint32_t piece_index,
+        uint32_t piece_length_standard,
+        uint32_t actual_piece_length,
+        HashCompleteCallback callback,
+        DiskJobPriority priority = DiskJobPriority::LOW
+    );
+    
+    // Queue a flush operation (ensures all pending writes are complete)
+    void async_flush(FlushCompleteCallback callback);
+    
+    // Statistics
+    size_t get_pending_write_jobs() const;
+    size_t get_pending_read_jobs() const;
+    size_t get_total_pending_jobs() const;
+    uint64_t get_total_bytes_written() const { return total_bytes_written_.load(); }
+    uint64_t get_total_bytes_read() const { return total_bytes_read_.load(); }
+    uint64_t get_jobs_completed() const { return jobs_completed_.load(); }
+    
+private:
+    DiskIOConfig config_;
+    std::atomic<bool> running_;
+    
+    // Thread counts (can be adjusted at runtime)
+    std::atomic<int> num_write_threads_;
+    std::atomic<int> num_read_threads_;
+    
+    // Worker threads
+    std::vector<std::thread> write_threads_;
+    std::vector<std::thread> read_threads_;
+    
+    // Separate job queues for writes and reads (with priority)
+    std::priority_queue<DiskJob> write_queue_;
+    std::priority_queue<DiskJob> read_queue_;
+    
+    mutable std::mutex write_mutex_;
+    mutable std::mutex read_mutex_;
+    std::condition_variable write_cv_;
+    std::condition_variable read_cv_;
+    
+    // Statistics
+    std::atomic<uint64_t> total_bytes_written_;
+    std::atomic<uint64_t> total_bytes_read_;
+    std::atomic<uint64_t> jobs_completed_;
+    
+    // Worker thread functions
+    void write_worker_loop();
+    void read_worker_loop();
+    
+    // Execute individual job types
+    void execute_write_block(const DiskJob& job);
+    void execute_read_piece(const DiskJob& job);
+    void execute_hash_piece(const DiskJob& job);
+    void execute_flush(const DiskJob& job);
+    
+    // Helper: Map torrent offset to file(s)
+    // Returns list of (file_path, file_offset, length) tuples for the given range
+    static std::vector<std::tuple<std::string, uint64_t, size_t>> map_to_files(
+        const std::string& download_path,
+        const std::vector<FileMappingInfo>& files,
+        uint64_t torrent_offset,
+        size_t length
+    );
+    
+    // Helper: Start/stop worker threads
+    void start_write_threads(int count);
+    void start_read_threads(int count);
+    void stop_write_threads();
+    void stop_read_threads();
+};
+
+//=============================================================================
+// Legacy compatibility - DiskIOThread using thread pool internally
 //=============================================================================
 
 class DiskIOThread {
@@ -87,15 +232,15 @@ public:
     // Start/stop the disk I/O thread
     bool start();
     void stop();
-    bool is_running() const { return running_.load(); }
+    bool is_running() const;
     
     // Queue a write operation (writes block immediately to disk)
     void async_write_block(
         const std::string& download_path,
         const std::vector<FileMappingInfo>& files,
         uint32_t piece_index,
-        uint32_t piece_length_standard,  // Standard piece length from torrent
-        uint32_t block_offset,           // Offset within piece
+        uint32_t piece_length_standard,
+        uint32_t block_offset,
         const std::vector<uint8_t>& data,
         WriteCompleteCallback callback
     );
@@ -106,7 +251,7 @@ public:
         const std::vector<FileMappingInfo>& files,
         uint32_t piece_index,
         uint32_t piece_length_standard,
-        uint32_t actual_piece_length,    // May be smaller for last piece
+        uint32_t actual_piece_length,
         ReadCompleteCallback callback
     );
     
@@ -125,39 +270,11 @@ public:
     
     // Statistics
     size_t get_pending_jobs() const;
-    uint64_t get_total_bytes_written() const { return total_bytes_written_.load(); }
-    uint64_t get_total_bytes_read() const { return total_bytes_read_.load(); }
+    uint64_t get_total_bytes_written() const;
+    uint64_t get_total_bytes_read() const;
     
 private:
-    std::atomic<bool> running_;
-    std::thread worker_thread_;
-    
-    // Job queue
-    std::queue<DiskJob> job_queue_;
-    mutable std::mutex queue_mutex_;
-    std::condition_variable queue_cv_;
-    
-    // Statistics
-    std::atomic<uint64_t> total_bytes_written_;
-    std::atomic<uint64_t> total_bytes_read_;
-    
-    // Worker thread function
-    void worker_loop();
-    
-    // Execute individual job types
-    void execute_write_block(const DiskJob& job);
-    void execute_read_piece(const DiskJob& job);
-    void execute_hash_piece(const DiskJob& job);
-    void execute_flush(const DiskJob& job);
-    
-    // Helper: Map torrent offset to file(s)
-    // Returns list of (file_path, file_offset, length) tuples for the given range
-    std::vector<std::tuple<std::string, uint64_t, size_t>> map_to_files(
-        const std::string& download_path,
-        const std::vector<FileMappingInfo>& files,
-        uint64_t torrent_offset,
-        size_t length
-    );
+    std::unique_ptr<DiskIOThreadPool> pool_;
 };
 
 //=============================================================================
@@ -166,7 +283,10 @@ private:
 
 class DiskIO {
 public:
-    static DiskIOThread& instance();
+    static DiskIOThreadPool& instance();
+    
+    // Configure the singleton (must be called before first instance() call)
+    static void configure(const DiskIOConfig& config);
     
     // Non-copyable
     DiskIO(const DiskIO&) = delete;
@@ -174,8 +294,9 @@ public:
     
 private:
     DiskIO() = default;
-    static std::unique_ptr<DiskIOThread> instance_;
+    static std::unique_ptr<DiskIOThreadPool> instance_;
     static std::once_flag init_flag_;
+    static DiskIOConfig config_;
 };
 
 } // namespace librats

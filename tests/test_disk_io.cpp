@@ -67,8 +67,8 @@ TEST_F(DiskIOTest, ThreadStartStop) {
 
 // Test singleton instance
 TEST_F(DiskIOTest, SingletonInstance) {
-    DiskIOThread& instance1 = DiskIO::instance();
-    DiskIOThread& instance2 = DiskIO::instance();
+    DiskIOThreadPool& instance1 = DiskIO::instance();
+    DiskIOThreadPool& instance2 = DiskIO::instance();
     
     EXPECT_EQ(&instance1, &instance2);
     EXPECT_TRUE(instance1.is_running());
@@ -526,6 +526,136 @@ TEST_F(DiskIOTest, ConcurrentWrites) {
     }
 }
 
+// Test thread pool configuration
+TEST_F(DiskIOTest, ThreadPoolConfiguration) {
+    DiskIOConfig config;
+    config.num_write_threads = 2;
+    config.num_read_threads = 4;
+    
+    DiskIOThreadPool pool(config);
+    EXPECT_FALSE(pool.is_running());
+    
+    EXPECT_TRUE(pool.start());
+    EXPECT_TRUE(pool.is_running());
+    
+    EXPECT_EQ(pool.get_num_write_threads(), 2);
+    EXPECT_EQ(pool.get_num_read_threads(), 4);
+    
+    // Dynamically change thread count
+    pool.set_num_write_threads(3);
+    EXPECT_EQ(pool.get_num_write_threads(), 3);
+    
+    pool.set_num_read_threads(2);
+    EXPECT_EQ(pool.get_num_read_threads(), 2);
+    
+    pool.stop();
+    EXPECT_FALSE(pool.is_running());
+}
+
+// Test priority queuing (high priority jobs should be processed first)
+TEST_F(DiskIOTest, PriorityQueuing) {
+    std::string file_path = test_dir_ + "/priority_test.bin";
+    ASSERT_TRUE(create_file_with_size(file_path.c_str(), 1024));
+    
+    std::vector<FileMappingInfo> mappings;
+    FileMappingInfo mapping;
+    mapping.path = "priority_test.bin";
+    mapping.length = 1024;
+    mapping.torrent_offset = 0;
+    mappings.push_back(mapping);
+    
+    std::vector<uint8_t> data(64, 0x42);
+    
+    // Queue jobs with different priorities
+    std::atomic<int> completed(0);
+    std::vector<int> completion_order;
+    std::mutex order_mutex;
+    
+    // First, queue a LOW priority job
+    DiskIO::instance().async_write_block(
+        test_dir_, mappings, 0, 1024, 0, data,
+        [&](bool) {
+            std::lock_guard<std::mutex> lock(order_mutex);
+            completion_order.push_back(0);  // LOW priority was queued first
+            completed++;
+        },
+        DiskJobPriority::LOW
+    );
+    
+    // Then queue a HIGH priority job
+    DiskIO::instance().async_write_block(
+        test_dir_, mappings, 0, 1024, 64, data,
+        [&](bool) {
+            std::lock_guard<std::mutex> lock(order_mutex);
+            completion_order.push_back(1);  // HIGH priority
+            completed++;
+        },
+        DiskJobPriority::HIGH
+    );
+    
+    // Wait for completion
+    auto start = std::chrono::steady_clock::now();
+    while (completed < 2 && 
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    EXPECT_EQ(completed, 2);
+    // Note: Due to the nature of threading, we can't guarantee strict ordering
+    // but typically HIGH priority jobs should complete first if they were queued
+    // before LOW priority jobs had a chance to start
+}
+
+// Test separate write and read queues
+TEST_F(DiskIOTest, SeparateWriteReadQueues) {
+    DiskIOConfig config;
+    config.num_write_threads = 1;
+    config.num_read_threads = 2;
+    
+    DiskIOThreadPool pool(config);
+    pool.start();
+    
+    // Initially both queues should be empty
+    EXPECT_EQ(pool.get_pending_write_jobs(), 0);
+    EXPECT_EQ(pool.get_pending_read_jobs(), 0);
+    EXPECT_EQ(pool.get_total_pending_jobs(), 0);
+    
+    pool.stop();
+}
+
+// Test jobs completed counter
+TEST_F(DiskIOTest, JobsCompletedCounter) {
+    DiskIOConfig config;
+    config.num_write_threads = 2;
+    config.num_read_threads = 2;
+    
+    DiskIOThreadPool pool(config);
+    pool.start();
+    
+    uint64_t initial_completed = pool.get_jobs_completed();
+    
+    const int num_jobs = 10;
+    std::atomic<int> done(0);
+    
+    for (int i = 0; i < num_jobs; ++i) {
+        pool.async_flush([&](bool) {
+            done++;
+        });
+    }
+    
+    // Wait for completion
+    auto start = std::chrono::steady_clock::now();
+    while (done < num_jobs && 
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    EXPECT_EQ(done, num_jobs);
+    EXPECT_GE(pool.get_jobs_completed() - initial_completed, static_cast<uint64_t>(num_jobs));
+    
+    pool.stop();
+}
+
 // Test large piece handling
 TEST_F(DiskIOTest, LargePieceWrite) {
     std::string file_path = test_dir_ + "/large_file.bin";
@@ -603,4 +733,109 @@ TEST_F(DiskIOTest, LargePieceWrite) {
     
     std::lock_guard<std::mutex> lock(hash_mutex);
     EXPECT_EQ(calculated_hash, expected_hash);
+}
+
+// Test parallel hash operations (uses multiple read threads)
+TEST_F(DiskIOTest, ParallelHashOperations) {
+    const int num_files = 6;
+    const size_t file_size = 1024;
+    
+    // Create test files with known content
+    std::vector<std::string> expected_hashes;
+    for (int i = 0; i < num_files; ++i) {
+        std::string file_path = test_dir_ + "/hash_" + std::to_string(i) + ".bin";
+        std::vector<uint8_t> data(file_size, static_cast<uint8_t>(i * 17));
+        ASSERT_TRUE(create_file_binary(file_path.c_str(), data.data(), data.size()));
+        expected_hashes.push_back(SHA1::hash_bytes(data));
+    }
+    
+    // Queue parallel hash operations
+    std::atomic<int> completed(0);
+    std::vector<std::string> calculated_hashes(num_files);
+    std::vector<bool> hash_success(num_files, false);
+    std::mutex results_mutex;
+    
+    for (int i = 0; i < num_files; ++i) {
+        std::vector<FileMappingInfo> mappings;
+        FileMappingInfo mapping;
+        mapping.path = "hash_" + std::to_string(i) + ".bin";
+        mapping.length = file_size;
+        mapping.torrent_offset = 0;
+        mappings.push_back(mapping);
+        
+        DiskIO::instance().async_hash_piece(
+            test_dir_, mappings,
+            0, static_cast<uint32_t>(file_size), static_cast<uint32_t>(file_size),
+            [&, i](bool success, const std::string& hash) {
+                std::lock_guard<std::mutex> lock(results_mutex);
+                hash_success[i] = success;
+                calculated_hashes[i] = hash;
+                completed++;
+            }
+        );
+    }
+    
+    // Wait for all hashes
+    auto start = std::chrono::steady_clock::now();
+    while (completed < num_files && 
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    EXPECT_EQ(completed, num_files);
+    
+    // Verify all hashes
+    std::lock_guard<std::mutex> lock(results_mutex);
+    for (int i = 0; i < num_files; ++i) {
+        EXPECT_TRUE(hash_success[i]) << "Hash " << i << " failed";
+        EXPECT_EQ(calculated_hashes[i], expected_hashes[i]) 
+            << "Hash mismatch for file " << i;
+    }
+}
+
+// Test mixed read/write operations
+TEST_F(DiskIOTest, MixedReadWriteOperations) {
+    const int num_ops = 20;
+    std::string file_path = test_dir_ + "/mixed_ops.bin";
+    ASSERT_TRUE(create_file_with_size(file_path.c_str(), 4096));
+    
+    std::vector<FileMappingInfo> mappings;
+    FileMappingInfo mapping;
+    mapping.path = "mixed_ops.bin";
+    mapping.length = 4096;
+    mapping.torrent_offset = 0;
+    mappings.push_back(mapping);
+    
+    std::atomic<int> writes_completed(0);
+    std::atomic<int> reads_completed(0);
+    
+    // Interleave writes and reads
+    for (int i = 0; i < num_ops; ++i) {
+        if (i % 2 == 0) {
+            // Write operation
+            std::vector<uint8_t> data(128, static_cast<uint8_t>(i));
+            DiskIO::instance().async_write_block(
+                test_dir_, mappings,
+                0, 4096, (i / 2) * 128, data,
+                [&](bool) { writes_completed++; }
+            );
+        } else {
+            // Read operation
+            DiskIO::instance().async_read_piece(
+                test_dir_, mappings,
+                0, 4096, 128,
+                [&](bool, const std::vector<uint8_t>&) { reads_completed++; }
+            );
+        }
+    }
+    
+    // Wait for all operations
+    auto start = std::chrono::steady_clock::now();
+    while ((writes_completed + reads_completed) < num_ops && 
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    EXPECT_EQ(writes_completed, num_ops / 2);
+    EXPECT_EQ(reads_completed, num_ops / 2);
 }
