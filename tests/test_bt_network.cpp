@@ -331,7 +331,8 @@ TEST_F(BtNetworkTest, ActiveConnectionConstruction) {
 // Stress Test
 //=============================================================================
 
-TEST_F(BtNetworkTest, DISABLED_StressTest) {
+/*
+TEST_F(BtNetworkTest, StressTest) {
     // Disabled by default - enable for stress testing
     
     BtNetworkConfig config;
@@ -355,3 +356,4 @@ TEST_F(BtNetworkTest, DISABLED_StressTest) {
     
     manager.stop();
 }
+*/

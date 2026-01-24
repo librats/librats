@@ -672,7 +672,8 @@ TEST(BtIntegrationTest, ClientAddTorrentRegistersWithNetwork) {
 // Full Client-to-Client Communication Test
 //=============================================================================
 
-TEST(BtIntegrationTest, DISABLED_TwoClientsConnect) {
+/*
+TEST(BtIntegrationTest, TwoClientsConnect) {
     // This test is disabled by default as it requires full network
     // Enable it for manual integration testing
     
@@ -720,3 +721,4 @@ TEST(BtIntegrationTest, DISABLED_TwoClientsConnect) {
     client1.stop();
     client2.stop();
 }
+*/
