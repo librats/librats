@@ -148,35 +148,49 @@ void BtNetworkManager::stop() {
         io_thread_.join();
     }
     
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<DisconnectedEvent> disconnected_events;
     
-    // Close all connections
-    for (auto& [socket, ctx] : connections_) {
-        if (on_disconnected_ && ctx.connection) {
-            on_disconnected_(ctx.info_hash, ctx.connection.get());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Collect disconnected events for all connections
+        for (auto& [socket, ctx] : connections_) {
+            if (ctx.connection) {
+                DisconnectedEvent event;
+                event.info_hash = ctx.info_hash;
+                event.connection = ctx.connection;
+                disconnected_events.push_back(std::move(event));
+            }
+            close_socket(socket, true);
         }
-        close_socket(socket, true);
+        connections_.clear();
+        
+        // Close connecting sockets
+        for (auto& [socket, pending] : connecting_) {
+            close_socket(socket, true);
+        }
+        connecting_.clear();
+        
+        // Clear pending queue
+        while (!pending_connects_.empty()) {
+            pending_connects_.pop();
+        }
+        
+        // Close listen socket
+        if (is_valid_socket(listen_socket_)) {
+            close_socket(listen_socket_);
+            listen_socket_ = INVALID_SOCKET_VALUE;
+        }
+        
+        LOG_NET_INFO("Network manager stopped");
     }
-    connections_.clear();
     
-    // Close connecting sockets
-    for (auto& [socket, pending] : connecting_) {
-        close_socket(socket, true);
+    // Invoke callbacks outside mutex
+    for (const auto& event : disconnected_events) {
+        if (on_disconnected_) {
+            on_disconnected_(event.info_hash, event.connection.get());
+        }
     }
-    connecting_.clear();
-    
-    // Clear pending queue
-    while (!pending_connects_.empty()) {
-        pending_connects_.pop();
-    }
-    
-    // Close listen socket
-    if (is_valid_socket(listen_socket_)) {
-        close_socket(listen_socket_);
-        listen_socket_ = INVALID_SOCKET_VALUE;
-    }
-    
-    LOG_NET_INFO("Network manager stopped");
 }
 
 //=============================================================================
@@ -199,23 +213,34 @@ void BtNetworkManager::register_torrent(const BtInfoHash& info_hash,
 }
 
 void BtNetworkManager::unregister_torrent(const BtInfoHash& info_hash) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<DisconnectedEvent> disconnected_events;
     
-    // Close all connections for this torrent
-    std::vector<socket_t> to_close;
-    for (auto& [socket, ctx] : connections_) {
-        if (ctx.info_hash == info_hash) {
-            to_close.push_back(socket);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Close all connections for this torrent
+        std::vector<socket_t> to_close;
+        for (auto& [socket, ctx] : connections_) {
+            if (ctx.info_hash == info_hash) {
+                to_close.push_back(socket);
+            }
+        }
+        
+        for (socket_t s : to_close) {
+            close_connection_internal(s, disconnected_events);
+        }
+        
+        torrents_.erase(info_hash);
+        
+        LOG_NET_DEBUG("Unregistered torrent " + info_hash_to_hex(info_hash).substr(0, 8) + "...");
+    }
+    
+    // Invoke callbacks outside mutex
+    for (const auto& event : disconnected_events) {
+        if (on_disconnected_) {
+            on_disconnected_(event.info_hash, event.connection.get());
         }
     }
-    
-    for (socket_t s : to_close) {
-        close_connection_internal(s, true);
-    }
-    
-    torrents_.erase(info_hash);
-    
-    LOG_NET_DEBUG("Unregistered torrent " + info_hash_to_hex(info_hash).substr(0, 8) + "...");
 }
 
 //=============================================================================
@@ -267,8 +292,19 @@ bool BtNetworkManager::connect_peer(const std::string& ip, uint16_t port,
 }
 
 void BtNetworkManager::close_connection(socket_t socket) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    close_connection_internal(socket, true);
+    std::vector<DisconnectedEvent> disconnected_events;
+    
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        close_connection_internal(socket, disconnected_events);
+    }
+    
+    // Invoke callbacks outside mutex
+    for (const auto& event : disconnected_events) {
+        if (on_disconnected_) {
+            on_disconnected_(event.info_hash, event.connection.get());
+        }
+    }
 }
 
 bool BtNetworkManager::send_to_peer(socket_t socket, const std::vector<uint8_t>& data) {
@@ -307,7 +343,17 @@ size_t BtNetworkManager::pending_connect_count() const {
 void BtNetworkManager::io_loop() {
     LOG_NET_DEBUG("I/O loop started");
     
+    // Event vectors for deferred callback invocation (outside mutex)
+    std::vector<ConnectedEvent> connected_events;
+    std::vector<DataEvent> data_events;
+    std::vector<DisconnectedEvent> disconnected_events;
+    
     while (running_) {
+        // Clear event vectors for this iteration
+        connected_events.clear();
+        data_events.clear();
+        disconnected_events.clear();
+        
         // Process pending connect queue
         process_pending_connects();
         
@@ -474,7 +520,7 @@ void BtNetworkManager::io_loop() {
             }
         }
         
-        // Handle active connections
+        // Handle active connections (collect events under mutex)
         {
             std::lock_guard<std::mutex> lock(mutex_);
             
@@ -484,12 +530,14 @@ void BtNetworkManager::io_loop() {
                 bool should_close = false;
                 
                 if (FD_ISSET(socket, &error_fds)) {
-                    LOG_NET_DEBUG("Error on socket for " + ctx.connection->ip());
+                    if (ctx.connection) {
+                        LOG_NET_DEBUG("Error on socket for " + ctx.connection->ip());
+                    }
                     should_close = true;
                 }
                 
                 if (!should_close && FD_ISSET(socket, &read_fds)) {
-                    handle_readable(socket);
+                    handle_readable(socket, connected_events, data_events, disconnected_events);
                     
                     // Check if connection was closed
                     auto it = connections_.find(socket);
@@ -499,7 +547,7 @@ void BtNetworkManager::io_loop() {
                 }
                 
                 if (!should_close && FD_ISSET(socket, &write_fds)) {
-                    handle_writable(socket);
+                    handle_writable(socket, disconnected_events);
                 }
                 
                 if (should_close) {
@@ -508,7 +556,27 @@ void BtNetworkManager::io_loop() {
             }
             
             for (socket_t s : to_close) {
-                close_connection_internal(s, true);
+                close_connection_internal(s, disconnected_events);
+            }
+        }
+        
+        // Invoke callbacks OUTSIDE the mutex to prevent deadlocks
+        for (const auto& event : connected_events) {
+            if (on_connected_) {
+                on_connected_(event.info_hash, event.connection, 
+                             event.socket, event.incoming);
+            }
+        }
+        
+        for (const auto& event : data_events) {
+            if (on_data_) {
+                on_data_(event.info_hash, event.connection.get(), event.socket);
+            }
+        }
+        
+        for (const auto& event : disconnected_events) {
+            if (on_disconnected_) {
+                on_disconnected_(event.info_hash, event.connection.get());
             }
         }
     }
@@ -654,7 +722,10 @@ void BtNetworkManager::accept_incoming() {
     connections_[client] = std::move(ctx);
 }
 
-void BtNetworkManager::handle_readable(socket_t socket) {
+void BtNetworkManager::handle_readable(socket_t socket,
+                                        std::vector<ConnectedEvent>& connected_events,
+                                        std::vector<DataEvent>& data_events,
+                                        std::vector<DisconnectedEvent>& disconnected_events) {
     auto it = connections_.find(socket);
     if (it == connections_.end()) return;
     
@@ -684,7 +755,7 @@ void BtNetworkManager::handle_readable(socket_t socket) {
 #endif
         }
         
-        close_connection_internal(socket, true);
+        close_connection_internal(socket, disconnected_events);
         return;
     }
     
@@ -693,18 +764,23 @@ void BtNetworkManager::handle_readable(socket_t socket) {
     std::string ip = ctx.connection ? ctx.connection->ip() : "unknown";
     LOG_NET_DEBUG("handle_peer_data: recv " + std::to_string(bytes) + " bytes from " + ip);
     
-    handle_peer_data(ctx, recv_buffer_.data(), static_cast<size_t>(bytes));
+    handle_peer_data(ctx, recv_buffer_.data(), static_cast<size_t>(bytes),
+                     connected_events, data_events, disconnected_events);
 }
 
-void BtNetworkManager::handle_writable(socket_t socket) {
+void BtNetworkManager::handle_writable(socket_t socket,
+                                        std::vector<DisconnectedEvent>& disconnected_events) {
     auto it = connections_.find(socket);
     if (it == connections_.end()) return;
     
-    flush_send_buffer(it->second);
+    flush_send_buffer(it->second, disconnected_events);
 }
 
 void BtNetworkManager::handle_peer_data(SocketContext& ctx, 
-                                         const uint8_t* data, size_t length) {
+                                         const uint8_t* data, size_t length,
+                                         std::vector<ConnectedEvent>& connected_events,
+                                         std::vector<DataEvent>& data_events,
+                                         std::vector<DisconnectedEvent>& disconnected_events) {
     if (ctx.state == NetConnectionState::Handshaking) {
         // For incoming connections, we need to create the connection object
         // once we receive the handshake
@@ -720,7 +796,7 @@ void BtNetworkManager::handle_peer_data(SocketContext& ctx,
             auto hs = BtHandshake::decode(data, length);
             if (!hs) {
                 LOG_NET_ERROR("Invalid handshake from incoming connection");
-                close_connection_internal(ctx.socket, true);
+                close_connection_internal(ctx.socket, disconnected_events);
                 return;
             }
             
@@ -728,7 +804,7 @@ void BtNetworkManager::handle_peer_data(SocketContext& ctx,
             auto torrent_it = torrents_.find(hs->info_hash);
             if (torrent_it == torrents_.end()) {
                 LOG_NET_DEBUG("Unknown info_hash from incoming connection");
-                close_connection_internal(ctx.socket, true);
+                close_connection_internal(ctx.socket, disconnected_events);
                 return;
             }
             
@@ -762,13 +838,15 @@ void BtNetworkManager::handle_peer_data(SocketContext& ctx,
                 ctx.state = NetConnectionState::Connected;
                 
                 LOG_NET_DEBUG("Handshake complete with " + ctx.connection->ip() + 
-                             ", invoking callback");
+                             ", queueing callback");
                 
-                // Invoke callback
-                if (on_connected_) {
-                    on_connected_(ctx.info_hash, ctx.connection, 
-                                 ctx.socket, ctx.incoming);
-                }
+                // Queue connected event (callback will be invoked outside mutex)
+                ConnectedEvent event;
+                event.info_hash = ctx.info_hash;
+                event.connection = ctx.connection;
+                event.socket = ctx.socket;
+                event.incoming = ctx.incoming;
+                connected_events.push_back(std::move(event));
             }
             
             // Check if connection has data to send
@@ -787,10 +865,12 @@ void BtNetworkManager::handle_peer_data(SocketContext& ctx,
         // Process message data
         ctx.connection->on_receive(data, length);
         
-        // Invoke data callback
-        if (on_data_) {
-            on_data_(ctx.info_hash, ctx.connection.get(), ctx.socket);
-        }
+        // Queue data event (callback will be invoked outside mutex)
+        DataEvent event;
+        event.info_hash = ctx.info_hash;
+        event.connection = ctx.connection;
+        event.socket = ctx.socket;
+        data_events.push_back(std::move(event));
         
         // Check for data to send
         if (ctx.connection->has_send_data()) {
@@ -805,7 +885,8 @@ void BtNetworkManager::handle_peer_data(SocketContext& ctx,
     }
 }
 
-void BtNetworkManager::flush_send_buffer(SocketContext& ctx) {
+void BtNetworkManager::flush_send_buffer(SocketContext& ctx,
+                                          std::vector<DisconnectedEvent>& disconnected_events) {
     if (ctx.send_buffer.empty()) return;
     
     // Copy data to temporary buffer for sending
@@ -814,7 +895,9 @@ void BtNetworkManager::flush_send_buffer(SocketContext& ctx) {
     
     if (to_send == 0) return;
 
-    LOG_NET_DEBUG("flush_send_buffer: sending " + std::to_string(to_send) + " bytes to " + ctx.connection->ip());
+    if (ctx.connection) {
+        LOG_NET_DEBUG("flush_send_buffer: sending " + std::to_string(to_send) + " bytes to " + ctx.connection->ip());
+    }
     
     int sent = send(ctx.socket, reinterpret_cast<const char*>(buffer.data()),
                    static_cast<int>(to_send), 0);
@@ -827,25 +910,30 @@ void BtNetworkManager::flush_send_buffer(SocketContext& ctx) {
         int err = WSAGetLastError();
         if (err != WSAEWOULDBLOCK) {
             LOG_NET_DEBUG("Send error: " + std::to_string(err));
-            close_connection_internal(ctx.socket, true);
+            close_connection_internal(ctx.socket, disconnected_events);
         }
 #else
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             LOG_NET_DEBUG("Send error: " + std::string(strerror(errno)));
-            close_connection_internal(ctx.socket, true);
+            close_connection_internal(ctx.socket, disconnected_events);
         }
 #endif
     }
 }
 
-void BtNetworkManager::close_connection_internal(socket_t socket, bool notify) {
+void BtNetworkManager::close_connection_internal(socket_t socket,
+                                                  std::vector<DisconnectedEvent>& disconnected_events) {
     auto it = connections_.find(socket);
     if (it == connections_.end()) return;
     
     SocketContext& ctx = it->second;
     
-    if (notify && on_disconnected_ && ctx.connection) {
-        on_disconnected_(ctx.info_hash, ctx.connection.get());
+    // Queue disconnected event (callback will be invoked outside mutex)
+    if (ctx.connection) {
+        DisconnectedEvent event;
+        event.info_hash = ctx.info_hash;
+        event.connection = ctx.connection;
+        disconnected_events.push_back(std::move(event));
     }
     
     close_socket(socket, true);

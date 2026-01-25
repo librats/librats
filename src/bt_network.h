@@ -195,6 +195,37 @@ struct TorrentRegistration {
 };
 
 //=============================================================================
+// Deferred Callback Events (to avoid deadlocks)
+//=============================================================================
+
+/**
+ * @brief Event for connected callback (deferred)
+ */
+struct ConnectedEvent {
+    BtInfoHash info_hash;
+    std::shared_ptr<BtPeerConnection> connection;
+    socket_t socket;
+    bool incoming;
+};
+
+/**
+ * @brief Event for data callback (deferred)
+ */
+struct DataEvent {
+    BtInfoHash info_hash;
+    std::shared_ptr<BtPeerConnection> connection;
+    socket_t socket;
+};
+
+/**
+ * @brief Event for disconnected callback (deferred)
+ */
+struct DisconnectedEvent {
+    BtInfoHash info_hash;
+    std::shared_ptr<BtPeerConnection> connection;
+};
+
+//=============================================================================
 // Network Manager
 //=============================================================================
 
@@ -386,16 +417,23 @@ private:
     void accept_incoming();
     
     /// Handle readable socket
-    void handle_readable(socket_t socket);
+    void handle_readable(socket_t socket,
+                        std::vector<ConnectedEvent>& connected_events,
+                        std::vector<DataEvent>& data_events,
+                        std::vector<DisconnectedEvent>& disconnected_events);
     
     /// Handle writable socket (drain send buffer)
-    void handle_writable(socket_t socket);
+    void handle_writable(socket_t socket,
+                        std::vector<DisconnectedEvent>& disconnected_events);
     
     /// Handle connection completion
     void handle_connect_complete(socket_t socket, bool success);
     
     /// Handle data received from a peer
-    void handle_peer_data(SocketContext& ctx, const uint8_t* data, size_t length);
+    void handle_peer_data(SocketContext& ctx, const uint8_t* data, size_t length,
+                         std::vector<ConnectedEvent>& connected_events,
+                         std::vector<DataEvent>& data_events,
+                         std::vector<DisconnectedEvent>& disconnected_events);
     
     /// Send handshake on new connection
     void send_handshake(SocketContext& ctx);
@@ -403,11 +441,13 @@ private:
     /// Process handshake response
     bool process_handshake(SocketContext& ctx);
     
-    /// Close connection with cleanup
-    void close_connection_internal(socket_t socket, bool notify);
+    /// Close connection with cleanup (collects disconnected events)
+    void close_connection_internal(socket_t socket,
+                                  std::vector<DisconnectedEvent>& disconnected_events);
     
     /// Flush send buffers for a socket
-    void flush_send_buffer(SocketContext& ctx);
+    void flush_send_buffer(SocketContext& ctx,
+                          std::vector<DisconnectedEvent>& disconnected_events);
     
     /// Get socket context (must hold mutex_)
     SocketContext* get_context(socket_t socket);
