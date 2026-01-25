@@ -540,17 +540,12 @@ void BtClient::on_peer_disconnected(const BtInfoHash& info_hash,
 void BtClient::on_peer_data(const BtInfoHash& info_hash, 
                              BtPeerConnection* connection, 
                              socket_t socket) {
-    // Data is already processed by the connection's on_receive
-    // Any pending send data should be sent
-    if (connection->has_send_data() && network_manager_) {
-        std::vector<uint8_t> buffer(16384);
-        size_t len = connection->get_send_data(buffer.data(), buffer.size());
-        if (len > 0) {
-            buffer.resize(len);
-            network_manager_->send_to_peer(socket, buffer);
-            connection->mark_sent(len);
-        }
-    }
+    // Data is already processed by connection->process_incoming()
+    // Send data is already in connection->send_buffer() and will be
+    // sent by NetworkManager's flush_send_buffer() - no action needed here
+    (void)info_hash;
+    (void)connection;
+    (void)socket;
 }
 
 void BtClient::connect_pending_peers() {

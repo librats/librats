@@ -11,6 +11,8 @@
 #include "bt_bitfield.h"
 #include "bt_messages.h"
 #include "bt_handshake.h"
+#include "receive_buffer.h"
+#include "chained_send_buffer.h"
 
 #include <vector>
 #include <queue>
@@ -190,39 +192,43 @@ public:
     void close();
     
     //=========================================================================
+    // Buffer Access (for NetworkManager)
+    //=========================================================================
+    
+    /**
+     * @brief Get receive buffer for direct recv() operations
+     * 
+     * NetworkManager should:
+     *   1. recv_buffer().ensure_space(bytes)
+     *   2. recv(socket, recv_buffer().write_ptr(), recv_buffer().write_space())
+     *   3. recv_buffer().received(bytes)
+     *   4. process_incoming()
+     */
+    ReceiveBuffer& recv_buffer() { return recv_buffer_; }
+    const ReceiveBuffer& recv_buffer() const { return recv_buffer_; }
+    
+    /**
+     * @brief Get send buffer for direct send() operations
+     * 
+     * NetworkManager should:
+     *   1. Check !send_buffer().empty()
+     *   2. send(socket, send_buffer().front_data(), send_buffer().front_size())
+     *   3. send_buffer().pop_front(bytes_sent)
+     */
+    ChainedSendBuffer& send_buffer() { return send_buffer_; }
+    const ChainedSendBuffer& send_buffer() const { return send_buffer_; }
+    
+    //=========================================================================
     // Data Processing
     //=========================================================================
     
     /**
-     * @brief Process received data from socket
+     * @brief Process data in receive buffer
      * 
-     * Buffers data and parses complete messages.
-     * Calls message callbacks as messages are received.
-     * 
-     * @param data Received data
-     * @param length Data length
+     * Call this after data has been received into recv_buffer().
+     * Parses handshake and messages, invokes callbacks.
      */
-    void on_receive(const uint8_t* data, size_t length);
-    
-    /**
-     * @brief Get data to send (from send queue)
-     * 
-     * @param buffer Output buffer
-     * @param max_length Maximum bytes to copy
-     * @return Number of bytes copied
-     */
-    size_t get_send_data(uint8_t* buffer, size_t max_length);
-    
-    /**
-     * @brief Check if there's data to send
-     */
-    bool has_send_data() const;
-    size_t send_buffer_size() const { return send_buffer_.size() - send_offset_; }
-    
-    /**
-     * @brief Mark bytes as sent (remove from queue)
-     */
-    void mark_sent(size_t bytes);
+    void process_incoming();
     
     //=========================================================================
     // Callbacks
@@ -468,10 +474,9 @@ private:
     // Peer's pieces
     Bitfield peer_pieces_;
     
-    // Buffers
-    std::vector<uint8_t> recv_buffer_;
-    std::vector<uint8_t> send_buffer_;
-    size_t send_offset_;
+    // Buffers (single source of truth for I/O)
+    ReceiveBuffer recv_buffer_;
+    ChainedSendBuffer send_buffer_;
     
     // Pending requests
     std::vector<RequestMessage> pending_requests_;

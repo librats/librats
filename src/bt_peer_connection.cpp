@@ -61,7 +61,7 @@ BtPeerConnection::BtPeerConnection(const BtInfoHash& info_hash,
     , peer_choking_(true)
     , peer_interested_(false)
     , peer_pieces_(num_pieces)
-    , send_offset_(0)
+    , recv_buffer_(8192)  // Initial receive buffer capacity
     , max_pending_requests_(BT_DEFAULT_REQUEST_QUEUE_SIZE) {
 }
 
@@ -92,7 +92,6 @@ BtPeerConnection::BtPeerConnection(BtPeerConnection&& other) noexcept
     , peer_pieces_(std::move(other.peer_pieces_))
     , recv_buffer_(std::move(other.recv_buffer_))
     , send_buffer_(std::move(other.send_buffer_))
-    , send_offset_(other.send_offset_)
     , pending_requests_(std::move(other.pending_requests_))
     , max_pending_requests_(other.max_pending_requests_)
     , stats_(other.stats_)
@@ -130,7 +129,6 @@ BtPeerConnection& BtPeerConnection::operator=(BtPeerConnection&& other) noexcept
         peer_pieces_ = std::move(other.peer_pieces_);
         recv_buffer_ = std::move(other.recv_buffer_);
         send_buffer_ = std::move(other.send_buffer_);
-        send_offset_ = other.send_offset_;
         pending_requests_ = std::move(other.pending_requests_);
         max_pending_requests_ = other.max_pending_requests_;
         stats_ = other.stats_;
@@ -179,7 +177,6 @@ void BtPeerConnection::close() {
     // Clear buffers
     recv_buffer_.clear();
     send_buffer_.clear();
-    send_offset_ = 0;
     pending_requests_.clear();
     
     // Socket closing should be handled by the owner
@@ -199,15 +196,13 @@ void BtPeerConnection::set_state(PeerConnectionState new_state) {
 // Data Processing
 //=============================================================================
 
-void BtPeerConnection::on_receive(const uint8_t* data, size_t length) {
-    if (length == 0) return;
+void BtPeerConnection::process_incoming() {
+    if (recv_buffer_.empty()) return;
     
-    // Append to receive buffer
-    recv_buffer_.insert(recv_buffer_.end(), data, data + length);
     stats_.last_message_at = std::chrono::steady_clock::now();
     
-    LOG_DEBUG("BtPeerConn", "on_receive: " + std::to_string(length) + " bytes from " + ip_ + 
-              ", buffer now " + std::to_string(recv_buffer_.size()) + " bytes");
+    LOG_DEBUG("BtPeerConn", "process_incoming: " + std::to_string(recv_buffer_.size()) + 
+              " bytes from " + ip_);
     
     // Process handshake first
     if (!handshake_received_) {
@@ -217,6 +212,11 @@ void BtPeerConnection::on_receive(const uint8_t* data, size_t length) {
     // Then process messages
     if (handshake_received_) {
         process_messages();
+    }
+    
+    // Periodically normalize buffer to reclaim space
+    if (recv_buffer_.front_waste() > 4096) {
+        recv_buffer_.normalize();
     }
 }
 
@@ -264,8 +264,8 @@ void BtPeerConnection::process_handshake() {
              ", ext_protocol=" + (hs->extensions.extension_protocol ? "yes" : "no") +
              ", fast=" + (hs->extensions.fast ? "yes" : "no"));
     
-    // Remove handshake from buffer
-    recv_buffer_.erase(recv_buffer_.begin(), recv_buffer_.begin() + BT_HANDSHAKE_SIZE);
+    // Consume handshake from buffer - O(1) operation!
+    recv_buffer_.consume(BT_HANDSHAKE_SIZE);
     
     // Notify
     if (on_handshake_) {
@@ -294,7 +294,7 @@ void BtPeerConnection::process_messages() {
         // Check for keep-alive
         if (BtMessageDecoder::is_keepalive(recv_buffer_.data(), recv_buffer_.size())) {
             LOG_DEBUG("BtPeerConn", "Received keep-alive from " + ip_);
-            recv_buffer_.erase(recv_buffer_.begin(), recv_buffer_.begin() + 4);
+            recv_buffer_.consume(4);  // O(1) operation!
             continue;
         }
         
@@ -310,8 +310,8 @@ void BtPeerConnection::process_messages() {
                      ", msg_len=" + std::to_string(msg_len));
         }
         
-        // Remove processed message
-        recv_buffer_.erase(recv_buffer_.begin(), recv_buffer_.begin() + msg_len);
+        // Consume processed message - O(1) operation!
+        recv_buffer_.consume(msg_len);
     }
 }
 
@@ -461,33 +461,8 @@ void BtPeerConnection::parse_extension_handshake(const std::vector<uint8_t>& pay
     }
 }
 
-size_t BtPeerConnection::get_send_data(uint8_t* buffer, size_t max_length) {
-    size_t available = send_buffer_.size() - send_offset_;
-    size_t to_copy = std::min(available, max_length);
-    
-    if (to_copy > 0) {
-        std::memcpy(buffer, send_buffer_.data() + send_offset_, to_copy);
-    }
-    
-    return to_copy;
-}
-
-bool BtPeerConnection::has_send_data() const {
-    return send_offset_ < send_buffer_.size();
-}
-
-void BtPeerConnection::mark_sent(size_t bytes) {
-    send_offset_ += bytes;
-    
-    // If all data sent, clear buffer
-    if (send_offset_ >= send_buffer_.size()) {
-        send_buffer_.clear();
-        send_offset_ = 0;
-    }
-}
-
 void BtPeerConnection::queue_send(const std::vector<uint8_t>& data) {
-    send_buffer_.insert(send_buffer_.end(), data.begin(), data.end());
+    send_buffer_.append(data.data(), data.size());
     LOG_DEBUG("BtPeerConn", "queue_send: " + std::to_string(data.size()) + " bytes to " + ip_ + 
               ", buffer now " + std::to_string(send_buffer_.size()) + " bytes");
 }

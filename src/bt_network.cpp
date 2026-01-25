@@ -25,62 +25,6 @@
 namespace librats {
 
 //=============================================================================
-// ChainedSendBuffer Implementation
-//=============================================================================
-
-void ChainedSendBuffer::append(std::vector<uint8_t> data) {
-    if (data.empty()) return;
-    total_bytes_ += data.size();
-    chunks_.emplace_back(std::move(data));
-}
-
-void ChainedSendBuffer::append(const uint8_t* data, size_t length) {
-    if (length == 0) return;
-    std::vector<uint8_t> chunk(data, data + length);
-    append(std::move(chunk));
-}
-
-void ChainedSendBuffer::pop_front(size_t bytes) {
-    while (bytes > 0 && !chunks_.empty()) {
-        SendChunk& front = chunks_.front();
-        size_t remaining = front.remaining();
-        
-        if (bytes >= remaining) {
-            // Consume entire chunk
-            bytes -= remaining;
-            total_bytes_ -= remaining;
-            chunks_.pop_front();
-        } else {
-            // Partial consume
-            front.offset += bytes;
-            total_bytes_ -= bytes;
-            bytes = 0;
-        }
-    }
-}
-
-size_t ChainedSendBuffer::copy_to(uint8_t* buffer, size_t max_bytes) const {
-    size_t copied = 0;
-    
-    for (const auto& chunk : chunks_) {
-        if (copied >= max_bytes) break;
-        
-        size_t remaining = chunk.remaining();
-        size_t to_copy = std::min(remaining, max_bytes - copied);
-        
-        std::memcpy(buffer + copied, chunk.current(), to_copy);
-        copied += to_copy;
-    }
-    
-    return copied;
-}
-
-void ChainedSendBuffer::clear() {
-    chunks_.clear();
-    total_bytes_ = 0;
-}
-
-//=============================================================================
 // BtNetworkManager Construction
 //=============================================================================
 
@@ -89,7 +33,6 @@ BtNetworkManager::BtNetworkManager(const BtNetworkConfig& config)
     , running_(false)
     , actual_listen_port_(0)
     , listen_socket_(INVALID_SOCKET_VALUE) {
-    recv_buffer_.resize(config_.recv_buffer_size);
 }
 
 BtNetworkManager::~BtNetworkManager() {
@@ -311,18 +254,21 @@ bool BtNetworkManager::send_to_peer(socket_t socket, const std::vector<uint8_t>&
     std::lock_guard<std::mutex> lock(mutex_);
     
     auto it = connections_.find(socket);
-    if (it == connections_.end()) {
+    if (it == connections_.end() || !it->second.connection) {
         return false;
     }
     
+    auto& send_buf = it->second.connection->send_buffer();
+    
     // Check high water mark
-    if (it->second.send_buffer.size() + data.size() > config_.send_buffer_high_water) {
+    if (send_buf.size() + data.size() > config_.send_buffer_high_water) {
         LOG_NET_WARN("Send buffer high water reached for " + 
                      it->second.connection->ip());
         return false;
     }
     
-    it->second.send_buffer.append(data.data(), data.size());
+    // Append directly to connection's send buffer (single source of truth)
+    send_buf.append(data.data(), data.size());
     return true;
 }
 
@@ -379,8 +325,8 @@ void BtNetworkManager::io_loop() {
                 FD_SET(socket, &read_fds);
                 FD_SET(socket, &error_fds);
                 
-                // Only monitor for write if we have data to send
-                if (!ctx.send_buffer.empty()) {
+                // Only monitor for write if connection has data to send
+                if (ctx.connection && !ctx.connection->send_buffer().empty()) {
                     FD_SET(socket, &write_fds);
                 }
                 
@@ -495,17 +441,17 @@ void BtNetworkManager::io_loop() {
                         ctx.connected_at = std::chrono::steady_clock::now();
                         ctx.last_activity = ctx.connected_at;
                         
-                        // Send handshake
+                        // Send handshake directly to connection's buffer
                         LOG_NET_DEBUG("Sending handshake (" + 
                                      std::to_string(BT_HANDSHAKE_SIZE) + " bytes) to " + 
                                      pending.ip);
                         auto hs = BtHandshake::encode_with_extensions(
                             pending.info_hash, pending.peer_id);
-                        ctx.send_buffer.append(std::move(hs));
+                        conn->send_buffer().append(std::move(hs));
                         
                         connections_[socket] = std::move(ctx);
                         
-                        LOG_NET_DEBUG("Handshake sent successfully to " + pending.ip);
+                        LOG_NET_DEBUG("Handshake queued to " + pending.ip);
                     } else {
                         LOG_NET_DEBUG("Connection failed to " + pending.ip + ": " + 
                                      std::to_string(sock_error));
@@ -731,9 +677,93 @@ void BtNetworkManager::handle_readable(socket_t socket,
     
     SocketContext& ctx = it->second;
     
-    // Receive data
-    int bytes = recv(socket, reinterpret_cast<char*>(recv_buffer_.data()), 
-                    static_cast<int>(recv_buffer_.size()), 0);
+    // For incoming connections without a connection object yet,
+    // we need to create a temporary buffer for the handshake
+    if (!ctx.connection) {
+        // Create a temporary buffer for handshake parsing
+        std::vector<uint8_t> temp_buffer(BT_HANDSHAKE_SIZE + 64);
+        int bytes = recv(socket, reinterpret_cast<char*>(temp_buffer.data()), 
+                        static_cast<int>(temp_buffer.size()), 0);
+        
+        if (bytes <= 0) {
+            if (bytes == 0) {
+                LOG_NET_DEBUG("Connection closed by peer during handshake");
+            }
+            close_connection_internal(socket, disconnected_events);
+            return;
+        }
+        
+        // Parse handshake to get info_hash and create connection
+        if (static_cast<size_t>(bytes) >= BT_HANDSHAKE_SIZE) {
+            auto hs = BtHandshake::decode(temp_buffer.data(), bytes);
+            if (!hs) {
+                LOG_NET_ERROR("Invalid handshake from incoming connection");
+                close_connection_internal(socket, disconnected_events);
+                return;
+            }
+            
+            // Find registered torrent
+            auto torrent_it = torrents_.find(hs->info_hash);
+            if (torrent_it == torrents_.end()) {
+                LOG_NET_DEBUG("Unknown info_hash from incoming connection");
+                close_connection_internal(socket, disconnected_events);
+                return;
+            }
+            
+            const auto& reg = torrent_it->second;
+            
+            // Create connection object
+            ctx.connection = std::make_shared<BtPeerConnection>(
+                hs->info_hash, reg.peer_id, reg.num_pieces);
+            ctx.info_hash = hs->info_hash;
+            
+            // Get peer address
+            std::string peer_addr = get_peer_address(ctx.socket);
+            std::string ip;
+            uint16_t port = 0;
+            size_t colon = peer_addr.rfind(':');
+            if (colon != std::string::npos) {
+                ip = peer_addr.substr(0, colon);
+                port = static_cast<uint16_t>(std::stoi(peer_addr.substr(colon + 1)));
+            }
+            
+            ctx.connection->set_address(ip, port);
+            ctx.connection->set_socket(static_cast<int>(ctx.socket));
+            
+            // Put remaining data into connection's recv buffer and process
+            auto& recv_buf = ctx.connection->recv_buffer();
+            recv_buf.ensure_space(bytes);
+            std::memcpy(recv_buf.write_ptr(), temp_buffer.data(), bytes);
+            recv_buf.received(bytes);
+            ctx.connection->process_incoming();
+            
+            // Check if handshake complete
+            if (ctx.connection->is_connected()) {
+                ctx.state = NetConnectionState::Connected;
+                
+                ConnectedEvent event;
+                event.info_hash = ctx.info_hash;
+                event.connection = ctx.connection;
+                event.socket = ctx.socket;
+                event.incoming = ctx.incoming;
+                connected_events.push_back(std::move(event));
+            }
+        }
+        
+        ctx.last_activity = std::chrono::steady_clock::now();
+        return;
+    }
+    
+    // Normal case: connection exists, receive directly into its buffer
+    auto& recv_buf = ctx.connection->recv_buffer();
+    
+    // Ensure we have space for incoming data
+    const size_t recv_size = 16384;
+    recv_buf.ensure_space(recv_size);
+    
+    // Receive directly into connection's buffer - NO COPY!
+    int bytes = recv(socket, reinterpret_cast<char*>(recv_buf.write_ptr()), 
+                    static_cast<int>(recv_buf.write_space()), 0);
     
     if (bytes <= 0) {
         if (bytes == 0) {
@@ -759,13 +789,15 @@ void BtNetworkManager::handle_readable(socket_t socket,
         return;
     }
     
+    // Mark bytes as received
+    recv_buf.received(bytes);
     ctx.last_activity = std::chrono::steady_clock::now();
     
-    std::string ip = ctx.connection ? ctx.connection->ip() : "unknown";
-    LOG_NET_DEBUG("handle_peer_data: recv " + std::to_string(bytes) + " bytes from " + ip);
+    LOG_NET_DEBUG("handle_readable: recv " + std::to_string(bytes) + 
+                  " bytes from " + ctx.connection->ip());
     
-    handle_peer_data(ctx, recv_buffer_.data(), static_cast<size_t>(bytes),
-                     connected_events, data_events, disconnected_events);
+    // Process the data (handshake and messages)
+    handle_peer_data(ctx, connected_events, data_events, disconnected_events);
 }
 
 void BtNetworkManager::handle_writable(socket_t socket,
@@ -776,134 +808,66 @@ void BtNetworkManager::handle_writable(socket_t socket,
     flush_send_buffer(it->second, disconnected_events);
 }
 
-void BtNetworkManager::handle_peer_data(SocketContext& ctx, 
-                                         const uint8_t* data, size_t length,
+void BtNetworkManager::handle_peer_data(SocketContext& ctx,
                                          std::vector<ConnectedEvent>& connected_events,
                                          std::vector<DataEvent>& data_events,
                                          std::vector<DisconnectedEvent>& disconnected_events) {
+    if (!ctx.connection) return;
+    
+    // Process incoming data (handshake and messages)
+    // Data is already in connection's recv_buffer - no copy needed!
+    ctx.connection->process_incoming();
+    
     if (ctx.state == NetConnectionState::Handshaking) {
-        // For incoming connections, we need to create the connection object
-        // once we receive the handshake
-        if (ctx.incoming && !ctx.connection) {
-            // Check if we have enough data for handshake
-            if (length < BT_HANDSHAKE_SIZE) {
-                // Buffer and wait for more
-                // For now, we'll just wait for complete handshake
-                return;
-            }
+        // Check if handshake complete
+        if (ctx.connection->is_connected()) {
+            ctx.state = NetConnectionState::Connected;
             
-            // Parse handshake to get info_hash
-            auto hs = BtHandshake::decode(data, length);
-            if (!hs) {
-                LOG_NET_ERROR("Invalid handshake from incoming connection");
-                close_connection_internal(ctx.socket, disconnected_events);
-                return;
-            }
+            LOG_NET_DEBUG("Handshake complete with " + ctx.connection->ip() + 
+                         ", queueing callback");
             
-            // Find registered torrent
-            auto torrent_it = torrents_.find(hs->info_hash);
-            if (torrent_it == torrents_.end()) {
-                LOG_NET_DEBUG("Unknown info_hash from incoming connection");
-                close_connection_internal(ctx.socket, disconnected_events);
-                return;
-            }
-            
-            const auto& reg = torrent_it->second;
-            
-            // Create connection object
-            ctx.connection = std::make_shared<BtPeerConnection>(
-                hs->info_hash, reg.peer_id, reg.num_pieces);
-            ctx.info_hash = hs->info_hash;
-            
-            // Get peer address
-            std::string peer_addr = get_peer_address(ctx.socket);
-            std::string ip;
-            uint16_t port = 0;
-            size_t colon = peer_addr.rfind(':');
-            if (colon != std::string::npos) {
-                ip = peer_addr.substr(0, colon);
-                port = static_cast<uint16_t>(std::stoi(peer_addr.substr(colon + 1)));
-            }
-            
-            ctx.connection->set_address(ip, port);
-            ctx.connection->set_socket(static_cast<int>(ctx.socket));
+            // Queue connected event (callback will be invoked outside mutex)
+            ConnectedEvent event;
+            event.info_hash = ctx.info_hash;
+            event.connection = ctx.connection;
+            event.socket = ctx.socket;
+            event.incoming = ctx.incoming;
+            connected_events.push_back(std::move(event));
         }
-        
-        // Process handshake data
-        if (ctx.connection) {
-            ctx.connection->on_receive(data, length);
-            
-            // Check if handshake complete
-            if (ctx.connection->is_connected()) {
-                ctx.state = NetConnectionState::Connected;
-                
-                LOG_NET_DEBUG("Handshake complete with " + ctx.connection->ip() + 
-                             ", queueing callback");
-                
-                // Queue connected event (callback will be invoked outside mutex)
-                ConnectedEvent event;
-                event.info_hash = ctx.info_hash;
-                event.connection = ctx.connection;
-                event.socket = ctx.socket;
-                event.incoming = ctx.incoming;
-                connected_events.push_back(std::move(event));
-            }
-            
-            // Check if connection has data to send
-            if (ctx.connection->has_send_data()) {
-                std::vector<uint8_t> buffer(16384);
-                size_t len = ctx.connection->get_send_data(
-                    buffer.data(), buffer.size());
-                if (len > 0) {
-                    buffer.resize(len);
-                    ctx.send_buffer.append(std::move(buffer));
-                    ctx.connection->mark_sent(len);
-                }
-            }
-        }
-    } else if (ctx.state == NetConnectionState::Connected && ctx.connection) {
-        // Process message data
-        ctx.connection->on_receive(data, length);
-        
+    } else if (ctx.state == NetConnectionState::Connected) {
         // Queue data event (callback will be invoked outside mutex)
         DataEvent event;
         event.info_hash = ctx.info_hash;
         event.connection = ctx.connection;
         event.socket = ctx.socket;
         data_events.push_back(std::move(event));
-        
-        // Check for data to send
-        if (ctx.connection->has_send_data()) {
-            std::vector<uint8_t> buffer(16384);
-            size_t len = ctx.connection->get_send_data(buffer.data(), buffer.size());
-            if (len > 0) {
-                buffer.resize(len);
-                ctx.send_buffer.append(std::move(buffer));
-                ctx.connection->mark_sent(len);
-            }
-        }
     }
+    
+    // Note: send data is already in connection->send_buffer()
+    // flush_send_buffer() will send it directly - no copy needed!
 }
 
 void BtNetworkManager::flush_send_buffer(SocketContext& ctx,
                                           std::vector<DisconnectedEvent>& disconnected_events) {
-    if (ctx.send_buffer.empty()) return;
+    if (!ctx.connection) return;
     
-    // Copy data to temporary buffer for sending
-    std::vector<uint8_t> buffer(std::min(ctx.send_buffer.size(), size_t(65536)));
-    size_t to_send = ctx.send_buffer.copy_to(buffer.data(), buffer.size());
+    auto& send_buf = ctx.connection->send_buffer();
+    if (send_buf.empty()) return;
     
-    if (to_send == 0) return;
+    // Send directly from connection's buffer - NO COPY!
+    const uint8_t* data = send_buf.front_data();
+    size_t to_send = send_buf.front_size();
+    
+    if (to_send == 0 || data == nullptr) return;
 
-    if (ctx.connection) {
-        LOG_NET_DEBUG("flush_send_buffer: sending " + std::to_string(to_send) + " bytes to " + ctx.connection->ip());
-    }
+    LOG_NET_DEBUG("flush_send_buffer: sending " + std::to_string(to_send) + 
+                  " bytes to " + ctx.connection->ip());
     
-    int sent = send(ctx.socket, reinterpret_cast<const char*>(buffer.data()),
+    int sent = send(ctx.socket, reinterpret_cast<const char*>(data),
                    static_cast<int>(to_send), 0);
     
     if (sent > 0) {
-        ctx.send_buffer.pop_front(static_cast<size_t>(sent));
+        send_buf.pop_front(static_cast<size_t>(sent));
         ctx.last_activity = std::chrono::steady_clock::now();
     } else if (sent < 0) {
 #ifdef _WIN32
@@ -938,14 +902,6 @@ void BtNetworkManager::close_connection_internal(socket_t socket,
     
     close_socket(socket, true);
     connections_.erase(it);
-}
-
-SocketContext* BtNetworkManager::get_context(socket_t socket) {
-    auto it = connections_.find(socket);
-    if (it != connections_.end()) {
-        return &it->second;
-    }
-    return nullptr;
 }
 
 } // namespace librats

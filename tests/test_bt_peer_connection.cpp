@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "bt_peer_connection.h"
+#include <cstring>
 
 using namespace librats;
 
@@ -17,6 +18,19 @@ BtInfoHash make_test_hash() {
 
 PeerID make_test_peer_id() {
     return generate_peer_id("-TS0001-");
+}
+
+// Helper: simulate receiving data into connection's buffer and processing it
+void feed_data(BtPeerConnection& conn, const uint8_t* data, size_t length) {
+    auto& buf = conn.recv_buffer();
+    buf.ensure_space(length);
+    std::memcpy(buf.write_ptr(), data, length);
+    buf.received(length);
+    conn.process_incoming();
+}
+
+void feed_data(BtPeerConnection& conn, const std::vector<uint8_t>& data) {
+    feed_data(conn, data.data(), data.size());
 }
 
 //=============================================================================
@@ -90,11 +104,11 @@ TEST(BtPeerConnectionTest, StartHandshake) {
     
     conn.start_handshake();
     
-    EXPECT_TRUE(conn.has_send_data());
+    EXPECT_FALSE(conn.send_buffer().empty());
     
     // Get the handshake data
     std::vector<uint8_t> buffer(68);
-    size_t len = conn.get_send_data(buffer.data(), buffer.size());
+    size_t len = conn.send_buffer().copy_to(buffer.data(), buffer.size());
     
     EXPECT_EQ(len, 68);  // Handshake is 68 bytes
     
@@ -126,7 +140,7 @@ TEST(BtPeerConnectionTest, ReceiveHandshake) {
     auto hs_data = BtHandshake::encode_with_extensions(our_hash, peer_id);
     
     // Feed to connection
-    conn.on_receive(hs_data.data(), hs_data.size());
+    feed_data(conn, hs_data);
     
     EXPECT_TRUE(handshake_received);
     EXPECT_EQ(received_hs.peer_id, peer_id);
@@ -149,7 +163,7 @@ TEST(BtPeerConnectionTest, HandshakeMismatch) {
     wrong_hash[0] = 0xFF;  // Different
     
     auto hs_data = BtHandshake::encode(wrong_hash, make_test_peer_id());
-    conn.on_receive(hs_data.data(), hs_data.size());
+    feed_data(conn, hs_data);
     
     EXPECT_TRUE(error_received);
     EXPECT_EQ(conn.state(), PeerConnectionState::Disconnected);
@@ -192,7 +206,7 @@ TEST(BtPeerConnectionTest, ReceiveMessages) {
     
     // First receive handshake to get connected
     auto hs_data = BtHandshake::encode(our_hash, make_test_peer_id());
-    conn.on_receive(hs_data.data(), hs_data.size());
+    feed_data(conn, hs_data);
     ASSERT_EQ(conn.state(), PeerConnectionState::Connected);
     
     std::vector<BtMessage> received_msgs;
@@ -202,7 +216,7 @@ TEST(BtPeerConnectionTest, ReceiveMessages) {
     
     // Send unchoke message
     auto unchoke = BtMessageEncoder::encode_unchoke();
-    conn.on_receive(unchoke.data(), unchoke.size());
+    feed_data(conn, unchoke);
     
     ASSERT_EQ(received_msgs.size(), 1);
     EXPECT_EQ(received_msgs[0].type, BtMessageType::Unchoke);
@@ -216,13 +230,13 @@ TEST(BtPeerConnectionTest, ReceiveHave) {
     
     // Handshake
     auto hs_data = BtHandshake::encode(our_hash, make_test_peer_id());
-    conn.on_receive(hs_data.data(), hs_data.size());
+    feed_data(conn, hs_data);
     
     EXPECT_FALSE(conn.peer_has_piece(42));
     
     // Receive HAVE message
     auto have = BtMessageEncoder::encode_have(42);
-    conn.on_receive(have.data(), have.size());
+    feed_data(conn, have);
     
     EXPECT_TRUE(conn.peer_has_piece(42));
 }
@@ -234,7 +248,7 @@ TEST(BtPeerConnectionTest, ReceiveBitfield) {
     
     // Handshake
     auto hs_data = BtHandshake::encode(our_hash, make_test_peer_id());
-    conn.on_receive(hs_data.data(), hs_data.size());
+    feed_data(conn, hs_data);
     
     // Create and send bitfield
     Bitfield bf(100);
@@ -243,7 +257,7 @@ TEST(BtPeerConnectionTest, ReceiveBitfield) {
     bf.set_bit(99);
     
     auto bf_msg = BtMessageEncoder::encode_bitfield(bf);
-    conn.on_receive(bf_msg.data(), bf_msg.size());
+    feed_data(conn, bf_msg);
     
     EXPECT_TRUE(conn.peer_has_piece(0));
     EXPECT_TRUE(conn.peer_has_piece(50));
@@ -283,10 +297,10 @@ TEST(BtPeerConnectionTest, CanRequest) {
     // Simulate receiving unchoke
     auto our_hash = make_test_hash();
     auto hs = BtHandshake::encode(our_hash, make_test_peer_id());
-    conn.on_receive(hs.data(), hs.size());
+    feed_data(conn, hs);
     
     auto unchoke = BtMessageEncoder::encode_unchoke();
-    conn.on_receive(unchoke.data(), unchoke.size());
+    feed_data(conn, unchoke);
     
     EXPECT_TRUE(conn.can_request());
     
@@ -299,49 +313,42 @@ TEST(BtPeerConnectionTest, CanRequest) {
 }
 
 //=============================================================================
-// Send Buffer Tests
+// Message Queuing Tests
 //=============================================================================
 
-TEST(BtPeerConnectionTest, SendBuffer) {
+TEST(BtPeerConnectionTest, SendQueuesSingleMessage) {
     BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
     conn.set_socket(42);
     
-    EXPECT_FALSE(conn.has_send_data());
+    EXPECT_TRUE(conn.send_buffer().empty());
     
     conn.send_interested();
-    EXPECT_TRUE(conn.has_send_data());
     
-    std::vector<uint8_t> buffer(100);
-    size_t len = conn.get_send_data(buffer.data(), buffer.size());
-    EXPECT_EQ(len, 5);  // Interested message is 5 bytes
-    
-    // Data still there until marked as sent
-    EXPECT_TRUE(conn.has_send_data());
-    
-    conn.mark_sent(5);
-    EXPECT_FALSE(conn.has_send_data());
+    // Interested message should be queued
+    EXPECT_FALSE(conn.send_buffer().empty());
+    EXPECT_EQ(conn.send_buffer().size(), 5);  // 4 bytes length + 1 byte type
 }
 
-TEST(BtPeerConnectionTest, PartialSend) {
+TEST(BtPeerConnectionTest, SendQueuesMultipleMessages) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Queue several messages
+    conn.send_interested();    // 5 bytes
+    conn.send_have(10);        // 9 bytes
+    conn.send_unchoke();       // 5 bytes
+    
+    EXPECT_EQ(conn.send_buffer().size(), 19);
+}
+
+TEST(BtPeerConnectionTest, HandshakeQueued) {
     BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
     conn.set_socket(42);
     
     conn.start_handshake();
     
-    // Get first half
-    std::vector<uint8_t> buffer(34);
-    size_t len = conn.get_send_data(buffer.data(), 34);
-    EXPECT_EQ(len, 34);
-    
-    conn.mark_sent(34);
-    EXPECT_TRUE(conn.has_send_data());
-    
-    // Get second half
-    len = conn.get_send_data(buffer.data(), 34);
-    EXPECT_EQ(len, 34);
-    
-    conn.mark_sent(34);
-    EXPECT_FALSE(conn.has_send_data());
+    // Handshake is 68 bytes
+    EXPECT_EQ(conn.send_buffer().size(), 68);
 }
 
 //=============================================================================
@@ -361,7 +368,7 @@ TEST(BtPeerConnectionTest, Statistics) {
     
     // Handshake
     auto hs = BtHandshake::encode(our_hash, make_test_peer_id());
-    conn.on_receive(hs.data(), hs.size());
+    feed_data(conn, hs);
     
     // Send some messages
     conn.send_interested();
@@ -371,7 +378,7 @@ TEST(BtPeerConnectionTest, Statistics) {
     
     // Receive messages
     auto interested = BtMessageEncoder::encode_interested();
-    conn.on_receive(interested.data(), interested.size());
+    feed_data(conn, interested);
     
     EXPECT_EQ(conn.stats().messages_received, 1);
 }
@@ -383,12 +390,12 @@ TEST(BtPeerConnectionTest, DownloadStats) {
     
     // Handshake
     auto hs = BtHandshake::encode(our_hash, make_test_peer_id());
-    conn.on_receive(hs.data(), hs.size());
+    feed_data(conn, hs);
     
     // Receive piece data
     std::vector<uint8_t> data(1000, 0xAB);
     auto piece_msg = BtMessageEncoder::encode_piece(0, 0, data.data(), data.size());
-    conn.on_receive(piece_msg.data(), piece_msg.size());
+    feed_data(conn, piece_msg);
     
     EXPECT_EQ(conn.stats().bytes_downloaded, 1000);
     EXPECT_EQ(conn.stats().pieces_received, 1);
@@ -436,7 +443,7 @@ TEST(BtPeerConnectionTest, Close) {
     
     // Handshake to get connected
     auto hs = BtHandshake::encode(our_hash, make_test_peer_id());
-    conn.on_receive(hs.data(), hs.size());
+    feed_data(conn, hs);
     EXPECT_EQ(conn.state(), PeerConnectionState::Connected);
     
     conn.close();
@@ -466,7 +473,7 @@ TEST(BtPeerConnectionTest, ExtensionHandshakeParsing) {
     
     // First receive BT handshake with extension protocol support
     auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
-    conn.on_receive(hs.data(), hs.size());
+    feed_data(conn, hs);
     ASSERT_EQ(conn.state(), PeerConnectionState::Connected);
     
     // Create extension handshake (bencode keys must be in lexicographic order!)
@@ -477,7 +484,7 @@ TEST(BtPeerConnectionTest, ExtensionHandshakeParsing) {
     
     // Create extended message with extension_id=0 (handshake)
     auto ext_msg = BtMessageEncoder::encode_extended(0, ext_payload);
-    conn.on_receive(ext_msg.data(), ext_msg.size());
+    feed_data(conn, ext_msg);
     
     // Verify extension handshake data was parsed and stored
     EXPECT_TRUE(conn.extension_handshake_received());
@@ -492,7 +499,7 @@ TEST(BtPeerConnectionTest, ExtensionHandshakeWithoutMetadata) {
     
     // BT handshake
     auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
-    conn.on_receive(hs.data(), hs.size());
+    feed_data(conn, hs);
     
     // Extension handshake without metadata_size (peer doesn't have metadata)
     // Just has ut_metadata ID: d1:md11:ut_metadatai2eee
@@ -500,7 +507,7 @@ TEST(BtPeerConnectionTest, ExtensionHandshakeWithoutMetadata) {
     std::vector<uint8_t> ext_payload(ext_hs.begin(), ext_hs.end());
     
     auto ext_msg = BtMessageEncoder::encode_extended(0, ext_payload);
-    conn.on_receive(ext_msg.data(), ext_msg.size());
+    feed_data(conn, ext_msg);
     
     EXPECT_TRUE(conn.extension_handshake_received());
     EXPECT_EQ(conn.peer_metadata_size(), 0);  // Not provided
@@ -514,7 +521,7 @@ TEST(BtPeerConnectionTest, ExtensionHandshakeNoUtMetadata) {
     
     // BT handshake
     auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
-    conn.on_receive(hs.data(), hs.size());
+    feed_data(conn, hs);
     
     // Extension handshake with metadata_size but no ut_metadata
     // {"m": {"ut_pex": 1}, "metadata_size": 5000}
@@ -523,7 +530,7 @@ TEST(BtPeerConnectionTest, ExtensionHandshakeNoUtMetadata) {
     std::vector<uint8_t> ext_payload(ext_hs.begin(), ext_hs.end());
     
     auto ext_msg = BtMessageEncoder::encode_extended(0, ext_payload);
-    conn.on_receive(ext_msg.data(), ext_msg.size());
+    feed_data(conn, ext_msg);
     
     EXPECT_TRUE(conn.extension_handshake_received());
     EXPECT_EQ(conn.peer_metadata_size(), 5000);
@@ -537,14 +544,14 @@ TEST(BtPeerConnectionTest, ExtensionHandshakeMovedConnection) {
     
     // BT handshake + extension handshake
     auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
-    conn1.on_receive(hs.data(), hs.size());
+    feed_data(conn1, hs);
     
     // {"m": {"ut_metadata": 5}, "metadata_size": 99999}
     // In bencode: d1:md11:ut_metadatai5ee13:metadata_sizei99999ee
     std::string ext_hs = "d1:md11:ut_metadatai5ee13:metadata_sizei99999ee";
     std::vector<uint8_t> ext_payload(ext_hs.begin(), ext_hs.end());
     auto ext_msg = BtMessageEncoder::encode_extended(0, ext_payload);
-    conn1.on_receive(ext_msg.data(), ext_msg.size());
+    feed_data(conn1, ext_msg);
     
     // Move the connection
     BtPeerConnection conn2(std::move(conn1));

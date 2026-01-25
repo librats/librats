@@ -157,6 +157,12 @@ set(LIBRARY_SOURCES
     src/rats_export.h
     ${PROJECT_BINARY_DIR}/src/version.h
 
+# Buffer utilities for bittorrent and file transfer
+    src/receive_buffer.h
+    src/receive_buffer.cpp
+    src/chained_send_buffer.h
+    src/chained_send_buffer.cpp
+
 # Cypto algorithms including Noise Protocol needed
     src/crypto/curve25519.c
     src/crypto/curve25519.h
@@ -420,8 +426,11 @@ if(RATS_BUILD_TESTS)
         tests/test_stun.cpp
         tests/test_turn.cpp
         tests/test_ice.cpp
+# Buffer utilities for file transfer and bittorrent
+        tests/test_receive_buffer.cpp
+        tests/test_chained_send_buffer.cpp
     )
-    
+
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled
     if(RATS_SEARCH_FEATURES)
         list(APPEND TEST_SOURCES 

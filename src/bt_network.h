@@ -5,7 +5,8 @@
  * @brief Async network layer for BitTorrent peer connections
  * 
  * Provides efficient multiplexed I/O for managing multiple peer connections
- * with non-blocking sockets and chained send buffers.
+ * with non-blocking sockets. Buffers are owned by BtPeerConnection (single
+ * source of truth) - this class only handles socket I/O.
  */
 
 #include "bt_types.h"
@@ -25,91 +26,6 @@
 namespace librats {
 
 //=============================================================================
-// Chained Send Buffer
-//=============================================================================
-
-/**
- * @brief A chunk of data in the send buffer
- */
-struct SendChunk {
-    std::vector<uint8_t> data;  ///< Owned data
-    size_t offset;               ///< Current read offset (for partial sends)
-    
-    SendChunk() : offset(0) {}
-    explicit SendChunk(std::vector<uint8_t> d) : data(std::move(d)), offset(0) {}
-    
-    /// Bytes remaining to send
-    size_t remaining() const { return data.size() - offset; }
-    
-    /// Pointer to current data position
-    const uint8_t* current() const { return data.data() + offset; }
-};
-
-/**
- * @brief Zero-copy chained send buffer for efficient queuing
- * 
- * Zero-copy chained buffer for efficient sending. Allows appending
- * data chunks without copying, and efficient draining via
- * scatter-gather I/O patterns.
- */
-class ChainedSendBuffer {
-public:
-    ChainedSendBuffer() : total_bytes_(0) {}
-    
-    /**
-     * @brief Append data to the send queue
-     */
-    void append(std::vector<uint8_t> data);
-    
-    /**
-     * @brief Append data by copying
-     */
-    void append(const uint8_t* data, size_t length);
-    
-    /**
-     * @brief Pop bytes from the front of the buffer
-     * 
-     * @param bytes Number of bytes that were successfully sent
-     */
-    void pop_front(size_t bytes);
-    
-    /**
-     * @brief Build a contiguous buffer for sending
-     * 
-     * Copies up to max_bytes into the output buffer.
-     * 
-     * @param buffer Output buffer
-     * @param max_bytes Maximum bytes to copy
-     * @return Actual bytes copied
-     */
-    size_t copy_to(uint8_t* buffer, size_t max_bytes) const;
-    
-    /**
-     * @brief Get total bytes pending
-     */
-    size_t size() const { return total_bytes_; }
-    
-    /**
-     * @brief Check if buffer is empty
-     */
-    bool empty() const { return total_bytes_ == 0; }
-    
-    /**
-     * @brief Clear all pending data
-     */
-    void clear();
-    
-    /**
-     * @brief Get number of chunks
-     */
-    size_t chunk_count() const { return chunks_.size(); }
-    
-private:
-    std::deque<SendChunk> chunks_;
-    size_t total_bytes_;
-};
-
-//=============================================================================
 // Network Configuration
 //=============================================================================
 
@@ -122,7 +38,6 @@ struct BtNetworkConfig {
     bool enable_incoming;           ///< Accept incoming connections
     int connect_timeout_ms;         ///< Timeout for outgoing connections (ms)
     int select_timeout_ms;          ///< Timeout for select() call (ms)
-    size_t recv_buffer_size;        ///< Size of receive buffer
     size_t send_buffer_high_water;  ///< High water mark for send buffer
     
     BtNetworkConfig()
@@ -131,7 +46,6 @@ struct BtNetworkConfig {
         , enable_incoming(true)
         , connect_timeout_ms(30000)
         , select_timeout_ms(15)
-        , recv_buffer_size(65536)
         , send_buffer_high_water(1024 * 1024) {}  // 1MB
 };
 
@@ -166,12 +80,14 @@ struct PendingConnect {
 
 /**
  * @brief Per-socket connection context
+ * 
+ * Note: Buffers are now owned by BtPeerConnection (single source of truth).
+ * This struct only holds socket state and connection reference.
  */
 struct SocketContext {
     socket_t socket;
     BtInfoHash info_hash;
     std::shared_ptr<BtPeerConnection> connection;
-    ChainedSendBuffer send_buffer;
     NetConnectionState state;
     bool incoming;
     std::chrono::steady_clock::time_point connected_at;
@@ -426,20 +342,11 @@ private:
     void handle_writable(socket_t socket,
                         std::vector<DisconnectedEvent>& disconnected_events);
     
-    /// Handle connection completion
-    void handle_connect_complete(socket_t socket, bool success);
-    
-    /// Handle data received from a peer
-    void handle_peer_data(SocketContext& ctx, const uint8_t* data, size_t length,
+    /// Handle data received from a peer (data is already in connection's recv_buffer)
+    void handle_peer_data(SocketContext& ctx,
                          std::vector<ConnectedEvent>& connected_events,
                          std::vector<DataEvent>& data_events,
                          std::vector<DisconnectedEvent>& disconnected_events);
-    
-    /// Send handshake on new connection
-    void send_handshake(SocketContext& ctx);
-    
-    /// Process handshake response
-    bool process_handshake(SocketContext& ctx);
     
     /// Close connection with cleanup (collects disconnected events)
     void close_connection_internal(socket_t socket,
@@ -448,9 +355,6 @@ private:
     /// Flush send buffers for a socket
     void flush_send_buffer(SocketContext& ctx,
                           std::vector<DisconnectedEvent>& disconnected_events);
-    
-    /// Get socket context (must hold mutex_)
-    SocketContext* get_context(socket_t socket);
     
     /// Create socket for outgoing connection
     socket_t create_connect_socket(const std::string& ip, uint16_t port);
@@ -482,9 +386,6 @@ private:
     
     /// I/O thread
     std::thread io_thread_;
-    
-    /// Receive buffer (reused)
-    std::vector<uint8_t> recv_buffer_;
     
     /// Callbacks
     ConnectedCallback on_connected_;

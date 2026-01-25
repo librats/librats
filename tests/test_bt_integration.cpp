@@ -3,6 +3,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <cstring>
 #include "bt_types.h"
 #include "bt_bitfield.h"
 #include "bt_file_storage.h"
@@ -18,6 +19,17 @@
 #include "bt_network.h"
 #include "bencode.h"
 #include "socket.h"
+
+// Helper: simulate receiving data into connection's buffer and processing it
+namespace {
+void feed_data(librats::BtPeerConnection& conn, const std::vector<uint8_t>& data) {
+    auto& buf = conn.recv_buffer();
+    buf.ensure_space(data.size());
+    std::memcpy(buf.write_ptr(), data.data(), data.size());
+    buf.received(data.size());
+    conn.process_incoming();
+}
+}
 
 using namespace librats;
 
@@ -422,7 +434,7 @@ TEST(BtIntegrationTest, PeerConnectionStateFlow) {
     
     // Receive handshake
     auto hs = BtHandshake::encode_with_extensions(hash, peer_id);
-    conn.on_receive(hs.data(), hs.size());
+    feed_data(conn, hs);
     EXPECT_EQ(conn.state(), PeerConnectionState::Connected);
     EXPECT_EQ(conn.peer_id(), peer_id);
     
@@ -431,7 +443,7 @@ TEST(BtIntegrationTest, PeerConnectionStateFlow) {
     bf.set_bit(0);
     bf.set_bit(50);
     auto bf_msg = BtMessageEncoder::encode_bitfield(bf);
-    conn.on_receive(bf_msg.data(), bf_msg.size());
+    feed_data(conn, bf_msg);
     
     EXPECT_TRUE(conn.peer_has_piece(0));
     EXPECT_TRUE(conn.peer_has_piece(50));
@@ -439,7 +451,7 @@ TEST(BtIntegrationTest, PeerConnectionStateFlow) {
     
     // Receive unchoke
     auto unchoke = BtMessageEncoder::encode_unchoke();
-    conn.on_receive(unchoke.data(), unchoke.size());
+    feed_data(conn, unchoke);
     EXPECT_FALSE(conn.peer_choking());
     
     // Send interest

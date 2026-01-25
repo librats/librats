@@ -287,7 +287,6 @@ TEST(BtNetworkConfigTest, DefaultValues) {
     EXPECT_TRUE(config.enable_incoming);
     EXPECT_EQ(config.connect_timeout_ms, 30000);
     EXPECT_EQ(config.select_timeout_ms, 15);
-    EXPECT_EQ(config.recv_buffer_size, 65536);
     EXPECT_EQ(config.send_buffer_high_water, 1024 * 1024);
 }
 
@@ -298,7 +297,6 @@ TEST(BtNetworkConfigTest, CustomValues) {
     config.enable_incoming = false;
     config.connect_timeout_ms = 10000;
     config.select_timeout_ms = 100;
-    config.recv_buffer_size = 32768;
     config.send_buffer_high_water = 512 * 1024;
     
     EXPECT_EQ(config.listen_port, 51413);
@@ -306,7 +304,6 @@ TEST(BtNetworkConfigTest, CustomValues) {
     EXPECT_FALSE(config.enable_incoming);
     EXPECT_EQ(config.connect_timeout_ms, 10000);
     EXPECT_EQ(config.select_timeout_ms, 100);
-    EXPECT_EQ(config.recv_buffer_size, 32768);
     EXPECT_EQ(config.send_buffer_high_water, 512 * 1024);
 }
 
@@ -320,7 +317,6 @@ TEST(SocketContextTest, DefaultValues) {
     EXPECT_EQ(ctx.socket, INVALID_SOCKET_VALUE);
     EXPECT_EQ(ctx.state, NetConnectionState::Connecting);
     EXPECT_FALSE(ctx.incoming);
-    EXPECT_TRUE(ctx.send_buffer.empty());
     EXPECT_EQ(ctx.connection, nullptr);
 }
 
