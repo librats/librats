@@ -217,6 +217,7 @@ public:
      * @brief Check if there's data to send
      */
     bool has_send_data() const;
+    size_t send_buffer_size() const { return send_buffer_.size() - send_offset_; }
     
     /**
      * @brief Mark bytes as sent (remove from queue)

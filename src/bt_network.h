@@ -282,9 +282,36 @@ private:
     void process_active_connections();
     void handle_incoming_connection(socket_t client_socket, const std::string& peer_addr);
     void handle_connection_established(PendingConnection& pending);
-    void handle_peer_data(ActiveConnection& conn);
+    
+    /**
+     * @brief Handle data from a peer connection (without holding connections_mutex_)
+     * 
+     * This function is designed to be called WITHOUT holding the connections_mutex_
+     * to prevent deadlocks when callbacks call back into network methods.
+     * 
+     * @param sock The socket descriptor
+     * @param connection Shared pointer to the peer connection
+     * @param info_hash The torrent info hash
+     * @param is_incoming Whether this is an incoming connection
+     * @param callback_already_invoked Whether on_peer_connected was already called
+     */
+    void handle_peer_data_unlocked(socket_t sock,
+                                   std::shared_ptr<BtPeerConnection> connection,
+                                   const BtInfoHash& info_hash,
+                                   bool is_incoming,
+                                   bool callback_already_invoked);
+    
     void flush_send_buffer(socket_t sock);
     void flush_send_buffer_internal(ActiveConnection& conn);
+    
+    /**
+     * @brief Flush send buffer without requiring connections_mutex_
+     * 
+     * Safe to call from callbacks as it doesn't acquire any locks.
+     */
+    void flush_send_buffer_direct(socket_t sock, 
+                                  std::shared_ptr<BtPeerConnection> connection);
+    
     void cleanup_stale_connections();
     
     //=========================================================================

@@ -704,12 +704,32 @@ void BtNetworkManager::process_active_connections() {
     }
     
     // Handle readable sockets (incoming data)
+    // IMPORTANT: We must NOT hold connections_mutex_ when invoking callbacks,
+    // as callbacks may call back into network methods (deadlock prevention).
     for (socket_t sock : sockets) {
         if (FD_ISSET(sock, &read_fds)) {
-            std::lock_guard<std::mutex> lock(connections_mutex_);
-            auto it = active_connections_.find(sock);
-            if (it != active_connections_.end()) {
-                handle_peer_data(it->second);
+            // Copy connection info under lock, then release before processing
+            std::shared_ptr<BtPeerConnection> connection;
+            BtInfoHash info_hash;
+            bool is_incoming = false;
+            bool callback_invoked = false;
+            
+            {
+                std::lock_guard<std::mutex> lock(connections_mutex_);
+                auto it = active_connections_.find(sock);
+                if (it == active_connections_.end()) {
+                    continue;
+                }
+                connection = it->second.connection;
+                info_hash = it->second.info_hash;
+                is_incoming = it->second.is_incoming;
+                callback_invoked = it->second.callback_invoked;
+            }
+            // Mutex released here - safe to call callbacks
+            
+            if (connection) {
+                handle_peer_data_unlocked(sock, connection, info_hash, 
+                                          is_incoming, callback_invoked);
             }
         }
     }
@@ -724,58 +744,88 @@ void BtNetworkManager::process_active_connections() {
     }
 }
 
-void BtNetworkManager::handle_peer_data(ActiveConnection& conn) {
+void BtNetworkManager::handle_peer_data_unlocked(
+    socket_t sock,
+    std::shared_ptr<BtPeerConnection> connection,
+    const BtInfoHash& info_hash,
+    bool is_incoming,
+    bool callback_already_invoked) {
+    
+    // NOTE: This function is called WITHOUT holding connections_mutex_
+    // to prevent deadlocks when callbacks call back into network methods.
+    
     uint8_t buffer[16384];
     
-    int n = recv(conn.socket, reinterpret_cast<char*>(buffer), sizeof(buffer), 0);
+    int n = recv(sock, reinterpret_cast<char*>(buffer), sizeof(buffer), 0);
     
     if (n <= 0) {
         // Connection closed or error
-        std::string peer_ip = conn.connection ? conn.connection->ip() : "unknown";
+        std::string peer_ip = connection ? connection->ip() : "unknown";
         LOG_DEBUG("BtNetwork", "handle_peer_data: recv returned " + std::to_string(n) + 
                   " from " + peer_ip + " (closing)");
-        if (on_peer_disconnected_ && conn.connection) {
-            on_peer_disconnected_(conn.info_hash, conn.connection.get());
+        
+        // Invoke disconnect callback (without holding lock)
+        if (on_peer_disconnected_ && connection) {
+            on_peer_disconnected_(info_hash, connection.get());
         }
-        close_socket(conn.socket);
+        
+        // Now close and remove under lock
+        close_connection(sock);
         return;
     }
     
-    std::string peer_ip = conn.connection ? conn.connection->ip() : "unknown";
+    std::string peer_ip = connection ? connection->ip() : "unknown";
     LOG_DEBUG("BtNetwork", "handle_peer_data: recv " + std::to_string(n) + " bytes from " + peer_ip);
     
-    conn.last_activity = std::chrono::steady_clock::now();
+    // Update last activity under lock
+    {
+        std::lock_guard<std::mutex> lock(connections_mutex_);
+        auto it = active_connections_.find(sock);
+        if (it != active_connections_.end()) {
+            it->second.last_activity = std::chrono::steady_clock::now();
+        }
+    }
     
-    // Pass data to peer connection
-    if (conn.connection) {
-        conn.connection->on_receive(buffer, static_cast<size_t>(n));
+    // Pass data to peer connection (no lock needed, connection is shared_ptr)
+    if (connection) {
+        connection->on_receive(buffer, static_cast<size_t>(n));
     }
     
     // Check if connection just completed handshake (for outgoing connections)
     // and we haven't invoked the callback yet
-    if (!conn.callback_invoked && conn.connection && conn.connection->is_connected()) {
-        conn.callback_invoked = true;
+    if (!callback_already_invoked && connection && connection->is_connected()) {
+        // Mark callback as invoked under lock
+        {
+            std::lock_guard<std::mutex> lock(connections_mutex_);
+            auto it = active_connections_.find(sock);
+            if (it != active_connections_.end()) {
+                it->second.callback_invoked = true;
+            }
+        }
         
-        LOG_DEBUG("BtNetwork", "Handshake complete with " + conn.connection->ip() + 
+        LOG_DEBUG("BtNetwork", "Handshake complete with " + connection->ip() + 
                   ", invoking callback");
         
-        // Invoke on_peer_connected callback
-        // Pass shared_ptr - both network manager and torrent share ownership
+        // Invoke on_peer_connected callback (WITHOUT holding lock - prevents deadlock)
         if (on_peer_connected_) {
-            on_peer_connected_(conn.info_hash, conn.connection, 
-                               conn.socket, conn.is_incoming);
+            on_peer_connected_(info_hash, connection, sock, is_incoming);
         }
     }
     
-    // Notify data callback - connection is always valid (shared ownership)
-    if (on_peer_data_ && conn.connection) {
-        on_peer_data_(conn.info_hash, conn.connection.get(), conn.socket);
+    // Notify data callback (WITHOUT holding lock - prevents deadlock)
+    if (on_peer_data_ && connection) {
+        on_peer_data_(info_hash, connection.get(), sock);
     }
     
     // After processing received data, immediately try to send any pending data
     // This ensures responses are sent without waiting for the next poll cycle
-    if (conn.connection && conn.connection->has_send_data()) {
-        flush_send_buffer_internal(conn);
+    if (connection && connection->has_send_data()) {
+        size_t pending = connection->send_buffer_size();
+        LOG_DEBUG("BtNetwork", "Flushing send buffer for " + connection->ip() + 
+                  ": pending=" + std::to_string(pending) + " bytes");
+        
+        // Flush directly using the socket (no lock needed for send)
+        flush_send_buffer_direct(sock, connection);
     }
 }
 
@@ -793,24 +843,38 @@ void BtNetworkManager::flush_send_buffer_internal(ActiveConnection& conn) {
         return;
     }
     
+    flush_send_buffer_direct(conn.socket, conn.connection);
+    conn.last_activity = std::chrono::steady_clock::now();
+}
+
+void BtNetworkManager::flush_send_buffer_direct(
+    socket_t sock, 
+    std::shared_ptr<BtPeerConnection> connection) {
+    
+    // NOTE: This function does NOT require connections_mutex_ to be held.
+    // It only uses the socket (which is valid) and the connection shared_ptr.
+    
+    if (!connection || !connection->has_send_data()) {
+        return;
+    }
+    
     uint8_t buffer[16384];
     
-    while (conn.connection->has_send_data()) {
-        size_t len = conn.connection->get_send_data(buffer, sizeof(buffer));
+    while (connection->has_send_data()) {
+        size_t len = connection->get_send_data(buffer, sizeof(buffer));
         if (len == 0) {
             break;
         }
         
         // Try to send data
-        int sent = ::send(conn.socket, reinterpret_cast<const char*>(buffer), 
+        int sent = ::send(sock, reinterpret_cast<const char*>(buffer), 
                           static_cast<int>(len), 0);
         
         if (sent > 0) {
-            conn.connection->mark_sent(static_cast<size_t>(sent));
-            conn.last_activity = std::chrono::steady_clock::now();
+            connection->mark_sent(static_cast<size_t>(sent));
             
             LOG_DEBUG("BtNetwork", "Sent " + std::to_string(sent) + " bytes to " + 
-                      conn.connection->ip());
+                      connection->ip());
             
             // If we couldn't send everything, the socket buffer is full
             // Wait for next write opportunity
@@ -824,12 +888,12 @@ void BtNetworkManager::flush_send_buffer_internal(ActiveConnection& conn) {
             int err = WSAGetLastError();
             if (err != WSAEWOULDBLOCK) {
                 LOG_DEBUG("BtNetwork", "Send error " + std::to_string(err) + 
-                          " to " + conn.connection->ip());
+                          " to " + connection->ip());
             }
 #else
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 LOG_DEBUG("BtNetwork", "Send error " + std::to_string(errno) + 
-                          " to " + conn.connection->ip());
+                          " to " + connection->ip());
             }
 #endif
             break;
