@@ -813,6 +813,8 @@ void BtNetworkManager::flush_send_buffer(SocketContext& ctx) {
     size_t to_send = ctx.send_buffer.copy_to(buffer.data(), buffer.size());
     
     if (to_send == 0) return;
+
+    LOG_NET_DEBUG("flush_send_buffer: sending " + std::to_string(to_send) + " bytes to " + ctx.connection->ip());
     
     int sent = send(ctx.socket, reinterpret_cast<const char*>(buffer.data()),
                    static_cast<int>(to_send), 0);
