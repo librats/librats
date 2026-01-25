@@ -874,20 +874,8 @@ TEST(BtIntegrationTest, TorrentExtensionHandshakeSupport) {
 }
 
 //=============================================================================
-// Integration Test: Network Callback Tracking
+// Integration Test: Torrent Magnet State
 //=============================================================================
-
-TEST(BtIntegrationTest, ActiveConnectionCallbackFlag) {
-    // Test that ActiveConnection properly tracks callback_invoked
-    ActiveConnection conn;
-    
-    // Default should be false
-    EXPECT_FALSE(conn.callback_invoked);
-    
-    // Set to true
-    conn.callback_invoked = true;
-    EXPECT_TRUE(conn.callback_invoked);
-}
 
 TEST(BtIntegrationTest, TorrentMagnetState) {
     // Create a minimal TorrentInfo for magnet testing
