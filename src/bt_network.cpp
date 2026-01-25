@@ -660,11 +660,16 @@ void BtNetworkManager::handle_incoming_connection(socket_t client_socket,
 
 void BtNetworkManager::process_active_connections() {
     std::vector<socket_t> sockets;
+    std::vector<socket_t> sockets_with_pending_data;
     
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
         for (const auto& [sock, conn] : active_connections_) {
             sockets.push_back(sock);
+            // Check if this connection has data waiting to be sent
+            if (conn.connection && conn.connection->has_send_data()) {
+                sockets_with_pending_data.push_back(sock);
+            }
         }
     }
     
@@ -672,9 +677,10 @@ void BtNetworkManager::process_active_connections() {
         return;
     }
     
-    // Build fd_set
-    fd_set read_fds;
+    // Build fd_sets for both reading and writing
+    fd_set read_fds, write_fds;
     FD_ZERO(&read_fds);
+    FD_ZERO(&write_fds);
     
     socket_t max_fd = 0;
     for (socket_t sock : sockets) {
@@ -684,19 +690,35 @@ void BtNetworkManager::process_active_connections() {
         }
     }
     
+    // Add sockets with pending data to write_fds
+    for (socket_t sock : sockets_with_pending_data) {
+        FD_SET(sock, &write_fds);
+    }
+    
     struct timeval tv = {0, 0};
-    int ready = select(static_cast<int>(max_fd + 1), &read_fds, nullptr, nullptr, &tv);
+    fd_set* write_fds_ptr = sockets_with_pending_data.empty() ? nullptr : &write_fds;
+    int ready = select(static_cast<int>(max_fd + 1), &read_fds, write_fds_ptr, nullptr, &tv);
     
     if (ready <= 0) {
         return;
     }
     
+    // Handle readable sockets (incoming data)
     for (socket_t sock : sockets) {
         if (FD_ISSET(sock, &read_fds)) {
             std::lock_guard<std::mutex> lock(connections_mutex_);
             auto it = active_connections_.find(sock);
             if (it != active_connections_.end()) {
                 handle_peer_data(it->second);
+            }
+        }
+    }
+    
+    // Handle writable sockets (send pending data)
+    if (write_fds_ptr) {
+        for (socket_t sock : sockets_with_pending_data) {
+            if (FD_ISSET(sock, &write_fds)) {
+                flush_send_buffer(sock);
             }
         }
     }
@@ -748,6 +770,70 @@ void BtNetworkManager::handle_peer_data(ActiveConnection& conn) {
     // Notify data callback - connection is always valid (shared ownership)
     if (on_peer_data_ && conn.connection) {
         on_peer_data_(conn.info_hash, conn.connection.get(), conn.socket);
+    }
+    
+    // After processing received data, immediately try to send any pending data
+    // This ensures responses are sent without waiting for the next poll cycle
+    if (conn.connection && conn.connection->has_send_data()) {
+        flush_send_buffer_internal(conn);
+    }
+}
+
+void BtNetworkManager::flush_send_buffer(socket_t sock) {
+    std::lock_guard<std::mutex> lock(connections_mutex_);
+    auto it = active_connections_.find(sock);
+    if (it == active_connections_.end()) {
+        return;
+    }
+    flush_send_buffer_internal(it->second);
+}
+
+void BtNetworkManager::flush_send_buffer_internal(ActiveConnection& conn) {
+    if (!conn.connection || !conn.connection->has_send_data()) {
+        return;
+    }
+    
+    uint8_t buffer[16384];
+    
+    while (conn.connection->has_send_data()) {
+        size_t len = conn.connection->get_send_data(buffer, sizeof(buffer));
+        if (len == 0) {
+            break;
+        }
+        
+        // Try to send data
+        int sent = ::send(conn.socket, reinterpret_cast<const char*>(buffer), 
+                          static_cast<int>(len), 0);
+        
+        if (sent > 0) {
+            conn.connection->mark_sent(static_cast<size_t>(sent));
+            conn.last_activity = std::chrono::steady_clock::now();
+            
+            LOG_DEBUG("BtNetwork", "Sent " + std::to_string(sent) + " bytes to " + 
+                      conn.connection->ip());
+            
+            // If we couldn't send everything, the socket buffer is full
+            // Wait for next write opportunity
+            if (static_cast<size_t>(sent) < len) {
+                break;
+            }
+        } else {
+            // EAGAIN/EWOULDBLOCK means socket buffer is full, try again later
+            // Other errors - connection might be broken
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            if (err != WSAEWOULDBLOCK) {
+                LOG_DEBUG("BtNetwork", "Send error " + std::to_string(err) + 
+                          " to " + conn.connection->ip());
+            }
+#else
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                LOG_DEBUG("BtNetwork", "Send error " + std::to_string(errno) + 
+                          " to " + conn.connection->ip());
+            }
+#endif
+            break;
+        }
     }
 }
 

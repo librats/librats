@@ -283,6 +283,8 @@ private:
     void handle_incoming_connection(socket_t client_socket, const std::string& peer_addr);
     void handle_connection_established(PendingConnection& pending);
     void handle_peer_data(ActiveConnection& conn);
+    void flush_send_buffer(socket_t sock);
+    void flush_send_buffer_internal(ActiveConnection& conn);
     void cleanup_stale_connections();
     
     //=========================================================================
