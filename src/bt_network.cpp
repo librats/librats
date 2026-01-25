@@ -349,6 +349,14 @@ void BtNetworkManager::io_loop() {
             }
         }
         
+        // If no sockets to monitor, sleep to avoid CPU spinning.
+        // This happens when enable_incoming=false and no connections yet.
+        if (max_fd == 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(config_.select_timeout_ms));
+            continue;
+        }
+        
         // Select with timeout
         struct timeval timeout;
         timeout.tv_sec = 0;
@@ -359,12 +367,17 @@ void BtNetworkManager::io_loop() {
         
         if (result < 0) {
 #ifdef _WIN32
-            if (WSAGetLastError() != WSAEINTR) {
-                LOG_NET_ERROR("select() failed: " + std::to_string(WSAGetLastError()));
+            int err = WSAGetLastError();
+            if (err != WSAEINTR) {
+                LOG_NET_ERROR("select() failed: " + std::to_string(err));
+                // Avoid spinning on persistent errors
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
 #else
             if (errno != EINTR) {
                 LOG_NET_ERROR("select() failed: " + std::string(strerror(errno)));
+                // Avoid spinning on persistent errors
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
 #endif
             continue;
