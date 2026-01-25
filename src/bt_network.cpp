@@ -441,13 +441,11 @@ void BtNetworkManager::io_loop() {
                         ctx.connected_at = std::chrono::steady_clock::now();
                         ctx.last_activity = ctx.connected_at;
                         
-                        // Send handshake directly to connection's buffer
+                        // Send handshake via connection method (sets handshake_sent_ flag)
                         LOG_NET_DEBUG("Sending handshake (" + 
                                      std::to_string(BT_HANDSHAKE_SIZE) + " bytes) to " + 
                                      pending.ip);
-                        auto hs = BtHandshake::encode_with_extensions(
-                            pending.info_hash, pending.peer_id);
-                        conn->send_buffer().append(std::move(hs));
+                        conn->start_handshake();
                         
                         connections_[socket] = std::move(ctx);
                         
