@@ -1,4 +1,5 @@
 #include "bt_piece_picker.h"
+#include "logger.h"
 #include <algorithm>
 #include <random>
 #include <chrono>
@@ -378,22 +379,36 @@ bool PiecePicker::mark_finished(const BlockInfo& block) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     auto* dp = find_downloading(block.piece_index);
-    if (!dp) return false;
+    if (!dp) {
+        LOG_WARN("PiecePicker", "mark_finished: piece " + std::to_string(block.piece_index) + 
+                 " not in downloading list!");
+        return false;
+    }
     
     size_t block_idx = block.offset / BT_BLOCK_SIZE;
-    if (block_idx >= dp->blocks.size()) return false;
+    if (block_idx >= dp->blocks.size()) {
+        LOG_WARN("PiecePicker", "mark_finished: block index " + std::to_string(block_idx) + 
+                 " >= blocks.size " + std::to_string(dp->blocks.size()));
+        return false;
+    }
     
     dp->blocks[block_idx].state = BlockState::Finished;
     dp->blocks[block_idx].peer = nullptr;
     
     // Check if piece is complete
-    bool complete = true;
+    size_t finished_count = 0;
     for (const auto& b : dp->blocks) {
-        if (b.state != BlockState::Finished) {
-            complete = false;
-            break;
+        if (b.state == BlockState::Finished) {
+            ++finished_count;
         }
     }
+    
+    bool complete = (finished_count == dp->blocks.size());
+    
+    LOG_DEBUG("PiecePicker", "mark_finished: piece=" + std::to_string(block.piece_index) + 
+              " block=" + std::to_string(block_idx) + 
+              " finished=" + std::to_string(finished_count) + "/" + std::to_string(dp->blocks.size()) +
+              (complete ? " COMPLETE!" : ""));
     
     if (complete) {
         check_endgame();
