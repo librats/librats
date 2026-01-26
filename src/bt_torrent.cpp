@@ -403,12 +403,22 @@ bool Torrent::set_metadata(const std::vector<uint8_t>& metadata) {
     // This is necessary because peers connected during DownloadingMetadata state
     // were not added to the picker (it didn't exist yet).
     // Following standard pattern: torrent::init() -> peer_connection::init()
+    
+    // In metadata-only mode (empty save_path), we skip sending INTERESTED and bitfield
+    // because we're not going to download anything - just needed the metadata
+    const bool metadata_only = config_.save_path.empty();
+    
     for (auto& conn : connections_) {
         if (!conn->is_connected()) continue;
         
         // Update peer's bitfield size to match the torrent
         // This is needed because peer may have sent Bitfield/HaveAll before we had metadata
         conn->set_torrent_info(info_hash_, info_->num_pieces());
+        
+        // Skip download-related initialization in metadata-only mode
+        if (metadata_only) {
+            continue;
+        }
         
         // Get peer's pieces (now correctly sized)
         const auto& peer_pieces = conn->peer_pieces();
