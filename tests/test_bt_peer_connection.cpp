@@ -771,3 +771,106 @@ TEST(BtPeerConnectionTest, HaveNoneClearsPeerHasAll) {
     EXPECT_FALSE(conn.peer_has_all());
     EXPECT_EQ(conn.peer_pieces().count(), 0);
 }
+
+// Test that when bitfield is received before metadata (num_pieces unknown),
+// and then set_torrent_info() is called, the bitfield data is preserved.
+// This is a regression test for a bug where the bitfield was reset to empty.
+TEST(BtPeerConnectionTest, BitfieldPreservedAfterSetTorrentInfo) {
+    // Create incoming connection (num_pieces = 0, unknown before metadata)
+    auto our_peer_id = make_test_peer_id();
+    BtPeerConnection conn(our_peer_id);
+    
+    // Simulate connection setup
+    conn.set_socket(123);
+    conn.set_address("1.2.3.4", 6881);
+    
+    // Create a handshake from peer
+    BtInfoHash peer_hash = make_test_hash();
+    PeerID remote_peer_id;
+    for (int i = 0; i < 20; ++i) remote_peer_id[i] = 'd' + i;
+    auto handshake = BtHandshake::encode(peer_hash, remote_peer_id);
+    
+    // Feed handshake - but it will fail because info_hash not known
+    // We need to set up the callback to set torrent info
+    bool callback_invoked = false;
+    conn.set_info_hash_callback([&](BtPeerConnection* c, const BtInfoHash& hash) {
+        callback_invoked = true;
+        // For this test, we just mark it as known without full setup
+        // This simulates what BtNetworkManager does
+    });
+    
+    // For simplicity, let's test the resize functionality directly
+    // Create connection with small num_pieces
+    BtPeerConnection conn2(peer_hash, our_peer_id, 0);  // num_pieces=0 initially
+    conn2.set_socket(123);
+    conn2.set_address("1.2.3.4", 6881);
+    
+    // Simulate receiving handshake with valid info_hash
+    auto hs = BtHandshake::encode(peer_hash, remote_peer_id);
+    feed_data(conn2, hs);
+    
+    EXPECT_TRUE(conn2.is_connected());
+    
+    // Simulate receiving a bitfield with 16 pieces (2 bytes)
+    // Bitfield: 0xFF (first 8 bits set), 0xC0 (bits 8-9 set) = 10 pieces
+    // But decoder will use bf_len * 8 = 16 bits when num_pieces = 0
+    std::vector<uint8_t> bitfield_msg = {
+        0x00, 0x00, 0x00, 0x03,  // length = 3 (1 + 2 bytes)
+        0x05,                    // Bitfield message type
+        0xFF, 0xC0              // 10 pieces: bits 0-7 and 8-9 set
+    };
+    feed_data(conn2, bitfield_msg);
+    
+    // The bitfield was decoded with size 16 (2*8)
+    EXPECT_EQ(conn2.peer_pieces().size(), 16);
+    // First 10 bits should be set
+    for (size_t i = 0; i < 10; ++i) {
+        EXPECT_TRUE(conn2.peer_pieces().get_bit(i)) << "Bit " << i << " should be set";
+    }
+    size_t initial_count = conn2.peer_pieces().count();
+    EXPECT_EQ(initial_count, 10);
+    
+    // Now simulate receiving metadata - actual num_pieces is 10
+    conn2.set_torrent_info(peer_hash, 10);
+    
+    // The bitfield should be resized to 10 but data preserved
+    EXPECT_EQ(conn2.peer_pieces().size(), 10);
+    
+    // All 10 bits should still be set
+    for (size_t i = 0; i < 10; ++i) {
+        EXPECT_TRUE(conn2.peer_pieces().get_bit(i)) << "Bit " << i << " should still be set after resize";
+    }
+    EXPECT_EQ(conn2.peer_pieces().count(), 10);
+}
+
+// Test that set_torrent_info preserves HaveAll flag
+TEST(BtPeerConnectionTest, HaveAllPreservedAfterSetTorrentInfo) {
+    auto our_peer_id = make_test_peer_id();
+    BtInfoHash peer_hash = make_test_hash();
+    PeerID remote_peer_id;
+    for (int i = 0; i < 20; ++i) remote_peer_id[i] = 'd' + i;
+    
+    // Create connection with num_pieces=0 (magnet link scenario)
+    BtPeerConnection conn(peer_hash, our_peer_id, 0);
+    conn.set_socket(123);
+    conn.set_address("1.2.3.4", 6881);
+    
+    // Simulate receiving handshake
+    auto hs = BtHandshake::encode_with_extensions(peer_hash, remote_peer_id);
+    feed_data(conn, hs);
+    EXPECT_TRUE(conn.is_connected());
+    
+    // Receive HaveAll message
+    std::vector<uint8_t> have_all = {0x00, 0x00, 0x00, 0x01, 0x0E};
+    feed_data(conn, have_all);
+    
+    EXPECT_TRUE(conn.peer_has_all());
+    
+    // Now set torrent info with actual num_pieces
+    conn.set_torrent_info(peer_hash, 100);
+    
+    // All 100 pieces should be set
+    EXPECT_EQ(conn.peer_pieces().size(), 100);
+    EXPECT_EQ(conn.peer_pieces().count(), 100);
+    EXPECT_TRUE(conn.peer_pieces().all_set());
+}

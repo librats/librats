@@ -240,9 +240,17 @@ void BtPeerConnection::set_torrent_info(const BtInfoHash& info_hash, uint32_t nu
             LOG_DEBUG("BtPeerConn", "Peer " + ip_ + " had sent HaveAll, setting all " + 
                       std::to_string(num_pieces) + " pieces");
         } else {
-            // Peer may have sent a bitfield that we partially decoded
-            // If the sizes don't match, we need to reset it
-            peer_pieces_ = Bitfield(num_pieces);
+            // Peer may have sent a bitfield before we knew num_pieces.
+            // The bitfield was decoded with size bf_len*8 which may differ from actual num_pieces.
+            // Use resize() to adjust to correct size while preserving existing bit data.
+            // This is important: the extra padding bits at the end are meaningless anyway.
+            size_t old_size = peer_pieces_.size();
+            size_t old_count = peer_pieces_.count();
+            peer_pieces_.resize(num_pieces);
+            LOG_DEBUG("BtPeerConn", "Peer " + ip_ + " bitfield resized from " + 
+                      std::to_string(old_size) + " to " + std::to_string(num_pieces) +
+                      " bits (had " + std::to_string(old_count) + " pieces, now " + 
+                      std::to_string(peer_pieces_.count()) + ")");
         }
     }
     
