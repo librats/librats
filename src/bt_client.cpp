@@ -547,10 +547,13 @@ void BtClient::on_peer_connected(const BtInfoHash& info_hash,
     
     LOG_INFO("BtClient", "Peer connected: " + connection->ip() + ":" + 
              std::to_string(connection->port()) + 
-             (is_incoming ? " (incoming)" : " (outgoing)"));
+             (is_incoming ? " (incoming)" : " (outgoing)") +
+             " state=" + peer_state_to_string(connection->state()));
     
-    // Store socket in connection for later use
-    connection->set_socket(static_cast<int>(socket));
+    // NOTE: Do NOT call set_socket() here! The socket was already set by
+    // NetworkManager when the connection was created. Calling set_socket()
+    // again would reset the state from Connected back to Handshaking,
+    // breaking the torrent download logic.
     
     // Hand connection to torrent - it will manage from here
     // Both network manager and torrent share ownership via shared_ptr

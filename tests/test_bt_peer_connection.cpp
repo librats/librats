@@ -70,6 +70,41 @@ TEST(BtPeerConnectionTest, SetSocket) {
     EXPECT_EQ(conn.state(), PeerConnectionState::Handshaking);
 }
 
+TEST(BtPeerConnectionTest, SetSocketDoesNotResetConnectedState) {
+    // This test ensures that calling set_socket() after handshake is complete
+    // does NOT reset the state back to Handshaking. This was a bug where
+    // BtClient::on_peer_connected() called set_socket() again after NetworkManager
+    // had already set the socket and completed the handshake.
+    
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    
+    // Initial state is Disconnected
+    EXPECT_EQ(conn.state(), PeerConnectionState::Disconnected);
+    
+    // First set_socket should transition to Handshaking
+    conn.set_socket(42);
+    EXPECT_EQ(conn.state(), PeerConnectionState::Handshaking);
+    
+    // Simulate receiving a valid handshake (this sets state to Connected)
+    auto peer_id = make_test_peer_id();
+    for (size_t i = 0; i < 8; ++i) {
+        peer_id[i] = static_cast<uint8_t>('d' + i);  // "defghijk..."
+    }
+    auto hs_data = BtHandshake::encode_with_extensions(make_test_hash(), peer_id);
+    feed_data(conn, hs_data);
+    
+    EXPECT_EQ(conn.state(), PeerConnectionState::Connected);
+    EXPECT_TRUE(conn.is_connected());
+    
+    // Calling set_socket() again should NOT reset state to Handshaking
+    conn.set_socket(99);
+    
+    // Socket fd is updated, but state remains Connected
+    EXPECT_EQ(conn.socket(), 99);
+    EXPECT_EQ(conn.state(), PeerConnectionState::Connected);
+    EXPECT_TRUE(conn.is_connected());
+}
+
 //=============================================================================
 // State Tests
 //=============================================================================

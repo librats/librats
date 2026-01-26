@@ -182,7 +182,10 @@ BtPeerConnection& BtPeerConnection::operator=(BtPeerConnection&& other) noexcept
 
 void BtPeerConnection::set_socket(int socket_fd) {
     socket_fd_ = socket_fd;
-    if (socket_fd >= 0) {
+    // Only transition to Handshaking if currently Disconnected.
+    // This prevents accidentally resetting state if set_socket is called
+    // after handshake is already complete (e.g., from a callback).
+    if (socket_fd >= 0 && state_ == PeerConnectionState::Disconnected) {
         set_state(PeerConnectionState::Handshaking);
         stats_.connected_at = std::chrono::steady_clock::now();
     }
