@@ -322,16 +322,36 @@ Torrent::Ptr BtClient::add_magnet(const std::string& magnet_uri,
 }
 
 void BtClient::remove_torrent(const BtInfoHash& info_hash, bool delete_files) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    Torrent::Ptr torrent;
     
-    auto it = torrents_.find(info_hash);
-    if (it == torrents_.end()) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        LOG_INFO("BtClient", "Removing torrent: " + info_hash_to_hex(info_hash).substr(0, 8) + "...");
+        
+        auto it = torrents_.find(info_hash);
+        if (it == torrents_.end()) {
+            return;
+        }
+        
+        torrent = it->second;  // Keep a reference before erasing
+        torrent->stop();
+        
+        // Remove tracker manager
+        tracker_managers_.erase(info_hash);
+        
+        if (delete_files) {
+            // TODO: Delete downloaded files
+        }
+        
+        torrents_.erase(it);
     }
+    // mutex_ is now RELEASED - important to avoid deadlock!
+    // The callbacks below may try to acquire mutex_ via get_torrent()
     
-    it->second->stop();
-    
-    // Unregister from network manager
+    // Unregister from network manager OUTSIDE the mutex
+    // This invokes on_disconnected_ callbacks which call on_peer_disconnected()
+    // which needs to acquire mutex_ via get_torrent()
     if (network_manager_) {
         network_manager_->unregister_torrent(info_hash);
     }
@@ -341,15 +361,6 @@ void BtClient::remove_torrent(const BtInfoHash& info_hash, bool delete_files) {
     if (dht) {
         dht->cancel_search(info_hash);
     }
-    
-    // Remove tracker manager
-    tracker_managers_.erase(info_hash);
-    
-    if (delete_files) {
-        // TODO: Delete downloaded files
-    }
-    
-    torrents_.erase(it);
     
     if (on_torrent_removed_) {
         on_torrent_removed_(info_hash);
