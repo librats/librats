@@ -63,6 +63,7 @@ BtPeerConnection::BtPeerConnection(const BtInfoHash& info_hash,
     , peer_interested_(false)
     , peer_pieces_(num_pieces)
     , peer_has_all_(false)
+    , bitfield_received_(false)
     , recv_buffer_(8192)  // Initial receive buffer capacity
     , max_pending_requests_(BT_DEFAULT_REQUEST_QUEUE_SIZE) {
 }
@@ -88,6 +89,7 @@ BtPeerConnection::BtPeerConnection(const PeerID& our_peer_id)
     , peer_interested_(false)
     , peer_pieces_(0)  // Will be resized after set_torrent_info
     , peer_has_all_(false)
+    , bitfield_received_(false)
     , recv_buffer_(8192)
     , max_pending_requests_(BT_DEFAULT_REQUEST_QUEUE_SIZE) {
 }
@@ -119,6 +121,7 @@ BtPeerConnection::BtPeerConnection(BtPeerConnection&& other) noexcept
     , peer_interested_(other.peer_interested_)
     , peer_pieces_(std::move(other.peer_pieces_))
     , peer_has_all_(other.peer_has_all_)
+    , bitfield_received_(other.bitfield_received_)
     , recv_buffer_(std::move(other.recv_buffer_))
     , send_buffer_(std::move(other.send_buffer_))
     , pending_requests_(std::move(other.pending_requests_))
@@ -472,35 +475,67 @@ void BtPeerConnection::handle_message(const BtMessage& msg) {
             break;
             
         case BtMessageType::Have:
-            if (msg.have_piece < num_pieces_) {
-                peer_pieces_.set_bit(msg.have_piece);
+            // Skip if we don't have metadata yet (magnet link scenario)
+            if (num_pieces_ == 0) {
+                LOG_DEBUG("BtPeerConn", "Ignoring HAVE (no metadata yet) from " + ip_);
+                break;
             }
+            // Validate piece index
+            if (msg.have_piece >= num_pieces_) {
+                LOG_WARN("BtPeerConn", "Invalid HAVE index " + std::to_string(msg.have_piece) + 
+                         " >= " + std::to_string(num_pieces_) + " from " + ip_);
+                break;
+            }
+            // Ignore redundant HAVE
+            if (peer_pieces_.get_bit(msg.have_piece)) {
+                LOG_DEBUG("BtPeerConn", "Redundant HAVE for piece " + std::to_string(msg.have_piece));
+                break;
+            }
+            peer_pieces_.set_bit(msg.have_piece);
             break;
             
         case BtMessageType::Bitfield:
             if (msg.bitfield) {
-                peer_pieces_ = *msg.bitfield;
+                // Validate bitfield size
+                if (num_pieces_ > 0 && msg.bitfield->size() != num_pieces_) {
+                    LOG_WARN("BtPeerConn", "Invalid bitfield size " + std::to_string(msg.bitfield->size()) + 
+                             " expected " + std::to_string(num_pieces_) + " from " + ip_);
+                    // Resize to match expected size
+                    peer_pieces_ = *msg.bitfield;
+                    peer_pieces_.resize(num_pieces_);
+                } else {
+                    peer_pieces_ = *msg.bitfield;
+                }
                 peer_has_all_ = false;  // Explicit bitfield takes precedence over HaveAll
+                bitfield_received_ = true;
             }
             break;
             
         case BtMessageType::Piece:
             if (msg.piece) {
+                RequestMessage req(msg.piece->piece_index, msg.piece->begin, 
+                                  static_cast<uint32_t>(msg.piece->data.size()));
+                
+                // Check if this block was requested
+                bool was_requested = has_pending_request(req);
+                if (!was_requested) {
+                    LOG_DEBUG("BtPeerConn", "Received unrequested piece " + 
+                              std::to_string(msg.piece->piece_index) + " from " + ip_);
+                    // Still process it, but mark as potentially wasteful
+                }
+                
                 stats_.bytes_downloaded += msg.piece->data.size();
                 stats_.last_piece_at = std::chrono::steady_clock::now();
                 ++stats_.pieces_received;
                 
-                // Remove from pending
-                if (msg.piece) {
-                    RequestMessage req(msg.piece->piece_index, msg.piece->begin, 
-                                      static_cast<uint32_t>(msg.piece->data.size()));
-                    remove_pending_request(req);
-                }
+                // Remove from pending requests
+                remove_pending_request(req);
             }
             break;
             
         case BtMessageType::HaveAll:
             peer_has_all_ = true;
+            bitfield_received_ = true;
             // If we have metadata (num_pieces_ > 0), set all bits now
             // Otherwise, we'll resize and set in set_torrent_info()
             if (peer_pieces_.size() > 0) {
@@ -510,6 +545,7 @@ void BtPeerConnection::handle_message(const BtMessage& msg) {
             
         case BtMessageType::HaveNone:
             peer_has_all_ = false;
+            bitfield_received_ = true;
             peer_pieces_.clear_all();
             break;
             

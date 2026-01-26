@@ -909,3 +909,120 @@ TEST(BtPeerConnectionTest, HaveAllPreservedAfterSetTorrentInfo) {
     EXPECT_EQ(conn.peer_pieces().count(), 100);
     EXPECT_TRUE(conn.peer_pieces().all_set());
 }
+
+//=============================================================================
+// Validation Tests
+//=============================================================================
+
+TEST(BtPeerConnectionTest, InvalidHaveIndexIgnored) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);  // 100 pieces
+    conn.set_socket(42);
+    
+    // Handshake
+    auto hs_data = BtHandshake::encode(our_hash, make_test_peer_id());
+    feed_data(conn, hs_data);
+    
+    // Send HAVE with invalid index (>= num_pieces)
+    auto have_invalid = BtMessageEncoder::encode_have(150);  // index 150 > 100
+    feed_data(conn, have_invalid);
+    
+    // Should NOT crash and should not have piece 150
+    // (peer_pieces_ is only 100 bits)
+    EXPECT_EQ(conn.peer_pieces().count(), 0);  // No pieces added
+}
+
+TEST(BtPeerConnectionTest, RedundantHaveIgnored) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Handshake
+    auto hs_data = BtHandshake::encode(our_hash, make_test_peer_id());
+    feed_data(conn, hs_data);
+    
+    EXPECT_FALSE(conn.peer_has_piece(42));
+    
+    // First HAVE - should set bit
+    auto have = BtMessageEncoder::encode_have(42);
+    feed_data(conn, have);
+    EXPECT_TRUE(conn.peer_has_piece(42));
+    EXPECT_EQ(conn.peer_pieces().count(), 1);
+    
+    // Second HAVE for same piece - should be ignored (redundant)
+    feed_data(conn, have);
+    EXPECT_TRUE(conn.peer_has_piece(42));
+    EXPECT_EQ(conn.peer_pieces().count(), 1);  // Still 1, not 2
+}
+
+TEST(BtPeerConnectionTest, InvalidBitfieldSizeHandled) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);  // Expect 100 pieces
+    conn.set_socket(42);
+    
+    // Handshake
+    auto hs_data = BtHandshake::encode(our_hash, make_test_peer_id());
+    feed_data(conn, hs_data);
+    
+    // Create bitfield with wrong size (50 instead of 100)
+    Bitfield bf(50);
+    bf.set_bit(0);
+    bf.set_bit(25);
+    bf.set_bit(49);
+    
+    auto bf_msg = BtMessageEncoder::encode_bitfield(bf);
+    feed_data(conn, bf_msg);
+    
+    // Should handle gracefully - resize to fit
+    // The original bits should still be accessible
+    EXPECT_TRUE(conn.peer_has_piece(0));
+    EXPECT_TRUE(conn.peer_has_piece(25));
+    EXPECT_TRUE(conn.peer_has_piece(49));
+}
+
+TEST(BtPeerConnectionTest, HasPendingRequest) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    RequestMessage req1(5, 0, 16384);
+    RequestMessage req2(5, 16384, 16384);
+    RequestMessage req3(10, 0, 16384);  // Different piece
+    
+    EXPECT_FALSE(conn.has_pending_request(req1));
+    
+    conn.add_pending_request(req1);
+    conn.add_pending_request(req2);
+    
+    EXPECT_TRUE(conn.has_pending_request(req1));
+    EXPECT_TRUE(conn.has_pending_request(req2));
+    EXPECT_FALSE(conn.has_pending_request(req3));
+    
+    conn.remove_pending_request(req1);
+    EXPECT_FALSE(conn.has_pending_request(req1));
+    EXPECT_TRUE(conn.has_pending_request(req2));
+}
+
+TEST(BtPeerConnectionTest, IncomingRequestTracking) {
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    RequestMessage req1(5, 0, 16384);
+    RequestMessage req2(5, 16384, 16384);
+    
+    // Initially no incoming requests
+    EXPECT_FALSE(conn.has_incoming_request(req1));
+    
+    // Add incoming request (peer requested from us)
+    conn.add_incoming_request(req1);
+    EXPECT_TRUE(conn.has_incoming_request(req1));
+    EXPECT_FALSE(conn.has_incoming_request(req2));
+    
+    // Remove (Cancel received or piece sent)
+    bool removed = conn.remove_incoming_request(req1);
+    EXPECT_TRUE(removed);
+    EXPECT_FALSE(conn.has_incoming_request(req1));
+    
+    // Remove again - should return false
+    removed = conn.remove_incoming_request(req1);
+    EXPECT_FALSE(removed);
+}

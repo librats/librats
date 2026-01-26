@@ -451,6 +451,14 @@ public:
     void remove_pending_request(const RequestMessage& req);
     
     /**
+     * @brief Check if we have a pending request for a block
+     */
+    bool has_pending_request(const RequestMessage& req) const {
+        return std::find(pending_requests_.begin(), pending_requests_.end(), req) 
+               != pending_requests_.end();
+    }
+    
+    /**
      * @brief Clear all pending requests
      */
     void clear_pending_requests();
@@ -551,6 +559,7 @@ private:
     // Peer's pieces
     Bitfield peer_pieces_;
     bool peer_has_all_;  ///< True if peer sent HaveAll (used when metadata not yet available)
+    bool bitfield_received_;  ///< True if we've received Bitfield/HaveAll/HaveNone
     
     // Buffers (single source of truth for I/O)
     ReceiveBuffer recv_buffer_;
