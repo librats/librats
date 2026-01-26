@@ -1147,6 +1147,9 @@ void Torrent::write_block_to_disk(const BlockInfo& block, const std::vector<uint
             std::lock_guard<std::mutex> lock(self->mutex_);
             
             if (success) {
+                LOG_DEBUG("Torrent", "Block written to disk: piece=" + std::to_string(block.piece_index) +
+                          " offset=" + std::to_string(block.offset));
+                
                 // Write successful - mark block as finished
                 if (self->picker_) {
                     bool piece_complete = self->picker_->mark_finished(block);
