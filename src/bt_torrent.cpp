@@ -26,6 +26,51 @@ const char* torrent_state_to_string(TorrentState state) {
     }
 }
 
+// Format bytes to human-readable string (KB, MB, GB)
+static std::string format_size(uint64_t bytes) {
+    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    int unit_idx = 0;
+    double size = static_cast<double>(bytes);
+    
+    while (size >= 1024.0 && unit_idx < 4) {
+        size /= 1024.0;
+        unit_idx++;
+    }
+    
+    char buf[32];
+    if (unit_idx == 0) {
+        snprintf(buf, sizeof(buf), "%.0f %s", size, units[unit_idx]);
+    } else {
+        snprintf(buf, sizeof(buf), "%.2f %s", size, units[unit_idx]);
+    }
+    return buf;
+}
+
+// Format speed to human-readable string (KB/s, MB/s)
+static std::string format_speed(uint64_t bytes_per_sec) {
+    return format_size(bytes_per_sec) + "/s";
+}
+
+// Format ETA to human-readable string
+static std::string format_eta(std::chrono::seconds eta) {
+    if (eta.count() <= 0) return "∞";
+    
+    auto total_secs = eta.count();
+    int hours = static_cast<int>(total_secs / 3600);
+    int mins = static_cast<int>((total_secs % 3600) / 60);
+    int secs = static_cast<int>(total_secs % 60);
+    
+    char buf[32];
+    if (hours > 0) {
+        snprintf(buf, sizeof(buf), "%dh %dm %ds", hours, mins, secs);
+    } else if (mins > 0) {
+        snprintf(buf, sizeof(buf), "%dm %ds", mins, secs);
+    } else {
+        snprintf(buf, sizeof(buf), "%ds", secs);
+    }
+    return buf;
+}
+
 //=============================================================================
 // Constructor / Destructor
 //=============================================================================
@@ -1016,6 +1061,47 @@ void Torrent::update_stats() {
     if (stats_.download_rate > 0 && stats_.bytes_done < stats_.total_size) {
         uint64_t remaining = stats_.total_size - stats_.bytes_done;
         stats_.eta = std::chrono::seconds(remaining / stats_.download_rate);
+    }
+    
+    // Log progress (only when downloading)
+    if (state_ == TorrentState::Downloading && stats_.total_size > 0) {
+        LOG_INFO("Torrent", "[" + name_ + "] " +
+                 std::to_string(static_cast<int>(stats_.progress * 100)) + "% | " +
+                 format_size(stats_.bytes_done) + " / " + format_size(stats_.total_size) + " | " +
+                 "DL: " + format_speed(stats_.download_rate) + " | " +
+                 "UL: " + format_speed(stats_.upload_rate) + " | " +
+                 "Peers: " + std::to_string(stats_.peers_connected) + 
+                 " (" + std::to_string(stats_.seeders) + "S/" + 
+                 std::to_string(stats_.leechers) + "L) | " +
+                 "Pieces: " + std::to_string(stats_.pieces_done) + "/" + 
+                 std::to_string(stats_.pieces_total) + " | " +
+                 "ETA: " + format_eta(stats_.eta));
+        
+        // Log individual peer stats
+        for (const auto& conn : connections_) {
+            if (!conn->is_connected()) continue;
+            
+            const auto& ps = conn->stats();
+            uint32_t peer_pieces = static_cast<uint32_t>(conn->peer_pieces().count());
+            
+            // Build state flags string
+            std::string flags;
+            flags += conn->am_interested() ? "I" : "-";      // we are interested
+            flags += conn->peer_interested() ? "i" : "-";    // peer interested in us
+            flags += conn->am_choking() ? "C" : "-";         // we are choking
+            flags += conn->peer_choking() ? "c" : "-";       // peer choking us
+            
+            bool is_seeder = conn->peer_pieces().all_set() || conn->peer_has_all();
+            
+            LOG_INFO("Torrent", "  Peer " + conn->ip() + ":" + std::to_string(conn->port()) + 
+                     " | " + flags +
+                     " | DL: " + format_speed(static_cast<uint64_t>(ps.download_rate())) +
+                     " | UL: " + format_speed(static_cast<uint64_t>(ps.upload_rate())) +
+                     " | Req: " + std::to_string(conn->pending_requests()) +
+                     " | Got: " + format_size(ps.bytes_downloaded) +
+                     " | Pieces: " + std::to_string(peer_pieces) + "/" + std::to_string(stats_.pieces_total) +
+                     (is_seeder ? " [Seeder]" : ""));
+        }
     }
 }
 
