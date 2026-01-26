@@ -334,29 +334,25 @@ private:
     /// Accept incoming connections
     void accept_incoming();
     
-    /// Handle readable socket
-    void handle_readable(socket_t socket,
+    /// Handle readable socket (returns true if connection should be closed)
+    bool handle_readable(socket_t socket,
                         std::vector<ConnectedEvent>& connected_events,
-                        std::vector<DataEvent>& data_events,
-                        std::vector<DisconnectedEvent>& disconnected_events);
+                        std::vector<DataEvent>& data_events);
     
-    /// Handle writable socket (drain send buffer)
-    void handle_writable(socket_t socket,
-                        std::vector<DisconnectedEvent>& disconnected_events);
+    /// Handle writable socket (drain send buffer, returns true if connection should be closed)
+    bool handle_writable(socket_t socket);
     
-    /// Handle data received from a peer (data is already in connection's recv_buffer)
-    void handle_peer_data(SocketContext& ctx,
+    /// Handle data received from a peer (returns true if connection should be closed)
+    bool handle_peer_data(SocketContext& ctx,
                          std::vector<ConnectedEvent>& connected_events,
-                         std::vector<DataEvent>& data_events,
-                         std::vector<DisconnectedEvent>& disconnected_events);
+                         std::vector<DataEvent>& data_events);
     
     /// Close connection with cleanup (collects disconnected events)
     void close_connection_internal(socket_t socket,
                                   std::vector<DisconnectedEvent>& disconnected_events);
     
-    /// Flush send buffers for a socket
-    void flush_send_buffer(SocketContext& ctx,
-                          std::vector<DisconnectedEvent>& disconnected_events);
+    /// Flush send buffers for a socket (returns true if connection should be closed)
+    bool flush_send_buffer(SocketContext& ctx);
     
     /// Create socket for outgoing connection
     socket_t create_connect_socket(const std::string& ip, uint16_t port);

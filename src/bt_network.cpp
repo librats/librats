@@ -464,6 +464,8 @@ void BtNetworkManager::io_loop() {
         }
         
         // Handle active connections (collect events under mutex)
+        // IMPORTANT: Never call close_connection_internal() during iteration!
+        // Collect sockets to close and process AFTER the loop to avoid iterator invalidation.
         {
             std::lock_guard<std::mutex> lock(mutex_);
             
@@ -480,17 +482,11 @@ void BtNetworkManager::io_loop() {
                 }
                 
                 if (!should_close && FD_ISSET(socket, &read_fds)) {
-                    handle_readable(socket, connected_events, data_events, disconnected_events);
-                    
-                    // Check if connection was closed
-                    auto it = connections_.find(socket);
-                    if (it == connections_.end()) {
-                        continue;  // Already removed
-                    }
+                    should_close = handle_readable(socket, connected_events, data_events);
                 }
                 
                 if (!should_close && FD_ISSET(socket, &write_fds)) {
-                    handle_writable(socket, disconnected_events);
+                    should_close = handle_writable(socket);
                 }
                 
                 if (should_close) {
@@ -498,6 +494,7 @@ void BtNetworkManager::io_loop() {
                 }
             }
             
+            // Close connections AFTER iteration to avoid iterator invalidation
             for (socket_t s : to_close) {
                 close_connection_internal(s, disconnected_events);
             }
@@ -705,20 +702,18 @@ void BtNetworkManager::on_incoming_info_hash(BtPeerConnection* conn, const BtInf
     }
 }
 
-void BtNetworkManager::handle_readable(socket_t socket,
+bool BtNetworkManager::handle_readable(socket_t socket,
                                         std::vector<ConnectedEvent>& connected_events,
-                                        std::vector<DataEvent>& data_events,
-                                        std::vector<DisconnectedEvent>& disconnected_events) {
+                                        std::vector<DataEvent>& data_events) {
     auto it = connections_.find(socket);
-    if (it == connections_.end()) return;
+    if (it == connections_.end()) return false;
     
     SocketContext& ctx = it->second;
     
     // Connection object should always exist now (created in accept_incoming or connect_peer)
     if (!ctx.connection) {
         LOG_NET_ERROR("handle_readable: no connection object for socket");
-        close_connection_internal(socket, disconnected_events);
-        return;
+        return true;  // Should close
     }
     
     // Receive directly into connection's buffer
@@ -741,19 +736,18 @@ void BtNetworkManager::handle_readable(socket_t socket,
             if (err != WSAEWOULDBLOCK) {
                 LOG_NET_DEBUG("Receive error: " + std::to_string(err));
             } else {
-                return;  // Would block, try again later
+                return false;  // Would block, try again later
             }
 #else
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 LOG_NET_DEBUG("Receive error: " + std::string(strerror(errno)));
             } else {
-                return;  // Would block, try again later
+                return false;  // Would block, try again later
             }
 #endif
         }
         
-        close_connection_internal(socket, disconnected_events);
-        return;
+        return true;  // Should close
     }
     
     // Mark bytes as received
@@ -764,22 +758,20 @@ void BtNetworkManager::handle_readable(socket_t socket,
                   " bytes from " + ctx.connection->ip());
     
     // Process the data (handshake and messages)
-    handle_peer_data(ctx, connected_events, data_events, disconnected_events);
+    return handle_peer_data(ctx, connected_events, data_events);
 }
 
-void BtNetworkManager::handle_writable(socket_t socket,
-                                        std::vector<DisconnectedEvent>& disconnected_events) {
+bool BtNetworkManager::handle_writable(socket_t socket) {
     auto it = connections_.find(socket);
-    if (it == connections_.end()) return;
+    if (it == connections_.end()) return false;
     
-    flush_send_buffer(it->second, disconnected_events);
+    return flush_send_buffer(it->second);
 }
 
-void BtNetworkManager::handle_peer_data(SocketContext& ctx,
+bool BtNetworkManager::handle_peer_data(SocketContext& ctx,
                                          std::vector<ConnectedEvent>& connected_events,
-                                         std::vector<DataEvent>& data_events,
-                                         std::vector<DisconnectedEvent>& disconnected_events) {
-    if (!ctx.connection) return;
+                                         std::vector<DataEvent>& data_events) {
+    if (!ctx.connection) return false;
     
     // Process incoming data (handshake and messages)
     // Data is already in connection's recv_buffer - no copy needed!
@@ -790,8 +782,7 @@ void BtNetworkManager::handle_peer_data(SocketContext& ctx,
     if (conn_state == PeerConnectionState::Disconnected || 
         conn_state == PeerConnectionState::Closing) {
         LOG_NET_DEBUG("Connection closed during processing for " + ctx.connection->ip());
-        close_connection_internal(ctx.socket, disconnected_events);
-        return;
+        return true;  // Should close
     }
     
     if (ctx.state == NetConnectionState::Handshaking) {
@@ -821,20 +812,20 @@ void BtNetworkManager::handle_peer_data(SocketContext& ctx,
     
     // Note: send data is already in connection->send_buffer()
     // flush_send_buffer() will send it directly - no copy needed!
+    return false;  // Don't close
 }
 
-void BtNetworkManager::flush_send_buffer(SocketContext& ctx,
-                                          std::vector<DisconnectedEvent>& disconnected_events) {
-    if (!ctx.connection) return;
+bool BtNetworkManager::flush_send_buffer(SocketContext& ctx) {
+    if (!ctx.connection) return false;
     
     auto& send_buf = ctx.connection->send_buffer();
-    if (send_buf.empty()) return;
+    if (send_buf.empty()) return false;
     
     // Send directly from connection's buffer - NO COPY!
     const uint8_t* data = send_buf.front_data();
     size_t to_send = send_buf.front_size();
     
-    if (to_send == 0 || data == nullptr) return;
+    if (to_send == 0 || data == nullptr) return false;
 
     LOG_NET_DEBUG("flush_send_buffer: sending " + std::to_string(to_send) + 
                   " bytes to " + ctx.connection->ip());
@@ -850,15 +841,16 @@ void BtNetworkManager::flush_send_buffer(SocketContext& ctx,
         int err = WSAGetLastError();
         if (err != WSAEWOULDBLOCK) {
             LOG_NET_DEBUG("Send error: " + std::to_string(err));
-            close_connection_internal(ctx.socket, disconnected_events);
+            return true;  // Should close
         }
 #else
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             LOG_NET_DEBUG("Send error: " + std::string(strerror(errno)));
-            close_connection_internal(ctx.socket, disconnected_events);
+            return true;  // Should close
         }
 #endif
     }
+    return false;  // Don't close
 }
 
 void BtNetworkManager::close_connection_internal(socket_t socket,
