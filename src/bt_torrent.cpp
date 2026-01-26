@@ -392,7 +392,19 @@ void Torrent::remove_connection(BtPeerConnection* connection) {
     if (it != connections_.end()) {
         LOG_DEBUG("Torrent", "Removing connection from " + connection->ip() + ":" + 
                   std::to_string(connection->port()));
-        on_peer_disconnected(connection);
+        
+        // Cleanup peer from picker (cancel requests, remove from availability)
+        // Note: on_peer_disconnected may have already been called via state_callback,
+        // but these operations are idempotent
+        if (picker_) {
+            picker_->cancel_peer_requests(connection);
+            picker_->remove_peer(connection);
+        }
+        
+        // Clear metadata tracking for this peer
+        peer_metadata_size_.erase(connection);
+        peer_ut_metadata_id_.erase(connection);
+        
         connections_.erase(it);
         LOG_DEBUG("Torrent", "Active connections: " + std::to_string(connections_.size()));
     } else {
@@ -581,6 +593,22 @@ void Torrent::tick() {
     }
     
     // Request pieces from peers
+    if (state_ == TorrentState::Downloading && picker_) {
+        // Log peer status periodically (every 5 seconds)
+        static auto last_peer_log = std::chrono::steady_clock::time_point{};
+        if ((now - last_peer_log) >= std::chrono::seconds(5)) {
+            LOG_DEBUG("Torrent", "Peer status for '" + name_ + "' (" + 
+                      std::to_string(connections_.size()) + " peers):");
+            for (const auto& conn : connections_) {
+                LOG_DEBUG("Torrent", "  " + conn->ip() + 
+                          " connected=" + (conn->is_connected() ? "yes" : "no") +
+                          " peer_choking=" + (conn->peer_choking() ? "yes" : "no") +
+                          " am_interested=" + (conn->am_interested() ? "yes" : "no") +
+                          " pieces=" + std::to_string(conn->peer_pieces().count()));
+            }
+            last_peer_log = now;
+        }
+    }
     request_pieces();
     
     // Update statistics
@@ -819,14 +847,25 @@ void Torrent::request_pieces() {
     if (!picker_) return;
     
     for (auto& conn : connections_) {
-        if (!conn->is_connected()) continue;
-        if (conn->peer_choking()) continue;
+        if (!conn->is_connected()) {
+            LOG_DEBUG("Torrent", "request_pieces: " + conn->ip() + " not connected, skipping");
+            continue;
+        }
+        if (conn->peer_choking()) {
+            LOG_DEBUG("Torrent", "request_pieces: " + conn->ip() + " is choking us, skipping");
+            continue;
+        }
         
         while (conn->can_request()) {
             auto blocks = picker_->pick_pieces(conn->peer_pieces(), 1, conn.get());
-            if (blocks.empty()) break;
+            if (blocks.empty()) {
+                LOG_DEBUG("Torrent", "request_pieces: no blocks to pick from " + conn->ip());
+                break;
+            }
             
             const auto& block = blocks[0].block;
+            LOG_DEBUG("Torrent", "request_pieces: requesting piece=" + std::to_string(block.piece_index) +
+                      " offset=" + std::to_string(block.offset) + " from " + conn->ip());
             conn->send_request(block.piece_index, block.offset, block.length);
         }
     }
