@@ -59,6 +59,16 @@ constexpr size_t BT_MAX_PENDING_REQUESTS = 250;
 constexpr size_t BT_DEFAULT_REQUEST_QUEUE_SIZE = 16;
 
 //=============================================================================
+// Extension Protocol Message IDs (BEP 10)
+//=============================================================================
+
+/// Our local ID for ut_metadata extension (BEP 9)
+constexpr uint8_t BT_EXT_UT_METADATA_ID = 1;
+
+/// Our local ID for ut_pex extension (BEP 11)
+constexpr uint8_t BT_EXT_UT_PEX_ID = 2;
+
+//=============================================================================
 // Reserved Bytes Bit Positions (for extensions)
 //=============================================================================
 

@@ -838,8 +838,8 @@ void Torrent::send_extension_handshake(BtPeerConnection* peer) {
     
     // Build 'm' dictionary with extension name -> message ID
     BencodeValue m = BencodeValue::create_dict();
-    m["ut_metadata"] = BencodeValue(static_cast<int64_t>(1));  // Our ID for ut_metadata
-    m["ut_pex"] = BencodeValue(static_cast<int64_t>(2));       // Our ID for ut_pex
+    m["ut_metadata"] = BencodeValue(static_cast<int64_t>(BT_EXT_UT_METADATA_ID));
+    m["ut_pex"] = BencodeValue(static_cast<int64_t>(BT_EXT_UT_PEX_ID));
     handshake["m"] = m;
     
     // Add metadata_size if we have metadata
@@ -868,17 +868,21 @@ void Torrent::on_extension_message(BtPeerConnection* peer, uint8_t ext_id,
         // Extension handshake
         LOG_DEBUG("Torrent", "Processing extension handshake from " + peer->ip());
         on_extension_handshake(peer, payload);
-    } else {
-        // Regular extension message
-        // We need to look up what extension this corresponds to based on what
-        // the peer told us in their handshake
-        // For now, try to handle as ut_metadata if we're downloading metadata
+    } else if (ext_id == BT_EXT_UT_METADATA_ID) {
+        // ut_metadata message (our local ID = 1)
         if (state_ == TorrentState::DownloadingMetadata) {
-            LOG_DEBUG("Torrent", "Processing as ut_metadata message from " + peer->ip());
+            LOG_DEBUG("Torrent", "Processing ut_metadata message from " + peer->ip());
             on_metadata_message(peer, payload);
         } else {
-            LOG_DEBUG("Torrent", "Ignoring extension message (not in DownloadingMetadata state)");
+            LOG_DEBUG("Torrent", "Ignoring ut_metadata message (already have metadata)");
         }
+    } else if (ext_id == BT_EXT_UT_PEX_ID) {
+        // ut_pex message (our local ID = 2)
+        LOG_DEBUG("Torrent", "Received ut_pex message from " + peer->ip() + " (not implemented)");
+        // TODO: Handle PEX for peer discovery
+    } else {
+        LOG_DEBUG("Torrent", "Unknown extension message ext_id=" + std::to_string(ext_id) + 
+                  " from " + peer->ip());
     }
 }
 
