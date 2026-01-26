@@ -482,7 +482,6 @@ bool Torrent::set_metadata(const std::vector<uint8_t>& metadata) {
     // CRITICAL: Initialize existing peer connections with the new metadata
     // This is necessary because peers connected during DownloadingMetadata state
     // were not added to the picker (it didn't exist yet).
-    // Following standard pattern: torrent::init() -> peer_connection::init()
     
     // In metadata-only mode (empty save_path), we skip sending INTERESTED and bitfield
     // because we're not going to download anything - just needed the metadata
@@ -702,7 +701,33 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
                       " from " + peer->ip());
             if (picker_) {
                 picker_->peer_has_piece(peer, msg.have_piece);
+                // Check if we should become interested
+                if (!peer->am_interested() && !have_pieces_.get_bit(msg.have_piece)) {
+                    peer->send_interested();
+                }
             }
+            break;
+            
+        case BtMessageType::HaveAll:
+            // Fast extension: peer has all pieces (seeder)
+            LOG_DEBUG("Torrent", "on_peer_message: HaveAll from " + peer->ip());
+            if (picker_) {
+                // Add peer to picker with all pieces
+                Bitfield all_pieces(info_ ? info_->num_pieces() : 0);
+                all_pieces.set_all();
+                picker_->add_peer(peer, all_pieces);
+                
+                // We're definitely interested in a seeder
+                if (!peer->am_interested()) {
+                    LOG_DEBUG("Torrent", "Peer " + peer->ip() + " has all pieces, sending interested");
+                    peer->send_interested();
+                }
+            }
+            break;
+            
+        case BtMessageType::HaveNone:
+            // Fast extension: peer has no pieces
+            LOG_DEBUG("Torrent", "on_peer_message: HaveNone from " + peer->ip());
             break;
             
         case BtMessageType::Piece:
@@ -731,6 +756,10 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
         case BtMessageType::Unchoke:
             // Peer unchoked us - can start requesting
             LOG_DEBUG("Torrent", "on_peer_message: Unchoke from " + peer->ip());
+            // Immediately request blocks from this peer
+            if (picker_ && peer->am_interested()) {
+                request_blocks_from_peer(peer);
+            }
             break;
             
         case BtMessageType::Choke:
@@ -847,27 +876,39 @@ void Torrent::request_pieces() {
     if (!picker_) return;
     
     for (auto& conn : connections_) {
-        if (!conn->is_connected()) {
-            LOG_DEBUG("Torrent", "request_pieces: " + conn->ip() + " not connected, skipping");
-            continue;
-        }
-        if (conn->peer_choking()) {
-            LOG_DEBUG("Torrent", "request_pieces: " + conn->ip() + " is choking us, skipping");
-            continue;
+        request_blocks_from_peer(conn.get());
+    }
+}
+
+void Torrent::request_blocks_from_peer(BtPeerConnection* peer) {
+    if (!picker_ || !peer) return;
+    
+    if (!peer->is_connected()) {
+        LOG_DEBUG("Torrent", "request_blocks_from_peer: Peer " + peer->ip() + " is not connected, skipping request");
+        return;
+    }
+    if (peer->peer_choking()) {
+        LOG_DEBUG("Torrent", "request_blocks_from_peer: Peer " + peer->ip() + " is choking, skipping request");
+        return;
+    }
+    
+    int requested = 0;
+    while (peer->can_request()) {
+        auto blocks = picker_->pick_pieces(peer->peer_pieces(), 1, peer);
+        if (blocks.empty()) {
+            break;
         }
         
-        while (conn->can_request()) {
-            auto blocks = picker_->pick_pieces(conn->peer_pieces(), 1, conn.get());
-            if (blocks.empty()) {
-                LOG_DEBUG("Torrent", "request_pieces: no blocks to pick from " + conn->ip());
-                break;
-            }
-            
-            const auto& block = blocks[0].block;
-            LOG_DEBUG("Torrent", "request_pieces: requesting piece=" + std::to_string(block.piece_index) +
-                      " offset=" + std::to_string(block.offset) + " from " + conn->ip());
-            conn->send_request(block.piece_index, block.offset, block.length);
-        }
+        const auto& block = blocks[0].block;
+        LOG_DEBUG("Torrent", "request_blocks_from_peer: Requesting piece=" + std::to_string(block.piece_index) +
+                  " offset=" + std::to_string(block.offset) + 
+                  " len=" + std::to_string(block.length) + " from " + peer->ip());
+        peer->send_request(block.piece_index, block.offset, block.length);
+        ++requested;
+    }
+    
+    if (requested > 0) {
+        LOG_DEBUG("Torrent", "Requested " + std::to_string(requested) + " blocks from " + peer->ip());
     }
 }
 

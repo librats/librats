@@ -407,6 +407,7 @@ private:
     void on_piece_received(uint32_t piece, uint32_t begin, const std::vector<uint8_t>& data);
     void on_piece_verified(uint32_t piece, bool valid);
     void request_pieces();
+    void request_blocks_from_peer(BtPeerConnection* peer);
     void run_choker();
     void update_stats();
     
