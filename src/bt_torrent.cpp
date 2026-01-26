@@ -481,7 +481,15 @@ bool Torrent::set_metadata(const std::vector<uint8_t>& metadata) {
               (metadata_only ? " (metadata-only mode)" : ""));
     
     for (auto& conn : connections_) {
-        if (!conn->is_connected()) continue;
+        LOG_DEBUG("Torrent", "Processing connection " + conn->ip() + 
+                  " is_connected=" + (conn->is_connected() ? "yes" : "no") +
+                  " peer_has_all=" + (conn->peer_has_all() ? "yes" : "no") +
+                  " peer_pieces_count=" + std::to_string(conn->peer_pieces().count()));
+        
+        if (!conn->is_connected()) {
+            LOG_DEBUG("Torrent", "Skipping " + conn->ip() + " - not connected");
+            continue;
+        }
         
         // Update peer's bitfield size to match the torrent
         // This is needed because peer may have sent Bitfield/HaveAll before we had metadata
