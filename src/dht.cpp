@@ -281,6 +281,41 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port, PeerDisc
     return true;
 }
 
+void DhtClient::cancel_search(const InfoHash& info_hash) {
+    std::string hash_key = node_id_to_hex(info_hash);
+    
+    LOG_DHT_INFO("Cancelling search/announce for info hash: " << hash_key);
+    
+    std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+    
+    auto search_it = pending_searches_.find(hash_key);
+    if (search_it == pending_searches_.end()) {
+        LOG_DHT_DEBUG("No active search found for info hash " << hash_key);
+        return;
+    }
+    
+    // Mark as finished to prevent further queries
+    search_it->second.is_finished = true;
+    
+    // Remove all associated transactions
+    std::vector<std::string> transactions_to_remove;
+    for (const auto& [tx_id, tx] : transaction_to_search_) {
+        if (tx.info_hash_hex == hash_key) {
+            transactions_to_remove.push_back(tx_id);
+        }
+    }
+    
+    for (const auto& tx_id : transactions_to_remove) {
+        transaction_to_search_.erase(tx_id);
+    }
+    
+    // Remove the search
+    pending_searches_.erase(search_it);
+    
+    LOG_DHT_INFO("Cancelled search for info hash " << hash_key << 
+                 ", removed " << transactions_to_remove.size() << " pending transactions");
+}
+
 size_t DhtClient::get_routing_table_size() const {
     std::lock_guard<std::mutex> lock(routing_table_mutex_);
     size_t total = 0;

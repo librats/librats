@@ -406,8 +406,7 @@ void Torrent::add_connection(std::shared_ptr<BtPeerConnection> connection) {
     
     connection->set_state_callback(
         [this](BtPeerConnection* peer, PeerConnectionState state) {
-            if (state == PeerConnectionState::Disconnected ||
-                state == PeerConnectionState::Closing) {
+            if (state == PeerConnectionState::Disconnected) {
                 on_peer_disconnected(peer);
             } else if (state == PeerConnectionState::Connected) {
                 on_peer_connected(peer);

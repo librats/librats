@@ -336,6 +336,12 @@ void BtClient::remove_torrent(const BtInfoHash& info_hash, bool delete_files) {
         network_manager_->unregister_torrent(info_hash);
     }
     
+    // Cancel any active DHT searches/announces for this torrent
+    DhtClient* dht = external_dht_ ? external_dht_ : dht_client_.get();
+    if (dht) {
+        dht->cancel_search(info_hash);
+    }
+    
     // Remove tracker manager
     tracker_managers_.erase(info_hash);
     

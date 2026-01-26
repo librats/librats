@@ -214,6 +214,13 @@ public:
     bool announce_peer(const InfoHash& info_hash, uint16_t port = 0, PeerDiscoveryCallback callback = nullptr);
     
     /**
+     * Cancel an active search or announce for a specific info hash
+     * Should be called when a torrent is removed to clean up DHT state.
+     * @param info_hash The info hash to cancel search for
+     */
+    void cancel_search(const InfoHash& info_hash);
+    
+    /**
      * Get our node ID
      * @return The node ID
      */
