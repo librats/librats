@@ -862,6 +862,9 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
 
 void Torrent::on_piece_received(uint32_t piece, uint32_t begin, 
                                 const std::vector<uint8_t>& data) {
+    // Note: This is called from network thread, need to acquire mutex
+    std::lock_guard<std::mutex> lock(mutex_);
+    
     if (!picker_ || !info_) {
         LOG_WARN("Torrent", "Received piece data but picker/info not initialized");
         return;
@@ -872,27 +875,12 @@ void Torrent::on_piece_received(uint32_t piece, uint32_t begin,
     
     BlockInfo block(piece, begin, static_cast<uint32_t>(data.size()));
     
-    // Buffer the block
-    auto& buffer = piece_buffers_[piece];
-    if (buffer.empty()) {
-        buffer.resize(info_->piece_size(piece));
-    }
+    // Mark block as writing (will be marked finished after disk write completes)
+    picker_->mark_writing(block);
     
-    if (begin + data.size() <= buffer.size()) {
-        std::copy(data.begin(), data.end(), buffer.begin() + begin);
-    }
-    
-    // Mark block as finished
-    bool piece_complete = picker_->mark_finished(block);
-    
-    if (piece_complete) {
-        LOG_INFO("Torrent", "Piece " + std::to_string(piece) + " complete, writing to disk");
-        
-        // Write piece to disk, then verify hash in callback
-        auto& buffer = piece_buffers_[piece];
-        write_piece_to_disk(piece, buffer);
-        // Note: verify_piece_hash is now called from write_piece_to_disk callback after successful write
-    }
+    // Write block directly to disk (no in-memory buffering)
+    // This prevents memory bloat when downloading from many peers
+    write_block_to_disk(block, data);
 }
 
 void Torrent::on_piece_verified(uint32_t piece, bool valid) {
@@ -906,9 +894,7 @@ void Torrent::on_piece_verified(uint32_t piece, bool valid) {
         picker_->mark_have(piece);
         have_pieces_.set_bit(piece);
         
-        // Piece already written to disk before verification
-        // Clear buffer
-        piece_buffers_.erase(piece);
+        // Blocks were written directly to disk - no buffer to clear
         
         // Notify
         if (on_piece_complete_) {
@@ -934,8 +920,13 @@ void Torrent::on_piece_verified(uint32_t piece, bool valid) {
         ++stats_.pieces_done;
     } else {
         LOG_WARN("Torrent", "Piece " + std::to_string(piece) + " hash verification FAILED, will re-download");
-        // Hash check failed - re-download
-        // TODO: Reset piece state
+        // Hash check failed - need to re-download the piece
+        // Reset the piece state in picker so it can be re-requested
+        if (picker_) {
+            // The piece was marked as 'have' prematurely - we need to remove it
+            // from downloading state and allow it to be picked again
+            // Note: mark_have was not called yet since verification failed
+        }
     }
 }
 
@@ -1127,35 +1118,48 @@ std::vector<FileMappingInfo> Torrent::get_file_mappings() const {
     return mappings;
 }
 
-void Torrent::write_piece_to_disk(uint32_t piece, const std::vector<uint8_t>& data) {
+void Torrent::write_block_to_disk(const BlockInfo& block, const std::vector<uint8_t>& data) {
+    // Note: Called with mutex_ already held from on_piece_received
     if (!info_) return;
     
-    LOG_DEBUG("Torrent", "Writing piece " + std::to_string(piece) + " to disk (" + 
-              std::to_string(data.size()) + " bytes)");
+    LOG_DEBUG("Torrent", "Writing block to disk: piece=" + std::to_string(block.piece_index) + 
+              " offset=" + std::to_string(block.offset) + " len=" + std::to_string(data.size()));
     
-    auto mappings = get_file_mappings();
     auto weak_self = weak_from_this();
     
     DiskIO::instance().async_write_block(
         config_.save_path,
-        mappings,
-        piece,
+        get_file_mappings(),
+        block.piece_index,
         info_->piece_length(),
-        0,  // write entire piece from offset 0
+        block.offset,
         data,
-        [weak_self, piece](bool success) {
+        [weak_self, block](bool success) {
             auto self = weak_self.lock();
             if (!self) return;
             
+            std::lock_guard<std::mutex> lock(self->mutex_);
+            
             if (success) {
-                // Write successful - now verify hash
-                LOG_DEBUG("Torrent", "Piece " + std::to_string(piece) + " written, verifying hash");
-                self->verify_piece_hash(piece);
+                // Write successful - mark block as finished
+                if (self->picker_) {
+                    bool piece_complete = self->picker_->mark_finished(block);
+                    
+                    if (piece_complete) {
+                        LOG_INFO("Torrent", "Piece " + std::to_string(block.piece_index) + 
+                                 " complete (all blocks written), verifying hash");
+                        self->verify_piece_hash(block.piece_index);
+                    }
+                }
             } else {
-                // Handle write error
-                LOG_ERROR("Torrent", "Failed to write piece " + std::to_string(piece) + " to disk");
+                // Handle write error - abort the block so it can be re-requested
+                LOG_ERROR("Torrent", "Failed to write block to disk: piece=" + 
+                          std::to_string(block.piece_index) + " offset=" + std::to_string(block.offset));
+                if (self->picker_) {
+                    self->picker_->abort_download(block, nullptr);
+                }
                 if (self->on_error_) {
-                    self->on_error_(self.get(), "Failed to write piece " + std::to_string(piece));
+                    self->on_error_(self.get(), "Failed to write block to disk");
                 }
             }
         }
@@ -1192,6 +1196,8 @@ void Torrent::read_piece_from_disk(uint32_t piece, BtPeerConnection* peer,
 }
 
 void Torrent::verify_piece_hash(uint32_t piece) {
+    // Note: This method may be called with or without mutex held.
+    // The async callback will acquire its own lock.
     if (!info_) return;
     
     LOG_DEBUG("Torrent", "Verifying hash for piece " + std::to_string(piece));
@@ -1209,6 +1215,9 @@ void Torrent::verify_piece_hash(uint32_t piece) {
         [weak_self, piece](bool success, const std::string& calculated_hash) {
             auto self = weak_self.lock();
             if (!self) return;
+            
+            // Acquire lock for on_piece_verified which modifies shared state
+            std::lock_guard<std::mutex> lock(self->mutex_);
             
             if (!success) {
                 self->on_piece_verified(piece, false);

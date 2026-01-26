@@ -413,7 +413,7 @@ private:
     
     // Disk I/O helpers
     std::vector<FileMappingInfo> get_file_mappings() const;
-    void write_piece_to_disk(uint32_t piece, const std::vector<uint8_t>& data);
+    void write_block_to_disk(const BlockInfo& block, const std::vector<uint8_t>& data);
     void read_piece_from_disk(uint32_t piece, BtPeerConnection* peer, 
                                uint32_t begin, uint32_t length);
     void verify_piece_hash(uint32_t piece);
@@ -454,7 +454,8 @@ private:
     // Piece management
     std::unique_ptr<PiecePicker> picker_;
     Bitfield have_pieces_;
-    std::unordered_map<uint32_t, std::vector<uint8_t>> piece_buffers_;
+    // Note: Blocks are written directly to disk as they arrive (no in-memory buffering)
+    // This prevents memory bloat when downloading from many peers simultaneously
     
     // Peers
     std::vector<std::shared_ptr<BtPeerConnection>> connections_;
