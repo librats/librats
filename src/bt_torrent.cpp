@@ -120,7 +120,24 @@ void Torrent::stop() {
     }
     connections_.clear();
     
+    // Clear pending peers
+    pending_peers_.clear();
+    
+    // Clear metadata exchange state
+    metadata_buffer_.clear();
+    metadata_pieces_received_.clear();
+    peer_metadata_size_.clear();
+    peer_ut_metadata_id_.clear();
+    
     set_state(TorrentState::Stopped);
+    
+    // Clear callbacks to prevent dangling pointer issues after stop
+    // Note: Keeping on_state_change_ until after set_state() call above
+    on_state_change_ = nullptr;
+    on_piece_complete_ = nullptr;
+    on_complete_ = nullptr;
+    on_error_ = nullptr;
+    on_metadata_received_ = nullptr;
 }
 
 void Torrent::pause() {

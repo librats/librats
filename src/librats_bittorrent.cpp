@@ -168,7 +168,7 @@ void RatsClient::get_torrent_metadata(const InfoHash& info_hash,
         return;
     }
     
-    // Add torrent in metadata-only mode, then retrieve info when complete
+    // Add torrent in metadata-only mode (empty save_path), then retrieve info when complete
     std::string hash_hex = info_hash_to_hex(info_hash);
     std::string magnet = "magnet:?xt=urn:btih:" + hash_hex;
     auto torrent = bittorrent_client_->add_magnet(magnet, "");
@@ -180,28 +180,43 @@ void RatsClient::get_torrent_metadata(const InfoHash& info_hash,
         return;
     }
     
-    // If metadata is already available, return immediately
+    // If metadata is already available, return immediately and cleanup
     if (torrent->has_metadata()) {
         if (callback) {
             callback(*torrent->info(), true, "");
+        }
+        // Cleanup metadata-only torrent (empty save_path means no download requested)
+        if (torrent->save_path().empty()) {
+            bittorrent_client_->mark_for_removal(info_hash);
         }
         return;
     }
     
     // Set up async callback for when metadata is received
-    if (callback) {
-        torrent->set_metadata_callback(
-            [callback](Torrent* t, bool success) {
-                if (success && t->info()) {
+    // Capture bittorrent_client_ and info_hash for cleanup after callback
+    auto client = bittorrent_client_.get();
+    torrent->set_metadata_callback(
+        [callback, client, info_hash](Torrent* t, bool success) {
+            // Invoke user callback first
+            if (success && t->info()) {
+                if (callback) {
                     callback(*t->info(), true, "");
-                } else {
+                }
+            } else {
+                if (callback) {
                     callback(TorrentInfo(), false, "Failed to download metadata");
                 }
             }
-        );
-        
-        LOG_CLIENT_INFO("Waiting for metadata download for " << hash_hex.substr(0, 8) << "...");
-    }
+            
+            // Cleanup metadata-only torrent (empty save_path means no download requested)
+            // Using mark_for_removal to avoid deadlock (callback is called from I/O thread)
+            if (client && t->save_path().empty()) {
+                client->mark_for_removal(info_hash);
+            }
+        }
+    );
+    
+    LOG_CLIENT_INFO("Waiting for metadata download for " << hash_hex.substr(0, 8) << "...");
 }
 
 void RatsClient::get_torrent_metadata(const std::string& info_hash_hex, 
@@ -224,7 +239,7 @@ void RatsClient::get_torrent_metadata_from_peer(const InfoHash& info_hash,
     
     LOG_CLIENT_INFO("Fetching metadata from peer " << peer_ip << ":" << peer_port << " (fast path)");
     
-    // Add magnet and immediately add the peer
+    // Add magnet in metadata-only mode (empty save_path) and immediately add the peer
     std::string hash_hex = info_hash_to_hex(info_hash);
     std::string magnet = "magnet:?xt=urn:btih:" + hash_hex;
     auto torrent = bittorrent_client_->add_magnet(magnet, "");
@@ -239,29 +254,44 @@ void RatsClient::get_torrent_metadata_from_peer(const InfoHash& info_hash,
     // Add the specific peer for direct connection
     torrent->add_peer(peer_ip, peer_port);
     
-    // If metadata is already available, return immediately
+    // If metadata is already available, return immediately and cleanup
     if (torrent->has_metadata()) {
         if (callback) {
             callback(*torrent->info(), true, "");
+        }
+        // Cleanup metadata-only torrent
+        if (torrent->save_path().empty()) {
+            bittorrent_client_->mark_for_removal(info_hash);
         }
         return;
     }
     
     // Set up async callback for when metadata is received
-    if (callback) {
-        torrent->set_metadata_callback(
-            [callback, peer_ip, peer_port](Torrent* t, bool success) {
-                if (success && t->info()) {
+    // Capture bittorrent_client_ and info_hash for cleanup after callback
+    auto client = bittorrent_client_.get();
+    torrent->set_metadata_callback(
+        [callback, client, info_hash, peer_ip, peer_port](Torrent* t, bool success) {
+            // Invoke user callback first
+            if (success && t->info()) {
+                if (callback) {
                     callback(*t->info(), true, "");
-                } else {
+                }
+            } else {
+                if (callback) {
                     callback(TorrentInfo(), false, 
                              "Failed to download metadata from " + peer_ip + ":" + std::to_string(peer_port));
                 }
             }
-        );
-        
-        LOG_CLIENT_INFO("Waiting for metadata from " << peer_ip << ":" << peer_port);
-    }
+            
+            // Cleanup metadata-only torrent (empty save_path means no download requested)
+            // Using mark_for_removal to avoid deadlock (callback is called from I/O thread)
+            if (client && t->save_path().empty()) {
+                client->mark_for_removal(info_hash);
+            }
+        }
+    );
+    
+    LOG_CLIENT_INFO("Waiting for metadata from " << peer_ip << ":" << peer_port);
 }
 
 void RatsClient::get_torrent_metadata_from_peer(const std::string& info_hash_hex,

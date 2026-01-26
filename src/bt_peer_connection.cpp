@@ -212,6 +212,14 @@ void BtPeerConnection::close() {
     socket_fd_ = -1;
     
     set_state(PeerConnectionState::Disconnected);
+    
+    // Clear callbacks to prevent dangling pointer issues
+    // Important: Must be done AFTER state callbacks are invoked
+    on_message_ = nullptr;
+    on_state_change_ = nullptr;
+    on_handshake_ = nullptr;
+    on_error_ = nullptr;
+    on_info_hash_ = nullptr;
 }
 
 void BtPeerConnection::set_torrent_info(const BtInfoHash& info_hash, uint32_t num_pieces) {

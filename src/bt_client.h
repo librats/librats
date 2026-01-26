@@ -175,6 +175,16 @@ public:
     void remove_torrent(const BtInfoHash& info_hash, bool delete_files = false);
     
     /**
+     * @brief Mark a torrent for deferred removal
+     * 
+     * Thread-safe method that can be called from any thread/callback.
+     * The actual removal happens in the tick loop to avoid deadlocks.
+     * 
+     * @param info_hash Info hash of torrent to remove
+     */
+    void mark_for_removal(const BtInfoHash& info_hash);
+    
+    /**
      * @brief Get a torrent by info hash
      */
     Torrent::Ptr get_torrent(const BtInfoHash& info_hash);
@@ -358,6 +368,10 @@ private:
     // Announce timing
     std::chrono::steady_clock::time_point last_dht_announce_;
     std::chrono::steady_clock::time_point last_tracker_announce_;
+    
+    // Deferred removal queue (thread-safe, processed in tick_loop)
+    mutable std::mutex removal_mutex_;
+    std::vector<BtInfoHash> pending_removals_;
     
     // Callbacks
     TorrentAddedCallback on_torrent_added_;

@@ -165,6 +165,18 @@ void BtClient::stop() {
     // Clear tracker managers
     tracker_managers_.clear();
     
+    // Clear torrents (already stopped above)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        torrents_.clear();
+    }
+    
+    // Clear pending removals
+    {
+        std::lock_guard<std::mutex> lock(removal_mutex_);
+        pending_removals_.clear();
+    }
+    
     if (on_alert_) {
         on_alert_("BitTorrent client stopped");
     }
@@ -338,6 +350,21 @@ void BtClient::remove_torrent(const BtInfoHash& info_hash, bool delete_files) {
     }
     
     LOG_INFO("BtClient", "Removed torrent: " + info_hash_to_hex(info_hash).substr(0, 8) + "...");
+}
+
+void BtClient::mark_for_removal(const BtInfoHash& info_hash) {
+    std::lock_guard<std::mutex> lock(removal_mutex_);
+    
+    // Avoid duplicates
+    for (const auto& hash : pending_removals_) {
+        if (hash == info_hash) {
+            return;
+        }
+    }
+    
+    pending_removals_.push_back(info_hash);
+    LOG_DEBUG("BtClient", "Marked torrent for removal: " + 
+              info_hash_to_hex(info_hash).substr(0, 8) + "...");
 }
 
 Torrent::Ptr BtClient::get_torrent(const BtInfoHash& info_hash) {
@@ -623,6 +650,20 @@ void BtClient::tick_loop() {
     
     while (running_) {
         auto now = std::chrono::steady_clock::now();
+        
+        // Process deferred removals (outside main mutex to avoid deadlocks)
+        {
+            std::vector<BtInfoHash> to_remove;
+            {
+                std::lock_guard<std::mutex> lock(removal_mutex_);
+                to_remove = std::move(pending_removals_);
+                pending_removals_.clear();
+            }
+            
+            for (const auto& hash : to_remove) {
+                remove_torrent(hash);
+            }
+        }
         
         {
             std::lock_guard<std::mutex> lock(mutex_);
