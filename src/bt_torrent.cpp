@@ -102,6 +102,7 @@ void Torrent::start() {
     
     if (!info_ || !info_->has_metadata()) {
         // No metadata yet - need to download it from peers
+        metadata_download_started_ = std::chrono::steady_clock::now();
         set_state(TorrentState::DownloadingMetadata);
     } else if (config_.seed_mode || is_complete_unlocked()) {
         set_state(TorrentState::Seeding);
@@ -415,6 +416,34 @@ void Torrent::tick() {
     }
     
     auto now = std::chrono::steady_clock::now();
+    
+    // Check metadata download timeout
+    if (state_ == TorrentState::DownloadingMetadata) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            now - metadata_download_started_).count();
+        
+        if (elapsed >= METADATA_TIMEOUT_SECONDS) {
+            LOG_WARN("Torrent", "Metadata download timeout for " + 
+                     info_hash_to_hex(info_hash_).substr(0, 8) + "...");
+            
+            // Notify callback of failure
+            if (on_metadata_received_) {
+                on_metadata_received_(this, false);
+            }
+            
+            // Clear metadata state
+            metadata_buffer_.clear();
+            metadata_pieces_received_.clear();
+            peer_metadata_size_.clear();
+            peer_ut_metadata_id_.clear();
+            
+            // Set error state
+            error_message_ = "Metadata download timeout";
+            set_state(TorrentState::Error);
+            
+            return;
+        }
+    }
     
     // Run choker periodically
     if (choker_.should_rechoke()) {

@@ -479,6 +479,8 @@ private:
     std::vector<bool> metadata_pieces_received_;
     std::unordered_map<BtPeerConnection*, size_t> peer_metadata_size_;
     std::unordered_map<BtPeerConnection*, uint8_t> peer_ut_metadata_id_;
+    std::chrono::steady_clock::time_point metadata_download_started_;
+    static constexpr int METADATA_TIMEOUT_SECONDS = 120;  // 2 minutes timeout
 };
 
 } // namespace librats
