@@ -565,7 +565,11 @@ void BtClient::on_peer_disconnected(const BtInfoHash& info_hash,
                                      BtPeerConnection* connection) {
     LOG_DEBUG("BtClient", "Peer disconnected: " + connection->ip());
     
-    // Torrent will handle cleanup
+    // Remove connection from torrent
+    auto torrent = get_torrent(info_hash);
+    if (torrent) {
+        torrent->remove_connection(connection);
+    }
 }
 
 void BtClient::on_peer_data(const BtInfoHash& info_hash, 
