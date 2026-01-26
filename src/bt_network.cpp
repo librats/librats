@@ -45,6 +45,12 @@ BtNetworkManager::~BtNetworkManager() {
 bool BtNetworkManager::start() {
     if (running_) return true;
     
+    // Initialize socket library (required on Windows)
+    if (!init_socket_library()) {
+        LOG_NET_ERROR("Failed to initialize socket library");
+        return false;
+    }
+    
     // Create listen socket if incoming enabled
     if (config_.enable_incoming) {
         listen_socket_ = create_tcp_server(config_.listen_port, 50);
@@ -195,8 +201,9 @@ bool BtNetworkManager::connect_peer(const std::string& ip, uint16_t port,
                                      uint32_t num_pieces) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    // Check connection limit
-    if (connections_.size() + connecting_.size() >= config_.max_connections) {
+    // Check connection limit (include pending queue in the count)
+    size_t total = connections_.size() + connecting_.size() + pending_connects_.size();
+    if (total >= config_.max_connections) {
         LOG_NET_DEBUG("Connection limit reached, cannot connect to " + ip);
         return false;
     }
@@ -215,6 +222,18 @@ bool BtNetworkManager::connect_peer(const std::string& ip, uint16_t port,
             LOG_NET_DEBUG("Already connecting to " + ip + ":" + std::to_string(port));
             return false;
         }
+    }
+    
+    // Check pending queue for duplicates
+    // Note: std::queue doesn't support iteration, so we use a temporary copy
+    std::queue<PendingConnect> temp_queue = pending_connects_;
+    while (!temp_queue.empty()) {
+        const auto& queued = temp_queue.front();
+        if (queued.ip == ip && queued.port == port) {
+            LOG_NET_DEBUG("Already queued connection to " + ip + ":" + std::to_string(port));
+            return false;
+        }
+        temp_queue.pop();
     }
     
     // Queue the connection
