@@ -1,5 +1,4 @@
 #include "bt_network.h"
-#include "bt_handshake.h"
 #include "network_utils.h"
 #include "logger.h"
 
@@ -651,9 +650,17 @@ void BtNetworkManager::accept_incoming() {
     
     LOG_NET_INFO("Accepted incoming connection from " + peer_addr);
     
-    // For incoming connections, we don't know the info_hash yet
-    // We'll get it from the handshake
     std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Create connection object immediately (info_hash unknown until handshake)
+    auto conn = std::make_shared<BtPeerConnection>(config_.peer_id);
+    conn->set_address(ip, port);
+    conn->set_socket(static_cast<int>(client));
+    
+    // Set up callback for when handshake reveals the info_hash
+    conn->set_info_hash_callback([this](BtPeerConnection* peer, const BtInfoHash& info_hash) {
+        on_incoming_info_hash(peer, info_hash);
+    });
     
     SocketContext ctx;
     ctx.socket = client;
@@ -661,9 +668,41 @@ void BtNetworkManager::accept_incoming() {
     ctx.incoming = true;
     ctx.connected_at = std::chrono::steady_clock::now();
     ctx.last_activity = ctx.connected_at;
+    ctx.connection = conn;
     
-    // Connection will be created after handshake
     connections_[client] = std::move(ctx);
+}
+
+void BtNetworkManager::on_incoming_info_hash(BtPeerConnection* conn, const BtInfoHash& info_hash) {
+    // This is called from within process_incoming() when an incoming connection
+    // receives a handshake and discovers the info_hash. We need to look up the
+    // torrent and set the correct info.
+    
+    // Note: We're already holding the mutex (called from io_loop -> handle_readable -> process_incoming)
+    
+    auto torrent_it = torrents_.find(info_hash);
+    if (torrent_it == torrents_.end()) {
+        LOG_NET_DEBUG("Unknown info_hash " + info_hash_to_hex(info_hash).substr(0, 8) + 
+                      "... from incoming connection " + conn->ip());
+        // Connection will be closed by BtPeerConnection when set_torrent_info is not called
+        return;
+    }
+    
+    const auto& reg = torrent_it->second;
+    
+    LOG_NET_DEBUG("Routing incoming connection from " + conn->ip() + 
+                  " to torrent " + info_hash_to_hex(info_hash).substr(0, 8) + "...");
+    
+    // Set the torrent info on the connection
+    conn->set_torrent_info(info_hash, reg.num_pieces);
+    
+    // Update the SocketContext with the info_hash
+    for (auto& [socket, ctx] : connections_) {
+        if (ctx.connection.get() == conn) {
+            ctx.info_hash = info_hash;
+            break;
+        }
+    }
 }
 
 void BtNetworkManager::handle_readable(socket_t socket,
@@ -675,84 +714,14 @@ void BtNetworkManager::handle_readable(socket_t socket,
     
     SocketContext& ctx = it->second;
     
-    // For incoming connections without a connection object yet,
-    // we need to create a temporary buffer for the handshake
+    // Connection object should always exist now (created in accept_incoming or connect_peer)
     if (!ctx.connection) {
-        // Create a temporary buffer for handshake parsing
-        std::vector<uint8_t> temp_buffer(BT_HANDSHAKE_SIZE + 64);
-        int bytes = recv(socket, reinterpret_cast<char*>(temp_buffer.data()), 
-                        static_cast<int>(temp_buffer.size()), 0);
-        
-        if (bytes <= 0) {
-            if (bytes == 0) {
-                LOG_NET_DEBUG("Connection closed by peer during handshake");
-            }
-            close_connection_internal(socket, disconnected_events);
-            return;
-        }
-        
-        // Parse handshake to get info_hash and create connection
-        if (static_cast<size_t>(bytes) >= BT_HANDSHAKE_SIZE) {
-            auto hs = BtHandshake::decode(temp_buffer.data(), bytes);
-            if (!hs) {
-                LOG_NET_ERROR("Invalid handshake from incoming connection");
-                close_connection_internal(socket, disconnected_events);
-                return;
-            }
-            
-            // Find registered torrent
-            auto torrent_it = torrents_.find(hs->info_hash);
-            if (torrent_it == torrents_.end()) {
-                LOG_NET_DEBUG("Unknown info_hash from incoming connection");
-                close_connection_internal(socket, disconnected_events);
-                return;
-            }
-            
-            const auto& reg = torrent_it->second;
-            
-            // Create connection object
-            ctx.connection = std::make_shared<BtPeerConnection>(
-                hs->info_hash, reg.peer_id, reg.num_pieces);
-            ctx.info_hash = hs->info_hash;
-            
-            // Get peer address
-            std::string peer_addr = get_peer_address(ctx.socket);
-            std::string ip;
-            uint16_t port = 0;
-            size_t colon = peer_addr.rfind(':');
-            if (colon != std::string::npos) {
-                ip = peer_addr.substr(0, colon);
-                port = static_cast<uint16_t>(std::stoi(peer_addr.substr(colon + 1)));
-            }
-            
-            ctx.connection->set_address(ip, port);
-            ctx.connection->set_socket(static_cast<int>(ctx.socket));
-            
-            // Put remaining data into connection's recv buffer and process
-            auto& recv_buf = ctx.connection->recv_buffer();
-            recv_buf.ensure_space(bytes);
-            std::memcpy(recv_buf.write_ptr(), temp_buffer.data(), bytes);
-            recv_buf.received(bytes);
-            ctx.connection->process_incoming();
-            
-            // Check if handshake complete
-            if (ctx.connection->is_connected()) {
-                ctx.state = NetConnectionState::Connected;
-                
-                ConnectedEvent event;
-                event.info_hash = ctx.info_hash;
-                event.connection = ctx.connection;
-                event.socket = ctx.socket;
-                event.incoming = ctx.incoming;
-                connected_events.push_back(std::move(event));
-            }
-        }
-        
-        ctx.last_activity = std::chrono::steady_clock::now();
+        LOG_NET_ERROR("handle_readable: no connection object for socket");
+        close_connection_internal(socket, disconnected_events);
         return;
     }
     
-    // Normal case: connection exists, receive directly into its buffer
+    // Receive directly into connection's buffer
     auto& recv_buf = ctx.connection->recv_buffer();
     
     // Ensure we have space for incoming data
@@ -815,6 +784,15 @@ void BtNetworkManager::handle_peer_data(SocketContext& ctx,
     // Process incoming data (handshake and messages)
     // Data is already in connection's recv_buffer - no copy needed!
     ctx.connection->process_incoming();
+    
+    // Check if connection was closed during processing (e.g., unknown torrent, invalid handshake)
+    auto conn_state = ctx.connection->state();
+    if (conn_state == PeerConnectionState::Disconnected || 
+        conn_state == PeerConnectionState::Closing) {
+        LOG_NET_DEBUG("Connection closed during processing for " + ctx.connection->ip());
+        close_connection_internal(ctx.socket, disconnected_events);
+        return;
+    }
     
     if (ctx.state == NetConnectionState::Handshaking) {
         // Check if handshake complete

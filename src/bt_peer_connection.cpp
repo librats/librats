@@ -49,6 +49,7 @@ BtPeerConnection::BtPeerConnection(const BtInfoHash& info_hash,
     , our_info_hash_(info_hash)
     , our_peer_id_(our_peer_id)
     , num_pieces_(num_pieces)
+    , info_hash_known_(true)  // Outgoing: info_hash is known
     , peer_info_hash_{}
     , peer_id_{}
     , handshake_received_(false)
@@ -65,6 +66,30 @@ BtPeerConnection::BtPeerConnection(const BtInfoHash& info_hash,
     , max_pending_requests_(BT_DEFAULT_REQUEST_QUEUE_SIZE) {
 }
 
+BtPeerConnection::BtPeerConnection(const PeerID& our_peer_id)
+    : socket_fd_(-1)
+    , port_(0)
+    , state_(PeerConnectionState::Disconnected)
+    , our_info_hash_{}
+    , our_peer_id_(our_peer_id)
+    , num_pieces_(0)
+    , info_hash_known_(false)  // Incoming: info_hash unknown until handshake
+    , peer_info_hash_{}
+    , peer_id_{}
+    , handshake_received_(false)
+    , handshake_sent_(false)
+    , extension_handshake_received_(false)
+    , peer_metadata_size_(0)
+    , peer_ut_metadata_id_(0)
+    , am_choking_(true)
+    , am_interested_(false)
+    , peer_choking_(true)
+    , peer_interested_(false)
+    , peer_pieces_(0)  // Will be resized after set_torrent_info
+    , recv_buffer_(8192)
+    , max_pending_requests_(BT_DEFAULT_REQUEST_QUEUE_SIZE) {
+}
+
 BtPeerConnection::~BtPeerConnection() {
     close();
 }
@@ -77,6 +102,7 @@ BtPeerConnection::BtPeerConnection(BtPeerConnection&& other) noexcept
     , our_info_hash_(std::move(other.our_info_hash_))
     , our_peer_id_(std::move(other.our_peer_id_))
     , num_pieces_(other.num_pieces_)
+    , info_hash_known_(other.info_hash_known_)
     , peer_info_hash_(std::move(other.peer_info_hash_))
     , peer_id_(std::move(other.peer_id_))
     , peer_extensions_(other.peer_extensions_)
@@ -98,7 +124,8 @@ BtPeerConnection::BtPeerConnection(BtPeerConnection&& other) noexcept
     , on_message_(std::move(other.on_message_))
     , on_state_change_(std::move(other.on_state_change_))
     , on_handshake_(std::move(other.on_handshake_))
-    , on_error_(std::move(other.on_error_)) {
+    , on_error_(std::move(other.on_error_))
+    , on_info_hash_(std::move(other.on_info_hash_)) {
     other.socket_fd_ = -1;
     other.state_ = PeerConnectionState::Disconnected;
 }
@@ -114,6 +141,7 @@ BtPeerConnection& BtPeerConnection::operator=(BtPeerConnection&& other) noexcept
         our_info_hash_ = std::move(other.our_info_hash_);
         our_peer_id_ = std::move(other.our_peer_id_);
         num_pieces_ = other.num_pieces_;
+        info_hash_known_ = other.info_hash_known_;
         peer_info_hash_ = std::move(other.peer_info_hash_);
         peer_id_ = std::move(other.peer_id_);
         peer_extensions_ = other.peer_extensions_;
@@ -136,6 +164,7 @@ BtPeerConnection& BtPeerConnection::operator=(BtPeerConnection&& other) noexcept
         on_state_change_ = std::move(other.on_state_change_);
         on_handshake_ = std::move(other.on_handshake_);
         on_error_ = std::move(other.on_error_);
+        on_info_hash_ = std::move(other.on_info_hash_);
         
         other.socket_fd_ = -1;
         other.state_ = PeerConnectionState::Disconnected;
@@ -183,6 +212,21 @@ void BtPeerConnection::close() {
     socket_fd_ = -1;
     
     set_state(PeerConnectionState::Disconnected);
+}
+
+void BtPeerConnection::set_torrent_info(const BtInfoHash& info_hash, uint32_t num_pieces) {
+    our_info_hash_ = info_hash;
+    num_pieces_ = num_pieces;
+    info_hash_known_ = true;
+    
+    // Resize peer_pieces bitfield if needed
+    if (peer_pieces_.size() != num_pieces) {
+        peer_pieces_ = Bitfield(num_pieces);
+    }
+    
+    LOG_DEBUG("BtPeerConn", "Set torrent info for " + ip_ + 
+              ": info_hash=" + info_hash_to_hex(info_hash).substr(0, 8) + 
+              "..., num_pieces=" + std::to_string(num_pieces));
 }
 
 void BtPeerConnection::set_state(PeerConnectionState new_state) {
@@ -237,7 +281,35 @@ void BtPeerConnection::process_handshake() {
         return;
     }
     
-    // Verify info hash matches
+    // Store peer info
+    peer_info_hash_ = hs->info_hash;
+    peer_id_ = hs->peer_id;
+    peer_extensions_ = hs->extensions;
+    
+    // For incoming connections, we need to notify about the info_hash first
+    // so NetworkManager can look up the torrent and call set_torrent_info()
+    if (!info_hash_known_) {
+        LOG_DEBUG("BtPeerConn", "Incoming connection: notifying info_hash " + 
+                  info_hash_to_hex(hs->info_hash).substr(0, 8) + "...");
+        
+        if (on_info_hash_) {
+            on_info_hash_(this, hs->info_hash);
+        }
+        
+        // After callback, info_hash should be set via set_torrent_info()
+        // If not, the connection should be closed by the callback handler
+        if (!info_hash_known_) {
+            LOG_ERROR("BtPeerConn", "Unknown torrent from " + ip_ + 
+                      ", info_hash=" + info_hash_to_hex(hs->info_hash).substr(0, 8) + "...");
+            if (on_error_) {
+                on_error_(this, "Unknown torrent");
+            }
+            close();
+            return;
+        }
+    }
+    
+    // Verify info hash matches (for outgoing connections, or after set_torrent_info)
     if (hs->info_hash != our_info_hash_) {
         LOG_ERROR("BtPeerConn", "Info hash mismatch from " + ip_);
         if (on_error_) {
@@ -247,10 +319,6 @@ void BtPeerConnection::process_handshake() {
         return;
     }
     
-    // Store peer info
-    peer_info_hash_ = hs->info_hash;
-    peer_id_ = hs->peer_id;
-    peer_extensions_ = hs->extensions;
     handshake_received_ = true;
     
     // Format peer_id for logging (first 8 chars, printable only)

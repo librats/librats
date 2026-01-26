@@ -54,6 +54,7 @@ void BtClient::start() {
     net_config.listen_port = config_.listen_port;
     net_config.max_connections = config_.max_connections;
     net_config.enable_incoming = true;
+    net_config.peer_id = peer_id_;  // For incoming connections
     
     network_manager_ = std::make_unique<BtNetworkManager>(net_config);
     

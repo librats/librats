@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <optional>
 
 namespace librats {
 
@@ -114,12 +115,15 @@ public:
     /// Callback for errors
     using ErrorCallback = std::function<void(BtPeerConnection*, const std::string&)>;
     
+    /// Callback when info_hash is discovered (for incoming connections)
+    using InfoHashCallback = std::function<void(BtPeerConnection*, const BtInfoHash&)>;
+    
     //=========================================================================
     // Construction
     //=========================================================================
     
     /**
-     * @brief Create a peer connection
+     * @brief Create a peer connection (outgoing - info_hash known)
      * 
      * @param info_hash Our info hash
      * @param our_peer_id Our peer ID
@@ -130,9 +134,23 @@ public:
                      uint32_t num_pieces);
     
     /**
+     * @brief Create a peer connection (incoming - info_hash unknown until handshake)
+     * 
+     * For incoming connections, we don't know which torrent the peer wants
+     * until we receive their handshake. Use set_torrent_info() after handshake.
+     * 
+     * @param our_peer_id Our peer ID
+     */
+    explicit BtPeerConnection(const PeerID& our_peer_id);
+    
+    /**
      * @brief Destructor
      */
     ~BtPeerConnection();
+    
+    //=========================================================================
+    // Static Helpers
+    //=========================================================================
     
     // Non-copyable
     BtPeerConnection(const BtPeerConnection&) = delete;
@@ -191,6 +209,26 @@ public:
      */
     void close();
     
+    /**
+     * @brief Check if info_hash is known (false for incoming before handshake)
+     */
+    bool has_info_hash() const { return info_hash_known_; }
+    
+    /**
+     * @brief Get our info hash
+     */
+    const BtInfoHash& our_info_hash() const { return our_info_hash_; }
+    
+    /**
+     * @brief Set torrent info after handshake received (for incoming connections)
+     * 
+     * Called by NetworkManager after routing incoming connection to correct torrent.
+     * 
+     * @param info_hash The info hash from handshake
+     * @param num_pieces Number of pieces in torrent
+     */
+    void set_torrent_info(const BtInfoHash& info_hash, uint32_t num_pieces);
+    
     //=========================================================================
     // Buffer Access (for NetworkManager)
     //=========================================================================
@@ -238,6 +276,7 @@ public:
     void set_state_callback(StateCallback cb) { on_state_change_ = std::move(cb); }
     void set_handshake_callback(HandshakeCallback cb) { on_handshake_ = std::move(cb); }
     void set_error_callback(ErrorCallback cb) { on_error_ = std::move(cb); }
+    void set_info_hash_callback(InfoHashCallback cb) { on_info_hash_ = std::move(cb); }
     
     //=========================================================================
     // Protocol State
@@ -452,6 +491,7 @@ private:
     BtInfoHash our_info_hash_;
     PeerID our_peer_id_;
     uint32_t num_pieces_;
+    bool info_hash_known_;  ///< True if info_hash is known (false for incoming before handshake)
     
     // Peer identity (from handshake)
     BtInfoHash peer_info_hash_;
@@ -490,6 +530,7 @@ private:
     StateCallback on_state_change_;
     HandshakeCallback on_handshake_;
     ErrorCallback on_error_;
+    InfoHashCallback on_info_hash_;
 };
 
 } // namespace librats

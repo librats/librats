@@ -39,6 +39,7 @@ struct BtNetworkConfig {
     int connect_timeout_ms;         ///< Timeout for outgoing connections (ms)
     int select_timeout_ms;          ///< Timeout for select() call (ms)
     size_t send_buffer_high_water;  ///< High water mark for send buffer
+    PeerID peer_id;                 ///< Our peer ID (for incoming connections)
     
     BtNetworkConfig()
         : listen_port(6881)
@@ -46,7 +47,8 @@ struct BtNetworkConfig {
         , enable_incoming(true)
         , connect_timeout_ms(30000)
         , select_timeout_ms(15)
-        , send_buffer_high_water(1024 * 1024) {}  // 1MB
+        , send_buffer_high_water(1024 * 1024)  // 1MB
+        , peer_id{} {}
 };
 
 //=============================================================================
@@ -358,6 +360,9 @@ private:
     
     /// Create socket for outgoing connection
     socket_t create_connect_socket(const std::string& ip, uint16_t port);
+    
+    /// Handle info_hash discovered from incoming connection handshake
+    void on_incoming_info_hash(BtPeerConnection* conn, const BtInfoHash& info_hash);
     
     //=========================================================================
     // Data Members
