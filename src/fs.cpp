@@ -409,24 +409,26 @@ bool write_file_chunk(const char* path, uint64_t offset, const void* data, size_
     
     FILE* file = fopen(path, "r+b");
     if (!file) {
-        // Try to create the file if it doesn't exist
-        file = fopen(path, "w+b");
-        if (!file) {
-            // Directory might not exist - create it
+        // Check if file doesn't exist (vs other errors like permission denied)
+        if (!file_exists(path)) {
+            // File doesn't exist - create parent directory if needed
             std::string parent = get_parent_directory(path);
-            if (!parent.empty()) {
+            if (!parent.empty() && !directory_exists(parent.c_str())) {
                 if (!create_directories(parent.c_str())) {
                     LOG_ERROR("FS", "Failed to create directory: " << parent);
                     return false;
                 }
-                // Try opening file again after creating directory
-                file = fopen(path, "w+b");
             }
-            
+            // Create new file with read+write mode (w+b is safe here since file doesn't exist)
+            file = fopen(path, "w+b");
             if (!file) {
-                LOG_ERROR("FS", "Failed to open file for chunk writing: " << path);
+                LOG_ERROR("FS", "Failed to create file for chunk writing: " << path);
                 return false;
             }
+        } else {
+            // File exists but couldn't open - permission error or other issue
+            LOG_ERROR("FS", "Failed to open existing file for chunk writing: " << path);
+            return false;
         }
     }
     
