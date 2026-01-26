@@ -93,6 +93,10 @@ struct DownloadingPiece {
     bool is_empty() const { return blocks_requested == 0 && blocks_finished == 0; }
 };
 
+/// Default maximum number of pieces downloading simultaneously
+/// This prevents memory bloat and improves piece completion rate
+constexpr size_t DEFAULT_MAX_DOWNLOADING_PIECES = 20;
+
 /**
  * @brief Intelligent piece picker for BitTorrent downloads
  * 
@@ -155,6 +159,19 @@ public:
      * @brief Set priority for a range of pieces
      */
     void set_piece_priority_range(uint32_t start, uint32_t end, PiecePriority priority);
+    
+    /**
+     * @brief Set maximum number of pieces to download simultaneously
+     * 
+     * Limits memory usage and improves piece completion rate by focusing
+     * on completing partial pieces before starting new ones.
+     */
+    void set_max_downloading_pieces(size_t max) { max_downloading_pieces_ = max; }
+    
+    /**
+     * @brief Get maximum number of pieces to download simultaneously
+     */
+    size_t max_downloading_pieces() const { return max_downloading_pieces_; }
     
     //=========================================================================
     // Piece State Management
@@ -429,6 +446,7 @@ private:
     PickerMode mode_;
     bool endgame_enabled_;
     bool in_endgame_;
+    size_t max_downloading_pieces_;
     
     std::vector<PieceState> pieces_;
     std::vector<DownloadingPieceState> downloading_;

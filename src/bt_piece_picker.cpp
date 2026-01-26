@@ -17,6 +17,7 @@ PiecePicker::PiecePicker(uint32_t num_pieces, uint32_t piece_length, uint32_t la
     , mode_(PickerMode::RarestFirst)
     , endgame_enabled_(true)
     , in_endgame_(false)
+    , max_downloading_pieces_(DEFAULT_MAX_DOWNLOADING_PIECES)
     , pieces_(num_pieces)
     , num_have_(0)
     , num_downloading_(0)
@@ -32,6 +33,7 @@ PiecePicker::PiecePicker(PiecePicker&& other) noexcept
     , mode_(other.mode_)
     , endgame_enabled_(other.endgame_enabled_)
     , in_endgame_(other.in_endgame_)
+    , max_downloading_pieces_(other.max_downloading_pieces_)
     , pieces_(std::move(other.pieces_))
     , downloading_(std::move(other.downloading_))
     , peer_pieces_(std::move(other.peer_pieces_))
@@ -49,6 +51,7 @@ PiecePicker& PiecePicker::operator=(PiecePicker&& other) noexcept {
         mode_ = other.mode_;
         endgame_enabled_ = other.endgame_enabled_;
         in_endgame_ = other.in_endgame_;
+        max_downloading_pieces_ = other.max_downloading_pieces_;
         pieces_ = std::move(other.pieces_);
         downloading_ = std::move(other.downloading_);
         peer_pieces_ = std::move(other.peer_pieces_);
@@ -271,8 +274,16 @@ std::vector<BlockRequest> PiecePicker::pick_pieces(
         }
     }
     
-    // Then, pick new pieces
+    // Then, pick new pieces (if we're not at the limit)
+    // Note: In endgame mode, we ignore the limit to finish faster
     while (result.size() < num_blocks) {
+        // Check if we can start a new piece (respect max_downloading_pieces_ limit)
+        if (!in_endgame_ && downloading_.size() >= max_downloading_pieces_) {
+            LOG_DEBUG("PiecePicker", "At max downloading pieces limit (" + 
+                      std::to_string(max_downloading_pieces_) + "), not starting new pieces");
+            break;
+        }
+        
         uint32_t piece = UINT32_MAX;
         
         switch (mode_) {

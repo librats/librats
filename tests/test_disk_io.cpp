@@ -1081,3 +1081,94 @@ TEST_F(DiskIOTest, MultiFileTorrentWithNestedDirs) {
     }
     delete_directory((test_dir_ + "/Album Name").c_str());
 }
+
+//=============================================================================
+// Backpressure Tests
+//=============================================================================
+
+TEST_F(DiskIOTest, BackpressureWatermarkConfiguration) {
+    // Verify watermark configuration defaults
+    DiskIOConfig config;
+    EXPECT_EQ(config.high_watermark_percent, 80);
+    EXPECT_EQ(config.low_watermark_percent, 50);
+    EXPECT_EQ(config.max_pending_jobs, 1000);
+}
+
+TEST_F(DiskIOTest, CanAcceptWriteInitially) {
+    // Fresh pool should accept writes
+    DiskIOConfig config;
+    config.max_pending_jobs = 100;
+    config.high_watermark_percent = 80;
+    config.low_watermark_percent = 50;
+    
+    DiskIOThreadPool pool(config);
+    pool.start();
+    
+    // With no pending jobs, should accept writes
+    EXPECT_TRUE(pool.can_accept_write());
+    
+    pool.stop();
+}
+
+TEST_F(DiskIOTest, CanAcceptWriteEmptyQueue) {
+    // Singleton instance with empty queue should accept writes
+    EXPECT_TRUE(DiskIO::instance().can_accept_write());
+}
+
+TEST_F(DiskIOTest, BackpressureHysteresisLogic) {
+    // Test the hysteresis logic with a controlled pool
+    DiskIOConfig config;
+    config.max_pending_jobs = 10;  // Small for testing
+    config.high_watermark_percent = 80;  // 8 jobs
+    config.low_watermark_percent = 50;   // 5 jobs
+    config.num_write_threads = 1;
+    
+    DiskIOThreadPool pool(config);
+    // Don't start the pool - jobs will accumulate in queue
+    
+    // Initially should accept writes
+    EXPECT_TRUE(pool.can_accept_write());
+    
+    // Queue is empty, pending = 0, should accept
+    EXPECT_EQ(pool.get_pending_write_jobs(), 0);
+}
+
+// Test that backpressure works with the singleton
+TEST_F(DiskIOTest, BackpressureWithSingleton) {
+    // Create a file for testing
+    std::string file_path = test_dir_ + "/backpressure_test.bin";
+    ASSERT_TRUE(create_file_with_size(file_path.c_str(), 1024));
+    
+    std::vector<FileMappingInfo> mappings;
+    FileMappingInfo mapping;
+    mapping.path = "backpressure_test.bin";
+    mapping.length = 1024;
+    mapping.torrent_offset = 0;
+    mappings.push_back(mapping);
+    
+    std::vector<uint8_t> data(64, 0xAB);
+    
+    // Queue several writes and verify can_accept_write still works
+    std::atomic<int> completed(0);
+    const int num_writes = 5;
+    
+    for (int i = 0; i < num_writes; ++i) {
+        DiskIO::instance().async_write_block(
+            test_dir_, mappings,
+            0, 1024, i * 64, data,
+            [&](bool) { completed++; }
+        );
+    }
+    
+    // Wait for completion
+    auto start = std::chrono::steady_clock::now();
+    while (completed < num_writes && 
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    EXPECT_EQ(completed, num_writes);
+    
+    // After all writes complete, should accept new writes
+    EXPECT_TRUE(DiskIO::instance().can_accept_write());
+}

@@ -22,7 +22,8 @@ DiskIOThreadPool::DiskIOThreadPool(const DiskIOConfig& config)
     , num_read_threads_(config.num_read_threads)
     , total_bytes_written_(0)
     , total_bytes_read_(0)
-    , jobs_completed_(0) {
+    , jobs_completed_(0)
+    , under_pressure_(false) {
 }
 
 DiskIOThreadPool::~DiskIOThreadPool() {
@@ -245,6 +246,33 @@ size_t DiskIOThreadPool::get_pending_read_jobs() const {
 
 size_t DiskIOThreadPool::get_total_pending_jobs() const {
     return get_pending_write_jobs() + get_pending_read_jobs();
+}
+
+//=============================================================================
+// Backpressure Control
+//=============================================================================
+
+bool DiskIOThreadPool::can_accept_write() const {
+    size_t pending = get_pending_write_jobs();
+    size_t high_mark = static_cast<size_t>(config_.max_pending_jobs * config_.high_watermark_percent / 100);
+    size_t low_mark = static_cast<size_t>(config_.max_pending_jobs * config_.low_watermark_percent / 100);
+    
+    // Hysteresis: once under pressure, stay under pressure until below low watermark
+    if (under_pressure_.load()) {
+        if (pending <= low_mark) {
+            under_pressure_.store(false);
+            LOG_DISK_DEBUG("Disk I/O backpressure released, pending jobs: " << pending);
+            return true;
+        }
+        return false;
+    } else {
+        if (pending >= high_mark) {
+            under_pressure_.store(true);
+            LOG_DISK_DEBUG("Disk I/O under backpressure, pending jobs: " << pending);
+            return false;
+        }
+        return true;
+    }
 }
 
 //=============================================================================

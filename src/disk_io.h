@@ -100,6 +100,12 @@ struct DiskIOConfig {
     int max_pending_jobs = 1000;    // Maximum pending jobs before blocking
     bool enable_coalescing = true;  // Coalesce adjacent write operations
     
+    // Watermarks for backpressure (as percentage of max_pending_jobs)
+    // When pending jobs exceed high watermark, we signal backpressure
+    // When pending jobs fall below low watermark, we allow new writes again
+    int high_watermark_percent = 80;  // Start backpressure at 80%
+    int low_watermark_percent = 50;   // Resume at 50%
+    
     DiskIOConfig() = default;
 };
 
@@ -168,6 +174,10 @@ public:
     uint64_t get_total_bytes_read() const { return total_bytes_read_.load(); }
     uint64_t get_jobs_completed() const { return jobs_completed_.load(); }
     
+    // Backpressure control
+    // Returns true if disk I/O can accept more write operations
+    // Uses watermark-based hysteresis to avoid thrashing
+    bool can_accept_write() const;
 private:
     DiskIOConfig config_;
     std::atomic<bool> running_;
@@ -193,6 +203,9 @@ private:
     std::atomic<uint64_t> total_bytes_written_;
     std::atomic<uint64_t> total_bytes_read_;
     std::atomic<uint64_t> jobs_completed_;
+    
+    // Backpressure state (mutable for hysteresis in const methods)
+    mutable std::atomic<bool> under_pressure_;
     
     // Worker thread functions
     void write_worker_loop();

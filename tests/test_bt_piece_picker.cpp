@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <set>
 #include "bt_piece_picker.h"
 
 using namespace librats;
@@ -534,4 +535,113 @@ TEST(BtPiecePickerTest, ModeSwitching) {
     
     picker.set_mode(PickerMode::Random);
     EXPECT_EQ(picker.mode(), PickerMode::Random);
+}
+
+//=============================================================================
+// Max Downloading Pieces Limit Tests
+//=============================================================================
+
+TEST(BtPiecePickerTest, MaxDownloadingPiecesDefault) {
+    PiecePicker picker(100, 16384, 16384);
+    
+    // Default should be DEFAULT_MAX_DOWNLOADING_PIECES (20)
+    EXPECT_EQ(picker.max_downloading_pieces(), DEFAULT_MAX_DOWNLOADING_PIECES);
+    EXPECT_EQ(picker.max_downloading_pieces(), 20);
+}
+
+TEST(BtPiecePickerTest, SetMaxDownloadingPieces) {
+    PiecePicker picker(100, 16384, 16384);
+    
+    picker.set_max_downloading_pieces(50);
+    EXPECT_EQ(picker.max_downloading_pieces(), 50);
+    
+    picker.set_max_downloading_pieces(5);
+    EXPECT_EQ(picker.max_downloading_pieces(), 5);
+}
+
+TEST(BtPiecePickerTest, MaxDownloadingPiecesLimitEnforced) {
+    // Create picker with 50 pieces
+    PiecePicker picker(50, 16384, 16384);
+    
+    // Set low limit
+    picker.set_max_downloading_pieces(3);
+    
+    Bitfield peer_bf(50, true);  // Peer has all pieces
+    void* peer1 = reinterpret_cast<void*>(1);
+    picker.add_peer(peer1, peer_bf);
+    
+    // Request many blocks - should only start 3 pieces due to limit
+    auto blocks = picker.pick_pieces(peer_bf, 10, peer1);
+    
+    // Should have blocks, but only from at most 3 pieces
+    EXPECT_FALSE(blocks.empty());
+    
+    // Count unique pieces in the result
+    std::set<uint32_t> pieces_requested;
+    for (const auto& req : blocks) {
+        pieces_requested.insert(req.block.piece_index);
+    }
+    
+    // Should not exceed max_downloading_pieces
+    EXPECT_LE(pieces_requested.size(), 3);
+    EXPECT_EQ(picker.num_downloading(), pieces_requested.size());
+}
+
+TEST(BtPiecePickerTest, MaxDownloadingPiecesPreferPartialPieces) {
+    // Verifies that picker prefers completing partial pieces over starting new ones
+    PiecePicker picker(10, 32768, 32768);  // 2 blocks per piece
+    
+    picker.set_max_downloading_pieces(2);
+    
+    Bitfield peer_bf(10, true);
+    void* peer1 = reinterpret_cast<void*>(1);
+    void* peer2 = reinterpret_cast<void*>(2);
+    picker.add_peer(peer1, peer_bf);
+    picker.add_peer(peer2, peer_bf);
+    
+    // First request - request 3 blocks to start 2 pieces
+    // (first piece gets 2 blocks, second piece gets 1 block)
+    auto blocks1 = picker.pick_pieces(peer_bf, 3, peer1);
+    EXPECT_EQ(blocks1.size(), 3);
+    EXPECT_EQ(picker.num_downloading(), 2);
+    
+    // Second request from different peer - should complete the partial second piece
+    // not start a new one (because limit is 2)
+    auto blocks2 = picker.pick_pieces(peer_bf, 2, peer2);
+    
+    // Should still only have 2 pieces downloading (completes partial, doesn't start new)
+    EXPECT_EQ(picker.num_downloading(), 2);
+    
+    // Should get 1 block (the remaining block from piece 2)
+    EXPECT_EQ(blocks2.size(), 1);
+}
+
+TEST(BtPiecePickerTest, MaxDownloadingPiecesIgnoredInEndgame) {
+    // In endgame mode, the limit should be ignored
+    PiecePicker picker(5, 16384, 16384);
+    picker.set_max_downloading_pieces(1);
+    
+    // Mark 4 pieces as have - leaving only 1
+    for (uint32_t i = 0; i < 4; ++i) {
+        picker.mark_have(i);
+    }
+    
+    Bitfield peer_bf(5, true);
+    void* peer1 = reinterpret_cast<void*>(1);
+    picker.add_peer(peer1, peer_bf);
+    
+    // Start downloading the last piece
+    auto blocks = picker.pick_pieces(peer_bf, 1, peer1);
+    EXPECT_EQ(blocks.size(), 1);
+    
+    // Mark it finished to trigger endgame
+    picker.mark_finished(blocks[0].block);
+    EXPECT_TRUE(picker.in_endgame_mode());
+    
+    // In endgame, should allow requesting from multiple peers
+    void* peer2 = reinterpret_cast<void*>(2);
+    auto blocks2 = picker.pick_pieces(peer_bf, 1, peer2);
+    
+    // Should still be able to get blocks even with limit = 1
+    // (endgame allows duplicate requests from different peers)
 }

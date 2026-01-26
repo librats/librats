@@ -950,6 +950,12 @@ void Torrent::request_blocks_from_peer(BtPeerConnection* peer) {
         return;
     }
     
+    // Check disk I/O backpressure - don't request more blocks if disk can't keep up
+    if (!DiskIO::instance().can_accept_write()) {
+        LOG_DEBUG("Torrent", "request_blocks_from_peer: Disk I/O under backpressure, deferring requests");
+        return;
+    }
+    
     int requested = 0;
     while (peer->can_request()) {
         auto blocks = picker_->pick_pieces(peer->peer_pieces(), 1, peer);
