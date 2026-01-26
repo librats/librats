@@ -41,6 +41,10 @@ Torrent::Torrent(const TorrentInfo& info,
     , state_(TorrentState::Stopped)
     , have_pieces_(info.num_pieces()) {
     
+    LOG_INFO("Torrent", "Creating torrent '" + name_ + "' with " + 
+             std::to_string(info.num_pieces()) + " pieces, total size=" + 
+             std::to_string(info.total_size()) + " bytes");
+    
     // Initialize piece picker
     uint32_t last_piece_len = info.piece_size(info.num_pieces() - 1);
     picker_ = std::make_unique<PiecePicker>(
@@ -51,6 +55,7 @@ Torrent::Torrent(const TorrentInfo& info,
     
     if (config_.sequential_download) {
         picker_->set_mode(PickerMode::Sequential);
+        LOG_DEBUG("Torrent", "Sequential download mode enabled");
     }
     
     // Configure choker
@@ -60,6 +65,8 @@ Torrent::Torrent(const TorrentInfo& info,
     
     stats_.total_size = info.total_size();
     stats_.pieces_total = info.num_pieces();
+    
+    LOG_DEBUG("Torrent", "Torrent '" + name_ + "' initialized successfully");
 }
 
 Torrent::Torrent(const BtInfoHash& info_hash,
@@ -73,14 +80,20 @@ Torrent::Torrent(const BtInfoHash& info_hash,
     , state_(TorrentState::Stopped)
     , have_pieces_(0) {
     
+    LOG_INFO("Torrent", "Creating torrent '" + name + "' from magnet link (no metadata yet), info_hash=" + 
+             info_hash_to_hex(info_hash).substr(0, 16) + "...");
+    
     // No picker until we have metadata
     
     ChokerConfig choker_config;
     choker_config.max_uploads = config_.max_uploads;
     choker_.set_config(choker_config);
+    
+    LOG_DEBUG("Torrent", "Torrent '" + name + "' initialized (awaiting metadata)");
 }
 
 Torrent::~Torrent() {
+    LOG_DEBUG("Torrent", "Destroying torrent '" + name_ + "'");
     stop();
 }
 
@@ -91,8 +104,11 @@ Torrent::~Torrent() {
 void Torrent::start() {
     std::lock_guard<std::mutex> lock(mutex_);
     
+    LOG_INFO("Torrent", "Starting torrent '" + name_ + "'");
+    
     if (state_ == TorrentState::Downloading || 
         state_ == TorrentState::Seeding) {
+        LOG_DEBUG("Torrent", "Torrent '" + name_ + "' already active, ignoring start()");
         return;
     }
     
@@ -102,12 +118,15 @@ void Torrent::start() {
     
     if (!info_ || !info_->has_metadata()) {
         // No metadata yet - need to download it from peers
+        LOG_INFO("Torrent", "No metadata available, starting metadata download for '" + name_ + "'");
         metadata_download_started_ = std::chrono::steady_clock::now();
         set_state(TorrentState::DownloadingMetadata);
     } else if (config_.seed_mode || is_complete_unlocked()) {
+        LOG_INFO("Torrent", "Torrent '" + name_ + "' is complete, entering seeding mode");
         set_state(TorrentState::Seeding);
         choker_.set_seed_mode(true);
     } else {
+        LOG_INFO("Torrent", "Starting download for '" + name_ + "'");
         set_state(TorrentState::Downloading);
     }
 }
@@ -115,14 +134,20 @@ void Torrent::start() {
 void Torrent::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
     
+    LOG_INFO("Torrent", "Stopping torrent '" + name_ + "'");
+    
     // Disconnect all peers
+    size_t num_connections = connections_.size();
     for (auto& conn : connections_) {
         conn->close();
     }
     connections_.clear();
+    LOG_DEBUG("Torrent", "Disconnected " + std::to_string(num_connections) + " peers");
     
     // Clear pending peers
+    size_t num_pending = pending_peers_.size();
     pending_peers_.clear();
+    LOG_DEBUG("Torrent", "Cleared " + std::to_string(num_pending) + " pending peers");
     
     // Clear metadata exchange state
     metadata_buffer_.clear();
@@ -139,6 +164,8 @@ void Torrent::stop() {
     on_complete_ = nullptr;
     on_error_ = nullptr;
     on_metadata_received_ = nullptr;
+    
+    LOG_INFO("Torrent", "Torrent '" + name_ + "' stopped");
 }
 
 void Torrent::pause() {
@@ -146,7 +173,12 @@ void Torrent::pause() {
     
     if (state_ == TorrentState::Downloading ||
         state_ == TorrentState::Seeding) {
+        LOG_INFO("Torrent", "Pausing torrent '" + name_ + "' (was " + 
+                 torrent_state_to_string(state_) + ")");
         set_state(TorrentState::Paused);
+    } else {
+        LOG_DEBUG("Torrent", "Cannot pause torrent '" + name_ + "' in state " + 
+                  torrent_state_to_string(state_));
     }
 }
 
@@ -155,15 +187,22 @@ void Torrent::resume() {
     
     if (state_ == TorrentState::Paused) {
         if (is_complete_unlocked()) {
+            LOG_INFO("Torrent", "Resuming torrent '" + name_ + "' in seeding mode");
             set_state(TorrentState::Seeding);
         } else {
+            LOG_INFO("Torrent", "Resuming torrent '" + name_ + "' in downloading mode");
             set_state(TorrentState::Downloading);
         }
+    } else {
+        LOG_DEBUG("Torrent", "Cannot resume torrent '" + name_ + "' in state " + 
+                  torrent_state_to_string(state_));
     }
 }
 
 void Torrent::recheck() {
     std::lock_guard<std::mutex> lock(mutex_);
+    
+    LOG_INFO("Torrent", "Starting recheck for torrent '" + name_ + "'");
     
     // Would trigger file checking
     set_state(TorrentState::CheckingFiles);
@@ -172,9 +211,11 @@ void Torrent::recheck() {
     if (info_) {
         have_pieces_ = Bitfield(info_->num_pieces());
         picker_->set_have_bitfield(have_pieces_);
+        LOG_DEBUG("Torrent", "Reset bitfield for " + std::to_string(info_->num_pieces()) + " pieces");
     }
     
     // TODO: Actually verify files
+    LOG_WARN("Torrent", "File verification not yet implemented");
 }
 
 //=============================================================================
@@ -208,8 +249,13 @@ bool Torrent::has_metadata_unlocked() const {
 
 void Torrent::set_state(TorrentState new_state) {
     TorrentState old_state = state_.exchange(new_state);
-    if (old_state != new_state && on_state_change_) {
-        on_state_change_(this, new_state);
+    if (old_state != new_state) {
+        LOG_DEBUG("Torrent", "State change: " + std::string(torrent_state_to_string(old_state)) + 
+                  " -> " + std::string(torrent_state_to_string(new_state)) + 
+                  " for '" + name_ + "'");
+        if (on_state_change_) {
+            on_state_change_(this, new_state);
+        }
     }
 }
 
@@ -240,6 +286,7 @@ void Torrent::add_peer(const std::string& ip, uint16_t port) {
     // Check if already connected
     for (const auto& conn : connections_) {
         if (conn->ip() == ip && conn->port() == port) {
+            LOG_DEBUG("Torrent", "Peer " + ip + ":" + std::to_string(port) + " already connected");
             return;
         }
     }
@@ -247,11 +294,14 @@ void Torrent::add_peer(const std::string& ip, uint16_t port) {
     // Check if already pending
     for (const auto& peer : pending_peers_) {
         if (peer.first == ip && peer.second == port) {
+            LOG_DEBUG("Torrent", "Peer " + ip + ":" + std::to_string(port) + " already pending");
             return;
         }
     }
     
     pending_peers_.emplace_back(ip, port);
+    LOG_DEBUG("Torrent", "Added pending peer " + ip + ":" + std::to_string(port) + 
+              " (total pending=" + std::to_string(pending_peers_.size()) + ")");
 }
 
 void Torrent::add_peers(const std::vector<std::pair<std::string, uint16_t>>& peers) {
@@ -340,8 +390,13 @@ void Torrent::remove_connection(BtPeerConnection* connection) {
         });
     
     if (it != connections_.end()) {
+        LOG_DEBUG("Torrent", "Removing connection from " + connection->ip() + ":" + 
+                  std::to_string(connection->port()));
         on_peer_disconnected(connection);
         connections_.erase(it);
+        LOG_DEBUG("Torrent", "Active connections: " + std::to_string(connections_.size()));
+    } else {
+        LOG_DEBUG("Torrent", "Connection not found for removal: " + connection->ip());
     }
 }
 
@@ -352,6 +407,8 @@ void Torrent::remove_connection(BtPeerConnection* connection) {
 void Torrent::set_sequential(bool sequential) {
     std::lock_guard<std::mutex> lock(mutex_);
     config_.sequential_download = sequential;
+    LOG_INFO("Torrent", "Sequential download " + std::string(sequential ? "enabled" : "disabled") + 
+             " for '" + name_ + "'");
     if (picker_) {
         picker_->set_mode(sequential ? PickerMode::Sequential : PickerMode::RarestFirst);
     }
@@ -360,11 +417,15 @@ void Torrent::set_sequential(bool sequential) {
 void Torrent::set_download_limit(uint64_t bytes_per_sec) {
     std::lock_guard<std::mutex> lock(mutex_);
     config_.download_limit = bytes_per_sec;
+    LOG_INFO("Torrent", "Download limit set to " + std::to_string(bytes_per_sec) + 
+             " bytes/sec for '" + name_ + "'");
 }
 
 void Torrent::set_upload_limit(uint64_t bytes_per_sec) {
     std::lock_guard<std::mutex> lock(mutex_);
     config_.upload_limit = bytes_per_sec;
+    LOG_INFO("Torrent", "Upload limit set to " + std::to_string(bytes_per_sec) + 
+             " bytes/sec for '" + name_ + "'");
 }
 
 //=============================================================================
@@ -374,13 +435,17 @@ void Torrent::set_upload_limit(uint64_t bytes_per_sec) {
 bool Torrent::set_metadata(const std::vector<uint8_t>& metadata) {
     std::lock_guard<std::mutex> lock(mutex_);
     
+    LOG_INFO("Torrent", "Setting metadata (" + std::to_string(metadata.size()) + " bytes)");
+    
     auto new_info = TorrentInfo::from_info_dict(metadata, info_hash_);
     if (!new_info) {
+        LOG_ERROR("Torrent", "Failed to parse metadata - info_hash mismatch or invalid data");
         return false;
     }
     
     info_ = std::make_unique<TorrentInfo>(*new_info);
     name_ = info_->name();
+    LOG_INFO("Torrent", "Metadata parsed successfully: name='" + name_ + "'");
     
     // Initialize pieces
     have_pieces_ = Bitfield(info_->num_pieces());
@@ -399,6 +464,9 @@ bool Torrent::set_metadata(const std::vector<uint8_t>& metadata) {
     stats_.total_size = info_->total_size();
     stats_.pieces_total = info_->num_pieces();
     
+    LOG_DEBUG("Torrent", "Torrent stats: " + std::to_string(info_->num_pieces()) + " pieces, " +
+              std::to_string(info_->total_size()) + " bytes total");
+    
     // CRITICAL: Initialize existing peer connections with the new metadata
     // This is necessary because peers connected during DownloadingMetadata state
     // were not added to the picker (it didn't exist yet).
@@ -407,6 +475,10 @@ bool Torrent::set_metadata(const std::vector<uint8_t>& metadata) {
     // In metadata-only mode (empty save_path), we skip sending INTERESTED and bitfield
     // because we're not going to download anything - just needed the metadata
     const bool metadata_only = config_.save_path.empty();
+    
+    LOG_DEBUG("Torrent", "Initializing " + std::to_string(connections_.size()) + 
+              " existing connections with metadata" + 
+              (metadata_only ? " (metadata-only mode)" : ""));
     
     for (auto& conn : connections_) {
         if (!conn->is_connected()) continue;
@@ -553,15 +625,22 @@ void Torrent::on_peer_connected(BtPeerConnection* peer) {
 }
 
 void Torrent::on_peer_disconnected(BtPeerConnection* peer) {
+    LOG_DEBUG("Torrent", "Peer " + peer->ip() + " disconnected");
+    
     // Cancel pending requests
     if (picker_) {
         picker_->cancel_peer_requests(peer);
+        LOG_DEBUG("Torrent", "Cancelled pending requests for peer " + peer->ip());
     }
     
     // Remove from availability
     if (picker_) {
         picker_->remove_peer(peer);
     }
+    
+    // Clear metadata tracking for this peer
+    peer_metadata_size_.erase(peer);
+    peer_ut_metadata_id_.erase(peer);
 }
 
 void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
@@ -650,8 +729,12 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
 void Torrent::on_piece_received(uint32_t piece, uint32_t begin, 
                                 const std::vector<uint8_t>& data) {
     if (!picker_ || !info_) {
+        LOG_WARN("Torrent", "Received piece data but picker/info not initialized");
         return;
     }
+    
+    LOG_DEBUG("Torrent", "Block received: piece=" + std::to_string(piece) + 
+              " offset=" + std::to_string(begin) + " len=" + std::to_string(data.size()));
     
     BlockInfo block(piece, begin, static_cast<uint32_t>(data.size()));
     
@@ -669,6 +752,8 @@ void Torrent::on_piece_received(uint32_t piece, uint32_t begin,
     bool piece_complete = picker_->mark_finished(block);
     
     if (piece_complete) {
+        LOG_INFO("Torrent", "Piece " + std::to_string(piece) + " complete, writing to disk and verifying");
+        
         // Write piece to disk first, then verify hash
         auto& buffer = piece_buffers_[piece];
         write_piece_to_disk(piece, buffer);
@@ -682,6 +767,10 @@ void Torrent::on_piece_verified(uint32_t piece, bool valid) {
     if (!picker_) return;
     
     if (valid) {
+        LOG_INFO("Torrent", "Piece " + std::to_string(piece) + " verified successfully (" +
+                 std::to_string(picker_->num_have() + 1) + "/" + 
+                 std::to_string(stats_.pieces_total) + ")");
+        
         picker_->mark_have(piece);
         have_pieces_.set_bit(piece);
         
@@ -701,6 +790,7 @@ void Torrent::on_piece_verified(uint32_t piece, bool valid) {
         
         // Check if complete
         if (picker_->is_complete()) {
+            LOG_INFO("Torrent", "Download complete for '" + name_ + "'!");
             set_state(TorrentState::Seeding);
             choker_.set_seed_mode(true);
             
@@ -711,6 +801,7 @@ void Torrent::on_piece_verified(uint32_t piece, bool valid) {
         
         ++stats_.pieces_done;
     } else {
+        LOG_WARN("Torrent", "Piece " + std::to_string(piece) + " hash verification FAILED, will re-download");
         // Hash check failed - re-download
         // TODO: Reset piece state
     }
@@ -754,11 +845,18 @@ void Torrent::run_choker() {
     
     auto result = choker_.run(peer_infos);
     
+    if (!result.to_choke.empty() || !result.to_unchoke.empty()) {
+        LOG_DEBUG("Torrent", "Choker: choking " + std::to_string(result.to_choke.size()) + 
+                  " peers, unchoking " + std::to_string(result.to_unchoke.size()) + " peers");
+    }
+    
     for (auto* peer : result.to_choke) {
+        LOG_DEBUG("Torrent", "Choking peer " + peer->ip());
         peer->send_choke();
     }
     
     for (auto* peer : result.to_unchoke) {
+        LOG_DEBUG("Torrent", "Unchoking peer " + peer->ip());
         peer->send_unchoke();
     }
 }
@@ -836,6 +934,9 @@ std::vector<FileMappingInfo> Torrent::get_file_mappings() const {
 void Torrent::write_piece_to_disk(uint32_t piece, const std::vector<uint8_t>& data) {
     if (!info_) return;
     
+    LOG_DEBUG("Torrent", "Writing piece " + std::to_string(piece) + " to disk (" + 
+              std::to_string(data.size()) + " bytes)");
+    
     auto mappings = get_file_mappings();
     auto weak_self = weak_from_this();
     
@@ -864,6 +965,9 @@ void Torrent::read_piece_from_disk(uint32_t piece, BtPeerConnection* peer,
                                     uint32_t begin, uint32_t length) {
     if (!info_) return;
     
+    LOG_DEBUG("Torrent", "Reading piece " + std::to_string(piece) + " from disk for peer " + 
+              peer->ip() + " (offset=" + std::to_string(begin) + ", len=" + std::to_string(length) + ")");
+    
     auto mappings = get_file_mappings();
     auto weak_self = weak_from_this();
     uint32_t actual_length = info_->piece_size(piece);
@@ -888,6 +992,8 @@ void Torrent::read_piece_from_disk(uint32_t piece, BtPeerConnection* peer,
 
 void Torrent::verify_piece_hash(uint32_t piece) {
     if (!info_) return;
+    
+    LOG_DEBUG("Torrent", "Verifying hash for piece " + std::to_string(piece));
     
     auto mappings = get_file_mappings();
     auto weak_self = weak_from_this();
