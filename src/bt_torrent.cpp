@@ -399,6 +399,45 @@ bool Torrent::set_metadata(const std::vector<uint8_t>& metadata) {
     stats_.total_size = info_->total_size();
     stats_.pieces_total = info_->num_pieces();
     
+    // CRITICAL: Initialize existing peer connections with the new metadata
+    // This is necessary because peers connected during DownloadingMetadata state
+    // were not added to the picker (it didn't exist yet).
+    // Following standard pattern: torrent::init() -> peer_connection::init()
+    for (auto& conn : connections_) {
+        if (!conn->is_connected()) continue;
+        
+        // Update peer's bitfield size to match the torrent
+        // This is needed because peer may have sent Bitfield/HaveAll before we had metadata
+        conn->set_torrent_info(info_hash_, info_->num_pieces());
+        
+        // Get peer's pieces (now correctly sized)
+        const auto& peer_pieces = conn->peer_pieces();
+        
+        // Add peer to picker for availability tracking
+        picker_->add_peer(conn.get(), peer_pieces);
+        
+        // Check if this peer has pieces we need (either via bitfield or peer_has_all flag)
+        bool is_interesting = false;
+        if (conn->peer_has_all()) {
+            // Peer has everything, we have nothing - definitely interesting!
+            is_interesting = true;
+            LOG_DEBUG("Torrent", "Peer " + conn->ip() + " has all pieces (HaveAll)");
+        } else if (picker_->is_interesting(peer_pieces)) {
+            is_interesting = true;
+        }
+        
+        if (is_interesting) {
+            // Send INTERESTED to peer so they will (hopefully) unchoke us
+            if (!conn->am_interested()) {
+                LOG_DEBUG("Torrent", "Peer " + conn->ip() + " has pieces we need, sending interested");
+                conn->send_interested();
+            }
+        }
+        
+        // Send our bitfield to the peer (we have no pieces yet, but protocol requires it)
+        conn->send_bitfield(have_pieces_);
+    }
+    
     set_state(TorrentState::Downloading);
     
     return true;

@@ -313,6 +313,14 @@ public:
     bool peer_has_piece(uint32_t piece) const;
     
     /**
+     * @brief Check if peer sent HaveAll (has all pieces)
+     * 
+     * This is set when peer sends HaveAll message (Fast extension).
+     * Useful when metadata is not yet available to properly size the bitfield.
+     */
+    bool peer_has_all() const { return peer_has_all_; }
+    
+    /**
      * @brief Get peer's info hash (from handshake)
      */
     const BtInfoHash& peer_info_hash() const { return peer_info_hash_; }
@@ -513,6 +521,7 @@ private:
     
     // Peer's pieces
     Bitfield peer_pieces_;
+    bool peer_has_all_;  ///< True if peer sent HaveAll (used when metadata not yet available)
     
     // Buffers (single source of truth for I/O)
     ReceiveBuffer recv_buffer_;

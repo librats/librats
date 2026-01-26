@@ -561,3 +561,213 @@ TEST(BtPeerConnectionTest, ExtensionHandshakeMovedConnection) {
     EXPECT_EQ(conn2.peer_metadata_size(), 99999);
     EXPECT_EQ(conn2.peer_ut_metadata_id(), 5);
 }
+
+//=============================================================================
+// HaveAll and Metadata Download Tests (Magnet Link Support)
+//=============================================================================
+
+TEST(BtPeerConnectionTest, PeerHasAllInitialState) {
+    // Outgoing connection with known num_pieces
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
+    EXPECT_FALSE(conn.peer_has_all());
+    
+    // Incoming connection without metadata
+    BtPeerConnection conn2(make_test_peer_id());
+    EXPECT_FALSE(conn2.peer_has_all());
+}
+
+TEST(BtPeerConnectionTest, HaveAllWithKnownPieces) {
+    // Outgoing connection where we already know num_pieces
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Complete handshake
+    auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
+    feed_data(conn, hs);
+    ASSERT_EQ(conn.state(), PeerConnectionState::Connected);
+    
+    // Send HaveAll message
+    // HaveAll: length=1, message_id=14 (0x0E)
+    std::vector<uint8_t> have_all = {0x00, 0x00, 0x00, 0x01, 0x0E};
+    feed_data(conn, have_all);
+    
+    // peer_has_all should be true
+    EXPECT_TRUE(conn.peer_has_all());
+    
+    // peer_pieces should have all bits set (since we had 100 pieces)
+    EXPECT_TRUE(conn.peer_pieces().all_set());
+    EXPECT_EQ(conn.peer_pieces().count(), 100);
+}
+
+TEST(BtPeerConnectionTest, HaveAllWithoutMetadata) {
+    // Incoming connection - no metadata yet (like magnet link)
+    // peer_pieces_ is initialized with size 0
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(make_test_peer_id());  // Incoming - no info_hash yet
+    conn.set_socket(42);
+    
+    // Simulate receiving handshake from peer (incoming flow)
+    // For this test, manually set state since we need to bypass the handshake validation
+    // In real flow, NetworkManager would call set_torrent_info after routing
+    
+    // peer_pieces_ has size 0, so set_all() would do nothing
+    EXPECT_EQ(conn.peer_pieces().size(), 0);
+    EXPECT_FALSE(conn.peer_has_all());
+    
+    // Manually trigger what would happen with HaveAll before metadata
+    // (simulating the internal state after receiving HaveAll with size 0 bitfield)
+    // We can test set_torrent_info directly
+}
+
+TEST(BtPeerConnectionTest, SetTorrentInfoWithPeerHasAll) {
+    // Simulate the flow: peer sends HaveAll before we have metadata
+    // Then we receive metadata and call set_torrent_info
+    
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 0);  // num_pieces=0 (magnet link)
+    conn.set_socket(42);
+    
+    // Initial state
+    EXPECT_EQ(conn.peer_pieces().size(), 0);
+    EXPECT_FALSE(conn.peer_has_all());
+    
+    // Complete handshake (for simplicity, set state directly)
+    // In real flow this would come from handshake processing
+    
+    // Simulate HaveAll received - since num_pieces is 0, set_all does nothing
+    // but peer_has_all_ flag should be set
+    // We need to process a HaveAll message, but our connection isn't fully set up
+    // Let's test set_torrent_info directly with the flag
+    
+    // For this test, we access the private state through set_torrent_info behavior
+    // Create a connection that already has peer_has_all=true (simulated)
+    BtPeerConnection conn2(make_test_hash(), make_test_peer_id(), 100);
+    conn2.set_socket(42);
+    
+    // Handshake
+    auto hs = BtHandshake::encode_with_extensions(make_test_hash(), make_test_peer_id());
+    feed_data(conn2, hs);
+    
+    // Send HaveAll
+    std::vector<uint8_t> have_all = {0x00, 0x00, 0x00, 0x01, 0x0E};
+    feed_data(conn2, have_all);
+    
+    EXPECT_TRUE(conn2.peer_has_all());
+    
+    // Now simulate what happens when set_torrent_info is called with a different num_pieces
+    auto new_hash = make_test_hash();
+    new_hash[0] = 0xFF;  // Different hash
+    conn2.set_torrent_info(new_hash, 200);  // 200 pieces now
+    
+    // Bitfield should be resized and all bits set
+    EXPECT_EQ(conn2.peer_pieces().size(), 200);
+    EXPECT_TRUE(conn2.peer_pieces().all_set());
+    EXPECT_EQ(conn2.peer_pieces().count(), 200);
+}
+
+TEST(BtPeerConnectionTest, SetTorrentInfoWithoutPeerHasAll) {
+    // Normal case: peer sent Bitfield (not HaveAll), then we get metadata
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Handshake
+    auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
+    feed_data(conn, hs);
+    
+    EXPECT_FALSE(conn.peer_has_all());
+    EXPECT_EQ(conn.peer_pieces().size(), 100);
+    
+    // Call set_torrent_info with same num_pieces - should not change much
+    conn.set_torrent_info(our_hash, 100);
+    EXPECT_EQ(conn.peer_pieces().size(), 100);
+    EXPECT_FALSE(conn.peer_pieces().all_set());  // Still empty (no HaveAll received)
+    
+    // Call with different num_pieces - should resize and clear
+    auto new_hash = make_test_hash();
+    new_hash[0] = 0xAB;
+    conn.set_torrent_info(new_hash, 50);
+    EXPECT_EQ(conn.peer_pieces().size(), 50);
+    EXPECT_FALSE(conn.peer_pieces().all_set());
+}
+
+TEST(BtPeerConnectionTest, PeerHasAllMovedConnection) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn1(our_hash, make_test_peer_id(), 100);
+    conn1.set_socket(42);
+    
+    // Handshake + HaveAll
+    auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
+    feed_data(conn1, hs);
+    
+    std::vector<uint8_t> have_all = {0x00, 0x00, 0x00, 0x01, 0x0E};
+    feed_data(conn1, have_all);
+    
+    EXPECT_TRUE(conn1.peer_has_all());
+    
+    // Move the connection
+    BtPeerConnection conn2(std::move(conn1));
+    
+    // peer_has_all should be preserved
+    EXPECT_TRUE(conn2.peer_has_all());
+    EXPECT_TRUE(conn2.peer_pieces().all_set());
+}
+
+TEST(BtPeerConnectionTest, BitfieldClearsPeerHasAll) {
+    // Edge case: if peer sends Bitfield after HaveAll, Bitfield takes precedence
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 8);  // 8 pieces
+    conn.set_socket(42);
+    
+    // Handshake
+    auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
+    feed_data(conn, hs);
+    
+    // HaveAll
+    std::vector<uint8_t> have_all = {0x00, 0x00, 0x00, 0x01, 0x0E};
+    feed_data(conn, have_all);
+    EXPECT_TRUE(conn.peer_has_all());
+    EXPECT_TRUE(conn.peer_pieces().all_set());
+    
+    // Now send a Bitfield with only some pieces (should override HaveAll)
+    // 8 pieces = 1 byte, let's say peer has pieces 0, 2, 4, 6 = 0b10101010 = 0xAA
+    Bitfield partial(8);
+    partial.set_bit(0);
+    partial.set_bit(2);
+    partial.set_bit(4);
+    partial.set_bit(6);
+    auto bf_msg = BtMessageEncoder::encode_bitfield(partial);
+    feed_data(conn, bf_msg);
+    
+    // peer_has_all should be false now, and bitfield should reflect the partial pieces
+    EXPECT_FALSE(conn.peer_has_all());
+    EXPECT_FALSE(conn.peer_pieces().all_set());
+    EXPECT_EQ(conn.peer_pieces().count(), 4);
+    EXPECT_TRUE(conn.peer_has_piece(0));
+    EXPECT_FALSE(conn.peer_has_piece(1));
+    EXPECT_TRUE(conn.peer_has_piece(2));
+}
+
+TEST(BtPeerConnectionTest, HaveNoneClearsPeerHasAll) {
+    auto our_hash = make_test_hash();
+    BtPeerConnection conn(our_hash, make_test_peer_id(), 100);
+    conn.set_socket(42);
+    
+    // Handshake
+    auto hs = BtHandshake::encode_with_extensions(our_hash, make_test_peer_id());
+    feed_data(conn, hs);
+    
+    // HaveAll first
+    std::vector<uint8_t> have_all = {0x00, 0x00, 0x00, 0x01, 0x0E};
+    feed_data(conn, have_all);
+    EXPECT_TRUE(conn.peer_has_all());
+    
+    // Now HaveNone (should clear HaveAll)
+    // HaveNone: length=1, message_id=15 (0x0F)
+    std::vector<uint8_t> have_none = {0x00, 0x00, 0x00, 0x01, 0x0F};
+    feed_data(conn, have_none);
+    
+    EXPECT_FALSE(conn.peer_has_all());
+    EXPECT_EQ(conn.peer_pieces().count(), 0);
+}

@@ -62,6 +62,7 @@ BtPeerConnection::BtPeerConnection(const BtInfoHash& info_hash,
     , peer_choking_(true)
     , peer_interested_(false)
     , peer_pieces_(num_pieces)
+    , peer_has_all_(false)
     , recv_buffer_(8192)  // Initial receive buffer capacity
     , max_pending_requests_(BT_DEFAULT_REQUEST_QUEUE_SIZE) {
 }
@@ -86,6 +87,7 @@ BtPeerConnection::BtPeerConnection(const PeerID& our_peer_id)
     , peer_choking_(true)
     , peer_interested_(false)
     , peer_pieces_(0)  // Will be resized after set_torrent_info
+    , peer_has_all_(false)
     , recv_buffer_(8192)
     , max_pending_requests_(BT_DEFAULT_REQUEST_QUEUE_SIZE) {
 }
@@ -116,6 +118,7 @@ BtPeerConnection::BtPeerConnection(BtPeerConnection&& other) noexcept
     , peer_choking_(other.peer_choking_)
     , peer_interested_(other.peer_interested_)
     , peer_pieces_(std::move(other.peer_pieces_))
+    , peer_has_all_(other.peer_has_all_)
     , recv_buffer_(std::move(other.recv_buffer_))
     , send_buffer_(std::move(other.send_buffer_))
     , pending_requests_(std::move(other.pending_requests_))
@@ -155,6 +158,7 @@ BtPeerConnection& BtPeerConnection::operator=(BtPeerConnection&& other) noexcept
         peer_choking_ = other.peer_choking_;
         peer_interested_ = other.peer_interested_;
         peer_pieces_ = std::move(other.peer_pieces_);
+        peer_has_all_ = other.peer_has_all_;
         recv_buffer_ = std::move(other.recv_buffer_);
         send_buffer_ = std::move(other.send_buffer_);
         pending_requests_ = std::move(other.pending_requests_);
@@ -229,12 +233,23 @@ void BtPeerConnection::set_torrent_info(const BtInfoHash& info_hash, uint32_t nu
     
     // Resize peer_pieces bitfield if needed
     if (peer_pieces_.size() != num_pieces) {
-        peer_pieces_ = Bitfield(num_pieces);
+        // If peer sent HaveAll before we had metadata, set all bits now
+        if (peer_has_all_) {
+            peer_pieces_ = Bitfield(num_pieces);
+            peer_pieces_.set_all();
+            LOG_DEBUG("BtPeerConn", "Peer " + ip_ + " had sent HaveAll, setting all " + 
+                      std::to_string(num_pieces) + " pieces");
+        } else {
+            // Peer may have sent a bitfield that we partially decoded
+            // If the sizes don't match, we need to reset it
+            peer_pieces_ = Bitfield(num_pieces);
+        }
     }
     
     LOG_DEBUG("BtPeerConn", "Set torrent info for " + ip_ + 
               ": info_hash=" + info_hash_to_hex(info_hash).substr(0, 8) + 
-              "..., num_pieces=" + std::to_string(num_pieces));
+              "..., num_pieces=" + std::to_string(num_pieces) +
+              ", peer_has_all=" + (peer_has_all_ ? "yes" : "no"));
 }
 
 void BtPeerConnection::set_state(PeerConnectionState new_state) {
@@ -454,6 +469,7 @@ void BtPeerConnection::handle_message(const BtMessage& msg) {
         case BtMessageType::Bitfield:
             if (msg.bitfield) {
                 peer_pieces_ = *msg.bitfield;
+                peer_has_all_ = false;  // Explicit bitfield takes precedence over HaveAll
             }
             break;
             
@@ -473,10 +489,16 @@ void BtPeerConnection::handle_message(const BtMessage& msg) {
             break;
             
         case BtMessageType::HaveAll:
-            peer_pieces_.set_all();
+            peer_has_all_ = true;
+            // If we have metadata (num_pieces_ > 0), set all bits now
+            // Otherwise, we'll resize and set in set_torrent_info()
+            if (peer_pieces_.size() > 0) {
+                peer_pieces_.set_all();
+            }
             break;
             
         case BtMessageType::HaveNone:
+            peer_has_all_ = false;
             peer_pieces_.clear_all();
             break;
             
