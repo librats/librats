@@ -40,6 +40,20 @@ protected:
         delete_directory("test_directory/nested/deep");
         delete_directory("test_directory/nested");
         delete_directory("test_directory");
+        // Cleanup for write_file_chunk auto-directory tests
+        delete_file("test_auto_dir/nested/deep/subdir/testfile.bin");
+        delete_directory("test_auto_dir/nested/deep/subdir");
+        delete_directory("test_auto_dir/nested/deep");
+        delete_directory("test_auto_dir/nested");
+        delete_directory("test_auto_dir");
+        delete_file("torrent_download/Artist/Album/track01.flac");
+        delete_directory("torrent_download/Artist/Album");
+        delete_directory("torrent_download/Artist");
+        delete_directory("torrent_download");
+        delete_file("./2019 - Digital Hell/01. Track One.flac");
+        delete_file("./2019 - Digital Hell/02. Track Two.flac");
+        delete_file("./2019 - Digital Hell/cover.jpg");
+        delete_directory("./2019 - Digital Hell");
     }
     
     void TearDown() override {
@@ -75,6 +89,20 @@ protected:
         delete_directory("test_directory/nested/deep");
         delete_directory("test_directory/nested");
         delete_directory("test_directory");
+        // Cleanup for write_file_chunk auto-directory tests
+        delete_file("test_auto_dir/nested/deep/subdir/testfile.bin");
+        delete_directory("test_auto_dir/nested/deep/subdir");
+        delete_directory("test_auto_dir/nested/deep");
+        delete_directory("test_auto_dir/nested");
+        delete_directory("test_auto_dir");
+        delete_file("torrent_download/Artist/Album/track01.flac");
+        delete_directory("torrent_download/Artist/Album");
+        delete_directory("torrent_download/Artist");
+        delete_directory("torrent_download");
+        delete_file("./2019 - Digital Hell/01. Track One.flac");
+        delete_file("./2019 - Digital Hell/02. Track Two.flac");
+        delete_file("./2019 - Digital Hell/cover.jpg");
+        delete_directory("./2019 - Digital Hell");
     }
 };
 
@@ -749,4 +777,115 @@ TEST_F(FSTest, LargeFileOperations) {
     delete_file(zero_file);
     
     std::cout << "✓ Large file operations test passed" << std::endl;
+}
+
+//=============================================================================
+// Test: write_file_chunk creates parent directories automatically
+//=============================================================================
+
+TEST_F(FSTest, WriteFileChunkCreatesDirectories) {
+    // This test verifies that write_file_chunk automatically creates parent
+    // directories if they don't exist
+    
+    const char* nested_file = "test_auto_dir/nested/deep/subdir/testfile.bin";
+    const char test_data[] = "Hello from nested directory!";
+    const size_t data_size = strlen(test_data);
+    
+    // Ensure directories don't exist beforehand
+    EXPECT_FALSE(directory_exists("test_auto_dir"));
+    EXPECT_FALSE(file_exists(nested_file));
+    
+    // Write chunk - this should create all parent directories
+    bool result = write_file_chunk(nested_file, 0, test_data, data_size);
+    EXPECT_TRUE(result) << "write_file_chunk should create directories and succeed";
+    
+    // Verify file was created
+    EXPECT_TRUE(file_exists(nested_file));
+    
+    // Verify directories were created
+    EXPECT_TRUE(directory_exists("test_auto_dir"));
+    EXPECT_TRUE(directory_exists("test_auto_dir/nested"));
+    EXPECT_TRUE(directory_exists("test_auto_dir/nested/deep"));
+    EXPECT_TRUE(directory_exists("test_auto_dir/nested/deep/subdir"));
+    
+    // Verify data was written correctly
+    char buffer[64] = {0};
+    EXPECT_TRUE(read_file_chunk(nested_file, 0, buffer, data_size));
+    EXPECT_STREQ(buffer, test_data);
+    
+    // Test writing another chunk at offset
+    const char more_data[] = " More data!";
+    EXPECT_TRUE(write_file_chunk(nested_file, data_size, more_data, strlen(more_data)));
+    
+    // Verify combined content
+    int64_t file_size = get_file_size(nested_file);
+    EXPECT_EQ(file_size, static_cast<int64_t>(data_size + strlen(more_data)));
+    
+    // Clean up
+    delete_file(nested_file);
+    delete_directory("test_auto_dir/nested/deep/subdir");
+    delete_directory("test_auto_dir/nested/deep");
+    delete_directory("test_auto_dir/nested");
+    delete_directory("test_auto_dir");
+    
+    std::cout << "✓ write_file_chunk creates directories test passed" << std::endl;
+}
+
+TEST_F(FSTest, WriteFileChunkWithRelativePath) {
+    // Test with relative path containing directory separators
+    const char* rel_file = "torrent_download/Artist/Album/track01.flac";
+    const char test_data[] = "Fake audio data";
+    
+    // Write chunk
+    bool result = write_file_chunk(rel_file, 0, test_data, strlen(test_data));
+    EXPECT_TRUE(result) << "Should create directories for relative path";
+    
+    // Verify
+    EXPECT_TRUE(file_exists(rel_file));
+    EXPECT_TRUE(directory_exists("torrent_download/Artist/Album"));
+    
+    // Clean up
+    delete_file(rel_file);
+    delete_directory("torrent_download/Artist/Album");
+    delete_directory("torrent_download/Artist");
+    delete_directory("torrent_download");
+    
+    std::cout << "✓ write_file_chunk with relative path test passed" << std::endl;
+}
+
+TEST_F(FSTest, WriteFileChunkMultipleTorrentFiles) {
+    // Simulate writing multiple files from a multi-file torrent
+    // This is the real-world use case that triggered the bug
+    
+    const char* file1 = "./2019 - Digital Hell/01. Track One.flac";
+    const char* file2 = "./2019 - Digital Hell/02. Track Two.flac";
+    const char* file3 = "./2019 - Digital Hell/cover.jpg";
+    
+    const char data1[] = "FLAC data 1";
+    const char data2[] = "FLAC data 2";
+    const char data3[] = "JPEG data";
+    
+    // Write all chunks - should create directory once
+    EXPECT_TRUE(write_file_chunk(file1, 0, data1, strlen(data1)));
+    EXPECT_TRUE(write_file_chunk(file2, 0, data2, strlen(data2)));
+    EXPECT_TRUE(write_file_chunk(file3, 0, data3, strlen(data3)));
+    
+    // All files should exist
+    EXPECT_TRUE(file_exists(file1));
+    EXPECT_TRUE(file_exists(file2));
+    EXPECT_TRUE(file_exists(file3));
+    
+    // Verify data
+    char buf[32];
+    EXPECT_TRUE(read_file_chunk(file1, 0, buf, strlen(data1)));
+    buf[strlen(data1)] = 0;
+    EXPECT_STREQ(buf, data1);
+    
+    // Clean up
+    delete_file(file1);
+    delete_file(file2);
+    delete_file(file3);
+    delete_directory("./2019 - Digital Hell");
+    
+    std::cout << "✓ Multi-file torrent simulation test passed" << std::endl;
 } 

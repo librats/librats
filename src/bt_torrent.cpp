@@ -842,14 +842,12 @@ void Torrent::on_piece_received(uint32_t piece, uint32_t begin,
     bool piece_complete = picker_->mark_finished(block);
     
     if (piece_complete) {
-        LOG_INFO("Torrent", "Piece " + std::to_string(piece) + " complete, writing to disk and verifying");
+        LOG_INFO("Torrent", "Piece " + std::to_string(piece) + " complete, writing to disk");
         
-        // Write piece to disk first, then verify hash
+        // Write piece to disk, then verify hash in callback
         auto& buffer = piece_buffers_[piece];
         write_piece_to_disk(piece, buffer);
-        
-        // Verify hash asynchronously (callback will call on_piece_verified)
-        verify_piece_hash(piece);
+        // Note: verify_piece_hash is now called from write_piece_to_disk callback after successful write
     }
 }
 
@@ -1064,8 +1062,13 @@ void Torrent::write_piece_to_disk(uint32_t piece, const std::vector<uint8_t>& da
             auto self = weak_self.lock();
             if (!self) return;
             
-            if (!success) {
+            if (success) {
+                // Write successful - now verify hash
+                LOG_DEBUG("Torrent", "Piece " + std::to_string(piece) + " written, verifying hash");
+                self->verify_piece_hash(piece);
+            } else {
                 // Handle write error
+                LOG_ERROR("Torrent", "Failed to write piece " + std::to_string(piece) + " to disk");
                 if (self->on_error_) {
                     self->on_error_(self.get(), "Failed to write piece " + std::to_string(piece));
                 }

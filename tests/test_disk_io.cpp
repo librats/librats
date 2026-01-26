@@ -839,3 +839,245 @@ TEST_F(DiskIOTest, MixedReadWriteOperations) {
     EXPECT_EQ(writes_completed, num_ops / 2);
     EXPECT_EQ(reads_completed, num_ops / 2);
 }
+
+//=============================================================================
+// Test: Write creates parent directories automatically
+//=============================================================================
+
+TEST_F(DiskIOTest, WriteCreatesNestedDirectories) {
+    // This test verifies the fix for the bug where torrent downloads failed
+    // because parent directories didn't exist (e.g., "./Album Name/track.flac")
+    
+    // Nested path: test_dir_/Artist/Album/track.flac
+    std::string nested_path = "Artist/Album/track.flac";
+    std::string full_path = test_dir_ + "/" + nested_path;
+    
+    // Ensure directories don't exist
+    EXPECT_FALSE(directory_exists((test_dir_ + "/Artist").c_str()));
+    EXPECT_FALSE(directory_exists((test_dir_ + "/Artist/Album").c_str()));
+    EXPECT_FALSE(file_exists(full_path.c_str()));
+    
+    std::vector<FileMappingInfo> mappings;
+    FileMappingInfo mapping;
+    mapping.path = nested_path;
+    mapping.length = 256;
+    mapping.torrent_offset = 0;
+    mappings.push_back(mapping);
+    
+    // Write data - this should create directories automatically
+    std::vector<uint8_t> data(256);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<uint8_t>('A' + (i % 26));
+    }
+    
+    std::atomic<bool> callback_called(false);
+    std::atomic<bool> write_success(false);
+    
+    DiskIO::instance().async_write_block(
+        test_dir_,
+        mappings,
+        0, 256, 0, data,
+        [&](bool success) {
+            write_success = success;
+            callback_called = true;
+        }
+    );
+    
+    // Wait for callback
+    auto start = std::chrono::steady_clock::now();
+    while (!callback_called && 
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    EXPECT_TRUE(callback_called);
+    EXPECT_TRUE(write_success) << "Write should succeed with auto-created directories";
+    
+    // Verify directories and file were created
+    EXPECT_TRUE(directory_exists((test_dir_ + "/Artist").c_str()));
+    EXPECT_TRUE(directory_exists((test_dir_ + "/Artist/Album").c_str()));
+    EXPECT_TRUE(file_exists(full_path.c_str()));
+    
+    // Verify data
+    std::vector<uint8_t> read_buffer(256);
+    EXPECT_TRUE(read_file_chunk(full_path.c_str(), 0, read_buffer.data(), 256));
+    EXPECT_EQ(data, read_buffer);
+    
+    // Cleanup
+    delete_file(full_path.c_str());
+    delete_directory((test_dir_ + "/Artist/Album").c_str());
+    delete_directory((test_dir_ + "/Artist").c_str());
+}
+
+//=============================================================================
+// Test: Write-then-hash sequence (simulates torrent piece verification)
+//=============================================================================
+
+TEST_F(DiskIOTest, WriteThenHashSequence) {
+    // This test simulates the actual torrent flow:
+    // 1. Receive piece data from peer
+    // 2. Write to disk
+    // 3. Hash the piece and verify against expected hash
+    // 
+    // The fix ensures hash verification happens AFTER write completes
+    
+    std::string file_path = test_dir_ + "/piece_verify.bin";
+    const size_t piece_size = 16384;  // Standard BitTorrent piece
+    
+    std::vector<FileMappingInfo> mappings;
+    FileMappingInfo mapping;
+    mapping.path = "piece_verify.bin";
+    mapping.length = piece_size;
+    mapping.torrent_offset = 0;
+    mappings.push_back(mapping);
+    
+    // Create data with known hash
+    std::vector<uint8_t> piece_data(piece_size);
+    for (size_t i = 0; i < piece_size; ++i) {
+        piece_data[i] = static_cast<uint8_t>(i % 256);
+    }
+    
+    std::string expected_hash = SHA1::hash_bytes(piece_data);
+    
+    std::atomic<bool> write_done(false);
+    std::atomic<bool> hash_done(false);
+    std::atomic<bool> write_ok(false);
+    std::atomic<bool> hash_ok(false);
+    std::string actual_hash;
+    std::mutex hash_mutex;
+    
+    // Step 1: Write piece to disk
+    DiskIO::instance().async_write_block(
+        test_dir_,
+        mappings,
+        0, static_cast<uint32_t>(piece_size), 0, piece_data,
+        [&](bool success) {
+            write_ok = success;
+            write_done = true;
+            
+            // Step 2: Hash piece AFTER write completes (mimics fixed bt_torrent behavior)
+            if (success) {
+                DiskIO::instance().async_hash_piece(
+                    test_dir_,
+                    mappings,
+                    0, static_cast<uint32_t>(piece_size), static_cast<uint32_t>(piece_size),
+                    [&](bool hash_success, const std::string& hash) {
+                        std::lock_guard<std::mutex> lock(hash_mutex);
+                        hash_ok = hash_success;
+                        actual_hash = hash;
+                        hash_done = true;
+                    }
+                );
+            } else {
+                hash_done = true;  // Skip hash on write failure
+            }
+        }
+    );
+    
+    // Wait for both operations
+    auto start = std::chrono::steady_clock::now();
+    while ((!write_done || !hash_done) && 
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    EXPECT_TRUE(write_done);
+    EXPECT_TRUE(write_ok) << "Write should succeed";
+    
+    EXPECT_TRUE(hash_done);
+    EXPECT_TRUE(hash_ok) << "Hash should succeed after write";
+    
+    std::lock_guard<std::mutex> lock(hash_mutex);
+    EXPECT_EQ(actual_hash, expected_hash) 
+        << "Hash after write should match expected. "
+        << "Expected: " << expected_hash << ", Actual: " << actual_hash;
+}
+
+//=============================================================================
+// Test: Multi-file torrent write with nested directories
+//=============================================================================
+
+TEST_F(DiskIOTest, MultiFileTorrentWithNestedDirs) {
+    // Simulates downloading a multi-file torrent like:
+    // Album Name/
+    //   01. Track One.flac
+    //   02. Track Two.flac
+    //   cover.jpg
+    
+    std::vector<std::string> file_paths = {
+        "Album Name/01. Track One.flac",
+        "Album Name/02. Track Two.flac",
+        "Album Name/cover.jpg"
+    };
+    
+    std::vector<size_t> file_sizes = {1000, 1200, 500};
+    
+    // Calculate total size and create mappings
+    size_t total_size = 0;
+    std::vector<FileMappingInfo> mappings;
+    for (size_t i = 0; i < file_paths.size(); ++i) {
+        FileMappingInfo mapping;
+        mapping.path = file_paths[i];
+        mapping.length = file_sizes[i];
+        mapping.torrent_offset = total_size;
+        mappings.push_back(mapping);
+        total_size += file_sizes[i];
+    }
+    
+    // Create test data
+    std::vector<uint8_t> data(total_size);
+    for (size_t i = 0; i < total_size; ++i) {
+        data[i] = static_cast<uint8_t>(i % 256);
+    }
+    
+    std::atomic<bool> callback_called(false);
+    std::atomic<bool> write_success(false);
+    
+    // Write all data as one piece (spanning all files)
+    DiskIO::instance().async_write_block(
+        test_dir_,
+        mappings,
+        0, static_cast<uint32_t>(total_size), 0, data,
+        [&](bool success) {
+            write_success = success;
+            callback_called = true;
+        }
+    );
+    
+    // Wait for callback
+    auto start = std::chrono::steady_clock::now();
+    while (!callback_called && 
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(10)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    
+    EXPECT_TRUE(callback_called);
+    EXPECT_TRUE(write_success) << "Multi-file write should succeed";
+    
+    // Verify directory was created
+    EXPECT_TRUE(directory_exists((test_dir_ + "/Album Name").c_str()));
+    
+    // Verify all files exist and have correct content
+    size_t offset = 0;
+    for (size_t i = 0; i < file_paths.size(); ++i) {
+        std::string full_path = test_dir_ + "/" + file_paths[i];
+        EXPECT_TRUE(file_exists(full_path.c_str())) 
+            << "File should exist: " << file_paths[i];
+        
+        std::vector<uint8_t> file_content(file_sizes[i]);
+        EXPECT_TRUE(read_file_chunk(full_path.c_str(), 0, file_content.data(), file_sizes[i]));
+        
+        // Verify content
+        for (size_t j = 0; j < file_sizes[i]; ++j) {
+            EXPECT_EQ(file_content[j], data[offset + j]) 
+                << "Content mismatch in " << file_paths[i] << " at byte " << j;
+        }
+        offset += file_sizes[i];
+    }
+    
+    // Cleanup
+    for (const auto& path : file_paths) {
+        delete_file((test_dir_ + "/" + path).c_str());
+    }
+    delete_directory((test_dir_ + "/Album Name").c_str());
+}
