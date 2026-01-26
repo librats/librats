@@ -431,6 +431,26 @@ void PiecePicker::cancel_peer_requests(void* peer_id) {
     }
 }
 
+void PiecePicker::abort_download(const BlockInfo& block, void* peer_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto* dp = find_downloading(block.piece_index);
+    if (!dp) return;
+    
+    // Find the block within the piece
+    uint32_t block_index = block.offset / BT_BLOCK_SIZE;
+    if (block_index >= dp->blocks.size()) return;
+    
+    auto& b = dp->blocks[block_index];
+    
+    // Only abort if it matches the peer (or peer_id is null)
+    if (b.state == BlockState::Requested && 
+        (peer_id == nullptr || b.peer == peer_id)) {
+        b.state = BlockState::None;
+        b.peer = nullptr;
+    }
+}
+
 BlockState PiecePicker::block_state(const BlockInfo& block) const {
     std::lock_guard<std::mutex> lock(mutex_);
     

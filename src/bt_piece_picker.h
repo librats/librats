@@ -296,6 +296,15 @@ public:
     void cancel_peer_requests(void* peer_id);
     
     /**
+     * @brief Abort download of a specific block (e.g., when peer rejects request)
+     * @param block Block to abort
+     * @param peer_id Peer that was downloading the block (optional)
+     * 
+     * Marks the block as available for re-request from another peer.
+     */
+    void abort_download(const BlockInfo& block, void* peer_id = nullptr);
+    
+    /**
      * @brief Get state of a specific block
      */
     BlockState block_state(const BlockInfo& block) const;

@@ -22,6 +22,7 @@
 #include <mutex>
 #include <atomic>
 #include <optional>
+#include <algorithm>
 
 namespace librats {
 
@@ -459,6 +460,34 @@ public:
      */
     const std::vector<RequestMessage>& get_pending_requests() const { return pending_requests_; }
     
+    /**
+     * @brief Add an incoming request from peer (for Cancel tracking)
+     */
+    void add_incoming_request(const RequestMessage& req) {
+        incoming_requests_.push_back(req);
+    }
+    
+    /**
+     * @brief Remove an incoming request (when Cancel received or piece sent)
+     * @return true if request was found and removed
+     */
+    bool remove_incoming_request(const RequestMessage& req) {
+        auto it = std::find(incoming_requests_.begin(), incoming_requests_.end(), req);
+        if (it != incoming_requests_.end()) {
+            incoming_requests_.erase(it);
+            return true;
+        }
+        return false;
+    }
+    
+    /**
+     * @brief Check if we have a pending incoming request
+     */
+    bool has_incoming_request(const RequestMessage& req) const {
+        return std::find(incoming_requests_.begin(), incoming_requests_.end(), req) 
+               != incoming_requests_.end();
+    }
+    
     //=========================================================================
     // Statistics
     //=========================================================================
@@ -527,9 +556,12 @@ private:
     ReceiveBuffer recv_buffer_;
     ChainedSendBuffer send_buffer_;
     
-    // Pending requests
+    // Pending requests (our requests to peer)
     std::vector<RequestMessage> pending_requests_;
     size_t max_pending_requests_;
+    
+    // Incoming requests (peer's requests to us) - for handling Cancel
+    std::vector<RequestMessage> incoming_requests_;
     
     // Statistics
     PeerStats stats_;

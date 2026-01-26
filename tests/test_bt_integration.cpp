@@ -1155,3 +1155,85 @@ TEST(BtIntegrationTest, CleanupOnPeerDisconnect) {
     SUCCEED() << "Peer disconnection cleanup completed successfully, "
               << "had " << requests_before << " pending requests";
 }
+
+//=============================================================================
+// Integration Test: Cancel message handling
+//=============================================================================
+
+TEST(BtIntegrationTest, CancelMessageRemovesIncomingRequest) {
+    // This test verifies that when a peer sends CANCEL, we remove their
+    // request from our incoming queue (to avoid sending piece data).
+    
+    // Create a peer connection
+    BtInfoHash hash;
+    std::fill(hash.begin(), hash.end(), 0x42);
+    PeerID our_peer_id, remote_peer_id;
+    std::fill(our_peer_id.begin(), our_peer_id.end(), 0xAA);
+    std::fill(remote_peer_id.begin(), remote_peer_id.end(), 0xBB);
+    
+    BtPeerConnection conn(hash, our_peer_id, 100);
+    conn.set_address("192.168.1.100", 6881);
+    conn.set_socket(42);
+    
+    // Complete handshake
+    auto remote_handshake = BtHandshake::encode_with_extensions(hash, remote_peer_id);
+    feed_data(conn, remote_handshake);
+    ASSERT_TRUE(conn.is_connected());
+    
+    // Simulate an incoming request from peer
+    RequestMessage req(5, 0, 16384);  // piece=5, offset=0, len=16KB
+    conn.add_incoming_request(req);
+    EXPECT_TRUE(conn.has_incoming_request(req));
+    
+    // Now simulate Cancel - should remove the request
+    bool removed = conn.remove_incoming_request(req);
+    EXPECT_TRUE(removed);
+    EXPECT_FALSE(conn.has_incoming_request(req));
+    
+    // Removing again should return false
+    removed = conn.remove_incoming_request(req);
+    EXPECT_FALSE(removed);
+}
+
+//=============================================================================
+// Integration Test: RejectRequest handling (Fast Extension)
+//=============================================================================
+
+TEST(BtIntegrationTest, AbortDownloadOnReject) {
+    // When peer sends REJECT_REQUEST (Fast Extension), we should mark the block
+    // as available for re-request from another peer.
+    
+    // Create a piece picker
+    PiecePicker picker(10, 65536, 16384);  // 10 pieces, 64KB each, 16KB blocks
+    
+    // Create a mock peer
+    int mock_peer1 = 1;
+    int mock_peer2 = 2;
+    
+    // Peer 1 has all pieces
+    Bitfield bf(10);
+    bf.set_all();
+    picker.add_peer(&mock_peer1, bf);
+    picker.add_peer(&mock_peer2, bf);
+    
+    // Pick a block from peer 1
+    auto blocks = picker.pick_pieces(bf, 1, &mock_peer1);
+    ASSERT_FALSE(blocks.empty());
+    
+    BlockInfo picked = blocks[0].block;
+    
+    // Verify block is now in Requested state for peer1
+    EXPECT_EQ(picker.block_state(picked), BlockState::Requested);
+    
+    // Simulate rejection - abort download
+    picker.abort_download(picked, &mock_peer1);
+    
+    // Block should be available again (state = None)
+    EXPECT_EQ(picker.block_state(picked), BlockState::None);
+    
+    // Now we can pick it again (possibly from another peer)
+    auto blocks2 = picker.pick_pieces(bf, 1, &mock_peer2);
+    ASSERT_FALSE(blocks2.empty());
+    EXPECT_EQ(blocks2[0].block.piece_index, picked.piece_index);
+    EXPECT_EQ(blocks2[0].block.offset, picked.offset);
+}

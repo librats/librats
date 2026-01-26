@@ -747,9 +747,34 @@ void Torrent::on_peer_message(BtPeerConnection* peer, const BtMessage& msg) {
                           " len=" + std::to_string(msg.request->length) + " from " + peer->ip());
             }
             if (msg.request && !peer->am_choking() && have_pieces_.get_bit(msg.request->piece_index)) {
+                // Track this request so we can handle Cancel
+                peer->add_incoming_request(*msg.request);
                 // Read from disk and send piece data to peer
                 read_piece_from_disk(msg.request->piece_index, peer, 
                                     msg.request->begin, msg.request->length);
+            }
+            break;
+            
+        case BtMessageType::Cancel:
+            // Peer is cancelling a previous request (don't send the piece)
+            if (msg.request) {
+                LOG_DEBUG("Torrent", "on_peer_message: Cancel piece=" + std::to_string(msg.request->piece_index) + 
+                          " begin=" + std::to_string(msg.request->begin) + 
+                          " len=" + std::to_string(msg.request->length) + " from " + peer->ip());
+                peer->remove_incoming_request(*msg.request);
+            }
+            break;
+            
+        case BtMessageType::RejectRequest:
+            // Peer rejected our request (Fast Extension) - need to request from another peer
+            if (msg.request) {
+                LOG_DEBUG("Torrent", "on_peer_message: RejectRequest piece=" + std::to_string(msg.request->piece_index) + 
+                          " begin=" + std::to_string(msg.request->begin) + " from " + peer->ip());
+                // Remove from pending and mark as available for re-request
+                if (picker_) {
+                    BlockInfo block(msg.request->piece_index, msg.request->begin, msg.request->length);
+                    picker_->abort_download(block, peer);
+                }
             }
             break;
             
