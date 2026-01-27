@@ -15,6 +15,7 @@
 #include "bt_peer_connection.h"
 #include "bt_choker.h"
 #include "disk_io.h"
+#include "socket.h" // For Peer struct
 
 #include <memory>
 #include <vector>
@@ -153,6 +154,21 @@ public:
     /// Callback for metadata received (for magnet links)
     using MetadataCallback = std::function<void(Torrent*, bool success)>;
     
+    /// Callback for progress updates (downloaded bytes, total bytes, percentage)
+    using ProgressCallback = std::function<void(uint64_t downloaded, uint64_t total, double percentage)>;
+    
+    /// Callback for torrent completion (name)
+    using TorrentCompleteCallback = std::function<void(const std::string& name)>;
+    
+    /// Callback for metadata received with TorrentInfo (for rats-search compatibility)
+    using MetadataCompleteCallback = std::function<void(const TorrentInfo& info)>;
+    
+    /// Callback for peer connected (peer info)
+    using PeerConnectedCallback = std::function<void(const Peer& peer)>;
+    
+    /// Callback for peer disconnected (peer info)
+    using PeerDisconnectedCallback = std::function<void(const Peer& peer)>;
+    
     //=========================================================================
     // Construction
     //=========================================================================
@@ -265,9 +281,34 @@ public:
     const TorrentInfo* info() const { return info_.get(); }
     
     /**
+     * @brief Get torrent info reference (for rats-search compatibility)
+     * @note Returns a static empty TorrentInfo if metadata not available
+     */
+    const TorrentInfo& get_torrent_info() const;
+    
+    /**
      * @brief Get save path
      */
     const std::string& save_path() const { return config_.save_path; }
+    
+    //=========================================================================
+    // Progress and Speed Accessors (rats-search compatibility)
+    //=========================================================================
+    
+    /**
+     * @brief Get total downloaded bytes
+     */
+    uint64_t downloaded_bytes() const;
+    
+    /**
+     * @brief Get download progress as percentage (0-100)
+     */
+    double progress_percentage() const;
+    
+    /**
+     * @brief Get current download speed in bytes/sec
+     */
+    double download_speed() const;
     
     //=========================================================================
     // Statistics
@@ -367,6 +408,13 @@ public:
     void set_complete_callback(CompleteCallback cb) { on_complete_ = std::move(cb); }
     void set_error_callback(ErrorCallback cb) { on_error_ = std::move(cb); }
     void set_metadata_callback(MetadataCallback cb) { on_metadata_received_ = std::move(cb); }
+    
+    // Extended callbacks (rats-search compatibility)
+    void set_progress_callback(ProgressCallback cb) { on_progress_ = std::move(cb); }
+    void set_torrent_complete_callback(TorrentCompleteCallback cb) { on_torrent_complete_ = std::move(cb); }
+    void set_metadata_complete_callback(MetadataCompleteCallback cb) { on_metadata_complete_ = std::move(cb); }
+    void set_peer_connected_callback(PeerConnectedCallback cb) { on_peer_connected_ext_ = std::move(cb); }
+    void set_peer_disconnected_callback(PeerDisconnectedCallback cb) { on_peer_disconnected_ext_ = std::move(cb); }
     
     //=========================================================================
     // Metadata (for magnet links)
@@ -475,6 +523,13 @@ private:
     CompleteCallback on_complete_;
     ErrorCallback on_error_;
     MetadataCallback on_metadata_received_;
+    
+    // Extended callbacks (rats-search compatibility)
+    ProgressCallback on_progress_;
+    TorrentCompleteCallback on_torrent_complete_;
+    MetadataCompleteCallback on_metadata_complete_;
+    PeerConnectedCallback on_peer_connected_ext_;
+    PeerDisconnectedCallback on_peer_disconnected_ext_;
     
     // Metadata exchange (for magnet links)
     std::vector<uint8_t> metadata_buffer_;

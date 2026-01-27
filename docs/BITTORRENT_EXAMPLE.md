@@ -43,11 +43,11 @@ if (client.enable_bittorrent(6881)) {
 auto torrent = client.add_torrent("example.torrent", "./downloads/");
 if (torrent) {
     const auto& info = torrent->get_torrent_info();
-    std::cout << "Added torrent: " << info.get_name() << std::endl;
-    std::cout << "Total size: " << info.get_total_length() << " bytes" << std::endl;
-    std::cout << "Piece length: " << info.get_piece_length() << " bytes" << std::endl;
+    std::cout << "Added torrent: " << info.name() << std::endl;
+    std::cout << "Total size: " << info.total_size() << " bytes" << std::endl;
+    std::cout << "Piece length: " << info.piece_length() << " bytes" << std::endl;
     std::cout << "Number of pieces: " << info.get_num_pieces() << std::endl;
-    std::cout << "Files: " << info.get_files().size() << std::endl;
+    std::cout << "Files: " << info.files().files().size() << std::endl;
 } else {
     std::cerr << "Failed to add torrent" << std::endl;
 }
@@ -81,10 +81,10 @@ auto torrent = client.add_torrent_by_hash(info_hash_hex, "./downloads/");
 client.get_torrent_metadata(info_hash_hex, 
     [](const librats::TorrentInfo& info, bool success, const std::string& error) {
         if (success) {
-            std::cout << "Torrent name: " << info.get_name() << std::endl;
-            std::cout << "Total size: " << info.get_total_length() << " bytes" << std::endl;
+            std::cout << "Torrent name: " << info.name() << std::endl;
+            std::cout << "Total size: " << info.total_size() << " bytes" << std::endl;
             std::cout << "Files:" << std::endl;
-            for (const auto& file : info.get_files()) {
+            for (const auto& file : info.files().files()) {
                 std::cout << "  - " << file.path << " (" << file.length << " bytes)" << std::endl;
             }
         } else {
@@ -129,7 +129,7 @@ if (torrent) {
 ```cpp
 if (torrent) {
     // Progress percentage (0.0 - 100.0)
-    double progress = torrent->get_progress_percentage();
+    double progress = torrent->progress_percentage();
     std::cout << "Progress: " << progress << "%" << std::endl;
     
     // Piece statistics
@@ -138,13 +138,13 @@ if (torrent) {
     std::cout << "Pieces: " << completed << "/" << total << std::endl;
     
     // Download/upload statistics
-    uint64_t downloaded = torrent->get_downloaded_bytes();
+    uint64_t downloaded = torrent->downloaded_bytes();
     uint64_t uploaded = torrent->get_uploaded_bytes();
     std::cout << "Downloaded: " << downloaded << " bytes" << std::endl;
     std::cout << "Uploaded: " << uploaded << " bytes" << std::endl;
     
     // Speed statistics (bytes per second)
-    double dl_speed = torrent->get_download_speed();
+    double dl_speed = torrent->download_speed();
     double ul_speed = torrent->get_upload_speed();
     std::cout << "Download speed: " << (dl_speed / 1024) << " KB/s" << std::endl;
     std::cout << "Upload speed: " << (ul_speed / 1024) << " KB/s" << std::endl;
@@ -205,15 +205,15 @@ std::cout << "Managing " << all_torrents.size() << " torrents:" << std::endl;
 
 for (const auto& t : all_torrents) {
     const auto& info = t->get_torrent_info();
-    std::cout << "- " << info.get_name() 
+    std::cout << "- " << info.name() 
               << " (" << std::fixed << std::setprecision(1) 
-              << t->get_progress_percentage() << "%)" 
+              << t->progress_percentage() << "%)" 
               << " Peers: " << t->get_peer_count()
               << std::endl;
 }
 
 // Get a specific torrent by info hash
-const auto& info_hash = torrent1->get_torrent_info().get_info_hash();
+const auto& info_hash = torrent1->get_torrent_info().info_hash();
 auto found_torrent = client.get_torrent(info_hash);
 
 // Remove a torrent
@@ -288,10 +288,10 @@ int main() {
     
     const auto& info = torrent->get_torrent_info();
     std::cout << "\nTorrent Information:" << std::endl;
-    std::cout << "  Name: " << info.get_name() << std::endl;
-    std::cout << "  Size: " << format_bytes(info.get_total_length()) << std::endl;
+    std::cout << "  Name: " << info.name() << std::endl;
+    std::cout << "  Size: " << format_bytes(info.total_size()) << std::endl;
     std::cout << "  Pieces: " << info.get_num_pieces() << std::endl;
-    std::cout << "  Files: " << info.get_files().size() << std::endl;
+    std::cout << "  Files: " << info.files().files().size() << std::endl;
     
     // Set up callbacks
     torrent->set_progress_callback([](uint64_t downloaded, uint64_t total, double percentage) {
@@ -320,12 +320,12 @@ int main() {
         // Print detailed stats every 5 seconds
         std::cout << "\n--- Status Update ---" << std::endl;
         std::cout << "Progress: " << std::fixed << std::setprecision(1) 
-                  << torrent->get_progress_percentage() << "%" << std::endl;
+                  << torrent->progress_percentage() << "%" << std::endl;
         std::cout << "Pieces: " << torrent->get_completed_pieces() 
                   << "/" << info.get_num_pieces() << std::endl;
-        std::cout << "Downloaded: " << format_bytes(torrent->get_downloaded_bytes()) << std::endl;
+        std::cout << "Downloaded: " << format_bytes(torrent->downloaded_bytes()) << std::endl;
         std::cout << "Download speed: " << std::fixed << std::setprecision(1) 
-                  << (torrent->get_download_speed() / 1024) << " KB/s" << std::endl;
+                  << (torrent->download_speed() / 1024) << " KB/s" << std::endl;
         std::cout << "Upload speed: " << std::fixed << std::setprecision(1) 
                   << (torrent->get_upload_speed() / 1024) << " KB/s" << std::endl;
         std::cout << "Peers: " << torrent->get_peer_count() << std::endl;
@@ -390,8 +390,8 @@ int main() {
                 return;
             }
             
-            std::cout << "Found torrent: " << info.get_name() << std::endl;
-            std::cout << "Size: " << info.get_total_length() << " bytes" << std::endl;
+            std::cout << "Found torrent: " << info.name() << std::endl;
+            std::cout << "Size: " << info.total_size() << " bytes" << std::endl;
             
             // Now add the torrent for download
             auto torrent = client.add_torrent(info, "./downloads/");
@@ -439,11 +439,11 @@ int main() {
 | `is_complete()` | Check if download is complete |
 | `pause()` | Pause the download |
 | `resume()` | Resume the download |
-| `get_progress_percentage()` | Get progress (0.0 - 100.0) |
+| `progress_percentage()` | Get progress (0.0 - 100.0) |
 | `get_completed_pieces()` | Get number of completed pieces |
-| `get_downloaded_bytes()` | Get total downloaded bytes |
+| `downloaded_bytes()` | Get total downloaded bytes |
 | `get_uploaded_bytes()` | Get total uploaded bytes |
-| `get_download_speed()` | Get download speed (bytes/sec) |
+| `download_speed()` | Get download speed (bytes/sec) |
 | `get_upload_speed()` | Get upload speed (bytes/sec) |
 | `get_peer_count()` | Get number of connected peers |
 | `get_torrent_info()` | Get TorrentInfo object |
@@ -457,12 +457,12 @@ int main() {
 
 | Method | Description |
 |--------|-------------|
-| `get_name()` | Get torrent name |
-| `get_total_length()` | Get total size in bytes |
-| `get_piece_length()` | Get piece size in bytes |
+| `name()` | Get torrent name |
+| `total_size()` | Get total size in bytes |
+| `piece_length()` | Get piece size in bytes |
 | `get_num_pieces()` | Get number of pieces |
-| `get_files()` | Get list of files |
-| `get_info_hash()` | Get 20-byte info hash |
+| `files().files()` | Get list of files |
+| `info_hash()` | Get 20-byte info hash |
 | `get_announce()` | Get primary tracker URL |
 | `get_announce_list()` | Get list of tracker URLs |
 | `is_single_file()` | Check if single file torrent |

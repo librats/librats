@@ -210,6 +210,13 @@ void Torrent::stop() {
     on_error_ = nullptr;
     on_metadata_received_ = nullptr;
     
+    // Extended callbacks (rats-search compatibility)
+    on_progress_ = nullptr;
+    on_torrent_complete_ = nullptr;
+    on_metadata_complete_ = nullptr;
+    on_peer_connected_ext_ = nullptr;
+    on_peer_disconnected_ext_ = nullptr;
+    
     LOG_INFO("Torrent", "Torrent '" + name_ + "' stopped");
 }
 
@@ -290,6 +297,36 @@ bool Torrent::has_metadata() const {
 
 bool Torrent::has_metadata_unlocked() const {
     return info_ != nullptr && info_->has_metadata();
+}
+
+//=============================================================================
+// Accessor Methods (rats-search compatibility)
+//=============================================================================
+
+// Static empty TorrentInfo for when metadata is not available
+static TorrentInfo s_empty_torrent_info;
+
+const TorrentInfo& Torrent::get_torrent_info() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (info_) {
+        return *info_;
+    }
+    return s_empty_torrent_info;
+}
+
+uint64_t Torrent::downloaded_bytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return stats_.bytes_done;
+}
+
+double Torrent::progress_percentage() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return stats_.progress * 100.0;
+}
+
+double Torrent::download_speed() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<double>(stats_.download_rate);
 }
 
 void Torrent::set_state(TorrentState new_state) {
@@ -674,6 +711,12 @@ void Torrent::on_peer_connected(BtPeerConnection* peer) {
     LOG_DEBUG("Torrent", "Peer " + peer->ip() + " connected, has_metadata=" + 
               (has_metadata_unlocked() ? "true" : "false"));
     
+    // Extended callback (rats-search compatibility)
+    if (on_peer_connected_ext_) {
+        Peer p(peer->ip(), peer->port());
+        on_peer_connected_ext_(p);
+    }
+    
     // Send extension handshake if peer supports it
     if (peer->peer_extensions().extension_protocol) {
         send_extension_handshake(peer);
@@ -705,6 +748,12 @@ void Torrent::on_peer_connected(BtPeerConnection* peer) {
 
 void Torrent::on_peer_disconnected(BtPeerConnection* peer) {
     LOG_DEBUG("Torrent", "Peer " + peer->ip() + " disconnected");
+    
+    // Extended callback (rats-search compatibility)
+    if (on_peer_disconnected_ext_) {
+        Peer p(peer->ip(), peer->port());
+        on_peer_disconnected_ext_(p);
+    }
     
     // Cancel pending requests
     if (picker_) {
@@ -915,6 +964,11 @@ void Torrent::on_piece_verified(uint32_t piece, bool valid) {
             if (on_complete_) {
                 on_complete_(this);
             }
+            
+            // Extended callback (rats-search compatibility)
+            if (on_torrent_complete_) {
+                on_torrent_complete_(name_);
+            }
         }
         
         ++stats_.pieces_done;
@@ -1098,6 +1152,12 @@ void Torrent::update_stats() {
                      " | Pieces: " + std::to_string(peer_pieces) + "/" + std::to_string(stats_.pieces_total) +
                      (is_seeder ? " [Seeder]" : ""));
         }
+    }
+    
+    // Extended progress callback (rats-search compatibility)
+    if (on_progress_ && stats_.total_size > 0) {
+        double percentage = stats_.progress * 100.0;
+        on_progress_(stats_.bytes_done, stats_.total_size, percentage);
     }
 }
 
@@ -1531,6 +1591,11 @@ void Torrent::on_metadata_complete() {
         // Notify callback that metadata was received successfully
         if (on_metadata_received_) {
             on_metadata_received_(this, true);
+        }
+        
+        // Extended callback with TorrentInfo (rats-search compatibility)
+        if (on_metadata_complete_ && info_) {
+            on_metadata_complete_(*info_);
         }
     } else {
         LOG_ERROR("Torrent", "Metadata validation failed");

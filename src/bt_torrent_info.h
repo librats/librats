@@ -81,6 +81,23 @@ public:
      */
     ~TorrentInfo();
     
+    /**
+     * @brief Load torrent metadata from raw bytes (rats-search compatibility)
+     * 
+     * @param data Bencoded .torrent file data
+     * @return true if parsed successfully
+     */
+    bool load_from_data(const std::vector<uint8_t>& data);
+    
+    /**
+     * @brief Load torrent metadata from raw bytes (Qt/C style)
+     * 
+     * @param data Pointer to data
+     * @param size Size of data
+     * @return true if parsed successfully
+     */
+    bool load_from_data(const uint8_t* data, size_t size);
+    
     //=========================================================================
     // Static Factory Methods
     //=========================================================================

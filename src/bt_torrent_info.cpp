@@ -635,4 +635,25 @@ std::optional<MagnetUri> MagnetUri::parse(const std::string& uri) {
     return result;
 }
 
+//=============================================================================
+// Load from data (rats-search compatibility)
+//=============================================================================
+
+bool TorrentInfo::load_from_data(const std::vector<uint8_t>& data) {
+    auto result = TorrentInfo::from_bytes(data);
+    if (result) {
+        *this = std::move(*result);
+        return true;
+    }
+    return false;
+}
+
+bool TorrentInfo::load_from_data(const uint8_t* data, size_t size) {
+    if (!data || size == 0) {
+        return false;
+    }
+    std::vector<uint8_t> vec(data, data + size);
+    return load_from_data(vec);
+}
+
 } // namespace librats
