@@ -1096,7 +1096,7 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     // Create TCP connection with timeout
     socket_t client_socket = create_tcp_client(host, port, 10000);  // 10 second timeout
     if (!is_valid_socket(client_socket)) {
-        LOG_CLIENT_ERROR("Failed to connect to " << host << ":" << port);
+        LOG_CLIENT_DEBUG("Failed to connect to " << host << ":" << port);
         return false;
     }
     

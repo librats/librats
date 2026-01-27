@@ -485,7 +485,7 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sen
     
     auto krpc_message = KrpcProtocol::decode_message(data);
     if (!krpc_message) {
-        LOG_DHT_WARN("Failed to decode KRPC message from " << sender.ip << ":" << sender.port);
+        LOG_DHT_DEBUG("Failed to decode KRPC message from " << sender.ip << ":" << sender.port);
         return;
     }
     

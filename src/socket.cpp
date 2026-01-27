@@ -109,8 +109,8 @@ bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr
     int select_result = select(socket + 1, nullptr, &write_fds, &error_fds, &timeout);
     
     if (select_result == 0) {
-        // Timeout occurred
-        LOG_SOCKET_WARN("Connection timeout after " << timeout_ms << "ms");
+        // Timeout occurred - expected for unavailable peers
+        LOG_SOCKET_DEBUG("Connection timeout after " << timeout_ms << "ms");
         return false;
     } else if (select_result < 0) {
         // Select error
@@ -124,8 +124,8 @@ bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr
     
     // Check if connection completed successfully or failed
     if (FD_ISSET(socket, &error_fds)) {
-        // Connection failed
-        LOG_SOCKET_ERROR("Connection failed (error detected)");
+        // Connection failed - this is expected for unavailable peers in P2P networks
+        LOG_SOCKET_DEBUG("Connection failed (error detected)");
         return false;
     }
     
@@ -185,7 +185,7 @@ socket_t create_tcp_client(const std::string& host, int port, int timeout_ms) {
         return client_socket;
     }
     
-    LOG_SOCKET_ERROR("Failed to connect using both IPv6 and IPv4");
+    LOG_SOCKET_DEBUG("Failed to connect using both IPv6 and IPv4");
     return INVALID_SOCKET_VALUE;
 }
 
@@ -242,9 +242,9 @@ socket_t create_tcp_client_v4(const std::string& host, int port, int timeout_ms)
     
     if (!connection_success) {
         if (timeout_ms > 0) {
-            LOG_SOCKET_ERROR("Connection to " << resolved_ip << ":" << port << " failed or timed out after " << timeout_ms << "ms");
+            LOG_SOCKET_DEBUG("Connection to " << resolved_ip << ":" << port << " failed or timed out after " << timeout_ms << "ms");
         } else {
-            LOG_SOCKET_ERROR("Connection to " << resolved_ip << ":" << port << " failed");
+            LOG_SOCKET_DEBUG("Connection to " << resolved_ip << ":" << port << " failed");
         }
         close_socket(client_socket);
         return INVALID_SOCKET_VALUE;
@@ -281,7 +281,7 @@ socket_t create_tcp_client_v6(const std::string& host, int port, int timeout_ms)
     // Resolve hostname to IPv6 address
     std::string resolved_ip = network_utils::resolve_hostname_v6(host);
     if (resolved_ip.empty()) {
-        LOG_SOCKET_ERROR("Failed to resolve hostname to IPv6: " << host);
+        LOG_SOCKET_DEBUG("Failed to resolve hostname to IPv6: " << host);
         close_socket(client_socket);
         return INVALID_SOCKET_VALUE;
     }
@@ -307,9 +307,9 @@ socket_t create_tcp_client_v6(const std::string& host, int port, int timeout_ms)
     
     if (!connection_success) {
         if (timeout_ms > 0) {
-            LOG_SOCKET_ERROR("Connection to IPv6 " << resolved_ip << ":" << port << " failed or timed out after " << timeout_ms << "ms");
+            LOG_SOCKET_DEBUG("Connection to IPv6 " << resolved_ip << ":" << port << " failed or timed out after " << timeout_ms << "ms");
         } else {
-            LOG_SOCKET_ERROR("Connection to IPv6 " << resolved_ip << ":" << port << " failed");
+            LOG_SOCKET_DEBUG("Connection to IPv6 " << resolved_ip << ":" << port << " failed");
         }
         close_socket(client_socket);
         return INVALID_SOCKET_VALUE;
@@ -1110,7 +1110,7 @@ std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer&
             // No data available on non-blocking socket - this is normal
             return std::vector<uint8_t>();
         } else {
-            LOG_SOCKET_ERROR("Failed to receive UDP data: " << error);
+            LOG_SOCKET_DEBUG("Failed to receive UDP data: " << error);
             return std::vector<uint8_t>();
         }
 #else
@@ -1119,7 +1119,7 @@ std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer&
             // No data available on non-blocking socket - this is normal
             return std::vector<uint8_t>();
         } else {
-            LOG_SOCKET_ERROR("Failed to receive UDP data: " << strerror(error));
+            LOG_SOCKET_DEBUG("Failed to receive UDP data: " << strerror(error));
             return std::vector<uint8_t>();
         }
 #endif
@@ -1213,7 +1213,7 @@ std::vector<uint8_t> receive_udp_data_with_timeout(socket_t socket, size_t buffe
             LOG_SOCKET_DEBUG("No UDP data available (non-blocking)");
             return std::vector<uint8_t>();
         } else {
-            LOG_SOCKET_ERROR("Failed to receive UDP data: " << error);
+            LOG_SOCKET_DEBUG("Failed to receive UDP data: " << error);
             return std::vector<uint8_t>();
         }
 #else
@@ -1223,7 +1223,7 @@ std::vector<uint8_t> receive_udp_data_with_timeout(socket_t socket, size_t buffe
             LOG_SOCKET_DEBUG("No UDP data available (non-blocking)");
             return std::vector<uint8_t>();
         } else {
-            LOG_SOCKET_ERROR("Failed to receive UDP data: " << strerror(error));
+            LOG_SOCKET_DEBUG("Failed to receive UDP data: " << strerror(error));
             return std::vector<uint8_t>();
         }
 #endif

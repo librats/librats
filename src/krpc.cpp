@@ -266,7 +266,7 @@ std::unique_ptr<KrpcMessage> KrpcProtocol::decode_message(const std::vector<uint
             return nullptr;
         }
     } catch (const std::exception& e) {
-        LOG_KRPC_ERROR("Failed to decode KRPC message: " << e.what());
+        LOG_KRPC_DEBUG("Failed to decode KRPC message: " << e.what());
         return nullptr;
     }
 }

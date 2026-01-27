@@ -100,9 +100,9 @@ std::string resolve_hostname_v6(const std::string& hostname) {
     int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &result);
     if (status != 0) {
 #ifdef _WIN32
-        LOG_NETUTILS_ERROR("Failed to resolve hostname " << hostname << " to IPv6: " << WSAGetLastError());
+        LOG_NETUTILS_DEBUG("Failed to resolve hostname " << hostname << " to IPv6: " << WSAGetLastError());
 #else
-        LOG_NETUTILS_ERROR("Failed to resolve hostname " << hostname << " to IPv6: " << gai_strerror(status));
+        LOG_NETUTILS_DEBUG("Failed to resolve hostname " << hostname << " to IPv6: " << gai_strerror(status));
 #endif
         return "";
     }
@@ -113,7 +113,7 @@ std::string resolve_hostname_v6(const std::string& hostname) {
     
     freeaddrinfo(result);
     
-    LOG_NETUTILS_INFO("Resolved " << hostname << " to IPv6 " << ip_str);
+    LOG_NETUTILS_DEBUG("Resolved " << hostname << " to IPv6 " << ip_str);
     return std::string(ip_str);
 }
 
@@ -295,9 +295,9 @@ std::vector<std::string> resolve_all_addresses_v6(const std::string& hostname) {
     int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &result);
     if (status != 0) {
 #ifdef _WIN32
-        LOG_NETUTILS_ERROR("Failed to resolve hostname " << hostname << " to IPv6: " << WSAGetLastError());
+        LOG_NETUTILS_DEBUG("Failed to resolve hostname " << hostname << " to IPv6: " << WSAGetLastError());
 #else
-        LOG_NETUTILS_ERROR("Failed to resolve hostname " << hostname << " to IPv6: " << gai_strerror(status));
+        LOG_NETUTILS_DEBUG("Failed to resolve hostname " << hostname << " to IPv6: " << gai_strerror(status));
 #endif
         return addresses;
     }
