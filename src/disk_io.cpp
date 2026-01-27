@@ -400,8 +400,8 @@ std::vector<std::tuple<std::string, uint64_t, size_t>> DiskIOThreadPool::map_to_
         }
         
         // Calculate overlap with this file
-        uint64_t read_start_in_torrent = std::max(current_offset, file.torrent_offset);
-        uint64_t read_end_in_torrent = std::min(current_offset + remaining, file_end);
+        uint64_t read_start_in_torrent = (std::max)(current_offset, file.torrent_offset);
+        uint64_t read_end_in_torrent = (std::min)(current_offset + remaining, file_end);
         size_t read_length = static_cast<size_t>(read_end_in_torrent - read_start_in_torrent);
         
         if (read_length == 0) continue;

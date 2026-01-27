@@ -156,7 +156,7 @@ size_t Bitfield::popcount32(uint32_t x) {
 //=============================================================================
 
 Bitfield& Bitfield::operator&=(const Bitfield& other) {
-    size_t min_words = std::min(data_.size(), other.data_.size());
+    size_t min_words = (std::min)(data_.size(), other.data_.size());
     for (size_t i = 0; i < min_words; ++i) {
         data_[i] &= other.data_[i];
     }
@@ -168,7 +168,7 @@ Bitfield& Bitfield::operator&=(const Bitfield& other) {
 }
 
 Bitfield& Bitfield::operator|=(const Bitfield& other) {
-    size_t min_words = std::min(data_.size(), other.data_.size());
+    size_t min_words = (std::min)(data_.size(), other.data_.size());
     for (size_t i = 0; i < min_words; ++i) {
         data_[i] |= other.data_[i];
     }
@@ -177,7 +177,7 @@ Bitfield& Bitfield::operator|=(const Bitfield& other) {
 }
 
 Bitfield& Bitfield::operator^=(const Bitfield& other) {
-    size_t min_words = std::min(data_.size(), other.data_.size());
+    size_t min_words = (std::min)(data_.size(), other.data_.size());
     for (size_t i = 0; i < min_words; ++i) {
         data_[i] ^= other.data_[i];
     }
@@ -195,7 +195,7 @@ Bitfield Bitfield::operator~() const {
 }
 
 bool Bitfield::has_bits_not_in(const Bitfield& other) const {
-    size_t min_words = std::min(data_.size(), other.data_.size());
+    size_t min_words = (std::min)(data_.size(), other.data_.size());
     for (size_t i = 0; i < min_words; ++i) {
         if ((data_[i] & ~other.data_[i]) != 0) return true;
     }
@@ -228,7 +228,7 @@ std::vector<uint8_t> Bitfield::to_bytes() const {
 Bitfield Bitfield::from_bytes(const uint8_t* data, size_t data_len, size_t num_bits) {
     Bitfield bf(num_bits);
     
-    size_t bits_to_copy = std::min(num_bits, data_len * 8);
+    size_t bits_to_copy = (std::min)(num_bits, data_len * 8);
     for (size_t i = 0; i < bits_to_copy; ++i) {
         size_t byte_idx = i / 8;
         size_t bit_idx = 7 - (i % 8);  // Big-endian bit order

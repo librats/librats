@@ -523,7 +523,7 @@ void BtClient::on_dht_peers_found(const std::vector<Peer>& peers, const InfoHash
     
     // Build peer list string for logging (show up to 5 peers)
     std::string peer_list;
-    size_t show_count = std::min(peers.size(), static_cast<size_t>(5));
+    size_t show_count = (std::min)(peers.size(), static_cast<size_t>(5));
     for (size_t i = 0; i < show_count; ++i) {
         if (i > 0) peer_list += ", ";
         peer_list += peers[i].ip + ":" + std::to_string(peers[i].port);

@@ -305,7 +305,7 @@ void UtMetadataExtension::handle_data(const BencodeDict& msg,
     // Copy data to correct position
     size_t offset = static_cast<size_t>(piece) * BT_METADATA_PIECE_SIZE;
     size_t data_size = payload.size() - dict_end;
-    size_t to_copy = std::min(data_size, metadata_size_ - offset);
+    size_t to_copy = (std::min)(data_size, metadata_size_ - offset);
     
     if (offset + to_copy <= received_metadata_.size()) {
         std::memcpy(received_metadata_.data() + offset, payload.data() + dict_end, to_copy);

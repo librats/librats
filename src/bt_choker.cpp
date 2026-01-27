@@ -206,7 +206,7 @@ void Choker::rotate_optimistic(std::vector<ChokePeerInfo>& peers) {
     size_t index = 0;
     if (candidates.size() > 1) {
         // Prefer first 1/4 of candidates (newer)
-        size_t range = std::max(candidates.size() / 4, size_t(1));
+        size_t range = (std::max)(candidates.size() / 4, size_t(1));
         
         static thread_local std::mt19937 gen(std::random_device{}());
         std::uniform_int_distribution<size_t> dis(0, range - 1);

@@ -135,7 +135,7 @@ std::vector<FileSlice> FileStorage::map_block(uint32_t piece, uint32_t offset, u
         
         // How much can we read from this file?
         int64_t bytes_in_file = file.size - file_offset;
-        int64_t bytes_to_read = std::min(remaining, bytes_in_file);
+        int64_t bytes_to_read = (std::min)(remaining, bytes_in_file);
         
         if (bytes_to_read > 0 && !file.pad_file) {
             result.emplace_back(file_idx, file_offset, bytes_to_read);

@@ -198,7 +198,7 @@ TEST(ChainedSendBufferTest, SimulateSendLoop) {
     size_t total_sent = 0;
     while (!buf.empty()) {
         // "Send" up to 100 bytes at a time
-        size_t to_send = std::min(buf.front_size(), size_t(100));
+        size_t to_send = (std::min)(buf.front_size(), size_t(100));
         buf.pop_front(to_send);
         total_sent += to_send;
     }

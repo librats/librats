@@ -63,7 +63,7 @@ size_t ChainedSendBuffer::copy_to(uint8_t* buffer, size_t max_bytes) const {
         if (copied >= max_bytes) break;
         
         size_t remaining = chunk.remaining();
-        size_t to_copy = std::min(remaining, max_bytes - copied);
+        size_t to_copy = (std::min)(remaining, max_bytes - copied);
         
         std::memcpy(buffer + copied, chunk.current(), to_copy);
         copied += to_copy;

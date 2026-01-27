@@ -93,7 +93,7 @@ PiecePriority PiecePicker::piece_priority(uint32_t piece) const {
 
 void PiecePicker::set_piece_priority_range(uint32_t start, uint32_t end, PiecePriority priority) {
     std::lock_guard<std::mutex> lock(mutex_);
-    end = std::min(end, num_pieces_);
+    end = (std::min)(end, num_pieces_);
     for (uint32_t i = start; i < end; ++i) {
         pieces_[i].priority = priority;
     }
@@ -615,7 +615,7 @@ uint32_t PiecePicker::block_size(uint32_t piece, uint32_t block_index) const {
     uint32_t offset = block_index * BT_BLOCK_SIZE;
     
     if (offset >= piece_size) return 0;
-    return std::min(BT_BLOCK_SIZE, piece_size - offset);
+    return (std::min)(BT_BLOCK_SIZE, piece_size - offset);
 }
 
 //=============================================================================

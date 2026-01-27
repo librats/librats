@@ -101,7 +101,7 @@ struct InfoHashHash {
     size_t operator()(const BtInfoHash& hash) const {
         // Simple hash - combine first few bytes
         size_t result = 0;
-        for (size_t i = 0; i < std::min(sizeof(size_t), hash.size()); ++i) {
+        for (size_t i = 0; i < (std::min)(sizeof(size_t), hash.size()); ++i) {
             result = (result << 8) | hash[i];
         }
         return result;
@@ -125,7 +125,7 @@ inline PeerID generate_peer_id(const std::string& client_id = "-LR0001-") {
     PeerID peer_id{};
     
     // Copy client ID prefix (up to 8 characters)
-    size_t prefix_len = std::min(client_id.size(), static_cast<size_t>(8));
+    size_t prefix_len = (std::min)(client_id.size(), static_cast<size_t>(8));
     for (size_t i = 0; i < prefix_len; ++i) {
         peer_id[i] = static_cast<uint8_t>(client_id[i]);
     }
@@ -154,7 +154,7 @@ inline PeerID generate_peer_id_with_timestamp(const std::string& client_id = "-L
     PeerID peer_id{};
     
     // Copy client ID prefix
-    size_t prefix_len = std::min(client_id.size(), static_cast<size_t>(8));
+    size_t prefix_len = (std::min)(client_id.size(), static_cast<size_t>(8));
     for (size_t i = 0; i < prefix_len; ++i) {
         peer_id[i] = static_cast<uint8_t>(client_id[i]);
     }
