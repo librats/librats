@@ -418,48 +418,52 @@ void Torrent::clear_pending_peers() {
 }
 
 void Torrent::add_connection(std::shared_ptr<BtPeerConnection> connection) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
     if (!connection) return;
-    
-    LOG_DEBUG("Torrent", "Adding connection from " + connection->ip() + ":" + 
-              std::to_string(connection->port()));
-    
-    // Remove from pending if present
-    auto it = std::remove_if(pending_peers_.begin(), pending_peers_.end(),
-        [&](const auto& p) {
-            return p.first == connection->ip() && p.second == connection->port();
-        });
-    pending_peers_.erase(it, pending_peers_.end());
-    
-    // Setup callbacks
-    BtPeerConnection* conn_ptr = connection.get();
-    
-    connection->set_message_callback(
-        [this](BtPeerConnection* peer, const BtMessage& msg) {
-            on_peer_message(peer, msg);
-        }
-    );
-    
-    connection->set_state_callback(
-        [this](BtPeerConnection* peer, PeerConnectionState state) {
-            if (state == PeerConnectionState::Disconnected) {
-                on_peer_disconnected(peer);
-            } else if (state == PeerConnectionState::Connected) {
-                on_peer_connected(peer);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        LOG_DEBUG("Torrent", "Adding connection from " + connection->ip() + ":" + 
+                std::to_string(connection->port()));
+        
+        // Remove from pending if present
+        auto it = std::remove_if(pending_peers_.begin(), pending_peers_.end(),
+            [&](const auto& p) {
+                return p.first == connection->ip() && p.second == connection->port();
+            });
+        pending_peers_.erase(it, pending_peers_.end());
+
+        connection->set_message_callback(
+            [this](BtPeerConnection* peer, const BtMessage& msg) {
+                on_peer_message(peer, msg);
             }
+        );
+        
+        connection->set_state_callback(
+            [this](BtPeerConnection* peer, PeerConnectionState state) {
+                if (state == PeerConnectionState::Disconnected) {
+                    on_peer_disconnected(peer);
+                } else if (state == PeerConnectionState::Connected) {
+                    on_peer_connected(peer);
+                }
+            }
+        );
+        
+        // Add to picker for availability tracking
+        if (picker_ && connection->is_connected()) {
+            picker_->add_peer(connection.get(), connection->peer_pieces());
         }
-    );
-    
-    // Add to picker for availability tracking
-    if (picker_ && connection->is_connected()) {
-        picker_->add_peer(conn_ptr, connection->peer_pieces());
+        
+        connections_.push_back(connection);  // shared_ptr - just copy
+        
+        // Notify peer we're connected and setup extension handshake
+        on_peer_connected(connection.get());
     }
-    
-    connections_.push_back(connection);  // shared_ptr - just copy
-    
-    // Notify peer we're connected and setup extension handshake
-    on_peer_connected(conn_ptr);
+
+    // Extended callback (rats-search compatibility)
+    if (on_peer_connected_ext_) {
+        Peer peer_address(connection->ip(), connection->port());
+        on_peer_connected_ext_(peer_address);
+    }
 }
 
 void Torrent::remove_connection(BtPeerConnection* connection) {
@@ -710,12 +714,6 @@ void Torrent::tick() {
 void Torrent::on_peer_connected(BtPeerConnection* peer) {
     LOG_DEBUG("Torrent", "Peer " + peer->ip() + " connected, has_metadata=" + 
               (has_metadata_unlocked() ? "true" : "false"));
-    
-    // Extended callback (rats-search compatibility)
-    if (on_peer_connected_ext_) {
-        Peer p(peer->ip(), peer->port());
-        on_peer_connected_ext_(p);
-    }
     
     // Send extension handshake if peer supports it
     if (peer->peer_extensions().extension_protocol) {
