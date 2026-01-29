@@ -102,6 +102,7 @@ struct TorrentStats {
  */
 struct TorrentConfig {
     std::string save_path;              ///< Directory to save files
+    std::string resume_data_path;       ///< Directory for resume data (if empty, uses save_path)
     size_t max_connections;             ///< Max peer connections (0 = unlimited)
     size_t max_uploads;                 ///< Max upload slots
     uint64_t download_limit;            ///< Bytes/sec (0 = unlimited)
@@ -116,6 +117,11 @@ struct TorrentConfig {
         , upload_limit(0)
         , sequential_download(false)
         , seed_mode(false) {}
+    
+    /// Get the path to use for resume data (resume_data_path if set, otherwise save_path)
+    const std::string& get_resume_path() const {
+        return resume_data_path.empty() ? save_path : resume_data_path;
+    }
 };
 
 //=============================================================================

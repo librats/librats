@@ -1702,7 +1702,7 @@ bool Torrent::save_resume_data() {
     std::string path;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        path = get_resume_file_path(config_.save_path, info_hash_);
+        path = get_resume_file_path(config_.get_resume_path(), info_hash_);
     }
     return save_resume_data(path);
 }
@@ -1810,7 +1810,7 @@ bool Torrent::try_load_resume_data() {
     std::string path;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        path = get_resume_file_path(config_.save_path, info_hash_);
+        path = get_resume_file_path(config_.get_resume_path(), info_hash_);
     }
     
     std::string error;

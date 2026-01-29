@@ -49,6 +49,15 @@ bool RatsClient::enable_bittorrent(int listen_port) {
     return true;
 }
 
+void RatsClient::set_resume_data_path(const std::string& path) {
+    if (!bittorrent_client_) {
+        LOG_CLIENT_WARN("Cannot set resume data path: BitTorrent not enabled");
+        return;
+    }
+    
+    bittorrent_client_->set_resume_data_path(path);
+}
+
 void RatsClient::disable_bittorrent() {
     if (!bittorrent_client_) {
         return;

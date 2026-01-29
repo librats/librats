@@ -37,6 +37,7 @@ class TrackerManager;
  */
 struct BtClientConfig {
     std::string download_path;          ///< Default download directory
+    std::string resume_data_path;       ///< Directory for resume data files (if empty, uses download_path)
     uint16_t listen_port;               ///< Port for incoming connections (0 = random)
     size_t max_connections;             ///< Global max connections
     size_t max_connections_per_torrent; ///< Max connections per torrent
@@ -136,6 +137,13 @@ public:
     //=========================================================================
     // Torrent Management
     //=========================================================================
+    
+    /**
+     * @brief Set the resume data path for all new torrents
+     * 
+     * @param path Directory where resume data files will be stored
+     */
+    void set_resume_data_path(const std::string& path);
     
     /**
      * @brief Add a torrent from a .torrent file

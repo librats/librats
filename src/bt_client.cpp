@@ -130,6 +130,12 @@ void BtClient::start() {
     }
 }
 
+void BtClient::set_resume_data_path(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.resume_data_path = path;
+    LOG_INFO("BtClient", "Resume data path set to: " + path);
+}
+
 void BtClient::stop() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -299,6 +305,7 @@ Torrent::Ptr BtClient::add_magnet(const std::string& magnet_uri,
     // Create torrent without full metadata
     TorrentConfig torrent_config;
     torrent_config.save_path = save_path.empty() ? config_.download_path : save_path;
+    torrent_config.resume_data_path = config_.resume_data_path;
     torrent_config.max_connections = config_.max_connections_per_torrent;
     torrent_config.max_uploads = config_.max_uploads;
     
@@ -894,6 +901,7 @@ Torrent::Ptr BtClient::create_torrent(const TorrentInfo& info,
                                        const std::string& save_path) {
     TorrentConfig torrent_config;
     torrent_config.save_path = save_path.empty() ? config_.download_path : save_path;
+    torrent_config.resume_data_path = config_.resume_data_path;
     torrent_config.max_connections = config_.max_connections_per_torrent;
     torrent_config.max_uploads = config_.max_uploads;
     

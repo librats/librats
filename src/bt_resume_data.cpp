@@ -147,8 +147,12 @@ bool write_resume_data_file(const TorrentResumeData& data, const std::string& pa
     
     // Create parent directory if needed
     std::string parent = get_parent_directory(path);
-    if (!parent.empty() && !file_exists(parent.c_str())) {
-        create_directories(parent.c_str());
+    if (!parent.empty() && !directory_exists(parent.c_str())) {
+        LOG_DEBUG("ResumeData", "Creating resume directory: " + parent);
+        if (!create_directories(parent.c_str())) {
+            LOG_ERROR("ResumeData", "Failed to create resume directory: " + parent);
+            return false;
+        }
     }
     
     std::ofstream file(path, std::ios::binary);

@@ -1627,6 +1627,14 @@ public:
     bool enable_bittorrent(int listen_port = 6881);
     
     /**
+     * Set the directory for storing resume data files
+     * Resume data allows torrents to resume from where they left off.
+     * Should be called after enable_bittorrent() and before adding torrents.
+     * @param path Directory path for resume data (e.g., app data folder)
+     */
+    void set_resume_data_path(const std::string& path);
+    
+    /**
      * Disable BitTorrent functionality
      */
     void disable_bittorrent();
