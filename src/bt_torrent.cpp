@@ -1657,7 +1657,7 @@ TorrentResumeData Torrent::generate_resume_data() const {
                 
                 for (uint32_t i = 0; i < dp.blocks_total; ++i) {
                     BlockInfo block(dp.piece_index, i * block_size, 
-                                   std::min(block_size, piece_len - i * block_size));
+                                   (std::min)(block_size, piece_len - i * block_size));
                     BlockState state = picker_->block_state(block);
                     if (state == BlockState::Finished) {
                         blocks.set_bit(i);
@@ -1868,7 +1868,7 @@ void Torrent::verify_piece_hash_sync(uint32_t piece, bool& valid) {
         }
         
         size_t read_len = static_cast<size_t>(
-            std::min(static_cast<uint64_t>(actual_length - bytes_read),
+            (std::min)(static_cast<uint64_t>(actual_length - bytes_read),
                      file_end - (file_start + read_offset_in_file)));
         
         std::string file_path = combine_paths(config_.save_path, mapping.path);
