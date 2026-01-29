@@ -235,6 +235,8 @@ if(RATS_SEARCH_FEATURES)
         src/tracker.h
         src/bt_create_torrent.h
         src/bt_create_torrent.cpp
+        src/bt_resume_data.h
+        src/bt_resume_data.cpp
     )
 endif()
 
@@ -450,6 +452,7 @@ if(RATS_BUILD_TESTS)
             tests/test_bt_network.cpp
             tests/test_bt_integration.cpp
             tests/test_bt_create_torrent.cpp
+            tests/test_bt_resume_data.cpp
         )
     endif()
 

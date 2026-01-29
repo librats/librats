@@ -11,6 +11,7 @@
 #include "bt_types.h"
 #include "bt_torrent.h"
 #include "bt_torrent_info.h"
+#include "bt_resume_data.h"
 #include "bt_network.h"
 #include "dht.h"
 
@@ -165,6 +166,42 @@ public:
      */
     Torrent::Ptr add_magnet(const std::string& magnet_uri,
                             const std::string& save_path = "");
+    
+    /**
+     * @brief Add a torrent with resume data for fast resume
+     * 
+     * @param info Torrent metadata
+     * @param resume_data Resume data from previous session
+     * @param save_path Directory to save files (uses resume_data.save_path if empty)
+     * @return Torrent pointer
+     */
+    Torrent::Ptr add_torrent_with_resume(
+        const TorrentInfo& info,
+        const TorrentResumeData& resume_data,
+        const std::string& save_path = "");
+    
+    /**
+     * @brief Add a torrent and try to load resume data automatically
+     * 
+     * Looks for resume data in {save_path}/.resume/{info_hash}.resume
+     * If found, applies it for fast resume. Otherwise, starts fresh.
+     * 
+     * @param info Torrent metadata
+     * @param save_path Directory to save files
+     * @param check_files If true and no resume data, verify existing files
+     * @return Torrent pointer
+     */
+    Torrent::Ptr add_torrent_auto_resume(
+        const TorrentInfo& info,
+        const std::string& save_path = "",
+        bool check_files = true);
+    
+    /**
+     * @brief Save resume data for all active torrents
+     * 
+     * Call this periodically or before shutdown to save progress.
+     */
+    void save_all_resume_data();
     
     /**
      * @brief Remove a torrent

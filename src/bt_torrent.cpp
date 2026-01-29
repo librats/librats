@@ -1,11 +1,16 @@
 #include "bt_torrent.h"
 #include "bt_extension.h"
+#include "bt_resume_data.h"
 #include "bencode.h"
 #include "disk_io.h"
 #include "logger.h"
+#include "fs.h"
+#include "sha1.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <thread>
+#include <ctime>
 
 namespace librats {
 
@@ -111,6 +116,10 @@ Torrent::Torrent(const TorrentInfo& info,
     stats_.total_size = info.total_size();
     stats_.pieces_total = info.num_pieces();
     
+    // Initialize time tracking
+    added_time_ = std::time(nullptr);
+    last_activity_check_ = std::chrono::steady_clock::now();
+    
     LOG_DEBUG("Torrent", "Torrent '" + name_ + "' initialized successfully");
 }
 
@@ -133,6 +142,10 @@ Torrent::Torrent(const BtInfoHash& info_hash,
     ChokerConfig choker_config;
     choker_config.max_uploads = config_.max_uploads;
     choker_.set_config(choker_config);
+    
+    // Initialize time tracking
+    added_time_ = std::time(nullptr);
+    last_activity_check_ = std::chrono::steady_clock::now();
     
     LOG_DEBUG("Torrent", "Torrent '" + name + "' initialized (awaiting metadata)");
 }
@@ -1606,6 +1619,384 @@ void Torrent::on_metadata_complete() {
         // Could retry from other peers
         metadata_buffer_.clear();
         metadata_pieces_received_.clear();
+    }
+}
+
+//=============================================================================
+// Resume Data Methods
+//=============================================================================
+
+TorrentResumeData Torrent::generate_resume_data() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    TorrentResumeData data;
+    
+    // Identification
+    data.info_hash = info_hash_;
+    data.name = name_;
+    data.save_path = config_.save_path;
+    
+    // Have pieces
+    if (picker_) {
+        data.have_pieces = picker_->get_have_bitfield();
+    } else {
+        data.have_pieces = have_pieces_;
+    }
+    
+    // Unfinished pieces (partial downloads)
+    if (picker_) {
+        auto downloading = picker_->downloading_pieces();
+        for (const auto& dp : downloading) {
+            if (dp.blocks_finished > 0 && dp.blocks_finished < dp.blocks_total) {
+                // This piece has some but not all blocks - save state
+                Bitfield blocks(dp.blocks_total);
+                
+                // Get block states from piece picker
+                uint32_t piece_len = info_ ? info_->piece_length() : 16384;
+                uint32_t block_size = BT_BLOCK_SIZE;
+                
+                for (uint32_t i = 0; i < dp.blocks_total; ++i) {
+                    BlockInfo block(dp.piece_index, i * block_size, 
+                                   std::min(block_size, piece_len - i * block_size));
+                    BlockState state = picker_->block_state(block);
+                    if (state == BlockState::Finished) {
+                        blocks.set_bit(i);
+                    }
+                }
+                
+                data.unfinished_pieces[dp.piece_index] = blocks;
+            }
+        }
+    }
+    
+    // Statistics
+    data.total_uploaded = stats_.total_uploaded;
+    data.total_downloaded = stats_.total_downloaded;
+    data.active_time = active_time_;
+    data.seeding_time = seeding_time_;
+    data.added_time = added_time_;
+    data.completed_time = completed_time_;
+    
+    // Configuration
+    data.sequential_download = config_.sequential_download;
+    data.max_connections = static_cast<int>(config_.max_connections);
+    data.max_uploads = static_cast<int>(config_.max_uploads);
+    data.download_limit = static_cast<int64_t>(config_.download_limit);
+    data.upload_limit = static_cast<int64_t>(config_.upload_limit);
+    
+    // Peer cache (save connected peers for quick reconnection)
+    for (const auto& conn : connections_) {
+        if (conn->is_connected()) {
+            data.peers.emplace_back(conn->ip(), conn->port());
+        }
+    }
+    
+    LOG_DEBUG("Torrent", "Generated resume data: " + std::to_string(data.have_pieces.count()) +
+              "/" + std::to_string(data.have_pieces.size()) + " pieces, " +
+              std::to_string(data.unfinished_pieces.size()) + " partial");
+    
+    return data;
+}
+
+bool Torrent::save_resume_data() {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        path = get_resume_file_path(config_.save_path, info_hash_);
+    }
+    return save_resume_data(path);
+}
+
+bool Torrent::save_resume_data(const std::string& path) {
+    auto data = generate_resume_data();
+    
+    if (!write_resume_data_file(data, path)) {
+        LOG_ERROR("Torrent", "Failed to save resume data to " + path);
+        return false;
+    }
+    
+    LOG_INFO("Torrent", "Saved resume data for '" + name_ + "' to " + path);
+    return true;
+}
+
+bool Torrent::load_resume_data(const TorrentResumeData& resume_data) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Verify info hash matches
+    if (resume_data.info_hash != info_hash_) {
+        LOG_ERROR("Torrent", "Resume data info_hash mismatch");
+        return false;
+    }
+    
+    // Apply have pieces
+    if (resume_data.have_pieces.size() > 0) {
+        if (picker_) {
+            // Update picker with have pieces
+            for (uint32_t i = 0; i < resume_data.have_pieces.size(); ++i) {
+                if (resume_data.have_pieces.get_bit(i)) {
+                    picker_->mark_have(i);
+                }
+            }
+            have_pieces_ = picker_->get_have_bitfield();
+        } else if (info_) {
+            // No picker yet, but store for later
+            have_pieces_ = resume_data.have_pieces;
+        }
+        
+        LOG_INFO("Torrent", "Loaded resume data: " + 
+                 std::to_string(resume_data.have_pieces.count()) + " pieces");
+    }
+    
+    // Apply unfinished pieces
+    // NOTE: For now, we don't restore partial pieces - they will be re-downloaded
+    // This is safer than trying to restore partial block state
+    // A future optimization could verify the existing blocks on disk
+    if (!resume_data.unfinished_pieces.empty()) {
+        LOG_DEBUG("Torrent", "Resume data has " + 
+                  std::to_string(resume_data.unfinished_pieces.size()) + 
+                  " partial pieces (will be re-downloaded)");
+    }
+    
+    // Restore statistics
+    stats_.total_uploaded = resume_data.total_uploaded;
+    stats_.total_downloaded = resume_data.total_downloaded;
+    active_time_ = resume_data.active_time;
+    seeding_time_ = resume_data.seeding_time;
+    added_time_ = resume_data.added_time;
+    completed_time_ = resume_data.completed_time;
+    
+    // Restore configuration
+    if (resume_data.max_connections > 0) {
+        config_.max_connections = static_cast<size_t>(resume_data.max_connections);
+    }
+    if (resume_data.max_uploads > 0) {
+        config_.max_uploads = static_cast<size_t>(resume_data.max_uploads);
+    }
+    if (resume_data.download_limit > 0) {
+        config_.download_limit = static_cast<uint64_t>(resume_data.download_limit);
+    }
+    if (resume_data.upload_limit > 0) {
+        config_.upload_limit = static_cast<uint64_t>(resume_data.upload_limit);
+    }
+    config_.sequential_download = resume_data.sequential_download;
+    if (picker_ && config_.sequential_download) {
+        picker_->set_mode(PickerMode::Sequential);
+    }
+    
+    // Add cached peers
+    for (const auto& [ip, port] : resume_data.peers) {
+        pending_peers_.emplace_back(ip, port);
+    }
+    
+    // Update stats
+    if (picker_) {
+        stats_.pieces_done = picker_->num_have();
+        stats_.bytes_done = 0;
+        if (info_) {
+            for (uint32_t i = 0; i < stats_.pieces_done; ++i) {
+                if (have_pieces_.get_bit(i)) {
+                    stats_.bytes_done += info_->piece_size(i);
+                }
+            }
+        }
+        stats_.progress = static_cast<float>(stats_.pieces_done) / 
+                          static_cast<float>(stats_.pieces_total);
+    }
+    
+    return true;
+}
+
+bool Torrent::try_load_resume_data() {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        path = get_resume_file_path(config_.save_path, info_hash_);
+    }
+    
+    std::string error;
+    auto resume_data = read_resume_data_file(path, &error);
+    
+    if (!resume_data) {
+        LOG_DEBUG("Torrent", "No resume data found for '" + name_ + "': " + error);
+        return false;
+    }
+    
+    return load_resume_data(*resume_data);
+}
+
+//=============================================================================
+// File Verification (Recheck)
+//=============================================================================
+
+void Torrent::verify_piece_hash_sync(uint32_t piece, bool& valid) {
+    // Note: This reads the piece synchronously and computes hash
+    // For use during file checking, not during normal download
+    if (!info_) {
+        valid = false;
+        return;
+    }
+    
+    uint32_t actual_length = info_->piece_size(piece);
+    auto mappings = get_file_mappings();
+    
+    // Calculate piece offset in torrent
+    uint64_t piece_offset = static_cast<uint64_t>(piece) * info_->piece_length();
+    
+    // Read the piece data
+    std::vector<uint8_t> piece_data(actual_length);
+    size_t bytes_read = 0;
+    
+    // Map to files and read
+    for (const auto& mapping : mappings) {
+        if (bytes_read >= actual_length) break;
+        
+        // Check if this file contains part of our piece
+        uint64_t file_start = mapping.torrent_offset;
+        uint64_t file_end = file_start + mapping.length;
+        
+        if (piece_offset + bytes_read >= file_end) continue;
+        if (piece_offset + actual_length <= file_start) continue;
+        
+        // Calculate read range within this file
+        uint64_t read_start = 0;
+        uint64_t read_offset_in_file = 0;
+        
+        if (piece_offset + bytes_read >= file_start) {
+            read_offset_in_file = piece_offset + bytes_read - file_start;
+        } else {
+            read_start = file_start - piece_offset;
+        }
+        
+        size_t read_len = static_cast<size_t>(
+            std::min(static_cast<uint64_t>(actual_length - bytes_read),
+                     file_end - (file_start + read_offset_in_file)));
+        
+        std::string file_path = combine_paths(config_.save_path, mapping.path);
+        
+        if (!file_exists(file_path)) {
+            valid = false;
+            return;
+        }
+        
+        if (!read_file_chunk(file_path, read_offset_in_file, 
+                            piece_data.data() + read_start, read_len)) {
+            valid = false;
+            return;
+        }
+        
+        bytes_read += read_len;
+    }
+    
+    if (bytes_read < actual_length) {
+        valid = false;
+        return;
+    }
+    
+    // Compute SHA1 hash
+    SHA1 sha1;
+    sha1.update(piece_data.data(), piece_data.size());
+    std::string calculated_hash = sha1.finalize();
+    
+    // Compare with expected hash
+    auto expected_hash = info_->piece_hash(piece);
+    std::string expected_hex;
+    for (uint8_t b : expected_hash) {
+        char hex[3];
+        snprintf(hex, sizeof(hex), "%02x", b);
+        expected_hex += hex;
+    }
+    
+    valid = (calculated_hash == expected_hex);
+}
+
+void Torrent::check_files(std::function<void(uint32_t, uint32_t)> progress_callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!info_ || !picker_) {
+        LOG_WARN("Torrent", "Cannot check files - no metadata");
+        return;
+    }
+    
+    LOG_INFO("Torrent", "Checking files for '" + name_ + "'...");
+    
+    uint32_t num_pieces = info_->num_pieces();
+    uint32_t pieces_have = 0;
+    
+    // Reset bitfield
+    have_pieces_ = Bitfield(num_pieces);
+    picker_->set_have_bitfield(have_pieces_);
+    
+    for (uint32_t i = 0; i < num_pieces; ++i) {
+        bool valid = false;
+        verify_piece_hash_sync(i, valid);
+        
+        if (valid) {
+            picker_->mark_have(i);
+            have_pieces_.set_bit(i);
+            ++pieces_have;
+        }
+        
+        if (progress_callback) {
+            progress_callback(i + 1, num_pieces);
+        }
+    }
+    
+    // Update stats
+    stats_.pieces_done = pieces_have;
+    stats_.bytes_done = 0;
+    for (uint32_t i = 0; i < num_pieces; ++i) {
+        if (have_pieces_.get_bit(i)) {
+            stats_.bytes_done += info_->piece_size(i);
+        }
+    }
+    stats_.progress = static_cast<float>(pieces_have) / static_cast<float>(num_pieces);
+    
+    LOG_INFO("Torrent", "File check complete: " + std::to_string(pieces_have) + 
+             "/" + std::to_string(num_pieces) + " pieces verified");
+    
+    // If complete, switch to seeding
+    if (picker_->is_complete()) {
+        set_state(TorrentState::Seeding);
+        choker_.set_seed_mode(true);
+    }
+}
+
+void Torrent::check_files_async(
+    std::function<void(uint32_t, uint32_t)> completion_callback,
+    std::function<void(uint32_t, uint32_t)> progress_callback) {
+    
+    // Run file check in a separate thread
+    auto weak_self = weak_from_this();
+    
+    std::thread([weak_self, completion_callback, progress_callback]() {
+        auto self = weak_self.lock();
+        if (!self) return;
+        
+        self->check_files(progress_callback);
+        
+        uint32_t have = 0, total = 0;
+        {
+            std::lock_guard<std::mutex> lock(self->mutex_);
+            have = self->stats_.pieces_done;
+            total = self->stats_.pieces_total;
+        }
+        
+        if (completion_callback) {
+            completion_callback(have, total);
+        }
+    }).detach();
+}
+
+void Torrent::on_file_check_complete(uint32_t pieces_have) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    LOG_INFO("Torrent", "File check complete: " + std::to_string(pieces_have) + " pieces");
+    
+    if (picker_ && picker_->is_complete()) {
+        set_state(TorrentState::Seeding);
+        choker_.set_seed_mode(true);
+    } else if (state_ == TorrentState::CheckingFiles) {
+        set_state(TorrentState::Downloading);
     }
 }
 

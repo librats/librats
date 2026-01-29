@@ -17,6 +17,9 @@
 #include "disk_io.h"
 #include "socket.h" // For Peer struct
 
+// Forward declaration for resume data
+namespace librats { struct TorrentResumeData; }
+
 #include <memory>
 #include <vector>
 #include <unordered_map>
@@ -429,6 +432,83 @@ public:
     bool set_metadata(const std::vector<uint8_t>& metadata);
     
     //=========================================================================
+    // Resume Data (Fast Resume)
+    //=========================================================================
+    
+    /**
+     * @brief Generate resume data for this torrent
+     * 
+     * Resume data can be saved to disk and used to quickly resume 
+     * downloading without re-verifying existing pieces.
+     * 
+     * @return Resume data structure
+     */
+    TorrentResumeData generate_resume_data() const;
+    
+    /**
+     * @brief Save resume data to the default path
+     * 
+     * Saves to {save_path}/.resume/{info_hash}.resume
+     * 
+     * @return true on success
+     */
+    bool save_resume_data();
+    
+    /**
+     * @brief Save resume data to a specific path
+     * 
+     * @param path Path to save the resume file
+     * @return true on success
+     */
+    bool save_resume_data(const std::string& path);
+    
+    /**
+     * @brief Load resume data and apply it to this torrent
+     * 
+     * This should be called before start() to apply saved state.
+     * Will set have_pieces_ bitfield and restore unfinished pieces.
+     * 
+     * @param resume_data Resume data to apply
+     * @return true if resume data was valid and applied
+     */
+    bool load_resume_data(const TorrentResumeData& resume_data);
+    
+    /**
+     * @brief Try to load resume data from the default path
+     * 
+     * Looks for {save_path}/.resume/{info_hash}.resume
+     * 
+     * @return true if resume data was found and applied
+     */
+    bool try_load_resume_data();
+    
+    //=========================================================================
+    // File Verification (Recheck)
+    //=========================================================================
+    
+    /**
+     * @brief Check which pieces are already complete on disk
+     * 
+     * Reads and verifies hashes for all pieces. This is called during
+     * recheck() or when resuming without resume data.
+     * 
+     * @param progress_callback Optional callback for progress updates
+     *        Parameters: (current_piece, total_pieces)
+     */
+    void check_files(std::function<void(uint32_t, uint32_t)> progress_callback = nullptr);
+    
+    /**
+     * @brief Check files asynchronously
+     * 
+     * @param completion_callback Called when checking is complete
+     *        Parameters: (num_pieces_have, num_pieces_total)
+     * @param progress_callback Optional callback for progress updates
+     */
+    void check_files_async(
+        std::function<void(uint32_t, uint32_t)> completion_callback,
+        std::function<void(uint32_t, uint32_t)> progress_callback = nullptr);
+    
+    //=========================================================================
     // Tick (called periodically)
     //=========================================================================
     
@@ -478,6 +558,10 @@ private:
     void on_metadata_complete();
     size_t find_bencode_end(const std::vector<uint8_t>& data);
     
+    // Resume/recheck helpers
+    void verify_piece_hash_sync(uint32_t piece, bool& valid);
+    void on_file_check_complete(uint32_t pieces_have);
+    
     //=========================================================================
     // Data Members
     //=========================================================================
@@ -516,6 +600,13 @@ private:
     TorrentStats stats_;
     std::chrono::steady_clock::time_point last_stats_update_;
     std::chrono::steady_clock::time_point last_choker_run_;
+    
+    // Time tracking for resume data
+    int64_t added_time_ = 0;          ///< When torrent was added (Unix time)
+    int64_t completed_time_ = 0;      ///< When download completed (Unix time)
+    int64_t active_time_ = 0;         ///< Seconds spent actively downloading
+    int64_t seeding_time_ = 0;        ///< Seconds spent seeding
+    std::chrono::steady_clock::time_point last_activity_check_;
     
     // Callbacks
     StateCallback on_state_change_;

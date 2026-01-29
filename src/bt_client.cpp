@@ -1,6 +1,7 @@
 #include "bt_client.h"
 #include "tracker.h"
 #include "logger.h"
+#include "fs.h"
 
 #include <chrono>
 #include <algorithm>
@@ -137,6 +138,14 @@ void BtClient::stop() {
         
         running_ = false;
         dht_running_ = false;
+        
+        // Save resume data for all torrents before stopping
+        LOG_INFO("BtClient", "Saving resume data before shutdown...");
+        for (auto& [hash, torrent] : torrents_) {
+            if (torrent->has_metadata()) {
+                torrent->save_resume_data();
+            }
+        }
         
         // Stop all torrents
         for (auto& [hash, torrent] : torrents_) {
@@ -319,6 +328,131 @@ Torrent::Ptr BtClient::add_magnet(const std::string& magnet_uri,
              info_hash_to_hex(info->info_hash()).substr(0, 8) + "...)");
     
     return torrent;
+}
+
+Torrent::Ptr BtClient::add_torrent_with_resume(
+    const TorrentInfo& info,
+    const TorrentResumeData& resume_data,
+    const std::string& save_path) {
+    
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Check if already exists
+    auto it = torrents_.find(info.info_hash());
+    if (it != torrents_.end()) {
+        return it->second;
+    }
+    
+    // Create torrent with resume-specified or provided save path
+    std::string effective_save_path = save_path.empty() 
+        ? (resume_data.save_path.empty() ? config_.download_path : resume_data.save_path)
+        : save_path;
+    
+    auto torrent = create_torrent(info, effective_save_path);
+    
+    // Load resume data before starting
+    if (!torrent->load_resume_data(resume_data)) {
+        LOG_WARN("BtClient", "Failed to load resume data for " + info.name());
+    } else {
+        LOG_INFO("BtClient", "Loaded resume data for " + info.name() + 
+                 ": " + std::to_string(resume_data.have_pieces.count()) + " pieces");
+    }
+    
+    torrents_[info.info_hash()] = torrent;
+    
+    // Register with network manager
+    if (network_manager_ && info.has_metadata()) {
+        network_manager_->register_torrent(info.info_hash(), peer_id_, info.num_pieces());
+    }
+    
+    // Create tracker manager
+    tracker_managers_[info.info_hash()] = std::make_unique<TrackerManager>(info);
+    
+    if (running_) {
+        torrent->start();
+        
+        // Announce to DHT
+        if (dht_running_) {
+            find_peers_dht(info.info_hash());
+        }
+    }
+    
+    if (on_torrent_added_) {
+        on_torrent_added_(torrent);
+    }
+    
+    LOG_INFO("BtClient", "Added torrent with resume: " + info.name() + " (" + 
+             info_hash_to_hex(info.info_hash()).substr(0, 8) + "...)");
+    
+    return torrent;
+}
+
+Torrent::Ptr BtClient::add_torrent_auto_resume(
+    const TorrentInfo& info,
+    const std::string& save_path,
+    bool check_files) {
+    
+    std::string effective_save_path = save_path.empty() ? config_.download_path : save_path;
+    
+    // Try to load resume data
+    std::string resume_path = get_resume_file_path(effective_save_path, info.info_hash());
+    std::string error;
+    auto resume_data = read_resume_data_file(resume_path, &error);
+    
+    if (resume_data) {
+        LOG_INFO("BtClient", "Found resume data for " + info.name());
+        return add_torrent_with_resume(info, *resume_data, effective_save_path);
+    }
+    
+    LOG_DEBUG("BtClient", "No resume data for " + info.name() + ": " + error);
+    
+    // Add torrent normally
+    auto torrent = add_torrent(info, effective_save_path);
+    
+    // If files might exist, check them
+    if (torrent && check_files) {
+        // Check if any files already exist
+        bool files_exist = false;
+        const auto& files = info.files().files();
+        for (const auto& f : files) {
+            std::string file_path = combine_paths(effective_save_path, f.path);
+            if (file_exists(file_path)) {
+                files_exist = true;
+                break;
+            }
+        }
+        
+        if (files_exist) {
+            LOG_INFO("BtClient", "Files exist for " + info.name() + ", checking...");
+            torrent->check_files_async(
+                [this, hash = info.info_hash()](uint32_t have, uint32_t total) {
+                    LOG_INFO("BtClient", "File check complete: " + 
+                             std::to_string(have) + "/" + std::to_string(total) + " pieces");
+                    
+                    // Save resume data after check
+                    auto t = get_torrent(hash);
+                    if (t) {
+                        t->save_resume_data();
+                    }
+                },
+                nullptr
+            );
+        }
+    }
+    
+    return torrent;
+}
+
+void BtClient::save_all_resume_data() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    LOG_INFO("BtClient", "Saving resume data for " + std::to_string(torrents_.size()) + " torrents");
+    
+    for (auto& [hash, torrent] : torrents_) {
+        if (torrent->has_metadata()) {
+            torrent->save_resume_data();
+        }
+    }
 }
 
 void BtClient::remove_torrent(const BtInfoHash& info_hash, bool delete_files) {
