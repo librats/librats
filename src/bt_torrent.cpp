@@ -557,6 +557,10 @@ bool Torrent::set_metadata(const std::vector<uint8_t>& metadata) {
     name_ = info_->name();
     LOG_INFO("Torrent", "Metadata parsed successfully: name='" + name_ + "'");
     
+    // Save any previously loaded resume data (from try_load_resume_data before metadata)
+    Bitfield saved_have_pieces = have_pieces_;
+    bool had_resume_data = (saved_have_pieces.size() > 0 && saved_have_pieces.count() > 0);
+    
     // Initialize pieces
     have_pieces_ = Bitfield(info_->num_pieces());
     
@@ -573,6 +577,32 @@ bool Torrent::set_metadata(const std::vector<uint8_t>& metadata) {
     
     stats_.total_size = info_->total_size();
     stats_.pieces_total = info_->num_pieces();
+    
+    // Restore resume data if we had it loaded before metadata arrived
+    if (had_resume_data && saved_have_pieces.size() == info_->num_pieces()) {
+        LOG_INFO("Torrent", "Restoring " + std::to_string(saved_have_pieces.count()) + 
+                 " pieces from resume data");
+        have_pieces_ = saved_have_pieces;
+        for (uint32_t i = 0; i < have_pieces_.size(); ++i) {
+            if (have_pieces_.get_bit(i)) {
+                picker_->mark_have(i);
+            }
+        }
+        // Calculate bytes_done from pieces
+        stats_.pieces_done = picker_->num_have();
+        stats_.bytes_done = 0;
+        for (uint32_t i = 0; i < have_pieces_.size(); ++i) {
+            if (have_pieces_.get_bit(i)) {
+                stats_.bytes_done += info_->piece_size(i);
+            }
+        }
+        stats_.progress = static_cast<float>(stats_.pieces_done) / 
+                          static_cast<float>(stats_.pieces_total);
+        LOG_INFO("Torrent", "Resume data restored: " + std::to_string(stats_.pieces_done) + 
+                 "/" + std::to_string(stats_.pieces_total) + " pieces (" + 
+                 std::to_string(stats_.bytes_done) + " bytes, " + 
+                 std::to_string(stats_.progress * 100.0f) + "%)");
+    }
     
     LOG_DEBUG("Torrent", "Torrent stats: " + std::to_string(info_->num_pieces()) + " pieces, " +
               std::to_string(info_->total_size()) + " bytes total");
@@ -1738,9 +1768,12 @@ bool Torrent::load_resume_data(const TorrentResumeData& resume_data) {
                 }
             }
             have_pieces_ = picker_->get_have_bitfield();
-        } else if (info_) {
-            // No picker yet, but store for later
+        } else {
+            // No picker yet (metadata not received), store for later
+            // When metadata arrives, set_metadata() will use this
             have_pieces_ = resume_data.have_pieces;
+            LOG_DEBUG("Torrent", "Stored " + std::to_string(resume_data.have_pieces.count()) + 
+                      " pieces for when metadata arrives");
         }
         
         LOG_INFO("Torrent", "Loaded resume data: " + 
@@ -1793,7 +1826,8 @@ bool Torrent::load_resume_data(const TorrentResumeData& resume_data) {
         stats_.pieces_done = picker_->num_have();
         stats_.bytes_done = 0;
         if (info_) {
-            for (uint32_t i = 0; i < stats_.pieces_done; ++i) {
+            // Loop through ALL pieces and check if we have each one
+            for (uint32_t i = 0; i < have_pieces_.size(); ++i) {
                 if (have_pieces_.get_bit(i)) {
                     stats_.bytes_done += info_->piece_size(i);
                 }
@@ -1801,6 +1835,9 @@ bool Torrent::load_resume_data(const TorrentResumeData& resume_data) {
         }
         stats_.progress = static_cast<float>(stats_.pieces_done) / 
                           static_cast<float>(stats_.pieces_total);
+        LOG_INFO("Torrent", "Resume data applied: " + std::to_string(stats_.pieces_done) + 
+                 "/" + std::to_string(stats_.pieces_total) + " pieces (" + 
+                 std::to_string(stats_.bytes_done) + " bytes)");
     }
     
     return true;
