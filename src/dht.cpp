@@ -439,6 +439,11 @@ void DhtClient::maintenance_loop() {
             // Cleanup stale announced peers
             cleanup_stale_announced_peers();
             
+#ifdef RATS_SEARCH_FEATURES
+            // Cleanup stale spider transactions (requests without responses)
+            cleanup_stale_spider_transactions();
+#endif
+            
             last_general_cleanup = now;
         }
         
@@ -948,10 +953,13 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     handle_ping_verification_response(message.transaction_id, message.response_id, sender);
     
 #ifdef RATS_SEARCH_FEATURES
-    bool is_spider = spider_mode_.load();
+    // Check if this response is for a spider transaction
+    // This is based on how the request was sent, NOT current spider_mode_ state
+    // This ensures spider responses go to spider pool even if mode was toggled
+    bool is_spider_tx = is_spider_transaction(message.transaction_id);
     
-    if (is_spider) {
-        // Spider mode: add nodes to spider pool, NOT to routing table
+    if (is_spider_tx) {
+        // Spider transaction response: add nodes to spider pool, NOT to routing table
         // This keeps the routing table stable and clean
         KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
         DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
@@ -965,20 +973,23 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
         }
         add_spider_nodes(discovered_nodes);
         
-        LOG_DHT_DEBUG("Spider mode: added " << (1 + message.nodes.size()) << " nodes to spider pool");
-    } else
-#endif
-    {
-        // Normal mode: add nodes to routing table
-        KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
-        DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
-        add_node(sender_node, true, false);
+        LOG_DHT_DEBUG("Spider transaction response: added " << (1 + message.nodes.size()) << " nodes to spider pool");
         
-        // Add any nodes from the response (these are nodes we heard about, not confirmed)
-        for (const auto& node : message.nodes) {
-            DhtNode dht_node = krpc_node_to_dht_node(node);
-            add_node(dht_node, false, false);  // Not confirmed - just heard about from another node
-        }
+        // Spider responses don't need search tracking - they're just for node discovery
+        // Early return to avoid polluting normal DHT operations
+        return;
+    }
+#endif
+
+    // Normal mode: add nodes to routing table
+    KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
+    DhtNode sender_node = krpc_node_to_dht_node(krpc_node);
+    add_node(sender_node, true, false);
+    
+    // Add any nodes from the response (these are nodes we heard about, not confirmed)
+    for (const auto& node : message.nodes) {
+        DhtNode dht_node = krpc_node_to_dht_node(node);
+        add_node(dht_node, false, false);  // Not confirmed - just heard about from another node
     }
     
     // Check if this is a response to a pending search (get_peers with peers)
@@ -1328,22 +1339,27 @@ void DhtClient::print_statistics() {
 #ifdef RATS_SEARCH_FEATURES
     size_t spider_pool_size = 0;
     size_t spider_visited_count = 0;
+    size_t spider_pending_transactions = 0;
     bool is_spider_active = spider_mode_.load();
-    if (is_spider_active) {
+    {
         std::lock_guard<std::mutex> spider_lock(spider_nodes_mutex_);
         spider_pool_size = spider_nodes_.size();
         spider_visited_count = spider_visited_.size();
+        spider_pending_transactions = spider_transactions_.size();
     }
 #endif
     
     // Print main statistics
     LOG_DHT_INFO("=== DHT GLOBAL STATISTICS ===");
 #ifdef RATS_SEARCH_FEATURES
-    if (is_spider_active) {
-        LOG_DHT_INFO("[SPIDER MODE ACTIVE]");
+    if (is_spider_active || spider_pending_transactions > 0) {
+        LOG_DHT_INFO("[SPIDER MODE " << (is_spider_active ? "ACTIVE" : "INACTIVE") << "]");
         LOG_DHT_INFO("  Spider pool size: " << spider_pool_size << "/" << MAX_SPIDER_NODES);
         LOG_DHT_INFO("  Visited nodes: " << spider_visited_count << "/" << MAX_SPIDER_VISITED);
-        LOG_DHT_INFO("  Ignore mode: " << (spider_ignore_.load() ? "ON" : "OFF"));
+        LOG_DHT_INFO("  Pending transactions: " << spider_pending_transactions);
+        if (is_spider_active) {
+            LOG_DHT_INFO("  Ignore mode: " << (spider_ignore_.load() ? "ON" : "OFF"));
+        }
     }
 #endif
     LOG_DHT_INFO("[ROUTING TABLE]");
@@ -2797,12 +2813,52 @@ void DhtClient::cleanup_spider_state() {
     
     size_t nodes_count = spider_nodes_.size();
     size_t visited_count = spider_visited_.size();
+    size_t transactions_count = spider_transactions_.size();
     
     spider_nodes_.clear();
     spider_visited_.clear();
+    spider_transactions_.clear();
     
     LOG_DHT_DEBUG("Cleaned up spider state: " << nodes_count << " nodes, " 
-                  << visited_count << " visited entries cleared");
+                  << visited_count << " visited entries, "
+                  << transactions_count << " pending transactions cleared");
+}
+
+void DhtClient::cleanup_stale_spider_transactions() {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    
+    auto now = std::chrono::steady_clock::now();
+    auto timeout = std::chrono::seconds(60);  // 60 second timeout for spider transactions
+    
+    size_t removed = 0;
+    auto it = spider_transactions_.begin();
+    while (it != spider_transactions_.end()) {
+        if (now - it->second > timeout) {
+            it = spider_transactions_.erase(it);
+            removed++;
+        } else {
+            ++it;
+        }
+    }
+    
+    if (removed > 0) {
+        LOG_DHT_DEBUG("Cleaned up " << removed << " stale spider transactions");
+    }
+}
+
+void DhtClient::mark_spider_transaction(const std::string& transaction_id) {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    spider_transactions_[transaction_id] = std::chrono::steady_clock::now();
+}
+
+bool DhtClient::is_spider_transaction(const std::string& transaction_id) {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    auto it = spider_transactions_.find(transaction_id);
+    if (it != spider_transactions_.end()) {
+        spider_transactions_.erase(it);  // Remove after checking - one-time use
+        return true;
+    }
+    return false;
 }
 
 size_t DhtClient::get_spider_pool_size() const {
@@ -2894,6 +2950,11 @@ void DhtClient::spider_walk() {
         
         // Send find_node with our neighbor_id (pretending to be close to target_node)
         std::string transaction_id = KrpcProtocol::generate_transaction_id();
+        
+        // Mark this transaction as spider - responses will go to spider pool
+        // even if spider_mode_ is disabled before response arrives
+        mark_spider_transaction(transaction_id);
+        
         auto message = KrpcProtocol::create_find_node_query(transaction_id, query_id, random_target);
         send_krpc_message(message, target_node.peer);
         
