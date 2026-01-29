@@ -764,8 +764,11 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender)
         return;
     }
     bool is_spider = spider_mode_.load();
+    // Only use neighbor_id for IPs we've contacted via spider (to avoid polluting other DHT clients)
+    bool use_neighbor_id = is_spider && is_spider_contacted_ip(sender.ip);
 #else
     bool is_spider = false;
+    bool use_neighbor_id = false;
 #endif
     
     // Add sender to routing table (or spider pool in spider mode)
@@ -775,15 +778,17 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender)
 #ifdef RATS_SEARCH_FEATURES
     if (is_spider) {
         add_spider_node(sender_node);
-    } else
+    }
 #endif
+    // Adding spider related node very undesirable but ok
+    if (!use_neighbor_id)
     {
         add_node(sender_node, true, false);
     }
     
     // Respond with ping response
-    // Spider mode: use neighbor_id to appear close to sender's ID (attracts more traffic)
-    NodeId response_id = is_spider ? neighbor_id(message.sender_id) : node_id_;
+    // Use neighbor_id only for spider-contacted IPs, real node_id for organic DHT traffic
+    NodeId response_id = use_neighbor_id ? neighbor_id(message.sender_id) : node_id_;
     auto response = KrpcProtocol::create_ping_response(message.transaction_id, response_id);
     send_krpc_message(response, sender);
 }
@@ -797,8 +802,11 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
         return;
     }
     bool is_spider = spider_mode_.load();
+    // Only use neighbor_id for IPs we've contacted via spider (to avoid polluting other DHT clients)
+    bool use_neighbor_id = is_spider && is_spider_contacted_ip(sender.ip);
 #else
     bool is_spider = false;
+    bool use_neighbor_id = false;
 #endif
     
     // Add sender to routing table (or spider pool in spider mode)
@@ -808,8 +816,10 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
 #ifdef RATS_SEARCH_FEATURES
     if (is_spider) {
         add_spider_node(sender_node);
-    } else
+    }
 #endif
+    // Adding spider related node very undesirable but ok
+    if (!use_neighbor_id)
     {
         add_node(sender_node, true, false);
     }
@@ -819,8 +829,8 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
     auto krpc_nodes = dht_nodes_to_krpc_nodes(closest_nodes);
     
     // Respond with closest nodes
-    // Spider mode: use neighbor_id to appear close to target (attracts more traffic)
-    NodeId response_id = is_spider ? neighbor_id(message.target_id) : node_id_;
+    // Use neighbor_id only for spider-contacted IPs, real node_id for organic DHT traffic
+    NodeId response_id = use_neighbor_id ? neighbor_id(message.target_id) : node_id_;
     auto response = KrpcProtocol::create_find_node_response(message.transaction_id, response_id, krpc_nodes);
     send_krpc_message(response, sender);
 }
@@ -834,8 +844,11 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& se
         return;
     }
     bool is_spider = spider_mode_.load();
+    // Only use neighbor_id for IPs we've contacted via spider (to avoid polluting other DHT clients)
+    bool use_neighbor_id = is_spider && is_spider_contacted_ip(sender.ip);
 #else
     bool is_spider = false;
+    bool use_neighbor_id = false;
 #endif
     
     // Add sender to routing table (or spider pool in spider mode)
@@ -845,8 +858,10 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& se
 #ifdef RATS_SEARCH_FEATURES
     if (is_spider) {
         add_spider_node(sender_node);
-    } else
+    }
 #endif
+    // Adding spider related node very undesirable but ok
+    if (!use_neighbor_id)
     {
         add_node(sender_node, true, false);
     }
@@ -854,8 +869,8 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& se
     // Generate a token for this peer
     std::string token = generate_token(sender);
     
-    // Spider mode: use neighbor_id to appear close to info_hash (attracts more traffic)
-    NodeId response_id = is_spider ? neighbor_id(message.info_hash) : node_id_;
+    // Use neighbor_id only for spider-contacted IPs, real node_id for organic DHT traffic
+    NodeId response_id = use_neighbor_id ? neighbor_id(message.info_hash) : node_id_;
     
     // First check if we have announced peers for this info_hash
     auto announced_peers = get_announced_peers(message.info_hash);
@@ -881,6 +896,8 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
     
 #ifdef RATS_SEARCH_FEATURES
     bool is_spider = spider_mode_.load();
+    // Only use neighbor_id for IPs we've contacted via spider (to avoid polluting other DHT clients)
+    bool use_neighbor_id = is_spider && is_spider_contacted_ip(sender.ip);
     
     // Spider mode: check if ignoring requests (but still process announces for callback)
     // Note: We still want to collect announces even when ignoring other requests
@@ -901,6 +918,7 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
         return;
     }
     bool is_spider = false;
+    bool use_neighbor_id = false;
 #endif
     
     // Add sender to routing table (or spider pool in spider mode)
@@ -910,8 +928,10 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
 #ifdef RATS_SEARCH_FEATURES
     if (is_spider) {
         add_spider_node(sender_node);
-    } else
+    }
 #endif
+    // Adding spider related node very undesirable but ok
+    if (!use_neighbor_id)
     {
         add_node(sender_node, true, false);
     }
@@ -940,8 +960,8 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
 #endif
     
     // Respond with acknowledgment
-    // Spider mode: use neighbor_id to appear close to info_hash
-    NodeId response_id = is_spider ? neighbor_id(message.info_hash) : node_id_;
+    // Use neighbor_id only for spider-contacted IPs, real node_id for organic DHT traffic
+    NodeId response_id = use_neighbor_id ? neighbor_id(message.info_hash) : node_id_;
     auto response = KrpcProtocol::create_announce_peer_response(message.transaction_id, response_id);
     send_krpc_message(response, sender);
 }
@@ -1340,22 +1360,25 @@ void DhtClient::print_statistics() {
     size_t spider_pool_size = 0;
     size_t spider_visited_count = 0;
     size_t spider_pending_transactions = 0;
+    size_t spider_contacted_ips_count = 0;
     bool is_spider_active = spider_mode_.load();
     {
         std::lock_guard<std::mutex> spider_lock(spider_nodes_mutex_);
         spider_pool_size = spider_nodes_.size();
         spider_visited_count = spider_visited_.size();
         spider_pending_transactions = spider_transactions_.size();
+        spider_contacted_ips_count = spider_contacted_ips_.size();
     }
 #endif
     
     // Print main statistics
     LOG_DHT_INFO("=== DHT GLOBAL STATISTICS ===");
 #ifdef RATS_SEARCH_FEATURES
-    if (is_spider_active || spider_pending_transactions > 0) {
+    if (is_spider_active || spider_pending_transactions > 0 || spider_contacted_ips_count > 0) {
         LOG_DHT_INFO("[SPIDER MODE " << (is_spider_active ? "ACTIVE" : "INACTIVE") << "]");
         LOG_DHT_INFO("  Spider pool size: " << spider_pool_size << "/" << MAX_SPIDER_NODES);
         LOG_DHT_INFO("  Visited nodes: " << spider_visited_count << "/" << MAX_SPIDER_VISITED);
+        LOG_DHT_INFO("  Contacted IPs: " << spider_contacted_ips_count << "/" << MAX_SPIDER_CONTACTED_IPS);
         LOG_DHT_INFO("  Pending transactions: " << spider_pending_transactions);
         if (is_spider_active) {
             LOG_DHT_INFO("  Ignore mode: " << (spider_ignore_.load() ? "ON" : "OFF"));
@@ -2814,14 +2837,17 @@ void DhtClient::cleanup_spider_state() {
     size_t nodes_count = spider_nodes_.size();
     size_t visited_count = spider_visited_.size();
     size_t transactions_count = spider_transactions_.size();
+    size_t contacted_ips_count = spider_contacted_ips_.size();
     
     spider_nodes_.clear();
     spider_visited_.clear();
     spider_transactions_.clear();
+    spider_contacted_ips_.clear();
     
     LOG_DHT_DEBUG("Cleaned up spider state: " << nodes_count << " nodes, " 
                   << visited_count << " visited entries, "
-                  << transactions_count << " pending transactions cleared");
+                  << transactions_count << " pending transactions, "
+                  << contacted_ips_count << " contacted IPs cleared");
 }
 
 void DhtClient::cleanup_stale_spider_transactions() {
@@ -2859,6 +2885,26 @@ bool DhtClient::is_spider_transaction(const std::string& transaction_id) {
         return true;
     }
     return false;
+}
+
+void DhtClient::mark_spider_contacted_ip(const std::string& ip) {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    
+    // Limit size to avoid unbounded growth
+    if (spider_contacted_ips_.size() >= MAX_SPIDER_CONTACTED_IPS) {
+        // Clear half of the set (simple eviction)
+        auto it = spider_contacted_ips_.begin();
+        std::advance(it, spider_contacted_ips_.size() / 2);
+        spider_contacted_ips_.erase(spider_contacted_ips_.begin(), it);
+        LOG_DHT_DEBUG("Cleaned up spider contacted IPs, now " << spider_contacted_ips_.size() << " entries");
+    }
+    
+    spider_contacted_ips_.insert(ip);
+}
+
+bool DhtClient::is_spider_contacted_ip(const std::string& ip) const {
+    std::lock_guard<std::mutex> lock(spider_nodes_mutex_);
+    return spider_contacted_ips_.count(ip) > 0;
 }
 
 size_t DhtClient::get_spider_pool_size() const {
@@ -2954,6 +3000,9 @@ void DhtClient::spider_walk() {
         // Mark this transaction as spider - responses will go to spider pool
         // even if spider_mode_ is disabled before response arrives
         mark_spider_transaction(transaction_id);
+        
+        // Mark this IP as spider-contacted - we'll respond with neighbor_id to requests from this IP
+        mark_spider_contacted_ip(target_node.peer.ip);
         
         auto message = KrpcProtocol::create_find_node_query(transaction_id, query_id, random_target);
         send_krpc_message(message, target_node.peer);
