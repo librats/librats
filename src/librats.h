@@ -1753,6 +1753,79 @@ public:
                                         std::function<void(const TorrentInfo&, bool, const std::string&)> callback);
     
     // =========================================================================
+    // Torrent Creation API (requires RATS_SEARCH_FEATURES)
+    // =========================================================================
+    
+    /**
+     * Torrent creation progress callback type
+     * Called during piece hashing to report progress
+     * @param current_piece Current piece being hashed (0-indexed)
+     * @param total_pieces Total number of pieces
+     */
+    using TorrentCreationProgressCallback = std::function<void(uint32_t current_piece, uint32_t total_pieces)>;
+    
+    /**
+     * Create a torrent from a file or directory and return TorrentInfo
+     * This is a synchronous operation that reads all files to compute piece hashes.
+     * @param path Path to file or directory to create torrent from
+     * @param trackers Optional list of tracker URLs
+     * @param comment Optional comment
+     * @param progress_callback Optional callback for progress updates
+     * @return TorrentInfo object, or nullopt on failure
+     */
+    std::optional<TorrentInfo> create_torrent_from_path(
+        const std::string& path,
+        const std::vector<std::string>& trackers = {},
+        const std::string& comment = "",
+        TorrentCreationProgressCallback progress_callback = nullptr);
+    
+    /**
+     * Create a torrent from a file or directory and return raw torrent data
+     * @param path Path to file or directory
+     * @param trackers Optional list of tracker URLs
+     * @param comment Optional comment
+     * @param progress_callback Optional callback for progress updates
+     * @return Bencoded torrent data, or empty vector on failure
+     */
+    std::vector<uint8_t> create_torrent_data(
+        const std::string& path,
+        const std::vector<std::string>& trackers = {},
+        const std::string& comment = "",
+        TorrentCreationProgressCallback progress_callback = nullptr);
+    
+    /**
+     * Create a torrent and save it to a file
+     * @param path Path to file or directory
+     * @param output_file Path to save the .torrent file
+     * @param trackers Optional list of tracker URLs
+     * @param comment Optional comment
+     * @param progress_callback Optional callback for progress updates
+     * @return true if torrent was created and saved successfully
+     */
+    bool create_torrent_file(
+        const std::string& path,
+        const std::string& output_file,
+        const std::vector<std::string>& trackers = {},
+        const std::string& comment = "",
+        TorrentCreationProgressCallback progress_callback = nullptr);
+    
+    /**
+     * Create a torrent, add it to the BitTorrent client, and start seeding
+     * This combines torrent creation with immediately starting to seed it.
+     * @param path Path to file or directory
+     * @param trackers Optional list of tracker URLs
+     * @param comment Optional comment
+     * @param progress_callback Optional callback for progress updates
+     * @return Shared pointer to TorrentDownload for the seeding torrent, or nullptr on failure
+     * @note Requires BitTorrent to be enabled (call enable_bittorrent() first)
+     */
+    std::shared_ptr<TorrentDownload> create_and_seed_torrent(
+        const std::string& path,
+        const std::vector<std::string>& trackers = {},
+        const std::string& comment = "",
+        TorrentCreationProgressCallback progress_callback = nullptr);
+    
+    // =========================================================================
     // Spider Mode API (requires RATS_SEARCH_FEATURES)
     // =========================================================================
     

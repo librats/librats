@@ -233,6 +233,8 @@ if(RATS_SEARCH_FEATURES)
         src/disk_io.h
         src/tracker.cpp
         src/tracker.h
+        src/bt_create_torrent.h
+        src/bt_create_torrent.cpp
     )
 endif()
 
@@ -447,6 +449,7 @@ if(RATS_BUILD_TESTS)
             tests/test_bt_extension.cpp
             tests/test_bt_network.cpp
             tests/test_bt_integration.cpp
+            tests/test_bt_create_torrent.cpp
         )
     endif()
 

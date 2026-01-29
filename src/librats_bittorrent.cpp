@@ -1,4 +1,6 @@
 #include "librats.h"
+#include "bt_create_torrent.h"
+#include "fs.h"
 
 #ifdef RATS_SEARCH_FEATURES
 
@@ -387,6 +389,205 @@ void RatsClient::clear_spider_state() {
     }
     dht_client_->clear_spider_state();
     LOG_CLIENT_DEBUG("Spider state cleared");
+}
+
+//=============================================================================
+// Torrent Creation API Implementation (requires RATS_SEARCH_FEATURES)
+//=============================================================================
+
+std::optional<TorrentInfo> RatsClient::create_torrent_from_path(
+    const std::string& path,
+    const std::vector<std::string>& trackers,
+    const std::string& comment,
+    TorrentCreationProgressCallback progress_callback) {
+    
+    LOG_CLIENT_INFO("Creating torrent from path: " << path);
+    
+    TorrentCreatorConfig config;
+    config.comment = comment;
+    config.created_by = "librats";
+    
+    TorrentCreator creator(path, config);
+    
+    if (creator.num_files() == 0) {
+        LOG_CLIENT_ERROR("No files found at path: " << path);
+        return std::nullopt;
+    }
+    
+    for (const auto& tracker : trackers) {
+        creator.add_tracker(tracker);
+    }
+    
+    // Convert progress callback
+    PieceHashProgressCallback hash_callback = nullptr;
+    if (progress_callback) {
+        hash_callback = [progress_callback](uint32_t current, uint32_t total) {
+            progress_callback(current, total);
+        };
+    }
+    
+    TorrentCreateError error;
+    if (!creator.set_piece_hashes(hash_callback, &error)) {
+        LOG_CLIENT_ERROR("Failed to compute piece hashes: " << error.message);
+        return std::nullopt;
+    }
+    
+    auto result = creator.generate_torrent_info(&error);
+    if (!result) {
+        LOG_CLIENT_ERROR("Failed to generate torrent: " << error.message);
+        return std::nullopt;
+    }
+    
+    LOG_CLIENT_INFO("Torrent created successfully: " << result->name() 
+                    << " (" << result->num_files() << " files, " 
+                    << result->total_size() << " bytes, "
+                    << "info_hash: " << result->info_hash_hex().substr(0, 8) << "...)");
+    
+    return result;
+}
+
+std::vector<uint8_t> RatsClient::create_torrent_data(
+    const std::string& path,
+    const std::vector<std::string>& trackers,
+    const std::string& comment,
+    TorrentCreationProgressCallback progress_callback) {
+    
+    LOG_CLIENT_INFO("Creating torrent data from path: " << path);
+    
+    TorrentCreatorConfig config;
+    config.comment = comment;
+    config.created_by = "librats";
+    
+    TorrentCreator creator(path, config);
+    
+    if (creator.num_files() == 0) {
+        LOG_CLIENT_ERROR("No files found at path: " << path);
+        return {};
+    }
+    
+    for (const auto& tracker : trackers) {
+        creator.add_tracker(tracker);
+    }
+    
+    // Convert progress callback
+    PieceHashProgressCallback hash_callback = nullptr;
+    if (progress_callback) {
+        hash_callback = [progress_callback](uint32_t current, uint32_t total) {
+            progress_callback(current, total);
+        };
+    }
+    
+    TorrentCreateError error;
+    if (!creator.set_piece_hashes(hash_callback, &error)) {
+        LOG_CLIENT_ERROR("Failed to compute piece hashes: " << error.message);
+        return {};
+    }
+    
+    auto data = creator.generate(&error);
+    if (data.empty()) {
+        LOG_CLIENT_ERROR("Failed to generate torrent: " << error.message);
+        return {};
+    }
+    
+    LOG_CLIENT_INFO("Torrent data created successfully: " << creator.name() 
+                    << " (" << data.size() << " bytes)");
+    
+    return data;
+}
+
+bool RatsClient::create_torrent_file(
+    const std::string& path,
+    const std::string& output_file,
+    const std::vector<std::string>& trackers,
+    const std::string& comment,
+    TorrentCreationProgressCallback progress_callback) {
+    
+    LOG_CLIENT_INFO("Creating torrent file from path: " << path << " -> " << output_file);
+    
+    TorrentCreatorConfig config;
+    config.comment = comment;
+    config.created_by = "librats";
+    
+    TorrentCreator creator(path, config);
+    
+    if (creator.num_files() == 0) {
+        LOG_CLIENT_ERROR("No files found at path: " << path);
+        return false;
+    }
+    
+    for (const auto& tracker : trackers) {
+        creator.add_tracker(tracker);
+    }
+    
+    // Convert progress callback
+    PieceHashProgressCallback hash_callback = nullptr;
+    if (progress_callback) {
+        hash_callback = [progress_callback](uint32_t current, uint32_t total) {
+            progress_callback(current, total);
+        };
+    }
+    
+    TorrentCreateError error;
+    if (!creator.set_piece_hashes(hash_callback, &error)) {
+        LOG_CLIENT_ERROR("Failed to compute piece hashes: " << error.message);
+        return false;
+    }
+    
+    if (!creator.save_to_file(output_file, &error)) {
+        LOG_CLIENT_ERROR("Failed to save torrent file: " << error.message);
+        return false;
+    }
+    
+    LOG_CLIENT_INFO("Torrent file created successfully: " << output_file);
+    
+    return true;
+}
+
+std::shared_ptr<TorrentDownload> RatsClient::create_and_seed_torrent(
+    const std::string& path,
+    const std::vector<std::string>& trackers,
+    const std::string& comment,
+    TorrentCreationProgressCallback progress_callback) {
+    
+    if (!is_bittorrent_enabled()) {
+        LOG_CLIENT_ERROR("BitTorrent is not enabled. Call enable_bittorrent() first.");
+        return nullptr;
+    }
+    
+    LOG_CLIENT_INFO("Creating and seeding torrent from path: " << path);
+    
+    // Create torrent info
+    auto torrent_info = create_torrent_from_path(path, trackers, comment, progress_callback);
+    if (!torrent_info) {
+        return nullptr;
+    }
+    
+    // Determine save path (parent directory of the source)
+    std::string save_path;
+    if (is_directory(path.c_str())) {
+        // For directories, save_path is the parent of the directory
+        save_path = get_parent_directory(path);
+        if (save_path.empty()) {
+            save_path = ".";
+        }
+    } else {
+        // For single files, save_path is the directory containing the file
+        save_path = get_parent_directory(path);
+        if (save_path.empty()) {
+            save_path = ".";
+        }
+    }
+    
+    // Add torrent with complete data flag (for seeding)
+    auto torrent = bittorrent_client_->add_torrent(*torrent_info, save_path);
+    if (!torrent) {
+        LOG_CLIENT_ERROR("Failed to add torrent for seeding");
+        return nullptr;
+    }
+    
+    LOG_CLIENT_INFO("Started seeding torrent: " << torrent_info->info_hash_hex().substr(0, 8) << "...");
+    
+    return torrent;
 }
 
 }
