@@ -294,6 +294,137 @@ TEST(BtIntegrationTest, TorrentFromMagnet) {
     torrent.stop();
 }
 
+//=============================================================================
+// Seed Mode Tests - Verifies fix for file overwriting bug
+//=============================================================================
+
+TEST(BtIntegrationTest, TorrentSeedModeMarksAllPiecesAsHave) {
+    // Test that seed_mode properly marks all pieces as have
+    // This is the key fix to prevent file overwriting when seeding
+    
+    auto torrent_bytes = create_test_torrent("SeedTest.bin", 100000, 32768);
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    TorrentConfig config;
+    config.save_path = "/tmp/downloads";
+    config.seed_mode = true;  // Enable seed mode
+    
+    PeerID our_id = generate_peer_id("-LR0001-");
+    
+    Torrent torrent(*info, config, our_id);
+    
+    EXPECT_EQ(torrent.state(), TorrentState::Stopped);
+    EXPECT_FALSE(torrent.is_complete());  // Not complete before start
+    
+    // Start torrent in seed mode
+    torrent.start();
+    
+    // Should be in Seeding state, NOT Downloading
+    EXPECT_EQ(torrent.state(), TorrentState::Seeding);
+    
+    // Should report as complete
+    EXPECT_TRUE(torrent.is_complete());
+    
+    // Pieces done should equal total pieces
+    auto stats = torrent.stats();
+    EXPECT_FLOAT_EQ(stats.progress, 1.0f);
+    EXPECT_EQ(stats.pieces_done, info->num_pieces());
+    EXPECT_EQ(stats.bytes_done, info->total_size());
+    
+    torrent.stop();
+}
+
+TEST(BtIntegrationTest, TorrentWithoutSeedModeEntersDownloading) {
+    // Verify that without seed_mode, torrent enters Downloading state
+    
+    auto torrent_bytes = create_test_torrent("DownloadTest.bin", 50000, 16384);
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    TorrentConfig config;
+    config.save_path = "/tmp/downloads";
+    config.seed_mode = false;  // Explicitly disable seed mode
+    
+    PeerID our_id = generate_peer_id("-LR0001-");
+    
+    Torrent torrent(*info, config, our_id);
+    
+    torrent.start();
+    
+    // Should be in Downloading state
+    EXPECT_EQ(torrent.state(), TorrentState::Downloading);
+    EXPECT_FALSE(torrent.is_complete());
+    
+    auto stats = torrent.stats();
+    EXPECT_FLOAT_EQ(stats.progress, 0.0f);
+    
+    torrent.stop();
+}
+
+TEST(BtIntegrationTest, ClientAddTorrentForSeeding) {
+    // Test BtClient::add_torrent_for_seeding() API
+    init_socket_library();
+    
+    BtClientConfig config;
+    config.download_path = "/tmp/downloads";
+    config.listen_port = 0;  // Use random port
+    config.enable_dht = false;
+    
+    BtClient client(config);
+    client.start();
+    
+    auto torrent_bytes = create_test_torrent("ClientSeedTest.bin", 80000, 32768);
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    // Add torrent for seeding
+    auto torrent = client.add_torrent_for_seeding(*info, "/tmp/seed_data");
+    ASSERT_NE(torrent, nullptr);
+    
+    // Should be seeding
+    EXPECT_EQ(torrent->state(), TorrentState::Seeding);
+    EXPECT_TRUE(torrent->is_complete());
+    
+    // Verify stats
+    auto stats = torrent->stats();
+    EXPECT_FLOAT_EQ(stats.progress, 1.0f);
+    EXPECT_EQ(stats.pieces_done, info->num_pieces());
+    
+    client.remove_torrent(info->info_hash());
+    client.stop();
+}
+
+TEST(BtIntegrationTest, SeedModeDoesNotRequestPieces) {
+    // Verify that in seed mode, we don't request pieces from peers
+    // (This prevents overwriting our complete files)
+    
+    auto torrent_bytes = create_test_torrent("NoRequestTest.bin", 64000, 16384);
+    auto info = TorrentInfo::from_bytes(torrent_bytes);
+    ASSERT_TRUE(info.has_value());
+    
+    TorrentConfig config;
+    config.save_path = "/tmp/downloads";
+    config.seed_mode = true;
+    
+    PeerID our_id = generate_peer_id("-LR0001-");
+    
+    Torrent torrent(*info, config, our_id);
+    torrent.start();
+    
+    EXPECT_EQ(torrent.state(), TorrentState::Seeding);
+    
+    // Get our have bitfield - should be all 1s
+    Bitfield have = torrent.get_have_bitfield();
+    EXPECT_EQ(have.size(), info->num_pieces());
+    
+    for (uint32_t i = 0; i < info->num_pieces(); ++i) {
+        EXPECT_TRUE(have.get_bit(i)) << "Piece " << i << " should be marked as have";
+    }
+    
+    torrent.stop();
+}
+
 TEST(BtIntegrationTest, ClientBasicOperations) {
     init_socket_library();
     

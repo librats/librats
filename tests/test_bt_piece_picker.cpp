@@ -645,3 +645,84 @@ TEST(BtPiecePickerTest, MaxDownloadingPiecesIgnoredInEndgame) {
     // Should still be able to get blocks even with limit = 1
     // (endgame allows duplicate requests from different peers)
 }
+
+//=============================================================================
+// Mark Have All Tests (for seed_mode)
+//=============================================================================
+
+TEST(BtPiecePickerTest, MarkHaveAll) {
+    PiecePicker picker(100, 16384, 16384);
+    
+    EXPECT_EQ(picker.num_have(), 0);
+    EXPECT_EQ(picker.num_want(), 100);
+    EXPECT_FALSE(picker.is_complete());
+    
+    // Mark all pieces as have
+    picker.mark_have_all();
+    
+    EXPECT_EQ(picker.num_have(), 100);
+    EXPECT_EQ(picker.num_want(), 0);
+    EXPECT_TRUE(picker.is_complete());
+    
+    // Verify all pieces are marked as have
+    for (uint32_t i = 0; i < 100; ++i) {
+        EXPECT_TRUE(picker.have_piece(i));
+    }
+}
+
+TEST(BtPiecePickerTest, MarkHaveAllBitfield) {
+    PiecePicker picker(50, 16384, 16384);
+    
+    // Mark all pieces as have
+    picker.mark_have_all();
+    
+    // Verify bitfield is all 1s
+    Bitfield bf = picker.get_have_bitfield();
+    EXPECT_EQ(bf.size(), 50);
+    
+    for (uint32_t i = 0; i < 50; ++i) {
+        EXPECT_TRUE(bf.get_bit(i));
+    }
+}
+
+TEST(BtPiecePickerTest, MarkHaveAllClearsDownloading) {
+    PiecePicker picker(10, 32768, 32768);
+    
+    // Add a peer and start downloading
+    Bitfield peer_bf(10, true);
+    void* peer = reinterpret_cast<void*>(1);
+    picker.add_peer(peer, peer_bf);
+    
+    // Start downloading some pieces
+    auto blocks = picker.pick_pieces(peer_bf, 3, peer);
+    EXPECT_GT(picker.num_downloading(), 0);
+    
+    // Mark all as have - should clear downloading state
+    picker.mark_have_all();
+    
+    EXPECT_EQ(picker.num_downloading(), 0);
+    EXPECT_TRUE(picker.is_complete());
+}
+
+TEST(BtPiecePickerTest, MarkHaveAllIdempotent) {
+    PiecePicker picker(20, 16384, 16384);
+    
+    // Mark some pieces first
+    picker.mark_have(5);
+    picker.mark_have(10);
+    picker.mark_have(15);
+    
+    EXPECT_EQ(picker.num_have(), 3);
+    
+    // Mark all - should still work correctly
+    picker.mark_have_all();
+    
+    EXPECT_EQ(picker.num_have(), 20);
+    EXPECT_TRUE(picker.is_complete());
+    
+    // Calling again should be safe (idempotent)
+    picker.mark_have_all();
+    
+    EXPECT_EQ(picker.num_have(), 20);
+    EXPECT_TRUE(picker.is_complete());
+}
