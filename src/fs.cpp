@@ -224,8 +224,17 @@ bool create_directories(const char* path) {
     
     memcpy(path_copy, path, len + 1);
     
+    // Determine starting index (skip drive letter on Windows)
+    size_t start_index = 1;
+#ifdef _WIN32
+    // Skip drive letter like "C:/" or "C:\"
+    if (len >= 3 && path_copy[1] == ':' && (path_copy[2] == '/' || path_copy[2] == '\\')) {
+        start_index = 3;
+    }
+#endif
+    
     // Create parent directories recursively
-    for (size_t i = 1; i < len; i++) {
+    for (size_t i = start_index; i < len; i++) {
         if (path_copy[i] == '/' || path_copy[i] == '\\') {
             path_copy[i] = '\0';
             
