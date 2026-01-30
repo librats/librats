@@ -1744,6 +1744,18 @@ TorrentResumeData Torrent::generate_resume_data() const {
         }
     }
     
+    // Save info_dict (metadata) so we don't need to re-download it on restore
+    // This is critical for seeding torrents - without it, the torrent would
+    // enter DownloadingMetadata state and show 0% until metadata is re-fetched
+    if (info_ && info_->has_metadata()) {
+        const auto& info_bytes = info_->info_dict_bytes();
+        if (!info_bytes.empty()) {
+            data.info_dict = info_bytes;
+            LOG_DEBUG("Torrent", "Saving info_dict in resume data: " + 
+                      std::to_string(info_bytes.size()) + " bytes");
+        }
+    }
+    
     LOG_DEBUG("Torrent", "Generated resume data: " + std::to_string(data.have_pieces.count()) +
               "/" + std::to_string(data.have_pieces.size()) + " pieces, " +
               std::to_string(data.unfinished_pieces.size()) + " partial");
@@ -1779,6 +1791,40 @@ bool Torrent::load_resume_data(const TorrentResumeData& resume_data) {
     if (resume_data.info_hash != info_hash_) {
         LOG_ERROR("Torrent", "Resume data info_hash mismatch");
         return false;
+    }
+    
+    // If we don't have metadata but resume data has info_dict, restore it first
+    // This is critical for seeding torrents - without metadata, torrent shows 0%
+    if (!has_metadata_unlocked() && !resume_data.info_dict.empty()) {
+        LOG_INFO("Torrent", "Restoring metadata from resume data (" + 
+                 std::to_string(resume_data.info_dict.size()) + " bytes)");
+        
+        auto new_info = TorrentInfo::from_info_dict(resume_data.info_dict, info_hash_);
+        if (new_info) {
+            info_ = std::make_unique<TorrentInfo>(*new_info);
+            name_ = info_->name();
+            
+            // Initialize picker now that we have metadata
+            have_pieces_ = Bitfield(info_->num_pieces());
+            uint32_t last_piece_len = info_->piece_size(info_->num_pieces() - 1);
+            picker_ = std::make_unique<PiecePicker>(
+                info_->num_pieces(),
+                info_->piece_length(),
+                last_piece_len
+            );
+            
+            if (config_.sequential_download) {
+                picker_->set_mode(PickerMode::Sequential);
+            }
+            
+            stats_.total_size = info_->total_size();
+            stats_.pieces_total = info_->num_pieces();
+            
+            LOG_INFO("Torrent", "Metadata restored from resume data: '" + name_ + 
+                     "', " + std::to_string(info_->num_pieces()) + " pieces");
+        } else {
+            LOG_WARN("Torrent", "Failed to parse info_dict from resume data");
+        }
     }
     
     // Apply have pieces

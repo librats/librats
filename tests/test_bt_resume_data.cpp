@@ -611,4 +611,230 @@ TEST_F(TorrentResumeTest, ScatteredPiecesRestore) {
     EXPECT_NEAR(stats.progress, 0.1f, 0.01f);  // 10%
 }
 
+//=============================================================================
+// Info Dict (Metadata) Preservation Tests
+//=============================================================================
+
+/**
+ * Test: info_dict is saved in resume data when metadata is available
+ * 
+ * This is critical for seeding torrents. Without info_dict in resume data:
+ * 1. Torrent is created by hash (magnet link style) during restore
+ * 2. No metadata available -> enters DownloadingMetadata state
+ * 3. Shows 0% until metadata is re-downloaded from peers
+ * 
+ * With info_dict saved:
+ * 1. Resume data is loaded with info_dict
+ * 2. Metadata is restored immediately
+ * 3. Progress shows correctly from the start
+ */
+TEST_F(TorrentResumeTest, InfoDictSavedInResumeData) {
+    // Create torrent info
+    auto torrent_info = create_test_torrent_info(10, 16384);
+    ASSERT_TRUE(torrent_info.has_value());
+    
+    TorrentConfig config;
+    config.save_path = test_dir_;
+    config.resume_data_path = test_dir_;
+    
+    PeerID peer_id;
+    peer_id.fill(0x42);
+    
+    // Create torrent with metadata
+    Torrent torrent(*torrent_info, config, peer_id);
+    
+    // Verify torrent has metadata
+    EXPECT_TRUE(torrent.has_metadata());
+    
+    // Generate resume data
+    auto resume_data = torrent.generate_resume_data();
+    
+    // Verify info_dict is saved
+    EXPECT_FALSE(resume_data.info_dict.empty()) 
+        << "info_dict should be saved in resume data when metadata is available";
+    
+    // Verify info_dict matches original
+    EXPECT_EQ(resume_data.info_dict, torrent_info->info_dict_bytes());
+}
+
+/**
+ * Test: info_dict is restored when loading resume data without metadata
+ * 
+ * Scenario: Seeding torrent restored after app restart
+ * 1. Torrent created by hash only (no metadata)
+ * 2. Resume data contains info_dict from previous session
+ * 3. Metadata should be restored from info_dict
+ * 4. Torrent should immediately have metadata and correct progress
+ */
+TEST_F(TorrentResumeTest, InfoDictRestoredFromResumeData) {
+    // Create torrent info
+    auto torrent_info = create_test_torrent_info(10, 16384);
+    ASSERT_TRUE(torrent_info.has_value());
+    BtInfoHash real_hash = torrent_info->info_hash();
+    
+    // Create resume data with info_dict and all pieces complete (seeding)
+    TorrentResumeData resume_data;
+    resume_data.info_hash = real_hash;
+    resume_data.name = "Seeding Torrent";
+    resume_data.save_path = test_dir_;
+    
+    // Set all 10 pieces as complete
+    resume_data.have_pieces = Bitfield(10);
+    resume_data.have_pieces.set_all();
+    
+    // Include info_dict in resume data
+    resume_data.info_dict = torrent_info->info_dict_bytes();
+    
+    TorrentConfig config;
+    config.save_path = test_dir_;
+    config.resume_data_path = test_dir_;
+    
+    PeerID peer_id;
+    peer_id.fill(0x42);
+    
+    // Create torrent WITHOUT metadata (simulates magnet link / hash-only restore)
+    Torrent torrent(real_hash, "pending_metadata", config, peer_id);
+    
+    // Verify torrent does NOT have metadata initially
+    EXPECT_FALSE(torrent.has_metadata());
+    
+    // Load resume data - should restore metadata from info_dict
+    bool result = torrent.load_resume_data(resume_data);
+    ASSERT_TRUE(result);
+    
+    // Now torrent should have metadata
+    EXPECT_TRUE(torrent.has_metadata()) 
+        << "Metadata should be restored from info_dict in resume data";
+    
+    // Verify name was restored
+    const auto& info = torrent.get_torrent_info();
+    EXPECT_EQ(info.name(), "test_file.dat");  // Name from create_test_torrent_info
+    
+    // Verify all pieces are marked as have
+    auto stats = torrent.stats();
+    EXPECT_EQ(stats.pieces_done, 10u);
+    EXPECT_EQ(stats.pieces_total, 10u);
+    EXPECT_NEAR(stats.progress, 1.0f, 0.01f);  // 100%
+    EXPECT_EQ(stats.bytes_done, 10u * 16384u);
+}
+
+/**
+ * Test: Complete round-trip for seeding torrent
+ * 
+ * Full scenario:
+ * 1. Create torrent with metadata (simulates torrent creation for seeding)
+ * 2. Start torrent in seed mode (all pieces complete)
+ * 3. Save resume data
+ * 4. Create new torrent by hash only (simulates app restart)
+ * 5. Load resume data
+ * 6. Verify torrent has metadata and shows 100%
+ */
+TEST_F(TorrentResumeTest, SeedingTorrentRoundTrip) {
+    // Step 1: Create torrent with metadata
+    auto torrent_info = create_test_torrent_info(10, 16384);
+    ASSERT_TRUE(torrent_info.has_value());
+    BtInfoHash real_hash = torrent_info->info_hash();
+    
+    TorrentConfig config;
+    config.save_path = test_dir_;
+    config.resume_data_path = test_dir_;
+    config.seed_mode = true;  // Seeding mode
+    
+    PeerID peer_id;
+    peer_id.fill(0x42);
+    
+    // Create original torrent with full metadata
+    auto original_torrent = std::make_shared<Torrent>(*torrent_info, config, peer_id);
+    
+    // Step 2: Start torrent (seed mode marks all pieces as have)
+    original_torrent->start();
+    
+    // Verify it's in seeding state with all pieces
+    EXPECT_TRUE(original_torrent->has_metadata());
+    EXPECT_TRUE(original_torrent->is_complete());
+    auto original_stats = original_torrent->stats();
+    EXPECT_EQ(original_stats.pieces_done, 10u);
+    EXPECT_NEAR(original_stats.progress, 1.0f, 0.01f);
+    
+    // Step 3: Generate and save resume data
+    auto resume_data = original_torrent->generate_resume_data();
+    
+    // Verify resume data contains info_dict
+    ASSERT_FALSE(resume_data.info_dict.empty()) 
+        << "Resume data must contain info_dict for seeding torrents";
+    
+    // Verify all pieces are marked
+    EXPECT_EQ(resume_data.have_pieces.count(), 10u);
+    
+    // Write to file
+    std::string resume_path = get_resume_file_path(test_dir_, real_hash);
+    ASSERT_TRUE(write_resume_data_file(resume_data, resume_path));
+    
+    // Stop and destroy original torrent
+    original_torrent->stop();
+    original_torrent.reset();
+    
+    // Step 4: Create new torrent by hash only (simulates app restart)
+    TorrentConfig restore_config;
+    restore_config.save_path = test_dir_;
+    restore_config.resume_data_path = test_dir_;
+    // Note: NOT setting seed_mode - this simulates generic restore by hash
+    
+    Torrent restored_torrent(real_hash, "restored", restore_config, peer_id);
+    
+    // Verify restored torrent has NO metadata initially
+    EXPECT_FALSE(restored_torrent.has_metadata());
+    
+    // Step 5: Load resume data from file
+    ASSERT_TRUE(restored_torrent.try_load_resume_data());
+    
+    // Step 6: Verify torrent now has metadata and shows 100%
+    EXPECT_TRUE(restored_torrent.has_metadata()) 
+        << "After loading resume data, torrent should have metadata from info_dict";
+    
+    const auto& restored_info = restored_torrent.get_torrent_info();
+    EXPECT_TRUE(restored_info.is_valid());
+    EXPECT_EQ(restored_info.num_pieces(), 10u);
+    
+    auto restored_stats = restored_torrent.stats();
+    EXPECT_EQ(restored_stats.pieces_done, 10u) 
+        << "Restored seeding torrent should have all pieces";
+    EXPECT_EQ(restored_stats.pieces_total, 10u);
+    EXPECT_NEAR(restored_stats.progress, 1.0f, 0.01f) 
+        << "Restored seeding torrent should show 100% progress";
+    EXPECT_EQ(restored_stats.bytes_done, 10u * 16384u);
+}
+
+/**
+ * Test: Resume data serialization preserves info_dict
+ */
+TEST_F(TorrentResumeTest, InfoDictSerializationRoundTrip) {
+    auto torrent_info = create_test_torrent_info(10, 16384);
+    ASSERT_TRUE(torrent_info.has_value());
+    
+    // Create resume data with info_dict
+    TorrentResumeData original;
+    original.info_hash = torrent_info->info_hash();
+    original.name = "Test";
+    original.save_path = test_dir_;
+    original.have_pieces = Bitfield(10);
+    original.have_pieces.set_all();
+    original.info_dict = torrent_info->info_dict_bytes();
+    
+    ASSERT_FALSE(original.info_dict.empty());
+    
+    // Serialize
+    auto encoded = write_resume_data(original);
+    ASSERT_FALSE(encoded.empty());
+    
+    // Deserialize
+    std::string error;
+    auto decoded = read_resume_data(encoded, &error);
+    ASSERT_TRUE(decoded.has_value()) << "Error: " << error;
+    
+    // Verify info_dict is preserved
+    EXPECT_EQ(decoded->info_dict.size(), original.info_dict.size());
+    EXPECT_EQ(decoded->info_dict, original.info_dict);
+}
+
 #endif // RATS_SEARCH_FEATURES
