@@ -184,6 +184,14 @@ public:
     void mark_have(uint32_t piece);
     
     /**
+     * @brief Mark ALL pieces as having been downloaded and verified
+     * 
+     * Used for seed_mode when we assume all files are complete.
+     * This is more efficient than calling mark_have() for each piece.
+     */
+    void mark_have_all();
+    
+    /**
      * @brief Check if we have a piece
      * @param piece Piece index
      */

@@ -179,7 +179,30 @@ void Torrent::start() {
         LOG_INFO("Torrent", "No metadata available, starting metadata download for '" + name_ + "'");
         metadata_download_started_ = std::chrono::steady_clock::now();
         set_state(TorrentState::DownloadingMetadata);
-    } else if (config_.seed_mode || is_complete_unlocked()) {
+    } else if (config_.seed_mode) {
+        // Seed mode: assume all files are complete, mark all pieces as "have"
+        LOG_INFO("Torrent", "Torrent '" + name_ + "' in seed mode, marking all pieces as have");
+        
+        // Mark all pieces as have in the picker
+        if (picker_) {
+            picker_->mark_have_all();
+        }
+        
+        // Also set our have_pieces bitfield
+        have_pieces_ = Bitfield(info_->num_pieces());
+        have_pieces_.set_all();
+        
+        // Update stats
+        stats_.pieces_done = info_->num_pieces();
+        stats_.bytes_done = info_->total_size();
+        stats_.progress = 1.0f;
+        
+        set_state(TorrentState::Seeding);
+        choker_.set_seed_mode(true);
+        
+        LOG_INFO("Torrent", "Torrent '" + name_ + "' seeding with " + 
+                 std::to_string(info_->num_pieces()) + " pieces");
+    } else if (is_complete_unlocked()) {
         LOG_INFO("Torrent", "Torrent '" + name_ + "' is complete, entering seeding mode");
         set_state(TorrentState::Seeding);
         choker_.set_seed_mode(true);

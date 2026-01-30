@@ -235,15 +235,56 @@ Torrent::Ptr BtClient::add_torrent(const TorrentInfo& info,
     // Create tracker manager
     tracker_managers_[info.info_hash()] = std::make_unique<TrackerManager>(info);
     
+    // Check if files already exist before starting - to avoid overwriting existing data
+    // This is similar to libtorrent's async_check_files behavior
+    bool files_exist = false;
+    std::string effective_save_path = save_path.empty() ? config_.download_path : save_path;
+    const auto& files = info.files().files();
+    for (const auto& f : files) {
+        std::string file_path = combine_paths(effective_save_path, f.path);
+        if (file_exists(file_path)) {
+            files_exist = true;
+            break;
+        }
+    }
+    
     if (running_) {
-        torrent->start();
-        
-        // Announce to DHT
-        if (dht_running_) {
-            find_peers_dht(info.info_hash());
+        if (files_exist) {
+            // Files exist - check them before starting download to avoid overwriting
+            LOG_INFO("BtClient", "Files exist for " + info.name() + 
+                     ", checking before download to avoid overwriting...");
+            torrent->check_files_async(
+                [this, hash = info.info_hash()](uint32_t have, uint32_t total) {
+                    LOG_INFO("BtClient", "File check complete: " + 
+                             std::to_string(have) + "/" + std::to_string(total) + " pieces");
+                    
+                    auto t = get_torrent(hash);
+                    if (t) {
+                        // Now start the torrent after file check completes
+                        t->start();
+                        
+                        // Announce after start
+                        if (dht_running_) {
+                            find_peers_dht(hash);
+                        }
+                        
+                        // Save resume data after check
+                        t->save_resume_data();
+                    }
+                },
+                nullptr
+            );
+        } else {
+            // No files exist - safe to start download immediately
+            torrent->start();
+            
+            // Announce to DHT
+            if (dht_running_) {
+                find_peers_dht(info.info_hash());
+            }
         }
         
-        // Announce to trackers
+        // Announce to trackers (regardless of file check status)
         auto& tracker_mgr = tracker_managers_[info.info_hash()];
         if (tracker_mgr) {
             TrackerRequest req;
@@ -446,6 +487,88 @@ Torrent::Ptr BtClient::add_torrent_auto_resume(
             );
         }
     }
+    
+    return torrent;
+}
+
+Torrent::Ptr BtClient::add_torrent_for_seeding(
+    const TorrentInfo& info,
+    const std::string& save_path) {
+    
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Check if already exists
+    auto it = torrents_.find(info.info_hash());
+    if (it != torrents_.end()) {
+        return it->second;
+    }
+    
+    LOG_INFO("BtClient", "Adding torrent for seeding: " + info.name());
+    
+    // Create torrent with seed_mode enabled
+    TorrentConfig torrent_config;
+    torrent_config.save_path = save_path.empty() ? config_.download_path : save_path;
+    torrent_config.resume_data_path = config_.resume_data_path;
+    torrent_config.max_connections = config_.max_connections_per_torrent;
+    torrent_config.max_uploads = config_.max_uploads;
+    torrent_config.seed_mode = true;  // Key difference: seed_mode enabled
+    
+    auto torrent = std::make_shared<Torrent>(info, torrent_config, peer_id_);
+    torrents_[info.info_hash()] = torrent;
+    
+    // Register with network manager
+    if (network_manager_ && info.has_metadata()) {
+        network_manager_->register_torrent(info.info_hash(), peer_id_, info.num_pieces());
+    }
+    
+    // Create tracker manager
+    tracker_managers_[info.info_hash()] = std::make_unique<TrackerManager>(info);
+    
+    if (running_) {
+        torrent->start();
+        
+        // Announce to DHT
+        if (dht_running_) {
+            find_peers_dht(info.info_hash());
+        }
+        
+        // Announce to trackers with completed event (since we're seeding)
+        auto& tracker_mgr = tracker_managers_[info.info_hash()];
+        if (tracker_mgr) {
+            TrackerRequest req;
+            req.info_hash = info.info_hash();
+            req.peer_id = peer_id_;
+            req.port = network_manager_ ? network_manager_->listen_port() : config_.listen_port;
+            req.uploaded = 0;
+            req.downloaded = 0;
+            req.left = 0;  // 0 = seeding
+            req.event = TrackerEvent::COMPLETED;
+            req.numwant = 50;
+            
+            tracker_mgr->announce(req, [this, hash = info.info_hash()](
+                const TrackerResponse& response, const std::string& tracker_url) {
+                
+                if (response.success && !response.peers.empty()) {
+                    LOG_INFO("BtClient", "Got " + std::to_string(response.peers.size()) + 
+                             " peers from tracker " + tracker_url);
+                    
+                    auto torrent = get_torrent(hash);
+                    if (torrent) {
+                        for (const auto& peer : response.peers) {
+                            torrent->add_peer(peer.ip, peer.port);
+                        }
+                    }
+                }
+            });
+        }
+    }
+    
+    if (on_torrent_added_) {
+        on_torrent_added_(torrent);
+    }
+    
+    LOG_INFO("BtClient", "Added torrent for seeding: " + info.name() + " (" + 
+             info_hash_to_hex(info.info_hash()).substr(0, 8) + "...)");
     
     return torrent;
 }

@@ -205,6 +205,22 @@ public:
         bool check_files = true);
     
     /**
+     * @brief Add a torrent for seeding (seed_mode)
+     * 
+     * Use this when you have created a torrent from existing files and want to
+     * start seeding immediately. All pieces are assumed to be complete.
+     * 
+     * This is the correct method to use after create_torrent_from_path().
+     * 
+     * @param info Torrent metadata (from create_torrent_from_path or similar)
+     * @param save_path Directory where files are located
+     * @return Torrent pointer
+     */
+    Torrent::Ptr add_torrent_for_seeding(
+        const TorrentInfo& info,
+        const std::string& save_path);
+    
+    /**
      * @brief Save resume data for all active torrents
      * 
      * Call this periodically or before shutdown to save progress.

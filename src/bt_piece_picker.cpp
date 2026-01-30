@@ -118,6 +118,29 @@ void PiecePicker::mark_have(uint32_t piece) {
     }
 }
 
+void PiecePicker::mark_have_all() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Mark all pieces as have
+    for (uint32_t i = 0; i < num_pieces_; ++i) {
+        if (!pieces_[i].have) {
+            pieces_[i].have = true;
+            
+            // Clear downloading state if present
+            if (pieces_[i].downloading) {
+                pieces_[i].downloading = false;
+            }
+        }
+    }
+    
+    // Set count to total
+    num_have_ = num_pieces_;
+    
+    // Clear all downloading state
+    downloading_.clear();
+    num_downloading_ = 0;
+}
+
 bool PiecePicker::have_piece(uint32_t piece) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (piece >= num_pieces_) return false;

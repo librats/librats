@@ -587,8 +587,8 @@ std::shared_ptr<TorrentDownload> RatsClient::create_and_seed_torrent(
         }
     }
     
-    // Add torrent with complete data flag (for seeding)
-    auto torrent = bittorrent_client_->add_torrent(*torrent_info, save_path);
+    // Add torrent with seed_mode enabled (files are already complete)
+    auto torrent = bittorrent_client_->add_torrent_for_seeding(*torrent_info, save_path);
     if (!torrent) {
         LOG_CLIENT_ERROR("Failed to add torrent for seeding");
         return nullptr;
