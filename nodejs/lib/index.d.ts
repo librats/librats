@@ -696,3 +696,18 @@ export function getGitDescribe(): string;
  */
 export function getAbi(): number;
 
+// ============ Logging Control Functions ============
+
+/**
+ * Enable or disable console logging.
+ * When disabled, log messages will not be printed to stdout/stderr.
+ * File logging (if enabled) will still work.
+ * @param enabled - Whether to enable console logging (default: true)
+ */
+export function setConsoleLoggingEnabled(enabled: boolean): void;
+
+/**
+ * Check if console logging is currently enabled.
+ * @returns true if console logging is enabled
+ */
+export function isConsoleLoggingEnabled(): boolean;
