@@ -534,7 +534,9 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         }
         
         // ----- 4. HANDSHAKE PHASE -----
-        if (is_handshake_message(data)) {
+        // Only check for handshake messages BEFORE handshake is completed
+        // This avoids expensive JSON parsing on every message after handshake
+        if (!handshake_completed && is_handshake_message(data)) {
             if (!handle_handshake_message(client_socket, peer_hash_id, data)) {
                 LOG_CLIENT_ERROR("Failed to handle handshake message from " << peer_hash_id);
                 break;
