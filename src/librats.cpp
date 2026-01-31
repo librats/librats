@@ -542,44 +542,66 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                 break;
             }
             
-            // Check if handshake just completed
+            // Check if rats handshake just completed (COMPLETED or NOISE_PENDING state)
             if (!handshake_completed) {
                 RatsPeer peer_copy;
-                bool just_completed = false;
+                bool rats_handshake_done = false;
+                bool needs_noise_handshake = false;
                 
                 {
                     std::lock_guard<std::mutex> lock(peers_mutex_);
                     auto sock_it = socket_to_peer_id_.find(client_socket);
                     if (sock_it != socket_to_peer_id_.end()) {
                         auto peer_it = peers_.find(sock_it->second);
-                        if (peer_it != peers_.end() && peer_it->second.is_handshake_completed()) {
-                            just_completed = true;
-                            peer_copy = peer_it->second;
+                        if (peer_it != peers_.end()) {
+                            // Check if rats handshake completed (either COMPLETED or NOISE_PENDING)
+                            if (peer_it->second.is_handshake_completed()) {
+                                rats_handshake_done = true;
+                                peer_copy = peer_it->second;
+                            } else if (peer_it->second.handshake_state == RatsPeer::HandshakeState::NOISE_PENDING) {
+                                rats_handshake_done = true;
+                                needs_noise_handshake = true;
+                                peer_copy = peer_it->second;
+                            }
                         }
                     }
                 }
                 
                 // ----- POST-HANDSHAKE ACTIONS -----
-                if (just_completed) {
-                    handshake_completed = true;
-                    LOG_CLIENT_INFO("Handshake completed for peer " << peer_hash_id << " (peer_id: " << peer_copy.peer_id << ")");
+                if (rats_handshake_done) {
+                    LOG_CLIENT_INFO("Rats handshake completed for peer " << peer_hash_id << " (peer_id: " << peer_copy.peer_id << ")");
                     
                     // Remove from reconnection queue if present (successful connection)
                     remove_from_reconnect_queue(peer_copy.peer_id);
                     
                     // Noise encryption handshake - only if BOTH sides support encryption
                     // peer_copy.encryption_enabled is already negotiated in handle_handshake_message()
-                    if (peer_copy.encryption_enabled) {
+                    if (needs_noise_handshake) {
                         LOG_CLIENT_INFO("Starting Noise handshake for peer " << peer_copy.peer_id);
                         if (perform_noise_handshake(client_socket, peer_copy.peer_id, peer_copy.is_outgoing)) {
                             noise_handshake_done = true;
                             LOG_CLIENT_INFO("Noise handshake successful for peer " << peer_copy.peer_id);
+                            
+                            // Update state to COMPLETED after successful Noise handshake
+                            {
+                                std::lock_guard<std::mutex> lock(peers_mutex_);
+                                auto sock_it = socket_to_peer_id_.find(client_socket);
+                                if (sock_it != socket_to_peer_id_.end()) {
+                                    auto peer_it = peers_.find(sock_it->second);
+                                    if (peer_it != peers_.end()) {
+                                        peer_it->second.handshake_state = RatsPeer::HandshakeState::COMPLETED;
+                                        log_handshake_completion_unlocked(peer_it->second);
+                                    }
+                                }
+                            }
                         } else {
                             LOG_CLIENT_ERROR("Noise handshake failed for peer " << peer_copy.peer_id);
+                            // Connection will be closed due to failed Noise handshake
+                            break;
                         }
-                    } else {
-                        LOG_CLIENT_DEBUG("Skipping Noise handshake for peer " << peer_copy.peer_id << " - encryption not negotiated");
                     }
+                    
+                    handshake_completed = true;
                     
                     // Connection callback
                     if (connection_callback_) {
@@ -994,8 +1016,15 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     if (peer.handshake_state == RatsPeer::HandshakeState::PENDING) {
         // This is an incoming handshake - send our handshake back
         if (send_handshake_unlocked(socket, get_our_peer_id())) {
-            peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
-            log_handshake_completion_unlocked(peer);
+            // If encryption is enabled, we need to do Noise handshake first
+            // Set NOISE_PENDING to prevent other threads from sending messages
+            if (peer.encryption_enabled) {
+                peer.handshake_state = RatsPeer::HandshakeState::NOISE_PENDING;
+                LOG_CLIENT_DEBUG("Rats handshake done, entering NOISE_PENDING state for " << peer_hash_id);
+            } else {
+                peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
+                log_handshake_completion_unlocked(peer);
+            }
             
             // Append to historical peers file after successful connection
             append_peer_to_historical_file(peer);
@@ -1008,8 +1037,15 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
         }
     } else if (peer.handshake_state == RatsPeer::HandshakeState::SENT) {
         // This is a response to our handshake
-        peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
-        log_handshake_completion_unlocked(peer);
+        // If encryption is enabled, we need to do Noise handshake first
+        // Set NOISE_PENDING to prevent other threads from sending messages
+        if (peer.encryption_enabled) {
+            peer.handshake_state = RatsPeer::HandshakeState::NOISE_PENDING;
+            LOG_CLIENT_DEBUG("Rats handshake done, entering NOISE_PENDING state for " << peer_hash_id);
+        } else {
+            peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
+            log_handshake_completion_unlocked(peer);
+        }
         
         // Append to historical peers file after successful connection
         append_peer_to_historical_file(peer);

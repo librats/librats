@@ -103,6 +103,11 @@ std::vector<uint8_t> RatsClient::get_peer_handshake_hash(const std::string& peer
 }
 
 bool RatsClient::send_noise_message(socket_t socket, const uint8_t* data, size_t len) {
+    // Get socket-specific mutex for thread-safe sending
+    // This prevents race conditions with other threads sending rats protocol messages
+    auto socket_mutex = get_socket_send_mutex(socket);
+    std::lock_guard<std::mutex> send_lock(*socket_mutex);
+    
     // Send length-prefixed message for Noise handshake
     uint32_t network_len = htonl(static_cast<uint32_t>(len));
     

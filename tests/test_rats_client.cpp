@@ -1518,4 +1518,137 @@ TEST_F(RatsClientTest, BinaryDataEdgeCasesTest) {
     
     server.stop();
     client.stop();
-} 
+}
+
+// Test that NOISE_PENDING state is properly used during encrypted handshake
+// This verifies that the handshake state transitions correctly:
+// PENDING -> SENT -> NOISE_PENDING -> COMPLETED (when encryption enabled)
+TEST_F(RatsClientTest, NoisePendingStateTest) {
+    const int server_port = 59120;
+    const int client_port = 59121;
+    
+    RatsClient server(server_port);
+    RatsClient client(client_port);
+    
+    // Enable encryption on both clients
+    server.set_encryption_enabled(true);
+    client.set_encryption_enabled(true);
+    
+    EXPECT_TRUE(server.is_encryption_enabled());
+    EXPECT_TRUE(client.is_encryption_enabled());
+    
+    std::atomic<bool> server_connected(false);
+    std::atomic<bool> client_connected(false);
+    
+    // Track connection events - these should only fire after COMPLETED state
+    server.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
+        server_connected = true;
+    });
+    
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
+        client_connected = true;
+    });
+    
+    EXPECT_TRUE(server.start());
+    EXPECT_TRUE(client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Connect client to server
+    EXPECT_TRUE(client.connect_to_peer("127.0.0.1", server_port));
+    
+    // Wait for full connection (including Noise handshake)
+    bool connected = wait_for_condition([&]() {
+        return server_connected.load() && client_connected.load();
+    }, 5000);
+    EXPECT_TRUE(connected) << "Both clients should receive connection callback after Noise handshake";
+    
+    // Verify both peers have completed handshake (state == COMPLETED)
+    auto server_peers = server.get_validated_peers();
+    auto client_peers = client.get_validated_peers();
+    
+    EXPECT_EQ(server_peers.size(), 1) << "Server should have exactly 1 validated peer";
+    EXPECT_EQ(client_peers.size(), 1) << "Client should have exactly 1 validated peer";
+    
+    if (server_peers.size() > 0) {
+        // Verify handshake state is COMPLETED (not NOISE_PENDING)
+        EXPECT_TRUE(server_peers[0].is_handshake_completed()) 
+            << "Server peer should have COMPLETED handshake state";
+        
+        // Verify encryption is active
+        EXPECT_TRUE(server.is_peer_encrypted(server_peers[0].peer_id))
+            << "Server peer should be encrypted after Noise handshake";
+    }
+    
+    if (client_peers.size() > 0) {
+        // Verify handshake state is COMPLETED (not NOISE_PENDING)
+        EXPECT_TRUE(client_peers[0].is_handshake_completed())
+            << "Client peer should have COMPLETED handshake state";
+        
+        // Verify encryption is active
+        EXPECT_TRUE(client.is_peer_encrypted(client_peers[0].peer_id))
+            << "Client peer should be encrypted after Noise handshake";
+    }
+    
+    // Test that communication works after Noise handshake
+    std::atomic<bool> message_received(false);
+    std::string received_msg;
+    std::mutex msg_mutex;
+    
+    server.set_string_data_callback([&](socket_t socket, const std::string& peer_id, const std::string& data) {
+        std::lock_guard<std::mutex> lock(msg_mutex);
+        received_msg = data;
+        message_received = true;
+    });
+    
+    if (client_peers.size() > 0) {
+        std::string test_msg = "Test message after NOISE_PENDING -> COMPLETED transition";
+        client.send_string_to_peer(client_peers[0].socket, test_msg);
+        
+        bool received = wait_for_condition([&]() {
+            return message_received.load();
+        }, 2000);
+        
+        EXPECT_TRUE(received) << "Message should be received after Noise handshake";
+        
+        {
+            std::lock_guard<std::mutex> lock(msg_mutex);
+            EXPECT_EQ(received_msg, test_msg) << "Received message should match sent message";
+        }
+    }
+    
+    server.stop();
+    client.stop();
+}
+
+// Test that is_handshake_completed returns false for NOISE_PENDING state
+TEST_F(RatsClientTest, HandshakeStateEnumTest) {
+    // Test the HandshakeState enum directly
+    librats::RatsPeer peer;
+    
+    // Default state should be PENDING
+    EXPECT_EQ(peer.handshake_state, librats::RatsPeer::HandshakeState::PENDING);
+    EXPECT_FALSE(peer.is_handshake_completed());
+    EXPECT_FALSE(peer.is_handshake_failed());
+    
+    // SENT state
+    peer.handshake_state = librats::RatsPeer::HandshakeState::SENT;
+    EXPECT_FALSE(peer.is_handshake_completed());
+    EXPECT_FALSE(peer.is_handshake_failed());
+    
+    // NOISE_PENDING state - should NOT be considered "completed"
+    peer.handshake_state = librats::RatsPeer::HandshakeState::NOISE_PENDING;
+    EXPECT_FALSE(peer.is_handshake_completed()) 
+        << "NOISE_PENDING should not be considered handshake completed";
+    EXPECT_FALSE(peer.is_handshake_failed());
+    
+    // COMPLETED state
+    peer.handshake_state = librats::RatsPeer::HandshakeState::COMPLETED;
+    EXPECT_TRUE(peer.is_handshake_completed());
+    EXPECT_FALSE(peer.is_handshake_failed());
+    
+    // FAILED state
+    peer.handshake_state = librats::RatsPeer::HandshakeState::FAILED;
+    EXPECT_FALSE(peer.is_handshake_completed());
+    EXPECT_TRUE(peer.is_handshake_failed());
+}

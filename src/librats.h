@@ -48,9 +48,10 @@ struct RatsPeer {
     // Handshake-related fields
     enum class HandshakeState {
         PENDING,        // Handshake not started
-        SENT,          // Handshake sent, waiting for response
-        COMPLETED,     // Handshake completed successfully
-        FAILED         // Handshake failed
+        SENT,           // Handshake sent, waiting for response
+        NOISE_PENDING,  // Rats handshake done, Noise handshake in progress
+        COMPLETED,      // Handshake completed successfully (including Noise if enabled)
+        FAILED          // Handshake failed
     };
     
     HandshakeState handshake_state;         // Current handshake state
