@@ -161,6 +161,14 @@ char* rats_get_connection_statistics_json(rats_client_t handle) {
     return rats_strdup_owned(json.dump());
 }
 
+void rats_set_console_logging_enabled(int enabled) {
+    Logger::getInstance().set_console_logging_enabled(enabled != 0);
+}
+
+int rats_is_console_logging_enabled(void) {
+    return Logger::getInstance().is_console_logging_enabled() ? 1 : 0;
+}
+
 void rats_set_logging_enabled(int enabled) {
     // Global logger control through any client instance is awkward; use singleton
     Logger::getInstance().set_file_logging_enabled(enabled != 0);

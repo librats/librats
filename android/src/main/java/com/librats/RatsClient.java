@@ -1109,6 +1109,24 @@ public class RatsClient {
         return nativeGetAbi();
     }
     
+    /**
+     * Enable or disable console logging.
+     * When disabled, log messages will not be printed to stdout/stderr.
+     * File logging (if enabled) will still work.
+     * @param enabled Whether to enable console logging (default: true)
+     */
+    public static void setConsoleLoggingEnabled(boolean enabled) {
+        nativeSetConsoleLoggingEnabled(enabled);
+    }
+    
+    /**
+     * Check if console logging is currently enabled.
+     * @return true if console logging is enabled
+     */
+    public static boolean isConsoleLoggingEnabled() {
+        return nativeIsConsoleLoggingEnabled();
+    }
+    
     public static void setLoggingEnabled(boolean enabled) {
         nativeSetLoggingEnabled(enabled);
     }
@@ -1122,6 +1140,8 @@ public class RatsClient {
     private static native int[] nativeGetVersion();
     private static native String nativeGetGitDescribe();
     private static native int nativeGetAbi();
+    private static native void nativeSetConsoleLoggingEnabled(boolean enabled);
+    private static native boolean nativeIsConsoleLoggingEnabled();
     private static native void nativeSetLoggingEnabled(boolean enabled);
     private static native void nativeSetLogLevel(String level);
     

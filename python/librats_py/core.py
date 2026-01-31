@@ -1451,8 +1451,33 @@ class RatsClient:
     
     # Static logging methods
     @staticmethod
+    def set_console_logging_enabled(enabled: bool) -> None:
+        """
+        Enable or disable console logging.
+        
+        When disabled, log messages will not be printed to stdout/stderr.
+        File logging (if enabled) will still work.
+        
+        Args:
+            enabled: Whether to enable console logging (default: True)
+        """
+        lib = get_librats()
+        lib.lib.rats_set_console_logging_enabled(int(enabled))
+    
+    @staticmethod
+    def is_console_logging_enabled() -> bool:
+        """
+        Check if console logging is currently enabled.
+        
+        Returns:
+            True if console logging is enabled
+        """
+        lib = get_librats()
+        return bool(lib.lib.rats_is_console_logging_enabled())
+    
+    @staticmethod
     def set_logging_enabled(enabled: bool) -> None:
-        """Enable or disable global logging."""
+        """Enable or disable file logging."""
         lib = get_librats()
         lib.lib.rats_set_logging_enabled(int(enabled))
     

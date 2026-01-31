@@ -14,6 +14,18 @@ namespace librats {
 // Logging Control API Implementation
 //=============================================================================
 
+void RatsClient::set_console_logging_enabled(bool enabled) {
+    Logger::getInstance().set_console_logging_enabled(enabled);
+    // Only log if console is enabled, otherwise we're silently disabling
+    if (enabled) {
+        LOG_CLIENT_INFO("Console logging enabled");
+    }
+}
+
+bool RatsClient::is_console_logging_enabled() const {
+    return Logger::getInstance().is_console_logging_enabled();
+}
+
 void RatsClient::set_logging_enabled(bool enabled) {
     LOG_CLIENT_INFO("Setting file logging " << (enabled ? "enabled" : "disabled"));
     

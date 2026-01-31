@@ -41,6 +41,8 @@ RATS_API char** rats_get_peer_ids(rats_client_t client, int* count); // caller m
 RATS_API char* rats_get_peer_info_json(rats_client_t client, const char* peer_id); // caller must free
 
 // Logging controls (optional helpers)
+RATS_API void rats_set_console_logging_enabled(int enabled);
+RATS_API int rats_is_console_logging_enabled(void);
 RATS_API void rats_set_logging_enabled(int enabled);
 RATS_API void rats_set_log_level(const char* level_str); // "DEBUG", "INFO", "WARN", "ERROR"
 RATS_API void rats_set_log_file_path(rats_client_t client, const char* file_path);

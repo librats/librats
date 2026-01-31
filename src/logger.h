@@ -59,6 +59,17 @@ public:
         timestamps_enabled_ = enabled;
     }
     
+    // Console logging configuration
+    void set_console_logging_enabled(bool enabled) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        console_logging_enabled_ = enabled;
+    }
+    
+    bool is_console_logging_enabled() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return console_logging_enabled_;
+    }
+    
     // File logging configuration
     void set_file_logging_enabled(bool enabled) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -147,13 +158,15 @@ public:
         // Add message
         console_oss << " " << message << std::endl;
         
-        // Output to appropriate console stream
-        if (level >= LogLevel::ERROR) {
-            std::cerr << console_oss.str();
-            std::cerr.flush();
-        } else {
-            std::cout << console_oss.str();
-            std::cout.flush();
+        // Output to appropriate console stream (if console logging is enabled)
+        if (console_logging_enabled_) {
+            if (level >= LogLevel::ERROR) {
+                std::cerr << console_oss.str();
+                std::cerr.flush();
+            } else {
+                std::cout << console_oss.str();
+                std::cout.flush();
+            }
         }
         
         // Also write to file if file logging is enabled
@@ -164,8 +177,8 @@ public:
 
 private:
     Logger() : min_level_(LogLevel::INFO), colors_enabled_(true), timestamps_enabled_(true),
-               file_logging_enabled_(false), max_log_file_size_(10 * 1024 * 1024), 
-               max_log_files_(5), current_file_size_(0) {
+               console_logging_enabled_(true), file_logging_enabled_(false), 
+               max_log_file_size_(10 * 1024 * 1024), max_log_files_(5), current_file_size_(0) {
         // Check if we're outputting to a terminal
         is_terminal_ = isatty(fileno(stdout));
         
@@ -365,6 +378,9 @@ private:
     bool colors_enabled_;
     bool timestamps_enabled_;
     bool is_terminal_;
+    
+    // Console logging control
+    bool console_logging_enabled_;
     
     // File logging members
     bool file_logging_enabled_;

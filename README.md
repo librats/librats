@@ -548,7 +548,11 @@ int main() {
 int main() {
     librats::RatsClient client(8080);
     
-    // Enable and configure logging
+    // Disable console logging (useful for production/embedding)
+    // Log messages will only go to file, not stdout/stderr
+    client.set_console_logging_enabled(false);
+    
+    // Enable and configure file logging
     client.set_logging_enabled(true);
     client.set_log_file_path("librats_app.log");
     client.set_log_level("INFO");  // DEBUG, INFO, WARN, ERROR
@@ -561,12 +565,15 @@ int main() {
     
     std::cout << "📝 Logging to: " << client.get_log_file_path() << std::endl;
     std::cout << "📊 Log level: " << static_cast<int>(client.get_log_level()) << std::endl;
-    std::cout << "🎨 Colors enabled: " << (client.is_log_colors_enabled() ? "Yes" : "No") << std::endl;
+    std::cout << "🔇 Console logging: " << (client.is_console_logging_enabled() ? "Yes" : "No") << std::endl;
     
     client.start();
     
-    // All librats operations will now be logged
-    client.broadcast_string_to_peers("This action will be logged!");
+    // All librats operations will now be logged to file only
+    client.broadcast_string_to_peers("This action will be logged to file!");
+    
+    // Re-enable console logging if needed
+    // client.set_console_logging_enabled(true);
     
     // Clear log file if needed (uncomment to use)
     // client.clear_log_file();
@@ -727,7 +734,9 @@ const RatsPeer* get_peer_by_id(const std::string& peer_id) const;
 std::string get_our_peer_id() const;
 
 // Logging Control API
-void set_logging_enabled(bool enabled);
+void set_console_logging_enabled(bool enabled);  // Disable/enable console output
+bool is_console_logging_enabled() const;
+void set_logging_enabled(bool enabled);          // Enable/disable file logging
 bool is_logging_enabled() const;
 void set_log_file_path(const std::string& file_path);
 std::string get_log_file_path() const;
@@ -1223,6 +1232,44 @@ void on_storage_sync_complete(StorageSyncCompleteCallback callback);
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Understanding DHT vs Peer Connections
+
+**librats has two distinct peer systems that serve different purposes:**
+
+| Layer | Protocol | Purpose | APIs |
+|-------|----------|---------|------|
+| **DHT Layer** | UDP (Kademlia) | **Peer Discovery** only | `get_dht_routing_table_size()`, `find_peers_by_hash()`, `announce_for_hash()` |
+| **Peer Connection Layer** | TCP | **Message Exchange** | `get_all_peers()`, `get_validated_peers()`, `send_*()`, `broadcast_*()` |
+
+**Key Points:**
+- The **DHT routing table** is NOT your connected peers. It contains DHT nodes (often from the global BitTorrent Mainline DHT) that help you *discover* peers.
+- `get_dht_routing_table_size()` may return values larger than your peer count because it includes nodes from the global DHT network.
+- **Peer connections** (`get_all_peers()`, `get_validated_peers()`) are the actual TCP connections used for communication.
+- The DHT is designed for **discovery**, not message routing. For messaging, use the Peer Connection Layer or GossipSub.
+
+### Private Network Formation
+
+To create a private overlay that only includes your application's peers:
+
+1. **Set a unique protocol name and version BEFORE starting discovery:**
+
+```cpp
+client.set_protocol_name("my_private_app");
+client.set_protocol_version("1.0");
+client.start();
+client.start_dht_discovery();  // Now uses your unique discovery hash
+```
+
+2. **How it works:**
+   - librats generates a unique `discovery_hash` via SHA1 of `{protocol_name}_peer_discovery_v{version}`
+   - Peers announce themselves under this hash in the global DHT
+   - Only peers with the same protocol name/version will discover each other
+   - Once discovered via DHT, peers connect via TCP and form a mesh via peer exchange
+
+3. **Discovery timing:**
+   - DHT discovery is asynchronous and takes 1-30 seconds for initial peer discovery
+   - For faster local testing, use **mDNS discovery**: `client.start_mdns_discovery("my_service");`
 
 ## 🛠️ Building
 

@@ -991,6 +991,20 @@ public:
     // =========================================================================
     
     /**
+     * Enable or disable console logging
+     * When disabled, log messages will not be printed to stdout/stderr
+     * File logging (if enabled) will still work
+     * @param enabled Whether to enable console logging (default: true)
+     */
+    void set_console_logging_enabled(bool enabled);
+    
+    /**
+     * Check if console logging is currently enabled
+     * @return true if console logging is enabled
+     */
+    bool is_console_logging_enabled() const;
+    
+    /**
      * Enable or disable file logging
      * When enabled, logs will be written to "rats.log" by default
      * @param enabled Whether to enable file logging

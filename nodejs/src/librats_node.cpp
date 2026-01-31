@@ -1330,6 +1330,25 @@ Napi::Value GetVersion(const Napi::CallbackInfo& info) {
     return version;
 }
 
+// Console logging control functions
+Napi::Value SetConsoleLoggingEnabled(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    
+    if (info.Length() < 1 || !info[0].IsBoolean()) {
+        Napi::TypeError::New(env, "Boolean expected").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+    
+    bool enabled = info[0].As<Napi::Boolean>().Value();
+    rats_set_console_logging_enabled(enabled ? 1 : 0);
+    return env.Undefined();
+}
+
+Napi::Value IsConsoleLoggingEnabled(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    return Napi::Boolean::New(env, rats_is_console_logging_enabled() != 0);
+}
+
 Napi::Value GetGitDescribe(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     const char* git_describe = rats_get_git_describe();
@@ -1398,6 +1417,10 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     exports.Set("getVersion", Napi::Function::New(env, GetVersion));
     exports.Set("getGitDescribe", Napi::Function::New(env, GetGitDescribe));
     exports.Set("getAbi", Napi::Function::New(env, GetAbi));
+    
+    // Export logging control functions
+    exports.Set("setConsoleLoggingEnabled", Napi::Function::New(env, SetConsoleLoggingEnabled));
+    exports.Set("isConsoleLoggingEnabled", Napi::Function::New(env, IsConsoleLoggingEnabled));
     
     // Export constants
     exports.Set("constants", InitConstants(env));

@@ -419,6 +419,16 @@ Java_com_librats_RatsClient_nativeGetPeerIds(JNIEnv* env, jobject thiz, jlong cl
 
 // Logging controls
 JNIEXPORT void JNICALL
+Java_com_librats_RatsClient_nativeSetConsoleLoggingEnabled(JNIEnv* env, jclass clazz, jboolean enabled) {
+    rats_set_console_logging_enabled(enabled ? 1 : 0);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_librats_RatsClient_nativeIsConsoleLoggingEnabled(JNIEnv* env, jclass clazz) {
+    return rats_is_console_logging_enabled() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
 Java_com_librats_RatsClient_nativeSetLoggingEnabled(JNIEnv* env, jclass clazz, jboolean enabled) {
     rats_set_logging_enabled(enabled ? 1 : 0);
 }

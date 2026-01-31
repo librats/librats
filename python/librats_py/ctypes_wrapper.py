@@ -432,6 +432,12 @@ class LibratsCtypes:
         self.lib.rats_get_historical_peer_ids.restype = POINTER(c_char_p)
 
         # Logging functions
+        self.lib.rats_set_console_logging_enabled.argtypes = [c_int]
+        self.lib.rats_set_console_logging_enabled.restype = None
+        
+        self.lib.rats_is_console_logging_enabled.argtypes = []
+        self.lib.rats_is_console_logging_enabled.restype = c_int
+        
         self.lib.rats_set_logging_enabled.argtypes = [c_int]
         self.lib.rats_set_logging_enabled.restype = None
         
