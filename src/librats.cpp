@@ -455,7 +455,8 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         }
         
         // ----- 2. DECRYPT IF NEEDED -----
-        std::string data;
+        // Use vector directly to avoid unnecessary string conversions
+        std::vector<uint8_t> data;
         
         if (noise_handshake_done) {
             std::string current_peer_id;
@@ -492,16 +493,18 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
                 }
                 
                 plaintext.resize(pt_len);
-                data = std::string(plaintext.begin(), plaintext.end());
+                data = std::move(plaintext);
                 LOG_CLIENT_DEBUG("Decrypted message from " << current_peer_id << " (" << pt_len << " bytes)");
             } else {
-                data = std::string(received_bytes.begin(), received_bytes.end());
+                data = std::move(received_bytes);
             }
         } else {
-            data = std::string(received_bytes.begin(), received_bytes.end());
+            data = std::move(received_bytes);
         }
         
-        LOG_CLIENT_DEBUG("Received data from " << peer_hash_id << ": " << data.substr(0, 50) << (data.length() > 50 ? "..." : ""));
+        // Log first 50 bytes for debugging
+        size_t log_len = (std::min)(data.size(), static_cast<size_t>(50));
+        LOG_CLIENT_DEBUG("Received data from " << peer_hash_id << ": " << std::string(data.begin(), data.begin() + log_len) << (data.size() > 50 ? "..." : ""));
         
         // ----- 3. CONNECTION STATE CHECK (during handshake phase only) -----
         if (!handshake_completed) {
@@ -621,11 +624,11 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
             continue;
         }
         
-        std::vector<uint8_t> received_data(data.begin(), data.end());
+        // Use data directly - no need for extra copy
         MessageHeader header;
         std::vector<uint8_t> payload;
         
-        if (!parse_message_with_header(received_data, header, payload)) {
+        if (!parse_message_with_header(data, header, payload)) {
             LOG_CLIENT_WARN("No header found in message from " << peer_hash_id);
             continue;
         }
@@ -745,10 +748,10 @@ std::string RatsClient::create_handshake_message(const std::string& message_type
     return handshake_msg.dump();
 }
 
-bool RatsClient::parse_handshake_message(const std::string& message, HandshakeMessage& out_msg) const {
+bool RatsClient::parse_handshake_message(const std::vector<uint8_t>& data, HandshakeMessage& out_msg) const {
     try {
-        // Use nlohmann::json for proper JSON parsing
-        nlohmann::json json_msg = nlohmann::json::parse(message);
+        // Use nlohmann::json with iterators to avoid string conversion
+        nlohmann::json json_msg = nlohmann::json::parse(data.begin(), data.end());
         
         // Clear the output structure
         out_msg = HandshakeMessage{};
@@ -823,37 +826,30 @@ bool RatsClient::validate_handshake_message(const HandshakeMessage& msg) const {
     return true;
 }
 
-bool RatsClient::is_handshake_message(const std::string& message) const {
+bool RatsClient::is_handshake_message(const std::vector<uint8_t>& data) const {
     try {
-        std::string json_to_parse = message;
-        
         // Check if message has our message header (starts with "RATS" magic)
-        std::vector<uint8_t> message_data(message.begin(), message.end());
         MessageHeader header;
         std::vector<uint8_t> payload;
         
-        if (parse_message_with_header(message_data, header, payload)) {
+        if (parse_message_with_header(data, header, payload)) {
             // Message has valid header - extract the JSON payload
             if (header.type == MessageDataType::STRING || header.type == MessageDataType::JSON) {
-                json_to_parse = std::string(payload.begin(), payload.end());
-            } else {
-                // Handshake messages should be string/JSON type
-                return false;
+                // Parse the JSON message directly from payload
+                nlohmann::json json_msg = nlohmann::json::parse(payload.begin(), payload.end());
+                std::string expected_protocol;
+                {
+                    std::lock_guard<std::mutex> lock(protocol_config_mutex_);
+                    expected_protocol = custom_protocol_name_;
+                }
+                return json_msg.value("protocol", "") == expected_protocol && 
+                       json_msg.value("message_type", "") == "handshake";
             }
-        } else {
-            // Message has no header
+            // Handshake messages should be string/JSON type
             return false;
         }
-        
-        // Parse the JSON message
-        nlohmann::json json_msg = nlohmann::json::parse(json_to_parse);
-        std::string expected_protocol;
-        {
-            std::lock_guard<std::mutex> lock(protocol_config_mutex_);
-            expected_protocol = custom_protocol_name_;
-        }
-        return json_msg.value("protocol", "") == expected_protocol && 
-               json_msg.value("message_type", "") == "handshake";
+        // Message has no header
+        return false;
     } catch (const std::exception&) {
         return false;
     }
@@ -898,28 +894,25 @@ bool RatsClient::send_handshake(socket_t socket, const std::string& our_peer_id)
     return send_handshake_unlocked(socket, our_peer_id);
 }
 
-bool RatsClient::handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::string& message) {
-    // Extract JSON payload from message header if present
-    std::string json_to_parse = message;
-    std::vector<uint8_t> message_data(message.begin(), message.end());
+bool RatsClient::handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data) {
+    // Extract JSON payload from message header
     MessageHeader header;
     std::vector<uint8_t> payload;
     
-    if (parse_message_with_header(message_data, header, payload)) {
-        // Message has valid header - extract the JSON payload
-        if (header.type == MessageDataType::STRING || header.type == MessageDataType::JSON) {
-            json_to_parse = std::string(payload.begin(), payload.end());
-        } else {
-            LOG_CLIENT_ERROR("Invalid message type for handshake: " << static_cast<int>(header.type));
-            return false;
-        }
-    } else {
+    if (!parse_message_with_header(data, header, payload)) {
         LOG_CLIENT_ERROR("Failed to parse handshake message header from " << peer_hash_id);
         return false;
     }
     
+    // Message has valid header - check the type
+    if (header.type != MessageDataType::STRING && header.type != MessageDataType::JSON) {
+        LOG_CLIENT_ERROR("Invalid message type for handshake: " << static_cast<int>(header.type));
+        return false;
+    }
+    
+    // Parse handshake message directly from payload (no string conversion)
     HandshakeMessage handshake_msg;
-    if (!parse_handshake_message(json_to_parse, handshake_msg)) {
+    if (!parse_handshake_message(payload, handshake_msg)) {
         LOG_CLIENT_ERROR("Failed to parse handshake message from " << peer_hash_id);
         return false;
     }

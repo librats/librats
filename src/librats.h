@@ -2049,12 +2049,12 @@ private:
     };
 
     std::string create_handshake_message(const std::string& message_type, const std::string& our_peer_id) const;
-    bool parse_handshake_message(const std::string& message, HandshakeMessage& out_msg) const;
+    bool parse_handshake_message(const std::vector<uint8_t>& data, HandshakeMessage& out_msg) const;
     bool validate_handshake_message(const HandshakeMessage& msg) const;
-    bool is_handshake_message(const std::string& message) const;
+    bool is_handshake_message(const std::vector<uint8_t>& data) const;
     bool send_handshake(socket_t socket, const std::string& our_peer_id);
     bool send_handshake_unlocked(socket_t socket, const std::string& our_peer_id);
-    bool handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::string& message);
+    bool handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data);
     void check_handshake_timeouts();
     void log_handshake_completion_unlocked(const RatsPeer& peer);
 
