@@ -1233,6 +1233,8 @@ void on_storage_sync_complete(StorageSyncCompleteCallback callback);
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Frequently Asking Questions (FAQ)
+
 ### Understanding DHT vs Peer Connections
 
 **librats has two distinct peer systems that serve different purposes:**
