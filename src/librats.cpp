@@ -768,6 +768,7 @@ std::string RatsClient::create_handshake_message(const std::string& message_type
     handshake_msg["message_type"] = message_type;
     handshake_msg["timestamp"] = timestamp;
     handshake_msg["encryption_enabled"] = is_encryption_enabled();
+    handshake_msg["listen_port"] = listen_port_;
     
     return handshake_msg.dump();
 }
@@ -789,6 +790,8 @@ bool RatsClient::parse_handshake_message(const std::vector<uint8_t>& data, Hands
         out_msg.timestamp = json_msg.value("timestamp", static_cast<int64_t>(0));
         // Parse encryption_enabled (default to false for backward compatibility)
         out_msg.encryption_enabled = json_msg.value("encryption_enabled", false);
+        // Parse listen_port (default to 0 for backward compatibility with older clients)
+        out_msg.listen_port = json_msg.value("listen_port", static_cast<uint16_t>(0));
         
         return true;
         
@@ -1011,6 +1014,22 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& pe
     LOG_CLIENT_INFO("Encryption negotiation: local=" << local_encryption 
                     << ", remote=" << remote_encryption 
                     << ", result=" << peer.encryption_enabled);
+    
+    // For incoming connections, update port to the peer's actual listen port
+    // This is critical for peer exchange to work correctly
+    if (!peer.is_outgoing && handshake_msg.listen_port > 0) {
+        // Remove old address mapping
+        address_to_peer_id_.erase(peer.normalized_address);
+        
+        // Update port and normalized address
+        peer.port = handshake_msg.listen_port;
+        peer.normalized_address = normalize_peer_address(peer.ip, peer.port);
+        
+        // Add new address mapping
+        address_to_peer_id_[peer.normalized_address] = peer.peer_id;
+        
+        LOG_CLIENT_INFO("Updated incoming peer port to listen_port: " << peer.ip << ":" << peer.port);
+    }
     
     // Simplified handshake logic - just one message type
     if (peer.handshake_state == RatsPeer::HandshakeState::PENDING) {
@@ -2408,8 +2427,8 @@ nlohmann::json RatsClient::create_peer_exchange_message(const RatsPeer& peer) {
     payload["peer_id"] = peer.peer_id;
     payload["connection_type"] = peer.is_outgoing ? "outgoing" : "incoming";
     
-    // Create rats message
-    return create_rats_message("peer", payload, peer.peer_id);
+    // Create rats message - use OUR peer_id as sender, not the advertised peer's id
+    return create_rats_message("peer", payload, get_our_peer_id());
 }
 
 void RatsClient::broadcast_peer_exchange_message(const RatsPeer& new_peer) {

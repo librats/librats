@@ -2061,6 +2061,7 @@ private:
         std::string message_type;
         int64_t timestamp;
         bool encryption_enabled;  // Whether peer supports/wants encryption
+        uint16_t listen_port;     // Peer's listening port for peer exchange
     };
 
     std::string create_handshake_message(const std::string& message_type, const std::string& our_peer_id) const;
