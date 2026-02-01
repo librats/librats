@@ -1652,3 +1652,202 @@ TEST_F(RatsClientTest, HandshakeStateEnumTest) {
     EXPECT_FALSE(peer.is_handshake_completed());
     EXPECT_TRUE(peer.is_handshake_failed());
 }
+
+// Test 3 encrypted clients + 1 unencrypted client communication
+// Verifies:
+// 1. Multiple encrypted clients can communicate with central hub
+// 2. Nonce increments correctly across multiple messages
+// 3. Unencrypted client can communicate with encrypted hub (without encryption on that link)
+// 4. Encryption/decryption works correctly
+TEST_F(RatsClientTest, MultiClientEncryptionMeshTest) {
+    const int hub_port = 59130;
+    const int enc_client2_port = 59131;
+    const int enc_client3_port = 59132;
+    const int unenc_client_port = 59133;
+    
+    RatsClient hub(hub_port);  // Hub - encrypted
+    RatsClient enc_client2(enc_client2_port);
+    RatsClient enc_client3(enc_client3_port);
+    RatsClient unenc_client(unenc_client_port);
+    
+    // Enable encryption on hub and 2 clients, leave 1 unencrypted
+    hub.set_encryption_enabled(true);
+    enc_client2.set_encryption_enabled(true);
+    enc_client3.set_encryption_enabled(true);
+    // unenc_client stays with encryption disabled
+    
+    EXPECT_TRUE(hub.is_encryption_enabled());
+    EXPECT_TRUE(enc_client2.is_encryption_enabled());
+    EXPECT_TRUE(enc_client3.is_encryption_enabled());
+    EXPECT_FALSE(unenc_client.is_encryption_enabled());
+    
+    // Track received messages per client
+    struct MessageTracker {
+        std::atomic<int> count{0};
+        std::vector<std::string> messages;
+        std::mutex mutex;
+        
+        void add(const std::string& msg) {
+            std::lock_guard<std::mutex> lock(mutex);
+            messages.push_back(msg);
+            count++;
+        }
+        
+        bool has_message(const std::string& msg) {
+            std::lock_guard<std::mutex> lock(mutex);
+            return std::find(messages.begin(), messages.end(), msg) != messages.end();
+        }
+        
+        int get_count() {
+            return count.load();
+        }
+    };
+    
+    MessageTracker tracker_hub, tracker_enc2, tracker_enc3, tracker_unenc;
+    
+    hub.set_string_data_callback([&](socket_t, const std::string&, const std::string& data) {
+        tracker_hub.add(data);
+    });
+    enc_client2.set_string_data_callback([&](socket_t, const std::string&, const std::string& data) {
+        tracker_enc2.add(data);
+    });
+    enc_client3.set_string_data_callback([&](socket_t, const std::string&, const std::string& data) {
+        tracker_enc3.add(data);
+    });
+    unenc_client.set_string_data_callback([&](socket_t, const std::string&, const std::string& data) {
+        tracker_unenc.add(data);
+    });
+    
+    // Start all clients
+    EXPECT_TRUE(hub.start());
+    EXPECT_TRUE(enc_client2.start());
+    EXPECT_TRUE(enc_client3.start());
+    EXPECT_TRUE(unenc_client.start());
+    
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // Connect all clients to hub (star topology)
+    EXPECT_TRUE(enc_client2.connect_to_peer("127.0.0.1", hub_port));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(enc_client3.connect_to_peer("127.0.0.1", hub_port));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(unenc_client.connect_to_peer("127.0.0.1", hub_port));
+    
+    // Wait for all connections to hub
+    bool all_connected = wait_for_condition([&]() {
+        return hub.get_peer_count() >= 3;
+    }, 5000);
+    EXPECT_TRUE(all_connected) << "Hub should have 3 peers";
+    
+    // Wait for Noise handshakes to complete
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    // Verify encryption status on hub
+    auto hub_peers = hub.get_validated_peers();
+    EXPECT_EQ(hub_peers.size(), 3u) << "Hub should have exactly 3 validated peers";
+    
+    int encrypted_count = 0;
+    int unencrypted_count = 0;
+    for (const auto& peer : hub_peers) {
+        if (hub.is_peer_encrypted(peer.peer_id)) {
+            encrypted_count++;
+        } else {
+            unencrypted_count++;
+        }
+    }
+    EXPECT_EQ(encrypted_count, 2) << "Hub should have 2 encrypted peers";
+    EXPECT_EQ(unencrypted_count, 1) << "Hub should have 1 unencrypted peer";
+    
+    // === Test 1: Multiple messages from hub to all peers (tests nonce increment) ===
+    const int num_messages = 10;  // Send 10 messages to really test nonce
+    for (const auto& peer : hub_peers) {
+        for (int i = 0; i < num_messages; i++) {
+            std::string msg = "Hub_msg_" + std::to_string(i);
+            hub.send_string_to_peer(peer.socket, msg);
+        }
+    }
+    
+    // Wait for messages to be received
+    bool hub_msgs_received = wait_for_condition([&]() {
+        return tracker_enc2.get_count() >= num_messages && 
+               tracker_enc3.get_count() >= num_messages && 
+               tracker_unenc.get_count() >= num_messages;
+    }, 5000);
+    EXPECT_TRUE(hub_msgs_received) << "All clients should receive " << num_messages << " messages from hub";
+    
+    // Verify all messages arrived correctly (tests nonce is incrementing properly)
+    for (int i = 0; i < num_messages; i++) {
+        std::string expected = "Hub_msg_" + std::to_string(i);
+        EXPECT_TRUE(tracker_enc2.has_message(expected)) << "Encrypted client2 should have message " << i;
+        EXPECT_TRUE(tracker_enc3.has_message(expected)) << "Encrypted client3 should have message " << i;
+        EXPECT_TRUE(tracker_unenc.has_message(expected)) << "Unencrypted client should have message " << i;
+    }
+    
+    // === Test 2: Multiple messages from each client back to hub ===
+    // Get peer info for each client
+    auto enc2_peers = enc_client2.get_validated_peers();
+    auto enc3_peers = enc_client3.get_validated_peers();
+    auto unenc_peers = unenc_client.get_validated_peers();
+    
+    // Send from encrypted client2 to hub
+    for (const auto& peer : enc2_peers) {
+        if (peer.port == hub_port) {
+            for (int i = 0; i < num_messages; i++) {
+                enc_client2.send_string_to_peer(peer.socket, "Enc2_msg_" + std::to_string(i));
+            }
+            break;
+        }
+    }
+    
+    // Send from encrypted client3 to hub
+    for (const auto& peer : enc3_peers) {
+        if (peer.port == hub_port) {
+            for (int i = 0; i < num_messages; i++) {
+                enc_client3.send_string_to_peer(peer.socket, "Enc3_msg_" + std::to_string(i));
+            }
+            break;
+        }
+    }
+    
+    // Send from unencrypted client to hub
+    for (const auto& peer : unenc_peers) {
+        if (peer.port == hub_port) {
+            for (int i = 0; i < num_messages; i++) {
+                unenc_client.send_string_to_peer(peer.socket, "Unenc_msg_" + std::to_string(i));
+            }
+            break;
+        }
+    }
+    
+    // Wait for hub to receive all messages (10 from each of 3 clients = 30)
+    bool all_hub_received = wait_for_condition([&]() {
+        return tracker_hub.get_count() >= num_messages * 3;
+    }, 5000);
+    EXPECT_TRUE(all_hub_received) << "Hub should receive " << (num_messages * 3) << " messages";
+    
+    // Verify hub received all messages correctly
+    for (int i = 0; i < num_messages; i++) {
+        EXPECT_TRUE(tracker_hub.has_message("Enc2_msg_" + std::to_string(i))) 
+            << "Hub should have encrypted client2 message " << i;
+        EXPECT_TRUE(tracker_hub.has_message("Enc3_msg_" + std::to_string(i))) 
+            << "Hub should have encrypted client3 message " << i;
+        EXPECT_TRUE(tracker_hub.has_message("Unenc_msg_" + std::to_string(i))) 
+            << "Hub should have unencrypted client message " << i;
+    }
+    
+    // === Verify final counts ===
+    EXPECT_GE(tracker_hub.get_count(), num_messages * 3) 
+        << "Hub should have at least " << (num_messages * 3) << " messages";
+    EXPECT_GE(tracker_enc2.get_count(), num_messages) 
+        << "Encrypted client2 should have at least " << num_messages << " messages";
+    EXPECT_GE(tracker_enc3.get_count(), num_messages) 
+        << "Encrypted client3 should have at least " << num_messages << " messages";
+    EXPECT_GE(tracker_unenc.get_count(), num_messages) 
+        << "Unencrypted client should have at least " << num_messages << " messages";
+    
+    // Clean up
+    hub.stop();
+    enc_client2.stop();
+    enc_client3.stop();
+    unenc_client.stop();
+}
