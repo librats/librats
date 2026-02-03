@@ -637,6 +637,13 @@ public:
     bool is_automatic_discovery_running() const;
     
     /**
+     * Calculate discovery interval based on current peer count
+     * Uses graduated scaling: more aggressive when fewer peers, less aggressive when nearly full
+     * @return Discovery interval in seconds
+     */
+    std::chrono::seconds calculate_discovery_interval() const;
+    
+    /**
      * Get the discovery hash for current protocol configuration
      * @return Discovery hash based on current protocol name and version
      */

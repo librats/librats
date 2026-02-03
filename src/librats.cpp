@@ -1972,6 +1972,33 @@ bool RatsClient::is_automatic_discovery_running() const {
     return auto_discovery_running_.load();
 }
 
+std::chrono::seconds RatsClient::calculate_discovery_interval() const {
+    int peer_count = get_peer_count();
+    
+    // No peers - aggressive discovery
+    if (peer_count == 0) {
+        return std::chrono::seconds(15);
+    }
+    
+    // Calculate fill ratio
+    float fill_ratio = static_cast<float>(peer_count) / static_cast<float>(max_peers_);
+    
+    // Graduated intervals based on fill ratio
+    if (fill_ratio < 0.25f) {
+        // Less than 25% full - still fairly aggressive
+        return std::chrono::seconds(60);       // 1 minute
+    } else if (fill_ratio < 0.50f) {
+        // 25-50% full - moderate
+        return std::chrono::seconds(180);      // 3 minutes
+    } else if (fill_ratio < 0.75f) {
+        // 50-75% full - relaxed
+        return std::chrono::seconds(600);      // 10 minutes
+    } else {
+        // 75-100% full - very relaxed (mostly just re-announcing)
+        return std::chrono::seconds(1800);     // 30 minutes
+    }
+}
+
 void RatsClient::automatic_discovery_loop() {
     LOG_CLIENT_INFO("Automatic peer discovery loop started");
     
@@ -1993,12 +2020,12 @@ void RatsClient::automatic_discovery_loop() {
         auto now = std::chrono::steady_clock::now();
         
         // Announce combines both announcing our presence and discovering peers
-        // Adjust frequency based on whether we have peers
-        auto interval = (get_peer_count() == 0) 
-            ? std::chrono::seconds(15)    // Aggressive when no peers
-            : std::chrono::minutes(10);   // Less aggressive when connected
+        // Interval scales based on peer count: aggressive when empty, relaxed when nearly full
+        auto interval = calculate_discovery_interval();
         
         if (now - last_announce >= interval) {
+            LOG_CLIENT_DEBUG("Discovery interval: " << interval.count() << "s (peers: " 
+                            << get_peer_count() << "/" << max_peers_ << ")");
             announce_rats_peer();
             last_announce = now;
         }
