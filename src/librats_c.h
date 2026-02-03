@@ -53,6 +53,8 @@ RATS_API void rats_set_log_timestamps_enabled(rats_client_t client, int enabled)
 RATS_API int rats_is_log_timestamps_enabled(rats_client_t client);
 RATS_API void rats_set_log_rotation_size(rats_client_t client, size_t max_size_bytes);
 RATS_API void rats_set_log_retention_count(rats_client_t client, int count);
+RATS_API void rats_set_log_rotate_on_startup(rats_client_t client, int enabled);
+RATS_API int rats_is_log_rotate_on_startup_enabled(rats_client_t client);
 RATS_API void rats_clear_log_file(rats_client_t client);
 
 // Error codes

@@ -100,6 +100,17 @@ public:
         max_log_files_ = count;
     }
     
+    // Rotate on startup configuration
+    void set_rotate_on_startup(bool enabled) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        rotate_on_startup_ = enabled;
+    }
+    
+    bool is_rotate_on_startup_enabled() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return rotate_on_startup_;
+    }
+    
     // Get current file logging status
     bool is_file_logging_enabled() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -178,7 +189,8 @@ public:
 private:
     Logger() : min_level_(LogLevel::INFO), colors_enabled_(true), timestamps_enabled_(true),
                console_logging_enabled_(true), file_logging_enabled_(false), 
-               max_log_file_size_(10 * 1024 * 1024), max_log_files_(5), current_file_size_(0) {
+               max_log_file_size_(10 * 1024 * 1024), max_log_files_(5), current_file_size_(0),
+               rotate_on_startup_(false), startup_rotation_done_(false) {
         // Check if we're outputting to a terminal
         is_terminal_ = isatty(fileno(stdout));
         
@@ -330,6 +342,19 @@ private:
             }
         }
         
+        // Perform rotation on startup if enabled and not yet done this session
+        if (rotate_on_startup_ && !startup_rotation_done_) {
+            // Check if the log file exists and has content
+            if (file_exists(log_file_path_.c_str())) {
+                std::ifstream check_file(log_file_path_, std::ios::ate);
+                if (check_file.is_open() && check_file.tellg() > 0) {
+                    check_file.close();
+                    rotate_log_files_impl();
+                }
+            }
+            startup_rotation_done_ = true;
+        }
+        
         log_file_.open(log_file_path_, std::ios::app);
         if (log_file_.is_open()) {
             // Get current file size
@@ -350,6 +375,16 @@ private:
         if (log_file_path_.empty() || max_log_files_ <= 0) return;
         
         close_log_file();
+        rotate_log_files_impl();
+        
+        // Reopen the log file (new empty file)
+        open_log_file();
+    }
+    
+    // Internal rotation implementation - does not close/open files
+    // Called directly when we need to rotate before opening (e.g., on startup)
+    void rotate_log_files_impl() {
+        if (log_file_path_.empty() || max_log_files_ <= 0) return;
         
         // Move existing log files
         for (int i = max_log_files_ - 1; i >= 1; i--) {
@@ -368,9 +403,6 @@ private:
         // Move current log file to .1
         std::string backup_name = log_file_path_ + ".1";
         std::rename(log_file_path_.c_str(), backup_name.c_str());
-        
-        // Reopen the log file (new empty file)
-        open_log_file();
     }
     
     mutable std::mutex mutex_;
@@ -389,6 +421,10 @@ private:
     size_t max_log_file_size_;
     int max_log_files_;
     size_t current_file_size_;
+    
+    // Rotate on startup members
+    bool rotate_on_startup_;
+    bool startup_rotation_done_;  // Tracks if we've already done startup rotation for this session
 };
 
 } // namespace librats

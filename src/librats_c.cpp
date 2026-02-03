@@ -237,6 +237,18 @@ void rats_set_log_retention_count(rats_client_t handle, int count) {
     wrap->client->set_log_retention_count(count);
 }
 
+void rats_set_log_rotate_on_startup(rats_client_t handle, int enabled) {
+    if (!handle) return;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    wrap->client->set_log_rotate_on_startup(enabled != 0);
+}
+
+int rats_is_log_rotate_on_startup_enabled(rats_client_t handle) {
+    if (!handle) return 0;
+    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
+    return wrap->client->is_log_rotate_on_startup_enabled() ? 1 : 0;
+}
+
 void rats_clear_log_file(rats_client_t handle) {
     if (!handle) return;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);

@@ -136,6 +136,15 @@ void RatsClient::set_log_retention_count(int count) {
     LOG_CLIENT_INFO("Log retention count set to: " << count << " files");
 }
 
+void RatsClient::set_log_rotate_on_startup(bool enabled) {
+    Logger::getInstance().set_rotate_on_startup(enabled);
+    LOG_CLIENT_INFO("Log rotation on startup " << (enabled ? "enabled" : "disabled"));
+}
+
+bool RatsClient::is_log_rotate_on_startup_enabled() const {
+    return Logger::getInstance().is_rotate_on_startup_enabled();
+}
+
 void RatsClient::clear_log_file() {
     Logger& logger = Logger::getInstance();
     std::string log_path = logger.get_log_file_path();

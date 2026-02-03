@@ -1085,6 +1085,20 @@ public:
     void set_log_retention_count(int count);
     
     /**
+     * Enable or disable log rotation on application startup
+     * When enabled, the existing log file will be rotated when logging starts,
+     * so each application run gets a fresh log file
+     * @param enabled Whether to rotate logs on startup (default: false)
+     */
+    void set_log_rotate_on_startup(bool enabled);
+    
+    /**
+     * Check if log rotation on startup is enabled
+     * @return true if rotate on startup is enabled
+     */
+    bool is_log_rotate_on_startup_enabled() const;
+    
+    /**
      * Clear/reset the current log file
      */
     void clear_log_file();

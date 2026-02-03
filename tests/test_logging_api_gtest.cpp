@@ -36,7 +36,8 @@ protected:
         std::vector<std::string> test_files = {
             "rats.log", 
             "test_custom.log",
-            "test_logging.log"
+            "test_logging.log",
+            "persistent_test.log"
         };
         
         for (const auto& file : test_files) {
@@ -347,4 +348,166 @@ TEST_F(LoggingApiTest, StatePersistence) {
     
     EXPECT_EQ(client_->get_log_file_path(), "persistent_test.log")
         << "Log file path should still persist after other operations";
+}
+
+// Test rotate on startup initial state
+TEST_F(LoggingApiTest, RotateOnStartupInitialState) {
+    EXPECT_FALSE(client_->is_log_rotate_on_startup_enabled())
+        << "Rotate on startup should be disabled by default";
+}
+
+// Test enable/disable rotate on startup
+TEST_F(LoggingApiTest, RotateOnStartupEnableDisable) {
+    client_->set_log_rotate_on_startup(true);
+    EXPECT_TRUE(client_->is_log_rotate_on_startup_enabled())
+        << "Rotate on startup should be enabled after calling set_log_rotate_on_startup(true)";
+    
+    client_->set_log_rotate_on_startup(false);
+    EXPECT_FALSE(client_->is_log_rotate_on_startup_enabled())
+        << "Rotate on startup should be disabled after calling set_log_rotate_on_startup(false)";
+}
+
+// Test rotate on startup actually rotates existing log file
+TEST_F(LoggingApiTest, RotateOnStartupRotatesExistingLog) {
+    const std::string log_path = "test_logging.log";
+    const std::string rotated_path = log_path + ".1";
+    
+    // Clean up first
+    librats::delete_file(log_path.c_str());
+    librats::delete_file(rotated_path.c_str());
+    
+    // Create initial log file with some content
+    {
+        std::ofstream initial_log(log_path);
+        initial_log << "Initial log content before rotation" << std::endl;
+    }
+    
+    EXPECT_TRUE(file_or_directory_exists_test(log_path))
+        << "Initial log file should exist";
+    
+    // Enable rotate on startup and configure logging
+    client_->set_log_rotate_on_startup(true);
+    client_->set_log_file_path(log_path);
+    client_->set_logging_enabled(true);
+    
+    // The existing log should have been rotated to .1
+    EXPECT_TRUE(file_or_directory_exists_test(rotated_path))
+        << "Rotated log file (.1) should exist after enabling logging with rotate on startup";
+    
+    // Verify the rotated file contains the original content
+    std::string rotated_content = read_file_content(rotated_path);
+    EXPECT_NE(rotated_content.find("Initial log content before rotation"), std::string::npos)
+        << "Rotated log file should contain the original content";
+    
+    // Clean up
+    client_->set_logging_enabled(false);
+    librats::delete_file(log_path.c_str());
+    librats::delete_file(rotated_path.c_str());
+}
+
+// Test rotate on startup only rotates once per session
+TEST_F(LoggingApiTest, RotateOnStartupOnlyOnce) {
+    const std::string log_path = "test_logging.log";
+    const std::string rotated_path_1 = log_path + ".1";
+    const std::string rotated_path_2 = log_path + ".2";
+    
+    // Clean up first
+    librats::delete_file(log_path.c_str());
+    librats::delete_file(rotated_path_1.c_str());
+    librats::delete_file(rotated_path_2.c_str());
+    
+    // Create initial log file
+    {
+        std::ofstream initial_log(log_path);
+        initial_log << "First session content" << std::endl;
+    }
+    
+    // Enable rotate on startup
+    client_->set_log_rotate_on_startup(true);
+    client_->set_log_file_path(log_path);
+    client_->set_logging_enabled(true);
+    
+    // First rotation should happen
+    EXPECT_TRUE(file_or_directory_exists_test(rotated_path_1))
+        << "First rotation should create .1 file";
+    
+    // Disable and re-enable logging (simulate re-opening log in same session)
+    client_->set_logging_enabled(false);
+    
+    // Create some new content in the log file  
+    {
+        std::ofstream new_log(log_path);
+        new_log << "New content after disable" << std::endl;
+    }
+    
+    client_->set_logging_enabled(true);
+    
+    // The .1 file should still contain original content (no second rotation)
+    std::string rotated_content = read_file_content(rotated_path_1);
+    EXPECT_NE(rotated_content.find("First session content"), std::string::npos)
+        << "Rotated .1 file should still contain original content (no second rotation in same session)";
+    
+    // Clean up
+    client_->set_logging_enabled(false);
+    librats::delete_file(log_path.c_str());
+    librats::delete_file(rotated_path_1.c_str());
+    librats::delete_file(rotated_path_2.c_str());
+}
+
+// Test rotate on startup with empty log file (should not rotate)
+TEST_F(LoggingApiTest, RotateOnStartupEmptyFile) {
+    const std::string log_path = "test_logging.log";
+    const std::string rotated_path = log_path + ".1";
+    
+    // Clean up first
+    librats::delete_file(log_path.c_str());
+    librats::delete_file(rotated_path.c_str());
+    
+    // Create empty log file
+    {
+        std::ofstream empty_log(log_path);
+        // Don't write anything
+    }
+    
+    EXPECT_TRUE(file_or_directory_exists_test(log_path))
+        << "Empty log file should exist";
+    
+    // Enable rotate on startup
+    client_->set_log_rotate_on_startup(true);
+    client_->set_log_file_path(log_path);
+    client_->set_logging_enabled(true);
+    
+    // Empty file should NOT be rotated
+    EXPECT_FALSE(file_or_directory_exists_test(rotated_path))
+        << "Empty log file should not be rotated";
+    
+    // Clean up
+    client_->set_logging_enabled(false);
+    librats::delete_file(log_path.c_str());
+}
+
+// Test rotate on startup with non-existent log file
+TEST_F(LoggingApiTest, RotateOnStartupNoExistingFile) {
+    const std::string log_path = "test_logging.log";
+    const std::string rotated_path = log_path + ".1";
+    
+    // Ensure files don't exist
+    librats::delete_file(log_path.c_str());
+    librats::delete_file(rotated_path.c_str());
+    
+    EXPECT_FALSE(file_or_directory_exists_test(log_path))
+        << "Log file should not exist initially";
+    
+    // Enable rotate on startup
+    client_->set_log_rotate_on_startup(true);
+    client_->set_log_file_path(log_path);
+    client_->set_logging_enabled(true);
+    
+    // No rotation should happen (nothing to rotate)
+    EXPECT_FALSE(file_or_directory_exists_test(rotated_path))
+        << "No rotation should happen when there's no existing log file";
+    
+    // Clean up
+    client_->set_logging_enabled(false);
+    librats::delete_file(log_path.c_str());
 }
