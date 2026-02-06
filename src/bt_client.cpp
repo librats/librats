@@ -326,7 +326,8 @@ Torrent::Ptr BtClient::add_torrent(const TorrentInfo& info,
 }
 
 Torrent::Ptr BtClient::add_magnet(const std::string& magnet_uri,
-                                   const std::string& save_path) {
+                                   const std::string& save_path,
+                                   bool skip_dht_search) {
     auto info = TorrentInfo::from_magnet(magnet_uri);
     if (!info) {
         if (on_alert_) {
@@ -345,7 +346,14 @@ Torrent::Ptr BtClient::add_magnet(const std::string& magnet_uri,
     
     // Create torrent without full metadata
     TorrentConfig torrent_config;
-    torrent_config.save_path = save_path.empty() ? config_.download_path : save_path;
+    // For metadata-only mode (skip_dht_search=true with empty save_path), keep save_path empty
+    // Otherwise use default download path if not specified
+    if (skip_dht_search && save_path.empty()) {
+        // Metadata-only mode - keep empty save_path for proper detection
+        torrent_config.save_path = "";
+    } else {
+        torrent_config.save_path = save_path.empty() ? config_.download_path : save_path;
+    }
     torrent_config.resume_data_path = config_.resume_data_path;
     torrent_config.max_connections = config_.max_connections_per_torrent;
     torrent_config.max_uploads = config_.max_uploads;
@@ -362,8 +370,8 @@ Torrent::Ptr BtClient::add_magnet(const std::string& magnet_uri,
     if (running_) {
         torrent->start();
         
-        // Find peers via DHT for metadata
-        if (dht_running_) {
+        // Find peers via DHT for metadata (skip if using direct peer connection)
+        if (dht_running_ && !skip_dht_search) {
             find_peers_dht(info->info_hash());
         }
     }
@@ -891,6 +899,9 @@ void BtClient::announce_torrents_to_trackers() {
     for (auto& [hash, torrent] : torrents_) {
         if (!torrent->is_active()) continue;
         
+        // Skip metadata-only torrents (empty save_path means only fetching metadata)
+        if (torrent->save_path().empty()) continue;
+        
         auto tracker_it = tracker_managers_.find(hash);
         if (tracker_it == tracker_managers_.end()) continue;
         
@@ -993,12 +1004,14 @@ void BtClient::tick_loop() {
         }
         
         // Periodic DHT announces (every 15 minutes)
+        // Skip metadata-only torrents (empty save_path) to avoid unnecessary network traffic
         auto dht_elapsed = std::chrono::duration_cast<std::chrono::minutes>(
             now - last_dht_announce_).count();
         if (dht_elapsed >= 15 && dht_running_) {
             std::lock_guard<std::mutex> lock(mutex_);
             for (auto& [hash, torrent] : torrents_) {
-                if (torrent->is_active()) {
+                // Skip metadata-only torrents (empty save_path means only fetching metadata)
+                if (torrent->is_active() && !torrent->save_path().empty()) {
                     announce_to_dht(hash);
                 }
             }

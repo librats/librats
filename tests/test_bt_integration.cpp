@@ -1368,3 +1368,68 @@ TEST(BtIntegrationTest, AbortDownloadOnReject) {
     EXPECT_EQ(blocks2[0].block.piece_index, picked.piece_index);
     EXPECT_EQ(blocks2[0].block.offset, picked.offset);
 }
+
+//=============================================================================
+// Integration Test: add_magnet with skip_dht_search (metadata-only mode)
+//=============================================================================
+
+TEST(BtIntegrationTest, AddMagnetSkipDhtSearch) {
+    // Test that add_magnet with skip_dht_search=true creates a metadata-only torrent
+    // that does NOT trigger DHT peer discovery (for spider's direct peer connection)
+    init_socket_library();
+    
+    BtClientConfig config;
+    config.download_path = "/tmp/downloads";
+    config.listen_port = 0;
+    config.enable_dht = false;  // DHT disabled anyway for this unit test
+    
+    BtClient client(config);
+    client.start();
+    ASSERT_TRUE(client.is_running());
+    
+    // Create a valid magnet URI
+    std::string info_hash_hex = "0123456789abcdef0123456789abcdef01234567";
+    std::string magnet = "magnet:?xt=urn:btih:" + info_hash_hex;
+    
+    // Add magnet with skip_dht_search=true and empty save_path (metadata-only mode)
+    auto torrent = client.add_magnet(magnet, "", true /* skip_dht_search */);
+    ASSERT_NE(torrent, nullptr);
+    
+    // Verify torrent has empty save_path (metadata-only mode)
+    EXPECT_TRUE(torrent->save_path().empty());
+    
+    // Verify torrent doesn't have metadata yet (just a magnet link)
+    EXPECT_FALSE(torrent->has_metadata());
+    
+    // Verify torrent is active (started)
+    EXPECT_TRUE(torrent->is_active());
+    
+    client.stop();
+}
+
+TEST(BtIntegrationTest, AddMagnetNormalMode) {
+    // Test that add_magnet with skip_dht_search=false (default) uses download_path
+    init_socket_library();
+    
+    BtClientConfig config;
+    config.download_path = "/tmp/downloads";
+    config.listen_port = 0;
+    config.enable_dht = false;
+    
+    BtClient client(config);
+    client.start();
+    ASSERT_TRUE(client.is_running());
+    
+    std::string info_hash_hex = "fedcba9876543210fedcba9876543210fedcba98";
+    std::string magnet = "magnet:?xt=urn:btih:" + info_hash_hex;
+    
+    // Add magnet normally (skip_dht_search=false by default)
+    auto torrent = client.add_magnet(magnet, "");
+    ASSERT_NE(torrent, nullptr);
+    
+    // In normal mode, empty save_path should be replaced with config.download_path
+    EXPECT_FALSE(torrent->save_path().empty());
+    EXPECT_EQ(torrent->save_path(), "/tmp/downloads");
+    
+    client.stop();
+}

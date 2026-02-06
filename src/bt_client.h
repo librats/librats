@@ -170,10 +170,12 @@ public:
      * 
      * @param magnet_uri Magnet URI
      * @param save_path Directory to save files
+     * @param skip_dht_search If true, don't search DHT for peers (for metadata-only from specific peer)
      * @return Torrent pointer, or nullptr on failure
      */
     Torrent::Ptr add_magnet(const std::string& magnet_uri,
-                            const std::string& save_path = "");
+                            const std::string& save_path = "",
+                            bool skip_dht_search = false);
     
     /**
      * @brief Add a torrent with resume data for fast resume

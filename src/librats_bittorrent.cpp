@@ -248,12 +248,13 @@ void RatsClient::get_torrent_metadata_from_peer(const InfoHash& info_hash,
         return;
     }
     
-    LOG_CLIENT_INFO("Fetching metadata from peer " << peer_ip << ":" << peer_port << " (fast path)");
+    LOG_CLIENT_INFO("Fetching metadata from peer " << peer_ip << ":" << peer_port << " (fast path, no DHT)");
     
     // Add magnet in metadata-only mode (empty save_path) and immediately add the peer
+    // skip_dht_search=true to avoid network-wide DHT queries - we only want this specific peer
     std::string hash_hex = info_hash_to_hex(info_hash);
     std::string magnet = "magnet:?xt=urn:btih:" + hash_hex;
-    auto torrent = bittorrent_client_->add_magnet(magnet, "");
+    auto torrent = bittorrent_client_->add_magnet(magnet, "", true /* skip_dht_search */);
     
     if (!torrent) {
         if (callback) {
