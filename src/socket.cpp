@@ -1301,6 +1301,15 @@ void close_socket(socket_t socket, bool force) {
         
         // Peform force shutdown if needed
         if (force) {
+            // Set SO_LINGER with timeout=0 to send RST instead of FIN.
+            // This avoids TIME_WAIT state and frees the ephemeral port immediately,
+            // preventing port exhaustion under heavy connection churn (e.g. BitTorrent).
+            struct linger lin;
+            lin.l_onoff = 1;
+            lin.l_linger = 0;
+            setsockopt(socket, SOL_SOCKET, SO_LINGER,
+                       (const char*)&lin, sizeof(lin));
+
             LOG_SOCKET_DEBUG("Performing shutdown for TCP socket " << socket);
 #ifdef _WIN32
             shutdown(socket, SD_BOTH);
