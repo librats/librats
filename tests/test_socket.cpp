@@ -47,7 +47,7 @@ TEST_F(SocketTest, SocketValidityTest) {
     EXPECT_FALSE(is_valid_socket(invalid_socket));
 }
 
-// Test TCP server creation
+// Test TCP server creation with AddressFamily
 TEST_F(SocketTest, TCPServerCreationTest) {
     // Test dual-stack server (default)
     socket_t server = create_tcp_server(0);
@@ -55,17 +55,17 @@ TEST_F(SocketTest, TCPServerCreationTest) {
     close_socket(server);
     
     // Test IPv4 server
-    socket_t server_v4 = create_tcp_server_v4(0);
+    socket_t server_v4 = create_tcp_server(0, 5, "", AddressFamily::IPv4);
     EXPECT_TRUE(is_valid_socket(server_v4));
     close_socket(server_v4);
     
     // Test IPv6 server
-    socket_t server_v6 = create_tcp_server_v6(0);
+    socket_t server_v6 = create_tcp_server(0, 5, "", AddressFamily::IPv6);
     EXPECT_TRUE(is_valid_socket(server_v6));
     close_socket(server_v6);
 }
 
-// Test UDP socket creation
+// Test UDP socket creation with AddressFamily
 TEST_F(SocketTest, UDPSocketCreationTest) {
     // Test dual-stack UDP socket
     socket_t udp_socket = create_udp_socket(0);
@@ -73,12 +73,12 @@ TEST_F(SocketTest, UDPSocketCreationTest) {
     close_socket(udp_socket);
     
     // Test IPv4 UDP socket
-    socket_t udp_v4 = create_udp_socket_v4(0);
+    socket_t udp_v4 = create_udp_socket(0, "", AddressFamily::IPv4);
     EXPECT_TRUE(is_valid_socket(udp_v4));
     close_socket(udp_v4);
     
     // Test IPv6 UDP socket
-    socket_t udp_v6 = create_udp_socket_v6(0);
+    socket_t udp_v6 = create_udp_socket(0, "", AddressFamily::IPv6);
     EXPECT_TRUE(is_valid_socket(udp_v6));
     close_socket(udp_v6);
 }
@@ -90,17 +90,7 @@ TEST_F(SocketTest, TCPClientServerCommunicationTest) {
     ASSERT_TRUE(is_valid_socket(server));
     
     // Get the actual port the server is listening on
-    sockaddr_storage addr;
-    socklen_t addr_len = sizeof(addr);
-    ASSERT_EQ(getsockname(server, (sockaddr*)&addr, &addr_len), 0);
-    
-    int port = 0;
-    if (addr.ss_family == AF_INET) {
-        port = ntohs(((sockaddr_in*)&addr)->sin_port);
-    } else if (addr.ss_family == AF_INET6) {
-        port = ntohs(((sockaddr_in6*)&addr)->sin6_port);
-    }
-    
+    int port = get_bound_port(server);
     ASSERT_GT(port, 0);
     
     // Test connection in separate thread
@@ -109,8 +99,9 @@ TEST_F(SocketTest, TCPClientServerCommunicationTest) {
         EXPECT_TRUE(is_valid_socket(client));
         
         if (is_valid_socket(client)) {
-            std::string received = receive_tcp_string(client);
-            EXPECT_EQ(received, "Hello Server!");
+            auto received = receive_tcp_data(client);
+            std::string received_str(received.begin(), received.end());
+            EXPECT_EQ(received_str, "Hello Server!");
             
             int sent = send_tcp_string(client, "Hello Client!");
             EXPECT_GT(sent, 0);
@@ -131,8 +122,9 @@ TEST_F(SocketTest, TCPClientServerCommunicationTest) {
     EXPECT_GT(sent, 0);
     
     // Receive response
-    std::string response = receive_tcp_string(client);
-    EXPECT_EQ(response, "Hello Client!");
+    auto response = receive_tcp_data(client);
+    std::string response_str(response.begin(), response.end());
+    EXPECT_EQ(response_str, "Hello Client!");
     
     close_socket(client);
     server_thread.join();
@@ -144,16 +136,8 @@ TEST_F(SocketTest, GetPeerAddressTest) {
     socket_t server = create_tcp_server(0);
     ASSERT_TRUE(is_valid_socket(server));
     
-    sockaddr_storage addr;
-    socklen_t addr_len = sizeof(addr);
-    ASSERT_EQ(getsockname(server, (sockaddr*)&addr, &addr_len), 0);
-    
-    int port = 0;
-    if (addr.ss_family == AF_INET) {
-        port = ntohs(((sockaddr_in*)&addr)->sin_port);
-    } else if (addr.ss_family == AF_INET6) {
-        port = ntohs(((sockaddr_in6*)&addr)->sin6_port);
-    }
+    int port = get_bound_port(server);
+    ASSERT_GT(port, 0);
     
     std::thread server_thread([&]() {
         socket_t client = accept_client(server);
@@ -173,6 +157,28 @@ TEST_F(SocketTest, GetPeerAddressTest) {
     close_socket(client);
     server_thread.join();
     close_socket(server);
+}
+
+// Test get_bound_port
+TEST_F(SocketTest, GetBoundPortTest) {
+    socket_t server = create_tcp_server(0);
+    ASSERT_TRUE(is_valid_socket(server));
+    
+    int port = get_bound_port(server);
+    EXPECT_GT(port, 0);
+    EXPECT_LE(port, 65535);
+    
+    close_socket(server);
+    
+    // Test with UDP socket
+    socket_t udp = create_udp_socket(0);
+    ASSERT_TRUE(is_valid_socket(udp));
+    
+    int udp_port = get_bound_port(udp);
+    EXPECT_GT(udp_port, 0);
+    EXPECT_LE(udp_port, 65535);
+    
+    close_socket(udp);
 }
 
 // Test non-blocking socket
@@ -207,8 +213,8 @@ TEST_F(SocketTest, InvalidOperationsTest) {
     EXPECT_LE(result, 0);  // Should fail
     
     // Test receiving from invalid socket
-    std::string data = receive_tcp_string(invalid_socket);
-    EXPECT_TRUE(data.empty());  // Should return empty string
+    auto data = receive_tcp_data(invalid_socket);
+    EXPECT_TRUE(data.empty());  // Should return empty
     
     // Test getting peer address from invalid socket
     std::string peer_addr = get_peer_address(invalid_socket);
@@ -228,4 +234,4 @@ TEST_F(SocketTest, EdgeCasesTest) {
     // Test creating client with invalid port
     socket_t client2 = create_tcp_client("127.0.0.1", -1);
     EXPECT_FALSE(is_valid_socket(client2));
-} 
+}

@@ -1047,7 +1047,7 @@ std::optional<StunMessage> StunClient::send_request(socket_t socket,
         }
         
         // Send request
-        int sent = send_udp_data_to(socket, data, server, port);
+        int sent = send_udp_data(socket, data, server, port);
         if (sent <= 0) {
             LOG_STUN_ERROR("Failed to send STUN request");
             return std::nullopt;
@@ -1057,11 +1057,9 @@ std::optional<StunMessage> StunClient::send_request(socket_t socket,
         
         // Wait for response with current RTO
         int wait_time = (std::min)(rto, timeout_ms - total_time);
-        std::string sender_ip;
-        int sender_port;
+        Peer sender;
         
-        auto response_data = receive_udp_data_with_timeout(socket, STUN_MAX_MESSAGE_SIZE, 
-                                                           wait_time, &sender_ip, &sender_port);
+        auto response_data = receive_udp_data(socket, STUN_MAX_MESSAGE_SIZE, sender, wait_time);
         
         total_time += wait_time;
         

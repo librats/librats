@@ -155,7 +155,7 @@ bool RatsClient::start() {
     
     // Update listen_port_ with actual bound port if ephemeral port was requested
     if (listen_port_ == 0) {
-        listen_port_ = get_ephemeral_port(server_socket_);
+        listen_port_ = get_bound_port(server_socket_);
         if (listen_port_ == 0) {
             LOG_CLIENT_WARN("Failed to get actual bound port - using port 0");
         } else {
@@ -448,7 +448,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& peer_h
         
         // ----- 1. RECEIVE DATA -----
         LOG_CLIENT_DEBUG("Receiving data from socket " << client_socket);
-        std::vector<uint8_t> received_bytes = receive_tcp_message_framed(client_socket);
+        std::vector<uint8_t> received_bytes = receive_tcp_message(client_socket);
         
         if (received_bytes.empty()) {
             break; // Connection closed or error
@@ -897,7 +897,7 @@ bool RatsClient::send_handshake_unlocked(socket_t socket, const std::string& our
     auto socket_mutex = get_socket_send_mutex(socket);
     std::lock_guard<std::mutex> send_lock(*socket_mutex);
     
-    int sent = send_tcp_message_framed(socket, message_with_header);
+    int sent = send_tcp_message(socket, message_with_header);
     if (sent <= 0) {
         LOG_CLIENT_ERROR("Failed to send handshake to socket " << socket);
         return false;
@@ -1412,12 +1412,12 @@ bool RatsClient::send_binary_to_peer_unlocked(socket_t socket, const std::vector
         LOG_CLIENT_DEBUG("Sending encrypted message to " << peer_id_for_logging << " (" << ct_len << " bytes)");
         
         // Send encrypted message using framed protocol
-        int sent = send_tcp_message_framed(socket, ciphertext);
+        int sent = send_tcp_message(socket, ciphertext);
         return sent > 0;
     }
     
     // Unencrypted path - use framed messages for reliable large message handling
-    int sent = send_tcp_message_framed(socket, message_with_header);
+    int sent = send_tcp_message(socket, message_with_header);
     return sent > 0;
 }
 

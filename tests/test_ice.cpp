@@ -726,7 +726,7 @@ public:
             return false;
         }
         
-        port_ = get_ephemeral_port(socket_);
+        port_ = get_bound_port(socket_);
         running_ = true;
         server_thread_ = std::thread(&MockStunServerForIce::run, this);
         return true;
@@ -754,8 +754,7 @@ private:
     void run() {
         while (running_) {
             Peer sender;
-            auto data = receive_udp_data_with_timeout(socket_, 1500, 100,
-                                                      &sender.ip, reinterpret_cast<int*>(&sender.port));
+            auto data = receive_udp_data(socket_, 1500, sender, 100);
             
             if (data.empty()) continue;
             
@@ -773,7 +772,7 @@ private:
             response.add_xor_mapped_address(mapped);
             
             auto response_data = response.serialize();
-            send_udp_data(socket_, response_data, sender);
+            send_udp_data(socket_, response_data, sender.ip, sender.port);
         }
     }
     

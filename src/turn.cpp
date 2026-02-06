@@ -600,7 +600,7 @@ bool TurnClient::send_indication(const StunMappedAddress& peer, const std::vecto
     indication.add_data(data);
     
     auto msg_data = indication.serialize();
-    int sent = send_udp_data_to(socket_, msg_data, config_.server, config_.port);
+    int sent = send_udp_data(socket_, msg_data, config_.server, config_.port);
     
     return sent > 0;
 }
@@ -625,7 +625,7 @@ bool TurnClient::send_channel_data(uint16_t channel, const std::vector<uint8_t>&
         msg.push_back(0);
     }
     
-    int sent = send_udp_data_to(socket_, msg, config_.server, config_.port);
+    int sent = send_udp_data(socket_, msg, config_.server, config_.port);
     return sent > 0;
 }
 
@@ -634,10 +634,8 @@ std::optional<std::pair<StunMappedAddress, std::vector<uint8_t>>> TurnClient::re
         return std::nullopt;
     }
     
-    std::string sender_ip;
-    int sender_port;
-    auto data = receive_udp_data_with_timeout(socket_, STUN_MAX_MESSAGE_SIZE, timeout_ms,
-                                               &sender_ip, &sender_port);
+    Peer sender;
+    auto data = receive_udp_data(socket_, STUN_MAX_MESSAGE_SIZE, sender, timeout_ms);
     
     if (data.empty()) {
         return std::nullopt;

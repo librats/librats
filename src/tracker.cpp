@@ -673,12 +673,13 @@ std::vector<uint8_t> UdpTrackerClient::send_request(const std::vector<uint8_t>& 
     }
     
     // Send request
-    if (send_udp_data_to(socket_, request, hostname_, port_) <= 0) {
+    if (send_udp_data(socket_, request, hostname_, port_) <= 0) {
         return std::vector<uint8_t>();
     }
     
     // Receive response with timeout
-    std::vector<uint8_t> response = receive_udp_data_with_timeout(socket_, 2048, timeout_ms);
+    Peer sender;
+    std::vector<uint8_t> response = receive_udp_data(socket_, 2048, sender, timeout_ms);
     
     return response;
 }

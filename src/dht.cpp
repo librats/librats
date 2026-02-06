@@ -380,7 +380,7 @@ void DhtClient::network_loop() {
     
     while (running_) {
         Peer sender;
-        auto data = receive_udp_data(socket_, 1500, sender);  // MTU size
+        auto data = receive_udp_data(socket_, 1500, sender, -1);  // MTU size, blocking
         
         if (!data.empty()) {
             LOG_DHT_DEBUG("Received " << data.size() << " bytes from " << sender.ip << ":" << sender.port);
@@ -1072,7 +1072,7 @@ bool DhtClient::send_krpc_message(const KrpcMessage& message, const Peer& peer) 
     }
     
     LOG_DHT_DEBUG("Sending KRPC message (" << data.size() << " bytes) to " << peer.ip << ":" << peer.port);
-    int result = send_udp_data(socket_, data, peer);
+    int result = send_udp_data(socket_, data, peer.ip, peer.port);
     
     if (result > 0) {
         LOG_DHT_DEBUG("Successfully sent KRPC message to " << peer.ip << ":" << peer.port);

@@ -413,7 +413,7 @@ public:
         
         // Get actual port if port was 0
         if (port_ == 0) {
-            port_ = get_ephemeral_port(socket_);
+            port_ = get_bound_port(socket_);
         }
         
         running_ = true;
@@ -438,8 +438,7 @@ private:
     void run() {
         while (running_) {
             Peer sender;
-            auto data = receive_udp_data_with_timeout(socket_, 1500, 100, 
-                                                      &sender.ip, reinterpret_cast<int*>(&sender.port));
+            auto data = receive_udp_data(socket_, 1500, sender, 100);
             
             if (data.empty()) continue;
             
@@ -457,7 +456,7 @@ private:
             response.add_software("MockStunServer/1.0");
             
             auto response_data = response.serialize();
-            send_udp_data(socket_, response_data, sender);
+            send_udp_data(socket_, response_data, sender.ip, sender.port);
         }
     }
     
@@ -495,7 +494,7 @@ TEST_F(StunTest, BindingRequestWithExistingSocket) {
     socket_t sock = create_udp_socket(0);
     ASSERT_TRUE(is_valid_socket(sock));
     
-    int local_port = get_ephemeral_port(sock);
+    int local_port = get_bound_port(sock);
     EXPECT_GT(local_port, 0);
     
     StunClient client;

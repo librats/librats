@@ -281,7 +281,7 @@ bool IceManager::ensure_socket() {
         return false;
     }
     
-    local_port_ = static_cast<uint16_t>(get_ephemeral_port(socket_));
+    local_port_ = static_cast<uint16_t>(get_bound_port(socket_));
     LOG_ICE_DEBUG("Created ICE socket on port " << local_port_);
     return true;
 }

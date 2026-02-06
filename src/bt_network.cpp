@@ -69,7 +69,7 @@ bool BtNetworkManager::start() {
         }
         
         // Get actual port (in case 0 was specified)
-        actual_listen_port_ = static_cast<uint16_t>(get_ephemeral_port(listen_socket_));
+        actual_listen_port_ = static_cast<uint16_t>(get_bound_port(listen_socket_));
         if (actual_listen_port_ == 0) {
             actual_listen_port_ = config_.listen_port;
         }
