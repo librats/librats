@@ -541,7 +541,7 @@ private:
     void send_krpc_ping(const Peer& peer);
     void send_krpc_find_node(const Peer& peer, const NodeId& target);
     void send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash);
-    void send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token);
+    void send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token, bool implied_port = false);
     
     void add_node(const DhtNode& node, bool confirmed = true, bool no_verify = false);
     std::vector<DhtNode> find_closest_nodes(const NodeId& target, size_t count = K_BUCKET_SIZE);

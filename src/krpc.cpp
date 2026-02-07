@@ -60,7 +60,7 @@ KrpcMessage KrpcProtocol::create_get_peers_query(const std::string& transaction_
     return message;
 }
 
-KrpcMessage KrpcProtocol::create_announce_peer_query(const std::string& transaction_id, const NodeId& sender_id, const InfoHash& info_hash, uint16_t port, const std::string& token) {
+KrpcMessage KrpcProtocol::create_announce_peer_query(const std::string& transaction_id, const NodeId& sender_id, const InfoHash& info_hash, uint16_t port, const std::string& token, bool implied_port) {
     KrpcMessage message;
     message.type = KrpcMessageType::Query;
     message.transaction_id = transaction_id;
@@ -68,6 +68,7 @@ KrpcMessage KrpcProtocol::create_announce_peer_query(const std::string& transact
     message.sender_id = sender_id;
     message.info_hash = info_hash;
     message.port = port;
+    message.implied_port = implied_port;
     message.token = token;
     return message;
 }
@@ -176,6 +177,9 @@ BencodeValue KrpcProtocol::encode_query(const KrpcMessage& message) {
             args["info_hash"] = BencodeValue(node_id_to_string(message.info_hash));
             args["port"] = BencodeValue(static_cast<int64_t>(message.port));
             args["token"] = BencodeValue(message.token);
+            if (message.implied_port) {
+                args["implied_port"] = BencodeValue(static_cast<int64_t>(1));
+            }
             break;
     }
     
@@ -315,6 +319,9 @@ std::unique_ptr<KrpcMessage> KrpcProtocol::decode_query(const BencodeValue& data
             }
             if (args.has_key("token")) {
                 message->token = args["token"].as_string();
+            }
+            if (args.has_key("implied_port")) {
+                message->implied_port = (args["implied_port"].as_integer() != 0);
             }
             break;
     }

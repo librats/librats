@@ -68,6 +68,7 @@ struct KrpcMessage {
     NodeId target_id;
     InfoHash info_hash;
     uint16_t port;
+    bool implied_port;  // BEP 5: if true, use UDP source port instead of 'port' field
     std::string token;
     
     // For responses
@@ -79,7 +80,7 @@ struct KrpcMessage {
     KrpcErrorCode error_code;
     std::string error_message;
     
-    KrpcMessage() : type(KrpcMessageType::Query), query_type(KrpcQueryType::Ping), sender_id(), target_id(), info_hash(), port(0), response_id(), error_code(KrpcErrorCode::GenericError) {}
+    KrpcMessage() : type(KrpcMessageType::Query), query_type(KrpcQueryType::Ping), sender_id(), target_id(), info_hash(), port(0), implied_port(false), response_id(), error_code(KrpcErrorCode::GenericError) {}
 };
 
 /**
@@ -96,7 +97,7 @@ public:
     static KrpcMessage create_ping_query(const std::string& transaction_id, const NodeId& sender_id);
     static KrpcMessage create_find_node_query(const std::string& transaction_id, const NodeId& sender_id, const NodeId& target_id);
     static KrpcMessage create_get_peers_query(const std::string& transaction_id, const NodeId& sender_id, const InfoHash& info_hash);
-    static KrpcMessage create_announce_peer_query(const std::string& transaction_id, const NodeId& sender_id, const InfoHash& info_hash, uint16_t port, const std::string& token);
+    static KrpcMessage create_announce_peer_query(const std::string& transaction_id, const NodeId& sender_id, const InfoHash& info_hash, uint16_t port, const std::string& token, bool implied_port = false);
     
     static KrpcMessage create_ping_response(const std::string& transaction_id, const NodeId& response_id);
     static KrpcMessage create_find_node_response(const std::string& transaction_id, const NodeId& response_id, const std::vector<KrpcNode>& nodes);

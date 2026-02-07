@@ -937,7 +937,8 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
     }
     
     // Determine the actual port (BEP 5: implied_port support)
-    uint16_t peer_port = message.port;
+    // If implied_port is set, use the UDP source port instead of the explicit port field
+    uint16_t peer_port = message.implied_port ? sender.port : message.port;
     
     // Store the peer announcement
     Peer announcing_peer(sender.ip, peer_port);
@@ -1101,9 +1102,9 @@ void DhtClient::send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash)
     send_krpc_message(message, peer);
 }
 
-void DhtClient::send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token) {
+void DhtClient::send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token, bool implied_port) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
-    auto message = KrpcProtocol::create_announce_peer_query(transaction_id, node_id_, info_hash, port, token);
+    auto message = KrpcProtocol::create_announce_peer_query(transaction_id, node_id_, info_hash, port, token, implied_port);
     send_krpc_message(message, peer);
 }
 
@@ -2138,13 +2139,19 @@ void DhtClient::send_announce_to_closest_nodes(PendingSearch& search) {
     
     LOG_DHT_INFO("Announcing to " << announce_targets.size() << " closest nodes with tokens");
     
+    // BEP 5: Use implied_port when the announce port is the same as the DHT port.
+    // This tells the receiving node to use the UDP source port from the packet,
+    // which is more accurate when behind NAT.
+    bool use_implied_port = (search.announce_port == port_);
+    
     // Send announce_peer to each target
     for (const auto& [node, token] : announce_targets) {
         LOG_DHT_DEBUG("Sending announce_peer to node " << node_id_to_hex(node.id) 
                       << " at " << node.peer.ip << ":" << node.peer.port
-                      << " with token (distance: " << get_bucket_index(node.id) << ")");
+                      << " with token (distance: " << get_bucket_index(node.id) << ")"
+                      << (use_implied_port ? " [implied_port]" : ""));
         
-        send_krpc_announce_peer(node.peer, search.info_hash, search.announce_port, token);
+        send_krpc_announce_peer(node.peer, search.info_hash, search.announce_port, token, use_implied_port);
     }
     
     LOG_DHT_INFO("Announce completed: sent announce_peer to " << announce_targets.size() 
