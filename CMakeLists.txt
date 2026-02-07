@@ -501,3 +501,8 @@ if(RATS_BUILD_TESTS)
         RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin
     )
 endif()
+
+# Examples (basic examples always built; BT examples require RATS_SEARCH_FEATURES)
+if(RATS_BUILD_EXAMPLES)
+    add_subdirectory(examples)
+endif()
