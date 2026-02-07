@@ -69,15 +69,12 @@ int main(int argc, char* argv[]) {
     constexpr int LISTEN_PORT = 0;  // random port
     RatsClient client(LISTEN_PORT);
     client.set_console_logging_enabled(true);
-    client.set_log_level(LogLevel::INFO);
+    client.set_log_level(LogLevel::DEBUG);
 
     if (!client.start()) {
         std::cerr << "Error: failed to start RatsClient\n";
         return 1;
     }
-
-    // Start DHT so that enable_bittorrent() can reuse it
-    client.start_dht_discovery();
 
     // Enable BitTorrent subsystem
     if (!client.enable_bittorrent()) {
