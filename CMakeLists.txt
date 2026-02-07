@@ -229,6 +229,8 @@ if(RATS_SEARCH_FEATURES)
         src/bt_client.cpp
         src/bt_network.h
         src/bt_network.cpp
+        src/io_poller.h
+        src/io_poller.cpp
         src/disk_io.cpp
         src/disk_io.h
         src/tracker.cpp
@@ -430,6 +432,8 @@ if(RATS_BUILD_TESTS)
         tests/test_stun.cpp
         tests/test_turn.cpp
         tests/test_ice.cpp
+# I/O poller abstraction (epoll/kqueue/IOCP)
+        tests/test_io_poller.cpp
 # Buffer utilities for file transfer and bittorrent
         tests/test_receive_buffer.cpp
         tests/test_chained_send_buffer.cpp

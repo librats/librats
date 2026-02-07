@@ -5,12 +5,14 @@
  * @brief Async network layer for BitTorrent peer connections
  * 
  * Provides efficient multiplexed I/O for managing multiple peer connections
- * with non-blocking sockets. Buffers are owned by BtPeerConnection (single
- * source of truth) - this class only handles socket I/O.
+ * using platform-optimal I/O polling (epoll/kqueue/WSAPoll).
+ * Buffers are owned by BtPeerConnection (single source of truth) -
+ * this class only handles socket I/O.
  */
 
 #include "bt_types.h"
 #include "bt_peer_connection.h"
+#include "io_poller.h"
 #include "socket.h"
 
 #include <vector>
@@ -37,7 +39,7 @@ struct BtNetworkConfig {
     size_t max_connections;         ///< Maximum total connections
     bool enable_incoming;           ///< Accept incoming connections
     int connect_timeout_ms;         ///< Timeout for outgoing connections (ms)
-    int select_timeout_ms;          ///< Timeout for select() call (ms)
+    int poll_timeout_ms;            ///< Timeout for I/O poll (ms)
     size_t send_buffer_high_water;  ///< High water mark for send buffer
     PeerID peer_id;                 ///< Our peer ID (for incoming connections)
     
@@ -46,7 +48,7 @@ struct BtNetworkConfig {
         , max_connections(200)
         , enable_incoming(true)
         , connect_timeout_ms(30000)
-        , select_timeout_ms(15)
+        , poll_timeout_ms(15)
         , send_buffer_high_water(1024 * 1024)  // 1MB
         , peer_id{} {}
 };
@@ -150,10 +152,16 @@ struct DisconnectedEvent {
 /**
  * @brief Manages all BitTorrent peer connections
  * 
- * Provides async I/O via select() multiplexing:
+ * Provides async I/O via platform-optimal multiplexing:
+ * - Linux:   epoll   (O(1) per event)
+ * - macOS:   kqueue  (O(1) per event)
+ * - Windows: WSAPoll (no FD_SETSIZE limit)
+ * 
+ * Features:
  * - Listens for incoming connections
  * - Manages outgoing connection queue
  * - Handles non-blocking reads/writes
+ * - TCP_NODELAY for low-latency messaging
  * - Invokes callbacks for events
  * 
  * Thread-safety: The manager runs its own I/O thread.
@@ -328,6 +336,9 @@ private:
     /// Main I/O loop (runs in separate thread)
     void io_loop();
     
+    /// Synchronize poller state with current connections (under mutex)
+    void sync_poller();
+    
     /// Process the queue of pending connections
     void process_pending_connects();
     
@@ -360,6 +371,9 @@ private:
     /// Handle info_hash discovered from incoming connection handshake
     void on_incoming_info_hash(BtPeerConnection* conn, const BtInfoHash& info_hash);
     
+    /// Set TCP_NODELAY on a socket (disable Nagle's algorithm)
+    static bool set_tcp_nodelay(socket_t sock);
+    
     //=========================================================================
     // Data Members
     //=========================================================================
@@ -372,6 +386,12 @@ private:
     socket_t listen_socket_;
     
     mutable std::mutex mutex_;
+    
+    /// Platform-optimal I/O poller (epoll/kqueue/WSAPoll)
+    std::unique_ptr<IOPoller> poller_;
+    
+    /// Tracks current poller event mask per socket (to avoid redundant modify calls)
+    std::unordered_map<socket_t, uint32_t> poller_state_;
     
     /// Active connections by socket
     std::unordered_map<socket_t, SocketContext> connections_;
