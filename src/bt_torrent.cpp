@@ -135,7 +135,7 @@ Torrent::Torrent(const BtInfoHash& info_hash,
     , have_pieces_(0) {
     
     LOG_INFO("Torrent", "Creating torrent '" + name + "' from magnet link (no metadata yet), info_hash=" + 
-             info_hash_to_hex(info_hash).substr(0, 16) + "...");
+             info_hash_to_hex(info_hash));
     
     // No picker until we have metadata
     
