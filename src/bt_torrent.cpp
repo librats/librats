@@ -778,8 +778,9 @@ void Torrent::tick() {
 //=============================================================================
 
 void Torrent::on_peer_connected(BtPeerConnection* peer) {
-    LOG_DEBUG("Torrent", "Peer " + peer->ip() + " connected, has_metadata=" + 
-              (has_metadata_unlocked() ? "true" : "false"));
+    LOG_DEBUG("Torrent", "Peer " + peer->ip() + " connected" +
+              (peer->peer_client_name().empty() ? "" : " [" + peer->peer_client_name() + "]") +
+              ", has_metadata=" + (has_metadata_unlocked() ? "true" : "false"));
     
     // Send extension handshake if peer supports it
     if (peer->peer_extensions().extension_protocol) {

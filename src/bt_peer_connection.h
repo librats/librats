@@ -355,6 +355,11 @@ public:
      */
     uint8_t peer_ut_metadata_id() const { return peer_ut_metadata_id_; }
     
+    /**
+     * @brief Get peer's client name (from extension handshake "v" field, or identified from peer_id)
+     */
+    const std::string& peer_client_name() const { return peer_client_name_; }
+    
     //=========================================================================
     // Sending Messages
     //=========================================================================
@@ -549,6 +554,7 @@ private:
     bool extension_handshake_received_;
     size_t peer_metadata_size_;
     uint8_t peer_ut_metadata_id_;
+    std::string peer_client_name_;  ///< Client name (from "v" field or peer_id identification)
     
     // Protocol state
     bool am_choking_;

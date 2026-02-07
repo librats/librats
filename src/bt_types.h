@@ -10,6 +10,8 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
+#include <cstdio>
 #include <string>
 #include <random>
 #include <chrono>
@@ -270,39 +272,304 @@ inline bool is_zero_hash(const BtInfoHash& hash) {
 }
 
 //=============================================================================
-// Client ID Parsing
+// Client ID Parsing (BEP 20)
 //=============================================================================
 
+namespace detail {
+
 /**
- * @brief Extract client name from peer ID (BEP 20)
+ * @brief Decode a version digit from peer ID (supports 0-9 and A-Z)
+ */
+inline int decode_version_digit(uint8_t c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    return 0;
+}
+
+/**
+ * @brief Azureus-style client name lookup table
+ * Based on BEP 20 and libtorrent's identify_client implementation
+ */
+inline const char* lookup_az_client(const char* code) {
+    // Sorted alphabetically by 2-char code for binary search potential
+    // Using linear search for simplicity - table is small enough
+    struct Entry { const char* code; const char* name; };
+    static const Entry entries[] = {
+        {"7T", "aTorrent"},
+        {"AB", "AnyEvent BitTorrent"},
+        {"AG", "Ares"},
+        {"AR", "Arctic Torrent"},
+        {"AT", "Artemis"},
+        {"AV", "Avicora"},
+        {"AX", "BitPump"},
+        {"AZ", "Azureus"},
+        {"A~", "Ares"},
+        {"BB", "BitBuddy"},
+        {"BC", "BitComet"},
+        {"BE", "baretorrent"},
+        {"BF", "Bitflu"},
+        {"BG", "BTG"},
+        {"BI", "BiglyBT"},
+        {"BL", "BitBlinder"},
+        {"BP", "BitTorrent Pro"},
+        {"BR", "BitRocket"},
+        {"BS", "BTSlave"},
+        {"BT", "BitTorrent"},
+        {"BU", "BigUp"},
+        {"BW", "BitWombat"},
+        {"BX", "BittorrentX"},
+        {"CD", "Enhanced CTorrent"},
+        {"CT", "CTorrent"},
+        {"DE", "Deluge"},
+        {"DP", "Propagate Data Client"},
+        {"EB", "EBit"},
+        {"ES", "electric sheep"},
+        {"FC", "FileCroc"},
+        {"FT", "FoxTorrent"},
+        {"FW", "FrostWire"},
+        {"FX", "Freebox BitTorrent"},
+        {"GS", "GSTorrent"},
+        {"HK", "Hekate"},
+        {"HL", "Halite"},
+        {"HN", "Hydranode"},
+        {"IL", "iLivid"},
+        {"KC", "Koinonein"},
+        {"KG", "KGet"},
+        {"KT", "KTorrent"},
+        {"LC", "LeechCraft"},
+        {"LH", "LH-ABC"},
+        {"LK", "Linkage"},
+        {"LP", "lphant"},
+        {"LR", "librats"},
+        {"LT", "libtorrent"},
+        {"LW", "Limewire"},
+        {"ML", "MLDonkey"},
+        {"MO", "Mono Torrent"},
+        {"MP", "MooPolice"},
+        {"MR", "Miro"},
+        {"MT", "Moonlight Torrent"},
+        {"NX", "Net Transport"},
+        {"OS", "OneSwarm"},
+        {"OT", "OmegaTorrent"},
+        {"PD", "Pando"},
+        {"QD", "QQDownload"},
+        {"QT", "Qt 4"},
+        {"RT", "Retriever"},
+        {"RZ", "RezTorrent"},
+        {"SB", "Swiftbit"},
+        {"SD", "Xunlei"},
+        {"SK", "spark"},
+        {"SN", "ShareNet"},
+        {"SS", "SwarmScope"},
+        {"ST", "SymTorrent"},
+        {"SZ", "Shareaza"},
+        {"S~", "Shareaza (beta)"},
+        {"TB", "Torch"},
+        {"TL", "Tribler"},
+        {"TN", "Torrent.NET"},
+        {"TR", "Transmission"},
+        {"TS", "TorrentStorm"},
+        {"TT", "TuoTu"},
+        {"UL", "uLeecher"},
+        {"UM", "uTorrent Mac"},
+        {"UT", "uTorrent"},
+        {"VG", "Vagaa"},
+        {"WT", "BitLet"},
+        {"WY", "FireTorrent"},
+        {"XF", "Xfplay"},
+        {"XL", "Xunlei"},
+        {"XS", "XSwifter"},
+        {"XT", "XanTorrent"},
+        {"XX", "Xtorrent"},
+        {"ZO", "Zona"},
+        {"ZT", "ZipTorrent"},
+        {"lt", "rTorrent"},
+        {"pX", "pHoeniX"},
+        {"qB", "qBittorrent"},
+        {"st", "SharkTorrent"},
+    };
+
+    for (const auto& e : entries) {
+        if (e.code[0] == code[0] && e.code[1] == code[1]) {
+            return e.name;
+        }
+    }
+    return nullptr;
+}
+
+/**
+ * @brief Generic (non-standard) client name lookup
+ */
+inline const char* lookup_generic_client(const uint8_t* id) {
+    struct Entry { int offset; const char* pattern; const char* name; };
+    static const Entry entries[] = {
+        {0, "Deadman Walking-", "Deadman"},
+        {5, "Azureus", "Azureus 2.0.3.2"},
+        {0, "DansClient", "XanTorrent"},
+        {4, "btfans", "SimpleBT"},
+        {0, "PRC.P---", "Bittorrent Plus! II"},
+        {0, "P87.P---", "Bittorrent Plus!"},
+        {0, "S587Plus", "Bittorrent Plus!"},
+        {0, "martini", "Martini Man"},
+        {0, "Plus---", "Bittorrent Plus"},
+        {0, "turbobt", "TurboBT"},
+        {0, "a00---0", "Swarmy"},
+        {0, "a02---0", "Swarmy"},
+        {0, "T00---0", "Teeweety"},
+        {0, "BTDWV-", "Deadman Walking"},
+        {2, "BS", "BitSpirit"},
+        {0, "-SP", "BitSpirit 3.6"},
+        {0, "Pando-", "Pando"},
+        {0, "LIME", "LimeWire"},
+        {0, "btuga", "BTugaXP"},
+        {0, "oernu", "BTugaXP"},
+        {0, "Mbrst", "Burst!"},
+        {0, "PEERAPP", "PeerApp"},
+        {0, "Plus", "Plus!"},
+        {0, "-Qt-", "Qt"},
+        {0, "exbc", "BitComet"},
+        {0, "DNA", "BitTorrent DNA"},
+        {0, "-G3", "G3 Torrent"},
+        {0, "-FG", "FlashGet"},
+        {0, "-ML", "MLdonkey"},
+        {0, "-MG", "Media Get"},
+        {0, "XBT", "XBT"},
+        {0, "OP", "Opera"},
+        {2, "RS", "Rufus"},
+        {0, "AZ2500BT", "BitTyrant"},
+        {0, "btpd/", "BitTorrent Protocol Daemon"},
+        {0, "TIX", "Tixati"},
+        {0, "QVOD", "Qvod"},
+    };
+
+    for (const auto& e : entries) {
+        const char* p = e.pattern;
+        const char* s = reinterpret_cast<const char*>(id) + e.offset;
+        size_t len = std::strlen(p);
+        if (e.offset + len <= BT_PEER_ID_SIZE && std::memcmp(s, p, len) == 0) {
+            return e.name;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace detail
+
+/**
+ * @brief Identify BitTorrent client from peer ID (BEP 20)
  * 
- * Attempts to identify the client from the peer ID prefix
+ * Supports three encoding styles:
+ * - Azureus-style: -XX1234-xxxxxxxxxxxx
+ * - Shadow-style: Xyyy--xxxxxxxxxxxxxx
+ * - Mainline-style: M1-2-3--xxxxxxxxxxxx
+ * Also recognizes many non-standard encodings.
  * 
- * @param id Peer ID to parse
- * @return Client name or "Unknown"
+ * @param id 20-byte peer ID
+ * @return Human-readable client name with version, or "Unknown [...]"
  */
 inline std::string identify_client(const PeerID& id) {
-    // Azureus-style: -XX1234-
-    if (id[0] == '-' && id[7] == '-') {
-        char client[3] = {static_cast<char>(id[1]), static_cast<char>(id[2]), '\0'};
-        std::string client_code(client);
-        
-        if (client_code == "LR") return "librats";
-        if (client_code == "LT") return "libtorrent";
-        if (client_code == "qB") return "qBittorrent";
-        if (client_code == "DE") return "Deluge";
-        if (client_code == "TR") return "Transmission";
-        if (client_code == "UT") return "uTorrent";
-        if (client_code == "AZ") return "Azureus/Vuze";
-        if (client_code == "BT") return "BitTorrent";
-        
-        return std::string("Unknown (") + client_code + ")";
+    // Check if all zeros
+    bool all_zero = true;
+    for (uint8_t b : id) { if (b != 0) { all_zero = false; break; } }
+    if (all_zero) return "Unknown";
+    
+    // Check non-standard encodings first
+    const char* generic = detail::lookup_generic_client(id.data());
+    if (generic) return generic;
+    
+    // Check Bits on Wheels special case
+    if (id[0] == '-' && id[1] == 'B' && id[2] == 'O' && id[3] == 'W' && id[7] == '-') {
+        return "Bits on Wheels " + std::string(reinterpret_cast<const char*>(id.data()) + 4, 3);
     }
     
-    // Shadow-style: first byte is client ID
-    // Not as common, but still used
+    // Azureus-style: -XX1234-
+    if (id[0] == '-' && id[7] == '-' && 
+        (id[1] >= 'A' || id[1] >= 'a') &&
+        id[3] >= '0' && id[4] >= '0' && id[5] >= '0' && id[6] >= '0') {
+        
+        char code[3] = {static_cast<char>(id[1]), static_cast<char>(id[2]), '\0'};
+        
+        int v1 = detail::decode_version_digit(id[3]);
+        int v2 = detail::decode_version_digit(id[4]);
+        int v3 = detail::decode_version_digit(id[5]);
+        int v4 = detail::decode_version_digit(id[6]);
+        
+        const char* name = detail::lookup_az_client(code);
+        std::string client_name = name ? name : std::string("Unknown (") + code + ")";
+        
+        std::string version = std::to_string(v1) + "." + std::to_string(v2) + "." + std::to_string(v3);
+        if (v4 != 0) {
+            version += "." + std::to_string(v4);
+        }
+        
+        return client_name + " " + version;
+    }
     
-    return "Unknown";
+    // Shadow-style: first char is client, next 3 are version
+    if ((id[0] >= 'A' && id[0] <= 'Z') || (id[0] >= 'a' && id[0] <= 'z')) {
+        // Check for shadow format: X + 3 version bytes + "--"
+        if (id[4] == '-' && id[5] == '-') {
+            if (id[1] >= '0' && id[2] >= '0' && id[3] >= '0') {
+                char c = static_cast<char>(id[0]);
+                const char* name = nullptr;
+                switch (c) {
+                    case 'A': name = "ABC"; break;
+                    case 'M': name = "Mainline"; break;
+                    case 'O': name = "Osprey Permaseed"; break;
+                    case 'Q': name = "BTQueue"; break;
+                    case 'R': name = "Tribler"; break;
+                    case 'S': name = "Shadow"; break;
+                    case 'T': name = "BitTornado"; break;
+                    case 'U': name = "UPnP"; break;
+                    default: break;
+                }
+                if (name) {
+                    int v1 = detail::decode_version_digit(id[1]);
+                    int v2 = detail::decode_version_digit(id[2]);
+                    int v3 = detail::decode_version_digit(id[3]);
+                    return std::string(name) + " " + std::to_string(v1) + "." + 
+                           std::to_string(v2) + "." + std::to_string(v3);
+                }
+            }
+        }
+        
+        // Mainline-style: M1-2-3--
+        char ids[21];
+        std::memcpy(ids, id.data(), 20);
+        ids[20] = '\0';
+        char name_ch = '\0';
+        int v1 = 0, v2 = 0, v3 = 0;
+        if (std::sscanf(ids, "%c%3d-%3d-%3d--", &name_ch, &v1, &v2, &v3) == 4 &&
+            name_ch >= 32 && name_ch < 127) {
+            const char* name = nullptr;
+            switch (name_ch) {
+                case 'M': name = "Mainline"; break;
+                default: break;
+            }
+            if (name) {
+                return std::string(name) + " " + std::to_string(v1) + "." + 
+                       std::to_string(v2) + "." + std::to_string(v3);
+            }
+        }
+    }
+    
+    // All zeros in first 12 bytes - special cases
+    bool first_12_zero = true;
+    for (int i = 0; i < 12; ++i) { if (id[i] != 0) { first_12_zero = false; break; } }
+    if (first_12_zero) {
+        if (id[12] == 0x97) return "Experimental 3.2.1b2";
+        if (id[12] == 0x00) return "Experimental 3.1";
+        return "Generic";
+    }
+    
+    // Unknown - show printable representation
+    std::string unknown("Unknown [");
+    for (uint8_t c : id) {
+        unknown += (c >= 32 && c < 127) ? static_cast<char>(c) : '.';
+    }
+    unknown += "]";
+    return unknown;
 }
 
 //=============================================================================

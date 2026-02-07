@@ -358,6 +358,9 @@ void BtPeerConnection::process_handshake() {
     
     handshake_received_ = true;
     
+    // Identify client from peer_id
+    peer_client_name_ = identify_client(peer_id_);
+    
     // Format peer_id for logging (first 8 chars, printable only)
     std::string peer_id_str;
     for (size_t i = 0; i < 8 && i < peer_id_.size(); ++i) {
@@ -366,6 +369,7 @@ void BtPeerConnection::process_handshake() {
     }
     
     LOG_INFO("BtPeerConn", "Handshake received from " + ip_ + ", peer_id=" + peer_id_str + 
+             ", client=" + peer_client_name_ +
              ", ext_protocol=" + (hs->extensions.extension_protocol ? "yes" : "no") +
              ", fast=" + (hs->extensions.fast ? "yes" : "no"));
     
@@ -603,6 +607,13 @@ void BtPeerConnection::parse_extension_handshake(const std::vector<uint8_t>& pay
             LOG_DEBUG("BtPeerConn", "Peer " + ip_ + " ut_metadata_id=" + 
                       std::to_string(peer_ut_metadata_id_));
         }
+    }
+    
+    // Extract client version string from 'v' field
+    auto v_it = dict.find("v");
+    if (v_it != dict.end() && v_it->second.is_string()) {
+        peer_client_name_ = v_it->second.as_string();
+        LOG_INFO("BtPeerConn", "Peer " + ip_ + " client: " + peer_client_name_);
     }
 }
 
