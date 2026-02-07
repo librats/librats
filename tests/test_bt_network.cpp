@@ -286,7 +286,7 @@ TEST(BtNetworkConfigTest, DefaultValues) {
     EXPECT_EQ(config.max_connections, 200);
     EXPECT_TRUE(config.enable_incoming);
     EXPECT_EQ(config.connect_timeout_ms, 30000);
-    EXPECT_EQ(config.select_timeout_ms, 15);
+    EXPECT_EQ(config.poll_timeout_ms, 15);
     EXPECT_EQ(config.send_buffer_high_water, 1024 * 1024);
 }
 
@@ -296,14 +296,14 @@ TEST(BtNetworkConfigTest, CustomValues) {
     config.max_connections = 50;
     config.enable_incoming = false;
     config.connect_timeout_ms = 10000;
-    config.select_timeout_ms = 100;
+    config.poll_timeout_ms = 100;
     config.send_buffer_high_water = 512 * 1024;
     
     EXPECT_EQ(config.listen_port, 51413);
     EXPECT_EQ(config.max_connections, 50);
     EXPECT_FALSE(config.enable_incoming);
     EXPECT_EQ(config.connect_timeout_ms, 10000);
-    EXPECT_EQ(config.select_timeout_ms, 100);
+    EXPECT_EQ(config.poll_timeout_ms, 100);
     EXPECT_EQ(config.send_buffer_high_water, 512 * 1024);
 }
 

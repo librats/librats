@@ -9,7 +9,6 @@
     #include <winsock2.h>
     #include <ws2tcpip.h>
 #else
-    #include <sys/select.h>
     #include <netinet/tcp.h>
     #include <fcntl.h>
     #include <errno.h>
@@ -39,6 +38,21 @@ BtNetworkManager::~BtNetworkManager() {
 }
 
 //=============================================================================
+// TCP_NODELAY helper
+//=============================================================================
+
+bool BtNetworkManager::set_tcp_nodelay(socket_t sock) {
+    int flag = 1;
+    int result = setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                            reinterpret_cast<const char*>(&flag), sizeof(flag));
+    if (result < 0) {
+        LOG_NET_WARN("Failed to set TCP_NODELAY on socket " + std::to_string(static_cast<int>(sock)));
+        return false;
+    }
+    return true;
+}
+
+//=============================================================================
 // Lifecycle
 //=============================================================================
 
@@ -50,6 +64,14 @@ bool BtNetworkManager::start() {
         LOG_NET_ERROR("Failed to initialize socket library");
         return false;
     }
+    
+    // Create the I/O poller
+    poller_ = IOPoller::create();
+    if (!poller_) {
+        LOG_NET_ERROR("Failed to create I/O poller");
+        return false;
+    }
+    LOG_NET_INFO("Using I/O backend: " + std::string(poller_->name()));
     
     // Create listen socket if incoming enabled
     if (config_.enable_incoming) {
@@ -73,6 +95,10 @@ bool BtNetworkManager::start() {
         if (actual_listen_port_ == 0) {
             actual_listen_port_ = config_.listen_port;
         }
+        
+        // Register listen socket with poller (interested in incoming connections)
+        poller_->add(listen_socket_, PollIn);
+        poller_state_[listen_socket_] = PollIn;
         
         LOG_NET_INFO("Listening on port " + std::to_string(actual_listen_port_));
     }
@@ -109,12 +135,14 @@ void BtNetworkManager::stop() {
                 event.connection = ctx.connection;
                 disconnected_events.push_back(std::move(event));
             }
+            poller_->remove(socket);
             close_socket(socket, true);
         }
         connections_.clear();
         
         // Close connecting sockets
         for (auto& [socket, pending] : connecting_) {
+            poller_->remove(socket);
             close_socket(socket, true);
         }
         connecting_.clear();
@@ -126,9 +154,13 @@ void BtNetworkManager::stop() {
         
         // Close listen socket
         if (is_valid_socket(listen_socket_)) {
+            poller_->remove(listen_socket_);
             close_socket(listen_socket_);
             listen_socket_ = INVALID_SOCKET_VALUE;
         }
+        
+        poller_state_.clear();
+        poller_.reset();
         
         LOG_NET_INFO("Network manager stopped");
     }
@@ -285,8 +317,22 @@ bool BtNetworkManager::send_to_peer(socket_t socket, const std::vector<uint8_t>&
         return false;
     }
     
+    bool was_empty = send_buf.empty();
+    
     // Append directly to connection's send buffer (single source of truth)
     send_buf.append(data.data(), data.size());
+    
+    // If buffer was empty, we need to start watching for writability.
+    // Update poller to add PollOut interest.
+    if (was_empty && poller_) {
+        uint32_t desired = PollIn | PollOut;
+        auto ps = poller_state_.find(socket);
+        if (ps != poller_state_.end() && ps->second != desired) {
+            poller_->modify(socket, desired);
+            ps->second = desired;
+        }
+    }
+    
     return true;
 }
 
@@ -301,6 +347,45 @@ size_t BtNetworkManager::pending_connect_count() const {
 }
 
 //=============================================================================
+// Poller State Sync
+//=============================================================================
+
+void BtNetworkManager::sync_poller() {
+    // Called under mutex. Ensures poller registrations match current state.
+    // This is the primary sync point for connections whose send buffer
+    // state may have changed (e.g., after flush_send_buffer drains it).
+    
+    for (auto& [socket, ctx] : connections_) {
+        // Determine desired events
+        uint32_t desired = PollIn;  // Always interested in reading
+        if (ctx.connection && !ctx.connection->send_buffer().empty()) {
+            desired |= PollOut;  // Also interested in writing
+        }
+        
+        auto ps = poller_state_.find(socket);
+        if (ps == poller_state_.end()) {
+            // Not yet registered (shouldn't happen normally, but be safe)
+            poller_->add(socket, desired);
+            poller_state_[socket] = desired;
+        } else if (ps->second != desired) {
+            poller_->modify(socket, desired);
+            ps->second = desired;
+        }
+    }
+    
+    // Connecting sockets: interested in write (connect complete) + error
+    for (auto& [socket, pending] : connecting_) {
+        auto ps = poller_state_.find(socket);
+        uint32_t desired = PollOut;
+        if (ps == poller_state_.end()) {
+            poller_->add(socket, desired);
+            poller_state_[socket] = desired;
+        }
+        // Connecting sockets don't change their interest, no modify needed
+    }
+}
+
+//=============================================================================
 // I/O Loop
 //=============================================================================
 
@@ -312,89 +397,37 @@ void BtNetworkManager::io_loop() {
     std::vector<DataEvent> data_events;
     std::vector<DisconnectedEvent> disconnected_events;
     
+    // Poll results buffer
+    static constexpr int MAX_POLL_EVENTS = 256;
+    PollResult poll_results[MAX_POLL_EVENTS];
+    
     while (running_) {
         // Clear event vectors for this iteration
         connected_events.clear();
         data_events.clear();
         disconnected_events.clear();
         
-        // Process pending connect queue
+        // Process pending connect queue (adds new sockets to poller)
         process_pending_connects();
         
-        // Build fd_sets
-        fd_set read_fds, write_fds, error_fds;
-        FD_ZERO(&read_fds);
-        FD_ZERO(&write_fds);
-        FD_ZERO(&error_fds);
-        
-        socket_t max_fd = 0;
-        
+        // Sync poller state (update write interest based on send buffer state)
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            
-            // Add listen socket
-            if (is_valid_socket(listen_socket_)) {
-                FD_SET(listen_socket_, &read_fds);
-                if (listen_socket_ > max_fd) max_fd = listen_socket_;
-            }
-            
-            // Add connected sockets
-            for (auto& [socket, ctx] : connections_) {
-                FD_SET(socket, &read_fds);
-                FD_SET(socket, &error_fds);
-                
-                // Only monitor for write if connection has data to send
-                if (ctx.connection && !ctx.connection->send_buffer().empty()) {
-                    FD_SET(socket, &write_fds);
-                }
-                
-                if (socket > max_fd) max_fd = socket;
-            }
-            
-            // Add connecting sockets (monitor for write = connect complete)
-            for (auto& [socket, pending] : connecting_) {
-                FD_SET(socket, &write_fds);
-                FD_SET(socket, &error_fds);
-                if (socket > max_fd) max_fd = socket;
-            }
+            sync_poller();
         }
         
-        // If no sockets to monitor, sleep to avoid CPU spinning.
-        // This happens when enable_incoming=false and no connections yet.
-        if (max_fd == 0) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(config_.select_timeout_ms));
+        // Wait for I/O events (NO mutex held — this is the blocking call)
+        int num_events = poller_->wait(poll_results, MAX_POLL_EVENTS, 
+                                        config_.poll_timeout_ms);
+        
+        if (num_events < 0) {
+            // Error (EINTR already filtered by poller implementations)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
         
-        // Select with timeout
-        struct timeval timeout;
-        timeout.tv_sec = 0;
-        timeout.tv_usec = config_.select_timeout_ms * 1000;
-        
-        int result = select(static_cast<int>(max_fd) + 1, 
-                           &read_fds, &write_fds, &error_fds, &timeout);
-        
-        if (result < 0) {
-#ifdef _WIN32
-            int err = WSAGetLastError();
-            if (err != WSAEINTR) {
-                LOG_NET_ERROR("select() failed: " + std::to_string(err));
-                // Avoid spinning on persistent errors
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-#else
-            if (errno != EINTR) {
-                LOG_NET_ERROR("select() failed: " + std::string(strerror(errno)));
-                // Avoid spinning on persistent errors
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-#endif
-            continue;
-        }
-        
-        if (result == 0) {
-            // Timeout - check for connection timeouts
+        if (num_events == 0) {
+            // Timeout — check for connection timeouts
             auto now = std::chrono::steady_clock::now();
             
             std::lock_guard<std::mutex> lock(mutex_);
@@ -410,6 +443,8 @@ void BtNetworkManager::io_loop() {
             
             for (socket_t s : timed_out) {
                 LOG_NET_DEBUG("Connection timed out to " + connecting_[s].ip);
+                poller_->remove(s);
+                poller_state_.erase(s);
                 close_socket(s);
                 connecting_.erase(s);
             }
@@ -417,103 +452,149 @@ void BtNetworkManager::io_loop() {
             continue;
         }
         
-        LOG_NET_DEBUG("process_pending_connects: select() returned " + std::to_string(result) + " ready");
+        LOG_NET_DEBUG("I/O poll returned " + std::to_string(num_events) + " events");
         
-        // Handle listen socket
-        if (is_valid_socket(listen_socket_) && FD_ISSET(listen_socket_, &read_fds)) {
-            accept_incoming();
-        }
-        
-        // Handle connecting sockets
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            
-            std::vector<socket_t> completed;
-            for (auto& [socket, pending] : connecting_) {
-                if (FD_ISSET(socket, &error_fds)) {
-                    completed.push_back(socket);
-                } else if (FD_ISSET(socket, &write_fds)) {
-                    // Check if connection succeeded
-                    int sock_error = 0;
-                    socklen_t len = sizeof(sock_error);
-                    getsockopt(socket, SOL_SOCKET, SO_ERROR, 
-                              reinterpret_cast<char*>(&sock_error), &len);
-                    
-                    if (sock_error == 0) {
-                        LOG_NET_INFO("Connected to peer " + pending.ip + ":" + 
-                                    std::to_string(pending.port));
-                        
-                        // Create connection object
-                        auto conn = std::make_shared<BtPeerConnection>(
-                            pending.info_hash, pending.peer_id, pending.num_pieces);
-                        conn->set_address(pending.ip, pending.port);
-                        conn->set_socket(static_cast<int>(socket));
-                        
-                        // Create socket context
-                        SocketContext ctx;
-                        ctx.socket = socket;
-                        ctx.info_hash = pending.info_hash;
-                        ctx.connection = conn;
-                        ctx.state = NetConnectionState::Handshaking;
-                        ctx.incoming = false;
-                        ctx.connected_at = std::chrono::steady_clock::now();
-                        ctx.last_activity = ctx.connected_at;
-                        
-                        // Send handshake via connection method (sets handshake_sent_ flag)
-                        LOG_NET_DEBUG("Sending handshake (" + 
-                                     std::to_string(BT_HANDSHAKE_SIZE) + " bytes) to " + 
-                                     pending.ip);
-                        conn->start_handshake();
-                        
-                        connections_[socket] = std::move(ctx);
-                        
-                        LOG_NET_DEBUG("Handshake queued to " + pending.ip);
-                    } else {
-                        LOG_NET_DEBUG("Connection failed to " + pending.ip + ": " + 
-                                     std::to_string(sock_error));
-                        close_socket(socket);
-                    }
-                    completed.push_back(socket);
-                }
-            }
-            
-            for (socket_t s : completed) {
-                connecting_.erase(s);
-            }
-        }
-        
-        // Handle active connections (collect events under mutex)
-        // IMPORTANT: Never call close_connection_internal() during iteration!
-        // Collect sockets to close and process AFTER the loop to avoid iterator invalidation.
+        // Process all events under mutex
         {
             std::lock_guard<std::mutex> lock(mutex_);
             
             std::vector<socket_t> to_close;
             
-            for (auto& [socket, ctx] : connections_) {
+            for (int i = 0; i < num_events; ++i) {
+                socket_t fd = poll_results[i].fd;
+                uint32_t events = poll_results[i].events;
+                
+                //--------------------------------------------------------------
+                // Listen socket — accept incoming
+                //--------------------------------------------------------------
+                if (fd == listen_socket_) {
+                    if (events & PollIn) {
+                        // NOTE: accept_incoming acquires mutex internally,
+                        // but we are already holding it. We need to call
+                        // the internal version without re-locking.
+                        accept_incoming();
+                    }
+                    continue;
+                }
+                
+                //--------------------------------------------------------------
+                // Connecting socket — check connect completion
+                //--------------------------------------------------------------
+                auto connecting_it = connecting_.find(fd);
+                if (connecting_it != connecting_.end()) {
+                    auto& pending = connecting_it->second;
+                    
+                    if (events & PollErr) {
+                        // Connection failed
+                        LOG_NET_DEBUG("Connection failed (poll error) to " + pending.ip);
+                        poller_->remove(fd);
+                        poller_state_.erase(fd);
+                        close_socket(fd);
+                        connecting_.erase(connecting_it);
+                        continue;
+                    }
+                    
+                    if (events & PollOut) {
+                        // Check if connection succeeded
+                        int sock_error = 0;
+                        socklen_t len = sizeof(sock_error);
+                        getsockopt(fd, SOL_SOCKET, SO_ERROR,
+                                  reinterpret_cast<char*>(&sock_error), &len);
+                        
+                        if (sock_error == 0) {
+                            LOG_NET_INFO("Connected to peer " + pending.ip + ":" + 
+                                        std::to_string(pending.port));
+                            
+                            // Set TCP_NODELAY for low latency
+                            set_tcp_nodelay(fd);
+                            
+                            // Create connection object
+                            auto conn = std::make_shared<BtPeerConnection>(
+                                pending.info_hash, pending.peer_id, pending.num_pieces);
+                            conn->set_address(pending.ip, pending.port);
+                            conn->set_socket(static_cast<int>(fd));
+                            
+                            // Create socket context
+                            SocketContext ctx;
+                            ctx.socket = fd;
+                            ctx.info_hash = pending.info_hash;
+                            ctx.connection = conn;
+                            ctx.state = NetConnectionState::Handshaking;
+                            ctx.incoming = false;
+                            ctx.connected_at = std::chrono::steady_clock::now();
+                            ctx.last_activity = ctx.connected_at;
+                            
+                            // Send handshake
+                            LOG_NET_DEBUG("Sending handshake (" + 
+                                         std::to_string(BT_HANDSHAKE_SIZE) + " bytes) to " + 
+                                         pending.ip);
+                            conn->start_handshake();
+                            
+                            connections_[fd] = std::move(ctx);
+                            
+                            // Update poller: now interested in read (+ write if handshake queued)
+                            uint32_t desired = PollIn;
+                            if (!conn->send_buffer().empty()) {
+                                desired |= PollOut;
+                            }
+                            poller_->modify(fd, desired);
+                            poller_state_[fd] = desired;
+                            
+                            LOG_NET_DEBUG("Handshake queued to " + pending.ip);
+                        } else {
+                            LOG_NET_DEBUG("Connection failed to " + pending.ip + ": " + 
+                                         std::to_string(sock_error));
+                            poller_->remove(fd);
+                            poller_state_.erase(fd);
+                            close_socket(fd);
+                        }
+                        
+                        connecting_.erase(connecting_it);
+                    }
+                    continue;
+                }
+                
+                //--------------------------------------------------------------
+                // Active connection — handle read/write/error
+                //--------------------------------------------------------------
+                auto conn_it = connections_.find(fd);
+                if (conn_it == connections_.end()) {
+                    // Unknown fd — remove from poller
+                    poller_->remove(fd);
+                    poller_state_.erase(fd);
+                    continue;
+                }
+                
                 bool should_close = false;
                 
-                if (FD_ISSET(socket, &error_fds)) {
-                    if (ctx.connection) {
-                        LOG_NET_DEBUG("Error on socket for " + ctx.connection->ip());
+                if (events & PollErr) {
+                    if (conn_it->second.connection) {
+                        LOG_NET_DEBUG("Error on socket for " + conn_it->second.connection->ip());
                     }
                     should_close = true;
                 }
                 
-                if (!should_close && FD_ISSET(socket, &read_fds)) {
-                    should_close = handle_readable(socket, connected_events, data_events);
+                if (!should_close && (events & PollHup)) {
+                    if (conn_it->second.connection) {
+                        LOG_NET_DEBUG("Peer hung up: " + conn_it->second.connection->ip());
+                    }
+                    should_close = true;
                 }
                 
-                if (!should_close && FD_ISSET(socket, &write_fds)) {
-                    should_close = handle_writable(socket);
+                if (!should_close && (events & PollIn)) {
+                    should_close = handle_readable(fd, connected_events, data_events);
+                }
+                
+                if (!should_close && (events & PollOut)) {
+                    should_close = handle_writable(fd);
                 }
                 
                 if (should_close) {
-                    to_close.push_back(socket);
+                    to_close.push_back(fd);
                 }
             }
             
-            // Close connections AFTER iteration to avoid iterator invalidation
+            // Close connections AFTER processing all events to avoid iterator invalidation
             for (socket_t s : to_close) {
                 close_connection_internal(s, disconnected_events);
             }
@@ -565,6 +646,10 @@ void BtNetworkManager::process_pending_connects() {
         pending.socket = sock;
         pending.start_time = std::chrono::steady_clock::now();
         
+        // Register with poller: interested in write (connect complete)
+        poller_->add(sock, PollOut);
+        poller_state_[sock] = PollOut;
+        
         connecting_[sock] = std::move(pending);
     }
     
@@ -588,6 +673,9 @@ socket_t BtNetworkManager::create_connect_socket(const std::string& ip, uint16_t
         close_socket(sock);
         return INVALID_SOCKET_VALUE;
     }
+    
+    // Set TCP_NODELAY immediately (before connect)
+    set_tcp_nodelay(sock);
     
     // Resolve and connect
     std::string resolved = network_utils::resolve_hostname(ip);
@@ -632,19 +720,18 @@ socket_t BtNetworkManager::create_connect_socket(const std::string& ip, uint16_t
 }
 
 void BtNetworkManager::accept_incoming() {
+    // NOTE: called with mutex_ already held from io_loop
+    
     socket_t client = accept_client(listen_socket_);
     if (!is_valid_socket(client)) {
         return;
     }
     
     // Check connection limit
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (connections_.size() >= config_.max_connections) {
-            LOG_NET_DEBUG("Connection limit reached, rejecting incoming");
-            close_socket(client);
-            return;
-        }
+    if (connections_.size() >= config_.max_connections) {
+        LOG_NET_DEBUG("Connection limit reached, rejecting incoming");
+        close_socket(client);
+        return;
     }
     
     // Set non-blocking
@@ -652,6 +739,9 @@ void BtNetworkManager::accept_incoming() {
         close_socket(client);
         return;
     }
+    
+    // Set TCP_NODELAY for low latency
+    set_tcp_nodelay(client);
     
     // Get peer address
     std::string peer_addr = get_peer_address(client);
@@ -665,8 +755,6 @@ void BtNetworkManager::accept_incoming() {
     }
     
     LOG_NET_INFO("Accepted incoming connection from " + peer_addr);
-    
-    std::lock_guard<std::mutex> lock(mutex_);
     
     // Create connection object immediately (info_hash unknown until handshake)
     auto conn = std::make_shared<BtPeerConnection>(config_.peer_id);
@@ -687,6 +775,10 @@ void BtNetworkManager::accept_incoming() {
     ctx.connection = conn;
     
     connections_[client] = std::move(ctx);
+    
+    // Register with poller (interested in reading handshake)
+    poller_->add(client, PollIn);
+    poller_state_[client] = PollIn;
 }
 
 void BtNetworkManager::on_incoming_info_hash(BtPeerConnection* conn, const BtInfoHash& info_hash) {
@@ -735,48 +827,55 @@ bool BtNetworkManager::handle_readable(socket_t socket,
         return true;  // Should close
     }
     
-    // Receive directly into connection's buffer
+    // Drain all available data from the kernel buffer (loop until EWOULDBLOCK)
     auto& recv_buf = ctx.connection->recv_buffer();
+    bool got_data = false;
     
-    // Ensure we have space for incoming data
-    const size_t recv_size = 16384;
-    recv_buf.ensure_space(recv_size);
-    
-    // Receive directly into connection's buffer - NO COPY!
-    int bytes = recv(socket, reinterpret_cast<char*>(recv_buf.write_ptr()), 
-                    static_cast<int>(recv_buf.write_space()), 0);
-    
-    if (bytes <= 0) {
-        if (bytes == 0) {
-            LOG_NET_DEBUG("Connection closed by peer");
-        } else {
-#ifdef _WIN32
-            int err = WSAGetLastError();
-            if (err != WSAEWOULDBLOCK) {
-                LOG_NET_DEBUG("Receive error: " + std::to_string(err));
-            } else {
-                return false;  // Would block, try again later
-            }
-#else
-            if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                LOG_NET_DEBUG("Receive error: " + std::string(strerror(errno)));
-            } else {
-                return false;  // Would block, try again later
-            }
-#endif
+    while (true) {
+        const size_t recv_size = 16384;
+        recv_buf.ensure_space(recv_size);
+        
+        int bytes = recv(socket, reinterpret_cast<char*>(recv_buf.write_ptr()), 
+                        static_cast<int>(recv_buf.write_space()), 0);
+        
+        if (bytes > 0) {
+            recv_buf.received(bytes);
+            got_data = true;
+            
+            LOG_NET_DEBUG("handle_readable: recv " + std::to_string(bytes) + 
+                          " bytes from " + ctx.connection->ip());
+            continue;  // Try to read more
         }
         
-        return true;  // Should close
+        if (bytes == 0) {
+            // Peer closed connection gracefully
+            LOG_NET_DEBUG("Connection closed by peer: " + ctx.connection->ip());
+            return true;  // Should close
+        }
+        
+        // bytes < 0: error
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            break;  // No more data available, exit recv loop
+        }
+        LOG_NET_DEBUG("Receive error: " + std::to_string(err));
+#else
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;  // No more data available, exit recv loop
+        }
+        LOG_NET_DEBUG("Receive error: " + std::string(strerror(errno)));
+#endif
+        return true;  // Should close on real errors
     }
     
-    // Mark bytes as received
-    recv_buf.received(bytes);
+    if (!got_data) {
+        return false;  // Nothing received, no processing needed
+    }
+    
     ctx.last_activity = std::chrono::steady_clock::now();
     
-    LOG_NET_DEBUG("handle_readable: recv " + std::to_string(bytes) + 
-                  " bytes from " + ctx.connection->ip());
-    
-    // Process the data (handshake and messages)
+    // Process all received data (handshake and messages)
     return handle_peer_data(ctx, connected_events, data_events);
 }
 
@@ -855,6 +954,16 @@ bool BtNetworkManager::flush_send_buffer(SocketContext& ctx) {
     if (sent > 0) {
         send_buf.pop_front(static_cast<size_t>(sent));
         ctx.last_activity = std::chrono::steady_clock::now();
+        
+        // If send buffer is now empty, remove PollOut interest to avoid busy-looping
+        if (send_buf.empty()) {
+            uint32_t desired = PollIn;
+            auto ps = poller_state_.find(ctx.socket);
+            if (ps != poller_state_.end() && ps->second != desired) {
+                poller_->modify(ctx.socket, desired);
+                ps->second = desired;
+            }
+        }
     } else if (sent < 0) {
 #ifdef _WIN32
         int err = WSAGetLastError();
@@ -886,6 +995,10 @@ void BtNetworkManager::close_connection_internal(socket_t socket,
         event.connection = ctx.connection;
         disconnected_events.push_back(std::move(event));
     }
+    
+    // Remove from poller before closing socket
+    poller_->remove(socket);
+    poller_state_.erase(socket);
     
     close_socket(socket, true);
     connections_.erase(it);
