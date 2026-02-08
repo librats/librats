@@ -270,6 +270,19 @@ public:
      */
     bool is_running() const { return running_; }
     
+    /**
+     * Get detected external IP address (BEP 42)
+     * Determined by consensus from DHT peers reporting our IP back to us
+     * @return External IP address string, empty if not yet determined
+     */
+    std::string get_external_ip() const;
+    
+    /**
+     * Get detected external port (BEP 42)
+     * @return External port, 0 if not yet determined
+     */
+    uint16_t get_external_port() const;
+    
 #ifdef RATS_SEARCH_FEATURES
     // ============================================================================
     // SPIDER MODE - Aggressive node discovery and announce collection
@@ -484,6 +497,13 @@ private:
     std::condition_variable shutdown_cv_;
     std::mutex shutdown_mutex_;  // Lock order: 7 (can be locked independently)
     
+    // BEP 42: External IP tracking
+    // Determined by consensus from DHT peers reporting our IP back to us via "ip" field
+    std::string external_ip_;                              // Consensus external IP
+    uint16_t external_port_ = 0;                           // External port
+    std::unordered_map<std::string, int> external_ip_votes_;  // IP -> vote count from different nodes
+    mutable std::mutex external_ip_mutex_;                 // Independent lock (not in main hierarchy)
+    
 #ifdef RATS_SEARCH_FEATURES
     // Spider mode state
     std::atomic<bool> spider_mode_{false};
@@ -564,6 +584,9 @@ private:
     
     std::string generate_token(const Peer& peer);
     bool verify_token(const Peer& peer, const std::string& token);
+    
+    // BEP 42: Process external IP from incoming "ip" field
+    void update_external_address(const std::string& compact_ip);
     
 
     

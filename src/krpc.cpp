@@ -148,6 +148,12 @@ std::vector<uint8_t> KrpcProtocol::encode_message(const KrpcMessage& message) {
             return {};
     }
     
+    // BEP 42: Add "ip" field at top level if present
+    // Contains compact IP+port of the message recipient
+    if (!message.external_ip.empty()) {
+        root["ip"] = BencodeValue(message.external_ip);
+    }
+    
     return root.encode();
 }
 
@@ -259,16 +265,24 @@ std::unique_ptr<KrpcMessage> KrpcProtocol::decode_message(const std::vector<uint
         std::string transaction_id = root["t"].as_string();
         std::string message_type = root["y"].as_string();
         
+        std::unique_ptr<KrpcMessage> result;
         if (message_type == "q") {
-            return decode_query(root);
+            result = decode_query(root);
         } else if (message_type == "r") {
-            return decode_response(root);
+            result = decode_response(root);
         } else if (message_type == "e") {
-            return decode_error(root);
+            result = decode_error(root);
         } else {
             LOG_KRPC_ERROR("Unknown message type: " << message_type);
             return nullptr;
         }
+        
+        // BEP 42: Parse "ip" field from top level (present in responses)
+        if (result && root.has_key("ip")) {
+            result->external_ip = root["ip"].as_string();
+        }
+        
+        return result;
     } catch (const std::exception& e) {
         LOG_KRPC_DEBUG("Failed to decode KRPC message: " << e.what());
         return nullptr;

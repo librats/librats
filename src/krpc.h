@@ -80,6 +80,10 @@ struct KrpcMessage {
     KrpcErrorCode error_code;
     std::string error_message;
     
+    // BEP 42: External IP field - compact IP+port of the message recipient
+    // Included in all outgoing responses so the recipient can learn their external address
+    std::string external_ip;
+    
     KrpcMessage() : type(KrpcMessageType::Query), query_type(KrpcQueryType::Ping), sender_id(), target_id(), info_hash(), port(0), implied_port(false), response_id(), error_code(KrpcErrorCode::GenericError) {}
 };
 

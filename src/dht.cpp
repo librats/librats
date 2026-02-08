@@ -729,6 +729,11 @@ int DhtClient::get_bucket_index(const NodeId& id) {
 void DhtClient::handle_krpc_message(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC message type " << static_cast<int>(message.type) << " from " << sender.ip << ":" << sender.port);
     
+    // BEP 42: Process "ip" field if present (tells us our external address as seen by the sender)
+    if (!message.external_ip.empty()) {
+        update_external_address(message.external_ip);
+    }
+    
     switch (message.type) {
         case KrpcMessageType::Query:
             switch (message.query_type) {
@@ -790,6 +795,7 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender)
     // Use neighbor_id only for spider-contacted IPs, real node_id for organic DHT traffic
     NodeId response_id = use_neighbor_id ? neighbor_id(message.sender_id) : node_id_;
     auto response = KrpcProtocol::create_ping_response(message.transaction_id, response_id);
+    response.external_ip = KrpcProtocol::compact_peer_info(sender);  // BEP 42
     send_krpc_message(response, sender);
 }
 
@@ -832,6 +838,7 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
     // Use neighbor_id only for spider-contacted IPs, real node_id for organic DHT traffic
     NodeId response_id = use_neighbor_id ? neighbor_id(message.target_id) : node_id_;
     auto response = KrpcProtocol::create_find_node_response(message.transaction_id, response_id, krpc_nodes);
+    response.external_ip = KrpcProtocol::compact_peer_info(sender);  // BEP 42
     send_krpc_message(response, sender);
 }
 
@@ -888,6 +895,7 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& se
         LOG_DHT_DEBUG("Responding to KRPC GET_PEERS with " << krpc_nodes.size() << " closest nodes for info_hash " << node_id_to_hex(message.info_hash));
     }
     
+    response.external_ip = KrpcProtocol::compact_peer_info(sender);  // BEP 42
     send_krpc_message(response, sender);
 }
 
@@ -964,6 +972,7 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
     // Use neighbor_id only for spider-contacted IPs, real node_id for organic DHT traffic
     NodeId response_id = use_neighbor_id ? neighbor_id(message.info_hash) : node_id_;
     auto response = KrpcProtocol::create_announce_peer_response(message.transaction_id, response_id);
+    response.external_ip = KrpcProtocol::compact_peer_info(sender);  // BEP 42
     send_krpc_message(response, sender);
 }
 
@@ -1203,6 +1212,81 @@ bool DhtClient::verify_token(const Peer& peer, const std::string& token) {
         return it->second.token == token;
     }
     return false;
+}
+
+// BEP 42: External IP tracking
+void DhtClient::update_external_address(const std::string& compact_ip) {
+    // Parse compact IP+port (6 bytes for IPv4: 4 bytes IP + 2 bytes port)
+    if (compact_ip.size() < 6) {
+        return;
+    }
+    
+    auto peers = KrpcProtocol::parse_compact_peer_info(compact_ip);
+    if (peers.empty()) {
+        return;
+    }
+    
+    const std::string& reported_ip = peers[0].ip;
+    uint16_t reported_port = peers[0].port;
+    
+    // Ignore invalid/private addresses
+    if (reported_ip.empty() || reported_ip == "0.0.0.0") {
+        return;
+    }
+    
+    std::lock_guard<std::mutex> lock(external_ip_mutex_);
+    
+    // Increment vote for this IP
+    external_ip_votes_[reported_ip]++;
+    
+    // Find the IP with the most votes
+    int max_votes = 0;
+    std::string best_ip;
+    for (const auto& [ip, count] : external_ip_votes_) {
+        if (count > max_votes) {
+            max_votes = count;
+            best_ip = ip;
+        }
+    }
+    
+    // Accept consensus: require at least 3 agreeing nodes
+    if (max_votes >= 3 && external_ip_ != best_ip) {
+        std::string old_ip = external_ip_;
+        external_ip_ = best_ip;
+        external_port_ = reported_port;
+        if (old_ip.empty()) {
+            LOG_DHT_INFO("BEP 42: Detected external address: " << best_ip << ":" << reported_port
+                         << " (votes: " << max_votes << ")");
+        } else {
+            LOG_DHT_INFO("BEP 42: External address changed: " << old_ip << " -> " << best_ip << ":" << reported_port
+                         << " (votes: " << max_votes << ")");
+        }
+    }
+    
+    // Prevent unbounded growth of vote map
+    if (external_ip_votes_.size() > 100) {
+        // Keep only the current consensus IP and reset others
+        std::string keep_ip = external_ip_;
+        int keep_count = 0;
+        auto it = external_ip_votes_.find(keep_ip);
+        if (it != external_ip_votes_.end()) {
+            keep_count = it->second;
+        }
+        external_ip_votes_.clear();
+        if (!keep_ip.empty()) {
+            external_ip_votes_[keep_ip] = keep_count;
+        }
+    }
+}
+
+std::string DhtClient::get_external_ip() const {
+    std::lock_guard<std::mutex> lock(external_ip_mutex_);
+    return external_ip_;
+}
+
+uint16_t DhtClient::get_external_port() const {
+    std::lock_guard<std::mutex> lock(external_ip_mutex_);
+    return external_port_;
 }
 
 void DhtClient::cleanup_stale_nodes() {

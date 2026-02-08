@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include "dht.h"
+#include "krpc.h"
 #include "socket.h"
 #include <thread>
 #include <chrono>
@@ -484,6 +485,179 @@ TEST_F(DhtTest, RoutingTablePersistenceTest) {
     
     // Cleanup: In a real scenario, you might want to delete the test file
     // For now, we leave it as it uses the testing file path mechanism
+}
+
+// Test BEP 42: "ip" field encoding/decoding in KRPC messages
+TEST_F(DhtTest, BEP42_IpFieldEncodingTest) {
+    // Test that "ip" field is correctly encoded and decoded in KRPC messages
+    
+    // Create a ping response with external_ip set
+    NodeId node_id;
+    node_id.fill(0xAA);
+    auto response = KrpcProtocol::create_ping_response("tx01", node_id);
+    
+    // Set external_ip to compact peer info for 1.2.3.4:5678
+    Peer test_peer("1.2.3.4", 5678);
+    response.external_ip = KrpcProtocol::compact_peer_info(test_peer);
+    EXPECT_EQ(response.external_ip.size(), 6);  // 4 bytes IP + 2 bytes port
+    
+    // Encode the message
+    auto encoded = KrpcProtocol::encode_message(response);
+    EXPECT_FALSE(encoded.empty());
+    
+    // Verify "ip" key is present in the encoded bencode
+    std::string encoded_str(encoded.begin(), encoded.end());
+    EXPECT_NE(encoded_str.find("2:ip"), std::string::npos);
+    
+    // Decode the message back
+    auto decoded = KrpcProtocol::decode_message(encoded);
+    ASSERT_NE(decoded, nullptr);
+    
+    // Verify the external_ip was preserved through encode/decode
+    EXPECT_EQ(decoded->external_ip.size(), 6);
+    EXPECT_EQ(decoded->external_ip, response.external_ip);
+    
+    // Parse the compact IP back to verify it's correct
+    auto peers = KrpcProtocol::parse_compact_peer_info(decoded->external_ip);
+    ASSERT_EQ(peers.size(), 1);
+    EXPECT_EQ(peers[0].ip, "1.2.3.4");
+    EXPECT_EQ(peers[0].port, 5678);
+}
+
+// Test BEP 42: "ip" field is absent when not set
+TEST_F(DhtTest, BEP42_IpFieldAbsentWhenNotSetTest) {
+    NodeId node_id;
+    node_id.fill(0xBB);
+    auto response = KrpcProtocol::create_ping_response("tx02", node_id);
+    
+    // Do NOT set external_ip
+    EXPECT_TRUE(response.external_ip.empty());
+    
+    // Encode the message
+    auto encoded = KrpcProtocol::encode_message(response);
+    
+    // "ip" key should NOT be in the encoded output
+    std::string encoded_str(encoded.begin(), encoded.end());
+    EXPECT_EQ(encoded_str.find("2:ip"), std::string::npos);
+    
+    // Decode and verify
+    auto decoded = KrpcProtocol::decode_message(encoded);
+    ASSERT_NE(decoded, nullptr);
+    EXPECT_TRUE(decoded->external_ip.empty());
+}
+
+// Test BEP 42: External IP consensus tracking
+TEST_F(DhtTest, BEP42_ExternalIpConsensusTest) {
+    DhtClient client(0);
+    EXPECT_TRUE(client.start());
+    
+    // Initially, external IP should be empty
+    EXPECT_TRUE(client.get_external_ip().empty());
+    EXPECT_EQ(client.get_external_port(), 0);
+    
+    // Create a compact IP for our "external address" as seen by others: 203.0.113.42:6881
+    Peer our_external("203.0.113.42", 6881);
+    std::string compact_external = KrpcProtocol::compact_peer_info(our_external);
+    
+    // Verify the compact_peer_info round-trip works correctly
+    auto parsed = KrpcProtocol::parse_compact_peer_info(compact_external);
+    ASSERT_EQ(parsed.size(), 1);
+    EXPECT_EQ(parsed[0].ip, "203.0.113.42");
+    EXPECT_EQ(parsed[0].port, 6881);
+    
+    client.stop();
+}
+
+// Test BEP 42: "ip" field in different KRPC message types
+TEST_F(DhtTest, BEP42_IpFieldInVariousMessagesTest) {
+    NodeId node_id;
+    node_id.fill(0xCC);
+    Peer external_peer("192.168.1.100", 12345);
+    std::string compact_ip = KrpcProtocol::compact_peer_info(external_peer);
+    
+    // Test with find_node response
+    {
+        std::vector<KrpcNode> nodes;
+        auto response = KrpcProtocol::create_find_node_response("tx10", node_id, nodes);
+        response.external_ip = compact_ip;
+        
+        auto encoded = KrpcProtocol::encode_message(response);
+        auto decoded = KrpcProtocol::decode_message(encoded);
+        ASSERT_NE(decoded, nullptr);
+        EXPECT_EQ(decoded->external_ip, compact_ip);
+        
+        auto parsed = KrpcProtocol::parse_compact_peer_info(decoded->external_ip);
+        ASSERT_EQ(parsed.size(), 1);
+        EXPECT_EQ(parsed[0].ip, "192.168.1.100");
+        EXPECT_EQ(parsed[0].port, 12345);
+    }
+    
+    // Test with get_peers response (with nodes)
+    {
+        std::vector<KrpcNode> nodes;
+        auto response = KrpcProtocol::create_get_peers_response_with_nodes("tx11", node_id, nodes, "test_token");
+        response.external_ip = compact_ip;
+        
+        auto encoded = KrpcProtocol::encode_message(response);
+        auto decoded = KrpcProtocol::decode_message(encoded);
+        ASSERT_NE(decoded, nullptr);
+        EXPECT_EQ(decoded->external_ip, compact_ip);
+    }
+    
+    // Test with get_peers response (with peers)
+    {
+        std::vector<Peer> peers;
+        peers.push_back(Peer("10.0.0.1", 8080));
+        auto response = KrpcProtocol::create_get_peers_response("tx12", node_id, peers, "test_token");
+        response.external_ip = compact_ip;
+        
+        auto encoded = KrpcProtocol::encode_message(response);
+        auto decoded = KrpcProtocol::decode_message(encoded);
+        ASSERT_NE(decoded, nullptr);
+        EXPECT_EQ(decoded->external_ip, compact_ip);
+    }
+    
+    // Test with announce_peer response
+    {
+        auto response = KrpcProtocol::create_announce_peer_response("tx13", node_id);
+        response.external_ip = compact_ip;
+        
+        auto encoded = KrpcProtocol::encode_message(response);
+        auto decoded = KrpcProtocol::decode_message(encoded);
+        ASSERT_NE(decoded, nullptr);
+        EXPECT_EQ(decoded->external_ip, compact_ip);
+    }
+}
+
+// Test BEP 42: Compact peer info round-trip for various IPs
+TEST_F(DhtTest, BEP42_CompactPeerInfoRoundTripTest) {
+    // Test various IP addresses
+    struct TestCase {
+        std::string ip;
+        uint16_t port;
+    };
+    
+    std::vector<TestCase> test_cases = {
+        {"0.0.0.0", 0},
+        {"127.0.0.1", 6881},
+        {"192.168.1.1", 80},
+        {"255.255.255.255", 65535},
+        {"10.0.0.1", 1},
+        {"172.16.0.1", 443},
+        {"8.8.8.8", 53},
+        {"203.0.113.42", 6881},
+    };
+    
+    for (const auto& tc : test_cases) {
+        Peer peer(tc.ip, tc.port);
+        std::string compact = KrpcProtocol::compact_peer_info(peer);
+        ASSERT_EQ(compact.size(), 6) << "Failed for " << tc.ip << ":" << tc.port;
+        
+        auto parsed = KrpcProtocol::parse_compact_peer_info(compact);
+        ASSERT_EQ(parsed.size(), 1) << "Failed for " << tc.ip << ":" << tc.port;
+        EXPECT_EQ(parsed[0].ip, tc.ip) << "IP mismatch for " << tc.ip;
+        EXPECT_EQ(parsed[0].port, tc.port) << "Port mismatch for " << tc.ip;
+    }
 }
 
 // Test data directory configuration
