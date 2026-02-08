@@ -233,6 +233,7 @@ void Torrent::stop() {
     // Clear metadata exchange state
     metadata_buffer_.clear();
     metadata_pieces_received_.clear();
+    metadata_pieces_requested_.clear();
     peer_metadata_size_.clear();
     peer_ut_metadata_id_.clear();
     
@@ -725,6 +726,7 @@ void Torrent::tick() {
             // Clear metadata state
             metadata_buffer_.clear();
             metadata_pieces_received_.clear();
+            metadata_pieces_requested_.clear();
             peer_metadata_size_.clear();
             peer_ut_metadata_id_.clear();
             
@@ -1507,11 +1509,15 @@ void Torrent::request_metadata(BtPeerConnection* peer) {
     if (metadata_buffer_.empty()) {
         metadata_buffer_.resize(metadata_size);
         metadata_pieces_received_.resize(num_pieces, false);
+        metadata_pieces_requested_.resize(num_pieces, false);
     }
+
+    // Request pieces we don't have yet (pipeline up to 4 requests)
+    int requests_sent = 0;
+    const int max_pending_requests = 4;
     
-    // Request pieces we don't have yet
     for (uint32_t piece = 0; piece < num_pieces; ++piece) {
-        if (!metadata_pieces_received_[piece]) {
+        if (!metadata_pieces_received_[piece] && !metadata_pieces_requested_[piece]) {
             // Create request message
             BencodeValue req = BencodeValue::create_dict();
             req["msg_type"] = BencodeValue(static_cast<int64_t>(0));  // Request
@@ -1519,10 +1525,11 @@ void Torrent::request_metadata(BtPeerConnection* peer) {
             
             auto req_payload = req.encode();
             peer->send_extended(peer_ut_id, req_payload);
+            metadata_pieces_requested_[piece] = true;
             
             LOG_DEBUG("Torrent", "Requesting metadata piece " + std::to_string(piece) + 
                       " from " + peer->ip());
-            break;  // Request one piece at a time for now
+            if (++requests_sent >= max_pending_requests) break;
         }
     }
 }
@@ -1581,6 +1588,7 @@ void Torrent::on_metadata_message(BtPeerConnection* peer,
             
             if (piece < metadata_pieces_received_.size()) {
                 metadata_pieces_received_[piece] = true;
+                metadata_pieces_requested_[piece] = false;
             }
             
             LOG_DEBUG("Torrent", "Received metadata piece " + std::to_string(piece) + 
@@ -1648,6 +1656,7 @@ void Torrent::on_metadata_complete() {
         // Clear metadata tracking data
         metadata_buffer_.clear();
         metadata_pieces_received_.clear();
+        metadata_pieces_requested_.clear();
         peer_metadata_size_.clear();
         peer_ut_metadata_id_.clear();
         
@@ -1673,6 +1682,7 @@ void Torrent::on_metadata_complete() {
         // Could retry from other peers
         metadata_buffer_.clear();
         metadata_pieces_received_.clear();
+        metadata_pieces_requested_.clear();
     }
 }
 

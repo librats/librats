@@ -631,6 +631,7 @@ private:
     // Metadata exchange (for magnet links)
     std::vector<uint8_t> metadata_buffer_;
     std::vector<bool> metadata_pieces_received_;
+    std::vector<bool> metadata_pieces_requested_;
     std::unordered_map<BtPeerConnection*, size_t> peer_metadata_size_;
     std::unordered_map<BtPeerConnection*, uint8_t> peer_ut_metadata_id_;
     std::chrono::steady_clock::time_point metadata_download_started_;
