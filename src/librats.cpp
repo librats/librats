@@ -148,7 +148,7 @@ bool RatsClient::start() {
     // Create dual-stack server socket (supports both IPv4 and IPv6)
     server_socket_ = create_tcp_server(listen_port_, 5, bind_address_);
 	// Fallback to free port
-    if (!is_valid_socket(server_socket_) && listen_port_ != 0) {
+    if (!is_valid_socket(server_socket_) && listen_port_ > 0) {
         // Requested port is not available, try ephemeral port as fallback
         int original_port = listen_port_;
         LOG_CLIENT_WARN("TCP port " << original_port << " is not available, falling back to ephemeral port");

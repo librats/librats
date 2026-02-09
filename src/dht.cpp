@@ -63,7 +63,7 @@ bool DhtClient::start() {
     
     socket_ = create_udp_socket(port_, bind_address_);
 	// Fallback to free port
-    if (!is_valid_socket(socket_) && port_ != 0) {
+    if (!is_valid_socket(socket_) && port_ > 0) {
         // Requested port is not available, try ephemeral port as fallback
         int original_port = port_;
         LOG_DHT_WARN("UDP port " << original_port << " is not available, falling back to ephemeral port");
