@@ -62,8 +62,19 @@ bool DhtClient::start() {
     }
     
     socket_ = create_udp_socket(port_, bind_address_);
+	// Fallback to free port
+    if (!is_valid_socket(socket_) && port_ != 0) {
+        // Requested port is not available, try ephemeral port as fallback
+        int original_port = port_;
+        LOG_DHT_WARN("UDP port " << original_port << " is not available, falling back to ephemeral port");
+        socket_ = create_udp_socket(0, bind_address_);
+        if (is_valid_socket(socket_)) {
+            port_ = get_bound_port(socket_);
+            LOG_DHT_INFO("Fell back from port " << original_port << " to ephemeral port " << port_);
+        }
+    }
     if (!is_valid_socket(socket_)) {
-        LOG_DHT_ERROR("Failed to create dual-stack UDP socket");
+        LOG_DHT_ERROR("Failed to create dual-stack UDP socket on port " << port_);
         return false;
     }
     
