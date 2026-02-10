@@ -16,27 +16,7 @@
 #include <stdexcept>
 #include <string_view>
 
-#ifdef TESTING
-#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", "[pointer: " << this << "] " << message)
-#define LOG_CLIENT_INFO(message)  LOG_INFO("client", "[pointer: " << this << "] " << message)
-#define LOG_CLIENT_WARN(message)  LOG_WARN("client", "[pointer: " << this << "] " << message)
-#define LOG_CLIENT_ERROR(message) LOG_ERROR("client", "[pointer: " << this << "] " << message)
-
-#define LOG_SERVER_DEBUG(message) LOG_DEBUG("server", "[pointer: " << this << "] " << message)
-#define LOG_SERVER_INFO(message)  LOG_INFO("server", "[pointer: " << this << "] " << message)
-#define LOG_SERVER_WARN(message)  LOG_WARN("server", "[pointer: " << this << "] " << message)
-#define LOG_SERVER_ERROR(message) LOG_ERROR("server", "[pointer: " << this << "] " << message)
-#else
-#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
-#define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
-#define LOG_CLIENT_WARN(message)  LOG_WARN("client", message)
-#define LOG_CLIENT_ERROR(message) LOG_ERROR("client", message)
-
-#define LOG_SERVER_DEBUG(message) LOG_DEBUG("server", message)
-#define LOG_SERVER_INFO(message)  LOG_INFO("server", message)
-#define LOG_SERVER_WARN(message)  LOG_WARN("server", message)
-#define LOG_SERVER_ERROR(message) LOG_ERROR("server", message)
-#endif
+#include "librats_log_macros.h"
 
 namespace librats {
 
@@ -221,8 +201,7 @@ void RatsClient::stop() {
     if (gossipsub_) {
         gossipsub_->stop();
     }
-
-
+    
     // Trigger immediate shutdown of all background threads
     shutdown_all_threads();
     
@@ -256,6 +235,7 @@ void RatsClient::stop() {
         peers_.clear();
         socket_to_peer_id_.clear();
         address_to_peer_id_.clear();
+        validated_peer_count_.store(0, std::memory_order_relaxed);
     }
     
     // Wait for server thread to finish
@@ -274,7 +254,7 @@ void RatsClient::stop() {
     join_all_active_threads();
     
     cleanup_socket_library();
-
+    
     // Save configuration before stopping
     save_configuration();
     
@@ -286,7 +266,7 @@ void RatsClient::shutdown_all_threads() {
     
     // Signal all threads to stop
     running_.store(false);
-
+    
     // Call parent class to handle thread management shutdown
     ThreadManager::shutdown_all_threads();
 }
@@ -394,6 +374,13 @@ void RatsClient::management_loop() {
             }
         }
         
+        // Check handshake timeouts (centralized, runs once for all peers)
+        try {
+            check_handshake_timeouts();
+        } catch (const std::exception& e) {
+            LOG_CLIENT_ERROR("Exception during handshake timeout check: " << e.what());
+        }
+        
         // Process reconnection queue
         try {
             process_reconnect_queue();
@@ -416,7 +403,6 @@ void RatsClient::management_loop() {
     
     LOG_CLIENT_INFO("Management loop ended");
 }
-
 
 RatsClient::DecryptResult RatsClient::decrypt_received_data(socket_t socket, const std::vector<uint8_t>& received_bytes, std::vector<uint8_t>& out_data) {
     std::string current_peer_id;
@@ -603,9 +589,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& initia
     // ===== INITIALIZATION =====
     bool handshake_completed = false;
     bool noise_handshake_done = false;
-    bool encryption_enabled = is_encryption_enabled();
     bool is_outgoing = false;
-    auto last_timeout_check = std::chrono::steady_clock::now();
     
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -648,15 +632,8 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& initia
             data = std::move(received_bytes);
         }
         
-        // ----- 3. CONNECTION STATE CHECK (during handshake phase only) -----
+        // ----- 3. HANDSHAKE FAILURE CHECK (during handshake phase only) -----
         if (!handshake_completed) {
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_timeout_check >= std::chrono::seconds(1)) {
-                check_handshake_timeouts();
-                last_timeout_check = now;
-            }
-            
-            // Check for handshake failure
             bool handshake_failed = false;
             {
                 std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -719,6 +696,7 @@ void RatsClient::handle_client(socket_t client_socket, const std::string& initia
                                 auto peer_it = find_peer_by_socket_unlocked(client_socket);
                                 if (peer_it != peers_.end()) {
                                     peer_it->second.handshake_state = RatsPeer::HandshakeState::COMPLETED;
+                                    validated_peer_count_.fetch_add(1, std::memory_order_relaxed);
                                     log_handshake_completion_unlocked(peer_it->second);
                                 }
                             }
@@ -1029,6 +1007,7 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& in
                 LOG_CLIENT_DEBUG("Rats handshake done, entering NOISE_PENDING state for " << initial_peer_id);
             } else {
                 peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
+                validated_peer_count_.fetch_add(1, std::memory_order_relaxed);
                 log_handshake_completion_unlocked(peer);
             }
             
@@ -1050,6 +1029,7 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& in
             LOG_CLIENT_DEBUG("Rats handshake done, entering NOISE_PENDING state for " << initial_peer_id);
         } else {
             peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
+            validated_peer_count_.fetch_add(1, std::memory_order_relaxed);
             log_handshake_completion_unlocked(peer);
         }
         
@@ -1158,29 +1138,23 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
     return true;
 }
 
+void RatsClient::mark_manual_disconnect(const std::string& peer_id) {
+    std::lock_guard<std::mutex> lock(reconnect_mutex_);
+    manual_disconnect_peers_.insert(peer_id);
+    reconnect_queue_.erase(peer_id);
+}
+
 void RatsClient::disconnect_peer(socket_t socket) {
-    // Mark as manually disconnected to prevent auto-reconnection
     std::string peer_id = get_peer_id(socket);
     if (!peer_id.empty()) {
-        std::lock_guard<std::mutex> lock(reconnect_mutex_);
-        manual_disconnect_peers_.insert(peer_id);
-        // Also remove from reconnection queue if present
-        reconnect_queue_.erase(peer_id);
+        mark_manual_disconnect(peer_id);
     }
-    
     remove_peer(socket);
     close_socket(socket);
 }
 
 void RatsClient::disconnect_peer_by_id(const std::string& peer_id) {
-    // Mark as manually disconnected to prevent auto-reconnection
-    {
-        std::lock_guard<std::mutex> lock(reconnect_mutex_);
-        manual_disconnect_peers_.insert(peer_id);
-        // Also remove from reconnection queue if present
-        reconnect_queue_.erase(peer_id);
-    }
-    
+    mark_manual_disconnect(peer_id);
     socket_t socket = get_peer_socket_by_id(peer_id);
     if (is_valid_socket(socket)) {
         remove_peer(socket);
@@ -1206,11 +1180,6 @@ std::unordered_map<std::string, RatsPeer>::const_iterator RatsClient::find_peer_
 }
 
 // Helper methods for peer management
-void RatsClient::add_peer(const RatsPeer& peer) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    add_peer_unlocked(peer);
-}
-
 void RatsClient::add_peer_unlocked(const RatsPeer& peer) {
     // Assumes peers_mutex_ is already locked
     peers_[peer.peer_id] = peer;
@@ -1226,11 +1195,6 @@ void RatsClient::remove_peer(socket_t socket) {
     }
 }
 
-void RatsClient::remove_peer_by_id(const std::string& peer_id) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    remove_peer_by_id_unlocked(peer_id);
-}
-
 void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
     // Assumes peers_mutex_ is already locked
     
@@ -1239,6 +1203,11 @@ void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
     
     auto it = peers_.find(peer_id_copy);
     if (it != peers_.end()) {
+        // Decrement validated peer count if this peer had completed handshake
+        if (it->second.is_handshake_completed()) {
+            validated_peer_count_.fetch_sub(1, std::memory_order_relaxed);
+        }
+        
         // Copy the values we need before erasing to avoid use-after-free
         socket_t peer_socket = it->second.socket;
         std::string peer_normalized_address = it->second.normalized_address;
@@ -1260,9 +1229,8 @@ bool RatsClient::is_already_connected_to_address(const std::string& normalized_a
 void RatsClient::add_ignored_address(const std::string& ip_address) {
     std::lock_guard<std::mutex> lock(local_addresses_mutex_);
     
-    // Check if already in the list
-    if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), ip_address) == local_interface_addresses_.end()) {
-        local_interface_addresses_.push_back(ip_address);
+    auto [it, inserted] = local_interface_addresses_.insert(ip_address);
+    if (inserted) {
         LOG_CLIENT_INFO("Added " << ip_address << " to ignore list");
     } else {
         LOG_CLIENT_DEBUG("IP address " << ip_address << " already in ignore list");
@@ -1270,7 +1238,7 @@ void RatsClient::add_ignored_address(const std::string& ip_address) {
 }
 
 //common localhost addresses
-static constexpr std::array<std::string_view,4> localhost_addrs{"127.0.0.1", "::1", "0.0.0.0", "::"};
+static constexpr std::array<std::string_view,5> localhost_addrs{"127.0.0.1", "::1", "0.0.0.0", "::", "localhost"};
 
 // Local interface address blocking methods
 void RatsClient::initialize_local_addresses() {
@@ -1279,13 +1247,12 @@ void RatsClient::initialize_local_addresses() {
     std::lock_guard<std::mutex> lock(local_addresses_mutex_);
     
     // Get all local interface addresses using network_utils
-    local_interface_addresses_ = network_utils::get_local_interface_addresses();
+    auto addrs = network_utils::get_local_interface_addresses();
+    local_interface_addresses_.insert(addrs.begin(), addrs.end());
     
-    // Add common localhost addresses if not already present
+    // Add common localhost addresses
     for (const auto& addr : localhost_addrs) {
-        if (std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), addr) == local_interface_addresses_.end()) {
-            local_interface_addresses_.emplace_back(addr);
-        }
+        local_interface_addresses_.emplace(std::string(addr));
     }
     
     LOG_CLIENT_INFO("Found " << local_interface_addresses_.size() << " local addresses to block:");
@@ -1296,8 +1263,7 @@ void RatsClient::initialize_local_addresses() {
 
 bool RatsClient::is_blocked_address(const std::string& ip_address) const {
     std::lock_guard<std::mutex> lock(local_addresses_mutex_);
-    return std::find(local_interface_addresses_.begin(), local_interface_addresses_.end(), ip_address) 
-           != local_interface_addresses_.end();
+    return local_interface_addresses_.count(ip_address) > 0;
 }
 
 bool RatsClient::can_connect_to_peer(const std::string& ip, int port) const {
@@ -1321,21 +1287,21 @@ bool RatsClient::can_connect_to_peer(const std::string& ip, int port) const {
 }
 
 bool RatsClient::should_ignore_peer(const std::string& ip, int port) const {
-    // Always block connections to ourselves (same port)
-    if (port == listen_port_) {
-        if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost" || ip == "0.0.0.0" || ip == "::") {
+    // Check if this is a well-known localhost address
+    bool is_localhost = std::find(localhost_addrs.begin(), localhost_addrs.end(), ip) != localhost_addrs.end();
+    
+    if (is_localhost) {
+        // Block self-connections (same port on localhost)
+        if (port == listen_port_) {
             LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - localhost with same port");
             return true;
         }
-    }
-    
-    // For localhost addresses on different ports, allow the connection (for testing)
-    if (ip == "127.0.0.1" || ip == "::1" || ip == "localhost") {
+        // Allow localhost on different ports (for testing)
         LOG_CLIENT_DEBUG("Allowing localhost peer " << ip << ":" << port << " on different port");
         return false;
     }
     
-    // Check if the IP is a non-localhost local interface address
+    // Block non-localhost local interface addresses
     if (is_blocked_address(ip)) {
         LOG_CLIENT_DEBUG("Ignoring peer " << ip << ":" << port << " - matches local interface address");
         return true;
@@ -1466,12 +1432,14 @@ bool RatsClient::send_string_to_peer(socket_t socket, const std::string& data) {
     return send_binary_to_peer(socket, binary_data, MessageDataType::STRING);
 }
 
+std::vector<uint8_t> RatsClient::json_to_binary(const nlohmann::json& data) {
+    std::string s = data.dump();
+    return {s.begin(), s.end()};
+}
+
 bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& data) {
     try {
-        // Serialize JSON and convert to binary, then use the primary send_binary_to_peer method
-        std::string json_string = data.dump();
-        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
-        return send_binary_to_peer(socket, binary_data, MessageDataType::JSON);
+        return send_binary_to_peer(socket, json_to_binary(data), MessageDataType::JSON);
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
         return false;
@@ -1507,10 +1475,7 @@ bool RatsClient::send_string_to_peer_id(const std::string& peer_id, const std::s
 
 bool RatsClient::send_json_to_peer_id(const std::string& peer_id, const nlohmann::json& data) {
     try {
-        // Serialize JSON and convert to binary, then use primary binary method with JSON type
-        std::string json_string = data.dump();
-        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
-        return send_binary_to_peer_id(peer_id, binary_data, MessageDataType::JSON);
+        return send_binary_to_peer_id(peer_id, json_to_binary(data), MessageDataType::JSON);
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to serialize JSON message: " << e.what());
         return false;
@@ -1519,10 +1484,7 @@ bool RatsClient::send_json_to_peer_id(const std::string& peer_id, const nlohmann
 
 int RatsClient::broadcast_json_to_peers(const nlohmann::json& data) {
     try {
-        // Serialize JSON and convert to binary, then use primary binary method with JSON type
-        std::string json_string = data.dump();
-        std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
-        return broadcast_binary_to_peers(binary_data, MessageDataType::JSON);
+        return broadcast_binary_to_peers(json_to_binary(data), MessageDataType::JSON);
     } catch (const nlohmann::json::exception& e) {
         LOG_CLIENT_ERROR("Failed to serialize JSON message for broadcast: " << e.what());
         return 0;
@@ -1568,11 +1530,9 @@ int RatsClient::broadcast_string_to_peers(const std::string& data) {
 // Per-socket synchronization helpers
 std::shared_ptr<std::mutex> RatsClient::get_socket_send_mutex(socket_t socket) {
     std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
-    auto it = socket_send_mutexes_.find(socket);
-    if (it == socket_send_mutexes_.end()) {
-        // Create new mutex for this socket
-        socket_send_mutexes_[socket] = std::make_shared<std::mutex>();
-        return socket_send_mutexes_[socket];
+    auto [it, inserted] = socket_send_mutexes_.try_emplace(socket, nullptr);
+    if (inserted) {
+        it->second = std::make_shared<std::mutex>();
     }
     return it->second;
 }
@@ -1591,19 +1551,12 @@ std::string RatsClient::get_our_peer_id() const {
 }
 
 int RatsClient::get_peer_count_unlocked() const {
-    // Assumes peers_mutex_ is already locked
-    int count = 0;
-    for (const auto& pair : peers_) {
-        if (pair.second.is_handshake_completed()) {
-            count++;
-        }
-    }
-    return count;
+    // Returns the cached validated peer count (O(1) instead of O(N) scan)
+    return validated_peer_count_.load(std::memory_order_relaxed);
 }
 
 int RatsClient::get_peer_count() const {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    return get_peer_count_unlocked();
+    return validated_peer_count_.load(std::memory_order_relaxed);
 }
 
 std::string RatsClient::get_peer_id(socket_t socket) const {
@@ -1677,16 +1630,22 @@ std::vector<RatsPeer> RatsClient::get_random_peers(int max_count, const std::str
     return selected_peers;
 }
 
-const RatsPeer* RatsClient::get_peer_by_id(const std::string& peer_id) const {
+std::optional<RatsPeer> RatsClient::get_peer_by_id(const std::string& peer_id) const {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     auto it = peers_.find(peer_id);
-    return (it != peers_.end()) ? &it->second : nullptr;
+    if (it != peers_.end()) {
+        return it->second;
+    }
+    return std::nullopt;
 }
 
-const RatsPeer* RatsClient::get_peer_by_socket(socket_t socket) const {
+std::optional<RatsPeer> RatsClient::get_peer_by_socket(socket_t socket) const {
     std::lock_guard<std::mutex> lock(peers_mutex_);
     auto peer_it = find_peer_by_socket_unlocked(socket);
-    return (peer_it != peers_.end()) ? &peer_it->second : nullptr;
+    if (peer_it != peers_.end()) {
+        return peer_it->second;
+    }
+    return std::nullopt;
 }
 
 // Peer limit management methods
@@ -2065,7 +2024,6 @@ void RatsClient::announce_rats_peer() {
         LOG_CLIENT_WARN("Failed to announce peer for discovery");
     }
 }
-
 
 std::string RatsClient::get_discovery_hash() const {
     std::lock_guard<std::mutex> lock(protocol_config_mutex_);

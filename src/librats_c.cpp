@@ -847,7 +847,7 @@ char* rats_get_peer_info_json(rats_client_t handle, const char* peer_id) {
     if (!handle || !peer_id) return nullptr;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
     
-    const RatsPeer* peer = wrap->client->get_peer_by_id(std::string(peer_id));
+    auto peer = wrap->client->get_peer_by_id(std::string(peer_id));
     if (!peer) return nullptr;
     
     // Create JSON representation of peer info

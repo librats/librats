@@ -1,9 +1,5 @@
 #include "librats.h"
-// Logging macros for RatsClient
-#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
-#define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
-#define LOG_CLIENT_WARN(message)  LOG_WARN("client", message)
-#define LOG_CLIENT_ERROR(message) LOG_ERROR("client", message)
+#include "librats_log_macros.h"
 
 namespace librats {
 
@@ -141,7 +137,7 @@ void RatsClient::set_file_transfer_config(const FileTransferConfig& config) {
     file_transfer_manager_->set_config(config);
 }
 
-const FileTransferConfig& RatsClient::get_file_transfer_config() const {
+FileTransferConfig RatsClient::get_file_transfer_config() const {
     if (!is_file_transfer_available()) {
         throw std::runtime_error("File transfer manager not available");
     }

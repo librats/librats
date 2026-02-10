@@ -1,16 +1,5 @@
 #include "librats.h"
-
-#ifdef TESTING
-#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", "[pointer: " << this << "] " << message)
-#define LOG_CLIENT_INFO(message)  LOG_INFO("client", "[pointer: " << this << "] " << message)
-#define LOG_CLIENT_WARN(message)  LOG_WARN("client", "[pointer: " << this << "] " << message)
-#define LOG_CLIENT_ERROR(message) LOG_ERROR("client", "[pointer: " << this << "] " << message)
-#else
-#define LOG_CLIENT_DEBUG(message) LOG_DEBUG("client", message)
-#define LOG_CLIENT_INFO(message)  LOG_INFO("client", message)
-#define LOG_CLIENT_WARN(message)  LOG_WARN("client", message)
-#define LOG_CLIENT_ERROR(message) LOG_ERROR("client", message)
-#endif
+#include "librats_log_macros.h"
 
 namespace librats {
 
@@ -37,7 +26,7 @@ void RatsClient::set_reconnect_config(const ReconnectConfig& config) {
                     << ", stable_threshold=" << config.stable_connection_threshold_seconds << "s");
 }
 
-const ReconnectConfig& RatsClient::get_reconnect_config() const {
+ReconnectConfig RatsClient::get_reconnect_config() const {
     std::lock_guard<std::mutex> lock(reconnect_mutex_);
     return reconnect_config_;
 }

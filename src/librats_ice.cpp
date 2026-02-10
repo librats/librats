@@ -183,7 +183,7 @@ void RatsClient::set_ice_config(const IceConfig& config) {
     get_ice_manager().set_config(config);
 }
 
-const IceConfig& RatsClient::get_ice_config() const {
+IceConfig RatsClient::get_ice_config() const {
     // Need to cast away const to get mutable reference for lazy initialization
     return const_cast<RatsClient*>(this)->get_ice_manager().config();
 }

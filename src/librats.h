@@ -29,6 +29,7 @@
 #include <unordered_set> // Added for unordered_set
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include "rats_export.h"
 
 namespace librats {
@@ -261,7 +262,6 @@ public:
      */
     bool is_running() const;
 
-
     // =========================================================================
     // Utility Methods
     // =========================================================================
@@ -387,7 +387,6 @@ public:
      */
     int get_peer_count() const;
 
-
     /**
      * Get peer_id for a peer by socket (preferred)
      * @param socket Peer socket
@@ -423,16 +422,16 @@ public:
     /**
      * Get peer information by peer ID
      * @param peer_id The peer ID to look up
-     * @return Pointer to RatsPeer object, or nullptr if not found
+     * @return Copy of RatsPeer object, or std::nullopt if not found
      */
-    const RatsPeer* get_peer_by_id(const std::string& peer_id) const;
+    std::optional<RatsPeer> get_peer_by_id(const std::string& peer_id) const;
     
     /**
      * Get peer information by socket
      * @param socket The socket handle to look up
-     * @return Pointer to RatsPeer object, or nullptr if not found  
+     * @return Copy of RatsPeer object, or std::nullopt if not found
      */
-    const RatsPeer* get_peer_by_socket(socket_t socket) const;
+    std::optional<RatsPeer> get_peer_by_socket(socket_t socket) const;
     
     /**
      * Get maximum number of peers
@@ -476,9 +475,9 @@ public:
     
     /**
      * Get current reconnection configuration
-     * @return Current reconnection configuration
+     * @return Copy of current reconnection configuration
      */
-    const ReconnectConfig& get_reconnect_config() const;
+    ReconnectConfig get_reconnect_config() const;
     
     /**
      * Get the number of peers pending reconnection
@@ -1246,7 +1245,7 @@ public:
      * Get current file transfer configuration
      * @return Current configuration settings
      */
-    const FileTransferConfig& get_file_transfer_config() const;
+    FileTransferConfig get_file_transfer_config() const;
     
     // Event Handlers
     /**
@@ -1455,7 +1454,7 @@ public:
      * Get current ICE configuration
      * @return Current ICE configuration
      */
-    const IceConfig& get_ice_config() const;
+    IceConfig get_ice_config() const;
     
     // ICE Lifecycle
     /**
@@ -1977,13 +1976,14 @@ private:
     
     // [4] Local interface address blocking (protected by local_addresses_mutex_)
     mutable std::mutex local_addresses_mutex_;              // [4] Protects local interface addresses
-    std::vector<std::string> local_interface_addresses_;
+    std::unordered_set<std::string> local_interface_addresses_;
     
     // [5] Organized peer management using RatsPeer struct (protected by peers_mutex_)
     mutable std::mutex peers_mutex_;                        // [5] Protects peer data (most frequently locked)
     std::unordered_map<std::string, RatsPeer> peers_;          // keyed by peer_id
     std::unordered_map<socket_t, std::string> socket_to_peer_id_;  // for quick socket->peer_id lookup  
     std::unordered_map<std::string, std::string> address_to_peer_id_;  // for duplicate detection (normalized_address->peer_id)
+    std::atomic<int> validated_peer_count_{0};              // Cached count of peers with COMPLETED handshake
     
     // [6] Per-socket synchronization for thread-safe message sending (protected by socket_send_mutexes_mutex_)
     mutable std::mutex socket_send_mutexes_mutex_;          // [6] Protects socket send mutex map
@@ -2054,10 +2054,10 @@ private:
     bool parse_message_with_header(const std::vector<uint8_t>& message, MessageHeader& header, std::vector<uint8_t>& payload) const;
     
     // Peer management methods using RatsPeer
-    void add_peer(const RatsPeer& peer);
     void add_peer_unlocked(const RatsPeer& peer);  // Assumes peers_mutex_ is already locked
-    void remove_peer_by_id(const std::string& peer_id);
     void remove_peer_by_id_unlocked(const std::string& peer_id);  // Assumes peers_mutex_ is already locked
+    void mark_manual_disconnect(const std::string& peer_id);  // Mark peer as manually disconnected, remove from reconnect queue
+    static std::vector<uint8_t> json_to_binary(const nlohmann::json& data);  // Serialize JSON to binary
     bool is_already_connected_to_address(const std::string& normalized_address) const;
     std::string normalize_peer_address(const std::string& ip, int port) const;
     
