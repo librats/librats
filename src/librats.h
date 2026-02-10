@@ -2061,10 +2061,17 @@ private:
     bool is_already_connected_to_address(const std::string& normalized_address) const;
     std::string normalize_peer_address(const std::string& ip, int port) const;
     
-    // Data transmission helper - assumes peers_mutex_ is already locked or peer data is cached
+    // Lightweight cache of peer data needed for sending (avoids holding peers_mutex_ during TCP send)
+    struct PeerSendInfo {
+        socket_t socket;
+        std::string peer_id;
+        std::shared_ptr<rats::NoiseCipherState> send_cipher;
+    };
+    
+    // Data transmission helper - does NOT require peers_mutex_; caller passes cached peer data
     bool send_binary_to_peer_unlocked(socket_t socket, const std::vector<uint8_t>& data, 
                                        MessageDataType message_type, 
-                                       rats::NoiseCipherState* send_cipher,
+                                       std::shared_ptr<rats::NoiseCipherState> send_cipher,
                                        const std::string& peer_id_for_logging);
 
     // Local interface address blocking helper functions
@@ -2179,8 +2186,6 @@ private:
     bool perform_noise_handshake(socket_t socket, const std::string& peer_id, bool is_initiator);
     bool send_noise_message(socket_t socket, const uint8_t* data, size_t len);
     bool recv_noise_message(socket_t socket, std::vector<uint8_t>& out_data, int timeout_ms = 10000);
-    bool encrypt_and_send(socket_t socket, const std::string& peer_id, const std::vector<uint8_t>& plaintext);
-    bool receive_and_decrypt(socket_t socket, const std::string& peer_id, std::vector<uint8_t>& plaintext);
 };
 
 // Utility functions

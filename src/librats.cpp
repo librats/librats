@@ -420,13 +420,13 @@ void RatsClient::management_loop() {
 
 RatsClient::DecryptResult RatsClient::decrypt_received_data(socket_t socket, const std::vector<uint8_t>& received_bytes, std::vector<uint8_t>& out_data) {
     std::string current_peer_id;
-    rats::NoiseCipherState* recv_cipher = nullptr;
+    std::shared_ptr<rats::NoiseCipherState> recv_cipher;
     
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
         auto peer_it = find_peer_by_socket_unlocked(socket);
         if (peer_it != peers_.end() && peer_it->second.is_noise_encrypted()) {
-            recv_cipher = peer_it->second.recv_cipher.get();
+            recv_cipher = peer_it->second.recv_cipher; // shared_ptr copy keeps cipher alive
             current_peer_id = peer_it->second.peer_id;
         }
     }
@@ -1391,11 +1391,11 @@ bool RatsClient::parse_message_with_header(const std::vector<uint8_t>& message, 
     return true;
 }
 
-// Unlocked version - assumes peers_mutex_ is already locked or peer data is cached
-// Takes pre-cached encryption data to avoid locking peers_mutex_ inside
+// Unlocked version - does NOT require peers_mutex_; caller passes cached peer data
+// The shared_ptr keeps the cipher alive even if the peer is removed concurrently
 bool RatsClient::send_binary_to_peer_unlocked(socket_t socket, const std::vector<uint8_t>& data, 
                                                MessageDataType message_type,
-                                               rats::NoiseCipherState* send_cipher,
+                                               std::shared_ptr<rats::NoiseCipherState> send_cipher,
                                                const std::string& peer_id_for_logging) {
     if (!running_.load()) {
         return false;
@@ -1441,9 +1441,9 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
         return false;
     }
     
-    // Cache peer encryption data under lock, then release lock before sending
+    // Cache peer data under lock, then release lock before sending
     std::string peer_id;
-    rats::NoiseCipherState* send_cipher = nullptr;
+    std::shared_ptr<rats::NoiseCipherState> send_cipher;
     
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
@@ -1451,12 +1451,12 @@ bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>
         if (peer_it != peers_.end()) {
             peer_id = peer_it->second.peer_id;
             if (peer_it->second.is_noise_encrypted()) {
-                send_cipher = peer_it->second.send_cipher.get();
+                send_cipher = peer_it->second.send_cipher; // shared_ptr copy keeps cipher alive
             }
         }
     }
     
-    // Call unlocked version with cached data (peers_mutex_ is released)
+    // peers_mutex_ released -- safe to do potentially slow TCP send
     return send_binary_to_peer_unlocked(socket, data, message_type, send_cipher, peer_id);
 }
 
@@ -1479,16 +1479,24 @@ bool RatsClient::send_json_to_peer(socket_t socket, const nlohmann::json& data) 
 }
 
 bool RatsClient::send_binary_to_peer_id(const std::string& peer_id, const std::vector<uint8_t>& data, MessageDataType message_type) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    auto it = peers_.find(peer_id);
-    if (it == peers_.end() || !it->second.is_handshake_completed()) {
-        return false;
+    // Cache peer data under lock, then release before sending
+    socket_t socket;
+    std::shared_ptr<rats::NoiseCipherState> send_cipher;
+    
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto it = peers_.find(peer_id);
+        if (it == peers_.end() || !it->second.is_handshake_completed()) {
+            return false;
+        }
+        socket = it->second.socket;
+        if (it->second.is_noise_encrypted()) {
+            send_cipher = it->second.send_cipher; // shared_ptr copy keeps cipher alive
+        }
     }
     
-    // Use unlocked version since we already hold peers_mutex_
-    const RatsPeer& peer = it->second;
-    rats::NoiseCipherState* send_cipher = peer.is_noise_encrypted() ? peer.send_cipher.get() : nullptr;
-    return send_binary_to_peer_unlocked(peer.socket, data, message_type, send_cipher, peer.peer_id);
+    // peers_mutex_ released -- safe to do potentially slow TCP send
+    return send_binary_to_peer_unlocked(socket, data, message_type, send_cipher, peer_id);
 }
 
 bool RatsClient::send_string_to_peer_id(const std::string& peer_id, const std::string& data) {
@@ -1526,21 +1534,26 @@ int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data, Mess
         return 0;
     }
     
-    int sent_count = 0;
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    
-    for (const auto& pair : peers_) {
-        const RatsPeer& peer = pair.second;
-        // Only send to peers that have completed handshake
-        if (peer.is_handshake_completed()) {
-            // Use unlocked version since we already hold peers_mutex_
-            rats::NoiseCipherState* send_cipher = peer.is_noise_encrypted() ? peer.send_cipher.get() : nullptr;
-            if (send_binary_to_peer_unlocked(peer.socket, data, message_type, send_cipher, peer.peer_id)) {
-                sent_count++;
+    // Collect target peers under lock, then release before sending
+    std::vector<PeerSendInfo> targets;
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        targets.reserve(peers_.size());
+        for (const auto& [id, peer] : peers_) {
+            if (peer.is_handshake_completed()) {
+                targets.push_back({peer.socket, peer.peer_id,
+                    peer.is_noise_encrypted() ? peer.send_cipher : nullptr});
             }
         }
     }
     
+    // peers_mutex_ released -- now do the potentially slow TCP sends
+    int sent_count = 0;
+    for (const auto& t : targets) {
+        if (send_binary_to_peer_unlocked(t.socket, data, message_type, t.send_cipher, t.peer_id)) {
+            sent_count++;
+        }
+    }
     return sent_count;
 }
 
@@ -2332,24 +2345,28 @@ int RatsClient::broadcast_rats_message(const nlohmann::json& message, const std:
     }
     std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
     
-    int sent_count = 0;
+    // Collect target peers under lock, then release before sending
+    std::vector<PeerSendInfo> targets;
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
-        for (const auto& pair : peers_) {
-            const RatsPeer& peer = pair.second;
-            // Skip excluded peer
+        targets.reserve(peers_.size());
+        for (const auto& [id, peer] : peers_) {
             if (!exclude_peer_id.empty() && peer.peer_id == exclude_peer_id) {
                 continue;
             }
-            // Skip unvalidated peers if requested
             if (validated_only && !peer.is_handshake_completed()) {
                 continue;
             }
-            
-            rats::NoiseCipherState* send_cipher = peer.is_noise_encrypted() ? peer.send_cipher.get() : nullptr;
-            if (send_binary_to_peer_unlocked(peer.socket, binary_data, MessageDataType::JSON, send_cipher, peer.peer_id)) {
-                sent_count++;
-            }
+            targets.push_back({peer.socket, peer.peer_id,
+                peer.is_noise_encrypted() ? peer.send_cipher : nullptr});
+        }
+    }
+    
+    // peers_mutex_ released -- now do the potentially slow TCP sends
+    int sent_count = 0;
+    for (const auto& t : targets) {
+        if (send_binary_to_peer_unlocked(t.socket, binary_data, MessageDataType::JSON, t.send_cipher, t.peer_id)) {
+            sent_count++;
         }
     }
     return sent_count;
