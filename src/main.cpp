@@ -137,22 +137,22 @@ int main(int argc, char* argv[]) {
     std::mutex peers_list_mutex;
     
     // Set up callbacks
-    client.set_connection_callback([&](socket_t socket, const std::string& peer_hash_id) {
-        LOG_MAIN_INFO("New peer connected: " << peer_hash_id << " (socket: " << socket << ")");
+    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
+        LOG_MAIN_INFO("New peer connected: " << peer_id << " (socket: " << socket << ")");
         
         // Add to connected peers list
         {
             std::lock_guard<std::mutex> lock(peers_list_mutex);
-            connected_peers.push_back({socket, peer_hash_id});
+            connected_peers.push_back({socket, peer_id});
         }
     });
     
-    client.set_string_data_callback([](socket_t socket, const std::string& peer_hash_id, const std::string& data) {
-        LOG_MAIN_INFO("Message from peer " << peer_hash_id << ": " << data);
+    client.set_string_data_callback([](socket_t socket, const std::string& peer_id, const std::string& data) {
+        LOG_MAIN_INFO("Message from peer " << peer_id << ": " << data);
     });
     
-    client.set_disconnect_callback([&](socket_t socket, const std::string& peer_hash_id) {
-        LOG_MAIN_INFO("Peer disconnected: " << peer_hash_id << " (socket: " << socket << ")");
+    client.set_disconnect_callback([&](socket_t socket, const std::string& peer_id) {
+        LOG_MAIN_INFO("Peer disconnected: " << peer_id << " (socket: " << socket << ")");
         
         // Remove from connected peers list
         {

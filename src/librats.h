@@ -730,14 +730,6 @@ public:
      */
     void send(const std::string& peer_id, const std::string& message_type, const nlohmann::json& data, SendCallback callback = nullptr);
 
-    /**
-     * Parse a JSON message
-     * @param message Raw message string
-     * @param out_json Parsed JSON output
-     * @return true if parsed successfully
-     */
-    bool parse_json_message(const std::string& message, nlohmann::json& out_json);
-
     // =========================================================================
     // Encryption Functionality
     // =========================================================================
@@ -2038,9 +2030,22 @@ private:
 
     void server_loop();
     void management_loop();
-    void handle_client(socket_t client_socket, const std::string& peer_hash_id);
+    void handle_client(socket_t client_socket, const std::string& initial_peer_id);
+    
+    // Helper methods for handle_client
+    enum class DecryptResult { OK, ERROR, NOT_ENCRYPTED };
+    DecryptResult decrypt_received_data(socket_t socket, const std::vector<uint8_t>& received_bytes, std::vector<uint8_t>& out_data);
+    void handle_post_handshake_completion(socket_t socket, const RatsPeer& peer_copy);
+    void handle_client_cleanup(socket_t socket, bool handshake_completed, const std::string& initial_peer_id);
+    void process_message(socket_t socket, const std::vector<uint8_t>& data, const std::string& initial_peer_id);
+    
+    // Peer lookup helper (assumes peers_mutex_ is already locked)
+    // Returns iterator to the peer, or peers_.end() if not found
+    std::unordered_map<std::string, RatsPeer>::iterator find_peer_by_socket_unlocked(socket_t socket);
+    std::unordered_map<std::string, RatsPeer>::const_iterator find_peer_by_socket_unlocked(socket_t socket) const;
+    
     void remove_peer(socket_t socket);
-    std::string generate_peer_hash_id(socket_t socket, const std::string& connection_info);
+    std::string generate_temporary_peer_id(socket_t socket, const std::string& connection_info);
     void handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash);
     void handle_mdns_service_discovery(const MdnsService& service, bool is_new);
     
@@ -2066,14 +2071,24 @@ private:
     void initialize_local_addresses();
     bool is_blocked_address(const std::string& ip_address) const;
     bool should_ignore_peer(const std::string& ip, int port) const;
+    bool can_connect_to_peer(const std::string& ip, int port) const;
     static bool parse_address_string(const std::string& address_str, std::string& out_ip, int& out_port);
     
     // Helper functions that assume mutex is already locked
     int get_peer_count_unlocked() const;  // Helper that assumes peers_mutex_ is already locked
 
-    // Handshake protocol
+    // Protocol constants
     static constexpr const char* RATS_PROTOCOL_VERSION = "1.0";
     static constexpr int HANDSHAKE_TIMEOUT_SECONDS = 10;
+    static constexpr int TCP_CONNECT_TIMEOUT_MS = 10000;        // 10 second TCP connection timeout
+    static constexpr int PEER_RECONNECT_DELAY_MS = 100;         // Delay before reconnecting saved peers
+    static constexpr int HISTORICAL_RECONNECT_DELAY_MS = 500;   // Delay before reconnecting historical peers
+    static constexpr int MANAGEMENT_LOOP_INTERVAL_SECONDS = 2;  // Management loop tick interval
+    static constexpr int THREAD_CLEANUP_INTERVAL_SECONDS = 30;  // Thread cleanup interval
+    static constexpr int INITIAL_DISCOVERY_DELAY_SECONDS = 5;   // DHT bootstrap delay
+    static constexpr int MAX_PEERS_REQUEST_COUNT = 5;            // Max peers to request/respond
+    static constexpr int CONTENT_HASH_HEX_LENGTH = 40;          // 160-bit hash as hex
+    static constexpr int64_t TIMESTAMP_SKEW_TOLERANCE_MS = 10LL * 60LL * 1000LL; // 10 minutes
 
     struct HandshakeMessage {
         std::string protocol;
@@ -2091,7 +2106,7 @@ private:
     bool is_handshake_message(const std::vector<uint8_t>& data) const;
     bool send_handshake(socket_t socket, const std::string& our_peer_id);
     bool send_handshake_unlocked(socket_t socket, const std::string& our_peer_id);
-    bool handle_handshake_message(socket_t socket, const std::string& peer_hash_id, const std::vector<uint8_t>& data);
+    bool handle_handshake_message(socket_t socket, const std::string& initial_peer_id, const std::vector<uint8_t>& data);
     void check_handshake_timeouts();
     void log_handshake_completion_unlocked(const RatsPeer& peer);
 
@@ -2103,12 +2118,12 @@ private:
 
     // Message handling system
     nlohmann::json create_rats_message(const std::string& type, const nlohmann::json& payload, const std::string& sender_peer_id);
-    void handle_rats_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& message);
+    void handle_rats_message(socket_t socket, const std::string& peer_id, const nlohmann::json& message);
 
     // Specific message handlers
-    void handle_peer_exchange_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
-    void handle_peers_request_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
-    void handle_peers_response_message(socket_t socket, const std::string& peer_hash_id, const nlohmann::json& payload);
+    void handle_peer_exchange_message(socket_t socket, const std::string& peer_id, const nlohmann::json& payload);
+    void handle_peers_request_message(socket_t socket, const std::string& peer_id, const nlohmann::json& payload);
+    void handle_peers_response_message(socket_t socket, const std::string& peer_id, const nlohmann::json& payload);
 
     // Message creation and broadcasting
     nlohmann::json create_peer_exchange_message(const RatsPeer& peer);
@@ -2118,8 +2133,7 @@ private:
     std::vector<RatsPeer> get_random_peers(int max_count, const std::string& exclude_peer_id = "") const;
     void send_peers_request(socket_t socket, const std::string& our_peer_id);
 
-    int broadcast_rats_message(const nlohmann::json& message, const std::string& exclude_peer_id = "");
-    int broadcast_rats_message_to_validated_peers(const nlohmann::json& message, const std::string& exclude_peer_id = "");
+    int broadcast_rats_message(const nlohmann::json& message, const std::string& exclude_peer_id = "", bool validated_only = true);
     
     // [7] Message exchange API implementation (protected by message_handlers_mutex_)
     mutable std::mutex message_handlers_mutex_;             // [7] Protects message handlers
