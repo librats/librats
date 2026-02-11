@@ -364,9 +364,10 @@ TEST_F(RatsClientTest, ErrorHandlingTest) {
     bool send_by_hash_result = valid_client.send_string_to_peer_id("invalid_hash", "test");
     EXPECT_FALSE(send_by_hash_result);
     
-    // Test connecting to invalid address
+    // Test connecting to invalid address (async: returns true because connection is initiated,
+    // actual failure happens in the background thread)
     bool connect_result = valid_client.connect_to_peer("invalid.address.12345", 80);
-    EXPECT_FALSE(connect_result);
+    EXPECT_TRUE(connect_result);
     
     valid_client.stop();
 }

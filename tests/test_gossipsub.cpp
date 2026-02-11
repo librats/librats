@@ -9,6 +9,21 @@ using namespace librats;
 
 class GossipSubTest : public ::testing::Test {
 protected:
+    // Helper to wait for condition with timeout
+    template<typename Predicate>
+    bool wait_for_condition(Predicate pred, int timeout_ms = 2000) {
+        auto start = std::chrono::steady_clock::now();
+        while (!pred()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start);
+            if (elapsed.count() >= timeout_ms) {
+                return false;
+            }
+        }
+        return true;
+    }
+    
     void SetUp() override {
         // Create two RatsClient instances for testing
         client1_ = std::make_unique<RatsClient>(8081);
@@ -21,8 +36,11 @@ protected:
         // Connect the clients
         ASSERT_TRUE(client2_->connect_to_peer("127.0.0.1", 8081));
         
-        // Wait for connection to establish
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Wait for both clients to see each other (handshake completed)
+        bool connected = wait_for_condition([&]() {
+            return client1_->get_peer_count() > 0 && client2_->get_peer_count() > 0;
+        }, 3000);
+        ASSERT_TRUE(connected) << "Clients failed to establish connection within timeout";
     }
     
     void TearDown() override {

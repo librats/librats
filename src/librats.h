@@ -9,6 +9,9 @@
 #include "file_transfer.h" // File transfer functionality
 #include "noise.h" // Noise Protocol encryption
 #include "ice.h"   // ICE-lite NAT traversal
+#include "io_poller.h" // Platform-optimal I/O multiplexing
+#include "receive_buffer.h" // Efficient receive buffer for async I/O
+#include "chained_send_buffer.h" // Zero-copy chained send buffer
 #ifdef RATS_STORAGE
 #include "storage.h" // Distributed storage functionality
 #endif
@@ -26,13 +29,31 @@
 #include <memory>
 #include <chrono>
 #include <condition_variable>
-#include <unordered_set> // Added for unordered_set
+#include <unordered_set>
 #include <cstdint>
 #include <cstring>
 #include <optional>
 #include "rats_export.h"
 
 namespace librats {
+
+/**
+ * PeerIOContext - Per-peer async I/O buffers and framing state
+ *
+ * Used by the single-threaded IO loop for non-blocking message framing:
+ *   recv_buffer  – incoming bytes from recv(); frames parsed incrementally
+ *   send_buffer  – outgoing frames queued for non-blocking send()
+ *   noise_hs     – transient Noise XX handshake state (only during NOISE_PENDING)
+ *   noise_step   – current step in the 3-message XX pattern
+ */
+struct PeerIOContext {
+    ReceiveBuffer recv_buffer{8192};
+    ChainedSendBuffer send_buffer;
+
+    // Async Noise handshake (only valid while handshake_state == NOISE_PENDING)
+    std::unique_ptr<rats::NoiseHandshakeState> noise_hs;
+    int noise_step = 0;   // XX pattern: 0→initial, advances per message
+};
 
 /**
  * RatsPeer struct - comprehensive information about a connected rats peer
@@ -66,6 +87,9 @@ struct RatsPeer {
     std::shared_ptr<rats::NoiseCipherState> recv_cipher;   // Cipher for receiving encrypted data
     std::vector<uint8_t> remote_static_key;  // Remote peer's static public key (for identity verification)
     
+    // Async I/O context (per-peer buffers for non-blocking I/O)
+    PeerIOContext io_;
+    
     RatsPeer() : handshake_state(HandshakeState::PENDING), 
                  encryption_enabled(false),
                  noise_handshake_completed(false) {
@@ -83,6 +107,45 @@ struct RatsPeer {
         connected_at = std::chrono::steady_clock::now();
         handshake_start_time = connected_at;
     }
+    
+    // Custom copy: copies all fields except io_ (non-copyable due to unique_ptr).
+    // Copies are used for snapshots passed to callbacks – they never need the IO context.
+    RatsPeer(const RatsPeer& o)
+        : peer_id(o.peer_id), ip(o.ip), port(o.port), socket(o.socket),
+          normalized_address(o.normalized_address), connected_at(o.connected_at),
+          is_outgoing(o.is_outgoing), handshake_state(o.handshake_state),
+          version(o.version), handshake_start_time(o.handshake_start_time),
+          encryption_enabled(o.encryption_enabled),
+          noise_handshake_completed(o.noise_handshake_completed),
+          send_cipher(o.send_cipher), recv_cipher(o.recv_cipher),
+          remote_static_key(o.remote_static_key)
+          /* io_ default-constructed (fresh, empty) */ {}
+    
+    RatsPeer& operator=(const RatsPeer& o) {
+        if (this != &o) {
+            peer_id = o.peer_id;
+            ip = o.ip;
+            port = o.port;
+            socket = o.socket;
+            normalized_address = o.normalized_address;
+            connected_at = o.connected_at;
+            is_outgoing = o.is_outgoing;
+            handshake_state = o.handshake_state;
+            version = o.version;
+            handshake_start_time = o.handshake_start_time;
+            encryption_enabled = o.encryption_enabled;
+            noise_handshake_completed = o.noise_handshake_completed;
+            send_cipher = o.send_cipher;
+            recv_cipher = o.recv_cipher;
+            remote_static_key = o.remote_static_key;
+            // io_ left unchanged in the destination (no copy)
+        }
+        return *this;
+    }
+    
+    // Default move operations are fine
+    RatsPeer(RatsPeer&&) = default;
+    RatsPeer& operator=(RatsPeer&&) = default;
     
     // Check if peer has completed Noise handshake and is ready for encrypted communication
     bool is_noise_encrypted() const { 
@@ -1950,7 +2013,7 @@ private:
     // 3. encryption_mutex_           (Encryption settings and keys)
     // 4. local_addresses_mutex_      (Local interface addresses)
     // 5. peers_mutex_                (Peer management - most frequently locked)
-    // 6. socket_send_mutexes_mutex_ (Socket send mutex management)
+    // 6. io_mutex_                  (I/O poller and send buffer access)
     // 7. message_handlers_mutex_    (Message handler registration)
     // 8. reconnect_mutex_           (Reconnection queue management)
     // =========================================================================
@@ -1985,12 +2048,10 @@ private:
     std::unordered_map<std::string, std::string> address_to_peer_id_;  // for duplicate detection (normalized_address->peer_id)
     std::atomic<int> validated_peer_count_{0};              // Cached count of peers with COMPLETED handshake
     
-    // [6] Per-socket synchronization for thread-safe message sending (protected by socket_send_mutexes_mutex_)
-    mutable std::mutex socket_send_mutexes_mutex_;          // [6] Protects socket send mutex map
-    std::unordered_map<socket_t, std::shared_ptr<std::mutex>> socket_send_mutexes_;
-    
-    // Server and client management
-    std::thread server_thread_;
+    // [6] Async I/O (poller + io thread)
+    std::unique_ptr<IOPoller> poller_;
+    std::mutex io_mutex_;                                    // Protects poller_ and send-buffer writes from non-IO threads
+    std::thread io_thread_;
     std::thread management_thread_;
     
     ConnectionCallback connection_callback_;
@@ -2028,19 +2089,26 @@ private:
     void initialize_modules();
     void destroy_modules();
 
-    void server_loop();
+    // Async I/O loop (single thread for all sockets)
+    void io_loop();
     void management_loop();
-    void handle_client(socket_t client_socket, const std::string& initial_peer_id);
     
-    // Helper methods for handle_client
-    enum class DecryptResult { OK, ERROR, NOT_ENCRYPTED };
-    DecryptResult decrypt_received_data(socket_t socket, const std::vector<uint8_t>& received_bytes, std::vector<uint8_t>& out_data);
+    // I/O event handlers (called from io_loop)
+    void accept_incoming();
+    bool handle_readable(socket_t socket);
+    bool handle_writable(socket_t socket);
+    void handle_disconnect(socket_t socket);
+    
+    // Poller registration helpers
+    void poller_add(socket_t fd, uint32_t events);
+    void poller_modify(socket_t fd, uint32_t events);
+    void poller_remove(socket_t fd);
+    
+    // Helpers – post-handshake and message routing
     void handle_post_handshake_completion(socket_t socket, const RatsPeer& peer_copy);
-    void handle_client_cleanup(socket_t socket, bool handshake_completed, const std::string& initial_peer_id);
-    void process_message(socket_t socket, const std::vector<uint8_t>& data, const std::string& initial_peer_id);
+    void process_message(socket_t socket, const std::vector<uint8_t>& data, const std::string& peer_id);
     
     // Peer lookup helper (assumes peers_mutex_ is already locked)
-    // Returns iterator to the peer, or peers_.end() if not found
     std::unordered_map<std::string, RatsPeer>::iterator find_peer_by_socket_unlocked(socket_t socket);
     std::unordered_map<std::string, RatsPeer>::const_iterator find_peer_by_socket_unlocked(socket_t socket) const;
     
@@ -2056,23 +2124,35 @@ private:
     // Peer management methods using RatsPeer
     void add_peer_unlocked(const RatsPeer& peer);  // Assumes peers_mutex_ is already locked
     void remove_peer_by_id_unlocked(const std::string& peer_id);  // Assumes peers_mutex_ is already locked
-    void mark_manual_disconnect(const std::string& peer_id);  // Mark peer as manually disconnected, remove from reconnect queue
-    static std::vector<uint8_t> json_to_binary(const nlohmann::json& data);  // Serialize JSON to binary
+    void mark_manual_disconnect(const std::string& peer_id);
+    static std::vector<uint8_t> json_to_binary(const nlohmann::json& data);
     bool is_already_connected_to_address(const std::string& normalized_address) const;
     std::string normalize_peer_address(const std::string& ip, int port) const;
     
-    // Lightweight cache of peer data needed for sending (avoids holding peers_mutex_ during TCP send)
-    struct PeerSendInfo {
+    // Async send – enqueues a framed (length-prefixed) message into the peer's
+    // ChainedSendBuffer and arms PollOut.  Thread-safe (acquires io_mutex_).
+    // Returns false if the peer was not found.
+    bool enqueue_message(socket_t socket, const std::vector<uint8_t>& data);
+    // Unlocked variant – caller must hold peers_mutex_
+    bool enqueue_message_unlocked(RatsPeer& peer, const std::vector<uint8_t>& data);
+
+    // Lightweight snapshot of peer data needed for sending (avoids holding peers_mutex_ during enqueue)
+    struct PeerSendTarget {
         socket_t socket;
         std::string peer_id;
         std::shared_ptr<rats::NoiseCipherState> send_cipher;
     };
     
-    // Data transmission helper - does NOT require peers_mutex_; caller passes cached peer data
     bool send_binary_to_peer_unlocked(socket_t socket, const std::vector<uint8_t>& data, 
                                        MessageDataType message_type, 
                                        std::shared_ptr<rats::NoiseCipherState> send_cipher,
                                        const std::string& peer_id_for_logging);
+    
+    // Async Noise handshake – processes one Noise XX message received from peer.
+    // Returns false if peer should be disconnected.  Called from handle_readable.
+    bool handle_noise_frame(RatsPeer& peer);
+    // Kick-off: initialises noise_hs and writes first outgoing message if initiator.
+    void start_noise_handshake_async(RatsPeer& peer);
 
     // Local interface address blocking helper functions
     void initialize_local_addresses();
@@ -2088,6 +2168,8 @@ private:
     static constexpr const char* RATS_PROTOCOL_VERSION = "1.0";
     static constexpr int HANDSHAKE_TIMEOUT_SECONDS = 10;
     static constexpr int TCP_CONNECT_TIMEOUT_MS = 10000;        // 10 second TCP connection timeout
+    static constexpr int IO_POLL_TIMEOUT_MS = 100;              // IO poller tick interval (ms)
+    static constexpr size_t MAX_FRAME_SIZE = 100 * 1024 * 1024; // 100 MB max single frame
     static constexpr int PEER_RECONNECT_DELAY_MS = 100;         // Delay before reconnecting saved peers
     static constexpr int HISTORICAL_RECONNECT_DELAY_MS = 500;   // Delay before reconnecting historical peers
     static constexpr int MANAGEMENT_LOOP_INTERVAL_SECONDS = 2;  // Management loop tick interval
@@ -2111,8 +2193,7 @@ private:
     bool parse_handshake_message(const std::vector<uint8_t>& data, HandshakeMessage& out_msg) const;
     bool validate_handshake_message(const HandshakeMessage& msg) const;
     bool is_handshake_message(const std::vector<uint8_t>& data) const;
-    bool send_handshake(socket_t socket, const std::string& our_peer_id);
-    bool send_handshake_unlocked(socket_t socket, const std::string& our_peer_id);
+    bool send_handshake_unlocked(RatsPeer& peer, const std::string& our_peer_id);  // enqueues via send buffer (peers_mutex_ held)
     bool handle_handshake_message(socket_t socket, const std::string& initial_peer_id, const std::vector<uint8_t>& data);
     void check_handshake_timeouts();
     void log_handshake_completion_unlocked(const RatsPeer& peer);
@@ -2166,10 +2247,6 @@ private:
     void remove_from_reconnect_queue(const std::string& peer_id);
     int get_retry_interval_seconds(int attempt, bool is_stable) const;
 
-    // Per-socket synchronization helpers
-    std::shared_ptr<std::mutex> get_socket_send_mutex(socket_t socket);
-    void cleanup_socket_send_mutex(socket_t socket);
-
     // Configuration persistence helpers
     std::string generate_persistent_peer_id() const;
     nlohmann::json serialize_peer_for_persistence(const RatsPeer& peer) const;
@@ -2183,9 +2260,6 @@ private:
     
     // Noise Protocol encryption helpers
     void initialize_noise_keypair();
-    bool perform_noise_handshake(socket_t socket, const std::string& peer_id, bool is_initiator);
-    bool send_noise_message(socket_t socket, const uint8_t* data, size_t len);
-    bool recv_noise_message(socket_t socket, std::vector<uint8_t>& out_data, int timeout_ms = 10000);
 };
 
 // Utility functions

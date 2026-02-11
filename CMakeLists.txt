@@ -157,13 +157,17 @@ set(LIBRARY_SOURCES
     src/rats_export.h
     ${PROJECT_BINARY_DIR}/src/version.h
 
-# Buffer utilities for bittorrent and file transfer
+# Buffer utilities for async I/O, file transfer, and bittorrent
     src/receive_buffer.h
     src/receive_buffer.cpp
     src/chained_send_buffer.h
     src/chained_send_buffer.cpp
 
-# Cypto algorithms including Noise Protocol needed
+# Platform-optimal I/O multiplexing (epoll/kqueue/IOCP)
+    src/io_poller.h
+    src/io_poller.cpp
+
+# Crypto algorithms including Noise Protocol
     src/crypto/curve25519.c
     src/crypto/curve25519.h
     src/crypto/chacha.c
@@ -229,8 +233,6 @@ if(RATS_SEARCH_FEATURES)
         src/bt_client.cpp
         src/bt_network.h
         src/bt_network.cpp
-        src/io_poller.h
-        src/io_poller.cpp
         src/disk_io.cpp
         src/disk_io.h
         src/tracker.cpp

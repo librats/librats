@@ -153,12 +153,20 @@ bool RatsClient::start() {
         }
     }
     
+    // Set server socket to non-blocking for the IO poller
+    set_socket_nonblocking(server_socket_);
+    
+    // Create platform-optimal IO poller and register server socket
+    poller_ = IOPoller::create();
+    poller_->add(server_socket_, PollIn);
+    LOG_CLIENT_INFO("IO poller backend: " << poller_->name());
+    
     running_.store(true);
     
-    // Start server thread
-    server_thread_ = std::thread(&RatsClient::server_loop, this);
+    // Start IO thread (single-threaded event loop for all sockets)
+    io_thread_ = std::thread(&RatsClient::io_loop, this);
     
-    // Start management thread
+    // Start management thread (handshake timeouts, reconnection, thread cleanup)
     management_thread_ = std::thread(&RatsClient::management_loop, this);
     
     // Start GossipSub
@@ -224,12 +232,13 @@ void RatsClient::stop() {
         manual_disconnect_peers_.clear();
     }
     
-    // Close all peer connections
+    // Close all peer connections and remove from poller
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
         LOG_CLIENT_INFO("Closing " << peers_.size() << " peer connections");
         for (const auto& pair : peers_) {
             const RatsPeer& peer = pair.second;
+            if (poller_) poller_->remove(peer.socket);
             close_socket(peer.socket, true);
         }
         peers_.clear();
@@ -238,10 +247,10 @@ void RatsClient::stop() {
         validated_peer_count_.store(0, std::memory_order_relaxed);
     }
     
-    // Wait for server thread to finish
-    if (server_thread_.joinable()) {
-        LOG_CLIENT_DEBUG("Waiting for server thread to finish");
-        server_thread_.join();
+    // Wait for IO thread to finish
+    if (io_thread_.joinable()) {
+        LOG_CLIENT_DEBUG("Waiting for IO thread to finish");
+        io_thread_.join();
     }
     
     // Wait for management thread to finish
@@ -249,6 +258,9 @@ void RatsClient::stop() {
         LOG_CLIENT_DEBUG("Waiting for management thread to finish");
         management_thread_.join();
     }
+    
+    // Destroy poller after threads have stopped
+    poller_.reset();
     
     // Join all managed threads for graceful cleanup
     join_all_active_threads();
@@ -288,75 +300,433 @@ std::string RatsClient::get_bind_address() const {
 }
 
 // =========================================================================
-// Management Loops
+// Async I/O – single-threaded event loop
 // =========================================================================
 
-void RatsClient::server_loop() {
-    LOG_SERVER_INFO("Server loop started");
+void RatsClient::io_loop() {
+    LOG_CLIENT_INFO("IO loop started (backend: " << poller_->name() << ")");
+    
+    static constexpr int MAX_EVENTS = 256;
+    PollResult results[MAX_EVENTS];
     
     while (running_.load()) {
-        socket_t client_socket = accept_client(server_socket_);
-        if (!is_valid_socket(client_socket)) {
-            if (running_.load()) {
-                LOG_SERVER_ERROR("Failed to accept client connection");
-            }
-            break;
-        }
+        int n = poller_->wait(results, MAX_EVENTS, IO_POLL_TIMEOUT_MS);
         
-        // Get peer address information
-        std::string peer_address = get_peer_address(client_socket);
-        if (peer_address.empty()) {
-            LOG_SERVER_ERROR("Failed to get peer address for incoming connection");
-            close_socket(client_socket);
+        if (n < 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
         
-        // Parse IP and port from peer_address
+        // Collect sockets to disconnect (defer to avoid iterator issues)
+        std::vector<socket_t> to_disconnect;
+        
+        for (int i = 0; i < n; ++i) {
+            socket_t fd = results[i].fd;
+            uint32_t events = results[i].events;
+            
+            // Server socket – accept incoming connections
+            if (fd == server_socket_) {
+                if (events & PollIn) accept_incoming();
+                continue;
+            }
+            
+            bool should_close = false;
+            
+            if (events & (PollErr | PollHup)) {
+                should_close = true;
+            }
+            
+            if (!should_close && (events & PollIn)) {
+                should_close = handle_readable(fd);
+            }
+            
+            if (!should_close && (events & PollOut)) {
+                should_close = handle_writable(fd);
+            }
+            
+            if (should_close) {
+                to_disconnect.push_back(fd);
+            }
+        }
+        
+        // Handle disconnections outside the event loop
+        for (socket_t fd : to_disconnect) {
+            handle_disconnect(fd);
+        }
+    }
+    
+    LOG_CLIENT_INFO("IO loop ended");
+}
+
+// ---------------------------------------------------------------------------
+// accept_incoming – non-blocking accept of new TCP connections
+// ---------------------------------------------------------------------------
+void RatsClient::accept_incoming() {
+    // Accept as many pending connections as possible (level-triggered)
+    while (true) {
+        socket_t client = accept_client(server_socket_);
+        if (!is_valid_socket(client)) break;
+        
+        std::string peer_address = get_peer_address(client);
+        if (peer_address.empty()) {
+            close_socket(client);
+            continue;
+        }
+        
         std::string ip;
         int port = 0;
         if (!parse_address_string(peer_address, ip, port)) {
-            LOG_SERVER_ERROR("Failed to parse peer address from incoming connection: " << peer_address);
-            close_socket(client_socket);
+            close_socket(client);
             continue;
         }
         
-        std::string normalized_peer_address = normalize_peer_address(ip, port);
+        std::string normalized = normalize_peer_address(ip, port);
         
-        // Check if peer limit is reached
         if (is_peer_limit_reached()) {
-            LOG_SERVER_INFO("Peer limit reached (" << max_peers_ << "), rejecting connection from " << normalized_peer_address);
-            close_socket(client_socket);
+            LOG_SERVER_INFO("Peer limit reached, rejecting " << normalized);
+            close_socket(client);
             continue;
         }
         
-        // Check if we're already connected to this peer
-        if (is_already_connected_to_address(normalized_peer_address)) {
-            LOG_SERVER_INFO("Already connected to peer " << normalized_peer_address << ", rejecting duplicate connection");
-            close_socket(client_socket);
+        if (is_already_connected_to_address(normalized)) {
+            LOG_SERVER_DEBUG("Duplicate connection from " << normalized);
+            close_socket(client);
             continue;
         }
-
-        // Generate temporary peer ID (will be replaced after handshake with real peer ID)
-        std::string connection_info = "incoming_from_" + peer_address;
-        std::string initial_peer_id = generate_temporary_peer_id(client_socket, connection_info);
         
-        // Create RatsPeer object for incoming connection
+        // Make the new socket non-blocking and register with poller
+        set_socket_nonblocking(client);
+        
+        std::string initial_id = generate_temporary_peer_id(client, "incoming_from_" + peer_address);
+        
         {
             std::lock_guard<std::mutex> lock(peers_mutex_);
-            RatsPeer new_peer(initial_peer_id, ip, port, client_socket, normalized_peer_address, false);
+            RatsPeer new_peer(initial_id, ip, port, client, normalized, false);
             new_peer.encryption_enabled = is_encryption_enabled();
             add_peer_unlocked(new_peer);
         }
         
-        // Start a thread to handle this client
-        LOG_SERVER_DEBUG("Starting thread for client " << initial_peer_id << " from " << peer_address);
-        add_managed_thread(std::thread(&RatsClient::handle_client, this, client_socket, initial_peer_id), 
-                          "client-handler-" + initial_peer_id.substr(0, 8));
+        poller_add(client, PollIn);
         
-        // Note: Connection callback will be called after handshake completion in handle_client
+        LOG_SERVER_INFO("Accepted incoming connection from " << normalized << " (id: " << initial_id.substr(0, 8) << "…)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// handle_readable – drain kernel buffer, parse length-prefixed frames
+// Returns true if the peer should be disconnected.
+// ---------------------------------------------------------------------------
+bool RatsClient::handle_readable(socket_t socket) {
+    // ── Phase 1: drain data & extract complete frames under lock ──────────
+    struct PendingFrame {
+        std::vector<uint8_t> data;
+        RatsPeer::HandshakeState state;
+        std::string peer_id;
+        bool noise_encrypted;
+        std::shared_ptr<rats::NoiseCipherState> recv_cipher;
+    };
+    
+    std::vector<PendingFrame> frames;
+    bool peer_closed = false;
+    bool need_post_handshake = false;
+    RatsPeer peer_copy_for_post_handshake;
+    
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto peer_it = find_peer_by_socket_unlocked(socket);
+        if (peer_it == peers_.end()) return true;
+        
+        RatsPeer& peer = peer_it->second;
+        auto& recv_buf = peer.io_.recv_buffer;
+        
+        // Non-blocking recv loop
+        while (true) {
+            recv_buf.ensure_space(16384);
+            int bytes = ::recv(socket,
+                               reinterpret_cast<char*>(recv_buf.write_ptr()),
+                               static_cast<int>(recv_buf.write_space()), 0);
+            
+            if (bytes > 0) {
+                recv_buf.received(static_cast<size_t>(bytes));
+                continue;
+            }
+            if (bytes == 0) { peer_closed = true; break; }
+            
+#ifdef _WIN32
+            if (WSAGetLastError() == WSAEWOULDBLOCK) break;
+#else
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+#endif
+            peer_closed = true;
+            break;
+        }
+        
+        if (peer_closed && recv_buf.empty()) return true;
+        
+        // Parse length-prefixed frames:  [4-byte network-order length][payload]
+        while (recv_buf.size() >= 4) {
+            uint32_t net_len;
+            memcpy(&net_len, recv_buf.data(), 4);
+            uint32_t msg_len = ntohl(net_len);
+            
+            if (msg_len > MAX_FRAME_SIZE) {
+                LOG_CLIENT_ERROR("Frame too large (" << msg_len << " bytes) from " << peer.peer_id);
+                return true;
+            }
+            if (recv_buf.size() < 4 + msg_len) break; // incomplete frame
+            
+            // Handle Noise handshake messages inline (fast crypto, no callbacks)
+            if (peer.handshake_state == RatsPeer::HandshakeState::NOISE_PENDING) {
+                if (!handle_noise_frame(peer)) return true;
+                recv_buf.consume(4 + msg_len);
+                
+                // Check if Noise just completed
+                if (peer.handshake_state == RatsPeer::HandshakeState::COMPLETED) {
+                    need_post_handshake = true;
+                    peer_copy_for_post_handshake = peer;
+                }
+                continue;
+            }
+            
+            // Snapshot state for out-of-lock processing
+            PendingFrame pf;
+            pf.data.assign(recv_buf.data() + 4, recv_buf.data() + 4 + msg_len);
+            pf.state = peer.handshake_state;
+            pf.peer_id = peer.peer_id;
+            pf.noise_encrypted = peer.is_noise_encrypted();
+            if (pf.noise_encrypted) pf.recv_cipher = peer.recv_cipher;
+            
+            frames.push_back(std::move(pf));
+            recv_buf.consume(4 + msg_len);
+        }
+        
+        // Compact if >32KB wasted at front
+        if (recv_buf.front_waste() > 32768) recv_buf.normalize();
+    }
+    // ── peers_mutex_ released ────────────────────────────────────────────
+    
+    // Deferred post-handshake completion (includes callbacks – must be outside mutex)
+    if (need_post_handshake) {
+        handle_post_handshake_completion(socket, peer_copy_for_post_handshake);
     }
     
-    LOG_SERVER_INFO("Server loop ended");
+    // ── Phase 2: process frames outside lock ─────────────────────────────
+    for (auto& pf : frames) {
+        // Handshake phase – RATS JSON handshake messages
+        if (pf.state != RatsPeer::HandshakeState::COMPLETED) {
+            if (is_handshake_message(pf.data)) {
+                if (!handle_handshake_message(socket, pf.peer_id, pf.data)) {
+                    return true;
+                }
+                
+                // Check if handshake just completed and handle Noise / post-handshake
+                bool do_post_handshake = false;
+                RatsPeer post_hs_copy;
+                {
+                    std::lock_guard<std::mutex> lock(peers_mutex_);
+                    auto peer_it = find_peer_by_socket_unlocked(socket);
+                    if (peer_it == peers_.end()) return true;
+                    RatsPeer& peer = peer_it->second;
+                    
+                    if (peer.handshake_state == RatsPeer::HandshakeState::NOISE_PENDING) {
+                        start_noise_handshake_async(peer);
+                    } else if (peer.handshake_state == RatsPeer::HandshakeState::COMPLETED) {
+                        post_hs_copy = peer;
+                        do_post_handshake = true;
+                    }
+                }
+                // peers_mutex_ released – safe to invoke callbacks
+                if (do_post_handshake) {
+                    handle_post_handshake_completion(socket, post_hs_copy);
+                }
+            } else {
+                LOG_CLIENT_WARN("Non-handshake data from " << pf.peer_id << " before handshake – ignoring");
+            }
+            continue;
+        }
+        
+        // Data phase – decrypt if needed, then dispatch
+        std::vector<uint8_t> plaintext;
+        if (pf.noise_encrypted && pf.recv_cipher) {
+            if (pf.data.size() < rats::NOISE_TAG_SIZE) {
+                LOG_CLIENT_ERROR("Encrypted frame too small from " << pf.peer_id);
+                return true;
+            }
+            plaintext.resize(pf.data.size());
+            size_t pt_len = pf.recv_cipher->decrypt_with_ad(
+                nullptr, 0, pf.data.data(), pf.data.size(), plaintext.data());
+            if (pt_len == 0) {
+                LOG_CLIENT_ERROR("Decryption failed from " << pf.peer_id);
+                return true;
+            }
+            plaintext.resize(pt_len);
+        } else {
+            plaintext = std::move(pf.data);
+        }
+        
+        process_message(socket, plaintext, pf.peer_id);
+    }
+    
+    return peer_closed;
+}
+
+// ---------------------------------------------------------------------------
+// handle_writable – flush the peer's send buffer to the kernel
+// Returns true if the peer should be disconnected.
+// ---------------------------------------------------------------------------
+bool RatsClient::handle_writable(socket_t socket) {
+    bool buffer_empty = false;
+    
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto peer_it = find_peer_by_socket_unlocked(socket);
+        if (peer_it == peers_.end()) return true;
+        
+        auto& send_buf = peer_it->second.io_.send_buffer;
+        
+        while (!send_buf.empty()) {
+            int bytes = ::send(socket,
+                               reinterpret_cast<const char*>(send_buf.front_data()),
+                               static_cast<int>(send_buf.front_size()),
+#ifdef _WIN32
+                               0
+#else
+                               MSG_NOSIGNAL
+#endif
+            );
+            
+            if (bytes > 0) {
+                send_buf.pop_front(static_cast<size_t>(bytes));
+                continue;
+            }
+            
+            if (bytes < 0) {
+#ifdef _WIN32
+                if (WSAGetLastError() == WSAEWOULDBLOCK) break;
+#else
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+#endif
+                LOG_CLIENT_ERROR("Send error on socket " << socket);
+                return true;
+            }
+            
+            // bytes == 0 — shouldn't happen on a stream socket
+            break;
+        }
+        
+        buffer_empty = send_buf.empty();
+    }
+    // peers_mutex_ released before acquiring io_mutex_ (maintains lock order: peers → io)
+    
+    // If buffer fully flushed, stop watching for PollOut
+    if (buffer_empty) {
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        if (poller_) poller_->modify(socket, PollIn);
+    }
+    
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// handle_disconnect – clean up peer on error / hangup / close
+// ---------------------------------------------------------------------------
+void RatsClient::handle_disconnect(socket_t socket) {
+    // Gather info before removing
+    std::string peer_id;
+    bool was_validated = false;
+    RatsPeer peer_copy_for_reconnect;
+    bool should_schedule_reconnect = false;
+    
+    {
+        std::lock_guard<std::mutex> lock(peers_mutex_);
+        auto peer_it = find_peer_by_socket_unlocked(socket);
+        if (peer_it == peers_.end()) {
+            // Already removed
+            poller_remove(socket);
+            close_socket(socket);
+            return;
+        }
+        peer_id = peer_it->second.peer_id;
+        was_validated = peer_it->second.is_handshake_completed();
+        if (was_validated) {
+            peer_copy_for_reconnect = peer_it->second;
+            should_schedule_reconnect = true;
+        }
+    }
+    
+    // Remove from poller, peers map, close socket
+    poller_remove(socket);
+    remove_peer(socket);
+    close_socket(socket);
+    
+    if (was_validated) {
+        if (disconnect_callback_) {
+            disconnect_callback_(socket, peer_id);
+        }
+        if (gossipsub_) {
+            gossipsub_->handle_peer_disconnected(peer_id);
+        }
+        if (should_schedule_reconnect && running_.load()) {
+            schedule_reconnect(peer_copy_for_reconnect);
+        }
+        if (running_.load()) {
+            add_managed_thread(std::thread([this]() {
+                if (running_.load()) save_configuration();
+            }), "config-save-disconnect");
+        }
+    }
+    
+    LOG_CLIENT_INFO("Peer disconnected: " << peer_id);
+}
+
+// ---------------------------------------------------------------------------
+// Poller registration helpers (thread-safe via io_mutex_)
+// ---------------------------------------------------------------------------
+void RatsClient::poller_add(socket_t fd, uint32_t events) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    if (poller_) poller_->add(fd, events);
+}
+
+void RatsClient::poller_modify(socket_t fd, uint32_t events) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    if (poller_) poller_->modify(fd, events);
+}
+
+void RatsClient::poller_remove(socket_t fd) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    if (poller_) poller_->remove(fd);
+}
+
+// ---------------------------------------------------------------------------
+// enqueue_message – build a length-prefixed frame and append to send buffer
+// ---------------------------------------------------------------------------
+bool RatsClient::enqueue_message(socket_t socket, const std::vector<uint8_t>& data) {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto peer_it = find_peer_by_socket_unlocked(socket);
+    if (peer_it == peers_.end()) return false;
+    return enqueue_message_unlocked(peer_it->second, data);
+}
+
+bool RatsClient::enqueue_message_unlocked(RatsPeer& peer, const std::vector<uint8_t>& data) {
+    // Build length-prefixed frame:  [4-byte network-order length][payload]
+    uint32_t net_len = htonl(static_cast<uint32_t>(data.size()));
+    
+    std::vector<uint8_t> frame;
+    frame.reserve(4 + data.size());
+    frame.insert(frame.end(),
+                 reinterpret_cast<const uint8_t*>(&net_len),
+                 reinterpret_cast<const uint8_t*>(&net_len) + 4);
+    frame.insert(frame.end(), data.begin(), data.end());
+    
+    peer.io_.send_buffer.append(std::move(frame));
+    
+    // Arm PollOut so io_loop flushes the buffer
+    {
+        std::lock_guard<std::mutex> io_lock(io_mutex_);
+        if (poller_) poller_->modify(peer.socket, PollIn | PollOut);
+    }
+    
+    return true;
 }
 
 void RatsClient::management_loop() {
@@ -404,47 +774,6 @@ void RatsClient::management_loop() {
     LOG_CLIENT_INFO("Management loop ended");
 }
 
-RatsClient::DecryptResult RatsClient::decrypt_received_data(socket_t socket, const std::vector<uint8_t>& received_bytes, std::vector<uint8_t>& out_data) {
-    std::string current_peer_id;
-    std::shared_ptr<rats::NoiseCipherState> recv_cipher;
-    
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        auto peer_it = find_peer_by_socket_unlocked(socket);
-        if (peer_it != peers_.end() && peer_it->second.is_noise_encrypted()) {
-            recv_cipher = peer_it->second.recv_cipher; // shared_ptr copy keeps cipher alive
-            current_peer_id = peer_it->second.peer_id;
-        }
-    }
-    
-    if (!recv_cipher) {
-        out_data = received_bytes;
-        return DecryptResult::NOT_ENCRYPTED;
-    }
-    
-    if (received_bytes.size() < rats::NOISE_TAG_SIZE) {
-        LOG_CLIENT_ERROR("Received encrypted message too small from " << current_peer_id);
-        return DecryptResult::ERROR;
-    }
-    
-    std::vector<uint8_t> plaintext(received_bytes.size());
-    size_t pt_len = recv_cipher->decrypt_with_ad(
-        nullptr, 0,
-        received_bytes.data(), received_bytes.size(),
-        plaintext.data()
-    );
-    
-    if (pt_len == 0) {
-        LOG_CLIENT_ERROR("Failed to decrypt message from " << current_peer_id << " - closing connection");
-        return DecryptResult::ERROR;
-    }
-    
-    plaintext.resize(pt_len);
-    out_data = std::move(plaintext);
-    LOG_CLIENT_DEBUG("Decrypted message from " << current_peer_id << " (" << pt_len << " bytes)");
-    return DecryptResult::OK;
-}
-
 void RatsClient::handle_post_handshake_completion(socket_t socket, const RatsPeer& peer_copy) {
     // Remove from reconnection queue (successful connection)
     remove_from_reconnect_queue(peer_copy.peer_id);
@@ -482,51 +811,6 @@ void RatsClient::handle_post_handshake_completion(socket_t socket, const RatsPee
             }
         }), "config-save");
     }
-}
-
-void RatsClient::handle_client_cleanup(socket_t socket, bool handshake_completed, const std::string& initial_peer_id) {
-    std::string current_peer_id = get_peer_id(socket);
-    
-    // Save peer info for potential reconnection BEFORE removing from peers list
-    RatsPeer peer_copy_for_reconnect;
-    bool should_schedule_reconnect = false;
-    
-    if (handshake_completed) {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        auto peer_it = find_peer_by_socket_unlocked(socket);
-        if (peer_it != peers_.end()) {
-            peer_copy_for_reconnect = peer_it->second;
-            should_schedule_reconnect = true;
-        }
-    }
-    
-    remove_peer(socket);
-    close_socket(socket);
-    
-    if (handshake_completed) {
-        if (disconnect_callback_) {
-            disconnect_callback_(socket, current_peer_id);
-        }
-        
-        if (gossipsub_) {
-            gossipsub_->handle_peer_disconnected(current_peer_id);
-        }
-        
-        // Schedule reconnection if we have valid peer info
-        if (should_schedule_reconnect && running_.load()) {
-            schedule_reconnect(peer_copy_for_reconnect);
-        }
-        
-        if (running_.load()) {
-            add_managed_thread(std::thread([this]() {
-                if (running_.load()) {
-                    save_configuration();
-                }
-            }), "config-save-disconnect");
-        }
-    }
-    
-    LOG_CLIENT_INFO("Client disconnected: " << initial_peer_id);
 }
 
 void RatsClient::process_message(socket_t socket, const std::vector<uint8_t>& data, const std::string& initial_peer_id) {
@@ -581,151 +865,6 @@ void RatsClient::process_message(socket_t socket, const std::vector<uint8_t>& da
             LOG_CLIENT_WARN("Received message with unknown data type " << static_cast<int>(header.type) << " from " << peer_id);
             break;
     }
-}
-
-void RatsClient::handle_client(socket_t client_socket, const std::string& initial_peer_id) {
-    LOG_CLIENT_INFO("Started handling client: " << initial_peer_id);
-    
-    // ===== INITIALIZATION =====
-    bool handshake_completed = false;
-    bool noise_handshake_done = false;
-    bool is_outgoing = false;
-    
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        auto peer_it = find_peer_by_socket_unlocked(client_socket);
-        if (peer_it != peers_.end()) {
-            is_outgoing = peer_it->second.is_outgoing;
-        }
-    }
-    
-    // ===== SEND INITIAL HANDSHAKE FOR OUTGOING CONNECTIONS =====
-    if (is_outgoing) {
-        LOG_CLIENT_DEBUG("Sending initial handshake for outgoing connection to " << initial_peer_id);
-        if (!send_handshake(client_socket, get_our_peer_id())) {
-            LOG_CLIENT_ERROR("Failed to send initial handshake for outgoing connection to " << initial_peer_id);
-            remove_peer(client_socket);
-            close_socket(client_socket);
-            return;
-        }
-    }
-    
-    // ===== MAIN LOOP =====
-    while (running_.load()) {
-        
-        // ----- 1. RECEIVE DATA -----
-        std::vector<uint8_t> received_bytes = receive_tcp_message(client_socket);
-        
-        if (received_bytes.empty()) {
-            break; // Connection closed or error
-        }
-        
-        // ----- 2. DECRYPT IF NEEDED -----
-        std::vector<uint8_t> data;
-        
-        if (noise_handshake_done) {
-            auto result = decrypt_received_data(client_socket, received_bytes, data);
-            if (result == DecryptResult::ERROR) {
-                break;
-            }
-        } else {
-            data = std::move(received_bytes);
-        }
-        
-        // ----- 3. HANDSHAKE FAILURE CHECK (during handshake phase only) -----
-        if (!handshake_completed) {
-            bool handshake_failed = false;
-            {
-                std::lock_guard<std::mutex> lock(peers_mutex_);
-                auto peer_it = find_peer_by_socket_unlocked(client_socket);
-                if (peer_it != peers_.end() && peer_it->second.is_handshake_failed()) {
-                    handshake_failed = true;
-                }
-            }
-            
-            if (handshake_failed) {
-                LOG_CLIENT_ERROR("Handshake failed for peer " << initial_peer_id);
-                break;
-            }
-        }
-        
-        // ----- 4. HANDSHAKE PHASE -----
-        // Only check for handshake messages BEFORE handshake is completed
-        // This avoids expensive JSON parsing on every message after handshake
-        if (!handshake_completed && is_handshake_message(data)) {
-            if (!handle_handshake_message(client_socket, initial_peer_id, data)) {
-                LOG_CLIENT_ERROR("Failed to handle handshake message from " << initial_peer_id);
-                break;
-            }
-            
-            // Check if rats handshake just completed (COMPLETED or NOISE_PENDING state)
-            if (!handshake_completed) {
-                RatsPeer peer_copy;
-                bool rats_handshake_done = false;
-                bool needs_noise_handshake = false;
-                
-                {
-                    std::lock_guard<std::mutex> lock(peers_mutex_);
-                    auto peer_it = find_peer_by_socket_unlocked(client_socket);
-                    if (peer_it != peers_.end()) {
-                        if (peer_it->second.is_handshake_completed()) {
-                            rats_handshake_done = true;
-                            peer_copy = peer_it->second;
-                        } else if (peer_it->second.handshake_state == RatsPeer::HandshakeState::NOISE_PENDING) {
-                            rats_handshake_done = true;
-                            needs_noise_handshake = true;
-                            peer_copy = peer_it->second;
-                        }
-                    }
-                }
-                
-                // ----- POST-HANDSHAKE ACTIONS -----
-                if (rats_handshake_done) {
-                    LOG_CLIENT_INFO("Rats handshake completed for peer " << initial_peer_id << " (peer_id: " << peer_copy.peer_id << ")");
-                    
-                    // Noise encryption handshake - only if BOTH sides support encryption
-                    if (needs_noise_handshake) {
-                        LOG_CLIENT_INFO("Starting Noise handshake for peer " << peer_copy.peer_id);
-                        if (perform_noise_handshake(client_socket, peer_copy.peer_id, peer_copy.is_outgoing)) {
-                            noise_handshake_done = true;
-                            LOG_CLIENT_INFO("Noise handshake successful for peer " << peer_copy.peer_id);
-                            
-                            // Update state to COMPLETED after successful Noise handshake
-                            {
-                                std::lock_guard<std::mutex> lock(peers_mutex_);
-                                auto peer_it = find_peer_by_socket_unlocked(client_socket);
-                                if (peer_it != peers_.end()) {
-                                    peer_it->second.handshake_state = RatsPeer::HandshakeState::COMPLETED;
-                                    validated_peer_count_.fetch_add(1, std::memory_order_relaxed);
-                                    log_handshake_completion_unlocked(peer_it->second);
-                                }
-                            }
-                        } else {
-                            LOG_CLIENT_ERROR("Noise handshake failed for peer " << peer_copy.peer_id);
-                            break;
-                        }
-                    }
-                    
-                    handshake_completed = true;
-                    handle_post_handshake_completion(client_socket, peer_copy);
-                }
-            }
-            
-            continue;
-        }
-        
-        // ----- 5. DATA PROCESSING PHASE -----
-        if (!handshake_completed) {
-            LOG_CLIENT_WARN("Received non-handshake data from " << initial_peer_id << " before handshake completion - ignoring");
-            continue;
-        }
-        
-        process_message(client_socket, data, initial_peer_id);
-        
-    } // end while
-    
-    // ===== CLEANUP =====
-    handle_client_cleanup(client_socket, handshake_completed, initial_peer_id);
 }
 
 // Handshake protocol implementation
@@ -857,39 +996,23 @@ bool RatsClient::is_handshake_message(const std::vector<uint8_t>& data) const {
     }
 }
 
-bool RatsClient::send_handshake_unlocked(socket_t socket, const std::string& our_peer_id) {
+bool RatsClient::send_handshake_unlocked(RatsPeer& peer, const std::string& our_peer_id) {
     std::string handshake_msg = create_handshake_message("handshake", our_peer_id);
-    LOG_CLIENT_DEBUG("Sending handshake to socket " << socket << ": " << handshake_msg);
+    LOG_CLIENT_DEBUG("Sending handshake to " << peer.peer_id << ": " << handshake_msg);
     
-    // Send handshake directly without going through send_binary_to_peer
-    // (which would cause deadlock by trying to lock peers_mutex_ again).
-    // Handshakes are always unencrypted since they happen before noise handshake.
+    // Handshakes are always unencrypted – enqueue into the peer's send buffer
     std::vector<uint8_t> binary_data(handshake_msg.begin(), handshake_msg.end());
     std::vector<uint8_t> message_with_header = create_message_with_header(binary_data, MessageDataType::STRING);
     
-    // Get socket-specific mutex for thread-safe sending
-    auto socket_mutex = get_socket_send_mutex(socket);
-    std::lock_guard<std::mutex> send_lock(*socket_mutex);
-    
-    int sent = send_tcp_message(socket, message_with_header);
-    if (sent <= 0) {
-        LOG_CLIENT_ERROR("Failed to send handshake to socket " << socket);
+    if (!enqueue_message_unlocked(peer, message_with_header)) {
+        LOG_CLIENT_ERROR("Failed to enqueue handshake for " << peer.peer_id);
         return false;
     }
     
-    // Update peer state (assumes peers_mutex_ is already locked)
-    auto peer_it = find_peer_by_socket_unlocked(socket);
-    if (peer_it != peers_.end()) {
-        peer_it->second.handshake_state = RatsPeer::HandshakeState::SENT;
-        peer_it->second.handshake_start_time = std::chrono::steady_clock::now();
-    }
+    peer.handshake_state = RatsPeer::HandshakeState::SENT;
+    peer.handshake_start_time = std::chrono::steady_clock::now();
     
     return true;
-}
-
-bool RatsClient::send_handshake(socket_t socket, const std::string& our_peer_id) {
-    std::lock_guard<std::mutex> lock(peers_mutex_);
-    return send_handshake_unlocked(socket, our_peer_id);
 }
 
 bool RatsClient::handle_handshake_message(socket_t socket, const std::string& initial_peer_id, const std::vector<uint8_t>& data) {
@@ -999,7 +1122,7 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& in
     // Simplified handshake logic - just one message type
     if (peer.handshake_state == RatsPeer::HandshakeState::PENDING) {
         // This is an incoming handshake - send our handshake back
-        if (send_handshake_unlocked(socket, get_our_peer_id())) {
+        if (send_handshake_unlocked(peer, get_our_peer_id())) {
             // If encryption is enabled, we need to do Noise handshake first
             // Set NOISE_PENDING to prevent other threads from sending messages
             if (peer.encryption_enabled) {
@@ -1072,8 +1195,8 @@ void RatsClient::check_handshake_timeouts() {
             socket_t socket = peer_it->second.socket;
             LOG_CLIENT_INFO("Disconnecting peer " << peer_id << " due to handshake timeout");
             
-            // Clean up peer data
             remove_peer_by_id_unlocked(peer_id);
+            poller_remove(socket);
             close_socket(socket);
         }
     }
@@ -1110,30 +1233,60 @@ bool RatsClient::connect_to_peer(const std::string& host, int port) {
         return false;
     }
     
-    // Create TCP connection with timeout
-    socket_t client_socket = create_tcp_client(host, port, TCP_CONNECT_TIMEOUT_MS);
-    if (!is_valid_socket(client_socket)) {
-        LOG_CLIENT_DEBUG("Failed to connect to " << host << ":" << port);
-        return false;
-    }
-    
-    LOG_CLIENT_INFO("Successfully connected to " << host << ":" << port);
-    
-    // Generate temporary peer ID (will be replaced after handshake with real peer ID)
-    std::string initial_peer_id = generate_temporary_peer_id(client_socket, normalized_address);
-    
-    // Create RatsPeer object for outgoing connection
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        RatsPeer new_peer(initial_peer_id, host, static_cast<uint16_t>(port), client_socket, normalized_address, true);
-        new_peer.encryption_enabled = is_encryption_enabled();
-        add_peer_unlocked(new_peer);
-    }
-    
-    // Start a thread to handle this client
-    LOG_CLIENT_DEBUG("Starting thread for outgoing connection " << initial_peer_id);
-    add_managed_thread(std::thread(&RatsClient::handle_client, this, client_socket, initial_peer_id), 
-                      "client-handler-" + initial_peer_id.substr(0, 8));
+    // Create TCP connection with timeout (blocking connect is done on a managed thread
+    // to avoid blocking the caller, then the connected socket is handed to the IO loop).
+    add_managed_thread(std::thread([this, host, port, normalized_address]() {
+        socket_t client_socket = create_tcp_client(host, port, TCP_CONNECT_TIMEOUT_MS);
+        if (!is_valid_socket(client_socket)) {
+            LOG_CLIENT_DEBUG("Failed to connect to " << host << ":" << port);
+            return;
+        }
+        
+        LOG_CLIENT_INFO("TCP connected to " << host << ":" << port);
+        
+        // Switch to non-blocking for the IO poller
+        set_socket_nonblocking(client_socket);
+        
+        std::string initial_peer_id = generate_temporary_peer_id(client_socket, normalized_address);
+        
+        {
+            std::lock_guard<std::mutex> lock(peers_mutex_);
+            
+            // Re-check peer limit and duplicate (could have changed while connecting)
+            // NOTE: Use unlocked variant — peers_mutex_ is already held!
+            if (get_peer_count_unlocked() >= max_peers_) {
+                LOG_CLIENT_DEBUG("connect_to_peer: peer limit reached after TCP connect, aborting fd=" << client_socket);
+                close_socket(client_socket);
+                return;
+            }
+            if (address_to_peer_id_.find(normalized_address) != address_to_peer_id_.end()) {
+                LOG_CLIENT_DEBUG("connect_to_peer: duplicate address " << normalized_address << " after TCP connect, aborting fd=" << client_socket);
+                close_socket(client_socket);
+                return;
+            }
+            
+            RatsPeer new_peer(initial_peer_id, host, static_cast<uint16_t>(port), 
+                              client_socket, normalized_address, true);
+            new_peer.encryption_enabled = is_encryption_enabled();
+            add_peer_unlocked(new_peer);
+            
+            // Send initial handshake (enqueued into send buffer)
+            auto peer_it = peers_.find(initial_peer_id);
+            if (peer_it != peers_.end()) {
+                if (!send_handshake_unlocked(peer_it->second, get_our_peer_id())) {
+                    LOG_CLIENT_ERROR("Failed to enqueue handshake for outgoing connection to " << host << ":" << port);
+                    remove_peer_by_id_unlocked(initial_peer_id);
+                    close_socket(client_socket);
+                    return;
+                }
+            }
+        }
+        
+        // Register with poller – PollIn for reads, PollOut to flush the queued handshake
+        poller_add(client_socket, PollIn | PollOut);
+        
+        LOG_CLIENT_INFO("Outgoing connection to " << host << ":" << port << " registered with IO poller");
+    }), "connect-" + host + ":" + std::to_string(port));
     
     return true;
 }
@@ -1149,6 +1302,7 @@ void RatsClient::disconnect_peer(socket_t socket) {
     if (!peer_id.empty()) {
         mark_manual_disconnect(peer_id);
     }
+    poller_remove(socket);
     remove_peer(socket);
     close_socket(socket);
 }
@@ -1157,6 +1311,7 @@ void RatsClient::disconnect_peer_by_id(const std::string& peer_id) {
     mark_manual_disconnect(peer_id);
     socket_t socket = get_peer_socket_by_id(peer_id);
     if (is_valid_socket(socket)) {
+        poller_remove(socket);
         remove_peer(socket);
         close_socket(socket);
     }
@@ -1215,9 +1370,6 @@ void RatsClient::remove_peer_by_id_unlocked(const std::string& peer_id) {
         socket_to_peer_id_.erase(peer_socket);
         address_to_peer_id_.erase(peer_normalized_address);
         peers_.erase(it);
-        
-        // Clean up socket-specific mutex
-        cleanup_socket_send_mutex(peer_socket);
     }
 }
 
@@ -1357,8 +1509,9 @@ bool RatsClient::parse_message_with_header(const std::vector<uint8_t>& message, 
     return true;
 }
 
-// Unlocked version - does NOT require peers_mutex_; caller passes cached peer data
-// The shared_ptr keeps the cipher alive even if the peer is removed concurrently
+// Async send – enqueues header + (optionally encrypted) payload into the peer's
+// ChainedSendBuffer.  Does NOT require peers_mutex_; caller passes cached peer data.
+// The shared_ptr keeps the cipher alive even if the peer is removed concurrently.
 bool RatsClient::send_binary_to_peer_unlocked(socket_t socket, const std::vector<uint8_t>& data, 
                                                MessageDataType message_type,
                                                std::shared_ptr<rats::NoiseCipherState> send_cipher,
@@ -1367,16 +1520,11 @@ bool RatsClient::send_binary_to_peer_unlocked(socket_t socket, const std::vector
         return false;
     }
     
-    // Get socket-specific mutex for thread-safe sending
-    // Prevent framed messages corruption (like two-times sending the number of bytes instead number of bytes + message)
-    auto socket_mutex = get_socket_send_mutex(socket);
-    std::lock_guard<std::mutex> send_lock(*socket_mutex);
-    
     // Create message with specified header type
     std::vector<uint8_t> message_with_header = create_message_with_header(data, message_type);
     
     if (send_cipher) {
-        // Encrypt the message before sending
+        // Encrypt the message before enqueuing
         std::vector<uint8_t> ciphertext(message_with_header.size() + rats::NOISE_TAG_SIZE);
         size_t ct_len = send_cipher->encrypt_with_ad(
             nullptr, 0, 
@@ -1390,16 +1538,13 @@ bool RatsClient::send_binary_to_peer_unlocked(socket_t socket, const std::vector
         }
         
         ciphertext.resize(ct_len);
-        LOG_CLIENT_DEBUG("Sending encrypted message to " << peer_id_for_logging << " (" << ct_len << " bytes)");
+        LOG_CLIENT_DEBUG("Enqueuing encrypted message for " << peer_id_for_logging << " (" << ct_len << " bytes)");
         
-        // Send encrypted message using framed protocol
-        int sent = send_tcp_message(socket, ciphertext);
-        return sent > 0;
+        return enqueue_message(socket, ciphertext);
     }
     
-    // Unencrypted path - use framed messages for reliable large message handling
-    int sent = send_tcp_message(socket, message_with_header);
-    return sent > 0;
+    // Unencrypted path
+    return enqueue_message(socket, message_with_header);
 }
 
 bool RatsClient::send_binary_to_peer(socket_t socket, const std::vector<uint8_t>& data, MessageDataType message_type) {
@@ -1496,8 +1641,8 @@ int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data, Mess
         return 0;
     }
     
-    // Collect target peers under lock, then release before sending
-    std::vector<PeerSendInfo> targets;
+    // Collect targets under lock, then enqueue outside
+    std::vector<PeerSendTarget> targets;
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
         targets.reserve(peers_.size());
@@ -1509,7 +1654,6 @@ int RatsClient::broadcast_binary_to_peers(const std::vector<uint8_t>& data, Mess
         }
     }
     
-    // peers_mutex_ released -- now do the potentially slow TCP sends
     int sent_count = 0;
     for (const auto& t : targets) {
         if (send_binary_to_peer_unlocked(t.socket, data, message_type, t.send_cipher, t.peer_id)) {
@@ -1523,23 +1667,6 @@ int RatsClient::broadcast_string_to_peers(const std::string& data) {
     // Convert string to binary and use primary binary method with STRING type
     std::vector<uint8_t> binary_data(data.begin(), data.end());
     return broadcast_binary_to_peers(binary_data, MessageDataType::STRING);
-}
-
-// Helpers
-
-// Per-socket synchronization helpers
-std::shared_ptr<std::mutex> RatsClient::get_socket_send_mutex(socket_t socket) {
-    std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
-    auto [it, inserted] = socket_send_mutexes_.try_emplace(socket, nullptr);
-    if (inserted) {
-        it->second = std::make_shared<std::mutex>();
-    }
-    return it->second;
-}
-
-void RatsClient::cleanup_socket_send_mutex(socket_t socket) {
-    std::lock_guard<std::mutex> lock(socket_send_mutexes_mutex_);
-    socket_send_mutexes_.erase(socket);
 }
 
 // =========================================================================
@@ -2303,8 +2430,8 @@ int RatsClient::broadcast_rats_message(const nlohmann::json& message, const std:
     }
     std::vector<uint8_t> binary_data(json_string.begin(), json_string.end());
     
-    // Collect target peers under lock, then release before sending
-    std::vector<PeerSendInfo> targets;
+    // Collect targets under lock, then enqueue outside
+    std::vector<PeerSendTarget> targets;
     {
         std::lock_guard<std::mutex> lock(peers_mutex_);
         targets.reserve(peers_.size());
@@ -2320,7 +2447,6 @@ int RatsClient::broadcast_rats_message(const nlohmann::json& message, const std:
         }
     }
     
-    // peers_mutex_ released -- now do the potentially slow TCP sends
     int sent_count = 0;
     for (const auto& t : targets) {
         if (send_binary_to_peer_unlocked(t.socket, binary_data, MessageDataType::JSON, t.send_cipher, t.peer_id)) {

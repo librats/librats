@@ -97,73 +97,28 @@ std::vector<uint8_t> RatsClient::get_peer_handshake_hash(const std::string& peer
     return std::vector<uint8_t>();
 }
 
-bool RatsClient::send_noise_message(socket_t socket, const uint8_t* data, size_t len) {
-    // Get socket-specific mutex for thread-safe sending
-    // This prevents race conditions with other threads sending rats protocol messages
-    auto socket_mutex = get_socket_send_mutex(socket);
-    std::lock_guard<std::mutex> send_lock(*socket_mutex);
-    
-    // Send length-prefixed message for Noise handshake
-    uint32_t network_len = htonl(static_cast<uint32_t>(len));
-    
-    // Send length
-    int sent = ::send(socket, reinterpret_cast<const char*>(&network_len), 4, 0);
-    if (sent != 4) {
-        LOG_CLIENT_ERROR("Failed to send Noise message length");
-        return false;
-    }
-    
-    // Send data
-    sent = ::send(socket, reinterpret_cast<const char*>(data), static_cast<int>(len), 0);
-    if (sent != static_cast<int>(len)) {
-        LOG_CLIENT_ERROR("Failed to send Noise message data");
-        return false;
-    }
-    
-    return true;
-}
+// =========================================================================
+// Async Noise Handshake (non-blocking, driven by io_loop)
+// =========================================================================
 
-bool RatsClient::recv_noise_message(socket_t socket, std::vector<uint8_t>& out_data, int timeout_ms) {
-    // Set socket timeout (platform-specific)
-#ifdef _WIN32
-    // Windows: SO_RCVTIMEO expects DWORD (milliseconds)
-    DWORD tv = static_cast<DWORD>(timeout_ms);
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-#else
-    // Unix: SO_RCVTIMEO expects struct timeval
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
-#endif
-    
-    // Receive length
-    uint32_t network_len;
-    int received = recv(socket, reinterpret_cast<char*>(&network_len), 4, MSG_WAITALL);
-    if (received != 4) {
-        LOG_CLIENT_ERROR("Failed to receive Noise message length");
-        return false;
-    }
-    
-    uint32_t len = ntohl(network_len);
-    if (len > rats::NOISE_MAX_MESSAGE_SIZE) {
-        LOG_CLIENT_ERROR("Noise message too large: " << len);
-        return false;
-    }
-    
-    // Receive data
-    out_data.resize(len);
-    received = recv(socket, reinterpret_cast<char*>(out_data.data()), static_cast<int>(len), MSG_WAITALL);
-    if (received != static_cast<int>(len)) {
-        LOG_CLIENT_ERROR("Failed to receive Noise message data");
-        return false;
-    }
-    
-    return true;
-}
+/*
+ * Noise XX pattern (3 messages):
+ *   Initiator: write msg0 → read msg1 → write msg2 → split
+ *   Responder: read msg0 → write msg1 → read msg2 → split
+ *
+ * noise_step tracks where we are in this sequence:
+ *   Initiator: 0 = need write, 1 = need read, 2 = need write, 3 = done
+ *   Responder: 0 = need read,  1 = need write, 2 = need read,  3 = done
+ *
+ * start_noise_handshake_async() initialises noise_hs and writes the first
+ * outgoing message (if initiator).  Subsequent messages are processed by
+ * handle_noise_frame() which is called from handle_readable when
+ * handshake_state == NOISE_PENDING.
+ */
 
-bool RatsClient::perform_noise_handshake(socket_t socket, const std::string& peer_id, bool is_initiator) {
-    LOG_CLIENT_INFO("Starting Noise handshake with " << peer_id << " (initiator: " << is_initiator << ")");
+void RatsClient::start_noise_handshake_async(RatsPeer& peer) {
+    LOG_CLIENT_INFO("Starting async Noise handshake for " << peer.peer_id 
+                    << " (initiator: " << peer.is_outgoing << ")");
     
     // Get our static keypair
     rats::NoiseKeyPair static_keypair;
@@ -178,166 +133,141 @@ bool RatsClient::perform_noise_handshake(socket_t socket, const std::string& pee
         static_keypair.has_keys = true;
     }
     
-    // Initialize handshake state
-    rats::NoiseHandshakeState handshake;
-    rats::NoiseError err = handshake.initialize(is_initiator, &static_keypair);
+    // Allocate handshake state on the peer's IO context
+    peer.io_.noise_hs = std::make_unique<rats::NoiseHandshakeState>();
+    peer.io_.noise_step = 0;
+    
+    auto err = peer.io_.noise_hs->initialize(peer.is_outgoing, &static_keypair);
     if (err != rats::NoiseError::OK) {
-        LOG_CLIENT_ERROR("Failed to initialize Noise handshake: " << static_cast<int>(err));
+        LOG_CLIENT_ERROR("Failed to initialise Noise handshake: " << static_cast<int>(err));
+        peer.handshake_state = RatsPeer::HandshakeState::FAILED;
+        return;
+    }
+    
+    // Initiator sends message 0 immediately
+    if (peer.is_outgoing) {
+        uint8_t msg_buf[256];
+        size_t msg_len = sizeof(msg_buf);
+        err = peer.io_.noise_hs->write_message(nullptr, 0, msg_buf, &msg_len);
+        if (err != rats::NoiseError::OK) {
+            LOG_CLIENT_ERROR("Failed to write Noise msg 0: " << static_cast<int>(err));
+            peer.handshake_state = RatsPeer::HandshakeState::FAILED;
+            return;
+        }
+        
+        // Enqueue as a length-prefixed frame (same framing as data messages)
+        std::vector<uint8_t> payload(msg_buf, msg_buf + msg_len);
+        enqueue_message_unlocked(peer, payload);
+        peer.io_.noise_step = 1;  // next: need to read msg 1
+        LOG_CLIENT_DEBUG("Sent Noise msg 0 (" << msg_len << " bytes) to " << peer.peer_id);
+    }
+    // Responder waits for msg 0 from initiator (noise_step stays 0)
+}
+
+bool RatsClient::handle_noise_frame(RatsPeer& peer) {
+    // The caller (handle_readable) has already verified that a complete
+    // length-prefixed frame is available in the receive buffer, but hasn't
+    // consumed it yet.  We read the payload from recv_buf (skip 4-byte length).
+    auto& recv_buf = peer.io_.recv_buffer;
+    
+    // Read payload length
+    uint32_t net_len;
+    memcpy(&net_len, recv_buf.data(), 4);
+    uint32_t frame_len = ntohl(net_len);
+    
+    const uint8_t* frame_data = recv_buf.data() + 4;
+    
+    if (!peer.io_.noise_hs) {
+        LOG_CLIENT_ERROR("Noise frame received but no handshake state for " << peer.peer_id);
         return false;
     }
     
-    uint8_t message_buf[256];
-    size_t message_len;
-    std::vector<uint8_t> received_data;
-    uint8_t payload_buf[256];
-    size_t payload_len;
+    auto& hs = *peer.io_.noise_hs;
+    bool is_initiator = peer.is_outgoing;
+    rats::NoiseError err;
+    uint8_t out_buf[256];
+    size_t out_len;
     
     /*
-     * XX Pattern:
-     *   -> e                           (message 0, initiator sends)
-     *   <- e, ee, s, es                (message 1, responder sends)
-     *   -> s, se                       (message 2, initiator sends)
+     * Step table (noise_step → action):
+     *   Initiator: 0=write, 1=read, 2=write, 3=done
+     *   Responder: 0=read,  1=write, 2=read,  3=done
+     *
+     * This function is only called when we received a frame, so the current
+     * step must expect a "read".
      */
     
-    if (is_initiator) {
-        // Message 0: -> e
-        message_len = sizeof(message_buf);
-        err = handshake.write_message(nullptr, 0, message_buf, &message_len);
-        if (err != rats::NoiseError::OK) {
-            LOG_CLIENT_ERROR("Failed to write Noise message 0");
-            return false;
-        }
-        
-        if (!send_noise_message(socket, message_buf, message_len)) {
-            return false;
-        }
-        LOG_CLIENT_DEBUG("Sent Noise message 0 (e) - " << message_len << " bytes");
-        
-        // Receive message 1: <- e, ee, s, es
-        if (!recv_noise_message(socket, received_data)) {
-            return false;
-        }
-        LOG_CLIENT_DEBUG("Received Noise message 1 - " << received_data.size() << " bytes");
-        
-        payload_len = sizeof(payload_buf);
-        err = handshake.read_message(received_data.data(), received_data.size(), payload_buf, &payload_len);
-        if (err != rats::NoiseError::OK) {
-            LOG_CLIENT_ERROR("Failed to read Noise message 1: " << static_cast<int>(err));
-            return false;
-        }
-        
-        // Message 2: -> s, se
-        message_len = sizeof(message_buf);
-        err = handshake.write_message(nullptr, 0, message_buf, &message_len);
-        if (err != rats::NoiseError::OK) {
-            LOG_CLIENT_ERROR("Failed to write Noise message 2");
-            return false;
-        }
-        
-        if (!send_noise_message(socket, message_buf, message_len)) {
-            return false;
-        }
-        LOG_CLIENT_DEBUG("Sent Noise message 2 (s, se) - " << message_len << " bytes");
-        
-    } else {
-        // Responder
-        
-        // Receive message 0: -> e
-        if (!recv_noise_message(socket, received_data)) {
-            return false;
-        }
-        LOG_CLIENT_DEBUG("Received Noise message 0 - " << received_data.size() << " bytes");
-        
-        payload_len = sizeof(payload_buf);
-        err = handshake.read_message(received_data.data(), received_data.size(), payload_buf, &payload_len);
-        if (err != rats::NoiseError::OK) {
-            LOG_CLIENT_ERROR("Failed to read Noise message 0: " << static_cast<int>(err));
-            return false;
-        }
-        
-        // Message 1: <- e, ee, s, es
-        message_len = sizeof(message_buf);
-        err = handshake.write_message(nullptr, 0, message_buf, &message_len);
-        if (err != rats::NoiseError::OK) {
-            LOG_CLIENT_ERROR("Failed to write Noise message 1");
-            return false;
-        }
-        
-        if (!send_noise_message(socket, message_buf, message_len)) {
-            return false;
-        }
-        LOG_CLIENT_DEBUG("Sent Noise message 1 (e, ee, s, es) - " << message_len << " bytes");
-        
-        // Receive message 2: -> s, se
-        if (!recv_noise_message(socket, received_data)) {
-            return false;
-        }
-        LOG_CLIENT_DEBUG("Received Noise message 2 - " << received_data.size() << " bytes");
-        
-        payload_len = sizeof(payload_buf);
-        err = handshake.read_message(received_data.data(), received_data.size(), payload_buf, &payload_len);
-        if (err != rats::NoiseError::OK) {
-            LOG_CLIENT_ERROR("Failed to read Noise message 2: " << static_cast<int>(err));
-            return false;
-        }
-    }
-    
-    // Handshake should be complete now
-    if (!handshake.is_handshake_complete()) {
-        LOG_CLIENT_ERROR("Noise handshake not complete after all messages");
-        return false;
-    }
-    
-    // Split into transport ciphers
-    auto send_cipher = std::make_shared<rats::NoiseCipherState>();
-    auto recv_cipher = std::make_shared<rats::NoiseCipherState>();
-    
-    err = handshake.split(*send_cipher, *recv_cipher);
+    // ── Read the incoming Noise message ──
+    out_len = sizeof(out_buf);
+    err = hs.read_message(frame_data, frame_len, out_buf, &out_len);
     if (err != rats::NoiseError::OK) {
-        LOG_CLIENT_ERROR("Failed to split Noise session: " << static_cast<int>(err));
+        LOG_CLIENT_ERROR("Noise read_message failed (step " << peer.io_.noise_step 
+                         << "): " << static_cast<int>(err));
         return false;
     }
+    LOG_CLIENT_DEBUG("Read Noise msg (step " << peer.io_.noise_step 
+                     << ", " << frame_len << " bytes) from " << peer.peer_id);
     
-    // Store ciphers and remote static key in peer
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        auto it = peers_.find(peer_id);
-        if (it == peers_.end()) {
-            // Try to find by socket
-            auto sock_it = socket_to_peer_id_.find(socket);
-            if (sock_it != socket_to_peer_id_.end()) {
-                it = peers_.find(sock_it->second);
-            }
-        }
-        
-        if (it != peers_.end()) {
-            it->second.send_cipher = std::move(send_cipher);
-            it->second.recv_cipher = std::move(recv_cipher);
-            it->second.noise_handshake_completed = true;
-            
-            // Store remote static key
-            const uint8_t* remote_key = handshake.get_remote_static_public();
-            if (handshake.has_remote_static()) {
-                it->second.remote_static_key.assign(remote_key, remote_key + 32);
-            }
-            
-            LOG_CLIENT_INFO("Noise handshake completed with " << it->second.peer_id);
-        } else {
-            LOG_CLIENT_ERROR("Peer not found after Noise handshake: " << peer_id);
-            return false;
-        }
+    peer.io_.noise_step++;
+    
+    // ── If there's a reply to write, do it now ──
+    bool need_write = false;
+    if (is_initiator) {
+        // Initiator writes on steps 0 and 2 → after reading (step becomes 2), write
+        need_write = (peer.io_.noise_step == 2);
+    } else {
+        // Responder writes on step 1 → after reading (step becomes 1), write
+        need_write = (peer.io_.noise_step == 1);
     }
     
-    // Reset socket timeout to infinite (0) for normal operation after handshake
-#ifdef _WIN32
-    DWORD no_timeout = 0;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&no_timeout), sizeof(no_timeout));
-#else
-    struct timeval no_timeout;
-    no_timeout.tv_sec = 0;
-    no_timeout.tv_usec = 0;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&no_timeout), sizeof(no_timeout));
-#endif
+    if (need_write) {
+        out_len = sizeof(out_buf);
+        err = hs.write_message(nullptr, 0, out_buf, &out_len);
+        if (err != rats::NoiseError::OK) {
+            LOG_CLIENT_ERROR("Noise write_message failed (step " << peer.io_.noise_step 
+                             << "): " << static_cast<int>(err));
+            return false;
+        }
+        
+        std::vector<uint8_t> payload(out_buf, out_buf + out_len);
+        enqueue_message_unlocked(peer, payload);
+        LOG_CLIENT_DEBUG("Sent Noise msg (step " << peer.io_.noise_step 
+                         << ", " << out_len << " bytes) to " << peer.peer_id);
+        peer.io_.noise_step++;
+    }
+    
+    // ── Check if handshake is complete ──
+    if (hs.is_handshake_complete()) {
+        auto send_cipher = std::make_shared<rats::NoiseCipherState>();
+        auto recv_cipher = std::make_shared<rats::NoiseCipherState>();
+        
+        err = hs.split(*send_cipher, *recv_cipher);
+        if (err != rats::NoiseError::OK) {
+            LOG_CLIENT_ERROR("Noise split failed: " << static_cast<int>(err));
+            return false;
+        }
+        
+        // Store ciphers and remote static key
+        peer.send_cipher = std::move(send_cipher);
+        peer.recv_cipher = std::move(recv_cipher);
+        peer.noise_handshake_completed = true;
+        
+        if (hs.has_remote_static()) {
+            const uint8_t* remote_key = hs.get_remote_static_public();
+            peer.remote_static_key.assign(remote_key, remote_key + 32);
+        }
+        
+        // Free handshake state (no longer needed)
+        peer.io_.noise_hs.reset();
+        peer.io_.noise_step = 0;
+        
+        // Mark handshake completed
+        peer.handshake_state = RatsPeer::HandshakeState::COMPLETED;
+        validated_peer_count_.fetch_add(1, std::memory_order_relaxed);
+        log_handshake_completion_unlocked(peer);
+        
+        LOG_CLIENT_INFO("Noise handshake completed with " << peer.peer_id);
+    }
     
     return true;
 }
