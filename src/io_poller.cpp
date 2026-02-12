@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <set>
 
 //=============================================================================
 // Platform detection
@@ -185,10 +186,15 @@ public:
     }
     
     bool add(socket_t fd, uint32_t events) override {
-        return apply_changes(fd, events, EV_ADD | EV_CLEAR);
+        if (!apply_changes(fd, events, EV_ADD | EV_CLEAR))
+            return false;
+        registered_.insert(fd);
+        return true;
     }
     
     bool modify(socket_t fd, uint32_t events) override {
+        if (registered_.find(fd) == registered_.end()) return false;
+        
         // kqueue: adding a filter that already exists replaces it.
         // We also need to delete filters that are no longer wanted.
         struct kevent changes[4];
@@ -217,6 +223,8 @@ public:
     }
     
     bool remove(socket_t fd) override {
+        if (registered_.erase(fd) == 0) return false;
+        
         struct kevent changes[2];
         // Delete both read and write filters. Ignore errors (filter may not exist).
         EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
@@ -291,6 +299,7 @@ public:
     
 private:
     int kqfd_ = -1;
+    std::set<socket_t> registered_;  ///< Track registered fds
     
     bool apply_changes(socket_t fd, uint32_t events, uint16_t kq_flags) {
         struct kevent changes[2];
