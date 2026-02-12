@@ -568,51 +568,44 @@ bool RatsClient::handle_readable(socket_t socket) {
 // Returns true if the peer should be disconnected.
 // ---------------------------------------------------------------------------
 bool RatsClient::handle_writable(socket_t socket) {
-    bool buffer_empty = false;
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    auto peer_it = find_peer_by_socket_unlocked(socket);
+    if (peer_it == peers_.end()) return true;
     
-    {
-        std::lock_guard<std::mutex> lock(peers_mutex_);
-        auto peer_it = find_peer_by_socket_unlocked(socket);
-        if (peer_it == peers_.end()) return true;
-        
-        auto& send_buf = peer_it->second.io_.send_buffer;
-        
-        while (!send_buf.empty()) {
-            int bytes = ::send(socket,
-                               reinterpret_cast<const char*>(send_buf.front_data()),
-                               static_cast<int>(send_buf.front_size()),
+    auto& send_buf = peer_it->second.io_.send_buffer;
+    
+    while (!send_buf.empty()) {
+        int bytes = ::send(socket,
+                            reinterpret_cast<const char*>(send_buf.front_data()),
+                            static_cast<int>(send_buf.front_size()),
 #ifdef _WIN32
-                               0
+                            0
 #else
-                               MSG_NOSIGNAL
+                            MSG_NOSIGNAL
 #endif
-            );
-            
-            if (bytes > 0) {
-                send_buf.pop_front(static_cast<size_t>(bytes));
-                continue;
-            }
-            
-            if (bytes < 0) {
-#ifdef _WIN32
-                if (WSAGetLastError() == WSAEWOULDBLOCK) break;
-#else
-                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-#endif
-                LOG_CLIENT_ERROR("Send error on socket " << socket);
-                return true;
-            }
-            
-            // bytes == 0 — shouldn't happen on a stream socket
-            break;
+        );
+        
+        if (bytes > 0) {
+            send_buf.pop_front(static_cast<size_t>(bytes));
+            continue;
         }
         
-        buffer_empty = send_buf.empty();
+        if (bytes < 0) {
+#ifdef _WIN32
+            if (WSAGetLastError() == WSAEWOULDBLOCK) break;
+#else
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+#endif
+            LOG_CLIENT_ERROR("Send error on socket " << socket);
+            return true;
+        }
+        
+        // bytes == 0 — shouldn't happen on a stream socket
+        break;
     }
-    // peers_mutex_ released before acquiring io_mutex_ (maintains lock order: peers → io)
     
     // If buffer fully flushed, stop watching for PollOut
-    if (buffer_empty) {
+    if (send_buf.empty()) {
         std::lock_guard<std::mutex> io_lock(io_mutex_);
         if (poller_) poller_->modify(socket, PollIn);
     }
@@ -1063,22 +1056,18 @@ bool RatsClient::handle_handshake_message(socket_t socket, const std::string& in
     
     // Update peer mappings with new peer_id if it changed
     if (old_peer_id != handshake_msg.peer_id) {
-        // Create a copy of the peer object before erasing it.
-        RatsPeer peer_copy = peer_it->second;
-        
-        // Erase the old entry from the main peers map.
+        // Move the peer (preserves io_ context with send/recv buffers)
+        RatsPeer peer_moved = std::move(peer_it->second);
         peers_.erase(peer_it);
         
-        // Update the peer_id within the copied object.
-        peer_copy.peer_id = handshake_msg.peer_id;
+        peer_moved.peer_id = handshake_msg.peer_id;
         
-        // Insert the updated peer object back into the maps with the new peer_id.
-        peers_[peer_copy.peer_id] = peer_copy;
-        socket_to_peer_id_[socket] = peer_copy.peer_id;
-        address_to_peer_id_[peer_copy.normalized_address] = peer_copy.peer_id;
-
-        // Find the iterator for the newly inserted peer.
-        peer_it = peers_.find(peer_copy.peer_id);
+        // Use emplace to avoid extra copy/move
+        auto [new_it, ok] = peers_.emplace(peer_moved.peer_id, std::move(peer_moved));
+        socket_to_peer_id_[socket] = new_it->second.peer_id;
+        address_to_peer_id_[new_it->second.normalized_address] = new_it->second.peer_id;
+        
+        peer_it = new_it;
     }
 
     RatsPeer& peer = peer_it->second;
