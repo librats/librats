@@ -47,7 +47,7 @@
 #endif
 
 // Logging macros
-#define LOG_POLLER_DEBUG(msg) LOG_DEBUG("IOPoller", msg)
+#define LOG_POLLER_DEBUG(msg) LOG_INFO("IOPoller", msg)
 #define LOG_POLLER_INFO(msg)  LOG_INFO("IOPoller", msg)
 #define LOG_POLLER_WARN(msg)  LOG_WARN("IOPoller", msg)
 #define LOG_POLLER_ERROR(msg) LOG_ERROR("IOPoller", msg)
@@ -186,14 +186,29 @@ public:
     }
     
     bool add(socket_t fd, uint32_t events) override {
-        if (!apply_changes(fd, events, EV_ADD | EV_CLEAR))
+        LOG_POLLER_DEBUG("kqueue add: fd=" + std::to_string(fd) + 
+                        " events=0x" + std::to_string(events) +
+                        " registered_size=" + std::to_string(registered_.size()));
+        if (!apply_changes(fd, events, EV_ADD | EV_CLEAR)) {
+            LOG_POLLER_ERROR("kqueue add: apply_changes FAILED for fd=" + std::to_string(fd));
             return false;
+        }
         registered_.insert(fd);
+        LOG_POLLER_DEBUG("kqueue add: SUCCESS fd=" + std::to_string(fd) + 
+                        " registered_size=" + std::to_string(registered_.size()));
         return true;
     }
     
     bool modify(socket_t fd, uint32_t events) override {
-        if (registered_.find(fd) == registered_.end()) return false;
+        bool found = registered_.find(fd) != registered_.end();
+        LOG_POLLER_DEBUG("kqueue modify: fd=" + std::to_string(fd) + 
+                        " events=0x" + std::to_string(events) +
+                        " found_in_registered=" + std::string(found ? "YES" : "NO") +
+                        " registered_size=" + std::to_string(registered_.size()));
+        if (!found) {
+            LOG_POLLER_DEBUG("kqueue modify: REJECTED fd=" + std::to_string(fd) + " (not registered)");
+            return false;
+        }
         
         // kqueue: adding a filter that already exists replaces it.
         // We also need to delete filters that are no longer wanted.
@@ -219,17 +234,27 @@ public:
                             ": " + std::string(strerror(errno)));
             return false;
         }
+        LOG_POLLER_DEBUG("kqueue modify: SUCCESS fd=" + std::to_string(fd));
         return true;
     }
     
     bool remove(socket_t fd) override {
-        if (registered_.erase(fd) == 0) return false;
+        bool found = registered_.find(fd) != registered_.end();
+        LOG_POLLER_DEBUG("kqueue remove: fd=" + std::to_string(fd) + 
+                        " found_in_registered=" + std::string(found ? "YES" : "NO") +
+                        " registered_size=" + std::to_string(registered_.size()));
+        if (registered_.erase(fd) == 0) {
+            LOG_POLLER_DEBUG("kqueue remove: REJECTED fd=" + std::to_string(fd) + " (not registered)");
+            return false;
+        }
         
         struct kevent changes[2];
         // Delete both read and write filters. Ignore errors (filter may not exist).
         EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
         EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
         kevent(kqfd_, changes, 2, nullptr, 0, nullptr);
+        LOG_POLLER_DEBUG("kqueue remove: SUCCESS fd=" + std::to_string(fd) + 
+                        " registered_size=" + std::to_string(registered_.size()));
         return true;
     }
     
@@ -249,6 +274,10 @@ public:
         struct kevent kevents[internal_max > 256 ? 256 : internal_max];
         int kevents_size = (internal_max > 256) ? 256 : internal_max;
         
+        LOG_POLLER_DEBUG("kqueue wait: timeout_ms=" + std::to_string(timeout_ms) + 
+                        " max_results=" + std::to_string(max_results) +
+                        " registered_size=" + std::to_string(registered_.size()));
+        
         int n = kevent(kqfd_, nullptr, 0, kevents, kevents_size, ts_ptr);
         
         if (n < 0) {
@@ -258,22 +287,34 @@ public:
             return -1;
         }
         
+        LOG_POLLER_DEBUG("kqueue wait: kevent returned n=" + std::to_string(n));
+        
         // Merge events for the same fd
         int count = 0;
         for (int i = 0; i < n && count < max_results; ++i) {
             socket_t fd = static_cast<socket_t>(kevents[i].ident);
             uint32_t flags = 0;
             
+            std::string filter_name = "unknown";
             if (kevents[i].filter == EVFILT_READ) {
+                filter_name = "READ";
                 flags |= PollIn;
                 if (kevents[i].flags & EV_EOF) flags |= PollHup;
             }
             if (kevents[i].filter == EVFILT_WRITE) {
+                filter_name = "WRITE";
                 flags |= PollOut;
             }
             if (kevents[i].flags & EV_ERROR) {
                 flags |= PollErr;
+                filter_name += "+ERROR";
             }
+            
+            LOG_POLLER_DEBUG("kqueue wait: event[" + std::to_string(i) + "] fd=" + 
+                            std::to_string(fd) + " filter=" + filter_name +
+                            " flags=0x" + std::to_string(kevents[i].flags) +
+                            " data=" + std::to_string(kevents[i].data) +
+                            " poll_flags=0x" + std::to_string(flags));
             
             // Check if we already have an entry for this fd
             bool merged = false;
@@ -281,6 +322,7 @@ public:
                 if (results[j].fd == fd) {
                     results[j].events |= flags;
                     merged = true;
+                    LOG_POLLER_DEBUG("kqueue wait: merged fd=" + std::to_string(fd));
                     break;
                 }
             }
@@ -292,6 +334,7 @@ public:
             }
         }
         
+        LOG_POLLER_DEBUG("kqueue wait: returning count=" + std::to_string(count));
         return count;
     }
     
@@ -312,13 +355,21 @@ private:
             EV_SET(&changes[nchanges++], fd, EVFILT_WRITE, kq_flags, 0, 0, nullptr);
         }
         
+        LOG_POLLER_DEBUG("kqueue apply_changes: fd=" + std::to_string(fd) + 
+                        " events=0x" + std::to_string(events) +
+                        " kq_flags=0x" + std::to_string(kq_flags) +
+                        " nchanges=" + std::to_string(nchanges));
+        
         if (nchanges == 0) return true;
         
-        if (kevent(kqfd_, changes, nchanges, nullptr, 0, nullptr) < 0) {
+        int ret = kevent(kqfd_, changes, nchanges, nullptr, 0, nullptr);
+        if (ret < 0) {
             LOG_POLLER_ERROR("kevent add/modify failed for fd " + std::to_string(fd) + 
-                            ": " + std::string(strerror(errno)));
+                            ": " + std::string(strerror(errno)) + 
+                            " errno=" + std::to_string(errno));
             return false;
         }
+        LOG_POLLER_DEBUG("kqueue apply_changes: SUCCESS ret=" + std::to_string(ret));
         return true;
     }
 };

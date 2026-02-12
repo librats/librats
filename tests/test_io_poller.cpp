@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "io_poller.h"
 #include "socket.h"
+#include "logger.h"
 
 #include <thread>
 #include <chrono>
@@ -27,6 +28,7 @@ using namespace librats;
 class IOPollerTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        Logger::getInstance().set_log_level(LogLevel::DEBUG);
         ASSERT_TRUE(init_socket_library());
         poller_ = IOPoller::create();
         ASSERT_NE(poller_, nullptr);
@@ -35,6 +37,7 @@ protected:
     void TearDown() override {
         poller_.reset();
         cleanup_socket_library();
+        Logger::getInstance().set_log_level(LogLevel::INFO);
     }
     
     /// Create a TCP socketpair via loopback (returns server-accepted socket + client socket)
