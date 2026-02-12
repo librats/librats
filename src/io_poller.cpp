@@ -493,7 +493,7 @@ public:
         
         DWORD iocp_timeout = (count > 0) ? 0 : static_cast<DWORD>(timeout_ms);
         ULONG max_dequeue = static_cast<ULONG>(
-            std::min(static_cast<int>(MAX_ENTRIES), max_results - count));
+            (std::min)(static_cast<int>(MAX_ENTRIES), max_results - count));
         
         if (max_dequeue > 0 && iocp_) {
             BOOL ok = GetQueuedCompletionStatusEx(
