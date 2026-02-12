@@ -688,6 +688,362 @@ TEST_F(IOPollerTest, CrossThreadModifyWakesWait) {
 // Data transfer through polled sockets
 //=============================================================================
 
+//=============================================================================
+// PollErr detection (connection refused)
+//=============================================================================
+
+TEST_F(IOPollerTest, DetectsConnectionRefusedAsError) {
+    // A connected socket whose peer does a hard RST should produce
+    // PollErr or PollHup (or PollIn with 0-byte read), depending on platform.
+    
+    auto pair = create_connected_pair();
+    
+    EXPECT_TRUE(poller_->add(pair.server, PollIn));
+    
+    // Force RST by setting SO_LINGER with timeout 0, then closing client
+    struct linger lg = {1, 0};  // linger on, timeout 0 → RST on close
+    setsockopt(pair.client, SOL_SOCKET, SO_LINGER,
+               reinterpret_cast<const char*>(&lg), sizeof(lg));
+    close_socket(pair.client, true);  // Sends RST instead of FIN
+    pair.client = INVALID_SOCKET_VALUE;
+    
+    PollResult results[8];
+    uint32_t combined = 0;
+    
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        int n = poller_->wait(results, 8, 200);
+        for (int i = 0; i < n; ++i) {
+            if (results[i].fd == pair.server) {
+                combined |= results[i].events;
+            }
+        }
+        if (combined & (PollErr | PollHup | PollIn)) break;
+    }
+    
+    // Should detect the RST — either PollErr, PollHup, or PollIn (read returns error/0)
+    EXPECT_NE(combined, 0u)
+        << "Should detect connection reset (got events: " << combined << ")";
+    EXPECT_TRUE((combined & PollErr) || (combined & PollHup) || (combined & PollIn))
+        << "Should report error, hangup, or readable (for error read)";
+    
+    poller_->remove(pair.server);
+    close_pair(pair);
+}
+
+//=============================================================================
+// Concurrent add/remove from another thread during wait()
+//=============================================================================
+
+TEST_F(IOPollerTest, ConcurrentAddDuringWait) {
+    // Spawn a thread that adds a writable socket while main thread is waiting.
+    // The new socket's events should be picked up.
+    
+    auto pair = create_connected_pair();
+    
+    std::atomic<bool> got_event{false};
+    
+    std::thread adder([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Add a connected socket — it should be immediately writable
+        poller_->add(pair.client, PollOut);
+    });
+    
+    PollResult results[8];
+    
+    for (int attempt = 0; attempt < 10 && !got_event; ++attempt) {
+        int n = poller_->wait(results, 8, 300);
+        for (int i = 0; i < n; ++i) {
+            if (results[i].fd == pair.client && (results[i].events & PollOut)) {
+                got_event = true;
+            }
+        }
+    }
+    
+    adder.join();
+    
+    EXPECT_TRUE(got_event.load()) << "Socket added from another thread should produce events";
+    
+    poller_->remove(pair.client);
+    close_pair(pair);
+}
+
+TEST_F(IOPollerTest, ConcurrentRemoveDuringWait) {
+    // Add sockets, then remove one from another thread while wait() is blocking.
+    // Should not crash or hang.
+    
+    auto pair1 = create_connected_pair();
+    auto pair2 = create_connected_pair();
+    
+    EXPECT_TRUE(poller_->add(pair1.server, PollIn));
+    EXPECT_TRUE(poller_->add(pair2.server, PollIn));
+    
+    // Send data to pair2 so it becomes readable
+    const char msg[] = "data";
+    send(pair2.client, msg, sizeof(msg), 0);
+    
+    std::atomic<bool> removed{false};
+    
+    std::thread remover([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        poller_->remove(pair1.server);
+        removed = true;
+    });
+    
+    PollResult results[8];
+    bool got_pair2 = false;
+    
+    for (int attempt = 0; attempt < 10 && !got_pair2; ++attempt) {
+        int n = poller_->wait(results, 8, 200);
+        for (int i = 0; i < n; ++i) {
+            if (results[i].fd == pair2.server && (results[i].events & PollIn)) {
+                got_pair2 = true;
+            }
+        }
+    }
+    
+    remover.join();
+    
+    EXPECT_TRUE(removed.load());
+    EXPECT_TRUE(got_pair2) << "pair2 should still get events after pair1 removed from another thread";
+    
+    poller_->remove(pair2.server);
+    
+    char buf[64];
+    recv(pair2.server, buf, sizeof(buf), 0);
+    
+    close_pair(pair1);
+    close_pair(pair2);
+}
+
+//=============================================================================
+// Edge-triggered re-arming: repeated PollIn after partial read
+//=============================================================================
+
+TEST_F(IOPollerTest, RepeatedReadNotificationAfterNewData) {
+    // Verify that after reading data and then sending more, the poller
+    // fires PollIn again. This is critical for edge-triggered backends
+    // (kqueue EV_CLEAR, IOCP re-arm).
+    
+    auto pair = create_connected_pair();
+    
+    EXPECT_TRUE(poller_->add(pair.server, PollIn));
+    
+    // Round 1: send data, detect readable, read it
+    const char msg1[] = "first";
+    send(pair.client, msg1, sizeof(msg1), 0);
+    
+    PollResult results[8];
+    bool readable = false;
+    for (int attempt = 0; attempt < 5 && !readable; ++attempt) {
+        int n = poller_->wait(results, 8, 200);
+        for (int i = 0; i < n; ++i) {
+            if (results[i].fd == pair.server && (results[i].events & PollIn))
+                readable = true;
+        }
+    }
+    ASSERT_TRUE(readable) << "Round 1: should be readable";
+    
+    // Read all available data
+    char buf[256];
+    while (recv(pair.server, buf, sizeof(buf), 0) > 0) {}
+    
+    // Verify poller returns 0 after draining (no data left)
+    int n = poller_->wait(results, 8, 50);
+    // May or may not return 0 (platform-dependent), that's okay
+    
+    // Round 2: send new data → poller MUST fire PollIn again
+    const char msg2[] = "second";
+    send(pair.client, msg2, sizeof(msg2), 0);
+    
+    readable = false;
+    for (int attempt = 0; attempt < 5 && !readable; ++attempt) {
+        n = poller_->wait(results, 8, 200);
+        for (int i = 0; i < n; ++i) {
+            if (results[i].fd == pair.server && (results[i].events & PollIn))
+                readable = true;
+        }
+    }
+    EXPECT_TRUE(readable) << "Round 2: should be readable again after new data (edge re-arm)";
+    
+    // Drain
+    while (recv(pair.server, buf, sizeof(buf), 0) > 0) {}
+    
+    poller_->remove(pair.server);
+    close_pair(pair);
+}
+
+//=============================================================================
+// Double add: adding the same fd twice
+//=============================================================================
+
+TEST_F(IOPollerTest, DoubleAddSameFd) {
+    // Adding the same fd a second time should either fail or succeed
+    // (platform-dependent), but must not crash. Events should still work.
+    
+    auto pair = create_connected_pair();
+    
+    EXPECT_TRUE(poller_->add(pair.server, PollIn));
+    
+    // Second add of same fd — may return true or false depending on backend
+    // (epoll returns EEXIST → false, IOCP may succeed)
+    // The key contract: should NOT crash, and events should still work.
+    poller_->add(pair.server, PollIn);
+    
+    // Send data and verify events still fire
+    const char msg[] = "test";
+    send(pair.client, msg, sizeof(msg), 0);
+    
+    PollResult results[8];
+    bool readable = false;
+    for (int attempt = 0; attempt < 5 && !readable; ++attempt) {
+        int n = poller_->wait(results, 8, 200);
+        for (int i = 0; i < n; ++i) {
+            if (results[i].fd == pair.server && (results[i].events & PollIn))
+                readable = true;
+        }
+    }
+    EXPECT_TRUE(readable) << "Socket should still be functional after double add";
+    
+    char buf[64];
+    recv(pair.server, buf, sizeof(buf), 0);
+    
+    poller_->remove(pair.server);
+    close_pair(pair);
+}
+
+//=============================================================================
+// Re-add with different events after remove
+//=============================================================================
+
+TEST_F(IOPollerTest, ReAddWithDifferentEvents) {
+    // Pattern: add(PollIn) → remove() → add(PollOut)
+    // Simulates a socket being removed and re-registered with different interest.
+    
+    auto pair = create_connected_pair();
+    
+    // First: register for read only
+    EXPECT_TRUE(poller_->add(pair.client, PollIn));
+    
+    // No data to read → should timeout
+    PollResult results[8];
+    int n = poller_->wait(results, 8, 0);
+    EXPECT_EQ(n, 0);
+    
+    // Remove
+    EXPECT_TRUE(poller_->remove(pair.client));
+    
+    // Re-add with PollOut
+    EXPECT_TRUE(poller_->add(pair.client, PollOut));
+    
+    // Connected socket should be writable
+    bool writable = false;
+    for (int attempt = 0; attempt < 5 && !writable; ++attempt) {
+        n = poller_->wait(results, 8, 200);
+        for (int i = 0; i < n; ++i) {
+            if (results[i].fd == pair.client && (results[i].events & PollOut))
+                writable = true;
+        }
+    }
+    EXPECT_TRUE(writable) << "Re-added socket with PollOut should be writable";
+    
+    poller_->remove(pair.client);
+    close_pair(pair);
+}
+
+//=============================================================================
+// max_results boundary: fewer slots than ready sockets
+//=============================================================================
+
+TEST_F(IOPollerTest, MaxResultsTruncation) {
+    // Register multiple readable sockets but request max_results=1.
+    // Should return at most 1 event per wait() call, and not lose events.
+    
+    auto pair1 = create_connected_pair();
+    auto pair2 = create_connected_pair();
+    auto pair3 = create_connected_pair();
+    
+    EXPECT_TRUE(poller_->add(pair1.server, PollIn));
+    EXPECT_TRUE(poller_->add(pair2.server, PollIn));
+    EXPECT_TRUE(poller_->add(pair3.server, PollIn));
+    
+    const char msg[] = "data";
+    send(pair1.client, msg, sizeof(msg), 0);
+    send(pair2.client, msg, sizeof(msg), 0);
+    send(pair3.client, msg, sizeof(msg), 0);
+    
+    // Give data time to arrive
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
+    PollResult results[1];  // Only 1 slot!
+    
+    std::set<socket_t> seen;
+    for (int attempt = 0; attempt < 20 && seen.size() < 3; ++attempt) {
+        int n = poller_->wait(results, 1, 100);
+        EXPECT_LE(n, 1) << "max_results=1 should return at most 1 event";
+        for (int i = 0; i < n; ++i) {
+            seen.insert(results[i].fd);
+            // Drain data so this socket doesn't fire again
+            char buf[64];
+            recv(results[i].fd, buf, sizeof(buf), 0);
+        }
+    }
+    
+    EXPECT_EQ(seen.size(), 3u) << "All 3 sockets should eventually be reported";
+    
+    poller_->remove(pair1.server);
+    poller_->remove(pair2.server);
+    poller_->remove(pair3.server);
+    
+    close_pair(pair1);
+    close_pair(pair2);
+    close_pair(pair3);
+}
+
+//=============================================================================
+// Remove + close safety: poller survives closed fd
+//=============================================================================
+
+TEST_F(IOPollerTest, RemoveThenCloseSafety) {
+    // Production pattern: poller_remove(fd) then close_socket(fd).
+    // Verify no crash in subsequent wait() calls.
+    
+    auto pair = create_connected_pair();
+    
+    EXPECT_TRUE(poller_->add(pair.server, PollIn));
+    EXPECT_TRUE(poller_->add(pair.client, PollIn));
+    
+    // Remove and close server side
+    EXPECT_TRUE(poller_->remove(pair.server));
+    close_socket(pair.server);
+    pair.server = INVALID_SOCKET_VALUE;
+    
+    // Subsequent wait() should not crash — only client is registered
+    PollResult results[8];
+    int n = poller_->wait(results, 8, 50);
+    EXPECT_GE(n, 0) << "wait() should not return error after remove+close";
+    
+    // Client should still work
+    // (pair.server is closed, so client may get PollIn with 0-byte read or PollHup)
+    bool client_event = false;
+    for (int attempt = 0; attempt < 5 && !client_event; ++attempt) {
+        n = poller_->wait(results, 8, 200);
+        for (int i = 0; i < n; ++i) {
+            if (results[i].fd == pair.client) {
+                client_event = true;
+            }
+        }
+    }
+    // Client should detect the broken connection
+    EXPECT_TRUE(client_event) << "Client should detect server-side close";
+    
+    poller_->remove(pair.client);
+    close_pair(pair);
+}
+
+//=============================================================================
+// Data transfer through polled sockets
+//=============================================================================
+
 TEST_F(IOPollerTest, FullDataTransferRoundtrip) {
     auto pair = create_connected_pair();
     
