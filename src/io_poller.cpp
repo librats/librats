@@ -244,10 +244,12 @@ public:
         }
         
         // kqueue may return separate events for read and write on the same fd.
-        // We use a larger buffer and merge events for the same fd.
-        const int internal_max = max_results * 2;
-        struct kevent kevents[internal_max > 256 ? 256 : internal_max];
-        int kevents_size = (internal_max > 256) ? 256 : internal_max;
+        // We fetch at most max_results raw events — after merging we may get
+        // fewer results, but we never lose events (un-fetched events stay in
+        // the kqueue for the next call).  Fetching more than max_results would
+        // risk silently discarding events with EV_CLEAR (edge-triggered).
+        struct kevent kevents[max_results > 256 ? 256 : max_results];
+        int kevents_size = (max_results > 256) ? 256 : max_results;
         
         int n = kevent(kqfd_, nullptr, 0, kevents, kevents_size, ts_ptr);
         
