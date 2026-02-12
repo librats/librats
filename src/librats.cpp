@@ -1,19 +1,13 @@
 #include "librats.h"
-#include "gossipsub.h"
 #include "sha1.h"
 #include "os.h"
 #include "network_utils.h"
-#include "fs.h"
-#include "json.hpp" // nlohmann::json
 #include "version.h"
-#include <iostream>
 #include <algorithm>
-#include <chrono>
-#include <memory>
+#include <array>
 #include <random>
 #include <sstream>
 #include <iomanip>
-#include <stdexcept>
 #include <string_view>
 
 #include "librats_log_macros.h"
