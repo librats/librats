@@ -129,6 +129,7 @@ set(LIBRARY_SOURCES
     src/krpc.cpp
     src/krpc.h
     src/librats.cpp
+    src/librats_discovery.cpp
     src/librats_reconnection.cpp
     src/librats_logging.cpp
     src/librats_encryption.cpp
@@ -136,6 +137,7 @@ set(LIBRARY_SOURCES
     src/librats_gossipsub.cpp
     src/librats_mdns.cpp
     src/librats_persistence.cpp
+    src/librats_statistic.cpp
     src/librats.h
     src/sha1.cpp
     src/sha1.h
