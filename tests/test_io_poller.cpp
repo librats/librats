@@ -1017,16 +1017,15 @@ TEST_F(IOPollerTest, RemoveThenCloseSafety) {
     close_socket(pair.server);
     pair.server = INVALID_SOCKET_VALUE;
     
-    // Subsequent wait() should not crash — only client is registered
+    // Subsequent wait() should not crash — only client is registered.
+    // The client may receive the server-close event on this very first call
+    // (edge-triggered backends like kqueue EV_CLEAR fire it only once).
     PollResult results[8];
-    int n = poller_->wait(results, 8, 50);
-    EXPECT_GE(n, 0) << "wait() should not return error after remove+close";
-    
-    // Client should still work
-    // (pair.server is closed, so client may get PollIn with 0-byte read or PollHup)
     bool client_event = false;
+    
     for (int attempt = 0; attempt < 5 && !client_event; ++attempt) {
-        n = poller_->wait(results, 8, 200);
+        int n = poller_->wait(results, 8, 200);
+        EXPECT_GE(n, 0) << "wait() should not return error after remove+close";
         for (int i = 0; i < n; ++i) {
             if (results[i].fd == pair.client) {
                 client_event = true;
