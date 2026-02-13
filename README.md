@@ -34,6 +34,12 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Message Validation**: Configurable message validation and filtering
 - **Topic-based Communication**: Organized messaging with topic subscriptions
 
+### **I/O Multiplexing**
+- **Platform-Optimal Polling**: Unified abstraction over the best OS-specific I/O multiplexer
+- **Linux**: `epoll` — O(1) per event, scales to millions of file descriptors
+- **macOS/BSD**: `kqueue` — O(1) per event, scales to millions of file descriptors
+- **Windows**: `IOCP` (I/O Completion Ports) — true async completion, O(1) per event
+
 ### **High-Performance File Transfer**
 - **Chunked Transfers**: Efficient file splitting with parallel chunk transmission
 - **Resume Capability**: Automatic resume of interrupted transfers with checksum validation
