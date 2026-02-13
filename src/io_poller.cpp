@@ -467,9 +467,11 @@ public:
         }
         
         active_.erase(it);
-        // Note: SocketState is NOT freed — it stays in all_states_ so that
-        // the OVERLAPPED pointers remain valid until cancelled completions
-        // are dequeued from GQCS.
+        ++removed_count_;
+        // Note: SocketState is NOT freed yet — it stays in all_states_ so
+        // that the OVERLAPPED pointers remain valid until cancelled
+        // completions are dequeued from GQCS.  gc_removed_states() will
+        // free it once no I/O is in flight.
         return true;
     }
     
@@ -512,6 +514,7 @@ public:
         
         //------------------------------------------------------------------
         // Step 3: Process IOCP completions into PollResults
+        //         Also GC removed states once their I/O has drained.
         //------------------------------------------------------------------
         if (iocp_count > 0) {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -521,11 +524,14 @@ public:
                 
                 auto* io = reinterpret_cast<IocpOverlapped*>(entries[i].lpOverlapped);
                 auto* state = io->state;
-                if (!state || state->removed) continue;
+                if (!state) continue;
                 
-                // Mark the overlapped operation as completed
+                // Mark the overlapped operation as completed (even for removed states,
+                // so GC can later free them once no I/O is in flight)
                 if (io->event_type & PollIn)  state->read_pending = false;
                 if (io->event_type & PollOut) state->write_pending = false;
+                
+                if (state->removed) continue;
                 
                 // Check the NTSTATUS from the overlapped result
                 // 0 = STATUS_SUCCESS, non-zero = error (e.g. connection reset)
@@ -568,6 +574,14 @@ public:
                     results[count].events = reported_events;
                     ++count;
                 }
+            }
+            
+            // GC removed states whose cancelled I/O has fully drained.
+            // Threshold: at least 64 removed, or removed > half of total —
+            // avoids running the sweep on every wait() call.
+            if (removed_count_ >= 64 ||
+                (removed_count_ > 0 && removed_count_ * 2 >= all_states_.size())) {
+                gc_removed_states();
             }
         }
         
@@ -621,8 +635,9 @@ private:
     
     std::mutex mutex_;
     std::unordered_map<socket_t, IocpSocketState*> active_;     ///< fd → state lookup
-    std::vector<std::unique_ptr<IocpSocketState>> all_states_;  ///< Owns all states (never freed early)
+    std::vector<std::unique_ptr<IocpSocketState>> all_states_;  ///< Owns all states
     std::vector<WSAPOLLFD> wsapoll_fds_;                    ///< Reusable WSAPoll buffer
+    size_t removed_count_ = 0;                              ///< Number of removed states awaiting GC
     
     //----------------------------------------------------------------------
     // Zero-byte overlapped I/O: readiness notification via IOCP
@@ -688,6 +703,27 @@ private:
         }
         
         return false;
+    }
+    
+    //----------------------------------------------------------------------
+    // GC: free removed states whose I/O has fully drained. Called under mutex.
+    //----------------------------------------------------------------------
+    
+    void gc_removed_states() {
+        if (removed_count_ == 0) return;
+        
+        size_t before = all_states_.size();
+        all_states_.erase(
+            std::remove_if(all_states_.begin(), all_states_.end(),
+                [](const std::unique_ptr<IocpSocketState>& s) {
+                    return s->removed && !s->read_pending && !s->write_pending;
+                }),
+            all_states_.end());
+        
+        size_t freed = before - all_states_.size();
+        if (freed > 0) {
+            removed_count_ -= freed;
+        }
     }
     
     //----------------------------------------------------------------------
