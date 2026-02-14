@@ -3049,11 +3049,17 @@ void DhtClient::spider_walk() {
             pool_size = spider_nodes_.size();
         }
         
-        // If still empty, bootstrap
+        // If still empty, bootstrap (rate-limited to once per 30 seconds)
         if (pool_size == 0) {
-            LOG_DHT_DEBUG("Spider walk: routing table empty too, re-bootstrapping");
-            for (const auto& bootstrap : get_default_bootstrap_nodes()) {
-                send_krpc_find_node(bootstrap, node_id_);
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_spider_bootstrap_ >= std::chrono::seconds(30)) {
+                last_spider_bootstrap_ = now;
+                LOG_DHT_DEBUG("Spider walk: routing table empty too, re-bootstrapping");
+                for (const auto& bootstrap : get_default_bootstrap_nodes()) {
+                    send_krpc_find_node(bootstrap, node_id_);
+                }
+            } else {
+                LOG_DHT_DEBUG("Spider walk: skipping re-bootstrap (rate limited, last was < 30s ago)");
             }
         }
     }

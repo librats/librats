@@ -507,6 +507,9 @@ private:
     // Used to decide whether to respond with neighbor_id (spider contact) or real node_id (organic DHT)
     std::unordered_set<std::string> spider_contacted_ips_;
     
+    // Rate-limit re-bootstrapping in spider_walk to avoid DDOSing bootstrap nodes
+    std::chrono::steady_clock::time_point last_spider_bootstrap_{};  // epoch = never bootstrapped
+    
     // Spider helper methods
     void add_spider_node(const DhtNode& node);
     void add_spider_nodes(const std::vector<DhtNode>& nodes);
