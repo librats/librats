@@ -98,6 +98,13 @@ public:
         ev.events = to_epoll_events(events);
         
         if (epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev) < 0) {
+            // ENOENT is expected during disconnect races —
+            // another thread removed the fd between lookup and modify
+            if (errno == ENOENT) {
+                LOG_POLLER_DEBUG("epoll_ctl MOD: fd " + std::to_string(fd) + 
+                                " already removed (race with disconnect)");
+                return false;
+            }
             LOG_POLLER_ERROR("epoll_ctl MOD failed for fd " + std::to_string(fd) + 
                             ": " + std::string(strerror(errno)));
             return false;
