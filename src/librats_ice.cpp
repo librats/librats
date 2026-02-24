@@ -91,6 +91,10 @@ std::optional<StunMappedAddress> RatsClient::discover_public_address(
     
     if (result.success && result.mapped_address) {
         LOG_INFO("ice", "Discovered public address: " << result.mapped_address->to_string());
+        
+        // Add public IP to our own addresses list to prevent self-connections
+        add_ignored_address(result.mapped_address->address);
+        
         return result.mapped_address;
     }
     
