@@ -542,9 +542,10 @@ private:
     Napi::Value StartMdnsDiscovery(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
         
+        std::string service;
         const char* service_name = nullptr;
         if (info.Length() > 0 && info[0].IsString()) {
-            std::string service = info[0].As<Napi::String>().Utf8Value();
+            service = info[0].As<Napi::String>().Utf8Value();
             service_name = service.c_str();
         }
         
@@ -750,12 +751,13 @@ private:
     Napi::Value DiscoverPublicAddress(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
         
+        std::string server_str;
         const char* server = nullptr;
         uint16_t port = 0;
         int timeout_ms = 5000;
-        
+
         if (info.Length() > 0 && info[0].IsString()) {
-            std::string server_str = info[0].As<Napi::String>().Utf8Value();
+            server_str = info[0].As<Napi::String>().Utf8Value();
             server = server_str.c_str();
         }
         if (info.Length() > 1 && info[1].IsNumber()) {
@@ -976,12 +978,13 @@ private:
         std::string peer_id = info[0].As<Napi::String>().Utf8Value();
         std::string file_path = info[1].As<Napi::String>().Utf8Value();
         
+        std::string remote_name;
         const char* remote_filename = nullptr;
         if (info.Length() > 2 && info[2].IsString()) {
-            std::string remote_name = info[2].As<Napi::String>().Utf8Value();
+            remote_name = info[2].As<Napi::String>().Utf8Value();
             remote_filename = remote_name.c_str();
         }
-        
+
         char* transfer_id = rats_send_file(client_, peer_id.c_str(), file_path.c_str(), remote_filename);
         if (!transfer_id) return env.Null();
         
@@ -1001,12 +1004,13 @@ private:
         std::string peer_id = info[0].As<Napi::String>().Utf8Value();
         std::string directory_path = info[1].As<Napi::String>().Utf8Value();
         
+        std::string remote_name;
         const char* remote_directory_name = nullptr;
         if (info.Length() > 2 && info[2].IsString()) {
-            std::string remote_name = info[2].As<Napi::String>().Utf8Value();
+            remote_name = info[2].As<Napi::String>().Utf8Value();
             remote_directory_name = remote_name.c_str();
         }
-        
+
         int recursive = 1;
         if (info.Length() > 3 && info[3].IsBoolean()) {
             recursive = info[3].As<Napi::Boolean>().Value() ? 1 : 0;
@@ -1090,12 +1094,13 @@ private:
         
         std::string transfer_id = info[0].As<Napi::String>().Utf8Value();
         
+        std::string reason_str;
         const char* reason = nullptr;
         if (info.Length() > 1 && info[1].IsString()) {
-            std::string reason_str = info[1].As<Napi::String>().Utf8Value();
+            reason_str = info[1].As<Napi::String>().Utf8Value();
             reason = reason_str.c_str();
         }
-        
+
         rats_error_t result = rats_reject_file_transfer(client_, transfer_id.c_str(), reason);
         return Napi::Boolean::New(env, result == RATS_SUCCESS);
     }
