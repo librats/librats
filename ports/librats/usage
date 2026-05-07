@@ -1,0 +1,4 @@
+librats provides CMake targets:
+
+    find_package(rats CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE rats::rats)

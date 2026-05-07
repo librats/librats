@@ -1,53 +1,63 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.14)
 
-# Get version from git
-find_package(Git QUIET)
-if(GIT_FOUND)
-    # Get the current git tag/commit
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_DESCRIBE
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    
-    # Extract version from git tag (format: v1.2.3 or 1.2.3)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_TAG
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    
-    # Get commit count (revision number)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_REVISION_COUNT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    
-    # Parse version components
-    if(GIT_TAG MATCHES "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)")
-        set(VERSION_MAJOR ${CMAKE_MATCH_1})
-        set(VERSION_MINOR ${CMAKE_MATCH_2})
-        set(VERSION_PATCH ${CMAKE_MATCH_3})
+# Allow consumers (vcpkg/Conan/source tarballs) to bypass git lookup by
+# passing -DRATS_VERSION_OVERRIDE=X.Y.Z on the configure line.
+if(DEFINED RATS_VERSION_OVERRIDE AND RATS_VERSION_OVERRIDE MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+    set(VERSION_MAJOR ${CMAKE_MATCH_1})
+    set(VERSION_MINOR ${CMAKE_MATCH_2})
+    set(VERSION_PATCH ${CMAKE_MATCH_3})
+    set(GIT_DESCRIBE "${RATS_VERSION_OVERRIDE}")
+    set(GIT_REVISION_COUNT 0)
+else()
+    # Get version from git
+    find_package(Git QUIET)
+    if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+        # Get the current git tag/commit
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE GIT_DESCRIBE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+
+        # Extract version from git tag (format: v1.2.3 or 1.2.3)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE GIT_TAG
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+
+        # Get commit count (revision number)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE GIT_REVISION_COUNT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+
+        # Parse version components
+        if(GIT_TAG MATCHES "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+            set(VERSION_MAJOR ${CMAKE_MATCH_1})
+            set(VERSION_MINOR ${CMAKE_MATCH_2})
+            set(VERSION_PATCH ${CMAKE_MATCH_3})
+        else()
+            # Fallback to default version
+            set(VERSION_MAJOR 1)
+            set(VERSION_MINOR 0)
+            set(VERSION_PATCH 0)
+        endif()
     else()
-        # Fallback to default version
+        # Fallback when git is not available (e.g. source tarball builds)
         set(VERSION_MAJOR 1)
         set(VERSION_MINOR 0)
         set(VERSION_PATCH 0)
+        set(GIT_DESCRIBE "unknown")
+        set(GIT_REVISION_COUNT 0)
     endif()
-else()
-    # Fallback when git is not available
-    set(VERSION_MAJOR 1)
-    set(VERSION_MINOR 0)
-    set(VERSION_PATCH 0)
-    set(GIT_DESCRIBE "unknown")
-    set(GIT_REVISION_COUNT 0)
 endif()
 
 # Set build number to revision count (commit count)
@@ -279,9 +289,21 @@ endif()
 # Enable Position Independent Code for static library (required for linking into shared objects)
 set_target_properties(rats PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Include directories
-target_include_directories(rats PUBLIC ${PROJECT_BINARY_DIR}/src src)
-target_include_directories(rats PUBLIC ${PROJECT_SOURCE_DIR}/src/crypto)
+# GNUInstallDirs supplies CMAKE_INSTALL_INCLUDEDIR / LIBDIR / BINDIR. Include
+# it unconditionally so the INSTALL_INTERFACE generator expression below
+# resolves correctly even when RATS_INSTALL is later disabled.
+include(GNUInstallDirs)
+
+# Include directories. INSTALL_INTERFACE entries are only consumed via the
+# exported target, so they are safe to declare even when RATS_INSTALL is OFF.
+target_include_directories(rats
+    PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/crypto>
+        $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/src>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/librats>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/librats/crypto>
+)
 
 # Find and link threading support
 find_package(Threads REQUIRED)
@@ -513,4 +535,56 @@ endif()
 # Examples (basic examples always built; BT examples require RATS_SEARCH_FEATURES)
 if(RATS_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+
+# -----------------------------------------------------------------------------
+# Install / export configuration (consumed by vcpkg, Conan, and find_package)
+# -----------------------------------------------------------------------------
+option(RATS_INSTALL "Generate install rules and package config" ON)
+
+if(RATS_INSTALL)
+    include(CMakePackageConfigHelpers)
+
+    install(TARGETS rats
+        EXPORT ratsTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats
+    )
+
+    # Headers form a tightly coupled graph (librats.h pulls in dht/krpc/bencode/
+    # bt_*/storage/io_poller/etc.), so install the whole header tree under
+    # include/librats/. .cpp / .c / .in files are excluded.
+    install(DIRECTORY ${PROJECT_SOURCE_DIR}/src/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats
+        FILES_MATCHING
+            PATTERN "*.h"
+            PATTERN "*.hpp"
+    )
+    install(FILES ${PROJECT_BINARY_DIR}/src/version.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats
+    )
+
+    install(EXPORT ratsTargets
+        FILE ratsTargets.cmake
+        NAMESPACE rats::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rats
+    )
+
+    configure_package_config_file(
+        ${PROJECT_SOURCE_DIR}/cmake/ratsConfig.cmake.in
+        ${PROJECT_BINARY_DIR}/cmake/ratsConfig.cmake
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rats
+    )
+    write_basic_package_version_file(
+        ${PROJECT_BINARY_DIR}/cmake/ratsConfigVersion.cmake
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion
+    )
+    install(FILES
+        ${PROJECT_BINARY_DIR}/cmake/ratsConfig.cmake
+        ${PROJECT_BINARY_DIR}/cmake/ratsConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rats
+    )
 endif()
