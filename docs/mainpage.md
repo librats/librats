@@ -86,7 +86,7 @@ client.on_topic_message("chat", [](const std::string& peer_id,
 ```
 
 ### File Transfer
-Chunked file transfers with resume capability:
+Streaming file and directory transfers with integrity verification:
 ```cpp
 client.send_file("peer_id", "/path/to/file.txt");
 client.send_directory("peer_id", "/path/to/folder");
