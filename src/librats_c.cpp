@@ -679,42 +679,36 @@ char* rats_send_directory(rats_client_t handle, const char* peer_id, const char*
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
     
     std::string remote_name = remote_directory_name ? std::string(remote_directory_name) : std::string("");
-    std::string transfer_id = wrap->client->send_directory(std::string(peer_id), std::string(directory_path), remote_name, recursive != 0);
-    
+    (void)recursive; // directory transfers are always recursive
+    std::string transfer_id = wrap->client->send_directory(std::string(peer_id), std::string(directory_path), remote_name);
+
     return transfer_id.empty() ? nullptr : rats_strdup_owned(transfer_id);
 }
 
+// Pull-style requests are not supported in this version; transfers are push-only.
 char* rats_request_file(rats_client_t handle, const char* peer_id, const char* remote_file_path, const char* local_path) {
-    if (!handle || !peer_id || !remote_file_path || !local_path) return nullptr;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    
-    std::string transfer_id = wrap->client->request_file(std::string(peer_id), std::string(remote_file_path), std::string(local_path));
-    
-    return transfer_id.empty() ? nullptr : rats_strdup_owned(transfer_id);
+    (void)handle; (void)peer_id; (void)remote_file_path; (void)local_path;
+    return nullptr;
 }
 
 char* rats_request_directory(rats_client_t handle, const char* peer_id, const char* remote_directory_path, const char* local_directory_path, int recursive) {
-    if (!handle || !peer_id || !remote_directory_path || !local_directory_path) return nullptr;
-    rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    
-    std::string transfer_id = wrap->client->request_directory(std::string(peer_id), std::string(remote_directory_path), std::string(local_directory_path), recursive != 0);
-    
-    return transfer_id.empty() ? nullptr : rats_strdup_owned(transfer_id);
+    (void)handle; (void)peer_id; (void)remote_directory_path; (void)local_directory_path; (void)recursive;
+    return nullptr;
 }
 
 rats_error_t rats_accept_directory_transfer(rats_client_t handle, const char* transfer_id, const char* local_path) {
     if (!handle || !transfer_id || !local_path) return RATS_ERROR_INVALID_PARAMETER;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    
-    return wrap->client->accept_directory_transfer(std::string(transfer_id), std::string(local_path)) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+
+    return wrap->client->accept_file_transfer(std::string(transfer_id), std::string(local_path)) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
 }
 
 rats_error_t rats_reject_directory_transfer(rats_client_t handle, const char* transfer_id, const char* reason) {
     if (!handle || !transfer_id) return RATS_ERROR_INVALID_PARAMETER;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
-    
+
     std::string reject_reason = reason ? std::string(reason) : std::string("");
-    return wrap->client->reject_directory_transfer(std::string(transfer_id), reject_reason) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
+    return wrap->client->reject_file_transfer(std::string(transfer_id), reject_reason) ? RATS_SUCCESS : RATS_ERROR_OPERATION_FAILED;
 }
 
 rats_error_t rats_pause_file_transfer(rats_client_t handle, const char* transfer_id) {
@@ -768,44 +762,33 @@ void rats_set_file_request_callback(rats_client_t handle, rats_file_request_cb c
     wrap->file_request_ud = user_data;
     
     if (cb) {
-        wrap->client->on_file_request([wrap](const std::string& peer_id, const std::string& file_path, const std::string& transfer_id) {
+        // Fires for every incoming offer (file or directory). The C app should
+        // then call rats_accept_file_transfer()/rats_reject_file_transfer().
+        wrap->client->on_file_transfer_request([wrap](const IncomingTransferOffer& offer) {
             if (wrap->file_request_cb) {
-                wrap->file_request_cb(wrap->file_request_ud, peer_id.c_str(), transfer_id.c_str(), file_path.c_str(), "");
+                wrap->file_request_cb(wrap->file_request_ud, offer.peer_id.c_str(),
+                                      offer.transfer_id.c_str(), "", offer.name.c_str());
             }
-            return true; // Accept the file request
         });
     }
 }
 
+// Directory offers arrive through the unified file-request callback above;
+// this setter is kept for ABI compatibility and simply records the callback.
 void rats_set_directory_request_callback(rats_client_t handle, rats_directory_request_cb cb, void* user_data) {
     if (!handle) return;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
     wrap->directory_request_cb = cb;
     wrap->directory_request_ud = user_data;
-    
-    if (cb) {
-        wrap->client->on_directory_request([wrap](const std::string& peer_id, const std::string& directory_path, bool recursive, const std::string& transfer_id) {
-            if (wrap->directory_request_cb) {
-                wrap->directory_request_cb(wrap->directory_request_ud, peer_id.c_str(), transfer_id.c_str(), directory_path.c_str(), "");
-            }
-            return true; // Accept the directory request
-        });
-    }
 }
 
+// Directory progress arrives through the unified file-progress callback above;
+// this setter is kept for ABI compatibility and simply records the callback.
 void rats_set_directory_progress_callback(rats_client_t handle, rats_directory_progress_cb cb, void* user_data) {
     if (!handle) return;
     rats_client_wrapper* wrap = static_cast<rats_client_wrapper*>(handle);
     wrap->directory_progress_cb = cb;
     wrap->directory_progress_ud = user_data;
-    
-    if (cb) {
-        wrap->client->on_directory_transfer_progress([wrap](const std::string& transfer_id, const std::string& current_file, uint64_t files_completed, uint64_t total_files, uint64_t bytes_completed, uint64_t total_bytes) {
-            if (wrap->directory_progress_cb) {
-                wrap->directory_progress_cb(wrap->directory_progress_ud, transfer_id.c_str(), static_cast<int>(files_completed), static_cast<int>(total_files), current_file.c_str());
-            }
-        });
-    }
 }
 
 // Peer information

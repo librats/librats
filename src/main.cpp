@@ -196,48 +196,17 @@ int main(int argc, char* argv[]) {
             }
         });
         
-        // Incoming file transfer request callback
-        client.on_file_transfer_request([](const std::string& peer_id, const librats::FileMetadata& metadata, const std::string& transfer_id) {
-            LOG_MAIN_INFO("=== Incoming File Transfer Request ===");
-            LOG_MAIN_INFO("From peer: " << peer_id);
-            LOG_MAIN_INFO("File: " << metadata.filename);
-            LOG_MAIN_INFO("Size: " << metadata.file_size << " bytes");
-            LOG_MAIN_INFO("Transfer ID: " << transfer_id);
-            LOG_MAIN_INFO("Auto-accepting file transfer...");
-            return true; // Auto-accept for now - could be made interactive
-        });
-        
-        // Directory transfer progress callback
-        client.on_directory_transfer_progress([](const std::string& transfer_id, const std::string& current_file, 
-                                                uint64_t files_completed, uint64_t total_files, 
-                                                uint64_t bytes_completed, uint64_t total_bytes) {
-            double file_progress = total_files > 0 ? (double(files_completed) / total_files) * 100.0 : 0.0;
-            double byte_progress = total_bytes > 0 ? (double(bytes_completed) / total_bytes) * 100.0 : 0.0;
-            LOG_MAIN_INFO("Directory transfer " << transfer_id << ": " << files_completed << "/" << total_files 
-                         << " files (" << file_progress << "%), " << bytes_completed << "/" << total_bytes 
-                         << " bytes (" << byte_progress << "%) - Current: " << current_file);
-        });
-        
-        // File request callback (when receiving file requests)
-        client.on_file_request([](const std::string& peer_id, const std::string& file_path, const std::string& transfer_id) {
-            LOG_MAIN_INFO("=== Incoming File Request ===");
-            LOG_MAIN_INFO("From peer: " << peer_id);
-            LOG_MAIN_INFO("Requested file: " << file_path);
-            LOG_MAIN_INFO("Transfer ID: " << transfer_id);
-            LOG_MAIN_INFO("Auto-accepting file request...");
-            return true; // Auto-accept for now - could be made interactive
-        });
-        
-        // Directory request callback (when receiving directory requests)
-        client.on_directory_request([](const std::string& peer_id, const std::string& directory_path, 
-                                      bool recursive, const std::string& transfer_id) {
-            LOG_MAIN_INFO("=== Incoming Directory Request ===");
-            LOG_MAIN_INFO("From peer: " << peer_id);
-            LOG_MAIN_INFO("Requested directory: " << directory_path);
-            LOG_MAIN_INFO("Recursive: " << (recursive ? "yes" : "no"));
-            LOG_MAIN_INFO("Transfer ID: " << transfer_id);
-            LOG_MAIN_INFO("Auto-accepting directory request...");
-            return true; // Auto-accept for now - could be made interactive
+        // Incoming transfer offer (file or directory) - auto-accept for the demo.
+        client.on_file_transfer_request([&client](const librats::IncomingTransferOffer& offer) {
+            LOG_MAIN_INFO("=== Incoming Transfer Offer ===");
+            LOG_MAIN_INFO("From peer: " << offer.peer_id);
+            LOG_MAIN_INFO((offer.is_directory ? "Directory: " : "File: ") << offer.name);
+            LOG_MAIN_INFO("Total size: " << offer.total_size << " bytes, "
+                          << offer.files.size() << " file(s)");
+            LOG_MAIN_INFO("Transfer ID: " << offer.transfer_id);
+            std::string dest = "./" + offer.name;
+            LOG_MAIN_INFO("Auto-accepting to '" << dest << "'");
+            client.accept_file_transfer(offer.transfer_id, dest);
         });
         
         LOG_MAIN_INFO("File transfer callbacks configured");
@@ -614,11 +583,10 @@ int main(int argc, char* argv[]) {
                 if (!client.is_file_transfer_available()) {
                     LOG_MAIN_ERROR("File transfer not available");
                 } else {
-                    bool recursive = (recursive_str.empty() || recursive_str == "true" || recursive_str == "1");
-                    LOG_MAIN_INFO("Sending directory '" << dir_path << "' to peer " << peer_hash 
-                                 << (remote_name.empty() ? "" : " as '" + remote_name + "'")
-                                 << " (recursive: " << (recursive ? "yes" : "no") << ")");
-                    std::string transfer_id = client.send_directory(peer_hash, dir_path, remote_name, recursive);
+                    (void)recursive_str; // directory transfers are always recursive
+                    LOG_MAIN_INFO("Sending directory '" << dir_path << "' to peer " << peer_hash
+                                 << (remote_name.empty() ? "" : " as '" + remote_name + "'"));
+                    std::string transfer_id = client.send_directory(peer_hash, dir_path, remote_name);
                     if (!transfer_id.empty()) {
                         LOG_MAIN_INFO("Directory transfer initiated with ID: " << transfer_id);
                     } else {
@@ -637,14 +605,8 @@ int main(int argc, char* argv[]) {
                 if (!client.is_file_transfer_available()) {
                     LOG_MAIN_ERROR("File transfer not available");
                 } else {
-                    LOG_MAIN_INFO("Requesting file '" << remote_path << "' from peer " << peer_hash 
-                                 << " to save as '" << local_path << "'");
-                    std::string transfer_id = client.request_file(peer_hash, remote_path, local_path);
-                    if (!transfer_id.empty()) {
-                        LOG_MAIN_INFO("File request initiated with ID: " << transfer_id);
-                    } else {
-                        LOG_MAIN_ERROR("Failed to initiate file request");
-                    }
+                    (void)remote_path; (void)local_path;
+                    LOG_MAIN_ERROR("Pull-style requests are not supported; ask the peer to use file_send");
                 }
             } else {
                 std::cout << "Usage: file_request <peer_hash> <remote_path> <local_path>" << std::endl;
@@ -658,15 +620,8 @@ int main(int argc, char* argv[]) {
                 if (!client.is_file_transfer_available()) {
                     LOG_MAIN_ERROR("File transfer not available");
                 } else {
-                    bool recursive = (recursive_str.empty() || recursive_str == "true" || recursive_str == "1");
-                    LOG_MAIN_INFO("Requesting directory '" << remote_path << "' from peer " << peer_hash 
-                                 << " to save as '" << local_path << "' (recursive: " << (recursive ? "yes" : "no") << ")");
-                    std::string transfer_id = client.request_directory(peer_hash, remote_path, local_path, recursive);
-                    if (!transfer_id.empty()) {
-                        LOG_MAIN_INFO("Directory request initiated with ID: " << transfer_id);
-                    } else {
-                        LOG_MAIN_ERROR("Failed to initiate directory request");
-                    }
+                    (void)remote_path; (void)local_path; (void)recursive_str;
+                    LOG_MAIN_ERROR("Pull-style requests are not supported; ask the peer to use dir_send");
                 }
             } else {
                 std::cout << "Usage: dir_request <peer_hash> <remote_path> <local_path> [recursive]" << std::endl;
@@ -733,7 +688,7 @@ int main(int argc, char* argv[]) {
                         std::cout << std::endl;
                         std::cout << "  Progress: " << progress->get_completion_percentage() << "%" << std::endl;
                         std::cout << "  Bytes: " << progress->bytes_transferred << "/" << progress->total_bytes << std::endl;
-                        std::cout << "  Chunks: " << progress->chunks_completed << "/" << progress->total_chunks << std::endl;
+                        std::cout << "  Files: " << progress->files_completed << "/" << progress->total_files << std::endl;
                         std::cout << "  Rate: " << (progress->transfer_rate_bps / 1024.0) << " KB/s" << std::endl;
                         std::cout << "  Average Rate: " << (progress->average_rate_bps / 1024.0) << " KB/s" << std::endl;
                         std::cout << "  Elapsed: " << progress->get_elapsed_time().count() << " ms" << std::endl;

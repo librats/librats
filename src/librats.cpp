@@ -652,6 +652,9 @@ void RatsClient::handle_disconnect(socket_t socket) {
         if (gossipsub_) {
             gossipsub_->handle_peer_disconnected(peer_id);
         }
+        if (file_transfer_manager_) {
+            file_transfer_manager_->on_peer_disconnected(peer_id);
+        }
         if (should_schedule_reconnect && running_.load()) {
             schedule_reconnect(peer_copy_for_reconnect);
         }

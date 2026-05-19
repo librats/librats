@@ -1166,185 +1166,88 @@ public:
     // =========================================================================
     // File Transfer API
     // =========================================================================
-    
+    //
+    // Streams files and directory trees to connected peers. A transfer is
+    // offered to the peer, who accepts (choosing a destination) or rejects it.
+    // See file_transfer.h for the FileTransferManager that implements it.
+
     /**
-     * Get the file transfer manager instance
-     * @return Reference to the file transfer manager
+     * Get the file transfer manager instance.
      */
     FileTransferManager& get_file_transfer_manager();
-    
+
     /**
-     * Check if file transfer is available
-     * @return true if file transfer manager is initialized
+     * Check whether the file transfer manager is initialized.
      */
     bool is_file_transfer_available() const;
-    
-    // Sending and Requesting
+
     /**
-     * Send a file to a peer
-     * @param peer_id Target peer ID
-     * @param file_path Local file path to send
-     * @param remote_filename Optional remote filename (default: use local name)
-     * @return Transfer ID if successful, empty string if failed
+     * Send a file to a peer.
+     * @param peer_id        Target peer ID
+     * @param file_path      Local file to send
+     * @param remote_filename Optional name to present to the peer
+     * @return Transfer ID, or empty string on immediate failure
      */
-    std::string send_file(const std::string& peer_id, const std::string& file_path, 
-                         const std::string& remote_filename = "");
-    
+    std::string send_file(const std::string& peer_id, const std::string& file_path,
+                          const std::string& remote_filename = "");
+
     /**
-     * Send an entire directory to a peer
-     * @param peer_id Target peer ID
-     * @param directory_path Local directory path to send
-     * @param remote_directory_name Optional remote directory name
-     * @param recursive Whether to include subdirectories (default: true)
-     * @return Transfer ID if successful, empty string if failed
+     * Send a directory tree (recursively) to a peer.
+     * @param peer_id        Target peer ID
+     * @param directory_path Local directory to send
+     * @param remote_name    Optional name to present to the peer
+     * @return Transfer ID, or empty string on immediate failure
      */
     std::string send_directory(const std::string& peer_id, const std::string& directory_path,
-                              const std::string& remote_directory_name = "", bool recursive = true);
-    
+                               const std::string& remote_name = "");
+
     /**
-     * Request a file from a remote peer
-     * @param peer_id Target peer ID
-     * @param remote_file_path Path to file on remote peer
-     * @param local_path Local path where file should be saved
-     * @return Transfer ID if successful, empty string if failed
-     */
-    std::string request_file(const std::string& peer_id, const std::string& remote_file_path,
-                            const std::string& local_path);
-    
-    /**
-     * Request a directory from a remote peer
-     * @param peer_id Target peer ID
-     * @param remote_directory_path Path to directory on remote peer
-     * @param local_directory_path Local path where directory should be saved
-     * @param recursive Whether to include subdirectories (default: true)
-     * @return Transfer ID if successful, empty string if failed
-     */
-    std::string request_directory(const std::string& peer_id, const std::string& remote_directory_path,
-                                 const std::string& local_directory_path, bool recursive = true);
-    
-    // Accept/Reject Operations
-    /**
-     * Accept an incoming file transfer
-     * @param transfer_id Transfer identifier from request
-     * @param local_path Local path where file should be saved
-     * @return true if accepted successfully
+     * Accept an incoming transfer. For a file, local_path is the destination
+     * file path; for a directory, it is the destination directory.
      */
     bool accept_file_transfer(const std::string& transfer_id, const std::string& local_path);
-    
+
     /**
-     * Reject an incoming file transfer
-     * @param transfer_id Transfer identifier from request
-     * @param reason Optional reason for rejection
-     * @return true if rejected successfully
+     * Reject an incoming transfer.
      */
     bool reject_file_transfer(const std::string& transfer_id, const std::string& reason = "");
-    
-    /**
-     * Accept an incoming directory transfer
-     * @param transfer_id Transfer identifier from request
-     * @param local_path Local path where directory should be saved
-     * @return true if accepted successfully
-     */
-    bool accept_directory_transfer(const std::string& transfer_id, const std::string& local_path);
-    
-    /**
-     * Reject an incoming directory transfer
-     * @param transfer_id Transfer identifier from request
-     * @param reason Optional reason for rejection
-     * @return true if rejected successfully
-     */
-    bool reject_directory_transfer(const std::string& transfer_id, const std::string& reason = "");
-    
-    // Transfer Control
-    /**
-     * Pause an active file transfer
-     * @param transfer_id Transfer to pause
-     * @return true if paused successfully
-     */
+
+    /** Pause an active transfer (either direction). */
     bool pause_file_transfer(const std::string& transfer_id);
-    
-    /**
-     * Resume a paused file transfer
-     * @param transfer_id Transfer to resume
-     * @return true if resumed successfully
-     */
+
+    /** Resume a paused transfer. */
     bool resume_file_transfer(const std::string& transfer_id);
-    
-    /**
-     * Cancel an active or paused file transfer
-     * @param transfer_id Transfer to cancel
-     * @return true if cancelled successfully
-     */
+
+    /** Cancel an active or paused transfer. */
     bool cancel_file_transfer(const std::string& transfer_id);
-    
-    // Information and Monitoring
-    /**
-     * Get file transfer progress information
-     * @param transfer_id Transfer to query
-     * @return Progress information or nullptr if not found
-     */
+
+    /** Get a progress snapshot, or nullptr if the transfer is unknown. */
     std::shared_ptr<FileTransferProgress> get_file_transfer_progress(const std::string& transfer_id) const;
-    
-    /**
-     * Get all active file transfers
-     * @return Vector of transfer progress objects
-     */
+
+    /** Get progress snapshots for all non-finished transfers. */
     std::vector<std::shared_ptr<FileTransferProgress>> get_active_file_transfers() const;
-    
-    /**
-     * Get file transfer statistics
-     * @return JSON object with transfer statistics
-     */
+
+    /** Get aggregate file transfer statistics as JSON. */
     nlohmann::json get_file_transfer_statistics() const;
-    
-    /**
-     * Set file transfer configuration
-     * @param config Transfer configuration settings
-     */
+
+    /** Replace the file transfer configuration. */
     void set_file_transfer_config(const FileTransferConfig& config);
-    
-    /**
-     * Get current file transfer configuration
-     * @return Current configuration settings
-     */
+
+    /** Get the current file transfer configuration. */
     FileTransferConfig get_file_transfer_config() const;
-    
-    // Event Handlers
+
+    /** Set the progress callback (fires for both directions). */
+    void on_file_transfer_progress(TransferProgressCallback callback);
+
+    /** Set the completion callback (fires once per transfer). */
+    void on_file_transfer_completed(TransferCompletedCallback callback);
+
     /**
-     * Set file transfer progress callback
-     * @param callback Function to call with progress updates
+     * Set the incoming-offer callback. The handler should call
+     * accept_file_transfer()/reject_file_transfer(). Without it, offers are
+     * auto-rejected.
      */
-    void on_file_transfer_progress(FileTransferProgressCallback callback);
-    
-    /**
-     * Set file transfer completion callback
-     * @param callback Function to call when transfers complete
-     */
-    void on_file_transfer_completed(FileTransferCompletedCallback callback);
-    
-    /**
-     * Set incoming file transfer request callback
-     * @param callback Function to call when receiving transfer requests
-     */
-    void on_file_transfer_request(FileTransferRequestCallback callback);
-    
-    /**
-     * Set directory transfer progress callback
-     * @param callback Function to call with directory transfer progress
-     */
-    void on_directory_transfer_progress(DirectoryTransferProgressCallback callback);
-    
-    /**
-     * Set file request callback (called when receiving file requests)
-     * @param callback Function to call when receiving file requests
-     */
-    void on_file_request(FileRequestCallback callback);
-    
-    /**
-     * Set directory request callback (called when receiving directory requests)
-     * @param callback Function to call when receiving directory requests
-     */
-    void on_directory_request(DirectoryRequestCallback callback);
+    void on_file_transfer_request(TransferOfferCallback callback);
 
     // =========================================================================
     // ICE (NAT Traversal) API
