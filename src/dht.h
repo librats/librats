@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <random>
 #include <condition_variable>
 
 // Hash specialization for Peer and NodeId (must be defined before use in unordered_map/set)
@@ -226,9 +227,33 @@ public:
     
     /**
      * Get our node ID
-     * @return The node ID
+     * @return The node ID (returned by value; the ID may be regenerated at runtime
+     *         when our external IP is learned, see set_external_ip)
      */
-    const NodeId& get_node_id() const { return node_id_; }
+    NodeId get_node_id() const { return node_id_; }
+
+    /**
+     * Set our external (public) IP address and regenerate the node ID from it per BEP 42.
+     * IPv4/IPv6 node IDs must be derived from the matching-family external address, so this
+     * is a no-op if the address family does not match this instance. Safe to call at runtime;
+     * the routing table is re-bucketed against the new ID. Non-public/invalid addresses are ignored.
+     * @param ip External IP address as seen by the network (e.g. from STUN or DHT "ip" voting)
+     */
+    void set_external_ip(const std::string& ip);
+
+    /**
+     * Get the external address currently used to derive our node ID ("" if none/random).
+     */
+    std::string get_external_address() const;
+
+    /**
+     * BEP 42 helpers (public for testing / explicit use).
+     * generate_node_id_from_ip: build an IP-derived node ID (random where BEP 42 allows).
+     * verify_node_id_for_ip: check whether a node ID is valid for the given source IP
+     *   (always true for non-public IPs, which cannot be verified).
+     */
+    static bool generate_node_id_from_ip(const std::string& ip, NodeId& out, std::mt19937& gen);
+    static bool verify_node_id_for_ip(const NodeId& id, const std::string& ip);
     
     /**
      * Get number of nodes in routing table
@@ -384,10 +409,22 @@ private:
     std::string bind_address_;
     std::string data_directory_;
     AddressFamily address_family_;  // IPv4 or IPv6 (this node's Kademlia network)
-    NodeId node_id_;
+    NodeId node_id_;                // protected by routing_table_mutex_ for writes; lock-free reads are benign
     socket_t socket_;
     std::atomic<bool> running_;
-    
+
+    // BEP 42: external-IP-derived node ID.
+    // We learn our external address from the top-level "ip" field other nodes echo back in
+    // their responses, and vote across distinct responders before trusting it (so a single
+    // malicious node cannot poison our node ID). external_address_/voting are guarded by
+    // external_ip_mutex_, which is NEVER held while acquiring any other DHT mutex.
+    std::string external_address_;                          // IP currently used to derive node_id_ ("" = random)
+    std::unordered_map<std::string, int> external_ip_votes_;// reported external IP -> vote count
+    std::unordered_set<std::string> external_ip_voters_;    // responder IPs already counted (dedup)
+    mutable std::mutex external_ip_mutex_;                  // Lock order: independent (never nested with others)
+    static constexpr int EXTERNAL_IP_VOTE_THRESHOLD = 5;    // distinct responders that must agree
+    static constexpr size_t MAX_EXTERNAL_IP_VOTERS = 1000;  // cap voter set to bound memory
+
     // ============================================================================
     // MUTEX LOCK ORDER - CRITICAL: Always acquire mutexes in this order to avoid deadlocks
     // ============================================================================
@@ -572,6 +609,10 @@ private:
     int get_bucket_index(const NodeId& id);
     
     NodeId generate_node_id();
+    // BEP 42 internals
+    static bool is_public_address(const std::string& ip);
+    void rebuild_routing_table_unlocked();  // re-bucket all nodes after node_id_ changed (routing_table_mutex_ held)
+    void maybe_update_external_ip(const std::string& reported_ip, const Peer& responder);
     NodeId xor_distance(const NodeId& a, const NodeId& b);
     bool is_closer(const NodeId& a, const NodeId& b, const NodeId& target);
     

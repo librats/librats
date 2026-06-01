@@ -240,8 +240,18 @@ BencodeValue KrpcProtocol::encode_response(const KrpcMessage& message) {
     if (!message.token.empty()) {
         response["token"] = BencodeValue(message.token);
     }
-    
+
     root["r"] = response;
+
+    // BEP 42: echo the requester's external address as a top-level "ip" field
+    // (compact 6-byte IPv4 / 18-byte IPv6 ip+port).
+    if (!message.external_ip.empty()) {
+        std::string compact = compact_peer_info(Peer(message.external_ip, message.external_port));
+        if (!compact.empty()) {
+            root["ip"] = BencodeValue(compact);
+        }
+    }
+
     return root;
 }
 
@@ -404,7 +414,16 @@ std::unique_ptr<KrpcMessage> KrpcProtocol::decode_response(const BencodeValue& d
     if (response.has_key("token")) {
         message->token = response["token"].as_string();
     }
-    
+
+    // BEP 42: top-level "ip" field tells us our external address as the responder sees it.
+    if (data.has_key("ip")) {
+        auto endpoints = parse_compact_peer_info(data["ip"].as_string());
+        if (!endpoints.empty()) {
+            message->external_ip = endpoints[0].ip;
+            message->external_port = endpoints[0].port;
+        }
+    }
+
     return message;
 }
 

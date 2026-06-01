@@ -996,7 +996,14 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
 
 void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sender) {
     LOG_DHT_DEBUG("Handling KRPC response from " << sender.ip << ":" << sender.port);
-    
+
+    // BEP 42: nodes echo our external address back in the top-level "ip" field. Responses
+    // here are always replies to queries we sent, so the source is a node we chose to contact;
+    // we still require a consensus of distinct responders before regenerating our node ID.
+    if (!message.external_ip.empty()) {
+        maybe_update_external_ip(message.external_ip, sender);
+    }
+
     // Check if this is a ping verification response before normal processing
     handle_ping_verification_response(message.transaction_id, message.response_id, sender);
     
@@ -1093,7 +1100,18 @@ void DhtClient::handle_krpc_error(const KrpcMessage& message, const Peer& sender
 
 // KRPC sending functions
 bool DhtClient::send_krpc_message(const KrpcMessage& message, const Peer& peer) {
-    auto data = KrpcProtocol::encode_message(message);
+    // BEP 42: stamp the requester's external address into every response we send so the
+    // remote node can derive an IP-based node ID. Only copy the message when needed.
+    const KrpcMessage* out = &message;
+    KrpcMessage stamped;
+    if (message.type == KrpcMessageType::Response && message.external_ip.empty()) {
+        stamped = message;
+        stamped.external_ip = peer.ip;
+        stamped.external_port = peer.port;
+        out = &stamped;
+    }
+
+    auto data = KrpcProtocol::encode_message(*out);
     if (data.empty()) {
         LOG_DHT_ERROR("Failed to encode KRPC message");
         return false;
@@ -1172,12 +1190,212 @@ NodeId DhtClient::generate_node_id() {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, 255);
-    
+
     for (size_t i = 0; i < NODE_ID_SIZE; ++i) {
         id[i] = dis(gen);
     }
-    
+
     return id;
+}
+
+// ============================================================================
+// BEP 42: deriving the node ID from the external IP address
+// ============================================================================
+namespace {
+
+// CRC-32C (Castagnoli) — the polynomial mandated by BEP 42. Standard parameters:
+// reflected, init 0xFFFFFFFF, final XOR 0xFFFFFFFF. Bytes are processed in array order,
+// matching the BEP 42 reference implementation and its published test vectors.
+uint32_t crc32c(const uint8_t* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int k = 0; k < 8; ++k) {
+            crc = (crc & 1u) ? (crc >> 1) ^ 0x82F63B78u : (crc >> 1);
+        }
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+// Mask the leading octets of an IP per BEP 42 (4 octets for IPv4, 8 for IPv6).
+// Returns the number of octets written to `out`, or 0 on a parse failure.
+int masked_octets(const std::string& ip, uint8_t out[8]) {
+    static const uint8_t v4_mask[4] = { 0x03, 0x0f, 0x3f, 0xff };
+    static const uint8_t v6_mask[8] = { 0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff };
+
+    if (network_utils::is_valid_ipv6(ip)) {
+        struct in6_addr addr6;
+        if (inet_pton(AF_INET6, ip.c_str(), &addr6) != 1) return 0;
+        for (int i = 0; i < 8; ++i) out[i] = addr6.s6_addr[i] & v6_mask[i];
+        return 8;
+    }
+
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) return 0;
+    uint32_t h = ntohl(addr.s_addr);
+    uint8_t ipb[4] = {
+        static_cast<uint8_t>((h >> 24) & 0xff), static_cast<uint8_t>((h >> 16) & 0xff),
+        static_cast<uint8_t>((h >> 8) & 0xff),  static_cast<uint8_t>(h & 0xff)
+    };
+    for (int i = 0; i < 4; ++i) out[i] = ipb[i] & v4_mask[i];
+    return 4;
+}
+
+// Compute the 3 deterministic prefix bytes of a BEP 42 node ID for (ip, seed).
+// Only the high 5 bits of prefix[2] are deterministic (the low 3 bits are random in a real ID).
+bool bep42_prefix(const std::string& ip, uint8_t seed, uint8_t prefix[3]) {
+    uint8_t octets[8];
+    int num = masked_octets(ip, octets);
+    if (num == 0) return false;
+    octets[0] |= static_cast<uint8_t>((seed & 0x7) << 5);
+    uint32_t c = crc32c(octets, static_cast<size_t>(num));
+    prefix[0] = static_cast<uint8_t>((c >> 24) & 0xff);
+    prefix[1] = static_cast<uint8_t>((c >> 16) & 0xff);
+    prefix[2] = static_cast<uint8_t>((c >> 8) & 0xf8);
+    return true;
+}
+
+} // namespace
+
+bool DhtClient::is_public_address(const std::string& ip) {
+    if (ip.empty()) return false;
+
+    if (network_utils::is_valid_ipv6(ip)) {
+        struct in6_addr a;
+        if (inet_pton(AF_INET6, ip.c_str(), &a) != 1) return false;
+        const uint8_t* b = a.s6_addr;
+        bool all_zero = true;
+        for (int i = 0; i < 16; ++i) { if (b[i]) { all_zero = false; break; } }
+        if (all_zero) return false;                              // ::  (unspecified)
+        bool loopback = (b[15] == 1);
+        for (int i = 0; i < 15; ++i) { if (b[i]) { loopback = false; break; } }
+        if (loopback) return false;                              // ::1
+        if ((b[0] & 0xfe) == 0xfc) return false;                 // fc00::/7  unique local
+        if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return false; // fe80::/10 link-local
+        if (b[0] == 0xff) return false;                          // ff00::/8  multicast
+        return true;
+    }
+
+    struct in_addr a;
+    if (inet_pton(AF_INET, ip.c_str(), &a) != 1) return false;
+    uint32_t h = ntohl(a.s_addr);
+    uint8_t o1 = static_cast<uint8_t>((h >> 24) & 0xff);
+    uint8_t o2 = static_cast<uint8_t>((h >> 16) & 0xff);
+    if (o1 == 0) return false;                                   // 0.0.0.0/8
+    if (o1 == 127) return false;                                 // loopback
+    if (o1 == 10) return false;                                  // 10.0.0.0/8
+    if (o1 == 172 && o2 >= 16 && o2 <= 31) return false;         // 172.16.0.0/12
+    if (o1 == 192 && o2 == 168) return false;                    // 192.168.0.0/16
+    if (o1 == 169 && o2 == 254) return false;                    // 169.254.0.0/16 link-local
+    if (o1 == 100 && o2 >= 64 && o2 <= 127) return false;        // 100.64.0.0/10 CGNAT
+    if (o1 >= 224) return false;                                 // multicast / reserved
+    return true;
+}
+
+bool DhtClient::generate_node_id_from_ip(const std::string& ip, NodeId& out, std::mt19937& gen) {
+    uint8_t prefix[3];
+    std::uniform_int_distribution<int> dis(0, 255);
+    uint8_t seed = static_cast<uint8_t>(dis(gen));
+    if (!bep42_prefix(ip, seed, prefix)) return false;
+
+    out[0] = prefix[0];
+    out[1] = prefix[1];
+    out[2] = static_cast<uint8_t>(prefix[2] | (dis(gen) & 0x7));  // low 3 bits are random
+    for (int i = 3; i < 19; ++i) out[i] = static_cast<uint8_t>(dis(gen));
+    out[19] = seed;
+    return true;
+}
+
+bool DhtClient::verify_node_id_for_ip(const NodeId& id, const std::string& ip) {
+    // Local/private addresses cannot be verified (their IDs would be "wrong" anyway).
+    if (!is_public_address(ip)) return true;
+    uint8_t prefix[3];
+    if (!bep42_prefix(ip, id[19], prefix)) return true;          // unparseable -> don't reject
+    return id[0] == prefix[0]
+        && id[1] == prefix[1]
+        && (id[2] & 0xf8) == prefix[2];
+}
+
+void DhtClient::rebuild_routing_table_unlocked() {
+    // node_id_ changed; every node's bucket index is now stale. Re-bucket all of them.
+    std::vector<DhtNode> all;
+    for (auto& bucket : routing_table_) {
+        for (auto& node : bucket) all.push_back(std::move(node));
+        bucket.clear();
+    }
+    for (auto& node : all) {
+        int bucket_index = get_bucket_index(node.id);
+        if (bucket_index < 0 || bucket_index >= static_cast<int>(routing_table_.size())) continue;
+        auto& bucket = routing_table_[bucket_index];
+        if (bucket.size() < K_BUCKET_SIZE) bucket.push_back(std::move(node));
+    }
+}
+
+void DhtClient::set_external_ip(const std::string& ip) {
+    // Only public addresses of this instance's family can derive a valid node ID.
+    if (!is_public_address(ip)) return;
+    if (network_utils::is_valid_ipv6(ip) != is_ipv6()) return;
+
+    {
+        std::lock_guard<std::mutex> ext_lock(external_ip_mutex_);
+        if (ip == external_address_) return;  // already using this address
+        external_address_ = ip;
+    }
+
+    std::lock_guard<std::mutex> lock(routing_table_mutex_);
+    // If our current ID already matches this IP, keep it (avoids needless churn).
+    if (verify_node_id_for_ip(node_id_, ip)) {
+        LOG_DHT_DEBUG("External IP " << ip << " already matches current node ID (BEP 42)");
+        return;
+    }
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    NodeId new_id;
+    if (!generate_node_id_from_ip(ip, new_id, gen)) return;
+
+    NodeId old_id = node_id_;
+    node_id_ = new_id;
+    rebuild_routing_table_unlocked();
+    LOG_DHT_INFO("Regenerated DHT node ID from external IP " << ip << " (BEP 42): "
+                 << node_id_to_hex(old_id) << " -> " << node_id_to_hex(new_id));
+}
+
+std::string DhtClient::get_external_address() const {
+    std::lock_guard<std::mutex> lock(external_ip_mutex_);
+    return external_address_;
+}
+
+void DhtClient::maybe_update_external_ip(const std::string& reported_ip, const Peer& responder) {
+    // Only consider public addresses of our own family.
+    if (!is_public_address(reported_ip)) return;
+    if (network_utils::is_valid_ipv6(reported_ip) != is_ipv6()) return;
+
+    std::string winner;
+    {
+        std::lock_guard<std::mutex> lock(external_ip_mutex_);
+        if (reported_ip == external_address_) return;  // already adopted
+
+        // One vote per distinct responder so a single peer cannot force a change.
+        if (external_ip_voters_.size() >= MAX_EXTERNAL_IP_VOTERS) {
+            external_ip_voters_.clear();
+            external_ip_votes_.clear();
+        }
+        if (!external_ip_voters_.insert(responder.ip).second) return;  // this responder already voted
+
+        int votes = ++external_ip_votes_[reported_ip];
+        if (votes >= EXTERNAL_IP_VOTE_THRESHOLD) {
+            winner = reported_ip;
+            external_ip_votes_.clear();
+            external_ip_voters_.clear();
+        }
+    }
+
+    if (!winner.empty()) {
+        LOG_DHT_INFO("External IP consensus reached: " << winner
+                     << " (>= " << EXTERNAL_IP_VOTE_THRESHOLD << " responders agree)");
+        set_external_ip(winner);
+    }
 }
 
 NodeId DhtClient::xor_distance(const NodeId& a, const NodeId& b) {

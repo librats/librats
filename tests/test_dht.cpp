@@ -6,6 +6,7 @@
 #include <chrono>
 #include <vector>
 #include <string>
+#include <random>
 
 using namespace librats;
 
@@ -639,4 +640,75 @@ TEST_F(DhtTest, DualStackSamePortCoexistence) {
     }
 
     v4.stop();
+}
+
+// ============================================================================
+// BEP 42: node ID derived from external IP
+// ============================================================================
+
+// Validate our CRC32C + prefix computation against the official BEP 42 test vectors.
+// Each node ID must verify as valid for the IP it was generated from.
+TEST_F(DhtTest, Bep42OfficialTestVectors) {
+    struct Vec { const char* ip; const char* node_id_hex; };
+    const Vec vectors[] = {
+        {"124.31.75.21", "5fbfbff10c5d6a4ec8a88e4c6ab4c28b95eee401"},
+        {"21.75.31.124", "5a3ce9c14e7a08645677bbd1cfe7d8f956d53256"},
+        {"65.23.51.170", "a5d43220bc8f112a3d426c84764f8c2a1150e616"},
+        {"84.124.73.14", "1b0321dd1bb1fe518101ceef99462b947a01ff41"},
+        {"43.213.53.83", "e56f6cbf5b7c4be0237986d5243b87aa6d51305a"},
+    };
+    for (const auto& v : vectors) {
+        NodeId id = hex_to_node_id(v.node_id_hex);
+        EXPECT_TRUE(DhtClient::verify_node_id_for_ip(id, v.ip))
+            << "vector " << v.ip << " should verify against its published node ID";
+        // The same ID must NOT verify for an unrelated public IP.
+        EXPECT_FALSE(DhtClient::verify_node_id_for_ip(id, "8.8.8.8"))
+            << "vector " << v.ip << " must not verify for a different IP";
+    }
+}
+
+// Generated IDs must always verify for the IP they came from (IPv4 and IPv6).
+TEST_F(DhtTest, Bep42GenerateVerifyRoundTrip) {
+    std::mt19937 gen(0xC0FFEE);
+    const char* ips[] = {"1.2.3.4", "203.0.113.7", "2001:db8::1", "2606:4700:4700::1111"};
+    for (const char* ip : ips) {
+        NodeId id;
+        ASSERT_TRUE(DhtClient::generate_node_id_from_ip(ip, id, gen)) << ip;
+        EXPECT_TRUE(DhtClient::verify_node_id_for_ip(id, ip)) << ip;
+    }
+}
+
+// Non-public addresses cannot be verified, so verify must accept any ID for them.
+TEST_F(DhtTest, Bep42PrivateAddressesAlwaysVerify) {
+    NodeId id = create_test_node_id(0x42);
+    EXPECT_TRUE(DhtClient::verify_node_id_for_ip(id, "192.168.1.10"));
+    EXPECT_TRUE(DhtClient::verify_node_id_for_ip(id, "10.0.0.1"));
+    EXPECT_TRUE(DhtClient::verify_node_id_for_ip(id, "127.0.0.1"));
+    EXPECT_TRUE(DhtClient::verify_node_id_for_ip(id, "::1"));
+}
+
+// set_external_ip regenerates the node ID for a public IP and ignores private ones.
+TEST_F(DhtTest, Bep42SetExternalIpRegeneratesNodeId) {
+    DhtClient client(0, "", "", AddressFamily::IPv4);
+    NodeId before = client.get_node_id();
+
+    // Private IP: ignored, no change, no recorded external address.
+    client.set_external_ip("192.168.0.5");
+    EXPECT_EQ(client.get_node_id(), before);
+    EXPECT_TRUE(client.get_external_address().empty());
+
+    // Public IP: node ID is regenerated and now verifies for that IP.
+    client.set_external_ip("203.0.113.50");
+    NodeId after = client.get_node_id();
+    EXPECT_TRUE(DhtClient::verify_node_id_for_ip(after, "203.0.113.50"));
+    EXPECT_EQ(client.get_external_address(), "203.0.113.50");
+}
+
+// An IPv4 instance must ignore an IPv6 external address (separate Kademlia networks).
+TEST_F(DhtTest, Bep42ExternalIpFamilyMismatchIgnored) {
+    DhtClient client(0, "", "", AddressFamily::IPv4);
+    NodeId before = client.get_node_id();
+    client.set_external_ip("2001:db8::1234");  // IPv6 address on an IPv4 node
+    EXPECT_EQ(client.get_node_id(), before);
+    EXPECT_TRUE(client.get_external_address().empty());
 }

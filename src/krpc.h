@@ -80,6 +80,13 @@ struct KrpcMessage {
     std::vector<KrpcNode> nodes;  // may mix IPv4/IPv6 nodes; encoder splits into nodes/nodes6
     std::vector<Peer> peers;
 
+    // BEP 42: top-level "ip" field (compact ip+port).
+    // On responses we SEND: the requester's external address, so they can learn how the
+    // network sees them and derive a compliant node ID.
+    // On responses we RECEIVE: our own external address as observed by the responder.
+    std::string external_ip;
+    uint16_t external_port = 0;
+
     // For errors
     KrpcErrorCode error_code;
     std::string error_message;
