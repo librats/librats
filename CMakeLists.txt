@@ -212,6 +212,14 @@ set(LIBRARY_SOURCES
     src/ice.cpp
     src/ice.h
     src/librats_ice.cpp
+
+# Automatic port forwarding (UPnP IGD / NAT-PMP)
+    src/port_mapping.h
+    src/upnp.cpp
+    src/upnp.h
+    src/natpmp.cpp
+    src/natpmp.h
+    src/librats_portmap.cpp
 )
 
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
@@ -458,6 +466,8 @@ if(RATS_BUILD_TESTS)
         tests/test_stun.cpp
         tests/test_turn.cpp
         tests/test_ice.cpp
+# Automatic port forwarding tests (UPnP/NAT-PMP)
+        tests/test_portmap.cpp
 # I/O poller abstraction (epoll/kqueue/IOCP)
         tests/test_io_poller.cpp
 # Buffer utilities for file transfer and bittorrent

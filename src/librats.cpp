@@ -166,7 +166,11 @@ bool RatsClient::start() {
     if (gossipsub_ && !gossipsub_->start()) {
         LOG_CLIENT_WARN("Failed to start GossipSub - continuing without it");
     }
-    
+
+    // Start automatic port forwarding (UPnP/NAT-PMP) for the bound listen port.
+    // No-op when disabled; runs discovery/mapping on its own background threads.
+    start_port_mapping();
+
     LOG_CLIENT_INFO("RatsClient started successfully on port " << listen_port_);
     
     // Attempt to reconnect to saved peers
@@ -197,7 +201,11 @@ void RatsClient::stop() {
     }
     
     LOG_CLIENT_INFO("Stopping RatsClient");
-    
+
+    // Remove port mappings and stop UPnP/NAT-PMP backends before tearing down
+    // sockets (best-effort cleanup so we don't leave stale router mappings).
+    stop_port_mapping();
+
     // Stop GossipSub (can broadcast stop message)
     if (gossipsub_) {
         gossipsub_->stop();

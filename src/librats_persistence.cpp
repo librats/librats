@@ -79,8 +79,14 @@ bool RatsClient::load_configuration() {
         if (config.contains("encryption_enabled")) {
             encryption_enabled_ = config.value("encryption_enabled", true);
         }
-        
-        
+
+        // Load automatic port forwarding preference
+        if (config.contains("port_mapping_enabled")) {
+            std::lock_guard<std::mutex> pm_lock(port_mapping_mutex_);
+            port_mapping_config_.enabled = config.value("port_mapping_enabled", true);
+        }
+
+
         // Update last_updated timestamp
         auto now = std::chrono::high_resolution_clock::now();
         auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
@@ -119,6 +125,10 @@ bool RatsClient::save_configuration() {
         config["listen_port"] = listen_port_;
         config["max_peers"] = max_peers_;
         config["encryption_enabled"] = encryption_enabled_;
+        {
+            std::lock_guard<std::mutex> pm_lock(port_mapping_mutex_);
+            config["port_mapping_enabled"] = port_mapping_config_.enabled;
+        }
         // TODO: Re-add when implementing new Noise protocol
         // config["encryption_key"] = get_encryption_key();
         

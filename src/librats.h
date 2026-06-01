@@ -9,6 +9,8 @@
 #include "file_transfer.h" // File transfer functionality
 #include "noise.h" // Noise Protocol encryption
 #include "ice.h"   // ICE-lite NAT traversal
+#include "upnp.h"  // UPnP IGD automatic port forwarding
+#include "natpmp.h" // NAT-PMP automatic port forwarding
 #include "io_poller.h" // Platform-optimal I/O multiplexing
 #include "receive_buffer.h" // Efficient receive buffer for async I/O
 #include "chained_send_buffer.h" // Zero-copy chained send buffer
@@ -1432,6 +1434,50 @@ public:
      */
     void restart_ice();
 
+    // =========================================================================
+    // Automatic Port Forwarding API (UPnP IGD + NAT-PMP)
+    // =========================================================================
+    //
+    // When enabled (the default), RatsClient asks the home router to forward the
+    // TCP listen port on startup, using UPnP and NAT-PMP in parallel (whichever
+    // the router supports wins). Mappings are refreshed automatically and removed
+    // on stop(). This lets peers behind a NAT accept inbound connections without
+    // manual router configuration.
+
+    /**
+     * Enable or disable automatic port forwarding. If toggled while running, the
+     * port mapping backends are started or stopped immediately. The setting is
+     * persisted to config.json.
+     */
+    void set_port_mapping_enabled(bool enabled);
+
+    /// Whether automatic port forwarding is currently enabled.
+    bool is_port_mapping_enabled() const;
+
+    /// Replace the full port mapping configuration (takes effect on next start).
+    void set_port_mapping_config(const PortMappingConfig& config);
+
+    /// Get the current port mapping configuration.
+    PortMappingConfig get_port_mapping_config() const;
+
+    /**
+     * Request an additional port mapping beyond the automatic listen-port mapping
+     * (e.g. a DHT UDP port). Has effect only while port mapping is enabled.
+     */
+    void add_port_mapping(PortMapProtocol protocol, uint16_t port);
+
+    /**
+     * Get the public (external) address discovered by the port mapping backends.
+     * @return {external_ip, external_port} if a mapping is active, otherwise nullopt
+     */
+    std::optional<std::pair<std::string, uint16_t>> get_mapped_public_address() const;
+
+    /**
+     * Register a callback fired whenever a port mapping is established, refreshed,
+     * removed or fails (invoked from a backend worker thread).
+     */
+    void on_port_mapping(PortMapCallback callback);
+
 #ifdef RATS_STORAGE
     // =========================================================================
     // Distributed Storage API (requires RATS_STORAGE)
@@ -1981,7 +2027,22 @@ private:
     
     // ICE manager for NAT traversal
     std::unique_ptr<IceManager> ice_manager_;
-    
+
+    // Automatic port forwarding (UPnP IGD + NAT-PMP). Implemented in librats_portmap.cpp.
+    mutable std::mutex port_mapping_mutex_;        // guards the fields below
+    PortMappingConfig port_mapping_config_;
+    std::unique_ptr<UpnpClient> upnp_client_;
+    std::unique_ptr<NatPmpClient> natpmp_client_;
+    PortMapCallback port_mapping_callback_;
+    std::string mapped_external_ip_;
+    uint16_t mapped_external_port_ = 0;
+
+    // Start/stop the port mapping backends (no-ops if disabled). Called from
+    // start()/stop(); safe to call repeatedly.
+    void start_port_mapping();
+    void stop_port_mapping();
+    void handle_port_mapping_result(const PortMapResult& result);
+
 #ifdef RATS_STORAGE
     // Distributed storage manager (optional, requires RATS_STORAGE)
     std::unique_ptr<StorageManager> storage_manager_;

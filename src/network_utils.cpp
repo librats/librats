@@ -25,6 +25,12 @@
 #include <cstring>
 #include <iostream>
 #include <vector>
+#include <algorithm>
+
+#ifndef _WIN32
+    #include <cstdio>
+    #include <cstdlib>
+#endif
 
 // Network utilities module logging macros
 #define LOG_NETUTILS_DEBUG(message) LOG_DEBUG("network_utils", message)
@@ -390,10 +396,90 @@ std::vector<std::string> get_local_interface_addresses() {
     auto ipv6_addresses = get_local_interface_addresses_v6();
     addresses.insert(addresses.end(), ipv6_addresses.begin(), ipv6_addresses.end());
     
-    LOG_NETUTILS_INFO("Found " << addresses.size() << " total local interface addresses (" 
+    LOG_NETUTILS_INFO("Found " << addresses.size() << " total local interface addresses ("
                       << ipv4_addresses.size() << " IPv4, " << ipv6_addresses.size() << " IPv6)");
-    
+
     return addresses;
+}
+
+namespace {
+
+// Append unique, non-empty entries preserving order
+void append_unique(std::vector<std::string>& out, const std::string& value) {
+    if (value.empty()) return;
+    if (std::find(out.begin(), out.end(), value) == out.end()) {
+        out.push_back(value);
+    }
+}
+
+// Best-effort guess: for each local IPv4 assume the gateway is the .1 host of a
+// /24 network. Covers the overwhelming majority of home routers and serves as a
+// fallback when the OS routing table is unavailable.
+void append_gateway_heuristics(std::vector<std::string>& out) {
+    for (const auto& ip : get_local_interface_addresses_v4()) {
+        if (ip.empty() || ip == "127.0.0.1") continue;
+        auto last_dot = ip.find_last_of('.');
+        if (last_dot == std::string::npos) continue;
+        append_unique(out, ip.substr(0, last_dot) + ".1");
+    }
+}
+
+} // anonymous namespace
+
+std::vector<std::string> get_default_gateways() {
+    std::vector<std::string> gateways;
+
+#ifdef _WIN32
+    ULONG out_buf_len = sizeof(IP_ADAPTER_INFO);
+    std::vector<uint8_t> buffer(out_buf_len);
+    DWORD ret = GetAdaptersInfo(reinterpret_cast<PIP_ADAPTER_INFO>(buffer.data()), &out_buf_len);
+    if (ret == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(out_buf_len);
+        ret = GetAdaptersInfo(reinterpret_cast<PIP_ADAPTER_INFO>(buffer.data()), &out_buf_len);
+    }
+    if (ret == NO_ERROR) {
+        for (PIP_ADAPTER_INFO adapter = reinterpret_cast<PIP_ADAPTER_INFO>(buffer.data());
+             adapter != nullptr; adapter = adapter->Next) {
+            for (const IP_ADDR_STRING* gw = &adapter->GatewayList; gw != nullptr; gw = gw->Next) {
+                std::string gw_ip(gw->IpAddress.String);
+                if (gw_ip != "0.0.0.0") {
+                    append_unique(gateways, gw_ip);
+                }
+            }
+        }
+    } else {
+        LOG_NETUTILS_DEBUG("GetAdaptersInfo failed with error: " << ret);
+    }
+#elif defined(__linux__)
+    // /proc/net/route columns: Iface Destination Gateway Flags ... (hex, little-endian)
+    if (FILE* f = std::fopen("/proc/net/route", "r")) {
+        char line[256];
+        // Skip header line
+        if (std::fgets(line, sizeof(line), f)) {
+            char iface[64];
+            unsigned long dest = 0, gw = 0;
+            while (std::fgets(line, sizeof(line), f)) {
+                if (std::sscanf(line, "%63s %lx %lx", iface, &dest, &gw) == 3) {
+                    if (dest == 0 && gw != 0) {
+                        struct in_addr addr;
+                        addr.s_addr = static_cast<in_addr_t>(gw);
+                        char ip_str[INET_ADDRSTRLEN];
+                        if (inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str))) {
+                            append_unique(gateways, ip_str);
+                        }
+                    }
+                }
+            }
+        }
+        std::fclose(f);
+    }
+#endif
+
+    // Always add heuristics as a fallback so callers have something to try
+    append_gateway_heuristics(gateways);
+
+    LOG_NETUTILS_INFO("Detected " << gateways.size() << " default gateway candidate(s)");
+    return gateways;
 }
 
 } // namespace network_utils
