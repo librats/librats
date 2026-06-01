@@ -1384,6 +1384,10 @@ void DhtClient::maybe_update_external_ip(const std::string& reported_ip, const P
         if (!external_ip_voters_.insert(responder.ip).second) return;  // this responder already voted
 
         int votes = ++external_ip_votes_[reported_ip];
+        // A vote for an address other than our current one is genuinely interesting
+        // (startup ramp-up, or a possible address change), so surface it at INFO.
+        LOG_DHT_INFO("External IP vote from " << responder.ip << " -> " << reported_ip
+                     << " (" << votes << "/" << EXTERNAL_IP_VOTE_THRESHOLD << ")");
         if (votes >= EXTERNAL_IP_VOTE_THRESHOLD) {
             winner = reported_ip;
             external_ip_votes_.clear();
