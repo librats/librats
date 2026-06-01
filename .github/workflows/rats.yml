@@ -12,6 +12,9 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
 
+    permissions:
+      contents: write
+
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -136,7 +139,7 @@ jobs:
         with:
           files: artifacts/librats-linux-${{ env.ARCH_LOWER }}-${{ github.ref_name }}.zip
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload to Release (Windows)
         if: runner.os == 'Windows' && matrix.build-type == 'Release' && github.event_name == 'release'
@@ -144,7 +147,7 @@ jobs:
         with:
           files: artifacts/librats-windows-${{ env.ARCH_LOWER }}-${{ github.ref_name }}.zip
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Upload to Release (macOS)
         if: runner.os == 'macOS' && matrix.build-type == 'Release' && github.event_name == 'release'
@@ -152,4 +155,4 @@ jobs:
         with:
           files: artifacts/librats-macos-${{ env.ARCH_LOWER }}-${{ github.ref_name }}.zip
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
