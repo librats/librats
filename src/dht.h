@@ -165,8 +165,12 @@ public:
      * Constructor
      * @param port The UDP port to bind to (default: 6881)
      * @param bind_address The interface IP address to bind to (empty for all interfaces)
+     * @param data_directory Directory for routing-table persistence
+     * @param address_family Address family this node operates on. IPv4 and IPv6 form
+     *        separate Kademlia networks (BEP 32), so each family needs its own DhtClient.
      */
-    DhtClient(int port = DHT_PORT, const std::string& bind_address = "", const std::string& data_directory = "");
+    DhtClient(int port = DHT_PORT, const std::string& bind_address = "", const std::string& data_directory = "",
+              AddressFamily address_family = AddressFamily::IPv4);
     
     /**
      * Destructor
@@ -337,11 +341,26 @@ public:
 #endif // RATS_SEARCH_FEATURES
     
     /**
-     * Get default BitTorrent DHT bootstrap nodes
+     * Get default BitTorrent DHT bootstrap nodes.
+     * Hostnames are resolved per-family at send time, so the same list serves both
+     * IPv4 and IPv6 (nodes without an AAAA record are simply skipped on IPv6).
      * @return Vector of bootstrap nodes
      */
     static std::vector<Peer> get_default_bootstrap_nodes();
+
+    /**
+     * Address family this DHT node operates on.
+     */
+    AddressFamily address_family() const { return address_family_; }
+    bool is_ipv6() const { return address_family_ == AddressFamily::IPv6; }
     
+    /**
+     * Compute the routing-table persistence file path for this instance.
+     * Includes the address family so the IPv4 and IPv6 nodes (which may share a port)
+     * never overwrite each other's saved state.
+     */
+    std::string routing_table_file_path() const;
+
     /**
      * Save routing table to disk
      * @return true if successful, false otherwise
@@ -364,6 +383,7 @@ private:
     int port_;
     std::string bind_address_;
     std::string data_directory_;
+    AddressFamily address_family_;  // IPv4 or IPv6 (this node's Kademlia network)
     NodeId node_id_;
     socket_t socket_;
     std::atomic<bool> running_;

@@ -183,6 +183,15 @@ BencodeValue KrpcProtocol::encode_query(const KrpcMessage& message) {
             break;
     }
     
+    // BEP 32: advertise which node families we want back
+    if (!message.want.empty()) {
+        BencodeValue want_list = BencodeValue::create_list();
+        for (const auto& w : message.want) {
+            want_list.push_back(BencodeValue(w));
+        }
+        args["want"] = want_list;
+    }
+
     root["a"] = args;
     return root;
 }
@@ -198,13 +207,24 @@ BencodeValue KrpcProtocol::encode_response(const KrpcMessage& message) {
     BencodeValue response = BencodeValue::create_dict();
     response["id"] = BencodeValue(node_id_to_string(message.response_id));
     
-    // Add nodes if present
+    // Add nodes if present. BEP 32: IPv4 nodes go in "nodes" (26 bytes each),
+    // IPv6 nodes go in "nodes6" (38 bytes each).
     if (!message.nodes.empty()) {
-        std::string compact_nodes;
+        std::string compact_nodes_v4;
+        std::string compact_nodes_v6;
         for (const auto& node : message.nodes) {
-            compact_nodes += compact_node_info(node);
+            if (network_utils::is_valid_ipv6(node.ip)) {
+                compact_nodes_v6 += compact_node_info(node);
+            } else {
+                compact_nodes_v4 += compact_node_info(node);
+            }
         }
-        response["nodes"] = BencodeValue(compact_nodes);
+        if (!compact_nodes_v4.empty()) {
+            response["nodes"] = BencodeValue(compact_nodes_v4);
+        }
+        if (!compact_nodes_v6.empty()) {
+            response["nodes6"] = BencodeValue(compact_nodes_v6);
+        }
     }
     
     // Add peers if present
@@ -295,7 +315,17 @@ std::unique_ptr<KrpcMessage> KrpcProtocol::decode_query(const BencodeValue& data
     }
     
     message->sender_id = string_to_node_id(args["id"].as_string());
-    
+
+    // BEP 32: optional "want" list specifying desired node families
+    if (args.has_key("want")) {
+        const BencodeValue& want_list = args["want"];
+        if (want_list.is_list()) {
+            for (size_t i = 0; i < want_list.size(); ++i) {
+                message->want.push_back(want_list[i].as_string());
+            }
+        }
+    }
+
     switch (message->query_type) {
         case KrpcQueryType::Ping:
             // No additional arguments
@@ -347,10 +377,15 @@ std::unique_ptr<KrpcMessage> KrpcProtocol::decode_response(const BencodeValue& d
     
     message->response_id = string_to_node_id(response["id"].as_string());
     
-    // Parse nodes if present
+    // Parse nodes if present (BEP 32: "nodes" = IPv4, "nodes6" = IPv6)
     if (response.has_key("nodes")) {
         std::string compact_nodes = response["nodes"].as_string();
-        message->nodes = parse_compact_node_info(compact_nodes);
+        message->nodes = parse_compact_node_info(compact_nodes, /*ipv6=*/false);
+    }
+    if (response.has_key("nodes6")) {
+        std::string compact_nodes6 = response["nodes6"].as_string();
+        auto nodes6 = parse_compact_node_info(compact_nodes6, /*ipv6=*/true);
+        message->nodes.insert(message->nodes.end(), nodes6.begin(), nodes6.end());
     }
     
     // Parse peers if present
@@ -415,132 +450,143 @@ NodeId KrpcProtocol::string_to_node_id(const std::string& str) {
     return id;
 }
 
+// Append a compact IP address (4 bytes for IPv4, 16 bytes for IPv6) to `out`.
+// Returns the number of address bytes written, or 0 on failure.
+static size_t append_compact_address(const std::string& ip, std::string& out) {
+    if (network_utils::is_valid_ipv6(ip)) {
+        struct in6_addr addr6;
+        if (inet_pton(AF_INET6, ip.c_str(), &addr6) == 1) {
+            out.append(reinterpret_cast<const char*>(addr6.s6_addr), 16);
+            return 16;
+        }
+        return 0;
+    }
+
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip.c_str(), &addr) == 1) {
+        uint32_t v = ntohl(addr.s_addr);
+        out += static_cast<char>((v >> 24) & 0xFF);
+        out += static_cast<char>((v >> 16) & 0xFF);
+        out += static_cast<char>((v >> 8) & 0xFF);
+        out += static_cast<char>(v & 0xFF);
+        return 4;
+    }
+    // Invalid IPv4, use 0.0.0.0
+    out.append(4, '\x00');
+    return 4;
+}
+
+// Read a compact IP address of `addr_len` bytes (4=IPv4, 16=IPv6) at compact_info[offset]
+// into a printable string.
+static std::string read_compact_address(const std::string& compact_info, size_t offset, size_t addr_len) {
+    if (addr_len == 16) {
+        struct in6_addr addr6;
+        memcpy(addr6.s6_addr, compact_info.data() + offset, 16);
+        char ip_str[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, &addr6, ip_str, INET6_ADDRSTRLEN);
+        return std::string(ip_str);
+    }
+
+    struct in_addr addr;
+    uint32_t ip = 0;
+    ip |= (static_cast<uint8_t>(compact_info[offset]) << 24);
+    ip |= (static_cast<uint8_t>(compact_info[offset + 1]) << 16);
+    ip |= (static_cast<uint8_t>(compact_info[offset + 2]) << 8);
+    ip |= static_cast<uint8_t>(compact_info[offset + 3]);
+    addr.s_addr = htonl(ip);
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+    return std::string(ip_str);
+}
+
 std::string KrpcProtocol::compact_peer_info(const Peer& peer) {
     std::string result;
-    result.reserve(6);
-    
-    // Convert IP address to 4 bytes
-    if (network_utils::is_valid_ipv4(peer.ip)) {
-        struct in_addr addr;
-        if (inet_pton(AF_INET, peer.ip.c_str(), &addr) == 1) {
-            uint32_t ip = ntohl(addr.s_addr);
-            result += static_cast<char>((ip >> 24) & 0xFF);
-            result += static_cast<char>((ip >> 16) & 0xFF);
-            result += static_cast<char>((ip >> 8) & 0xFF);
-            result += static_cast<char>(ip & 0xFF);
-        } else {
-            // Invalid IP, use 0.0.0.0
-            result += "\x00\x00\x00\x00";
-        }
-    } else {
-        // Not IPv4, use 0.0.0.0
-        result += "\x00\x00\x00\x00";
-    }
-    
+    result.reserve(18);
+
+    // IP address (4 bytes IPv4 / 16 bytes IPv6)
+    append_compact_address(peer.ip, result);
+
     // Convert port to 2 bytes (network byte order)
     result += static_cast<char>((peer.port >> 8) & 0xFF);
     result += static_cast<char>(peer.port & 0xFF);
-    
+
     return result;
 }
 
 std::string KrpcProtocol::compact_node_info(const KrpcNode& node) {
     std::string result;
-    result.reserve(26);
-    
+    result.reserve(38);
+
     // Node ID (20 bytes)
     result += node_id_to_string(node.id);
-    
-    // IP address (4 bytes)
-    if (network_utils::is_valid_ipv4(node.ip)) {
-        struct in_addr addr;
-        if (inet_pton(AF_INET, node.ip.c_str(), &addr) == 1) {
-            uint32_t ip = ntohl(addr.s_addr);
-            result += static_cast<char>((ip >> 24) & 0xFF);
-            result += static_cast<char>((ip >> 16) & 0xFF);
-            result += static_cast<char>((ip >> 8) & 0xFF);
-            result += static_cast<char>(ip & 0xFF);
-        } else {
-            // Invalid IP, use 0.0.0.0
-            result += "\x00\x00\x00\x00";
-        }
-    } else {
-        // Not IPv4, use 0.0.0.0
-        result += "\x00\x00\x00\x00";
-    }
-    
+
+    // IP address (4 bytes IPv4 / 16 bytes IPv6)
+    append_compact_address(node.ip, result);
+
     // Port (2 bytes, network byte order)
     result += static_cast<char>((node.port >> 8) & 0xFF);
     result += static_cast<char>(node.port & 0xFF);
-    
+
     return result;
 }
 
 std::vector<Peer> KrpcProtocol::parse_compact_peer_info(const std::string& compact_info) {
     std::vector<Peer> peers;
-    
-    if (compact_info.size() % 6 != 0) {
+
+    // BEP 5/BEP 7: each "values" entry is a single compact peer: 6 bytes (IPv4) or 18 bytes (IPv6).
+    // Detect the family from the entry length. An exact length of 18 is treated as one IPv6 peer;
+    // otherwise we chunk by 6 (some implementations concatenate multiple IPv4 peers).
+    size_t record_size = 6;
+    size_t addr_len = 4;
+    if (compact_info.size() == 18) {
+        record_size = 18;
+        addr_len = 16;
+    } else if (compact_info.size() % 6 != 0) {
         LOG_KRPC_WARN("Invalid compact peer info size: " << compact_info.size());
         return peers;
     }
-    
-    for (size_t i = 0; i < compact_info.size(); i += 6) {
-        // Extract IP address (4 bytes)
-        uint32_t ip = 0;
-        ip |= (static_cast<uint8_t>(compact_info[i]) << 24);
-        ip |= (static_cast<uint8_t>(compact_info[i + 1]) << 16);
-        ip |= (static_cast<uint8_t>(compact_info[i + 2]) << 8);
-        ip |= static_cast<uint8_t>(compact_info[i + 3]);
-        
-        struct in_addr addr;
-        addr.s_addr = htonl(ip);
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
-        
-        // Extract port (2 bytes)
+
+    for (size_t i = 0; i + record_size <= compact_info.size(); i += record_size) {
+        std::string ip_str = read_compact_address(compact_info, i, addr_len);
+
         uint16_t port = 0;
-        port |= (static_cast<uint8_t>(compact_info[i + 4]) << 8);
-        port |= static_cast<uint8_t>(compact_info[i + 5]);
-        
+        port |= (static_cast<uint8_t>(compact_info[i + addr_len]) << 8);
+        port |= static_cast<uint8_t>(compact_info[i + addr_len + 1]);
+
         peers.emplace_back(ip_str, port);
     }
-    
+
     return peers;
 }
 
-std::vector<KrpcNode> KrpcProtocol::parse_compact_node_info(const std::string& compact_info) {
+std::vector<KrpcNode> KrpcProtocol::parse_compact_node_info(const std::string& compact_info, bool ipv6) {
     std::vector<KrpcNode> nodes;
-    
-    if (compact_info.size() % 26 != 0) {
-        LOG_KRPC_WARN("Invalid compact node info size: " << compact_info.size());
+
+    const size_t addr_len = ipv6 ? 16 : 4;
+    const size_t record_size = 20 + addr_len + 2;  // 26 (IPv4) or 38 (IPv6)
+
+    if (compact_info.size() % record_size != 0) {
+        LOG_KRPC_WARN("Invalid compact node info size: " << compact_info.size()
+                      << " (expected multiple of " << record_size << ")");
         return nodes;
     }
-    
-    for (size_t i = 0; i < compact_info.size(); i += 26) {
+
+    for (size_t i = 0; i < compact_info.size(); i += record_size) {
         // Extract node ID (20 bytes)
         NodeId node_id;
         std::copy_n(compact_info.begin() + i, 20, node_id.begin());
-        
-        // Extract IP address (4 bytes)
-        uint32_t ip = 0;
-        ip |= (static_cast<uint8_t>(compact_info[i + 20]) << 24);
-        ip |= (static_cast<uint8_t>(compact_info[i + 21]) << 16);
-        ip |= (static_cast<uint8_t>(compact_info[i + 22]) << 8);
-        ip |= static_cast<uint8_t>(compact_info[i + 23]);
-        
-        struct in_addr addr;
-        addr.s_addr = htonl(ip);
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
-        
+
+        // Extract IP address (4 or 16 bytes)
+        std::string ip_str = read_compact_address(compact_info, i + 20, addr_len);
+
         // Extract port (2 bytes)
         uint16_t port = 0;
-        port |= (static_cast<uint8_t>(compact_info[i + 24]) << 8);
-        port |= static_cast<uint8_t>(compact_info[i + 25]);
-        
+        port |= (static_cast<uint8_t>(compact_info[i + 20 + addr_len]) << 8);
+        port |= static_cast<uint8_t>(compact_info[i + 20 + addr_len + 1]);
+
         nodes.emplace_back(node_id, ip_str, port);
     }
-    
+
     return nodes;
 }
 

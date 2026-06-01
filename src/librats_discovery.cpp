@@ -13,94 +13,123 @@ bool RatsClient::start_dht_discovery(int dht_port) {
         LOG_CLIENT_WARN("DHT discovery is already running");
         return true;
     }
-    
+
     LOG_CLIENT_INFO("Starting DHT discovery on port " << dht_port <<
                    (bind_address_.empty() ? "" : " bound to " + bind_address_));
-    
-    dht_client_ = std::make_unique<DhtClient>(dht_port, bind_address_, data_directory_);
+
+    auto bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
+
+    // IPv4 DHT (also shared with the BitTorrent subsystem) - required.
+    dht_client_ = std::make_unique<DhtClient>(dht_port, bind_address_, data_directory_, AddressFamily::IPv4);
     if (!dht_client_->start()) {
-        LOG_CLIENT_ERROR("Failed to start DHT client");
+        LOG_CLIENT_ERROR("Failed to start IPv4 DHT client");
         dht_client_.reset();
         return false;
     }
-    
-    // Bootstrap with default nodes
-    auto bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
     if (!dht_client_->bootstrap(bootstrap_nodes)) {
-        LOG_CLIENT_WARN("Failed to bootstrap DHT");
+        LOG_CLIENT_WARN("Failed to bootstrap IPv4 DHT");
     }
-    
+
+    // IPv6 DHT - best effort. Shares the same port via a V6ONLY socket. If the host has
+    // no usable IPv6 stack, socket creation fails and we simply run IPv4-only.
+    dht_client_v6_ = std::make_unique<DhtClient>(dht_port, bind_address_, data_directory_, AddressFamily::IPv6);
+    if (dht_client_v6_->start()) {
+        if (!dht_client_v6_->bootstrap(bootstrap_nodes)) {
+            LOG_CLIENT_WARN("Failed to bootstrap IPv6 DHT");
+        }
+        LOG_CLIENT_INFO("IPv6 DHT client started");
+    } else {
+        LOG_CLIENT_INFO("IPv6 DHT unavailable on this host, running IPv4-only");
+        dht_client_v6_.reset();
+    }
+
     // Start automatic peer discovery
     start_automatic_peer_discovery();
-    
+
     LOG_CLIENT_INFO("DHT discovery started successfully");
     return true;
 }
 
 void RatsClient::stop_dht_discovery() {
-    if (!dht_client_) {
+    if (!dht_client_ && !dht_client_v6_) {
         return;
     }
-    
+
     LOG_CLIENT_INFO("Stopping DHT discovery");
-    
+
     // Stop automatic peer discovery
     stop_automatic_peer_discovery();
-    
-    dht_client_->stop();
-    dht_client_.reset();
+
+    if (dht_client_) {
+        dht_client_->stop();
+        dht_client_.reset();
+    }
+    if (dht_client_v6_) {
+        dht_client_v6_->stop();
+        dht_client_v6_.reset();
+    }
     LOG_CLIENT_INFO("DHT discovery stopped");
 }
 
 bool RatsClient::find_peers_by_hash(const std::string& content_hash, std::function<void(const std::vector<std::string>&)> callback) {
-    if (!dht_client_ || !dht_client_->is_running()) {
+    if (!is_dht_running()) {
         LOG_CLIENT_ERROR("DHT client not running");
         return false;
     }
-    
+
     if (content_hash.length() != CONTENT_HASH_HEX_LENGTH) {
         LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected " << CONTENT_HASH_HEX_LENGTH << ")");
         return false;
     }
-    
+
     LOG_CLIENT_INFO("Finding peers for content hash: " << content_hash);
-    
+
     InfoHash info_hash = hex_to_node_id(content_hash);
-    
-    return dht_client_->find_peers(info_hash, [this, callback](const std::vector<Peer>& peers, const InfoHash& info_hash) {
-        // Convert Peer to string addresses for callback
+
+    // Shared wrapper: discovered peers (IPv4 or IPv6) are delivered through the same callback.
+    PeerDiscoveryCallback peer_callback = [callback](const std::vector<Peer>& peers, const InfoHash&) {
         std::vector<std::string> peer_addresses;
+        peer_addresses.reserve(peers.size());
         for (const auto& peer : peers) {
             peer_addresses.emplace_back(peer.ip + ":" + std::to_string(peer.port));
         }
-        
         if (callback) {
             callback(peer_addresses);
         }
-    });
+    };
+
+    // Fan out to both Kademlia networks; succeed if at least one accepts the search.
+    bool started = false;
+    if (dht_client_ && dht_client_->is_running()) {
+        started |= dht_client_->find_peers(info_hash, peer_callback);
+    }
+    if (dht_client_v6_ && dht_client_v6_->is_running()) {
+        started |= dht_client_v6_->find_peers(info_hash, peer_callback);
+    }
+    return started;
 }
 
 bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t port,
                                    std::function<void(const std::vector<std::string>&)> callback) {
-    if (!dht_client_ || !dht_client_->is_running()) {
+    if (!is_dht_running()) {
         LOG_CLIENT_ERROR("DHT client not running");
         return false;
     }
-    
+
     if (content_hash.length() != CONTENT_HASH_HEX_LENGTH) {
         LOG_CLIENT_ERROR("Invalid content hash length: " << content_hash.length() << " (expected " << CONTENT_HASH_HEX_LENGTH << ")");
         return false;
     }
-    
+
     if (port == 0) {
         port = listen_port_;
     }
-    
+
     LOG_CLIENT_INFO("Announcing for content hash: " << content_hash << " on port " << port
                    << (callback ? " with peer callback" : ""));
-    
+
     InfoHash info_hash = hex_to_node_id(content_hash);
-    
+
     // Create wrapper callback that converts Peer to string addresses (if callback provided)
     PeerDiscoveryCallback peer_callback = nullptr;
     if (callback) {
@@ -113,19 +142,32 @@ bool RatsClient::announce_for_hash(const std::string& content_hash, uint16_t por
             callback(peer_addresses);
         };
     }
-    
-    return dht_client_->announce_peer(info_hash, port, peer_callback);
+
+    // Announce on both Kademlia networks so IPv4 and IPv6 peers can both find us.
+    bool started = false;
+    if (dht_client_ && dht_client_->is_running()) {
+        started |= dht_client_->announce_peer(info_hash, port, peer_callback);
+    }
+    if (dht_client_v6_ && dht_client_v6_->is_running()) {
+        started |= dht_client_v6_->announce_peer(info_hash, port, peer_callback);
+    }
+    return started;
 }
 
 bool RatsClient::is_dht_running() const {
-    return dht_client_ && dht_client_->is_running();
+    return (dht_client_ && dht_client_->is_running()) ||
+           (dht_client_v6_ && dht_client_v6_->is_running());
 }
 
 size_t RatsClient::get_dht_routing_table_size() const {
-    if (!dht_client_) {
-        return 0;
+    size_t total = 0;
+    if (dht_client_) {
+        total += dht_client_->get_routing_table_size();
     }
-    return dht_client_->get_routing_table_size();
+    if (dht_client_v6_) {
+        total += dht_client_v6_->get_routing_table_size();
+    }
+    return total;
 }
 
 void RatsClient::handle_dht_peer_discovery(const std::vector<Peer>& peers, const InfoHash& info_hash) {
@@ -261,7 +303,11 @@ void RatsClient::announce_rats_peer() {
     
     InfoHash info_hash = hex_to_node_id(discovery_hash);
 
-    if (dht_client_->is_announce_active(info_hash)) {
+    // Skip only if every running DHT network already has this announce in flight.
+    // (announce_peer() also dedups internally, so this is just to avoid redundant work.)
+    bool v4_busy = !dht_client_ || !dht_client_->is_running() || dht_client_->is_announce_active(info_hash);
+    bool v6_busy = !dht_client_v6_ || !dht_client_v6_->is_running() || dht_client_v6_->is_announce_active(info_hash);
+    if (v4_busy && v6_busy) {
         LOG_CLIENT_WARN("Announce already in progress for info hash: " << node_id_to_hex(info_hash));
         return;
     }

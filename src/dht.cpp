@@ -28,17 +28,19 @@
 namespace librats {
 
 
-DhtClient::DhtClient(int port, const std::string& bind_address, const std::string& data_directory) 
-    : port_(port), bind_address_(bind_address), data_directory_(data_directory), 
-      socket_(INVALID_SOCKET_VALUE), running_(false) {
+DhtClient::DhtClient(int port, const std::string& bind_address, const std::string& data_directory,
+                     AddressFamily address_family)
+    : port_(port), bind_address_(bind_address), data_directory_(data_directory),
+      address_family_(address_family), socket_(INVALID_SOCKET_VALUE), running_(false) {
     node_id_ = generate_node_id();
     routing_table_.resize(NODE_ID_SIZE * 8);  // 160 buckets for 160-bit node IDs
-    
+
     if (data_directory_.empty()) {
         data_directory_ = ".";
     }
-    
+
     LOG_DHT_INFO("DHT client created with node ID: " << node_id_to_hex(node_id_) <<
+                 " family: " << (is_ipv6() ? "IPv6" : "IPv4") <<
                  (bind_address_.empty() ? "" : " bind address: " + bind_address_) <<
                  " data directory: " << data_directory_);
 }
@@ -61,20 +63,22 @@ bool DhtClient::start() {
         return false;
     }
     
-    socket_ = create_udp_socket(port_, bind_address_);
+    // Each family gets its own single-family socket. IPv6 uses V6ONLY so the two
+    // sockets can share the same port and never cross-deliver mapped addresses.
+    socket_ = create_udp_socket(port_, bind_address_, address_family_);
 	// Fallback to free port
     if (!is_valid_socket(socket_) && port_ > 0) {
         // Requested port is not available, try ephemeral port as fallback
         int original_port = port_;
         LOG_DHT_WARN("UDP port " << original_port << " is not available, falling back to ephemeral port");
-        socket_ = create_udp_socket(0, bind_address_);
+        socket_ = create_udp_socket(0, bind_address_, address_family_);
         if (is_valid_socket(socket_)) {
             port_ = get_bound_port(socket_);
             LOG_DHT_INFO("Fell back from port " << original_port << " to ephemeral port " << port_);
         }
     }
     if (!is_valid_socket(socket_)) {
-        LOG_DHT_ERROR("Failed to create dual-stack UDP socket on port " << port_);
+        LOG_DHT_ERROR("Failed to create " << (is_ipv6() ? "IPv6" : "IPv4") << " UDP socket on port " << port_);
         return false;
     }
     
@@ -378,10 +382,14 @@ size_t DhtClient::get_active_announces_count() const {
 }
 
 std::vector<Peer> DhtClient::get_default_bootstrap_nodes() {
+    // Hostnames are resolved to the instance's family at send time (A for IPv4, AAAA for
+    // IPv6). dht.libtorrent.org publishes an AAAA record, giving the IPv6 network a
+    // reliable bootstrap entry point.
     return {
         {"router.bittorrent.com", 6881},
         {"dht.transmissionbt.com", 6881},
         {"router.utorrent.com", 6881},
+        {"dht.libtorrent.org", 25401},
         {"dht.aelitis.com", 6881}
     };
 }
@@ -509,6 +517,14 @@ void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sen
 }
 
 void DhtClient::add_node(const DhtNode& node, bool confirmed, bool no_verify) {
+    // IPv4 and IPv6 are separate Kademlia networks (BEP 32). Reject any node whose
+    // address family does not match this instance to keep the routing table clean.
+    if (network_utils::is_valid_ipv6(node.peer.ip) != is_ipv6()) {
+        LOG_DHT_DEBUG("Ignoring " << (is_ipv6() ? "non-IPv6" : "non-IPv4") << " node "
+                      << node.peer.ip << ":" << node.peer.port << " (wrong family)");
+        return;
+    }
+
     std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
     std::lock_guard<std::mutex> lock(routing_table_mutex_);
 
@@ -1084,7 +1100,7 @@ bool DhtClient::send_krpc_message(const KrpcMessage& message, const Peer& peer) 
     }
     
     LOG_DHT_DEBUG("Sending KRPC message (" << data.size() << " bytes) to " << peer.ip << ":" << peer.port);
-    int result = send_udp_data(socket_, data, peer.ip, peer.port);
+    int result = send_udp_data(socket_, data, peer.ip, peer.port, address_family_);
     
     if (result > 0) {
         LOG_DHT_DEBUG("Successfully sent KRPC message to " << peer.ip << ":" << peer.port);
@@ -1104,12 +1120,16 @@ void DhtClient::send_krpc_ping(const Peer& peer) {
 void DhtClient::send_krpc_find_node(const Peer& peer, const NodeId& target) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_find_node_query(transaction_id, node_id_, target);
+    // BEP 32: ask only for nodes of our own family (separate Kademlia networks)
+    message.want.push_back(is_ipv6() ? "n6" : "n4");
     send_krpc_message(message, peer);
 }
 
 void DhtClient::send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
+    // BEP 32: ask only for nodes of our own family (separate Kademlia networks)
+    message.want.push_back(is_ipv6() ? "n6" : "n4");
     send_krpc_message(message, peer);
 }
 
@@ -2243,8 +2263,10 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
         LOG_DHT_DEBUG("Querying node " << node_id_to_hex(node.id) << " at " << node.peer.ip << ":" << node.peer.port);
         
         auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, search.info_hash);
+        // BEP 32: request peers/nodes of our own family only
+        message.want.push_back(is_ipv6() ? "n6" : "n4");
         send_krpc_message(message, node.peer);
-        
+
         queries_sent++;
     }
     
@@ -2574,12 +2596,29 @@ std::string node_id_to_hex(const NodeId& id) {
 }
 
 // Routing table persistence implementation
+std::string DhtClient::routing_table_file_path() const {
+    // IPv6 instance uses a distinct filename suffix so it doesn't collide with the
+    // IPv4 instance bound to the same port.
+    const char* suffix = is_ipv6() ? "_v6" : "";
+#ifdef TESTING
+    if (port_ == 0) {
+        std::ostringstream oss;
+        oss << "dht_routing_" << this << suffix << ".json";
+        return oss.str();
+    }
+    return "dht_routing_" + std::to_string(port_) + suffix + ".json";
+#else
+    return data_directory_ + "/dht_routing_" + std::to_string(port_) + suffix + ".json";
+#endif
+}
+
 bool DhtClient::save_routing_table() {
     std::lock_guard<std::mutex> lock(routing_table_mutex_);
-    
+
     try {
         nlohmann::json routing_data;
         routing_data["version"] = 1;
+        routing_data["family"] = is_ipv6() ? "ipv6" : "ipv4";
         routing_data["node_id"] = node_id_to_hex(node_id_);
         routing_data["saved_at"] = std::chrono::system_clock::now().time_since_epoch().count();
         
@@ -2609,21 +2648,10 @@ bool DhtClient::save_routing_table() {
         
         routing_data["nodes"] = nodes_array;
         routing_data["count"] = saved_count;
-        
+
         // Determine file path
-        std::string file_path;
-        #ifdef TESTING
-            if (port_ == 0) {
-                std::ostringstream oss;
-                oss << "dht_routing_" << this << ".json";
-                file_path = oss.str();
-            } else {
-                file_path = "dht_routing_" + std::to_string(port_) + ".json";
-            }
-        #else
-            file_path = data_directory_ + "/dht_routing_" + std::to_string(port_) + ".json";
-        #endif
-        
+        std::string file_path = routing_table_file_path();
+
         // Write to file
         std::ofstream file(file_path);
         if (!file.is_open()) {
@@ -2648,19 +2676,8 @@ bool DhtClient::load_routing_table() {
     
     try {
         // Determine file path
-        std::string file_path;
-        #ifdef TESTING
-            if (port_ == 0) {
-                std::ostringstream oss;
-                oss << "dht_routing_" << this << ".json";
-                file_path = oss.str();
-            } else {
-                file_path = "dht_routing_" + std::to_string(port_) + ".json";
-            }
-        #else
-            file_path = data_directory_ + "/dht_routing_" + std::to_string(port_) + ".json";
-        #endif
-        
+        std::string file_path = routing_table_file_path();
+
         // Check if file exists
         std::ifstream file(file_path);
         if (!file.is_open()) {
@@ -2694,7 +2711,12 @@ bool DhtClient::load_routing_table() {
                 std::string node_id_hex = node_data["id"];
                 std::string ip = node_data["ip"];
                 int port = node_data["port"];
-                
+
+                // Skip nodes that don't belong to this instance's family
+                if (network_utils::is_valid_ipv6(ip) != is_ipv6()) {
+                    continue;
+                }
+
                 NodeId node_id = hex_to_node_id(node_id_hex);
                 Peer peer(ip, port);
                 DhtNode node(node_id, peer);

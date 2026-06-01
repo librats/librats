@@ -760,13 +760,25 @@ static bool build_udp_dest_addr(const std::string& host, int port, AddressFamily
                                 sockaddr_storage& addr, socklen_t& addr_len) {
     memset(&addr, 0, sizeof(addr));
 
-    // Native IPv6 address
+    // Native IPv6 address, or hostname that must resolve to IPv6 (pure IPv6 socket).
+    // A pure IPv6 socket (V6ONLY) cannot send to IPv4-mapped addresses, so hostnames
+    // are resolved via AAAA records here.
+    std::string ipv6_host;
     if (network_utils::is_valid_ipv6(host)) {
+        ipv6_host = host;
+    } else if (af == AddressFamily::IPv6) {
+        ipv6_host = network_utils::resolve_hostname_v6(host);
+        if (ipv6_host.empty()) {
+            LOG_SOCKET_DEBUG("Failed to resolve hostname to IPv6: " << host);
+            return false;
+        }
+    }
+    if (!ipv6_host.empty()) {
         auto* a6 = reinterpret_cast<sockaddr_in6*>(&addr);
         a6->sin6_family = AF_INET6;
         a6->sin6_port = htons(port);
-        if (inet_pton(AF_INET6, host.c_str(), &a6->sin6_addr) <= 0) {
-            LOG_SOCKET_ERROR("Invalid IPv6 address: " << host);
+        if (inet_pton(AF_INET6, ipv6_host.c_str(), &a6->sin6_addr) <= 0) {
+            LOG_SOCKET_ERROR("Invalid IPv6 address: " << ipv6_host);
             return false;
         }
         addr_len = sizeof(sockaddr_in6);

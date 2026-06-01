@@ -1962,9 +1962,13 @@ private:
     JsonDataCallback json_data_callback_;
     DisconnectCallback disconnect_callback_;
     
-    // DHT client for peer discovery
+    // DHT clients for peer discovery. IPv4 and IPv6 are separate Kademlia networks
+    // (BEP 32), so each family runs its own client. dht_client_ (IPv4) is also the one
+    // shared with the BitTorrent subsystem; dht_client_v6_ is created best-effort when
+    // IPv6 is available.
     std::unique_ptr<DhtClient> dht_client_;
-    
+    std::unique_ptr<DhtClient> dht_client_v6_;
+
     // mDNS client for local network discovery
     std::unique_ptr<MdnsClient> mdns_client_;
     std::function<void(const std::string&, int, const std::string&)> mdns_callback_;

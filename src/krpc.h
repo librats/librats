@@ -71,15 +71,19 @@ struct KrpcMessage {
     bool implied_port;  // BEP 5: if true, use UDP source port instead of 'port' field
     std::string token;
     
+    // BEP 32: requested node families for queries ("n4" and/or "n6").
+    // Empty means "no want specified" (responder defaults to the family the request arrived on).
+    std::vector<std::string> want;
+
     // For responses
     NodeId response_id;
-    std::vector<KrpcNode> nodes;
+    std::vector<KrpcNode> nodes;  // may mix IPv4/IPv6 nodes; encoder splits into nodes/nodes6
     std::vector<Peer> peers;
-    
+
     // For errors
     KrpcErrorCode error_code;
     std::string error_message;
-    
+
     KrpcMessage() : type(KrpcMessageType::Query), query_type(KrpcQueryType::Ping), sender_id(), target_id(), info_hash(), port(0), implied_port(false), response_id(), error_code(KrpcErrorCode::GenericError) {}
 };
 
@@ -123,10 +127,13 @@ public:
      */
     static std::string node_id_to_string(const NodeId& id);
     static NodeId string_to_node_id(const std::string& str);
+    // Compact encodings auto-select IPv4 (6/26 bytes) or IPv6 (18/38 bytes) based on the address.
     static std::string compact_peer_info(const Peer& peer);
     static std::string compact_node_info(const KrpcNode& node);
+    // parse_compact_peer_info detects the family from the string length (one peer per string).
     static std::vector<Peer> parse_compact_peer_info(const std::string& compact_info);
-    static std::vector<KrpcNode> parse_compact_node_info(const std::string& compact_info);
+    // parse_compact_node_info reads fixed-size records; pass ipv6=true for 38-byte ("nodes6") records.
+    static std::vector<KrpcNode> parse_compact_node_info(const std::string& compact_info, bool ipv6 = false);
 
 private:
     static BencodeValue encode_query(const KrpcMessage& message);

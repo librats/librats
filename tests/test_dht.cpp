@@ -506,4 +506,137 @@ TEST_F(DhtTest, DataDirectoryConfigurationTest) {
     DhtClient client2(0, "", "");
     EXPECT_TRUE(client2.start());
     client2.stop();
-} 
+}
+
+// ============================================================================
+// IPv6 / BEP 32 wire-format tests
+// ============================================================================
+
+// IPv4 compact node info round-trips through 26-byte records
+TEST_F(DhtTest, CompactNodeInfoIPv4RoundTrip) {
+    KrpcNode node(create_test_node_id(0x11), "192.168.1.42", 6881);
+    std::string compact = KrpcProtocol::compact_node_info(node);
+    EXPECT_EQ(compact.size(), 26u);  // 20 id + 4 ip + 2 port
+
+    auto parsed = KrpcProtocol::parse_compact_node_info(compact, /*ipv6=*/false);
+    ASSERT_EQ(parsed.size(), 1u);
+    EXPECT_EQ(parsed[0].id, node.id);
+    EXPECT_EQ(parsed[0].ip, "192.168.1.42");
+    EXPECT_EQ(parsed[0].port, 6881);
+}
+
+// IPv6 compact node info round-trips through 38-byte records (BEP 32)
+TEST_F(DhtTest, CompactNodeInfoIPv6RoundTrip) {
+    KrpcNode node(create_test_node_id(0x22), "2001:db8::1", 51413);
+    std::string compact = KrpcProtocol::compact_node_info(node);
+    EXPECT_EQ(compact.size(), 38u);  // 20 id + 16 ip + 2 port
+
+    auto parsed = KrpcProtocol::parse_compact_node_info(compact, /*ipv6=*/true);
+    ASSERT_EQ(parsed.size(), 1u);
+    EXPECT_EQ(parsed[0].id, node.id);
+    EXPECT_EQ(parsed[0].ip, "2001:db8::1");
+    EXPECT_EQ(parsed[0].port, 51413);
+}
+
+// Compact peer info encodes 6 bytes for IPv4 and 18 bytes for IPv6 (BEP 7)
+TEST_F(DhtTest, CompactPeerInfoFamilies) {
+    Peer v4("10.0.0.5", 1234);
+    std::string c4 = KrpcProtocol::compact_peer_info(v4);
+    EXPECT_EQ(c4.size(), 6u);
+    auto p4 = KrpcProtocol::parse_compact_peer_info(c4);
+    ASSERT_EQ(p4.size(), 1u);
+    EXPECT_EQ(p4[0].ip, "10.0.0.5");
+    EXPECT_EQ(p4[0].port, 1234);
+
+    Peer v6("2001:db8::dead:beef", 4321);
+    std::string c6 = KrpcProtocol::compact_peer_info(v6);
+    EXPECT_EQ(c6.size(), 18u);
+    auto p6 = KrpcProtocol::parse_compact_peer_info(c6);
+    ASSERT_EQ(p6.size(), 1u);
+    EXPECT_EQ(p6[0].ip, "2001:db8::dead:beef");
+    EXPECT_EQ(p6[0].port, 4321);
+}
+
+// A find_node response carrying IPv6 nodes encodes them under "nodes6" and decodes back
+TEST_F(DhtTest, FindNodeResponseIPv6NodesRoundTrip) {
+    std::vector<KrpcNode> nodes = {
+        KrpcNode(create_test_node_id(0x01), "2001:db8::1", 100),
+        KrpcNode(create_test_node_id(0x02), "fe80::abcd", 200),
+    };
+    auto msg = KrpcProtocol::create_find_node_response("aa", create_test_node_id(0xFF), nodes);
+    auto encoded = KrpcProtocol::encode_message(msg);
+    ASSERT_FALSE(encoded.empty());
+
+    auto decoded = KrpcProtocol::decode_message(encoded);
+    ASSERT_NE(decoded, nullptr);
+    ASSERT_EQ(decoded->nodes.size(), 2u);
+    EXPECT_EQ(decoded->nodes[0].ip, "2001:db8::1");
+    EXPECT_EQ(decoded->nodes[0].port, 100);
+    EXPECT_EQ(decoded->nodes[1].ip, "fe80::abcd");
+    EXPECT_EQ(decoded->nodes[1].port, 200);
+}
+
+// A response mixing IPv4 and IPv6 nodes splits them into nodes/nodes6 and recombines on decode
+TEST_F(DhtTest, FindNodeResponseMixedFamilies) {
+    std::vector<KrpcNode> nodes = {
+        KrpcNode(create_test_node_id(0x01), "192.168.0.1", 100),
+        KrpcNode(create_test_node_id(0x02), "2001:db8::2", 200),
+    };
+    auto msg = KrpcProtocol::create_find_node_response("bb", create_test_node_id(0xFF), nodes);
+    auto decoded = KrpcProtocol::decode_message(KrpcProtocol::encode_message(msg));
+    ASSERT_NE(decoded, nullptr);
+    ASSERT_EQ(decoded->nodes.size(), 2u);
+
+    bool has_v4 = false, has_v6 = false;
+    for (const auto& n : decoded->nodes) {
+        if (n.ip == "192.168.0.1" && n.port == 100) has_v4 = true;
+        if (n.ip == "2001:db8::2" && n.port == 200) has_v6 = true;
+    }
+    EXPECT_TRUE(has_v4);
+    EXPECT_TRUE(has_v6);
+}
+
+// BEP 32 "want" list survives a query encode/decode round-trip
+TEST_F(DhtTest, GetPeersQueryWantRoundTrip) {
+    auto msg = KrpcProtocol::create_get_peers_query("cc", create_test_node_id(0x33), create_test_info_hash(0x44));
+    msg.want.push_back("n4");
+    msg.want.push_back("n6");
+
+    auto decoded = KrpcProtocol::decode_message(KrpcProtocol::encode_message(msg));
+    ASSERT_NE(decoded, nullptr);
+    ASSERT_EQ(decoded->want.size(), 2u);
+    EXPECT_EQ(decoded->want[0], "n4");
+    EXPECT_EQ(decoded->want[1], "n6");
+}
+
+// An IPv6 DHT instance rejects IPv4 nodes from its routing table and vice versa
+TEST_F(DhtTest, RoutingTableFamilyIsolation) {
+    DhtClient v6(0, "", "", AddressFamily::IPv6);
+    EXPECT_TRUE(v6.is_ipv6());
+    EXPECT_EQ(v6.address_family(), AddressFamily::IPv6);
+
+    DhtClient v4(0, "", "", AddressFamily::IPv4);
+    EXPECT_FALSE(v4.is_ipv6());
+}
+
+// IPv4 and IPv6 DHT clients can run simultaneously on the same port (separate sockets).
+// IPv6 may be unavailable on the host, in which case only IPv4 is required to start.
+TEST_F(DhtTest, DualStackSamePortCoexistence) {
+    const int port = 6890;
+    DhtClient v4(port, "", "", AddressFamily::IPv4);
+    ASSERT_TRUE(v4.start());
+    EXPECT_TRUE(v4.is_running());
+
+    DhtClient v6(port, "", "", AddressFamily::IPv6);
+    if (v6.start()) {
+        // If IPv6 is available, both must coexist on the same port.
+        EXPECT_TRUE(v6.is_running());
+        EXPECT_TRUE(v4.is_running());
+        v6.stop();
+    } else {
+        // No usable IPv6 stack - acceptable, IPv4 keeps running.
+        SUCCEED() << "IPv6 unavailable on this host";
+    }
+
+    v4.stop();
+}

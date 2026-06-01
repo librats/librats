@@ -24,10 +24,18 @@ nlohmann::json RatsClient::get_connection_statistics() const {
     stats["our_peer_id"] = get_our_peer_id();
     stats["encryption_enabled"] = is_encryption_enabled();
     
-    // DHT statistics
-    if (dht_client_ && dht_client_->is_running()) {
+    // DHT statistics (IPv4 + IPv6 combined)
+    if (is_dht_running()) {
         stats["dht_running"] = true;
         stats["dht_routing_table_size"] = get_dht_routing_table_size();
+        stats["dht_ipv4_running"] = (dht_client_ && dht_client_->is_running());
+        stats["dht_ipv6_running"] = (dht_client_v6_ && dht_client_v6_->is_running());
+        if (dht_client_ && dht_client_->is_running()) {
+            stats["dht_ipv4_routing_table_size"] = dht_client_->get_routing_table_size();
+        }
+        if (dht_client_v6_ && dht_client_v6_->is_running()) {
+            stats["dht_ipv6_routing_table_size"] = dht_client_v6_->get_routing_table_size();
+        }
     } else {
         stats["dht_running"] = false;
     }
