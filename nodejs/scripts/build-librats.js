@@ -136,6 +136,9 @@ try {
         '-DRATS_BUILD_EXAMPLES=OFF',
         '-DRATS_STATIC_LIBRARY=ON',
         '-DRATS_BINDINGS=ON',
+        // The bindings only need the static archive; install/package-config rules
+        // (find_package support) are unnecessary here and pull in cmake/ratsConfig.cmake.in.
+        '-DRATS_INSTALL=OFF',
         '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL'
     ];
 

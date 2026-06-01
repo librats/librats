@@ -108,6 +108,16 @@ copyDir(
     srcFilter
 );
 
+// Copy cmake/ directory (package-config templates referenced by CMakeLists.txt
+// when RATS_INSTALL is enabled, e.g. cmake/ratsConfig.cmake.in)
+if (fs.existsSync(path.join(projectRoot, 'cmake'))) {
+    console.log('  Copying cmake/ directory...');
+    copyDir(
+        path.join(projectRoot, 'cmake'),
+        path.join(nativeSrcDir, 'cmake')
+    );
+}
+
 // Copy 3rdparty/ directory
 if (fs.existsSync(path.join(projectRoot, '3rdparty'))) {
     console.log('  Copying 3rdparty/ directory...');
