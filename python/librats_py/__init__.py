@@ -38,8 +38,6 @@ __all__ = [
     'MessageCallback',
     'FileProgressCallback',
     'FileRequestCallback',
-    'DirectoryRequestCallback',
-    'DirectoryProgressCallback',
     'TopicMessageCallback',
     'TopicJsonMessageCallback',
     'TopicPeerJoinedCallback',

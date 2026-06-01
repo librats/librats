@@ -166,11 +166,14 @@ ratsClient.broadcastJson("{\"type\":\"announcement\"}");
 
 ### File Transfer
 
-```java
-// Send a file
-String transferId = ratsClient.sendFile(peerId, "/path/to/file.txt", "remote_file.txt");
+Transfers are push-only: a peer sends an offer and the receiver accepts (or rejects) it.
 
-// Handle incoming file transfers (set up callback first)
+```java
+// Send a file or a directory (directories are always recursive)
+String transferId = ratsClient.sendFile(peerId, "/path/to/file.txt", "remote_file.txt");
+ratsClient.sendDirectory(peerId, "/path/to/dir", "remote_dir");
+
+// Track progress for both files and directories
 ratsClient.setFileProgressCallback(new FileProgressCallback() {
     @Override
     public void onFileProgress(String transferId, int progress, String status) {
@@ -178,9 +181,14 @@ ratsClient.setFileProgressCallback(new FileProgressCallback() {
     }
 });
 
-// Accept or reject file transfers
-ratsClient.acceptFileTransfer(transferId, "/path/to/save/file.txt");
-ratsClient.rejectFileTransfer(transferId, "Not accepting files");
+// Handle incoming offers, then accept or reject (remotePath is always empty)
+ratsClient.setFileRequestCallback(new FileRequestCallback() {
+    @Override
+    public void onFileRequest(String peerId, String transferId, String remotePath, String filename) {
+        ratsClient.acceptFileTransfer(transferId, "/path/to/save/" + filename);
+        // or: ratsClient.rejectFileTransfer(transferId, "Not accepting files");
+    }
+});
 ```
 
 ### Service Discovery
@@ -241,8 +249,11 @@ ratsClient.setEncryptionKey("your-hex-key-here");
 
 #### File Transfer Methods
 - `String sendFile(String peerId, String path, String filename)` - Send file
-- `int acceptFileTransfer(String transferId, String path)` - Accept transfer
-- `int rejectFileTransfer(String transferId, String reason)` - Reject transfer
+- `String sendDirectory(String peerId, String path, String remoteName)` - Send directory (always recursive)
+- `int acceptFileTransfer(String transferId, String path)` - Accept an incoming file/directory offer
+- `int rejectFileTransfer(String transferId, String reason)` - Reject an incoming offer
+- `int pauseFileTransfer(String transferId)` / `int resumeFileTransfer(String transferId)` - Pause/resume a transfer
+- `String getFileTransferProgressJson(String transferId)` / `String getFileTransferStatisticsJson()` - Query progress/stats
 
 #### Discovery Methods
 - `int startMdnsDiscovery(String serviceName)` - Start mDNS
@@ -268,7 +279,8 @@ ratsClient.setEncryptionKey("your-hex-key-here");
 - `JsonMessageCallback` - JSON messages
 - `DisconnectCallback` - Peer disconnections
 - `PeerDiscoveredCallback` - Service discovery
-- `FileProgressCallback` - File transfer progress
+- `FileProgressCallback` - File/directory transfer progress
+- `FileRequestCallback` - Incoming file/directory transfer offers
 
 ### Constants
 

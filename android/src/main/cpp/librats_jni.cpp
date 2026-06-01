@@ -36,10 +36,9 @@ static std::unordered_map<std::string, CallbackData> g_topic_json_message_callba
 static std::unordered_map<std::string, CallbackData> g_topic_peer_joined_callbacks;
 static std::unordered_map<std::string, CallbackData> g_topic_peer_left_callbacks;
 
-// File transfer callback maps
+// File transfer callback maps (incoming offers and progress, unified for files
+// and directories)
 static std::unordered_map<rats_client_t, CallbackData> g_file_request_callbacks;
-static std::unordered_map<rats_client_t, CallbackData> g_directory_request_callbacks;
-static std::unordered_map<rats_client_t, CallbackData> g_directory_progress_callbacks;
 
 // Helper to get JNI env
 JNIEnv* getJNIEnv() {
@@ -165,7 +164,7 @@ void peer_discovered_callback_bridge(void* user_data, const char* host, int port
 void file_progress_callback_bridge(void* user_data, const char* transfer_id, int progress_percent, const char* status) {
     JNIEnv* env = getJNIEnv();
     if (!env) return;
-    
+
     std::lock_guard<std::mutex> lock(g_callback_mutex);
     rats_client_t client = static_cast<rats_client_t>(user_data);
     auto it = g_file_progress_callbacks.find(client);
@@ -175,6 +174,28 @@ void file_progress_callback_bridge(void* user_data, const char* transfer_id, int
         env->CallVoidMethod(it->second.java_obj, it->second.method_id, jtransfer_id, progress_percent, jstatus);
         env->DeleteLocalRef(jtransfer_id);
         env->DeleteLocalRef(jstatus);
+    }
+}
+
+// Fires for every incoming transfer offer (file or directory). remote_path is
+// always empty in the push-only model; the offered name arrives as filename.
+void file_request_callback_bridge(void* user_data, const char* peer_id, const char* transfer_id, const char* remote_path, const char* filename) {
+    JNIEnv* env = getJNIEnv();
+    if (!env) return;
+
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    rats_client_t client = static_cast<rats_client_t>(user_data);
+    auto it = g_file_request_callbacks.find(client);
+    if (it != g_file_request_callbacks.end()) {
+        jstring jpeer_id = createJavaString(env, peer_id);
+        jstring jtransfer_id = createJavaString(env, transfer_id);
+        jstring jremote_path = createJavaString(env, remote_path ? remote_path : "");
+        jstring jfilename = createJavaString(env, filename ? filename : "");
+        env->CallVoidMethod(it->second.java_obj, it->second.method_id, jpeer_id, jtransfer_id, jremote_path, jfilename);
+        env->DeleteLocalRef(jpeer_id);
+        env->DeleteLocalRef(jtransfer_id);
+        env->DeleteLocalRef(jremote_path);
+        env->DeleteLocalRef(jfilename);
     }
 }
 
@@ -240,9 +261,7 @@ Java_com_librats_RatsClient_nativeDestroy(JNIEnv* env, jobject thiz, jlong clien
         g_peer_discovered_callbacks.erase(client);
         g_file_progress_callbacks.erase(client);
         g_file_request_callbacks.erase(client);
-        g_directory_request_callbacks.erase(client);
-        g_directory_progress_callbacks.erase(client);
-        
+
         // Clean up topic callbacks for this client
         std::string client_prefix = std::to_string(reinterpret_cast<intptr_t>(client)) + ":";
         auto it = g_topic_message_callbacks.begin();
@@ -680,6 +699,99 @@ Java_com_librats_RatsClient_nativeRejectFileTransfer(JNIEnv* env, jobject thiz, 
     std::string transfer_id_str = javaStringToCString(env, transfer_id);
     std::string reason_str = javaStringToCString(env, reason);
     return rats_reject_file_transfer(client, transfer_id_str.c_str(), reason_str.c_str());
+}
+
+// Advanced file transfer
+JNIEXPORT jstring JNICALL
+Java_com_librats_RatsClient_nativeSendDirectory(JNIEnv* env, jobject thiz, jlong client_ptr, jstring peer_id, jstring directory_path, jstring remote_directory_name) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string peer_id_str = javaStringToCString(env, peer_id);
+    std::string directory_path_str = javaStringToCString(env, directory_path);
+    std::string remote_name_str = javaStringToCString(env, remote_directory_name);
+
+    // Directory transfers are always recursive; the trailing flag is ignored.
+    char* transfer_id = rats_send_directory(client, peer_id_str.c_str(), directory_path_str.c_str(), remote_name_str.c_str(), 1);
+    jstring result = createJavaString(env, transfer_id);
+    if (transfer_id) rats_string_free(transfer_id);
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsClient_nativePauseFileTransfer(JNIEnv* env, jobject thiz, jlong client_ptr, jstring transfer_id) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string transfer_id_str = javaStringToCString(env, transfer_id);
+    return rats_pause_file_transfer(client, transfer_id_str.c_str());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsClient_nativeResumeFileTransfer(JNIEnv* env, jobject thiz, jlong client_ptr, jstring transfer_id) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string transfer_id_str = javaStringToCString(env, transfer_id);
+    return rats_resume_file_transfer(client, transfer_id_str.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_librats_RatsClient_nativeGetFileTransferProgressJson(JNIEnv* env, jobject thiz, jlong client_ptr, jstring transfer_id) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    std::string transfer_id_str = javaStringToCString(env, transfer_id);
+    char* json = rats_get_file_transfer_progress_json(client, transfer_id_str.c_str());
+    jstring result = createJavaString(env, json);
+    if (json) rats_string_free(json);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_librats_RatsClient_nativeGetFileTransferStatisticsJson(JNIEnv* env, jobject thiz, jlong client_ptr) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+    char* json = rats_get_file_transfer_statistics_json(client);
+    jstring result = createJavaString(env, json);
+    if (json) rats_string_free(json);
+    return result;
+}
+
+// File transfer callback setters
+JNIEXPORT void JNICALL
+Java_com_librats_RatsClient_nativeSetFileRequestCallback(JNIEnv* env, jobject thiz, jlong client_ptr, jobject callback) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    if (callback) {
+        jobject global_ref = env->NewGlobalRef(callback);
+        jclass callback_class = env->GetObjectClass(global_ref);
+        jmethodID method_id = env->GetMethodID(callback_class, "onFileRequest", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+
+        g_file_request_callbacks[client] = {global_ref, method_id};
+        rats_set_file_request_callback(client, file_request_callback_bridge, client);
+    } else {
+        auto it = g_file_request_callbacks.find(client);
+        if (it != g_file_request_callbacks.end()) {
+            env->DeleteGlobalRef(it->second.java_obj);
+            g_file_request_callbacks.erase(it);
+        }
+        rats_set_file_request_callback(client, nullptr, nullptr);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_librats_RatsClient_nativeSetFileProgressCallback(JNIEnv* env, jobject thiz, jlong client_ptr, jobject callback) {
+    rats_client_t client = reinterpret_cast<rats_client_t>(client_ptr);
+
+    std::lock_guard<std::mutex> lock(g_callback_mutex);
+    if (callback) {
+        jobject global_ref = env->NewGlobalRef(callback);
+        jclass callback_class = env->GetObjectClass(global_ref);
+        jmethodID method_id = env->GetMethodID(callback_class, "onFileProgress", "(Ljava/lang/String;ILjava/lang/String;)V");
+
+        g_file_progress_callbacks[client] = {global_ref, method_id};
+        rats_set_file_progress_callback(client, file_progress_callback_bridge, client);
+    } else {
+        auto it = g_file_progress_callbacks.find(client);
+        if (it != g_file_progress_callbacks.end()) {
+            env->DeleteGlobalRef(it->second.java_obj);
+            g_file_progress_callbacks.erase(it);
+        }
+        rats_set_file_progress_callback(client, nullptr, nullptr);
+    }
 }
 
 // ===================== GOSSIPSUB FUNCTIONALITY =====================

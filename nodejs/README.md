@@ -117,6 +117,12 @@ client.onFileProgress((transferId, progressPercent, status) => {
   console.log(`Transfer ${transferId}: ${progressPercent}% - ${status}`);
 });
 
+// Accept incoming transfer offers (transfers are push-only)
+client.onFileRequest((peerId, transferId, filename) => {
+  console.log(`Incoming offer "${filename}" from ${peerId}`);
+  client.acceptFileTransfer(transferId, `./downloads/${filename}`);
+});
+
 client.start();
 
 // Send a file to a peer
@@ -181,10 +187,8 @@ client.publishJsonToTopic('general-chat', JSON.stringify(message));
 #### File Transfer
 
 - `sendFile(peerId: string, filePath: string, remoteFilename?: string): string | null` - Send file
-- `sendDirectory(peerId: string, dirPath: string, remoteDirName?: string, recursive?: boolean): string | null` - Send directory
-- `requestFile(peerId: string, remoteFilePath: string, localPath: string): string | null` - Request file
-- `requestDirectory(peerId: string, remoteDirPath: string, localDirPath: string, recursive?: boolean): string | null` - Request directory
-- `acceptFileTransfer(transferId: string, localPath: string): boolean` - Accept file transfer
+- `sendDirectory(peerId: string, dirPath: string, remoteDirName?: string): string | null` - Send directory (always recursive)
+- `acceptFileTransfer(transferId: string, localPath: string): boolean` - Accept an incoming file/directory transfer offer
 - `rejectFileTransfer(transferId: string, reason?: string): boolean` - Reject file transfer
 - `cancelFileTransfer(transferId: string): boolean` - Cancel file transfer
 - `pauseFileTransfer(transferId: string): boolean` - Pause file transfer
@@ -223,6 +227,7 @@ client.publishJsonToTopic('general-chat', JSON.stringify(message));
 - `onJson(callback: (peerId: string, jsonStr: string) => void): void` - Set JSON message callback
 - `onDisconnect(callback: (peerId: string) => void): void` - Set disconnect callback
 - `onFileProgress(callback: (transferId: string, progressPercent: number, status: string) => void): void` - Set file progress callback
+- `onFileRequest(callback: (peerId: string, transferId: string, filename: string) => void): void` - Set incoming transfer offer callback (respond with `acceptFileTransfer`/`rejectFileTransfer`)
 
 ### Utility Functions
 

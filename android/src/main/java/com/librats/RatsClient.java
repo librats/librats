@@ -930,65 +930,19 @@ public class RatsClient {
     // ===================== ADVANCED FILE TRANSFER =====================
     
     /**
-     * Sends an entire directory to a peer.
-     * 
+     * Sends an entire directory to a peer. Directory transfers are always recursive.
+     * Use {@link #acceptFileTransfer} / {@link #rejectFileTransfer} on the receiving
+     * side to handle the incoming offer.
+     *
      * @param peerId Target peer ID
      * @param directoryPath Local directory path to send
      * @param remoteDirectoryName Optional remote directory name
-     * @param recursive Whether to include subdirectories
      * @return Transfer ID on success, null on failure
      */
-    public String sendDirectory(String peerId, String directoryPath, String remoteDirectoryName, boolean recursive) {
-        return nativeSendDirectory(nativeClientPtr, peerId, directoryPath, remoteDirectoryName, recursive);
+    public String sendDirectory(String peerId, String directoryPath, String remoteDirectoryName) {
+        return nativeSendDirectory(nativeClientPtr, peerId, directoryPath, remoteDirectoryName);
     }
-    
-    /**
-     * Requests a file from a remote peer.
-     * 
-     * @param peerId Target peer ID
-     * @param remoteFilePath Path to file on remote peer
-     * @param localPath Local path where file should be saved
-     * @return Transfer ID on success, null on failure
-     */
-    public String requestFile(String peerId, String remoteFilePath, String localPath) {
-        return nativeRequestFile(nativeClientPtr, peerId, remoteFilePath, localPath);
-    }
-    
-    /**
-     * Requests a directory from a remote peer.
-     * 
-     * @param peerId Target peer ID
-     * @param remoteDirectoryPath Path to directory on remote peer
-     * @param localDirectoryPath Local path where directory should be saved
-     * @param recursive Whether to include subdirectories
-     * @return Transfer ID on success, null on failure
-     */
-    public String requestDirectory(String peerId, String remoteDirectoryPath, String localDirectoryPath, boolean recursive) {
-        return nativeRequestDirectory(nativeClientPtr, peerId, remoteDirectoryPath, localDirectoryPath, recursive);
-    }
-    
-    /**
-     * Accepts an incoming directory transfer.
-     * 
-     * @param transferId Transfer identifier from request
-     * @param localPath Local path where directory should be saved
-     * @return SUCCESS on success, error code on failure
-     */
-    public int acceptDirectoryTransfer(String transferId, String localPath) {
-        return nativeAcceptDirectoryTransfer(nativeClientPtr, transferId, localPath);
-    }
-    
-    /**
-     * Rejects an incoming directory transfer.
-     * 
-     * @param transferId Transfer identifier from request
-     * @param reason Optional reason for rejection
-     * @return SUCCESS on success, error code on failure
-     */
-    public int rejectDirectoryTransfer(String transferId, String reason) {
-        return nativeRejectDirectoryTransfer(nativeClientPtr, transferId, reason);
-    }
-    
+
     /**
      * Pauses an active file transfer.
      * 
@@ -1080,16 +1034,20 @@ public class RatsClient {
     }
     
     // File transfer callback setters
+
+    /**
+     * Sets the callback fired for every incoming transfer offer (file or directory).
+     * Respond by calling {@link #acceptFileTransfer} or {@link #rejectFileTransfer}.
+     */
     public void setFileRequestCallback(FileRequestCallback callback) {
         nativeSetFileRequestCallback(nativeClientPtr, callback);
     }
-    
-    public void setDirectoryRequestCallback(DirectoryRequestCallback callback) {
-        nativeSetDirectoryRequestCallback(nativeClientPtr, callback);
-    }
-    
-    public void setDirectoryProgressCallback(DirectoryProgressCallback callback) {
-        nativeSetDirectoryProgressCallback(nativeClientPtr, callback);
+
+    /**
+     * Sets the callback fired with progress updates for file and directory transfers.
+     */
+    public void setFileProgressCallback(FileProgressCallback callback) {
+        nativeSetFileProgressCallback(nativeClientPtr, callback);
     }
     
     // Static utility methods
@@ -1273,20 +1231,15 @@ public class RatsClient {
     private native String[] nativeGetHistoricalPeerIds(long clientPtr);
     
     // Advanced file transfer
-    private native String nativeSendDirectory(long clientPtr, String peerId, String directoryPath, String remoteDirectoryName, boolean recursive);
-    private native String nativeRequestFile(long clientPtr, String peerId, String remoteFilePath, String localPath);
-    private native String nativeRequestDirectory(long clientPtr, String peerId, String remoteDirectoryPath, String localDirectoryPath, boolean recursive);
-    private native int nativeAcceptDirectoryTransfer(long clientPtr, String transferId, String localPath);
-    private native int nativeRejectDirectoryTransfer(long clientPtr, String transferId, String reason);
+    private native String nativeSendDirectory(long clientPtr, String peerId, String directoryPath, String remoteDirectoryName);
     private native int nativePauseFileTransfer(long clientPtr, String transferId);
     private native int nativeResumeFileTransfer(long clientPtr, String transferId);
     private native String nativeGetFileTransferProgressJson(long clientPtr, String transferId);
     private native String nativeGetFileTransferStatisticsJson(long clientPtr);
-    
+
     // File transfer callback setters
     private native void nativeSetFileRequestCallback(long clientPtr, FileRequestCallback callback);
-    private native void nativeSetDirectoryRequestCallback(long clientPtr, DirectoryRequestCallback callback);
-    private native void nativeSetDirectoryProgressCallback(long clientPtr, DirectoryProgressCallback callback);
+    private native void nativeSetFileProgressCallback(long clientPtr, FileProgressCallback callback);
     
     // Peer validation info
     private native String[] nativeGetValidatedPeerIds(long clientPtr);

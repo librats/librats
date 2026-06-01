@@ -161,11 +161,19 @@ client.is_gossipsub_available() -> bool
 
 #### File Transfer
 
+# Transfers are push-only: a peer sends an offer and the receiver accepts it.
 ```python
-# Send files
+# Send files and directories (directories are always recursive)
 client.send_file(peer_id: str, file_path: str, remote_filename: str = None) -> str
+client.send_directory(peer_id: str, directory_path: str, remote_directory_name: str) -> str
 
-# Handle incoming transfers
+# Handle incoming offers (file or directory). remote_path is always empty.
+def on_offer(peer_id, transfer_id, remote_path, filename):
+    client.accept_file_transfer(transfer_id, f"./downloads/{filename}")
+client.set_file_request_callback(on_offer)
+client.set_file_progress_callback(lambda tid, pct, status: print(tid, pct, status))
+
+# Respond to / control transfers
 client.accept_file_transfer(transfer_id: str, local_path: str)
 client.reject_file_transfer(transfer_id: str, reason: str = "")
 client.cancel_file_transfer(transfer_id: str)

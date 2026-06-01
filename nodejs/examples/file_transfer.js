@@ -35,17 +35,33 @@ class FileTransferExample {
       }
     });
 
+    // Incoming transfer offers (file or directory). Transfers are push-only:
+    // a peer sends us an offer and we accept (or reject) it here.
+    this.client.onFileRequest((peerId, transferId, filename) => {
+      const downloadPath = path.join(__dirname, 'transfers', 'downloads', filename);
+      const downloadDir = path.dirname(downloadPath);
+      if (!fs.existsSync(downloadDir)) {
+        fs.mkdirSync(downloadDir, { recursive: true });
+      }
+      console.log(`📥 Incoming offer "${filename}" from ${peerId} (transfer ${transferId})`);
+      console.log(`📁 Accepting, will save to: ${downloadPath}`);
+      this.client.acceptFileTransfer(transferId, downloadPath);
+      this.transfers.set(transferId, {
+        type: 'receive',
+        peerId,
+        localPath: downloadPath,
+        startTime: Date.now()
+      });
+    });
+
     // String message callback for simple commands
     this.client.onString((peerId, message) => {
       console.log(`📝 Message from ${peerId}: ${message}`);
-      
+
       // Handle simple file transfer commands
       if (message.startsWith('send:')) {
         const filePath = message.substring(5).trim();
         this.sendFileToPool(filePath);
-      } else if (message.startsWith('request:')) {
-        const filePath = message.substring(8).trim();
-        this.requestFileFromPeer(peerId, filePath);
       }
     });
   }
@@ -131,92 +147,29 @@ class FileTransferExample {
     }
   }
 
-  sendDirectoryToPeer(peerId, dirPath, remoteDirName = null, recursive = true) {
+  sendDirectoryToPeer(peerId, dirPath, remoteDirName = null) {
     if (!fs.existsSync(dirPath)) {
       console.log(`❌ Directory not found: ${dirPath}`);
       return null;
     }
 
     const dirName = remoteDirName || path.basename(dirPath);
-    console.log(`📂 Sending directory "${dirPath}" to peer ${peerId} as "${dirName}" (recursive: ${recursive})`);
-    
-    const transferId = this.client.sendDirectory(peerId, dirPath, dirName, recursive);
-    
+    console.log(`📂 Sending directory "${dirPath}" to peer ${peerId} as "${dirName}"`);
+
+    const transferId = this.client.sendDirectory(peerId, dirPath, dirName);
+
     if (transferId) {
       this.transfers.set(transferId, {
         type: 'send_dir',
         peerId,
         dirPath,
         remoteDirName: dirName,
-        recursive,
         startTime: Date.now()
       });
       console.log(`✅ Directory transfer initiated with ID: ${transferId}`);
       return transferId;
     } else {
       console.log(`❌ Failed to initiate directory transfer`);
-      return null;
-    }
-  }
-
-  requestFileFromPeer(peerId, remoteFilePath, localPath = null) {
-    const filename = path.basename(remoteFilePath);
-    const downloadPath = localPath || path.join(__dirname, 'transfers', 'downloads', filename);
-    
-    // Ensure download directory exists
-    const downloadDir = path.dirname(downloadPath);
-    if (!fs.existsSync(downloadDir)) {
-      fs.mkdirSync(downloadDir, { recursive: true });
-    }
-
-    console.log(`📥 Requesting file "${remoteFilePath}" from peer ${peerId}`);
-    console.log(`📁 Will save to: ${downloadPath}`);
-    
-    const transferId = this.client.requestFile(peerId, remoteFilePath, downloadPath);
-    
-    if (transferId) {
-      this.transfers.set(transferId, {
-        type: 'request',
-        peerId,
-        remoteFilePath,
-        localPath: downloadPath,
-        startTime: Date.now()
-      });
-      console.log(`✅ File request initiated with ID: ${transferId}`);
-      return transferId;
-    } else {
-      console.log(`❌ Failed to initiate file request`);
-      return null;
-    }
-  }
-
-  requestDirectoryFromPeer(peerId, remoteDirPath, localDirPath = null, recursive = true) {
-    const dirName = path.basename(remoteDirPath);
-    const downloadPath = localDirPath || path.join(__dirname, 'transfers', 'downloads', dirName);
-    
-    // Ensure download directory exists
-    if (!fs.existsSync(downloadPath)) {
-      fs.mkdirSync(downloadPath, { recursive: true });
-    }
-
-    console.log(`📂 Requesting directory "${remoteDirPath}" from peer ${peerId} (recursive: ${recursive})`);
-    console.log(`📁 Will save to: ${downloadPath}`);
-    
-    const transferId = this.client.requestDirectory(peerId, remoteDirPath, downloadPath, recursive);
-    
-    if (transferId) {
-      this.transfers.set(transferId, {
-        type: 'request_dir',
-        peerId,
-        remoteDirPath,
-        localDirPath: downloadPath,
-        recursive,
-        startTime: Date.now()
-      });
-      console.log(`✅ Directory request initiated with ID: ${transferId}`);
-      return transferId;
-    } else {
-      console.log(`❌ Failed to initiate directory request`);
       return null;
     }
   }
@@ -313,8 +266,6 @@ function setupInteractiveCLI(client) {
   console.log('  connect <host> <port>     - Connect to a peer');
   console.log('  send <peer_id> <file>     - Send file to peer');
   console.log('  senddir <peer_id> <dir>   - Send directory to peer');
-  console.log('  request <peer_id> <file>  - Request file from peer');
-  console.log('  reqdir <peer_id> <dir>    - Request directory from peer');
   console.log('  pause <transfer_id>       - Pause transfer');
   console.log('  resume <transfer_id>      - Resume transfer');
   console.log('  cancel <transfer_id>      - Cancel transfer');
@@ -354,22 +305,6 @@ function setupInteractiveCLI(client) {
             client.sendDirectoryToPeer(args[1], args[2]);
           } else {
             console.log('Usage: senddir <peer_id> <directory_path>');
-          }
-          break;
-
-        case 'request':
-          if (args.length >= 3) {
-            client.requestFileFromPeer(args[1], args[2]);
-          } else {
-            console.log('Usage: request <peer_id> <remote_file_path>');
-          }
-          break;
-
-        case 'reqdir':
-          if (args.length >= 3) {
-            client.requestDirectoryFromPeer(args[1], args[2]);
-          } else {
-            console.log('Usage: reqdir <peer_id> <remote_directory_path>');
           }
           break;
 

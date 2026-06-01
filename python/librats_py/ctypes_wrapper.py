@@ -316,22 +316,10 @@ class LibratsCtypes:
         self.lib.rats_broadcast_message.argtypes = [c_void_p, c_char_p, c_char_p]
         self.lib.rats_broadcast_message.restype = c_int
         
-        # Advanced File Transfer
+        # Advanced File Transfer (directories are always recursive; the trailing flag is ignored)
         self.lib.rats_send_directory.argtypes = [c_void_p, c_char_p, c_char_p, c_char_p, c_int]
         self.lib.rats_send_directory.restype = c_void_p
-        
-        self.lib.rats_request_file.argtypes = [c_void_p, c_char_p, c_char_p, c_char_p]
-        self.lib.rats_request_file.restype = c_void_p
-        
-        self.lib.rats_request_directory.argtypes = [c_void_p, c_char_p, c_char_p, c_char_p, c_int]
-        self.lib.rats_request_directory.restype = c_void_p
-        
-        self.lib.rats_accept_directory_transfer.argtypes = [c_void_p, c_char_p, c_char_p]
-        self.lib.rats_accept_directory_transfer.restype = c_int
-        
-        self.lib.rats_reject_directory_transfer.argtypes = [c_void_p, c_char_p, c_char_p]
-        self.lib.rats_reject_directory_transfer.restype = c_int
-        
+
         self.lib.rats_pause_file_transfer.argtypes = [c_void_p, c_char_p]
         self.lib.rats_pause_file_transfer.restype = c_int
         
@@ -344,19 +332,14 @@ class LibratsCtypes:
         self.lib.rats_get_file_transfer_statistics_json.argtypes = [c_void_p]
         self.lib.rats_get_file_transfer_statistics_json.restype = c_void_p
         
-        # File transfer callbacks
+        # File transfer callbacks (the unified file request/progress callbacks also
+        # cover directory transfers)
         self.lib.rats_set_file_request_callback.argtypes = [c_void_p, FileRequestCallbackType, c_void_p]
         self.lib.rats_set_file_request_callback.restype = None
-        
-        self.lib.rats_set_directory_request_callback.argtypes = [c_void_p, DirectoryRequestCallbackType, c_void_p]
-        self.lib.rats_set_directory_request_callback.restype = None
-        
+
         self.lib.rats_set_file_progress_callback.argtypes = [c_void_p, FileProgressCallbackType, c_void_p]
         self.lib.rats_set_file_progress_callback.restype = None
-        
-        self.lib.rats_set_directory_progress_callback.argtypes = [c_void_p, DirectoryProgressCallbackType, c_void_p]
-        self.lib.rats_set_directory_progress_callback.restype = None
-        
+
         # Enhanced GossipSub
         self.lib.rats_is_gossipsub_running.argtypes = [c_void_p]
         self.lib.rats_is_gossipsub_running.restype = c_int

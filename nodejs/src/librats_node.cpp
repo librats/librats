@@ -24,6 +24,7 @@ std::unordered_map<rats_client_t, std::shared_ptr<CallbackData>> binary_callback
 std::unordered_map<rats_client_t, std::shared_ptr<CallbackData>> json_callbacks;
 std::unordered_map<rats_client_t, std::shared_ptr<CallbackData>> disconnect_callbacks;
 std::unordered_map<rats_client_t, std::shared_ptr<CallbackData>> file_progress_callbacks;
+std::unordered_map<rats_client_t, std::shared_ptr<CallbackData>> file_request_callbacks;
 
 // C callback wrappers
 void connection_callback_wrapper(void* user_data, const char* peer_id) {
@@ -91,6 +92,23 @@ void file_progress_callback_wrapper(void* user_data, const char* transfer_id, in
             Napi::String::New(callback_data->env, transfer_id),
             Napi::Number::New(callback_data->env, progress_percent),
             Napi::String::New(callback_data->env, status)
+        });
+    }
+}
+
+// Fires for every incoming transfer offer (file or directory). The app should
+// respond by calling acceptFileTransfer()/rejectFileTransfer(). remote_path is
+// always empty in the push-only model, so only filename is forwarded.
+void file_request_callback_wrapper(void* user_data, const char* peer_id, const char* transfer_id, const char* remote_path, const char* filename) {
+    (void)remote_path;
+    rats_client_t client = static_cast<rats_client_t>(user_data);
+    auto it = file_request_callbacks.find(client);
+    if (it != file_request_callbacks.end() && it->second) {
+        auto callback_data = it->second;
+        callback_data->callback.Call({
+            Napi::String::New(callback_data->env, peer_id),
+            Napi::String::New(callback_data->env, transfer_id),
+            Napi::String::New(callback_data->env, filename)
         });
     }
 }
@@ -178,8 +196,6 @@ public:
             // File Transfer methods
             InstanceMethod("sendFile", &RatsClient::SendFile),
             InstanceMethod("sendDirectory", &RatsClient::SendDirectory),
-            InstanceMethod("requestFile", &RatsClient::RequestFile),
-            InstanceMethod("requestDirectory", &RatsClient::RequestDirectory),
             InstanceMethod("acceptFileTransfer", &RatsClient::AcceptFileTransfer),
             InstanceMethod("rejectFileTransfer", &RatsClient::RejectFileTransfer),
             InstanceMethod("cancelFileTransfer", &RatsClient::CancelFileTransfer),
@@ -198,6 +214,7 @@ public:
             InstanceMethod("onJson", &RatsClient::OnJson),
             InstanceMethod("onDisconnect", &RatsClient::OnDisconnect),
             InstanceMethod("onFileProgress", &RatsClient::OnFileProgress),
+            InstanceMethod("onFileRequest", &RatsClient::OnFileRequest),
             
             // Configuration persistence
             InstanceMethod("loadConfiguration", &RatsClient::LoadConfiguration),
@@ -240,7 +257,8 @@ public:
             json_callbacks.erase(client_);
             disconnect_callbacks.erase(client_);
             file_progress_callbacks.erase(client_);
-            
+            file_request_callbacks.erase(client_);
+
             rats_destroy(client_);
         }
     }
@@ -1011,57 +1029,8 @@ private:
             remote_directory_name = remote_name.c_str();
         }
 
-        int recursive = 1;
-        if (info.Length() > 3 && info[3].IsBoolean()) {
-            recursive = info[3].As<Napi::Boolean>().Value() ? 1 : 0;
-        }
-        
-        char* transfer_id = rats_send_directory(client_, peer_id.c_str(), directory_path.c_str(), remote_directory_name, recursive);
-        if (!transfer_id) return env.Null();
-        
-        Napi::String result = Napi::String::New(env, transfer_id);
-        rats_string_free(transfer_id);
-        return result;
-    }
-    
-    Napi::Value RequestFile(const Napi::CallbackInfo& info) {
-        Napi::Env env = info.Env();
-        
-        if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsString()) {
-            Napi::TypeError::New(env, "Expected peer_id (string), remote_file_path (string), and local_path (string)").ThrowAsJavaScriptException();
-            return env.Null();
-        }
-        
-        std::string peer_id = info[0].As<Napi::String>().Utf8Value();
-        std::string remote_file_path = info[1].As<Napi::String>().Utf8Value();
-        std::string local_path = info[2].As<Napi::String>().Utf8Value();
-        
-        char* transfer_id = rats_request_file(client_, peer_id.c_str(), remote_file_path.c_str(), local_path.c_str());
-        if (!transfer_id) return env.Null();
-        
-        Napi::String result = Napi::String::New(env, transfer_id);
-        rats_string_free(transfer_id);
-        return result;
-    }
-    
-    Napi::Value RequestDirectory(const Napi::CallbackInfo& info) {
-        Napi::Env env = info.Env();
-        
-        if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsString()) {
-            Napi::TypeError::New(env, "Expected peer_id (string), remote_directory_path (string), and local_directory_path (string)").ThrowAsJavaScriptException();
-            return env.Null();
-        }
-        
-        std::string peer_id = info[0].As<Napi::String>().Utf8Value();
-        std::string remote_directory_path = info[1].As<Napi::String>().Utf8Value();
-        std::string local_directory_path = info[2].As<Napi::String>().Utf8Value();
-        
-        int recursive = 1;
-        if (info.Length() > 3 && info[3].IsBoolean()) {
-            recursive = info[3].As<Napi::Boolean>().Value() ? 1 : 0;
-        }
-        
-        char* transfer_id = rats_request_directory(client_, peer_id.c_str(), remote_directory_path.c_str(), local_directory_path.c_str(), recursive);
+        // Directory transfers are always recursive; the trailing flag is ignored.
+        char* transfer_id = rats_send_directory(client_, peer_id.c_str(), directory_path.c_str(), remote_directory_name, 1);
         if (!transfer_id) return env.Null();
         
         Napi::String result = Napi::String::New(env, transfer_id);
@@ -1276,7 +1245,22 @@ private:
         file_progress_callbacks[client_] = callback_data;
         rats_set_file_progress_callback(client_, file_progress_callback_wrapper, client_);
     }
-    
+
+    void OnFileRequest(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+
+        if (info.Length() < 1 || !info[0].IsFunction()) {
+            Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
+            return;
+        }
+
+        auto callback_data = std::make_shared<CallbackData>(env);
+        callback_data->callback = Napi::Persistent(info[0].As<Napi::Function>());
+
+        file_request_callbacks[client_] = callback_data;
+        rats_set_file_request_callback(client_, file_request_callback_wrapper, client_);
+    }
+
     // Configuration persistence
     Napi::Value LoadConfiguration(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();

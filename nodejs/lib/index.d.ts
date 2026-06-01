@@ -225,33 +225,13 @@ export class RatsClient {
   sendFile(peerId: string, filePath: string, remoteFilename?: string): string | null;
 
   /**
-   * Send a directory to a peer
+   * Send a directory to a peer. Directory transfers are always recursive.
    * @param peerId - ID of the peer to send to
    * @param dirPath - Local path to the directory
    * @param remoteDirName - Optional directory name on remote side
-   * @param recursive - Whether to send recursively (default: true)
    * @returns Transfer ID, or null if failed
    */
-  sendDirectory(peerId: string, dirPath: string, remoteDirName?: string, recursive?: boolean): string | null;
-
-  /**
-   * Request a file from a peer
-   * @param peerId - ID of the peer to request from
-   * @param remoteFilePath - Path to the file on remote side
-   * @param localPath - Local path where file should be saved
-   * @returns Transfer ID, or null if failed
-   */
-  requestFile(peerId: string, remoteFilePath: string, localPath: string): string | null;
-
-  /**
-   * Request a directory from a peer
-   * @param peerId - ID of the peer to request from
-   * @param remoteDirPath - Path to the directory on remote side
-   * @param localDirPath - Local path where directory should be saved
-   * @param recursive - Whether to request recursively (default: true)
-   * @returns Transfer ID, or null if failed
-   */
-  requestDirectory(peerId: string, remoteDirPath: string, localDirPath: string, recursive?: boolean): string | null;
+  sendDirectory(peerId: string, dirPath: string, remoteDirName?: string): string | null;
 
   /**
    * Accept an incoming file transfer
@@ -668,6 +648,13 @@ export class RatsClient {
    * @param callback - Function to call with transfer ID, progress percentage, and status
    */
   onFileProgress(callback: (transferId: string, progressPercent: number, status: string) => void): void;
+
+  /**
+   * Set callback for incoming file/directory transfer offers. Respond by calling
+   * acceptFileTransfer() or rejectFileTransfer() with the given transfer ID.
+   * @param callback - Function to call with peer ID, transfer ID, and the offered file/directory name
+   */
+  onFileRequest(callback: (peerId: string, transferId: string, filename: string) => void): void;
 }
 
 // ============ Utility Functions ============

@@ -684,120 +684,39 @@ class RatsClient:
         result = self._lib.lib.rats_cancel_file_transfer(self._handle, transfer_id_bytes)
         check_error(result, f"Cancelling file transfer {transfer_id}")
     
-    def send_directory(self, peer_id: str, directory_path: str, 
-                      remote_directory_name: str, recursive: bool = True) -> str:
+    def send_directory(self, peer_id: str, directory_path: str,
+                      remote_directory_name: str) -> str:
         """
-        Send a directory to a peer.
-        
+        Send a directory to a peer. Directory transfers are always recursive.
+
         Args:
             peer_id: Target peer ID
             directory_path: Local directory path to send
             remote_directory_name: Remote directory name
-            recursive: Whether to send recursively
-            
+
         Returns:
             Transfer ID if successful
-            
+
         Raises:
             RatsError: If sending fails
         """
         peer_id_bytes = peer_id.encode('utf-8')
         directory_path_bytes = directory_path.encode('utf-8')
         remote_directory_name_bytes = remote_directory_name.encode('utf-8')
-        
+
+        # Directory transfers are always recursive; the trailing flag is ignored.
         result = self._lib.lib.rats_send_directory(
-            self._handle, peer_id_bytes, directory_path_bytes, 
-            remote_directory_name_bytes, int(recursive)
+            self._handle, peer_id_bytes, directory_path_bytes,
+            remote_directory_name_bytes, 1
         )
-        
+
         if not result:
             raise RatsError(f"Failed to send directory {directory_path} to peer {peer_id}")
-        
+
         transfer_id = string_at(result).decode('utf-8')
         self._lib.lib.rats_string_free(result)
         return transfer_id
-    
-    def request_file(self, peer_id: str, remote_file_path: str, local_path: str) -> str:
-        """
-        Request a file from a peer.
-        
-        Args:
-            peer_id: Target peer ID
-            remote_file_path: Remote file path to request
-            local_path: Local path to save the file
-            
-        Returns:
-            Transfer ID if successful
-            
-        Raises:
-            RatsError: If request fails
-        """
-        peer_id_bytes = peer_id.encode('utf-8')
-        remote_file_path_bytes = remote_file_path.encode('utf-8')
-        local_path_bytes = local_path.encode('utf-8')
-        
-        result = self._lib.lib.rats_request_file(
-            self._handle, peer_id_bytes, remote_file_path_bytes, local_path_bytes
-        )
-        
-        if not result:
-            raise RatsError(f"Failed to request file {remote_file_path} from peer {peer_id}")
-        
-        transfer_id = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return transfer_id
-    
-    def request_directory(self, peer_id: str, remote_directory_path: str, 
-                         local_directory_path: str, recursive: bool = True) -> str:
-        """
-        Request a directory from a peer.
-        
-        Args:
-            peer_id: Target peer ID
-            remote_directory_path: Remote directory path to request
-            local_directory_path: Local directory path to save to
-            recursive: Whether to request recursively
-            
-        Returns:
-            Transfer ID if successful
-            
-        Raises:
-            RatsError: If request fails
-        """
-        peer_id_bytes = peer_id.encode('utf-8')
-        remote_directory_path_bytes = remote_directory_path.encode('utf-8')
-        local_directory_path_bytes = local_directory_path.encode('utf-8')
-        
-        result = self._lib.lib.rats_request_directory(
-            self._handle, peer_id_bytes, remote_directory_path_bytes, 
-            local_directory_path_bytes, int(recursive)
-        )
-        
-        if not result:
-            raise RatsError(f"Failed to request directory {remote_directory_path} from peer {peer_id}")
-        
-        transfer_id = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return transfer_id
-    
-    def accept_directory_transfer(self, transfer_id: str, local_path: str) -> None:
-        """Accept an incoming directory transfer."""
-        transfer_id_bytes = transfer_id.encode('utf-8')
-        local_path_bytes = local_path.encode('utf-8')
-        result = self._lib.lib.rats_accept_directory_transfer(
-            self._handle, transfer_id_bytes, local_path_bytes
-        )
-        check_error(result, f"Accepting directory transfer {transfer_id}")
-    
-    def reject_directory_transfer(self, transfer_id: str, reason: str = "") -> None:
-        """Reject an incoming directory transfer."""
-        transfer_id_bytes = transfer_id.encode('utf-8')
-        reason_bytes = reason.encode('utf-8')
-        result = self._lib.lib.rats_reject_directory_transfer(
-            self._handle, transfer_id_bytes, reason_bytes
-        )
-        check_error(result, f"Rejecting directory transfer {transfer_id}")
-    
+
     def pause_file_transfer(self, transfer_id: str) -> None:
         """Pause an active file transfer."""
         transfer_id_bytes = transfer_id.encode('utf-8')
@@ -1189,33 +1108,23 @@ class RatsClient:
         return MessageCallbackType(c_callback)
     
     def _create_file_request_callback(self, callback: FileRequestCallback):
-        """Create a C callback wrapper for file request events."""
+        """Create a C callback wrapper for incoming transfer offers (file or directory).
+
+        Transfers are push-only, so ``remote_path`` is always empty; the offered
+        file/directory name is delivered as ``filename``.
+        """
         def c_callback(user_data, peer_id_ptr, transfer_id_ptr, remote_path_ptr, filename_ptr):
-            if callback and peer_id_ptr and transfer_id_ptr and remote_path_ptr and filename_ptr:
+            if callback and peer_id_ptr and transfer_id_ptr:
                 peer_id = peer_id_ptr.decode('utf-8')
                 transfer_id = transfer_id_ptr.decode('utf-8')
-                remote_path = remote_path_ptr.decode('utf-8')
-                filename = filename_ptr.decode('utf-8')
+                remote_path = remote_path_ptr.decode('utf-8') if remote_path_ptr else ""
+                filename = filename_ptr.decode('utf-8') if filename_ptr else ""
                 try:
                     callback(peer_id, transfer_id, remote_path, filename)
                 except Exception as e:
                     print(f"Error in file request callback: {e}")
         return FileRequestCallbackType(c_callback)
-    
-    def _create_directory_request_callback(self, callback: DirectoryRequestCallback):
-        """Create a C callback wrapper for directory request events."""
-        def c_callback(user_data, peer_id_ptr, transfer_id_ptr, remote_path_ptr, directory_name_ptr):
-            if callback and peer_id_ptr and transfer_id_ptr and remote_path_ptr and directory_name_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                transfer_id = transfer_id_ptr.decode('utf-8')
-                remote_path = remote_path_ptr.decode('utf-8')
-                directory_name = directory_name_ptr.decode('utf-8')
-                try:
-                    callback(peer_id, transfer_id, remote_path, directory_name)
-                except Exception as e:
-                    print(f"Error in directory request callback: {e}")
-        return DirectoryRequestCallbackType(c_callback)
-    
+
     def _create_file_progress_callback(self, callback: FileProgressCallback):
         """Create a C callback wrapper for file progress events."""
         def c_callback(user_data, transfer_id_ptr, progress_percent, status_ptr):
@@ -1227,19 +1136,7 @@ class RatsClient:
                 except Exception as e:
                     print(f"Error in file progress callback: {e}")
         return FileProgressCallbackType(c_callback)
-    
-    def _create_directory_progress_callback(self, callback: DirectoryProgressCallback):
-        """Create a C callback wrapper for directory progress events."""
-        def c_callback(user_data, transfer_id_ptr, files_completed, total_files, current_file_ptr):
-            if callback and transfer_id_ptr and current_file_ptr:
-                transfer_id = transfer_id_ptr.decode('utf-8')
-                current_file = current_file_ptr.decode('utf-8')
-                try:
-                    callback(transfer_id, files_completed, total_files, current_file)
-                except Exception as e:
-                    print(f"Error in directory progress callback: {e}")
-        return DirectoryProgressCallbackType(c_callback)
-    
+
     def _create_peer_discovered_callback(self, callback: PeerDiscoveredCallback):
         """Create a C callback wrapper for peer discovery events."""
         def c_callback(user_data, host_ptr, port, service_name_ptr):
@@ -1305,7 +1202,12 @@ class RatsClient:
     
     # Additional callback setters
     def set_file_request_callback(self, callback: FileRequestCallback) -> None:
-        """Set callback for file transfer requests."""
+        """Set callback for incoming transfer offers (file or directory).
+
+        The callback receives ``(peer_id, transfer_id, remote_path, filename)``.
+        Transfers are push-only, so ``remote_path`` is always empty; respond by
+        calling :meth:`accept_file_transfer` or :meth:`reject_file_transfer`.
+        """
         with self._callbacks_lock:
             self._callbacks['file_request'] = callback
             if callback:
@@ -1314,20 +1216,9 @@ class RatsClient:
                 self._lib.lib.rats_set_file_request_callback(self._handle, c_callback, None)
             else:
                 self._lib.lib.rats_set_file_request_callback(self._handle, None, None)
-    
-    def set_directory_request_callback(self, callback: DirectoryRequestCallback) -> None:
-        """Set callback for directory transfer requests."""
-        with self._callbacks_lock:
-            self._callbacks['directory_request'] = callback
-            if callback:
-                c_callback = self._create_directory_request_callback(callback)
-                self._c_callbacks['directory_request'] = c_callback
-                self._lib.lib.rats_set_directory_request_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_directory_request_callback(self._handle, None, None)
-    
+
     def set_file_progress_callback(self, callback: FileProgressCallback) -> None:
-        """Set callback for file transfer progress."""
+        """Set callback for file/directory transfer progress."""
         with self._callbacks_lock:
             self._callbacks['file_progress'] = callback
             if callback:
@@ -1336,18 +1227,7 @@ class RatsClient:
                 self._lib.lib.rats_set_file_progress_callback(self._handle, c_callback, None)
             else:
                 self._lib.lib.rats_set_file_progress_callback(self._handle, None, None)
-    
-    def set_directory_progress_callback(self, callback: DirectoryProgressCallback) -> None:
-        """Set callback for directory transfer progress."""
-        with self._callbacks_lock:
-            self._callbacks['directory_progress'] = callback
-            if callback:
-                c_callback = self._create_directory_progress_callback(callback)
-                self._c_callbacks['directory_progress'] = c_callback
-                self._lib.lib.rats_set_directory_progress_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_directory_progress_callback(self._handle, None, None)
-    
+
     def set_peer_discovered_callback(self, callback: PeerDiscoveredCallback) -> None:
         """Set callback for peer discovery events."""
         with self._callbacks_lock:
