@@ -43,27 +43,8 @@ bool RatsClient::start_dht_discovery(int dht_port) {
         dht_client_v6_.reset();
     }
 
-    // Best-effort: discover our public IP via STUN and derive a BEP 42 node ID from it.
-    // This gives the DHT an authoritative external address right at startup; it complements
-    // the in-DHT "ip"-field voting (which keeps the node ID correct if the address changes
-    // or STUN is unavailable). Runs in a managed thread so start() never blocks on STUN.
-    add_managed_thread(std::thread([this]() {
-        auto mapped = discover_public_address("stun.l.google.com", 19302, 4000);
-        if (!mapped) {
-            return;
-        }
-        // set_external_ip validates the address family, so feeding both instances is safe:
-        // only the matching-family DHT adopts it. (A default IPv4 STUN server yields an IPv4
-        // address; the IPv6 node ID is learned organically from IPv6 DHT responses.)
-        if (dht_client_) {
-            dht_client_->set_external_ip(mapped->address);
-        }
-        if (dht_client_v6_) {
-            dht_client_v6_->set_external_ip(mapped->address);
-        }
-    }), "dht-stun-extip");
-
-    // Start automatic peer discovery
+    // Start automatic peer discovery (this thread also performs the best-effort STUN probe
+    // that derives our BEP 42 node ID — see automatic_discovery_loop).
     start_automatic_peer_discovery();
 
     LOG_CLIENT_INFO("DHT discovery started successfully");
@@ -278,6 +259,27 @@ void RatsClient::automatic_discovery_loop() {
         if (shutdown_cv_.wait_for(lock, std::chrono::seconds(INITIAL_DISCOVERY_DELAY_SECONDS), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
             LOG_CLIENT_INFO("Automatic peer discovery loop stopped during initial delay");
             return;
+        }
+    }
+
+    // Best-effort: discover our public IP via STUN and derive a BEP 42 node ID from it before
+    // we announce, so we announce under the correct ID. This runs on the discovery thread (not
+    // a standalone one) on purpose: stop_dht_discovery() joins this thread via
+    // stop_automatic_peer_discovery() BEFORE resetting the DHT clients, so set_external_ip()
+    // can never touch a destroyed DhtClient. It complements the in-DHT "ip"-field voting, which
+    // keeps the node ID correct if the address changes or STUN is unavailable.
+    if (auto_discovery_running_.load() && running_.load()) {
+        auto mapped = discover_public_address("stun.l.google.com", 19302, 4000);
+        if (mapped) {
+            // set_external_ip validates the address family, so feeding both instances is safe:
+            // only the matching-family DHT adopts it. (A default IPv4 STUN server yields an IPv4
+            // address; the IPv6 node ID is learned organically from IPv6 DHT responses.)
+            if (dht_client_) {
+                dht_client_->set_external_ip(mapped->address);
+            }
+            if (dht_client_v6_) {
+                dht_client_v6_->set_external_ip(mapped->address);
+            }
         }
     }
 
