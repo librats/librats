@@ -89,7 +89,14 @@ void NatPmpClient::add_mapping(PortMapProtocol protocol, uint16_t internal_port,
     LOG_NATPMP_DEBUG("Registered mapping " << to_string(protocol) << " internal=" << internal_port
                      << " external=" << m.external_port);
     // If the worker is already running, wake it up to install the new mapping.
+    // wake_worker_ must be set under cv_mutex_ (the mutex the worker waits on) so
+    // the notification can't be lost in the gap between the worker evaluating its
+    // wait predicate and actually blocking.
     if (running_.load()) {
+        {
+            std::lock_guard<std::mutex> lk(cv_mutex_);
+            wake_worker_ = true;
+        }
         cv_.notify_all();
     }
 }
@@ -116,6 +123,12 @@ void NatPmpClient::stop() {
     // active exception").
     if (stop_requested_.exchange(true)) {
         return;
+    }
+    {
+        // Take cv_mutex_ before notifying so a worker about to sleep can't miss the
+        // stop request (same lost-wakeup hazard as add_mapping).
+        std::lock_guard<std::mutex> lk(cv_mutex_);
+        wake_worker_ = true;
     }
     cv_.notify_all();
     wakeup_.signal();  // unblock an in-flight gateway receive so the join is immediate
@@ -378,7 +391,8 @@ void NatPmpClient::worker_loop() {
         }
 
         std::unique_lock<std::mutex> lk(cv_mutex_);
-        cv_.wait_until(lk, next_wake, [this] { return stop_requested_.load(); });
+        cv_.wait_until(lk, next_wake, [this] { return stop_requested_.load() || wake_worker_; });
+        wake_worker_ = false;
     }
 
     // Clean up mappings on the way out.

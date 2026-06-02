@@ -129,6 +129,10 @@ private:
     std::atomic<bool> stop_requested_{false};
     std::condition_variable cv_;
     std::mutex cv_mutex_;
+    // Set under cv_mutex_ to break the refresh sleep early when a mapping is added
+    // or stop() is requested. Guarding it with the same mutex the worker waits on
+    // is what makes the wakeup race-free (no lost notifications).
+    bool wake_worker_ = false;
     WakeupPipe wakeup_;                 // interrupts blocking gateway receives on stop()
     std::thread worker_;
 };

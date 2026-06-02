@@ -211,7 +211,14 @@ void UpnpClient::add_mapping(PortMapProtocol protocol, uint16_t internal_port, u
     mappings_.push_back(m);
     LOG_UPNP_DEBUG("Registered mapping " << to_string(protocol) << " internal=" << internal_port
                    << " external=" << m.external_port);
+    // Wake the worker to install the new mapping immediately. wake_worker_ must be
+    // set under cv_mutex_ (the mutex the worker waits on) so the notification can't
+    // be lost in the gap between the worker evaluating its predicate and blocking.
     if (running_.load()) {
+        {
+            std::lock_guard<std::mutex> lk(cv_mutex_);
+            wake_worker_ = true;
+        }
         cv_.notify_all();
     }
 }
@@ -237,6 +244,12 @@ void UpnpClient::stop() {
     // then calls std::terminate ("terminate called without an active exception").
     if (stop_requested_.exchange(true)) {
         return;
+    }
+    {
+        // Take cv_mutex_ before notifying so a worker about to sleep can't miss the
+        // stop request (same lost-wakeup hazard as add_mapping).
+        std::lock_guard<std::mutex> lk(cv_mutex_);
+        wake_worker_ = true;
     }
     cv_.notify_all();
     wakeup_.signal();  // unblock an in-flight SSDP receive so the join is immediate
@@ -611,7 +624,8 @@ void UpnpClient::worker_loop() {
         }
 
         std::unique_lock<std::mutex> lk(cv_mutex_);
-        cv_.wait_until(lk, next_wake, [this] { return stop_requested_.load(); });
+        cv_.wait_until(lk, next_wake, [this] { return stop_requested_.load() || wake_worker_; });
+        wake_worker_ = false;
     }
 
     remove_all_mappings(dev);
