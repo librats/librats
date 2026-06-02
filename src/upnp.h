@@ -30,6 +30,30 @@
 
 namespace librats {
 
+/**
+ * Pure parsing helpers used by the UPnP client. Exposed (rather than file-local)
+ * so the SSDP/SOAP XML and URL handling — the most error-prone part of the
+ * protocol — can be unit tested directly.
+ */
+namespace upnp_detail {
+
+/// Extract the trimmed text of the first <tag ...>...</tag> (case-insensitive),
+/// searching from @p from. Returns "" when the tag is absent.
+std::string extract_xml_tag(const std::string& xml, const std::string& tag, size_t from = 0);
+
+/// Parse "http://host[:port][/path]". Defaults port to 80 and path to "/".
+/// Returns false if the scheme is missing or the host is empty.
+bool parse_http_url(const std::string& url, std::string& host, uint16_t& port, std::string& path);
+
+/// Resolve a device's controlURL (which may be absolute, root-relative or
+/// path-relative) into an absolute http URL. @p url_base is the device's optional
+/// <URLBase>; @p desc_host / @p desc_port are the host the description was fetched
+/// from, used when no URLBase is present.
+std::string resolve_control_url(std::string control_url, std::string url_base,
+                                const std::string& desc_host, uint16_t desc_port);
+
+} // namespace upnp_detail
+
 /// SSDP multicast address / port used to discover UPnP devices.
 constexpr const char* SSDP_MULTICAST_ADDR = "239.255.255.250";
 constexpr uint16_t SSDP_PORT = 1900;
@@ -103,12 +127,19 @@ private:
     void remove_all_mappings(const Device& dev);
     void notify(const Mapping& m, bool success, const std::string& error);
 
-    // SOAP helper: POST an action to the device control URL, returns body on 200.
+    // SOAP helper: POST an action to the device control URL. Returns true only on
+    // a successful (HTTP 200, no SOAP fault) response. When the IGD reports a UPnP
+    // error, *upnp_error receives its numeric code (e.g. 718 conflict, 725 permanent
+    // lease only) so the caller can react; it is set to 0 on success.
     bool soap_action(const Device& dev, const std::string& action,
-                     const std::string& body_args, std::string& response_body);
+                     const std::string& body_args, std::string& response_body,
+                     int* upnp_error = nullptr);
 
     PortMapCallback callback_;
     uint32_t lease_duration_ = UPNP_DEFAULT_LEASE;
+    // Set once an IGD rejects a timed lease with error 725; subsequent requests ask
+    // for a permanent (0) lease. Touched only from the worker thread.
+    bool permanent_lease_only_ = false;
 
     mutable std::mutex mutex_;          // guards mappings_, external_ip_, device_
     std::vector<Mapping> mappings_;

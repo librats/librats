@@ -9,8 +9,10 @@
 
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <cctype>
+#include <random>
 #include <sstream>
 
 #define LOG_UPNP_DEBUG(message) LOG_DEBUG("upnp", message)
@@ -40,47 +42,6 @@ size_t ifind(const std::string& haystack, const std::string& needle, size_t from
                           [](char a, char b) { return std::tolower((unsigned char)a) == std::tolower((unsigned char)b); });
     if (it == haystack.end()) return std::string::npos;
     return static_cast<size_t>(it - haystack.begin());
-}
-
-// Extract the text content of the first <tag>...</tag> (case-insensitive tag).
-std::string extract_tag(const std::string& xml, const std::string& tag, size_t from = 0) {
-    std::string open = "<" + tag;
-    size_t s = ifind(xml, open, from);
-    if (s == std::string::npos) return "";
-    size_t gt = xml.find('>', s);
-    if (gt == std::string::npos) return "";
-    std::string close = "</" + tag + ">";
-    size_t e = ifind(xml, close, gt + 1);
-    if (e == std::string::npos) return "";
-    std::string value = xml.substr(gt + 1, e - gt - 1);
-    // trim whitespace
-    size_t b = value.find_first_not_of(" \t\r\n");
-    size_t en = value.find_last_not_of(" \t\r\n");
-    if (b == std::string::npos) return "";
-    return value.substr(b, en - b + 1);
-}
-
-// Minimal URL parser for "http://host[:port][/path]".
-bool parse_http_url(const std::string& url, std::string& host, uint16_t& port, std::string& path) {
-    std::string lower = to_lower(url);
-    const std::string prefix = "http://";
-    if (lower.compare(0, prefix.size(), prefix) != 0) return false;
-    size_t host_start = prefix.size();
-    size_t path_start = url.find('/', host_start);
-    std::string authority = (path_start == std::string::npos)
-        ? url.substr(host_start)
-        : url.substr(host_start, path_start - host_start);
-    path = (path_start == std::string::npos) ? "/" : url.substr(path_start);
-    size_t colon = authority.find(':');
-    if (colon == std::string::npos) {
-        host = authority;
-        port = 80;
-    } else {
-        host = authority.substr(0, colon);
-        port = static_cast<uint16_t>(std::atoi(authority.substr(colon + 1).c_str()));
-        if (port == 0) port = 80;
-    }
-    return !host.empty();
 }
 
 // Determine which local IPv4 address the OS would use to reach `dest_ip`.
@@ -162,6 +123,72 @@ bool http_request(const std::string& host, uint16_t port, const std::string& met
 
 } // anonymous namespace
 
+namespace upnp_detail {
+
+std::string extract_xml_tag(const std::string& xml, const std::string& tag, size_t from) {
+    std::string open = "<" + tag;
+    size_t s = ifind(xml, open, from);
+    if (s == std::string::npos) return "";
+    size_t gt = xml.find('>', s);
+    if (gt == std::string::npos) return "";
+    std::string close = "</" + tag + ">";
+    size_t e = ifind(xml, close, gt + 1);
+    if (e == std::string::npos) return "";
+    std::string value = xml.substr(gt + 1, e - gt - 1);
+    // trim whitespace
+    size_t b = value.find_first_not_of(" \t\r\n");
+    size_t en = value.find_last_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    return value.substr(b, en - b + 1);
+}
+
+bool parse_http_url(const std::string& url, std::string& host, uint16_t& port, std::string& path) {
+    std::string lower = to_lower(url);
+    const std::string prefix = "http://";
+    if (lower.compare(0, prefix.size(), prefix) != 0) return false;
+    size_t host_start = prefix.size();
+    size_t path_start = url.find('/', host_start);
+    std::string authority = (path_start == std::string::npos)
+        ? url.substr(host_start)
+        : url.substr(host_start, path_start - host_start);
+    path = (path_start == std::string::npos) ? "/" : url.substr(path_start);
+    size_t colon = authority.find(':');
+    if (colon == std::string::npos) {
+        host = authority;
+        port = 80;
+    } else {
+        host = authority.substr(0, colon);
+        port = static_cast<uint16_t>(std::atoi(authority.substr(colon + 1).c_str()));
+        if (port == 0) port = 80;
+    }
+    return !host.empty();
+}
+
+std::string resolve_control_url(std::string control_url, std::string url_base,
+                                const std::string& desc_host, uint16_t desc_port) {
+    if (control_url.empty()) return "";
+
+    // Already absolute.
+    if (to_lower(control_url).compare(0, 7, "http://") == 0) {
+        return control_url;
+    }
+
+    // Ensure a leading slash so we can append to an authority.
+    if (control_url.front() != '/') control_url = "/" + control_url;
+
+    if (!url_base.empty()) {
+        // <URLBase> is typically http://host:port[/]; drop a trailing slash so we
+        // don't produce a doubled "//" when joining with the rooted control path.
+        if (url_base.back() == '/') url_base.pop_back();
+        return url_base + control_url;
+    }
+
+    // Fall back to the host the description itself was fetched from.
+    return "http://" + desc_host + ":" + std::to_string(desc_port) + control_url;
+}
+
+} // namespace upnp_detail
+
 UpnpClient::UpnpClient() = default;
 
 UpnpClient::~UpnpClient() {
@@ -238,19 +265,33 @@ bool UpnpClient::discover_device(Device& out) {
     }
 
     // SSDP M-SEARCH. MX=2 asks devices to spread responses over up to 2 seconds.
-    std::string msearch =
-        "M-SEARCH * HTTP/1.1\r\n"
-        "HOST: 239.255.255.250:1900\r\n"
-        "MAN: \"ssdp:discover\"\r\n"
-        "MX: 2\r\n"
-        "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n"
-        "\r\n";
-    std::vector<uint8_t> payload(msearch.begin(), msearch.end());
+    // Search for several targets: IGD v1/v2 directly, and the generic root-device
+    // target (some routers only answer the latter). We then validate the WAN
+    // service from each device description, so over-broad replies are harmless.
+    static const char* kSearchTargets[] = {
+        "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+        "urn:schemas-upnp-org:device:InternetGatewayDevice:2",
+        "upnp:rootdevice",
+    };
+    std::vector<std::vector<uint8_t>> payloads;
+    for (const char* st : kSearchTargets) {
+        std::string msearch =
+            "M-SEARCH * HTTP/1.1\r\n"
+            "HOST: 239.255.255.250:1900\r\n"
+            "MAN: \"ssdp:discover\"\r\n"
+            "MX: 2\r\n"
+            "ST: " + std::string(st) + "\r\n"
+            "\r\n";
+        payloads.emplace_back(msearch.begin(), msearch.end());
+    }
 
     bool found = false;
+    std::vector<std::string> tried; // device descriptions already fetched this run
     // Send a few bursts (UDP is lossy) and harvest responses for a few seconds.
     for (int attempt = 0; attempt < 3 && !found && !stop_requested_.load(); ++attempt) {
-        send_udp_data(sock, payload, SSDP_MULTICAST_ADDR, SSDP_PORT, AddressFamily::IPv4);
+        for (const auto& payload : payloads) {
+            send_udp_data(sock, payload, SSDP_MULTICAST_ADDR, SSDP_PORT, AddressFamily::IPv4);
+        }
 
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (std::chrono::steady_clock::now() < deadline && !stop_requested_.load()) {
@@ -270,6 +311,11 @@ bool UpnpClient::discover_device(Device& out) {
             if (b == std::string::npos) continue;
             location = location.substr(b, e - b + 1);
 
+            // The broadened search may surface non-IGD root devices and duplicate
+            // replies; fetch each unique description at most once.
+            if (std::find(tried.begin(), tried.end(), location) != tried.end()) continue;
+            tried.push_back(location);
+
             std::string local_ip = local_ip_for_destination(from.ip, from.port);
             LOG_UPNP_DEBUG("SSDP reply from " << from.ip << " location=" << location);
             if (fetch_description(location, local_ip, out)) {
@@ -286,7 +332,7 @@ bool UpnpClient::discover_device(Device& out) {
 bool UpnpClient::fetch_description(const std::string& location, const std::string& local_ip, Device& out) {
     std::string host, path;
     uint16_t port = 0;
-    if (!parse_http_url(location, host, port, path)) {
+    if (!upnp_detail::parse_http_url(location, host, port, path)) {
         return false;
     }
 
@@ -306,10 +352,10 @@ bool UpnpClient::fetch_description(const std::string& location, const std::strin
         size_t svc_end = ifind(body, "</service>", svc_start);
         if (svc_end == std::string::npos) break;
         std::string segment = body.substr(svc_start, svc_end - svc_start);
-        std::string type = extract_tag(segment, "serviceType");
+        std::string type = upnp_detail::extract_xml_tag(segment, "serviceType");
         for (const char* wanted : kWantedServices) {
             if (to_lower(type) == to_lower(wanted)) {
-                std::string ctrl = extract_tag(segment, "controlURL");
+                std::string ctrl = upnp_detail::extract_xml_tag(segment, "controlURL");
                 if (!ctrl.empty()) {
                     service_type = type;
                     control_url = ctrl;
@@ -326,29 +372,13 @@ bool UpnpClient::fetch_description(const std::string& location, const std::strin
         return false;
     }
 
-    // Resolve control URL: it may be absolute, or relative to <URLBase> / the
-    // description host.
-    std::string control_absolute;
-    if (to_lower(control_url).compare(0, 7, "http://") == 0) {
-        control_absolute = control_url;
-    } else {
-        std::string url_base = extract_tag(body, "URLBase");
-        if (!url_base.empty()) {
-            if (url_base.back() == '/' && !control_url.empty() && control_url.front() == '/') {
-                url_base.pop_back();
-            }
-            // URLBase is typically http://host:port
-            if (control_url.front() != '/') control_url = "/" + control_url;
-            control_absolute = url_base + control_url;
-        } else {
-            if (control_url.front() != '/') control_url = "/" + control_url;
-            control_absolute = "http://" + host + ":" + std::to_string(port) + control_url;
-        }
-    }
+    // Resolve control URL (absolute, root-relative or relative to <URLBase>).
+    std::string control_absolute = upnp_detail::resolve_control_url(
+        control_url, upnp_detail::extract_xml_tag(body, "URLBase"), host, port);
 
     std::string c_host, c_path;
     uint16_t c_port = 0;
-    if (!parse_http_url(control_absolute, c_host, c_port, c_path)) {
+    if (!upnp_detail::parse_http_url(control_absolute, c_host, c_port, c_path)) {
         return false;
     }
 
@@ -365,7 +395,10 @@ bool UpnpClient::fetch_description(const std::string& location, const std::strin
 }
 
 bool UpnpClient::soap_action(const Device& dev, const std::string& action,
-                             const std::string& body_args, std::string& response_body) {
+                             const std::string& body_args, std::string& response_body,
+                             int* upnp_error) {
+    if (upnp_error) *upnp_error = 0;
+
     std::ostringstream soap;
     soap << "<?xml version=\"1.0\"?>\r\n"
          << "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
@@ -385,42 +418,90 @@ bool UpnpClient::soap_action(const Device& dev, const std::string& action,
         return false;
     }
 
-    if (status != 200) {
-        std::string err_code = extract_tag(response_body, "errorCode");
+    // UPnP faults are carried in a SOAP body that typically rides on HTTP 500, but
+    // some routers answer 200 with a fault too. Parse the body regardless of status.
+    std::string err_code = upnp_detail::extract_xml_tag(response_body, "errorCode");
+    if (!err_code.empty()) {
+        int code = std::atoi(err_code.c_str());
+        if (upnp_error) *upnp_error = code;
         LOG_UPNP_DEBUG("SOAP " << action << " returned status " << status
-                       << (err_code.empty() ? "" : " upnp errorCode " + err_code));
+                       << " upnp errorCode " << code);
+        return false;
+    }
+
+    if (status != 200) {
+        LOG_UPNP_DEBUG("SOAP " << action << " returned status " << status);
         return false;
     }
     return true;
 }
 
 bool UpnpClient::add_port_mapping(const Device& dev, Mapping& m) {
-    std::ostringstream args;
-    args << "<NewRemoteHost></NewRemoteHost>"
-         << "<NewExternalPort>" << m.external_port << "</NewExternalPort>"
-         << "<NewProtocol>" << to_string(m.protocol) << "</NewProtocol>"
-         << "<NewInternalPort>" << m.internal_port << "</NewInternalPort>"
-         << "<NewInternalClient>" << dev.local_ip << "</NewInternalClient>"
-         << "<NewEnabled>1</NewEnabled>"
-         << "<NewPortMappingDescription>" << m.description << "</NewPortMappingDescription>"
-         << "<NewLeaseDuration>" << lease_duration_ << "</NewLeaseDuration>";
+    // A few routers reject the requested external port (718 conflict / 501 action
+    // failed) or only accept permanent leases (725). Mirror libtorrent: retry with
+    // a fresh random external port on conflict, and drop to a permanent lease on
+    // 725, instead of giving up on the first error.
+    static constexpr int kMaxAttempts = 6;
+    int last_error = 0;
 
-    std::string resp;
-    if (!soap_action(dev, "AddPortMapping", args.str(), resp)) {
-        notify(m, false, "AddPortMapping failed");
-        return false;
+    for (int attempt = 0; attempt < kMaxAttempts && !stop_requested_.load(); ++attempt) {
+        const uint32_t lease = permanent_lease_only_ ? 0 : lease_duration_;
+
+        std::ostringstream args;
+        args << "<NewRemoteHost></NewRemoteHost>"
+             << "<NewExternalPort>" << m.external_port << "</NewExternalPort>"
+             << "<NewProtocol>" << to_string(m.protocol) << "</NewProtocol>"
+             << "<NewInternalPort>" << m.internal_port << "</NewInternalPort>"
+             << "<NewInternalClient>" << dev.local_ip << "</NewInternalClient>"
+             << "<NewEnabled>1</NewEnabled>"
+             << "<NewPortMappingDescription>" << m.description << "</NewPortMappingDescription>"
+             << "<NewLeaseDuration>" << lease << "</NewLeaseDuration>";
+
+        std::string resp;
+        int upnp_error = 0;
+        if (soap_action(dev, "AddPortMapping", args.str(), resp, &upnp_error)) {
+            m.active = true;
+            uint32_t refresh = lease > 0 ? lease / 2 : 1800;
+            if (refresh < 60) refresh = 60;
+            m.expires = std::chrono::steady_clock::now() + std::chrono::seconds(refresh);
+
+            LOG_UPNP_INFO("UPnP mapped " << to_string(m.protocol) << " external " << m.external_port
+                          << " -> " << dev.local_ip << ":" << m.internal_port
+                          << " (lease " << lease << "s)");
+            notify(m, true, "");
+            return true;
+        }
+
+        last_error = upnp_error;
+
+        if (upnp_error == 725 && !permanent_lease_only_) {
+            // IGD only supports permanent leases: switch and retry immediately.
+            LOG_UPNP_DEBUG("IGD supports permanent leases only; retrying without a lease");
+            permanent_lease_only_ = true;
+            continue;
+        }
+
+        if (upnp_error == 718 || upnp_error == 501) {
+            // External port conflicts with an existing mapping (some routers report
+            // 501 Action Failed instead): pick another port and retry.
+            static std::mt19937 rng(std::random_device{}());
+            std::uniform_int_distribution<int> dist(49152, 65535);
+            uint16_t new_port = static_cast<uint16_t>(dist(rng));
+            LOG_UPNP_DEBUG("External port " << m.external_port << " conflicts (error " << upnp_error
+                           << "); retrying with " << new_port);
+            m.external_port = new_port;
+            continue;
+        }
+
+        // Any other error is not retryable.
+        break;
     }
 
-    m.active = true;
-    uint32_t refresh = lease_duration_ > 0 ? lease_duration_ / 2 : 1800;
-    if (refresh < 60) refresh = 60;
-    m.expires = std::chrono::steady_clock::now() + std::chrono::seconds(refresh);
-
-    LOG_UPNP_INFO("UPnP mapped " << to_string(m.protocol) << " external " << m.external_port
-                  << " -> " << dev.local_ip << ":" << m.internal_port
-                  << " (lease " << lease_duration_ << "s)");
-    notify(m, true, "");
-    return true;
+    std::string err = "AddPortMapping failed";
+    if (last_error) err += " (UPnP error " + std::to_string(last_error) + ")";
+    LOG_UPNP_WARN("UPnP " << err << " for " << to_string(m.protocol) << " port " << m.internal_port);
+    notify(m, false, err);
+    return false;
 }
 
 bool UpnpClient::delete_port_mapping(const Device& dev, const Mapping& m) {
@@ -441,7 +522,7 @@ bool UpnpClient::query_external_ip(const Device& dev) {
     if (!soap_action(dev, "GetExternalIPAddress", "", resp)) {
         return false;
     }
-    std::string ip = extract_tag(resp, "NewExternalIPAddress");
+    std::string ip = upnp_detail::extract_xml_tag(resp, "NewExternalIPAddress");
     if (!ip.empty()) {
         std::lock_guard<std::mutex> lock(mutex_);
         external_ip_ = ip;

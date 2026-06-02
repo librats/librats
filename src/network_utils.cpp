@@ -16,6 +16,17 @@
     #else
         #include <ifaddrs.h>
     #endif
+
+    // macOS / BSD default-gateway lookup via the PF_ROUTE sysctl routing table.
+    #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
+        defined(__OpenBSD__) || defined(__DragonFly__)
+        #define RATS_HAVE_BSD_ROUTES 1
+        #include <sys/types.h>
+        #include <sys/socket.h>
+        #include <sys/sysctl.h>
+        #include <net/route.h>
+        #include <net/if.h>
+    #endif
 #endif
 
 
@@ -472,6 +483,55 @@ std::vector<std::string> get_default_gateways() {
             }
         }
         std::fclose(f);
+    }
+#elif defined(RATS_HAVE_BSD_ROUTES)
+    // Dump the IPv4 routing table and pick the gateway of the default route(s).
+    int mib[6] = { CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_DUMP, 0 };
+    size_t needed = 0;
+    if (sysctl(mib, 6, nullptr, &needed, nullptr, 0) == 0 && needed > 0) {
+        std::vector<char> buf(needed);
+        if (sysctl(mib, 6, buf.data(), &needed, nullptr, 0) == 0) {
+            // sockaddrs in a routing message are padded to a 4-byte boundary.
+            auto sa_roundup = [](socklen_t len) -> size_t {
+                return len ? (1 + ((static_cast<size_t>(len) - 1) | (sizeof(uint32_t) - 1)))
+                           : sizeof(uint32_t);
+            };
+            char* lim = buf.data() + needed;
+            for (char* next = buf.data(); next + sizeof(struct rt_msghdr) <= lim; ) {
+                auto* rtm = reinterpret_cast<struct rt_msghdr*>(next);
+                if (rtm->rtm_msglen == 0) break;
+                char* msg_end = next + rtm->rtm_msglen;
+                next = msg_end;
+
+                if (!(rtm->rtm_flags & RTF_GATEWAY)) continue;
+                if (!(rtm->rtm_addrs & RTA_DST) || !(rtm->rtm_addrs & RTA_GATEWAY)) continue;
+
+                // Address list follows the header, ordered by the RTA_* bit flags.
+                char* sa_ptr = reinterpret_cast<char*>(rtm + 1);
+                struct sockaddr* dst = nullptr;
+                struct sockaddr* gw = nullptr;
+                for (int bit = 1; bit && sa_ptr < msg_end; bit <<= 1) {
+                    if (!(rtm->rtm_addrs & bit)) continue;
+                    auto* sa = reinterpret_cast<struct sockaddr*>(sa_ptr);
+                    if (bit == RTA_DST) dst = sa;
+                    else if (bit == RTA_GATEWAY) gw = sa;
+                    sa_ptr += sa_roundup(sa->sa_len);
+                }
+
+                if (!dst || !gw) continue;
+                if (dst->sa_family != AF_INET || gw->sa_family != AF_INET) continue;
+                // Default route: destination 0.0.0.0
+                if (reinterpret_cast<struct sockaddr_in*>(dst)->sin_addr.s_addr != 0) continue;
+
+                char ip_str[INET_ADDRSTRLEN];
+                auto* gw4 = reinterpret_cast<struct sockaddr_in*>(gw);
+                if (inet_ntop(AF_INET, &gw4->sin_addr, ip_str, sizeof(ip_str))) {
+                    append_unique(gateways, ip_str);
+                }
+            }
+        }
+    } else {
+        LOG_NETUTILS_DEBUG("PF_ROUTE sysctl for default gateway failed");
     }
 #endif
 
