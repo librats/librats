@@ -265,10 +265,30 @@ bool NatPmpClient::send_map_request(socket_t sock, Mapping& m, bool remove) {
     put_u16(req, requested_external);
     put_u32(req, lifetime);
 
+    if (remove) {
+        // Best-effort teardown. A NAT-PMP delete is just a MAP request with lifetime 0;
+        // we deliberately do NOT wait for the reply. stop() has already signalled the
+        // wakeup pipe so the worker exits promptly (tests churn through open/close
+        // cycles): a blocking receive here would either return instantly (confirming
+        // nothing) or, if the pipe were drained, stall for the full retransmit timeout
+        // when the gateway is silent. So we send the datagram twice — to ride out UDP
+        // loss — and return immediately. The lease caps the mapping lifetime as a
+        // backstop if both packets are lost.
+        bool sent = false;
+        for (int i = 0; i < 2; ++i) {
+            if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) >= 0) sent = true;
+        }
+        if (sent) {
+            LOG_NATPMP_INFO("NAT-PMP delete request sent (best-effort) for "
+                            << to_string(m.protocol) << " port " << m.internal_port);
+        }
+        return sent;
+    }
+
     const uint8_t expected_opcode = static_cast<uint8_t>(map_opcode(m.protocol) | OP_RESPONSE_BIT);
 
     for (int timeout : kRetryTimeouts) {
-        if (stop_requested_.load() && !remove) return false;
+        if (stop_requested_.load()) return false;
         if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) < 0) return false;
 
         Peer from;
@@ -284,17 +304,12 @@ bool NatPmpClient::send_map_request(socket_t sock, Mapping& m, bool remove) {
             std::string err = result_message(result);
             LOG_NATPMP_WARN("NAT-PMP map " << to_string(m.protocol) << " port " << m.internal_port
                             << " failed: " << err);
-            if (!remove) notify(m, false, err);
+            notify(m, false, err);
             return false;
         }
 
         uint16_t mapped_external = get_u16(&resp[10]);
         uint32_t granted_lifetime = get_u32(&resp[12]);
-
-        if (remove) {
-            LOG_NATPMP_INFO("NAT-PMP removed mapping " << to_string(m.protocol) << " port " << m.internal_port);
-            return true;
-        }
 
         m.external_port = mapped_external;
         m.active = true;
@@ -309,9 +324,7 @@ bool NatPmpClient::send_map_request(socket_t sock, Mapping& m, bool remove) {
         return true;
     }
 
-    if (!remove) {
-        LOG_NATPMP_DEBUG("NAT-PMP map request timed out for port " << m.internal_port);
-    }
+    LOG_NATPMP_DEBUG("NAT-PMP map request timed out for port " << m.internal_port);
     return false;
 }
 
