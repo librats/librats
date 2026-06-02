@@ -1258,38 +1258,9 @@ bool bep42_prefix(const std::string& ip, uint8_t seed, uint8_t prefix[3]) {
 } // namespace
 
 bool DhtClient::is_public_address(const std::string& ip) {
-    if (ip.empty()) return false;
-
-    if (network_utils::is_valid_ipv6(ip)) {
-        struct in6_addr a;
-        if (inet_pton(AF_INET6, ip.c_str(), &a) != 1) return false;
-        const uint8_t* b = a.s6_addr;
-        bool all_zero = true;
-        for (int i = 0; i < 16; ++i) { if (b[i]) { all_zero = false; break; } }
-        if (all_zero) return false;                              // ::  (unspecified)
-        bool loopback = (b[15] == 1);
-        for (int i = 0; i < 15; ++i) { if (b[i]) { loopback = false; break; } }
-        if (loopback) return false;                              // ::1
-        if ((b[0] & 0xfe) == 0xfc) return false;                 // fc00::/7  unique local
-        if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return false; // fe80::/10 link-local
-        if (b[0] == 0xff) return false;                          // ff00::/8  multicast
-        return true;
-    }
-
-    struct in_addr a;
-    if (inet_pton(AF_INET, ip.c_str(), &a) != 1) return false;
-    uint32_t h = ntohl(a.s_addr);
-    uint8_t o1 = static_cast<uint8_t>((h >> 24) & 0xff);
-    uint8_t o2 = static_cast<uint8_t>((h >> 16) & 0xff);
-    if (o1 == 0) return false;                                   // 0.0.0.0/8
-    if (o1 == 127) return false;                                 // loopback
-    if (o1 == 10) return false;                                  // 10.0.0.0/8
-    if (o1 == 172 && o2 >= 16 && o2 <= 31) return false;         // 172.16.0.0/12
-    if (o1 == 192 && o2 == 168) return false;                    // 192.168.0.0/16
-    if (o1 == 169 && o2 == 254) return false;                    // 169.254.0.0/16 link-local
-    if (o1 == 100 && o2 >= 64 && o2 <= 127) return false;        // 100.64.0.0/10 CGNAT
-    if (o1 >= 224) return false;                                 // multicast / reserved
-    return true;
+    // Shared with automatic port forwarding; the canonical classifier lives in
+    // network_utils so both subsystems agree on what "publicly routable" means.
+    return network_utils::is_public_ip(ip);
 }
 
 bool DhtClient::generate_node_id_from_ip(const std::string& ip, NodeId& out, std::mt19937& gen) {

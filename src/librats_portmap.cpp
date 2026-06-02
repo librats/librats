@@ -9,6 +9,7 @@
  */
 
 #include "librats.h"
+#include "network_utils.h"
 #include "logger.h"
 
 namespace librats {
@@ -90,11 +91,22 @@ void RatsClient::add_port_mapping(PortMapProtocol protocol, uint16_t port) {
 // ============================================================================
 
 void RatsClient::handle_port_mapping_result(const PortMapResult& result) {
+    // A gateway whose reported "external" IP is itself private means we're behind a
+    // second NAT (double-NAT): the mapping forwards a port on the inner router, but
+    // that doesn't make us reachable from the internet, and the inner port won't
+    // match whatever the outer NAT assigns. So such a mapping must NOT be treated as
+    // a public endpoint — we leave mapped_external_* untouched and let the advertised
+    // address fall back to listen_port_ / the STUN-discovered reflexive address.
+    // An empty external IP (gateway didn't report one) is "unknown", not private, so
+    // we keep the previous best-effort behavior for it.
+    const bool ip_is_private = !result.external_ip.empty() && !network_utils::is_public_ip(result.external_ip);
+
     PortMapCallback user_cb;
     bool tcp_port_changed = false;
+    bool warn_double_nat = false;
     {
         std::lock_guard<std::mutex> lock(port_mapping_mutex_);
-        if (result.success) {
+        if (result.success && !ip_is_private) {
             if (!result.external_ip.empty()) {
                 mapped_external_ip_ = result.external_ip;
             }
@@ -106,15 +118,29 @@ void RatsClient::handle_port_mapping_result(const PortMapResult& result) {
             } else {
                 mapped_external_udp_port_ = result.external_port;
             }
+        } else if (result.success && ip_is_private && !double_nat_warning_logged_) {
+            double_nat_warning_logged_ = true;
+            warn_double_nat = true;
         }
         user_cb = port_mapping_callback_;
     }
 
-    if (result.success) {
+    if (result.success && ip_is_private) {
+        LOG_INFO("portmap", to_string(result.transport) << " mapped " << to_string(result.protocol)
+                 << " port " << result.internal_port << " -> external " << result.external_ip << ":"
+                 << result.external_port << " (gateway external IP is private — not a usable public address)");
+        if (warn_double_nat) {
+            LOG_WARN("portmap", "Gateway reports a private external IP (" << result.external_ip
+                     << ") — likely double-NAT. Port forwarding alone won't make this host publicly "
+                        "reachable; relying on STUN for the public address.");
+        }
+    } else if (result.success) {
         LOG_INFO("portmap", to_string(result.transport) << " mapped " << to_string(result.protocol)
                  << " port " << result.internal_port << " -> external "
                  << (result.external_ip.empty() ? "?" : result.external_ip) << ":" << result.external_port);
-        // Avoid trying to connect to ourselves through the public address.
+        // Avoid trying to connect to ourselves through the public address. Only a
+        // genuinely public IP belongs on the ignore list — a private one could be a
+        // real LAN peer we still want to reach.
         if (!result.external_ip.empty()) {
             add_ignored_address(result.external_ip);
         }

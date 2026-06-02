@@ -2041,6 +2041,9 @@ private:
     std::string mapped_external_ip_;
     uint16_t mapped_external_tcp_port_ = 0;  // public port for the TCP peer-listen port
     uint16_t mapped_external_udp_port_ = 0;  // public port for the UDP DHT port
+    // Set once we warn that the gateway's reported external IP is itself private
+    // (double-NAT), so the warning isn't repeated on every lease refresh.
+    bool double_nat_warning_logged_ = false;
 
     // Start/stop the port mapping backends (no-ops if disabled). Called from
     // start()/stop(); safe to call repeatedly.

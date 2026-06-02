@@ -42,6 +42,19 @@ bool is_valid_ipv6(const std::string& ip_str);
 bool is_hostname(const std::string& str);
 
 /**
+ * Check whether an IP address is publicly routable (not a private/reserved range).
+ *
+ * Returns false for RFC1918 (10/8, 172.16/12, 192.168/16), CGNAT (100.64/10),
+ * loopback, link-local (169.254/16, fe80::/10), unspecified, multicast/reserved,
+ * and IPv6 unique-local (fc00::/7). A non-IP / unparseable string yields false.
+ *
+ * Used both by the DHT (BEP 42 external-IP voting) and by automatic port
+ * forwarding to detect a double-NAT gateway whose reported "external" IP is itself
+ * private and therefore not a usable public endpoint.
+ */
+bool is_public_ip(const std::string& ip);
+
+/**
  * Get all local network interface addresses (IPv4 and IPv6)
  * @return Vector of local IP addresses from all network interfaces
  */
