@@ -65,10 +65,18 @@ void RatsClient::on_port_mapping(PortMapCallback callback) {
 
 std::optional<std::pair<std::string, uint16_t>> RatsClient::get_mapped_public_address() const {
     std::lock_guard<std::mutex> lock(port_mapping_mutex_);
-    if (mapped_external_port_ == 0 || mapped_external_ip_.empty()) {
+    // The "public address" peers should reach us on is the TCP peer-listen mapping.
+    if (mapped_external_tcp_port_ == 0 || mapped_external_ip_.empty()) {
         return std::nullopt;
     }
-    return std::make_pair(mapped_external_ip_, mapped_external_port_);
+    return std::make_pair(mapped_external_ip_, mapped_external_tcp_port_);
+}
+
+uint16_t RatsClient::get_advertised_port() const {
+    std::lock_guard<std::mutex> lock(port_mapping_mutex_);
+    return mapped_external_tcp_port_ != 0
+         ? mapped_external_tcp_port_
+         : static_cast<uint16_t>(listen_port_);
 }
 
 void RatsClient::add_port_mapping(PortMapProtocol protocol, uint16_t port) {
@@ -83,13 +91,21 @@ void RatsClient::add_port_mapping(PortMapProtocol protocol, uint16_t port) {
 
 void RatsClient::handle_port_mapping_result(const PortMapResult& result) {
     PortMapCallback user_cb;
+    bool tcp_port_changed = false;
     {
         std::lock_guard<std::mutex> lock(port_mapping_mutex_);
         if (result.success) {
             if (!result.external_ip.empty()) {
                 mapped_external_ip_ = result.external_ip;
             }
-            mapped_external_port_ = result.external_port;
+            // Track the external port per protocol so the TCP (peer) and UDP (DHT)
+            // mappings don't overwrite each other.
+            if (result.protocol == PortMapProtocol::TCP) {
+                tcp_port_changed = (mapped_external_tcp_port_ != result.external_port);
+                mapped_external_tcp_port_ = result.external_port;
+            } else {
+                mapped_external_udp_port_ = result.external_port;
+            }
         }
         user_cb = port_mapping_callback_;
     }
@@ -102,6 +118,9 @@ void RatsClient::handle_port_mapping_result(const PortMapResult& result) {
         if (!result.external_ip.empty()) {
             add_ignored_address(result.external_ip);
         }
+        // A new/changed public TCP port means the address peers should reach us on
+        // changed: re-announce to the DHT so it advertises the mapped port instead
+        // of the (NATed) local listen port. Done outside the lock below.
     } else {
         LOG_DEBUG("portmap", to_string(result.transport) << " mapping failed: " << result.error);
     }
@@ -109,6 +128,11 @@ void RatsClient::handle_port_mapping_result(const PortMapResult& result) {
     // Invoke the user callback outside the lock to avoid re-entrancy deadlocks.
     if (user_cb) {
         user_cb(result);
+    }
+
+    // Re-announce with the freshly mapped public port (outside any lock).
+    if (tcp_port_changed && is_dht_running()) {
+        announce_rats_peer();
     }
 }
 

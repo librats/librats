@@ -43,6 +43,14 @@ bool RatsClient::start_dht_discovery(int dht_port) {
         dht_client_v6_.reset();
     }
 
+    // Forward the DHT's UDP port through the router, in addition to the TCP peer
+    // port mapped at start(). Like libtorrent (which maps both the TCP listen port
+    // and the UDP DHT/uTP port per listen socket), this makes the node reachable by
+    // inbound DHT traffic behind NAT. No-op when port mapping is disabled; the
+    // mapping uses external==internal so outgoing queries and inbound packets share
+    // one public port. The backends wake their workers to install it immediately.
+    add_port_mapping(PortMapProtocol::UDP, static_cast<uint16_t>(dht_port));
+
     // Start automatic peer discovery (this thread also performs the best-effort STUN probe
     // that derives our BEP 42 node ID — see automatic_discovery_loop).
     start_automatic_peer_discovery();
@@ -321,8 +329,14 @@ void RatsClient::announce_rats_peer() {
     }
     
     std::string discovery_hash = get_discovery_hash();
-    LOG_CLIENT_INFO("Announcing peer for discovery hash: " << discovery_hash << " on port " << listen_port_);
-    
+
+    // Advertise the mapped public TCP port when UPnP/NAT-PMP has established one,
+    // so WAN peers connect to (external_ip, external_port) rather than our NATed
+    // local listen port. Falls back to listen_port_ when no mapping is active.
+    // (Mirrors libtorrent feeding the port-mapping result into what it announces.)
+    uint16_t announce_port = get_advertised_port();
+    LOG_CLIENT_INFO("Announcing peer for discovery hash: " << discovery_hash << " on port " << announce_port);
+
     InfoHash info_hash = hex_to_node_id(discovery_hash);
 
     // Skip only if every running DHT network already has this announce in flight.
@@ -336,7 +350,7 @@ void RatsClient::announce_rats_peer() {
     
     // Use announce with callback - combines announce and find_peers in one traversal
     // Peers discovered during traversal will be returned through the callback
-    if (announce_for_hash(discovery_hash, listen_port_, [this, info_hash](const std::vector<std::string>& peer_addresses) {
+    if (announce_for_hash(discovery_hash, announce_port, [this, info_hash](const std::vector<std::string>& peer_addresses) {
         LOG_CLIENT_INFO("Announce discovered " << peer_addresses.size() << " peers during traversal");
         
         // Convert peer addresses to Peer objects for handle_dht_peer_discovery()

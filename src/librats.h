@@ -2034,14 +2034,22 @@ private:
     std::unique_ptr<UpnpClient> upnp_client_;
     std::unique_ptr<NatPmpClient> natpmp_client_;
     PortMapCallback port_mapping_callback_;
+    // Public address discovered by the backends. The external port is tracked per
+    // protocol (like libtorrent's per-listen-socket tcp/udp port mappings): the TCP
+    // mapping forwards the peer listen port, the UDP mapping forwards the DHT port.
+    // A single field would let the two backend callbacks clobber each other.
     std::string mapped_external_ip_;
-    uint16_t mapped_external_port_ = 0;
+    uint16_t mapped_external_tcp_port_ = 0;  // public port for the TCP peer-listen port
+    uint16_t mapped_external_udp_port_ = 0;  // public port for the UDP DHT port
 
     // Start/stop the port mapping backends (no-ops if disabled). Called from
     // start()/stop(); safe to call repeatedly.
     void start_port_mapping();
     void stop_port_mapping();
     void handle_port_mapping_result(const PortMapResult& result);
+    // Public TCP port to advertise to peers/DHT: the mapped external port once a
+    // TCP mapping is established, otherwise the local listen port.
+    uint16_t get_advertised_port() const;
 
 #ifdef RATS_STORAGE
     // Distributed storage manager (optional, requires RATS_STORAGE)
