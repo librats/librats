@@ -49,7 +49,12 @@ bool RatsClient::start_dht_discovery(int dht_port) {
     // inbound DHT traffic behind NAT. No-op when port mapping is disabled; the
     // mapping uses external==internal so outgoing queries and inbound packets share
     // one public port. The backends wake their workers to install it immediately.
-    add_port_mapping(PortMapProtocol::UDP, static_cast<uint16_t>(dht_port));
+    // Use the *actual* bound port: start() may have fallen back to an ephemeral one
+    // when the requested dht_port was taken.
+    uint16_t bound_dht_port = dht_client_->get_port();
+    if (bound_dht_port != 0) {
+        add_port_mapping(PortMapProtocol::UDP, bound_dht_port);
+    }
 
     // Start automatic peer discovery (this thread also performs the best-effort STUN probe
     // that derives our BEP 42 node ID — see automatic_discovery_loop).

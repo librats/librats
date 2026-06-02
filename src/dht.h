@@ -298,7 +298,15 @@ public:
      * @return true if running, false otherwise
      */
     bool is_running() const { return running_; }
-    
+
+    /**
+     * Actual bound UDP port. May differ from the requested port if it was taken and
+     * the client fell back to an ephemeral port (see start()). Use this — not the
+     * requested port — when forwarding the DHT port through a router.
+     * @return bound port, or 0 if not started
+     */
+    uint16_t get_port() const { return static_cast<uint16_t>(port_); }
+
 #ifdef RATS_SEARCH_FEATURES
     // ============================================================================
     // SPIDER MODE - Aggressive node discovery and announce collection
