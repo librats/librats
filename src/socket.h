@@ -170,10 +170,14 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const std::
  * @param buffer_size Maximum number of bytes to receive
  * @param sender_peer Output parameter for the sender's peer info
  * @param timeout_ms Timeout in milliseconds (-1 for blocking, 0 for non-blocking, >0 for timeout)
- * @return Received data, empty vector on timeout or error
+ * @param interrupt_fd Optional second socket to watch; when it becomes readable the
+ *                     call returns immediately with an empty vector (used to wake a
+ *                     blocking receive on shutdown). INVALID_SOCKET_VALUE disables it.
+ * @return Received data, empty vector on timeout, error or interrupt
  */
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer& sender_peer,
-                                      int timeout_ms = -1);
+                                      int timeout_ms = -1,
+                                      socket_t interrupt_fd = INVALID_SOCKET_VALUE);
 
 // Common Socket Functions
 /**

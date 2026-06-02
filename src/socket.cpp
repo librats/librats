@@ -844,23 +844,43 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data,
 }
 
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer& sender_peer,
-                                      int timeout_ms) {
-    // Handle timeout using select
-    if (timeout_ms >= 0) {
+                                      int timeout_ms, socket_t interrupt_fd) {
+    // Handle timeout (and optional interrupt socket) using select. When no interrupt
+    // fd is supplied this path is identical to the plain timeout behavior.
+    const bool have_interrupt = is_valid_socket(interrupt_fd);
+    if (timeout_ms >= 0 || have_interrupt) {
         fd_set read_fds;
         FD_ZERO(&read_fds);
         FD_SET(socket, &read_fds);
+        socket_t maxfd = socket;
+        if (have_interrupt) {
+            FD_SET(interrupt_fd, &read_fds);
+            if (interrupt_fd > maxfd) maxfd = interrupt_fd;
+        }
 
         struct timeval timeout;
-        timeout.tv_sec = timeout_ms / 1000;
-        timeout.tv_usec = (timeout_ms % 1000) * 1000;
+        struct timeval* ptimeout = nullptr; // timeout_ms < 0 => block until readable
+        if (timeout_ms >= 0) {
+            timeout.tv_sec = timeout_ms / 1000;
+            timeout.tv_usec = (timeout_ms % 1000) * 1000;
+            ptimeout = &timeout;
+        }
 
-        int result = select(socket + 1, &read_fds, nullptr, nullptr, &timeout);
+        int result = select(static_cast<int>(maxfd) + 1, &read_fds, nullptr, nullptr, ptimeout);
         if (result == 0) {
             LOG_SOCKET_DEBUG("UDP receive timeout (" << timeout_ms << "ms)");
             return {};
         } else if (result < 0) {
             LOG_SOCKET_ERROR("Select error while waiting for UDP data");
+            return {};
+        }
+        // Woken by the interrupt socket (e.g. stop requested): leave the data socket
+        // untouched and report no data so the caller can re-check its stop flag.
+        if (have_interrupt && FD_ISSET(interrupt_fd, &read_fds)) {
+            return {};
+        }
+        // Guard against calling recvfrom on a data socket that isn't actually ready.
+        if (!FD_ISSET(socket, &read_fds)) {
             return {};
         }
     }

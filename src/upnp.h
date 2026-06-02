@@ -19,6 +19,7 @@
  */
 
 #include "port_mapping.h"
+#include "wakeup_pipe.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -151,6 +152,7 @@ private:
     std::atomic<bool> stop_requested_{false};
     std::condition_variable cv_;
     std::mutex cv_mutex_;
+    WakeupPipe wakeup_;                 // interrupts blocking SSDP receives on stop()
     std::thread worker_;
 };
 

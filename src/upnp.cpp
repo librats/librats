@@ -239,6 +239,7 @@ void UpnpClient::stop() {
         return;
     }
     cv_.notify_all();
+    wakeup_.signal();  // unblock an in-flight SSDP receive so the join is immediate
     if (worker_.joinable()) {
         worker_.join();
     }
@@ -300,7 +301,7 @@ bool UpnpClient::discover_device(Device& out) {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (std::chrono::steady_clock::now() < deadline && !stop_requested_.load()) {
             Peer from;
-            auto resp = receive_udp_data(sock, 2048, from, 1000);
+            auto resp = receive_udp_data(sock, 2048, from, 1000, wakeup_.fd());
             if (resp.empty()) continue;
 
             std::string text(reinterpret_cast<const char*>(resp.data()), resp.size());

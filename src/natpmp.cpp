@@ -118,6 +118,7 @@ void NatPmpClient::stop() {
         return;
     }
     cv_.notify_all();
+    wakeup_.signal();  // unblock an in-flight gateway receive so the join is immediate
     if (worker_.joinable()) {
         worker_.join();
     }
@@ -166,7 +167,7 @@ bool NatPmpClient::ensure_gateway() {
             if (stop_requested_.load()) { close_socket(sock); return false; }
             if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) < 0) break;
             Peer from;
-            auto resp = receive_udp_data(sock, 64, from, timeout);
+            auto resp = receive_udp_data(sock, 64, from, timeout, wakeup_.fd());
             if (resp.size() >= 12 && from.ip == gw && resp[0] == NATPMP_VERSION &&
                 resp[1] == (OP_EXTERNAL_IP | OP_RESPONSE_BIT)) {
                 uint16_t result = get_u16(&resp[2]);
@@ -216,7 +217,7 @@ bool NatPmpClient::request_external_ip(socket_t sock) {
         if (stop_requested_.load()) return false;
         if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) < 0) return false;
         Peer from;
-        auto resp = receive_udp_data(sock, 64, from, timeout);
+        auto resp = receive_udp_data(sock, 64, from, timeout, wakeup_.fd());
         if (resp.size() >= 12 && from.ip == gw && resp[0] == NATPMP_VERSION &&
             resp[1] == (OP_EXTERNAL_IP | OP_RESPONSE_BIT) && get_u16(&resp[2]) == 0) {
             char ip[INET_ADDRSTRLEN];
@@ -258,7 +259,7 @@ bool NatPmpClient::send_map_request(socket_t sock, Mapping& m, bool remove) {
         if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) < 0) return false;
 
         Peer from;
-        auto resp = receive_udp_data(sock, 64, from, timeout);
+        auto resp = receive_udp_data(sock, 64, from, timeout, wakeup_.fd());
         if (resp.size() < 16 || from.ip != gw) continue;
         if (resp[0] != NATPMP_VERSION || resp[1] != expected_opcode) continue;
 
