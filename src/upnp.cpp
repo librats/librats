@@ -231,14 +231,18 @@ bool UpnpClient::start() {
 }
 
 void UpnpClient::stop() {
-    if (!running_.exchange(false)) {
+    // Guard idempotency on stop_requested_, NOT running_: the worker clears
+    // running_ itself when discovery fails (see worker_loop), so gating the join
+    // on running_ would skip it and leave the thread joinable — destroying it
+    // then calls std::terminate ("terminate called without an active exception").
+    if (stop_requested_.exchange(true)) {
         return;
     }
-    stop_requested_.store(true);
     cv_.notify_all();
     if (worker_.joinable()) {
         worker_.join();
     }
+    running_.store(false);
 }
 
 void UpnpClient::notify(const Mapping& m, bool success, const std::string& error) {
