@@ -265,22 +265,19 @@ std::chrono::seconds RatsClient::calculate_discovery_interval() const {
 
 void RatsClient::automatic_discovery_loop() {
     LOG_CLIENT_INFO("Automatic peer discovery loop started");
-    
-    // Initial delay to let DHT bootstrap
-    {
-        std::unique_lock<std::mutex> lock(shutdown_mutex_);
-        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(INITIAL_DISCOVERY_DELAY_SECONDS), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
-            LOG_CLIENT_INFO("Automatic peer discovery loop stopped during initial delay");
-            return;
-        }
-    }
 
-    // Best-effort: discover our public IP via STUN and derive a BEP 42 node ID from it before
-    // we announce, so we announce under the correct ID. This runs on the discovery thread (not
-    // a standalone one) on purpose: stop_dht_discovery() joins this thread via
-    // stop_automatic_peer_discovery() BEFORE resetting the DHT clients, so set_external_ip()
-    // can never touch a destroyed DhtClient. It complements the in-DHT "ip"-field voting, which
-    // keeps the node ID correct if the address changes or STUN is unavailable.
+    // Best-effort: discover our public IP via STUN and derive a BEP 42 node ID from it BEFORE
+    // the initial bootstrap delay below. The DHT starts receiving KRPC responses (each carrying
+    // our address in the "ip" field) immediately on bootstrap, and that in-DHT vote can reach
+    // EXTERNAL_IP_VOTE_THRESHOLD within a few seconds. Probing STUN first lets set_external_ip()
+    // adopt the address and regenerate the node ID up front, so the DHT bootstraps under the
+    // correct ID and the ip-field voting silently confirms the already-adopted address instead
+    // of racing it to consensus. The voting remains the fallback when STUN is unavailable or the
+    // address later changes.
+    //
+    // This runs on the discovery thread (not a standalone one) on purpose: stop_dht_discovery()
+    // joins this thread via stop_automatic_peer_discovery() BEFORE resetting the DHT clients, so
+    // set_external_ip() can never touch a destroyed DhtClient.
     if (auto_discovery_running_.load() && running_.load()) {
         auto mapped = discover_public_address("stun.l.google.com", 19302, 4000);
         if (mapped) {
@@ -293,6 +290,15 @@ void RatsClient::automatic_discovery_loop() {
             if (dht_client_v6_) {
                 dht_client_v6_->set_external_ip(mapped->address);
             }
+        }
+    }
+
+    // Initial delay to let DHT bootstrap
+    {
+        std::unique_lock<std::mutex> lock(shutdown_mutex_);
+        if (shutdown_cv_.wait_for(lock, std::chrono::seconds(INITIAL_DISCOVERY_DELAY_SECONDS), [this] { return !auto_discovery_running_.load() || !running_.load(); })) {
+            LOG_CLIENT_INFO("Automatic peer discovery loop stopped during initial delay");
+            return;
         }
     }
 
