@@ -9,7 +9,9 @@
  */
 
 #include "librats.h"
+#include "librats_log_macros.h"
 #include "network_utils.h"
+#include "network_monitor.h"
 #include "logger.h"
 
 namespace librats {
@@ -239,6 +241,179 @@ void RatsClient::stop_port_mapping() {
     }
     if (upnp)   upnp->stop();
     if (natpmp) natpmp->stop();
+}
+
+// ============================================================================
+// Network change detection
+// ============================================================================
+
+void RatsClient::set_network_change_detection_enabled(bool enabled) {
+    bool was_enabled;
+    {
+        std::lock_guard<std::mutex> lock(network_monitor_mutex_);
+        was_enabled = network_change_detection_enabled_;
+        network_change_detection_enabled_ = enabled;
+    }
+    if (was_enabled == enabled) {
+        return;
+    }
+    LOG_INFO("netmon", "Network change detection " << (enabled ? "enabled" : "disabled"));
+    if (running_.load()) {
+        if (enabled) {
+            start_network_monitor();
+        } else {
+            stop_network_monitor();
+        }
+    }
+}
+
+bool RatsClient::is_network_change_detection_enabled() const {
+    std::lock_guard<std::mutex> lock(network_monitor_mutex_);
+    return network_change_detection_enabled_;
+}
+
+void RatsClient::on_network_changed(NetworkChangeCallback callback) {
+    std::lock_guard<std::mutex> lock(network_monitor_mutex_);
+    network_change_callback_ = std::move(callback);
+}
+
+void RatsClient::start_network_monitor() {
+    {
+        std::lock_guard<std::mutex> lock(network_monitor_mutex_);
+        if (!network_change_detection_enabled_ || network_monitor_) {
+            return;  // disabled or already running
+        }
+    }
+
+    // Spin up the recovery worker before the monitor so it can never miss the
+    // first wake-up.
+    {
+        std::lock_guard<std::mutex> lock(network_recovery_mutex_);
+        network_recovery_stop_ = false;
+        network_recovery_pending_ = false;
+    }
+    network_recovery_thread_ = std::thread([this]() { network_recovery_loop(); });
+
+    auto monitor = std::make_unique<NetworkMonitor>();
+    monitor->start([this](const std::vector<std::string>& addrs) {
+        handle_network_change(addrs);
+    });
+    {
+        std::lock_guard<std::mutex> lock(network_monitor_mutex_);
+        network_monitor_ = std::move(monitor);
+    }
+    LOG_INFO("netmon", "Network change detection active");
+}
+
+void RatsClient::stop_network_monitor() {
+    // Stop the OS watcher first so no further change events are queued.
+    std::unique_ptr<NetworkMonitor> monitor;
+    {
+        std::lock_guard<std::mutex> lock(network_monitor_mutex_);
+        monitor = std::move(network_monitor_);
+    }
+    if (monitor) {
+        monitor->stop();   // joins the monitor's worker thread
+    }
+
+    // Then wake and join the recovery worker. Done after the monitor is down so
+    // no new recovery can be scheduled while we shut it down.
+    {
+        std::lock_guard<std::mutex> lock(network_recovery_mutex_);
+        network_recovery_stop_ = true;
+    }
+    network_recovery_cv_.notify_all();
+    if (network_recovery_thread_.joinable()) {
+        network_recovery_thread_.join();
+    }
+}
+
+void RatsClient::network_recovery_loop() {
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(network_recovery_mutex_);
+            network_recovery_cv_.wait(lock, [this]() {
+                return network_recovery_pending_ || network_recovery_stop_;
+            });
+            if (network_recovery_stop_) {
+                break;
+            }
+            network_recovery_pending_ = false;
+        }
+        recover_after_network_change();
+    }
+}
+
+void RatsClient::handle_network_change(const std::vector<std::string>& current_addresses) {
+    if (!running_.load()) {
+        return;
+    }
+    LOG_CLIENT_INFO("Network change detected (" << current_addresses.size()
+                    << " local address(es)); refreshing network state");
+
+    // Cheap and synchronous: refresh the self-address set so a freshly added
+    // local address isn't misjudged as a remote peer, and a removed one stops
+    // being blocked. (Diff-based; preserves STUN/mapped/ignored entries.)
+    initialize_local_addresses();
+
+    // Notify the application.
+    NetworkChangeCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(network_monitor_mutex_);
+        cb = network_change_callback_;
+    }
+    if (cb) {
+        cb(current_addresses);
+    }
+
+    // Hand the slow recovery (port re-mapping + STUN + re-announce) to the
+    // dedicated worker so we don't block the monitor thread. Coalesced: if a
+    // recovery is already running, this just marks another pass is needed.
+    {
+        std::lock_guard<std::mutex> lock(network_recovery_mutex_);
+        network_recovery_pending_ = true;
+    }
+    network_recovery_cv_.notify_all();
+}
+
+void RatsClient::recover_after_network_change() {
+    if (!running_.load()) {
+        return;
+    }
+    LOG_CLIENT_INFO("Recovering after network change: renewing port mappings and re-announcing");
+
+    // 1. Renew router port mappings. Our LAN IP and/or the gateway likely
+    //    changed, so existing UPnP/NAT-PMP leases are stale or aimed at the wrong
+    //    internal address. Tear down and re-run discovery from scratch.
+    if (is_port_mapping_enabled()) {
+        stop_port_mapping();
+        if (running_.load()) {
+            start_port_mapping();
+        }
+    }
+
+    if (!running_.load()) {
+        return;
+    }
+
+    // 2. Re-discover our public address via STUN, update the BEP 42 node IDs and
+    //    re-announce so the DHT advertises our current reachable endpoint rather
+    //    than the one from the previous network. This runs on the recovery
+    //    thread, which stop() joins before the DHT clients are destroyed, so the
+    //    set_external_ip()/announce calls can never touch a freed DhtClient.
+    if (is_dht_running()) {
+        auto mapped = discover_public_address("stun.l.google.com", 19302, 4000);
+        if (mapped) {
+            if (dht_client_)    dht_client_->set_external_ip(mapped->address);
+            if (dht_client_v6_) dht_client_v6_->set_external_ip(mapped->address);
+            LOG_CLIENT_INFO("Public address after network change: " << mapped->address);
+        } else {
+            LOG_CLIENT_DEBUG("STUN public address discovery failed after network change");
+        }
+        if (running_.load()) {
+            announce_rats_peer();
+        }
+    }
 }
 
 } // namespace librats

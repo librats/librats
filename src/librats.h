@@ -38,6 +38,11 @@
 
 namespace librats {
 
+// Detects host network configuration changes (defined in network_monitor.h).
+// Forward-declared here; only used via unique_ptr, so RatsClient's destructor
+// (defined in librats.cpp, which includes network_monitor.h) sees the full type.
+class NetworkMonitor;
+
 /**
  * PeerIOContext - Per-peer async I/O buffers and framing state
  *
@@ -282,6 +287,10 @@ public:
     using DisconnectCallback = std::function<void(socket_t, const std::string&)>;
     using MessageCallback = std::function<void(const std::string&, const nlohmann::json&)>;
     using SendCallback = std::function<void(bool, const std::string&)>;
+    // Fired when the host's network configuration changes (interface up/down, IP
+    // added/removed, default route change). The argument is the new full list of
+    // local interface addresses. See on_network_changed().
+    using NetworkChangeCallback = std::function<void(const std::vector<std::string>& local_addresses)>;
 
     // =========================================================================
     // Constructor and Destructor
@@ -1478,6 +1487,35 @@ public:
      */
     void on_port_mapping(PortMapCallback callback);
 
+    // =========================================================================
+    // Network change detection
+    // =========================================================================
+    //
+    // A long-lived node must notice when the host's connectivity changes (a new
+    // interface, an IP added/removed, the default route flipping between Wi-Fi
+    // and cellular, dock/undock, VPN up/down, wake-from-sleep) and recover:
+    // renew router port mappings, re-discover its public address via STUN, and
+    // re-announce to the DHT. Otherwise it keeps advertising a stale endpoint
+    // until the next periodic refresh. Enabled by default. Implemented in
+    // librats_portmap.cpp on top of the platform-specific NetworkMonitor.
+
+    /**
+     * Enable or disable automatic reaction to host network changes. Enabled by
+     * default. Can be called before or after start(): toggling while running
+     * starts/stops the monitor immediately. Not persisted.
+     */
+    void set_network_change_detection_enabled(bool enabled);
+    bool is_network_change_detection_enabled() const;
+
+    /**
+     * Register a callback fired (debounced) whenever the set of local interface
+     * addresses changes. The argument is the new full list of local addresses.
+     * Invoked from the monitor's worker thread, so keep the handler quick. This
+     * is in addition to — not a replacement for — the built-in recovery
+     * (port re-mapping, STUN re-discovery, DHT re-announce).
+     */
+    void on_network_changed(NetworkChangeCallback callback);
+
 #ifdef RATS_STORAGE
     // =========================================================================
     // Distributed Storage API (requires RATS_STORAGE)
@@ -1964,6 +2002,11 @@ private:
     // 6. io_mutex_                  (I/O poller and send buffer access)
     // 7. message_handlers_mutex_    (Message handler registration)
     // 8. reconnect_mutex_           (Reconnection queue management)
+    // 9. port_mapping_mutex_        (UPnP/NAT-PMP backends and mapped address)
+    // 10. network_monitor_mutex_ / network_recovery_mutex_ (network-change state)
+    //
+    // (9) and (10) are leaf locks: they are never held while acquiring any lock
+    // above, so they impose no additional ordering constraints.
     // =========================================================================
     
     // [1] Configuration persistence (protected by config_mutex_)
@@ -1988,7 +2031,12 @@ private:
     // [4] Local interface address blocking (protected by local_addresses_mutex_)
     mutable std::mutex local_addresses_mutex_;              // [4] Protects local interface addresses
     std::unordered_set<std::string> local_interface_addresses_;
-    
+    // Subset of local_interface_addresses_ that came from interface enumeration.
+    // Tracked separately so a network-change refresh can drop only stale auto
+    // entries without evicting localhost or externally-discovered addresses
+    // (STUN reflexive, mapped external IP, user add_ignored_address()).
+    std::unordered_set<std::string> auto_interface_addresses_;
+
     // [5] Organized peer management using RatsPeer struct (protected by peers_mutex_)
     mutable std::mutex peers_mutex_;                        // [5] Protects peer data (most frequently locked)
     std::unordered_map<std::string, RatsPeer> peers_;          // keyed by peer_id
@@ -2053,6 +2101,30 @@ private:
     // Public TCP port to advertise to peers/DHT: the mapped external port once a
     // TCP mapping is established, otherwise the local listen port.
     uint16_t get_advertised_port() const;
+
+    // Network change detection (implemented in librats_portmap.cpp). Monitor runs
+    // a platform watcher; on a real address-set change it refreshes the self-
+    // address set inline and wakes the recovery worker, which re-maps ports,
+    // re-discovers the public IP and re-announces. These mutexes are last in the
+    // lock order (after [8]) and are never held while calling into other
+    // subsystems, so they introduce no new ordering constraints.
+    std::unique_ptr<NetworkMonitor> network_monitor_;
+    bool network_change_detection_enabled_ = true;          // start the monitor on start()
+    mutable std::mutex network_monitor_mutex_;              // guards the user callback below
+    NetworkChangeCallback network_change_callback_;
+    // Dedicated recovery worker: serialises the slow recovery work (STUN can
+    // block for seconds) off the monitor thread and coalesces rapid changes.
+    std::thread network_recovery_thread_;
+    std::mutex network_recovery_mutex_;
+    std::condition_variable network_recovery_cv_;
+    bool network_recovery_pending_ = false;
+    bool network_recovery_stop_ = false;
+
+    void start_network_monitor();
+    void stop_network_monitor();
+    void network_recovery_loop();
+    void handle_network_change(const std::vector<std::string>& current_addresses);
+    void recover_after_network_change();
 
 #ifdef RATS_STORAGE
     // Distributed storage manager (optional, requires RATS_STORAGE)

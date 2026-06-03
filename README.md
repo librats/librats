@@ -56,7 +56,8 @@ librats is a modern P2P networking library designed for **superior performance**
 - **Perfect Forward Secrecy**: Session keys are ephemeral and secure
 - **Configurable Encryption**: Enable/disable on demand with `set_encryption_enabled()`
 
-### **NAT Traversal (ICE/STUN/TURN)**
+### **NAT Traversal (UPnP/NAT-PMP/ICE/STUN/TURN)**
+- **Automatic Port Forwarding**: Built-in **UPnP IGD** and **NAT-PMP** support — RatsClient asks the home router to forward the listen port on startup (both backends run in parallel, whichever the router supports wins), so peers behind a NAT can accept inbound connections with zero manual router configuration. Mappings are refreshed automatically and removed on `stop()`.
 - **ICE-lite Implementation**: RFC 5245 compliant NAT traversal for P2P connectivity
 - **STUN Support**: Discover public IP address through STUN servers (compatible with Google's public STUN servers)
 - **TURN Relay**: Fallback relay connectivity when direct P2P connection fails
@@ -359,7 +360,41 @@ int main() {
 int main() {
     librats::RatsClient client(8080);
     
+    // =========================================================================
+    // Automatic Port Forwarding (UPnP IGD + NAT-PMP) — enabled by default
+    // =========================================================================
+    
+    // On start() librats automatically asks the router to forward the listen
+    // port via UPnP and NAT-PMP in parallel (whichever the router supports wins),
+    // and removes the mapping on stop(). Get notified when a mapping is ready:
+    client.on_port_mapping([](const librats::PortMapResult& result) {
+        if (result.success) {
+            std::cout << "🔌 Port forwarded via " << librats::to_string(result.transport)
+                      << ": " << result.external_ip << ":" << result.external_port
+                      << " -> :" << result.internal_port << std::endl;
+        } else {
+            std::cout << "⚠️ Port mapping failed: " << result.error << std::endl;
+        }
+    });
+    
+    // Optionally tune or disable it before start():
+    // librats::PortMappingConfig pm;
+    // pm.enable_upnp = true;       // UPnP IGD backend
+    // pm.enable_natpmp = true;     // NAT-PMP backend
+    // pm.lease_duration_seconds = 3600;
+    // client.set_port_mapping_config(pm);
+    // client.set_port_mapping_enabled(false);  // turn it off entirely
+    
     client.start();
+    
+    // Map an extra port (e.g. a DHT UDP port) on top of the listen port:
+    // client.add_port_mapping(librats::PortMapProtocol::UDP, 6881);
+    
+    // Read back the public address the router assigned:
+    if (auto mapped = client.get_mapped_public_address()) {
+        std::cout << "🌐 Mapped public address: "
+                  << mapped->first << ":" << mapped->second << std::endl;
+    }
     
     // =========================================================================
     // Simple Public Address Discovery
@@ -782,6 +817,16 @@ void on_file_transfer_progress(TransferProgressCallback callback);
 void on_file_transfer_completed(TransferCompletedCallback callback);
 void on_file_transfer_request(TransferOfferCallback callback);  // incoming offer
 
+// Automatic Port Forwarding API (UPnP IGD + NAT-PMP)
+// Enabled by default: the listen port is forwarded on start() and removed on stop().
+void set_port_mapping_enabled(bool enabled);
+bool is_port_mapping_enabled() const;
+void set_port_mapping_config(const PortMappingConfig& config);
+PortMappingConfig get_port_mapping_config() const;
+void add_port_mapping(PortMapProtocol protocol, uint16_t port);  // map an extra port (e.g. DHT UDP)
+std::optional<std::pair<std::string, uint16_t>> get_mapped_public_address() const;
+void on_port_mapping(PortMapCallback callback);  // fired on map/refresh/remove/fail
+
 // ICE/NAT Traversal API
 IceManager& get_ice_manager();
 bool is_ice_available() const;
@@ -973,6 +1018,33 @@ struct IncomingTransferOffer {
     bool        is_directory;
     uint64_t    total_size;      // sum of all file sizes
     std::vector<FileInfo> files; // full manifest
+};
+```
+
+#### `PortMappingConfig`
+Automatic port forwarding configuration (UPnP IGD + NAT-PMP). Both backends run in parallel by default; whichever the router supports succeeds:
+
+```cpp
+struct PortMappingConfig {
+    bool enabled = true;                    // Master switch for automatic port forwarding
+    bool enable_upnp = true;                // Use the UPnP IGD backend
+    bool enable_natpmp = true;              // Use the NAT-PMP backend
+    uint32_t lease_duration_seconds = 3600; // Requested lease duration
+};
+```
+
+#### `PortMapResult`
+Result of a port mapping attempt, passed to the `on_port_mapping()` callback:
+
+```cpp
+struct PortMapResult {
+    PortMapTransport transport;        // UPnP or NatPMP — backend that produced this result
+    PortMapProtocol  protocol;         // TCP or UDP
+    bool             success = false;  // Whether the mapping is currently active
+    uint16_t         internal_port = 0;// Local (LAN) port that was mapped
+    uint16_t         external_port = 0;// Public (WAN) port assigned by the router
+    std::string      external_ip;      // Discovered public IP (may be empty)
+    std::string      error;            // Human readable error when !success
 };
 ```
 
@@ -1209,6 +1281,9 @@ void on_storage_sync_complete(StorageSyncCompleteCallback callback);
 │ │ DHT (Wide-Area) │ │ mDNS (Local Net)│ │ ICE/STUN/TURN   │    │
 │ │ BT Mainline DHT │ │   224.0.0.251   │ │  NAT Traversal  │    │
 │ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
+│ ┌─────────────────────────────────────────────────────────┐    │
+│ │     Automatic Port Forwarding - UPnP IGD + NAT-PMP      │    │
+│ └─────────────────────────────────────────────────────────┘    │
 │ ┌─────────────────────────────────────────────────────────┐    │
 │ │           Direct Sockets - IPv4/IPv6 Stack              │    │
 │ └─────────────────────────────────────────────────────────┘    │

@@ -132,6 +132,8 @@ set(LIBRARY_SOURCES
     src/socket.h
     src/network_utils.cpp
     src/network_utils.h
+    src/network_monitor.cpp
+    src/network_monitor.h
     src/dht.cpp
     src/dht.h
     src/bencode.cpp

@@ -1,6 +1,7 @@
 #include "librats.h"
 #include "os.h"
 #include "network_utils.h"
+#include "network_monitor.h"  // complete type for unique_ptr<NetworkMonitor> member
 #include "version.h"
 #include <algorithm>
 #include <array>
@@ -171,6 +172,10 @@ bool RatsClient::start() {
     // No-op when disabled; runs discovery/mapping on its own background threads.
     start_port_mapping();
 
+    // React to host network changes (IP/interface/route): renew port mappings,
+    // re-discover the public address and re-announce. No-op when disabled.
+    start_network_monitor();
+
     LOG_CLIENT_INFO("RatsClient started successfully on port " << listen_port_);
     
     // Attempt to reconnect to saved peers
@@ -201,6 +206,11 @@ void RatsClient::stop() {
     }
     
     LOG_CLIENT_INFO("Stopping RatsClient");
+
+    // Stop network-change detection FIRST and join its recovery worker: that
+    // worker touches the port-mapping backends and the DHT clients, both torn
+    // down below, so it must not be running past this point.
+    stop_network_monitor();
 
     // Remove port mappings and stop UPnP/NAT-PMP backends before tearing down
     // sockets (best-effort cleanup so we don't leave stale router mappings).
@@ -1387,22 +1397,34 @@ static constexpr std::array<std::string_view,5> localhost_addrs{"127.0.0.1", "::
 
 // Local interface address blocking methods
 void RatsClient::initialize_local_addresses() {
-    LOG_CLIENT_INFO("Initializing local interface addresses for connection blocking");
-    
     std::lock_guard<std::mutex> lock(local_addresses_mutex_);
-    
-    // Get all local interface addresses using network_utils
+
+    // (Re)enumerate the host's interface addresses. This is also called on every
+    // network change, so it must be a diff, not a blind insert: drop auto-detected
+    // addresses that have disappeared (a removed IP must stop being treated as
+    // "ourselves"), while preserving localhost entries and any externally-
+    // discovered / manually-ignored addresses (STUN reflexive, mapped external IP,
+    // user add_ignored_address()), which live in the same set.
     auto addrs = network_utils::get_local_interface_addresses();
-    local_interface_addresses_.insert(addrs.begin(), addrs.end());
-    
-    // Add common localhost addresses
+    std::unordered_set<std::string> new_auto(addrs.begin(), addrs.end());
+
+    for (const auto& old : auto_interface_addresses_) {
+        if (new_auto.find(old) == new_auto.end()) {
+            local_interface_addresses_.erase(old);
+        }
+    }
+    for (const auto& addr : addrs) {
+        local_interface_addresses_.insert(addr);
+    }
     for (const auto& addr : localhost_addrs) {
         local_interface_addresses_.emplace(std::string(addr));
     }
-    
-    LOG_CLIENT_INFO("Found " << local_interface_addresses_.size() << " local addresses to block:");
+    auto_interface_addresses_ = std::move(new_auto);
+
+    LOG_CLIENT_INFO("Local interface addresses: " << local_interface_addresses_.size()
+                    << " blocked (" << addrs.size() << " from interfaces)");
     for (const auto& addr : local_interface_addresses_) {
-        LOG_CLIENT_INFO("  - " << addr);
+        LOG_CLIENT_DEBUG("  - " << addr);
     }
 }
 
