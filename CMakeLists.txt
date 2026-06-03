@@ -470,6 +470,8 @@ if(RATS_BUILD_TESTS)
         tests/test_ice.cpp
 # Automatic port forwarding tests (UPnP/NAT-PMP)
         tests/test_portmap.cpp
+# Network change detection tests
+        tests/test_network_monitor.cpp
 # I/O poller abstraction (epoll/kqueue/IOCP)
         tests/test_io_poller.cpp
 # Buffer utilities for file transfer and bittorrent
