@@ -8,7 +8,7 @@
     <title>librats - High-Performance P2P Networking Library | C++, C, Node.js, Java, Python, Android | Open Source</title>
     <meta name="title" content="librats - High-Performance P2P Networking Library | C++, C, Node.js, Java, Python, Android | Open Source">
     <meta name="description" content="Enterprise-grade P2P networking library with C++, C, Node.js, Java, Python, and Android support. 50x less memory than alternatives. Advanced NAT traversal (99% success), end-to-end encryption, GossipSub messaging, file transfer. Cross-platform: Windows, Linux, macOS, Android.">
-    <meta name="keywords" content="P2P networking, p2p, peer-to-peer, C++17, C++20, C++23, Node.js bindings, Python bindings, NAT traversal, ICE, STUN, TURN, DHT, BitTorrent, mDNS, GossipSub, file transfer, Noise Protocol, encryption, mesh networking, real-time communication, libp2p alternative, decentralized networking, open source, npm package">
+    <meta name="keywords" content="P2P networking, p2p, peer-to-peer, C++17, C++20, C++23, Node.js bindings, Python bindings, NAT traversal, UPnP, UPnP IGD, NAT-PMP, port forwarding, ICE, STUN, TURN, DHT, BitTorrent, mDNS, GossipSub, file transfer, Noise Protocol, encryption, mesh networking, real-time communication, libp2p alternative, decentralized networking, open source, npm package">
     
     <!-- Open Graph / Facebook -->
     <meta property="og:type" content="website">
@@ -162,8 +162,16 @@
                         <i class="fas fa-network-wired"></i>
                     </div>
                     <h3>Advanced NAT Traversal</h3>
-                    <p>ICE, STUN, and TURN support with 99%+ success rate across any network topology. Automatic strategy selection for optimal connectivity.</p>
+                    <p>UPnP, NAT-PMP, ICE, STUN, and TURN support with 99%+ success rate across any network topology. Automatic strategy selection for optimal connectivity.</p>
                     <div class="feature-badge">RFC Compliant</div>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">
+                        <i class="fas fa-door-open"></i>
+                    </div>
+                    <h3>Automatic Port Forwarding</h3>
+                    <p>Built-in UPnP IGD and NAT-PMP support. librats asks your router to open the listen port on startup — no manual configuration — and removes the mapping on shutdown.</p>
+                    <div class="feature-badge">UPnP + NAT-PMP</div>
                 </div>
                 <div class="feature-card">
                     <div class="feature-icon">
@@ -641,6 +649,7 @@ int main() {
             <div class="section-header">
                 <h2 class="section-title">Industry-Leading NAT Traversal</h2>
                 <p class="section-subtitle">Connect across virtually any network topology</p>
+                <p class="section-subtitle">Automatic port forwarding via <strong>UPnP IGD</strong> and <strong>NAT-PMP</strong> opens your listen port on the router with zero configuration, with <strong>ICE / STUN / TURN</strong> handling the harder cases below.</p>
             </div>
             <div class="nat-table-container">
                 <table class="nat-table">

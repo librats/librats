@@ -351,7 +351,7 @@ int main() {
 }
 ```
 
-### 7. NAT Traversal (ICE/STUN/TURN)
+### 7. NAT Traversal (UPnP/NAT-PMP + ICE/STUN/TURN)
 
 ```cpp
 #include "librats.h"
