@@ -2894,7 +2894,30 @@ bool DhtClient::load_routing_table() {
             LOG_DHT_WARN("Unsupported routing table version: " << version);
             return false;
         }
-        
+
+        // Restore our own node ID so it stays stable across restarts (matches libtorrent's
+        // calculate_node_id). The external address is not known yet at load time, which is
+        // libtorrent's "external_address.is_unspecified()" case -> reuse the saved ID as long
+        // as it is valid (non-zero). If the external IP is later discovered and the restored
+        // ID is no longer valid for it (BEP 42), set_external_ip() regenerates it then.
+        // Restored before bucketing the loaded nodes below, since get_bucket_index() is
+        // computed relative to node_id_.
+        if (routing_data.contains("node_id")) {
+            try {
+                NodeId saved_id = hex_to_node_id(routing_data["node_id"].get<std::string>());
+                bool all_zeros = std::all_of(saved_id.begin(), saved_id.end(),
+                                             [](uint8_t b) { return b == 0; });
+                if (!all_zeros) {
+                    node_id_ = saved_id;
+                    LOG_DHT_INFO("Restored DHT node ID from disk: " << node_id_to_hex(node_id_));
+                } else {
+                    LOG_DHT_WARN("Saved node ID is invalid (zero/malformed), keeping generated one");
+                }
+            } catch (const std::exception& e) {
+                LOG_DHT_WARN("Failed to restore saved node ID, keeping generated one: " << e.what());
+            }
+        }
+
         // Load nodes
         const auto& nodes_array = routing_data["nodes"];
         size_t loaded_count = 0;

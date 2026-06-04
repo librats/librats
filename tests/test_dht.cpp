@@ -487,6 +487,31 @@ TEST_F(DhtTest, RoutingTablePersistenceTest) {
     // For now, we leave it as it uses the testing file path mechanism
 }
 
+// Our own node ID must stay stable across restarts (like libtorrent): it is written
+// to the routing table file on save and restored on load instead of being regenerated.
+TEST_F(DhtTest, NodeIdPersistedAcrossRestart) {
+    const int port = 6883;
+    const std::string test_data_dir = "./test_dht_nodeid_persistence";
+
+    // Phase 1: capture the generated node ID and persist it.
+    NodeId saved_id;
+    {
+        DhtClient client1(port, "", test_data_dir);
+        saved_id = client1.get_node_id();
+        EXPECT_TRUE(client1.save_routing_table());
+    }
+
+    // Phase 2: a new client generates a fresh random ID, but loading must restore the saved one.
+    {
+        DhtClient client2(port, "", test_data_dir);
+        // Overwhelmingly unlikely the fresh random ID equals the saved one.
+        EXPECT_NE(client2.get_node_id(), saved_id);
+
+        client2.load_routing_table();
+        EXPECT_EQ(client2.get_node_id(), saved_id);
+    }
+}
+
 // Test data directory configuration
 TEST_F(DhtTest, DataDirectoryConfigurationTest) {
     DhtClient client1(0);
