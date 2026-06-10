@@ -658,11 +658,9 @@ void RatsClient::handle_disconnect(socket_t socket) {
         }
     }
     
-    // Remove from poller, peers map, close socket
     poller_remove(socket);
     remove_peer(socket);
-    close_socket(socket);
-    
+
     if (was_validated) {
         if (disconnect_callback_) {
             disconnect_callback_(socket, peer_id);
@@ -682,7 +680,9 @@ void RatsClient::handle_disconnect(socket_t socket) {
             }), "config-save-disconnect");
         }
     }
-    
+
+    close_socket(socket);
+
     LOG_CLIENT_INFO("Peer disconnected: " << peer_id);
 }
 
