@@ -159,6 +159,10 @@ body {
     align-items: center;
     overflow: hidden;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    /* Reserve space for the fixed 70px navbar (plus breathing room) so the
+       vertically-centered hero content never rides up under the header on
+       short/laptop viewports */
+    padding-top: 110px;
 }
 
 .hero-background {
