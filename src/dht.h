@@ -443,24 +443,24 @@ private:
     // 3. routing_table_mutex_           (core routing data)
     // 4. spider_nodes_mutex_            (Spider mode: node pool and visited tracking) [RATS_SEARCH_FEATURES]
     // 5. announced_peers_mutex_         (Stored peer data)
-    // 6. peer_tokens_mutex_             (Token validation data)
+    // 6. token_secret_mutex_            (DHT write-token secret)
     // 7. shutdown_mutex_                (Lowest priority - can be locked independently)
     //
     // Routing table (k-buckets)
     std::vector<std::vector<DhtNode>> routing_table_;
     mutable std::mutex routing_table_mutex_;  // Lock order: 3
     
-    // Tokens for peers (use Peer directly as key for efficiency)
-    struct PeerToken {
-        std::string token;
-        std::chrono::steady_clock::time_point created_at;
-        
-        PeerToken() : created_at(std::chrono::steady_clock::now()) {}
-        PeerToken(const std::string& t)
-            : token(t), created_at(std::chrono::steady_clock::now()) {}
-    };
-    std::unordered_map<Peer, PeerToken> peer_tokens_;
-    std::mutex peer_tokens_mutex_;  // Lock order: 6
+    // DHT write-token secret (BEP 5). Announce tokens are SHA1(secret || querier_ip || info_hash),
+    // so they are unforgeable (an attacker does not know the secret) and bound to BOTH the
+    // querier's address and the specific info_hash. The secret rotates periodically; we keep the
+    // previous secret so tokens handed out shortly before a rotation still verify. This replaces the
+    // old, trivially forgeable std::hash("ip:port") scheme. Guarded by token_secret_mutex_, which is
+    // a leaf lock (never held while acquiring any other DHT mutex).
+    static constexpr int TOKEN_SECRET_ROTATION_MINUTES = 5;  // acceptance window ~= 2x this
+    std::array<uint8_t, 16> token_secret_;
+    std::array<uint8_t, 16> token_secret_prev_;
+    std::chrono::steady_clock::time_point token_secret_rotated_at_;
+    std::mutex token_secret_mutex_;  // Lock order: 6
     
 
     
@@ -501,11 +501,12 @@ private:
     struct SearchTransaction {
         std::string info_hash_hex;
         NodeId queried_node_id;
+        Peer queried_endpoint;          // endpoint we actually sent the query to (anti-spoofing)
         std::chrono::steady_clock::time_point sent_at;
-        
+
         SearchTransaction() = default;
-        SearchTransaction(const std::string& hash, const NodeId& id)
-            : info_hash_hex(hash), queried_node_id(id), 
+        SearchTransaction(const std::string& hash, const NodeId& id, const Peer& endpoint)
+            : info_hash_hex(hash), queried_node_id(id), queried_endpoint(endpoint),
               sent_at(std::chrono::steady_clock::now()) {}
     };
     std::unordered_map<std::string, SearchTransaction> transaction_to_search_; // transaction_id -> SearchTransaction
@@ -634,13 +635,20 @@ private:
     NodeId neighbor_id(const NodeId& target) const;
 
     
-    std::string generate_token(const Peer& peer);
-    bool verify_token(const Peer& peer, const std::string& token);
+    // BEP 5 write tokens: bound to the querier address + info_hash and authenticated with a rotating
+    // secret. generate_token is called when answering get_peers; verify_token gates announce_peer.
+    std::string generate_token(const Peer& peer, const InfoHash& info_hash);
+    bool verify_token(const Peer& peer, const InfoHash& info_hash, const std::string& token);
+    // Computes SHA1(secret || peer.ip || info_hash) as a hex digest. Port is intentionally excluded
+    // (a NAT may present a different source port on the subsequent announce).
+    std::string compute_token_with_secret(const Peer& peer, const InfoHash& info_hash,
+                                          const std::array<uint8_t, 16>& secret) const;
+    // Rotates the token secret if older than TOKEN_SECRET_ROTATION_MINUTES. Caller holds token_secret_mutex_.
+    void maybe_rotate_token_secret_unlocked();
     
 
     
     void cleanup_stale_nodes();
-    void cleanup_stale_peer_tokens();
     void refresh_buckets();
     void print_statistics();
     

@@ -2,6 +2,7 @@
 #include "network_utils.h"
 #include "logger.h"
 #include "socket.h"
+#include "sha1.h"
 #include "json.hpp"
 #include <random>
 #include <algorithm>
@@ -27,6 +28,16 @@
 
 namespace librats {
 
+// Normalize an IPv6-mapped IPv4 address (::ffff:x.x.x.x -> x.x.x.x) so a node reached over a
+// dual-stack socket compares equal regardless of how its source address was rendered.
+static std::string normalize_ip_for_compare(const std::string& ip) {
+    static const std::string ipv4_mapped_prefix = "::ffff:";
+    if (ip.compare(0, ipv4_mapped_prefix.size(), ipv4_mapped_prefix) == 0) {
+        return ip.substr(ipv4_mapped_prefix.size());
+    }
+    return ip;
+}
+
 
 DhtClient::DhtClient(int port, const std::string& bind_address, const std::string& data_directory,
                      AddressFamily address_family)
@@ -34,6 +45,14 @@ DhtClient::DhtClient(int port, const std::string& bind_address, const std::strin
       address_family_(address_family), socket_(INVALID_SOCKET_VALUE), running_(false) {
     node_id_ = generate_node_id();
     routing_table_.resize(NODE_ID_SIZE * 8);  // 160 buckets for 160-bit node IDs
+
+    // Seed the BEP 5 write-token secret with fresh randomness (current and previous generations).
+    {
+        std::random_device rd;
+        for (auto& b : token_secret_)      b = static_cast<uint8_t>(rd());
+        for (auto& b : token_secret_prev_) b = static_cast<uint8_t>(rd());
+        token_secret_rotated_at_ = std::chrono::steady_clock::now();
+    }
 
     if (data_directory_.empty()) {
         data_directory_ = ".";
@@ -448,9 +467,6 @@ void DhtClient::maintenance_loop() {
         if (now - last_general_cleanup >= std::chrono::minutes(1)) {
             // Cleanup stale nodes every 1 minute
             cleanup_stale_nodes();
-            
-            // Cleanup stale peer tokens
-            cleanup_stale_peer_tokens();
             
             // Cleanup stale pending searches
             cleanup_stale_searches();
@@ -893,8 +909,8 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& se
         add_node(sender_node, true, false);
     }
     
-    // Generate a token for this peer
-    std::string token = generate_token(sender);
+    // Generate a token for this peer, bound to this info_hash (BEP 5)
+    std::string token = generate_token(sender, message.info_hash);
     
     // Use neighbor_id only for spider-contacted IPs, real node_id for organic DHT traffic
     NodeId response_id = use_neighbor_id ? neighbor_id(message.info_hash) : node_id_;
@@ -930,7 +946,7 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
     // Note: We still want to collect announces even when ignoring other requests
     
     // In spider mode, skip token verification for maximum collection
-    if (!is_spider && !verify_token(sender, message.token)) {
+    if (!is_spider && !verify_token(sender, message.info_hash, message.token)) {
         LOG_DHT_WARN("Invalid token from " << sender.ip << ":" << sender.port << " for KRPC ANNOUNCE_PEER");
         auto error = KrpcProtocol::create_error(message.transaction_id, KrpcErrorCode::ProtocolError, "Invalid token");
         send_krpc_message(error, sender);
@@ -938,7 +954,7 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
     }
 #else
     // Verify token
-    if (!verify_token(sender, message.token)) {
+    if (!verify_token(sender, message.info_hash, message.token)) {
         LOG_DHT_WARN("Invalid token from " << sender.ip << ":" << sender.port << " for KRPC ANNOUNCE_PEER");
         auto error = KrpcProtocol::create_error(message.transaction_id, KrpcErrorCode::ProtocolError, "Invalid token");
         send_krpc_message(error, sender);
@@ -1035,6 +1051,24 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
         return;
     }
 #endif
+
+    // Anti-spoofing: if this response matches a search transaction we issued, require it to come
+    // from the exact endpoint we queried. Off-path attackers can guess/observe a transaction ID but
+    // cannot send from the queried node's address, so this drops forged responses before they can
+    // inject routing-table entries or poison the lookup. (Responses with an unknown transaction ID
+    // are not tied to any outstanding query and fall through to the existing handling.)
+    {
+        std::lock_guard<std::mutex> lock(pending_searches_mutex_);
+        auto trans_it = transaction_to_search_.find(message.transaction_id);
+        if (trans_it != transaction_to_search_.end()) {
+            if (normalize_ip_for_compare(sender.ip) != normalize_ip_for_compare(trans_it->second.queried_endpoint.ip)) {
+                LOG_DHT_WARN("Dropping search response from unexpected source " << sender.ip << ":" << sender.port
+                             << " (queried " << trans_it->second.queried_endpoint.ip << ":"
+                             << trans_it->second.queried_endpoint.port << ") - possible spoofing");
+                return;
+            }
+        }
+    }
 
     // Normal mode: add nodes to routing table
     KrpcNode krpc_node(message.response_id, sender.ip, sender.port);
@@ -1400,33 +1434,45 @@ NodeId DhtClient::neighbor_id(const NodeId& target) const {
     return result;
 }
 
-std::string DhtClient::generate_token(const Peer& peer) {
-    // Simple token generation (in real implementation, use proper cryptographic hash)
-    std::string data = peer.ip + ":" + std::to_string(peer.port);
-    std::hash<std::string> hasher;
-    size_t hash = hasher(data);
-    
-    // Convert hash to hex string
-    std::ostringstream oss;
-    oss << std::hex << hash;
-    std::string token = oss.str();
-    
-    // Store token for this peer with timestamp
-    {
-        std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
-        peer_tokens_[peer] = PeerToken(token);
+void DhtClient::maybe_rotate_token_secret_unlocked() {
+    // Caller holds token_secret_mutex_.
+    auto now = std::chrono::steady_clock::now();
+    if (now - token_secret_rotated_at_ >= std::chrono::minutes(TOKEN_SECRET_ROTATION_MINUTES)) {
+        token_secret_prev_ = token_secret_;
+        std::random_device rd;
+        for (auto& b : token_secret_) b = static_cast<uint8_t>(rd());
+        token_secret_rotated_at_ = now;
+        LOG_DHT_DEBUG("Rotated DHT write-token secret");
     }
-    
-    return token;
 }
 
-bool DhtClient::verify_token(const Peer& peer, const std::string& token) {
-    std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
-    auto it = peer_tokens_.find(peer);
-    if (it != peer_tokens_.end()) {
-        return it->second.token == token;
+std::string DhtClient::compute_token_with_secret(const Peer& peer, const InfoHash& info_hash,
+                                                 const std::array<uint8_t, 16>& secret) const {
+    // SHA1(secret || querier_ip || info_hash). Including the secret makes the token unforgeable;
+    // including the info_hash binds it to a single target so one token cannot announce arbitrary hashes.
+    std::vector<uint8_t> data;
+    data.reserve(secret.size() + peer.ip.size() + info_hash.size());
+    data.insert(data.end(), secret.begin(), secret.end());
+    data.insert(data.end(), peer.ip.begin(), peer.ip.end());
+    data.insert(data.end(), info_hash.begin(), info_hash.end());
+    return SHA1::hash_bytes(data);
+}
+
+std::string DhtClient::generate_token(const Peer& peer, const InfoHash& info_hash) {
+    std::lock_guard<std::mutex> lock(token_secret_mutex_);
+    maybe_rotate_token_secret_unlocked();
+    return compute_token_with_secret(peer, info_hash, token_secret_);
+}
+
+bool DhtClient::verify_token(const Peer& peer, const InfoHash& info_hash, const std::string& token) {
+    if (token.empty()) {
+        return false;
     }
-    return false;
+    std::lock_guard<std::mutex> lock(token_secret_mutex_);
+    maybe_rotate_token_secret_unlocked();
+    // Accept tokens minted with either the current or the previous secret (rotation window).
+    return token == compute_token_with_secret(peer, info_hash, token_secret_)
+        || token == compute_token_with_secret(peer, info_hash, token_secret_prev_);
 }
 
 void DhtClient::cleanup_stale_nodes() {
@@ -1465,32 +1511,6 @@ void DhtClient::cleanup_stale_nodes() {
     
     if (total_removed > 0) {
         LOG_DHT_DEBUG("Cleaned up " << total_removed << " stale/failed nodes from routing table");
-    }
-}
-
-void DhtClient::cleanup_stale_peer_tokens() {
-    std::lock_guard<std::mutex> lock(peer_tokens_mutex_);
-    
-    auto now = std::chrono::steady_clock::now();
-    auto stale_threshold = std::chrono::minutes(10);  // Tokens valid for 10 minutes (BEP 5 recommends tokens expire)
-    
-    size_t total_before = peer_tokens_.size();
-    
-    auto it = peer_tokens_.begin();
-    while (it != peer_tokens_.end()) {
-        if (now - it->second.created_at > stale_threshold) {
-            LOG_DHT_DEBUG("Removing stale token for peer " << it->first.ip << ":" << it->first.port);
-            it = peer_tokens_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    
-    size_t total_after = peer_tokens_.size();
-    
-    if (total_before > total_after) {
-        LOG_DHT_DEBUG("Cleaned up " << (total_before - total_after) << " stale peer tokens "
-                      << "(from " << total_before << " to " << total_after << ")");
     }
 }
 
@@ -1573,13 +1593,6 @@ void DhtClient::print_statistics() {
         nodes_being_replaced = nodes_being_replaced_.size();
     }
     
-    // Peer tokens statistics
-    size_t peer_tokens_count = 0;
-    {
-        std::lock_guard<std::mutex> tokens_lock(peer_tokens_mutex_);
-        peer_tokens_count = peer_tokens_.size();
-    }
-    
     // Spider mode statistics
 #ifdef RATS_SEARCH_FEATURES
     size_t spider_pool_size = 0;
@@ -1625,9 +1638,8 @@ void DhtClient::print_statistics() {
     LOG_DHT_INFO("  Pending ping verifications: " << pending_pings 
                  << " (nodes being replaced: " << nodes_being_replaced << ")");
     LOG_DHT_INFO("[STORED DATA]");
-    LOG_DHT_INFO("  Announced peers: " << announced_peers_total 
+    LOG_DHT_INFO("  Announced peers: " << announced_peers_total
                  << " across " << announced_peers_infohashes << " infohashes");
-    LOG_DHT_INFO("  Peer tokens: " << peer_tokens_count);
     
     // Best/Worst nodes analysis
     if (!all_nodes.empty()) {
@@ -2449,7 +2461,7 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
         
         // Send query to this node
         std::string transaction_id = KrpcProtocol::generate_transaction_id();
-        transaction_to_search_[transaction_id] = SearchTransaction(hash_key, node.id);
+        transaction_to_search_[transaction_id] = SearchTransaction(hash_key, node.id, node.peer);
         search.node_states[node.id] |= SearchNodeFlags::QUERIED;
         search.invoke_count++;
         
@@ -2637,18 +2649,10 @@ void DhtClient::handle_ping_verification_response(const std::string& transaction
         const auto& verification = it->second;
         
         // Security check: Verify response comes from the IP we pinged
-        // Normalize IPv6-mapped IPv4 addresses (::ffff:x.x.x.x -> x.x.x.x) for comparison
-        auto normalize_ip = [](const std::string& ip) -> std::string {
-            const std::string ipv4_mapped_prefix = "::ffff:";
-            if (ip.compare(0, ipv4_mapped_prefix.size(), ipv4_mapped_prefix) == 0) {
-                return ip.substr(ipv4_mapped_prefix.size());
-            }
-            return ip;
-        };
-        
-        std::string responder_ip_normalized = normalize_ip(responder.ip);
-        std::string expected_ip_normalized = normalize_ip(verification.old_node.peer.ip);
-        
+        // (normalize IPv6-mapped IPv4 addresses ::ffff:x.x.x.x -> x.x.x.x for comparison)
+        std::string responder_ip_normalized = normalize_ip_for_compare(responder.ip);
+        std::string expected_ip_normalized = normalize_ip_for_compare(verification.old_node.peer.ip);
+
         if (responder_ip_normalized != expected_ip_normalized) {
             LOG_DHT_WARN("Ping verification response from wrong IP " << responder.ip 
                          << " (expected " << verification.old_node.peer.ip << ") - ignoring");
