@@ -134,6 +134,13 @@ void Node::route_close(PeerRoute route) {
 // ── ConnectionDelegate (reactor thread) ─────────────────────────────────────
 
 void Node::on_established(Connection& conn) {
+    // Reject self-connections: a self-certifying handshake against our own
+    // listener yields our own id. (Common once DHT/discovery starts dialing.)
+    if (conn.remote_id() == identity_.id) {
+        reactors_->by_index(conn.reactor_index()).close(conn.id(), CloseReason::LocalClose);
+        return;
+    }
+
     PeerInfo info;
     info.id        = conn.remote_id();
     info.direction = conn.role();

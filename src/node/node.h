@@ -53,10 +53,10 @@ public:
     void stop();
 
     const PeerId& local_id() const noexcept override { return identity_.id; }
-    uint16_t      listen_port() const noexcept { return listen_port_; }
+    uint16_t      listen_port() const noexcept override { return listen_port_; }
 
     // — connections —
-    void connect(const Address& address);
+    void connect(const Address& address) override;
     void connect(const std::string& host, uint16_t port);
 
     size_t                  peer_count() const noexcept { return directory_.size(); }

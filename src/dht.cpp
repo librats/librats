@@ -100,7 +100,13 @@ bool DhtClient::start() {
         LOG_DHT_ERROR("Failed to create " << (is_ipv6() ? "IPv6" : "IPv4") << " UDP socket on port " << port_);
         return false;
     }
-    
+
+    // If an ephemeral port (0) was requested, record the actually-bound port so
+    // get_port() reports it (callers announce their own port to the network).
+    if (port_ == 0) {
+        port_ = get_bound_port(socket_);
+    }
+
     if (!set_socket_nonblocking(socket_)) {
         LOG_DHT_WARN("Failed to set socket to non-blocking mode");
     }

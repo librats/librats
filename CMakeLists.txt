@@ -226,6 +226,8 @@ set(LIBRARY_SOURCES
     src/subsystems/pubsub.cpp
     src/subsystems/file_transfer.h
     src/subsystems/file_transfer.cpp
+    src/subsystems/dht_discovery.h
+    src/subsystems/dht_discovery.cpp
 
 # Crypto algorithms including Noise Protocol
     src/crypto/curve25519.c
@@ -531,6 +533,7 @@ if(RATS_BUILD_TESTS)
         tests/test_subsystem.cpp
         tests/test_pubsub.cpp
         tests/test_filexfer.cpp
+        tests/test_dht_discovery.cpp
     )
 
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled

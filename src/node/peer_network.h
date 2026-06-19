@@ -13,7 +13,9 @@
 #include "core/bytes.h"
 #include "net/frame.h"   // MessageType
 #include "net/peer_id.h"
+#include "net/address.h"
 
+#include <cstdint>
 #include <functional>
 #include <vector>
 
@@ -30,6 +32,8 @@ public:
     using PeerDisconnectHandler  = std::function<void(const PeerId&)>;
 
     virtual const PeerId&       local_id() const = 0;
+    virtual uint16_t            listen_port() const = 0;     ///< our advertised TCP port
+    virtual void                connect(const Address& address) = 0;  ///< dial a discovered peer
     virtual void                send(const PeerId& to, MessageType type, ByteView payload) = 0;
     virtual void                broadcast(MessageType type, ByteView payload) = 0;
     virtual std::vector<PeerId>  connected_peers() const = 0;
