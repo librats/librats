@@ -43,6 +43,7 @@ enum class CloseReason {
     ProtocolError,     ///< Malformed frame / decryption failure on the wire.
     SlowConsumer,      ///< Send buffer exceeded its high-water mark.
     ReactorShutdown,   ///< Reactor is stopping.
+    DuplicateConn,     ///< Redundant connection to a peer we already hold; superseded.
 };
 
 const char* to_string(ConnState) noexcept;

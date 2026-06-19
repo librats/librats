@@ -23,6 +23,7 @@ const char* to_string(CloseReason r) noexcept {
         case CloseReason::ProtocolError:   return "ProtocolError";
         case CloseReason::SlowConsumer:    return "SlowConsumer";
         case CloseReason::ReactorShutdown: return "ReactorShutdown";
+        case CloseReason::DuplicateConn:   return "DuplicateConn";
     }
     return "?";
 }

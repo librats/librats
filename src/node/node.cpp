@@ -178,11 +178,24 @@ void Node::on_established(Connection& conn) {
     if (conn.has_dial_address())  // outbound: remember the address we dialed
         info.addresses.push_back(Address{conn.dial_host(), conn.dial_port()});
 
-    PeerRoute route{conn.reactor_index(), conn.id()};
-    directory_.add(info, route);
+    const PeerRoute route{conn.reactor_index(), conn.id()};
+    // Symmetric tie-break for a simultaneous cross-connect: both peers keep the
+    // link initiated by the smaller id, so they converge on the same connection.
+    const bool prefer_outbound = identity_.id < conn.remote_id();
+    const auto outcome = directory_.add(info, route, prefer_outbound);
 
-    PeerHandle handle = make_peer(conn.remote_id(), route);
-    for (auto& cb : peer_connected_) cb(handle);
+    // Tear down the loser of a duplicate/cross-connect race so it can't linger
+    // holding an fd. Its on_closed is a no-op: the directory no longer maps its
+    // route, so it neither evicts the survivor nor fires a spurious disconnect.
+    if (outcome.close)
+        reactors_->by_index(outcome.close->reactor).close(outcome.close->conn, CloseReason::DuplicateConn);
+
+    // Fire "connected" only on the 0→1 transition. A reconnect/duplicate that
+    // merely swapped the live route keeps the peer connected from the app's view.
+    if (outcome.result == PeerDirectory::AddResult::NewPeer) {
+        PeerHandle handle = make_peer(conn.remote_id(), route);
+        for (auto& cb : peer_connected_) cb(handle);
+    }
 }
 
 void Node::on_frame(Connection& conn, const Frame& frame) {
@@ -198,8 +211,14 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     // Only peers that actually established were registered.
     if (conn.remote_id().is_zero()) return;
 
-    const PeerId id = conn.remote_id();
-    directory_.remove(id);
+    const PeerId    id = conn.remote_id();
+    const PeerRoute route{conn.reactor_index(), conn.id()};
+
+    // Disconnect fires only for the connection currently registered for this peer.
+    // A loser of a duplicate race (or a rejected self-connection) is not mapped
+    // under its route, so removing it is a no-op and must NOT surface a disconnect
+    // for a peer that is still connected over the surviving link.
+    if (!directory_.remove(id, route)) return;
     for (auto& cb : peer_disconnected_) cb(id);
     (void)reason;
 }
