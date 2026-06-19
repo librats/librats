@@ -42,6 +42,7 @@ enum class MessageType : uint8_t {
     FileChunk = 4,
     Ping      = 5,  ///< liveness / RTT (PingService)
     Storage   = 6,  ///< distributed key-value store (StorageManager)
+    Typed     = 7,  ///< typed JSON message exchange (MessageExchange)
 };
 
 /// Fixed header of an inner message.

@@ -309,6 +309,8 @@ views point into the receive buffer and are valid only until consumed.
 | 3 | `Gossip` | `PubSub` |
 | 4 | `FileChunk` | `FileTransfer` |
 | 5 | `Ping` | `PingService` |
+| 6 | `Storage` | `StorageManager` |
+| 7 | `Typed` | `MessageExchange` (typed JSON messaging) |
 
 ---
 
