@@ -67,6 +67,7 @@ public:
 
     // — identity / state (reactor thread) —
     ConnId        id() const noexcept        { return id_; }
+    uint8_t       reactor_index() const noexcept;  ///< index of the owning reactor
     socket_t      socket() const noexcept    { return socket_; }
     ConnRole      role() const noexcept      { return role_; }
     ConnState     state() const noexcept     { return state_; }

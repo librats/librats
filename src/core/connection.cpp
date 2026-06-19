@@ -29,6 +29,8 @@ Connection::Connection(ConnId id, socket_t sock, ConnRole role,
 
 Connection::~Connection() = default;
 
+uint8_t Connection::reactor_index() const noexcept { return reactor_.index(); }
+
 // ── Outbound application frames ─────────────────────────────────────────────
 
 void Connection::send(FrameHeader header, ByteView payload) {

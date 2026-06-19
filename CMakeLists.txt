@@ -192,10 +192,15 @@ set(LIBRARY_SOURCES
     src/core/connection.cpp
     src/core/reactor.h
     src/core/reactor.cpp
+    src/core/reactor_pool.h
     src/net/frame.h
     src/net/frame.cpp
     src/net/peer_id.h
     src/net/peer_id.cpp
+    src/net/address.h
+    src/net/peer_info.h
+    src/net/peer_directory.h
+    src/net/peer_directory.cpp
 
 # Core v2 — security layer (Noise XX / plaintext) with self-certifying identity
     src/security/session.h
@@ -204,6 +209,15 @@ set(LIBRARY_SOURCES
     src/security/noise_security.h
     src/security/noise_security.cpp
     src/security/plaintext_security.h
+
+# Core v2 — node facade, peer handle, message router, plugin contract
+    src/node/config.h
+    src/node/peer.h
+    src/node/peer_network.h
+    src/node/message_router.h
+    src/node/message_router.cpp
+    src/node/node.h
+    src/node/node.cpp
 
 # Crypto algorithms including Noise Protocol
     src/crypto/curve25519.c
@@ -505,6 +519,7 @@ if(RATS_BUILD_TESTS)
         tests/test_frame.cpp
         tests/test_reactor.cpp
         tests/test_handshake.cpp
+        tests/test_node.cpp
     )
 
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled

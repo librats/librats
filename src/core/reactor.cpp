@@ -66,6 +66,15 @@ void Reactor::close(ConnId id, CloseReason reason) {
     });
 }
 
+void Reactor::broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload) {
+    execute([this, header, payload = std::move(payload)] {
+        for (auto& [sock, conn] : conns_) {
+            if (conn->state() == ConnState::Established)
+                conn->send(header, ByteView(*payload));
+        }
+    });
+}
+
 // ── Timers ──────────────────────────────────────────────────────────────────
 
 TimerId Reactor::schedule(std::chrono::milliseconds delay, Task on_fire) {

@@ -69,6 +69,11 @@ public:
     /// Close a connection by id (thread-safe; deferred to the reactor thread).
     void close(ConnId id, CloseReason reason);
 
+    /// Send a frame to every Established connection on this reactor. Thread-safe:
+    /// the iteration runs on the reactor thread. The payload is shared across
+    /// connections (the per-peer encryption still happens in each Connection).
+    void broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload);
+
     // — timers (reactor thread, or via post/execute) —
     TimerId schedule(std::chrono::milliseconds delay, Task on_fire);
     void    cancel(TimerId id);
