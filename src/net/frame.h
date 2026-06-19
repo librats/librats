@@ -37,9 +37,10 @@ namespace librats {
 /// Inner-message kind. Application traffic uses App, addressed by `channel`.
 enum class MessageType : uint8_t {
     App       = 1,
-    Control   = 2,  ///< core control plane (peer exchange, ping…)
+    Control   = 2,  ///< core control plane (peer exchange…)
     Gossip    = 3,
     FileChunk = 4,
+    Ping      = 5,  ///< liveness / RTT (PingService)
 };
 
 /// Fixed header of an inner message.

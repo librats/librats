@@ -45,6 +45,10 @@ public:
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
 
+    /// Attach a subsystem (DHT, GossipSub, PingService…). Call before start();
+    /// the node owns it, gives it a PeerNetwork on start(), and stops it on stop().
+    void add_subsystem(std::unique_ptr<Subsystem> subsystem);
+
     bool start();
     void stop();
 
@@ -92,6 +96,8 @@ private:
     PeerDirectory                     directory_;
     MessageRouter                     router_;
     std::unique_ptr<ReactorPool>      reactors_;
+
+    std::vector<std::unique_ptr<Subsystem>> subsystems_;
 
     socket_t          listen_socket_ = INVALID_SOCKET_VALUE;
     uint16_t          listen_port_   = 0;

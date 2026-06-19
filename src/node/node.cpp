@@ -28,6 +28,10 @@ Node::~Node() {
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
+void Node::add_subsystem(std::unique_ptr<Subsystem> subsystem) {
+    subsystems_.push_back(std::move(subsystem));
+}
+
 bool Node::start() {
     if (running_.exchange(true)) return false;
     init_socket_library();
@@ -44,15 +48,23 @@ bool Node::start() {
         reactors_->listen(listen_socket_);
     }
 
+    // Attach subsystems (registers their message handlers) BEFORE any reactor
+    // thread runs, so the router is fully built with no concurrent writes.
+    for (auto& s : subsystems_) s->attach(*this);
+
     reactors_->start();
+
+    for (auto& s : subsystems_) s->start();
+
     LOG_INFO("node", "Node " << identity_.id.short_hex() << " started on port " << listen_port_
-             << " (" << reactors_->size() << " reactor(s))");
+             << " (" << reactors_->size() << " reactor(s), " << subsystems_.size() << " subsystem(s))");
     return true;
 }
 
 void Node::stop() {
     if (!running_.exchange(false)) return;
-    reactors_->stop();  // joins reactor threads; closes all connections
+    for (auto& s : subsystems_) s->stop();  // stop subsystem threads first
+    reactors_->stop();                      // then join reactors; close connections
 }
 
 // ── Connections ─────────────────────────────────────────────────────────────
