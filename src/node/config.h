@@ -26,6 +26,11 @@ struct NodeConfig {
     /// Secure channel to use for peer connections.
     enum class Security { Noise, Plaintext };
     Security security = Security::Noise;
+
+    /// Directory for persistent state. Empty = ephemeral (a fresh random
+    /// identity each run). When set, the node's Noise keypair is loaded from /
+    /// saved to "<data_dir>/identity.key", giving a stable PeerId across restarts.
+    std::string data_dir = "";
 };
 
 } // namespace librats

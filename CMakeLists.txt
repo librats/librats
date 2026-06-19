@@ -534,6 +534,7 @@ if(RATS_BUILD_TESTS)
         tests/test_reactor.cpp
         tests/test_handshake.cpp
         tests/test_node.cpp
+        tests/test_persistence.cpp
         tests/test_subsystem.cpp
         tests/test_pubsub.cpp
         tests/test_filexfer.cpp

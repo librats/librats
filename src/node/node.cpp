@@ -1,24 +1,55 @@
 #include "node/node.h"
 #include "security/noise_security.h"
 #include "security/plaintext_security.h"
+#include "fs.h"
 #include "logger.h"
 
+#include <cstring>
 #include <memory>
 #include <utility>
 
 namespace librats {
 
 namespace {
+
 std::unique_ptr<SecurityProvider> make_security(NodeConfig::Security kind, const Identity& id) {
     if (kind == NodeConfig::Security::Noise)
         return std::make_unique<NoiseSecurity>(id);
     return std::make_unique<PlaintextSecurity>(id);
 }
+
+// Load a persisted identity from <data_dir>/identity.key, or generate one and
+// save it. An empty data_dir means ephemeral (fresh identity each run).
+Identity load_or_create_identity(const std::string& data_dir) {
+    if (data_dir.empty()) return Identity::generate();
+
+    const std::string key_path = combine_paths(data_dir, "identity.key");
+
+    size_t size = 0;
+    void* data = read_file_binary(key_path.c_str(), &size);
+    if (data) {
+        if (size == rats::NOISE_DH_SIZE) {
+            uint8_t priv[rats::NOISE_DH_SIZE];
+            std::memcpy(priv, data, rats::NOISE_DH_SIZE);
+            free_file_buffer(data);
+            return Identity::from_private_key(priv);
+        }
+        free_file_buffer(data);  // malformed key file → regenerate
+        LOG_WARN("node", "Ignoring malformed identity key at " << key_path);
+    }
+
+    Identity identity = Identity::generate();
+    create_directories(data_dir.c_str());
+    if (!create_file_binary(key_path.c_str(), identity.static_keypair.private_key, rats::NOISE_DH_SIZE))
+        LOG_WARN("node", "Failed to persist identity key to " << key_path);
+    return identity;
+}
+
 } // namespace
 
 Node::Node(NodeConfig config)
     : config_(std::move(config)),
-      identity_(Identity::generate()),
+      identity_(load_or_create_identity(config_.data_dir)),
       security_(make_security(config_.security, identity_)),
       reactors_(std::make_unique<ReactorPool>(config_.reactor_threads, *this, *security_)) {}
 
