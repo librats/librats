@@ -306,8 +306,7 @@ if(RATS_SEARCH_FEATURES)
 endif()
 
 # Add Storage sources if RATS_STORAGE is enabled
-# NOTE: storage.{h,cpp} still target the old RatsClient (StorageManager takes a
-# RatsClient&); RATS_STORAGE will not build until storage is ported to Node.
+# StorageManager is a Node subsystem (reaches the mesh via PeerNetwork).
 if(RATS_STORAGE)
     list(APPEND LIBRARY_SOURCES
         src/storage/storage.cpp

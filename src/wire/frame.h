@@ -41,6 +41,7 @@ enum class MessageType : uint8_t {
     Gossip    = 3,
     FileChunk = 4,
     Ping      = 5,  ///< liveness / RTT (PingService)
+    Storage   = 6,  ///< distributed key-value store (StorageManager)
 };
 
 /// Fixed header of an inner message.
