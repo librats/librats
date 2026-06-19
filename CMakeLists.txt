@@ -142,6 +142,8 @@ set(LIBRARY_SOURCES
     src/krpc.h
     src/sha1.cpp
     src/sha1.h
+    src/crc32.cpp
+    src/crc32.h
     src/os.cpp
     src/os.h
     src/fs.cpp
@@ -309,8 +311,6 @@ endif()
 # RatsClient&); RATS_STORAGE will not build until storage is ported to Node.
 if(RATS_STORAGE)
     list(APPEND LIBRARY_SOURCES
-        src/crc32.cpp
-        src/crc32.h
         src/storage.cpp
         src/storage.h
     )
