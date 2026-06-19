@@ -26,11 +26,19 @@ public:
     virtual ~PeerNetwork() = default;
     using MessageHandler = std::function<void(const PeerHandle&, ByteView)>;
 
+    using PeerEventHandler       = std::function<void(const PeerHandle&)>;
+    using PeerDisconnectHandler  = std::function<void(const PeerId&)>;
+
     virtual const PeerId&       local_id() const = 0;
     virtual void                send(const PeerId& to, MessageType type, ByteView payload) = 0;
     virtual void                broadcast(MessageType type, ByteView payload) = 0;
     virtual std::vector<PeerId>  connected_peers() const = 0;
     virtual void                on_message(MessageType type, MessageHandler handler) = 0;
+
+    // Lifecycle hooks. Multiple subsystems (and the application) may subscribe;
+    // all run on a reactor thread. Register before start().
+    virtual void                on_peer_connected(PeerEventHandler handler) = 0;
+    virtual void                on_peer_disconnected(PeerDisconnectHandler handler) = 0;
 };
 
 /// A pluggable network subsystem. Owns its own threads/sockets if it needs them;

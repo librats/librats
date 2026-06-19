@@ -222,6 +222,8 @@ set(LIBRARY_SOURCES
 # Core v2 — subsystems (plugins on PeerNetwork)
     src/subsystems/ping_service.h
     src/subsystems/ping_service.cpp
+    src/subsystems/pubsub.h
+    src/subsystems/pubsub.cpp
 
 # Crypto algorithms including Noise Protocol
     src/crypto/curve25519.c
@@ -525,6 +527,7 @@ if(RATS_BUILD_TESTS)
         tests/test_handshake.cpp
         tests/test_node.cpp
         tests/test_subsystem.cpp
+        tests/test_pubsub.cpp
     )
 
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled

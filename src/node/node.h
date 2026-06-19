@@ -67,9 +67,10 @@ public:
     void send(const PeerId& to, std::string_view channel, ByteView payload);
     void broadcast(std::string_view channel, ByteView payload);
 
-    // — events (register before start(); invoked on a reactor thread) —
-    void on_peer_connected(std::function<void(const PeerHandle&)> cb) { on_peer_connected_ = std::move(cb); }
-    void on_peer_disconnected(std::function<void(PeerId)> cb)     { on_peer_disconnected_ = std::move(cb); }
+    // — events (register before start(); invoked on a reactor thread). Multiple
+    //   listeners are supported, so subsystems and the app can both subscribe. —
+    void on_peer_connected(PeerNetwork::PeerEventHandler cb) override { peer_connected_.push_back(std::move(cb)); }
+    void on_peer_disconnected(PeerNetwork::PeerDisconnectHandler cb) override { peer_disconnected_.push_back(std::move(cb)); }
     void on_message(std::string_view channel, MessageRouter::Handler cb) { router_.on_channel(channel, std::move(cb)); }
 
     // — PeerNetwork (for subsystems) —
@@ -103,8 +104,8 @@ private:
     uint16_t          listen_port_   = 0;
     std::atomic<bool> running_{false};
 
-    std::function<void(const PeerHandle&)> on_peer_connected_;
-    std::function<void(PeerId)>            on_peer_disconnected_;
+    std::vector<PeerNetwork::PeerEventHandler>      peer_connected_;
+    std::vector<PeerNetwork::PeerDisconnectHandler> peer_disconnected_;
 };
 
 } // namespace librats

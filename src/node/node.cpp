@@ -141,7 +141,8 @@ void Node::on_established(Connection& conn) {
     PeerRoute route{conn.reactor_index(), conn.id()};
     directory_.add(info, route);
 
-    if (on_peer_connected_) on_peer_connected_(make_peer(conn.remote_id(), route));
+    PeerHandle handle = make_peer(conn.remote_id(), route);
+    for (auto& cb : peer_connected_) cb(handle);
 }
 
 void Node::on_frame(Connection& conn, const Frame& frame) {
@@ -157,8 +158,9 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     // Only peers that actually established were registered.
     if (conn.remote_id().is_zero()) return;
 
-    directory_.remove(conn.remote_id());
-    if (on_peer_disconnected_) on_peer_disconnected_(conn.remote_id());
+    const PeerId id = conn.remote_id();
+    directory_.remove(id);
+    for (auto& cb : peer_disconnected_) cb(id);
     (void)reason;
 }
 
