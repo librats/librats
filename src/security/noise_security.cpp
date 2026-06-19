@@ -66,6 +66,12 @@ public:
 private:
     // Run one handshake step; append the outgoing message (if any) to `out`.
     bool step(const uint8_t* received, size_t received_len, Bytes& out) {
+        // A Noise transport message is capped at 65535 bytes; reject anything
+        // larger before it reaches the state machine. Defense in depth: the
+        // block layer admits frames up to kMaxBlockSize (64 MB), so without
+        // this an oversized handshake frame would be fed straight in.
+        if (received_len > rats::NOISE_MAX_MESSAGE_SIZE) return false;
+
         uint8_t buffer[rats::NOISE_MAX_MESSAGE_SIZE];
         size_t  len = sizeof(buffer);
         bool    need_to_send = false;

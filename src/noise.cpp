@@ -243,7 +243,21 @@ size_t NoiseSymmetricState::encrypt_and_hash(const uint8_t* plaintext, size_t pt
     return ct_len;
 }
 
-size_t NoiseSymmetricState::decrypt_and_hash(const uint8_t* ciphertext, size_t ct_len, uint8_t* plaintext) {
+size_t NoiseSymmetricState::decrypt_and_hash(const uint8_t* ciphertext, size_t ct_len, uint8_t* plaintext, size_t plaintext_cap) {
+    /* Bound the write before touching `plaintext`. A keyed decrypt yields
+     * ct_len - NOISE_TAG_SIZE bytes; a passthrough copy (no key) yields ct_len.
+     * Refuse anything that would overflow the caller's buffer — this is the
+     * guard against an oversized handshake message smashing a fixed-size
+     * payload buffer (the ciphertext length is attacker-controlled). */
+    const size_t pt_max = cipher_has_key()
+        ? (ct_len >= NOISE_TAG_SIZE ? ct_len - NOISE_TAG_SIZE : 0)
+        : ct_len;
+    if (pt_max > plaintext_cap) {
+        LOG_NOISE_ERROR("decrypt_and_hash: plaintext " << pt_max
+                        << " exceeds output buffer capacity " << plaintext_cap);
+        return 0;
+    }
+
     /* Save ciphertext for mixing (before decryption modifies anything) */
     /* Mix ciphertext into hash first */
     uint8_t h_backup[NOISE_HASH_SIZE];
@@ -366,7 +380,7 @@ size_t NoiseHandshakeState::read_s(const uint8_t* in, size_t len) {
         return 0;
     }
     
-    size_t pt_len = symmetric_.decrypt_and_hash(in, expected_len, rs_.public_key);
+    size_t pt_len = symmetric_.decrypt_and_hash(in, expected_len, rs_.public_key, NOISE_DH_SIZE);
     if (pt_len != NOISE_DH_SIZE) {
         LOG_NOISE_ERROR("Read static failed: decryption returned " << pt_len << " bytes (expected " << NOISE_DH_SIZE << ")");
         return 0;
@@ -528,7 +542,11 @@ NoiseError NoiseHandshakeState::read_message(
     }
     
     LOG_NOISE_DEBUG("Reading handshake message " << message_index_ << " (" << (is_initiator_ ? "initiator" : "responder") << "): " << message_len << " bytes");
-    
+
+    /* On input, *payload_out_len carries the capacity of payload_out; capture it
+     * before we overwrite it with the decrypted length below. */
+    const size_t payload_cap = (payload_out_len != nullptr) ? *payload_out_len : 0;
+
     size_t offset = 0;
     size_t consumed;
     
@@ -593,7 +611,7 @@ NoiseError NoiseHandshakeState::read_message(
     /* Decrypt payload if there's remaining data */
     if (offset < message_len) {
         size_t remaining = message_len - offset;
-        size_t pt_len = symmetric_.decrypt_and_hash(message + offset, remaining, payload_out);
+        size_t pt_len = symmetric_.decrypt_and_hash(message + offset, remaining, payload_out, payload_cap);
         if (pt_len == 0 && remaining > 0) {
             LOG_NOISE_ERROR("Failed to decrypt payload in handshake message");
             return NoiseError::DECRYPT_FAILED;

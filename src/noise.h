@@ -145,9 +145,12 @@ public:
      * @param ciphertext Input ciphertext
      * @param ct_len Length of ciphertext
      * @param plaintext Output buffer
+     * @param plaintext_cap Capacity of the output buffer in bytes; decryption is
+     *        refused (returns 0) if the resulting plaintext would not fit. This
+     *        guards a fixed-size payload buffer against an oversized message.
      * @return Length of plaintext on success, 0 on failure
      */
-    size_t decrypt_and_hash(const uint8_t* ciphertext, size_t ct_len, uint8_t* plaintext);
+    size_t decrypt_and_hash(const uint8_t* ciphertext, size_t ct_len, uint8_t* plaintext, size_t plaintext_cap);
     
     /**
      * Split into two CipherState objects for transport phase
