@@ -33,6 +33,7 @@ public:
     struct Config {
         std::string               store_path = "";          ///< persist targets (empty = memory only)
         bool                      persist_discovered = true; ///< remember dialed peers automatically
+        size_t                    max_targets = 1024;        ///< cap on remembered targets (bounds memory + store growth)
         std::chrono::milliseconds base_backoff{1000};
         std::chrono::milliseconds max_backoff{60000};
         std::chrono::milliseconds tick{1000};
@@ -67,6 +68,10 @@ private:
 
     Config                      config_;
     PeerNetwork*                network_ = nullptr;
+    // Built once in the constructor (when store_path is set) and never reassigned,
+    // so the pointer is safe to read from any thread; PeerStore is itself internally
+    // synchronized. (Creating it in start() raced reads from on_connected, which can
+    // fire on a reactor thread before this subsystem's start() returns.)
     std::unique_ptr<PeerStore>  store_;
 
     std::thread             thread_;

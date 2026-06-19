@@ -8,7 +8,15 @@ namespace librats {
 
 ReconnectionService::ReconnectionService() : ReconnectionService(Config()) {}
 
-ReconnectionService::ReconnectionService(Config config) : config_(std::move(config)) {}
+ReconnectionService::ReconnectionService(Config config) : config_(std::move(config)) {
+    // Construct the store up front so the pointer is fixed for the object's life
+    // (no race with reactor-thread reads in on_connected) and so add() called
+    // before start() persists into an already-loaded set rather than clobbering it.
+    if (!config_.store_path.empty()) {
+        store_ = std::make_unique<PeerStore>(config_.store_path);
+        store_->load();
+    }
+}
 
 ReconnectionService::~ReconnectionService() { stop(); }
 
@@ -16,10 +24,14 @@ void ReconnectionService::add(const Address& address) {
     const std::string key = address.to_string();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto [it, inserted] = targets_.try_emplace(key);
-        if (!inserted) return;
-        it->second.address = address;
-        it->second.next_attempt = std::chrono::steady_clock::now();
+        if (targets_.find(key) != targets_.end()) return;
+        if (targets_.size() >= config_.max_targets) {
+            LOG_WARN("reconnect", "Target cap (" << config_.max_targets << ") reached; dropping " << key);
+            return;
+        }
+        Target& t = targets_[key];
+        t.address = address;
+        t.next_attempt = std::chrono::steady_clock::now();
     }
     if (store_ && store_->add(address)) store_->save();
     wake_.notify_all();
@@ -39,11 +51,10 @@ void ReconnectionService::attach(PeerNetwork& network) {
 void ReconnectionService::start() {
     if (running_.exchange(true)) return;
 
-    if (!config_.store_path.empty()) {
-        store_ = std::make_unique<PeerStore>(config_.store_path);
-        store_->load();
+    if (store_) {
+        std::lock_guard<std::mutex> lock(mutex_);
         for (const Address& addr : store_->all()) {
-            std::lock_guard<std::mutex> lock(mutex_);
+            if (targets_.size() >= config_.max_targets) break;
             auto [it, inserted] = targets_.try_emplace(addr.to_string());
             if (inserted) { it->second.address = addr; it->second.next_attempt = std::chrono::steady_clock::now(); }
         }
@@ -62,7 +73,7 @@ void ReconnectionService::on_connected(const Peer& peer) {
     auto info = peer.info();
     if (!info) return;
 
-    bool learned = false;
+    std::vector<Address> learned;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const Address& addr : info->addresses) {
@@ -70,17 +81,20 @@ void ReconnectionService::on_connected(const Peer& peer) {
             auto it = targets_.find(key);
             if (it == targets_.end()) {
                 if (!config_.persist_discovered) continue;
+                if (targets_.size() >= config_.max_targets) continue;  // bound discovered growth
                 it = targets_.emplace(key, Target{}).first;
                 it->second.address = addr;
-                learned = true;
+                learned.push_back(addr);
             }
             it->second.connected = true;
             it->second.peer_id = peer.id();
             it->second.attempts = 0;
         }
     }
-    if (learned && store_) {
-        for (const Address& addr : info->addresses) if (store_->add(addr)) store_->save();
+    if (store_ && !learned.empty()) {
+        bool changed = false;
+        for (const Address& addr : learned) changed |= store_->add(addr);
+        if (changed) store_->save();
     }
 }
 
