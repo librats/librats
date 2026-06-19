@@ -12,10 +12,10 @@
  */
 
 #include "node/peer_network.h"
-#include "node/peer.h"
+#include "peer/peer.h"
 #include "core/address.h"
-#include "net/peer_id.h"
-#include "net/peer_store.h"
+#include "peer/peer_id.h"
+#include "peer/peer_store.h"
 
 #include <atomic>
 #include <chrono>
@@ -60,7 +60,7 @@ private:
         std::chrono::steady_clock::time_point next_attempt;
     };
 
-    void on_connected(const PeerHandle& peer);
+    void on_connected(const Peer& peer);
     void on_disconnected(const PeerId& id);
     void loop();
     std::chrono::milliseconds backoff_for(int attempts) const;

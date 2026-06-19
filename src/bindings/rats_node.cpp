@@ -73,7 +73,7 @@ void rats_node_broadcast(rats_node_t node, const char* channel, const void* data
 
 void rats_node_on_peer_connected(rats_node_t node, rats_peer_cb cb, void* user) {
     if (!cb) return;
-    as_node(node)->on_peer_connected([cb, user](const PeerHandle& peer) {
+    as_node(node)->on_peer_connected([cb, user](const Peer& peer) {
         cb(user, peer.id().to_hex().c_str());
     });
 }
@@ -87,7 +87,7 @@ void rats_node_on_peer_disconnected(rats_node_t node, rats_peer_cb cb, void* use
 
 void rats_node_on_message(rats_node_t node, const char* channel, rats_message_cb cb, void* user) {
     if (!channel || !cb) return;
-    as_node(node)->on_message(channel, [cb, user](const PeerHandle& peer, ByteView data) {
+    as_node(node)->on_message(channel, [cb, user](const Peer& peer, ByteView data) {
         cb(user, peer.id().to_hex().c_str(), data.data(), data.size());
     });
 }

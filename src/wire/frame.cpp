@@ -1,4 +1,4 @@
-#include "net/frame.h"
+#include "wire/frame.h"
 #include "core/socket.h"  // htonl/htons/ntohl/ntohs (winsock or arpa/inet)
 
 #include <cstring>

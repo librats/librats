@@ -2,7 +2,7 @@
 
 #include "node/node.h"
 #include "subsystems/reconnection.h"
-#include "net/peer_store.h"
+#include "peer/peer_store.h"
 #include "util/fs.h"
 
 #include <algorithm>

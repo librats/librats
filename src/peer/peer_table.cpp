@@ -1,10 +1,10 @@
-#include "net/peer_directory.h"
+#include "peer/peer_table.h"
 
 #include <mutex>  // std::unique_lock (shared_lock comes from <shared_mutex>)
 
 namespace librats {
 
-PeerDirectory::AddOutcome PeerDirectory::add(const PeerInfo& info, PeerRoute route,
+PeerTable::AddOutcome PeerTable::add(const PeerInfo& info, PeerRoute route,
                                              bool prefer_outbound) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto [it, inserted] = peers_.try_emplace(info.id, Entry{info, route});
@@ -37,7 +37,7 @@ PeerDirectory::AddOutcome PeerDirectory::add(const PeerInfo& info, PeerRoute rou
     return {AddResult::Rejected, route};  // existing wins; caller closes the new connection
 }
 
-bool PeerDirectory::remove(const PeerId& id, PeerRoute route) {
+bool PeerTable::remove(const PeerId& id, PeerRoute route) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = peers_.find(id);
     if (it == peers_.end() || it->second.route != route) return false;
@@ -46,26 +46,26 @@ bool PeerDirectory::remove(const PeerId& id, PeerRoute route) {
     return true;
 }
 
-std::optional<PeerRoute> PeerDirectory::route(const PeerId& id) const {
+std::optional<PeerRoute> PeerTable::route(const PeerId& id) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = peers_.find(id);
     if (it == peers_.end()) return std::nullopt;
     return it->second.route;
 }
 
-std::optional<PeerInfo> PeerDirectory::info(const PeerId& id) const {
+std::optional<PeerInfo> PeerTable::info(const PeerId& id) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = peers_.find(id);
     if (it == peers_.end()) return std::nullopt;
     return it->second.info;
 }
 
-bool PeerDirectory::contains(const PeerId& id) const {
+bool PeerTable::contains(const PeerId& id) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     return peers_.find(id) != peers_.end();
 }
 
-std::vector<PeerInfo> PeerDirectory::snapshot() const {
+std::vector<PeerInfo> PeerTable::snapshot() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<PeerInfo> out;
     out.reserve(peers_.size());

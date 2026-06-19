@@ -76,7 +76,7 @@ FileTransfer::~FileTransfer() { stop(); }
 void FileTransfer::attach(PeerNetwork& network) {
     network_ = &network;
     network_->on_message(MessageType::FileChunk,
-                         [this](const PeerHandle& peer, ByteView payload) { on_message(peer, payload); });
+                         [this](const Peer& peer, ByteView payload) { on_message(peer, payload); });
     network_->on_peer_disconnected([this](const PeerId& id) {
         // Fail every in-flight transfer with the departed peer and reclaim temps.
         std::vector<std::shared_ptr<Outgoing>> out;
@@ -489,7 +489,7 @@ void FileTransfer::finish_incoming(const std::shared_ptr<Incoming>& t, bool succ
 
 // ── Message dispatch (reactor thread) ────────────────────────────────────────
 
-void FileTransfer::on_message(const PeerHandle& peer, ByteView payload) {
+void FileTransfer::on_message(const Peer& peer, ByteView payload) {
     Reader r{payload.data(), payload.data() + payload.size()};
     const uint8_t op = r.u8();
     const PeerId from = peer.id();

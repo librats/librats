@@ -20,9 +20,9 @@
  */
 
 #include "node/peer_network.h"
-#include "node/peer.h"
+#include "peer/peer.h"
 #include "core/bytes.h"
-#include "net/peer_id.h"
+#include "peer/peer_id.h"
 
 #include <cstdint>
 #include <deque>
@@ -55,9 +55,9 @@ public:
     void stop() override {}
 
 private:
-    void on_new_peer(const PeerHandle& peer);
+    void on_new_peer(const Peer& peer);
     void on_peer_gone(const PeerId& id);
-    void on_gossip(const PeerHandle& peer, ByteView payload);
+    void on_gossip(const Peer& peer, ByteView payload);
 
     void send_subscription(const PeerId& to, const std::string& topic, bool subscribe);
     void deliver_local(const PeerId& from, const std::string& topic, ByteView data);

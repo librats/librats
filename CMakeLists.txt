@@ -175,20 +175,20 @@ set(LIBRARY_SOURCES
     src/core/mpsc_queue.h
     src/core/timer_queue.h
     src/core/notifier.h
-    src/core/connection.h
-    src/core/connection.cpp
-    src/core/reactor.h
-    src/core/reactor.cpp
-    src/core/reactor_pool.h
-    src/net/frame.h
-    src/net/frame.cpp
-    src/net/peer_id.h
-    src/net/peer_id.cpp
-    src/net/peer_info.h
-    src/net/peer_directory.h
-    src/net/peer_directory.cpp
-    src/net/peer_store.h
-    src/net/peer_store.cpp
+    src/transport/connection.h
+    src/transport/connection.cpp
+    src/transport/reactor.h
+    src/transport/reactor.cpp
+    src/transport/reactor_pool.h
+    src/wire/frame.h
+    src/wire/frame.cpp
+    src/peer/peer_id.h
+    src/peer/peer_id.cpp
+    src/peer/peer_info.h
+    src/peer/peer_table.h
+    src/peer/peer_table.cpp
+    src/peer/peer_store.h
+    src/peer/peer_store.cpp
 
 # Core v2 — security layer (Noise XX / plaintext) with self-certifying identity
     src/security/session.h
@@ -200,10 +200,10 @@ set(LIBRARY_SOURCES
 
 # Core v2 — node facade, peer handle, message router, plugin contract
     src/node/config.h
-    src/node/peer.h
+    src/peer/peer.h
     src/node/peer_network.h
-    src/node/message_router.h
-    src/node/message_router.cpp
+    src/wire/message_router.h
+    src/wire/message_router.cpp
     src/node/node.h
     src/node/node.cpp
 

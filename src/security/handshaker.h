@@ -15,7 +15,7 @@
 
 #include "core/bytes.h"
 #include "core/types.h"   // ConnRole
-#include "net/peer_id.h"
+#include "peer/peer_id.h"
 #include "security/session.h"
 
 #include <memory>

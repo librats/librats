@@ -12,8 +12,8 @@
  */
 
 #include "core/bytes.h"
-#include "net/frame.h"
-#include "node/peer.h"
+#include "wire/frame.h"
+#include "peer/peer.h"
 
 #include <array>
 #include <cstdint>
@@ -26,7 +26,7 @@ namespace librats {
 
 class MessageRouter {
 public:
-    using Handler = std::function<void(const PeerHandle&, ByteView)>;
+    using Handler = std::function<void(const Peer&, ByteView)>;
 
     /// Deterministic 16-bit channel id (FNV-1a) for a channel name.
     static uint16_t channel_id(std::string_view name);
@@ -35,7 +35,7 @@ public:
     void on_type(MessageType type, Handler handler);
 
     /// Dispatch one decoded frame to its handler, if any. Returns true if handled.
-    bool dispatch(const PeerHandle& peer, const Frame& frame) const;
+    bool dispatch(const Peer& peer, const Frame& frame) const;
 
 private:
     std::unordered_map<uint16_t, Handler>     by_channel_;

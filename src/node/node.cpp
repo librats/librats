@@ -106,7 +106,7 @@ void Node::connect(const std::string& host, uint16_t port) {
     reactors_->pick().connect(host, port);
 }
 
-std::optional<PeerHandle> Node::peer(const PeerId& id) {
+std::optional<Peer> Node::peer(const PeerId& id) {
     auto route = directory_.route(id);
     if (!route) return std::nullopt;
     return make_peer(id, *route);
@@ -192,14 +192,14 @@ void Node::on_established(Connection& conn) {
 
     // Fire "connected" only on the 0→1 transition. A reconnect/duplicate that
     // merely swapped the live route keeps the peer connected from the app's view.
-    if (outcome.result == PeerDirectory::AddResult::NewPeer) {
-        PeerHandle handle = make_peer(conn.remote_id(), route);
+    if (outcome.result == PeerTable::AddResult::NewPeer) {
+        Peer handle = make_peer(conn.remote_id(), route);
         for (auto& cb : peer_connected_) cb(handle);
     }
 }
 
 void Node::on_frame(Connection& conn, const Frame& frame) {
-    PeerHandle peer = make_peer(conn.remote_id(), PeerRoute{conn.reactor_index(), conn.id()});
+    Peer peer = make_peer(conn.remote_id(), PeerRoute{conn.reactor_index(), conn.id()});
     if (!router_.dispatch(peer, frame)) {
         LOG_DEBUG("node", "No handler for frame from " << conn.remote_id().short_hex()
                   << " (type " << static_cast<int>(frame.header.type)
@@ -225,16 +225,16 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
 
 // ── Peer handle methods (defined here for the full Node type) ────────────────
 
-void PeerHandle::send(std::string_view channel, ByteView payload) const {
+void Peer::send(std::string_view channel, ByteView payload) const {
     node_->route_send(route_, FrameHeader{MessageType::App, 0, MessageRouter::channel_id(channel)},
                       payload.to_bytes());
 }
 
-void PeerHandle::disconnect() const {
+void Peer::disconnect() const {
     node_->route_close(route_);
 }
 
-std::optional<PeerInfo> PeerHandle::info() const {
+std::optional<PeerInfo> Peer::info() const {
     return node_->directory_.info(id_);
 }
 

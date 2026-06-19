@@ -22,8 +22,8 @@
 
 #include "core/types.h"
 #include "core/bytes.h"
-#include "net/frame.h"
-#include "net/peer_id.h"
+#include "wire/frame.h"
+#include "peer/peer_id.h"
 #include "security/handshaker.h"
 #include "core/receive_buffer.h"
 #include "core/chained_send_buffer.h"

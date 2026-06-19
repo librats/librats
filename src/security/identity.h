@@ -9,7 +9,7 @@
  * persisted private key to keep a stable PeerId across restarts.
  */
 
-#include "net/peer_id.h"
+#include "peer/peer_id.h"
 #include "noise.h"
 
 #include <cstring>

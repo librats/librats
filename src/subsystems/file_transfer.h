@@ -42,9 +42,9 @@
  */
 
 #include "node/peer_network.h"
-#include "node/peer.h"
+#include "peer/peer.h"
 #include "core/bytes.h"
-#include "net/peer_id.h"
+#include "peer/peer_id.h"
 
 extern "C" {
 #include "sha256.h"
@@ -211,7 +211,7 @@ private:
     };
 
     // ── message handling (reactor thread) ─────────────────────────────────────
-    void on_message(const PeerHandle& peer, ByteView payload);
+    void on_message(const Peer& peer, ByteView payload);
     void handle_offer(const PeerId& from, uint64_t id, bool is_dir, uint64_t total,
                       std::string name, std::vector<FileEntry> files);
     void handle_chunk(const PeerId& from, uint64_t id, uint32_t fidx, uint64_t offset,

@@ -16,8 +16,8 @@
  */
 
 #include "node/peer_network.h"
-#include "node/peer.h"
-#include "net/peer_id.h"
+#include "peer/peer.h"
+#include "peer/peer_id.h"
 
 #include <atomic>
 #include <chrono>
@@ -47,7 +47,7 @@ public:
 
 private:
     void run();                                       ///< own thread: ping loop
-    void handle(const PeerHandle& peer, ByteView payload);
+    void handle(const Peer& peer, ByteView payload);
     void ping_all();
 
     PeerNetwork*              network_ = nullptr;

@@ -32,7 +32,7 @@ size_t ReconnectionService::target_count() const {
 
 void ReconnectionService::attach(PeerNetwork& network) {
     network_ = &network;
-    network_->on_peer_connected([this](const PeerHandle& peer) { on_connected(peer); });
+    network_->on_peer_connected([this](const Peer& peer) { on_connected(peer); });
     network_->on_peer_disconnected([this](const PeerId& id) { on_disconnected(id); });
 }
 
@@ -58,7 +58,7 @@ void ReconnectionService::stop() {
     if (store_) store_->save();
 }
 
-void ReconnectionService::on_connected(const PeerHandle& peer) {
+void ReconnectionService::on_connected(const Peer& peer) {
     auto info = peer.info();
     if (!info) return;
 

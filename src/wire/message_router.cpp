@@ -1,4 +1,4 @@
-#include "node/message_router.h"
+#include "wire/message_router.h"
 #include "util/logger.h"
 
 namespace librats {
@@ -29,7 +29,7 @@ void MessageRouter::on_type(MessageType type, Handler handler) {
     by_type_[static_cast<uint8_t>(type)] = std::move(handler);
 }
 
-bool MessageRouter::dispatch(const PeerHandle& peer, const Frame& frame) const {
+bool MessageRouter::dispatch(const Peer& peer, const Frame& frame) const {
     if (frame.header.type == MessageType::App) {
         auto it = by_channel_.find(frame.header.channel);
         if (it == by_channel_.end()) return false;

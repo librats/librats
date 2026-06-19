@@ -39,13 +39,13 @@ int main(int argc, char** argv) {
     if (use_upnp)
         node.add_subsystem(std::make_unique<PortMappingService>());
 
-    node.on_peer_connected([](const PeerHandle& peer) {
+    node.on_peer_connected([](const Peer& peer) {
         std::cout << "[+] peer connected: " << peer.id().short_hex() << "\n";
     });
     node.on_peer_disconnected([](const PeerId& id) {
         std::cout << "[-] peer disconnected: " << id.short_hex() << "\n";
     });
-    node.on_message("chat", [](const PeerHandle& peer, ByteView data) {
+    node.on_message("chat", [](const Peer& peer, ByteView data) {
         std::cout << peer.id().short_hex() << ": "
                   << std::string(reinterpret_cast<const char*>(data.data()), data.size()) << "\n";
     });

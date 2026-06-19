@@ -50,15 +50,15 @@ TEST(NodeTest, ConnectAndEchoMessage) {
     Node client(client_config());
 
     std::atomic<int> server_peers{0}, client_peers{0};
-    server.on_peer_connected([&](const PeerHandle&) { server_peers++; });
-    client.on_peer_connected([&](const PeerHandle&) { client_peers++; });
+    server.on_peer_connected([&](const Peer&) { server_peers++; });
+    client.on_peer_connected([&](const Peer&) { client_peers++; });
 
     // Server echoes whatever arrives on "chat" back to the sender.
-    server.on_message("chat", [](const PeerHandle& from, ByteView msg) { from.send("chat", msg); });
+    server.on_message("chat", [](const Peer& from, ByteView msg) { from.send("chat", msg); });
 
     std::mutex mu;
     std::string got;
-    client.on_message("chat", [&](const PeerHandle&, ByteView msg) {
+    client.on_message("chat", [&](const Peer&, ByteView msg) {
         std::lock_guard<std::mutex> lock(mu);
         got = str(msg);
     });
@@ -90,10 +90,10 @@ TEST(NodeTest, ReplyViaPeerHandle) {
     Node server(server_config());
     Node client(client_config());
 
-    server.on_message("ping", [](const PeerHandle& from, ByteView) { from.send("pong", ByteView(std::string("ok"))); });
+    server.on_message("ping", [](const Peer& from, ByteView) { from.send("pong", ByteView(std::string("ok"))); });
 
     std::atomic<bool> ponged{false};
-    client.on_message("pong", [&](const PeerHandle&, ByteView msg) { if (str(msg) == "ok") ponged = true; });
+    client.on_message("pong", [&](const Peer&, ByteView msg) { if (str(msg) == "ok") ponged = true; });
 
     ASSERT_TRUE(server.start());
     ASSERT_TRUE(client.start());
@@ -114,8 +114,8 @@ TEST(NodeTest, BroadcastToAllPeers) {
     Node b(client_config());
 
     std::atomic<int> got_a{0}, got_b{0};
-    a.on_message("news", [&](const PeerHandle&, ByteView m) { if (str(m) == "extra") got_a++; });
-    b.on_message("news", [&](const PeerHandle&, ByteView m) { if (str(m) == "extra") got_b++; });
+    a.on_message("news", [&](const Peer&, ByteView m) { if (str(m) == "extra") got_a++; });
+    b.on_message("news", [&](const Peer&, ByteView m) { if (str(m) == "extra") got_b++; });
 
     ASSERT_TRUE(hub.start());
     ASSERT_TRUE(a.start());

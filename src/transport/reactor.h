@@ -21,7 +21,7 @@
  */
 
 #include "core/types.h"
-#include "core/connection.h"
+#include "transport/connection.h"
 #include "core/mpsc_queue.h"
 #include "core/timer_queue.h"
 #include "core/io_poller.h"

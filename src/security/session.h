@@ -12,7 +12,7 @@
  */
 
 #include "core/bytes.h"
-#include "net/peer_id.h"
+#include "peer/peer_id.h"
 
 namespace librats {
 

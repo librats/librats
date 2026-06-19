@@ -11,7 +11,7 @@
 
 #include "core/types.h"   // ConnRole
 #include "core/address.h"
-#include "net/peer_id.h"
+#include "peer/peer_id.h"
 
 #include <vector>
 

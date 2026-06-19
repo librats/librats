@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "net/peer_id.h"
+#include "peer/peer_id.h"
 #include "security/identity.h"
 #include "security/noise_security.h"
 #include "security/plaintext_security.h"

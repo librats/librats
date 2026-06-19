@@ -11,8 +11,8 @@
  */
 
 #include "core/bytes.h"
-#include "net/frame.h"   // MessageType
-#include "net/peer_id.h"
+#include "wire/frame.h"   // MessageType
+#include "peer/peer_id.h"
 #include "core/address.h"
 
 #include <cstdint>
@@ -21,14 +21,14 @@
 
 namespace librats {
 
-class PeerHandle;
+class Peer;
 
 class PeerNetwork {
 public:
     virtual ~PeerNetwork() = default;
-    using MessageHandler = std::function<void(const PeerHandle&, ByteView)>;
+    using MessageHandler = std::function<void(const Peer&, ByteView)>;
 
-    using PeerEventHandler       = std::function<void(const PeerHandle&)>;
+    using PeerEventHandler       = std::function<void(const Peer&)>;
     using PeerDisconnectHandler  = std::function<void(const PeerId&)>;
 
     virtual const PeerId&       local_id() const = 0;

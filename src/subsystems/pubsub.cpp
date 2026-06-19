@@ -46,8 +46,8 @@ std::string dedup_key(const PeerId& origin, uint64_t seqno) {
 void PubSub::attach(PeerNetwork& network) {
     network_ = &network;
     network_->on_message(MessageType::Gossip,
-                         [this](const PeerHandle& peer, ByteView payload) { on_gossip(peer, payload); });
-    network_->on_peer_connected([this](const PeerHandle& peer) { on_new_peer(peer); });
+                         [this](const Peer& peer, ByteView payload) { on_gossip(peer, payload); });
+    network_->on_peer_connected([this](const Peer& peer) { on_new_peer(peer); });
     network_->on_peer_disconnected([this](const PeerId& id) { on_peer_gone(id); });
 }
 
@@ -114,7 +114,7 @@ void PubSub::publish(const std::string& topic, ByteView data) {
 
 // ── Inbound ─────────────────────────────────────────────────────────────────
 
-void PubSub::on_gossip(const PeerHandle& peer, ByteView payload) {
+void PubSub::on_gossip(const Peer& peer, ByteView payload) {
     Reader r{payload.data(), payload.data() + payload.size()};
     const uint8_t op = r.u8();
 
@@ -158,7 +158,7 @@ void PubSub::on_gossip(const PeerHandle& peer, ByteView payload) {
 
 // ── Peer lifecycle ──────────────────────────────────────────────────────────
 
-void PubSub::on_new_peer(const PeerHandle& peer) {
+void PubSub::on_new_peer(const Peer& peer) {
     std::vector<std::string> topics;
     {
         std::lock_guard<std::mutex> lock(mutex_);

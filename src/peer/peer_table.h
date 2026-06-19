@@ -13,8 +13,8 @@
  */
 
 #include "core/types.h"   // ConnId
-#include "net/peer_id.h"
-#include "net/peer_info.h"
+#include "peer/peer_id.h"
+#include "peer/peer_info.h"
 
 #include <atomic>
 #include <cstdint>
@@ -36,7 +36,7 @@ struct PeerRoute {
     bool operator!=(const PeerRoute& o) const noexcept { return !(*this == o); }
 };
 
-class PeerDirectory {
+class PeerTable {
 public:
     enum class AddResult {
         NewPeer,   ///< First connection to this peer — caller should fire "connected".

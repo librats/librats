@@ -15,18 +15,18 @@
  * on_peer_disconnected) run on a reactor thread; register them before start().
  */
 
-#include "core/connection.h"      // ConnectionDelegate
-#include "core/reactor_pool.h"
+#include "transport/connection.h"      // ConnectionDelegate
+#include "transport/reactor_pool.h"
 #include "core/address.h"
-#include "net/peer_directory.h"
-#include "net/peer_id.h"
-#include "net/peer_info.h"
+#include "peer/peer_table.h"
+#include "peer/peer_id.h"
+#include "peer/peer_info.h"
 #include "security/identity.h"
 #include "security/handshaker.h"  // SecurityProvider
 #include "node/config.h"
-#include "node/peer.h"
+#include "peer/peer.h"
 #include "node/peer_network.h"
-#include "node/message_router.h"
+#include "wire/message_router.h"
 
 #include <atomic>
 #include <functional>
@@ -61,7 +61,7 @@ public:
 
     size_t                  peer_count() const noexcept { return directory_.size(); }
     std::vector<PeerInfo>   peers() const { return directory_.snapshot(); }
-    std::optional<PeerHandle> peer(const PeerId& id);
+    std::optional<Peer> peer(const PeerId& id);
 
     // — application messaging —
     void send(const PeerId& to, std::string_view channel, ByteView payload);
@@ -80,21 +80,21 @@ public:
     void                on_message(MessageType type, PeerNetwork::MessageHandler cb) override { router_.on_type(type, std::move(cb)); }
 
 private:
-    friend class PeerHandle;
+    friend class Peer;
 
     // ConnectionDelegate (reactor thread)
     void on_established(Connection& conn) override;
     void on_frame(Connection& conn, const Frame& frame) override;
     void on_closed(Connection& conn, CloseReason reason) override;
 
-    PeerHandle make_peer(const PeerId& id, PeerRoute route) { return PeerHandle(id, route, *this); }
+    Peer make_peer(const PeerId& id, PeerRoute route) { return Peer(id, route, *this); }
     void route_send(PeerRoute route, FrameHeader header, Bytes payload);
     void route_close(PeerRoute route);
 
     NodeConfig                        config_;
     Identity                          identity_;
     std::unique_ptr<SecurityProvider> security_;
-    PeerDirectory                     directory_;
+    PeerTable                     directory_;
     MessageRouter                     router_;
     std::unique_ptr<ReactorPool>      reactors_;
 

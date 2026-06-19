@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "core/reactor.h"
-#include "core/connection.h"
-#include "net/frame.h"
+#include "transport/reactor.h"
+#include "transport/connection.h"
+#include "wire/frame.h"
 #include "security/identity.h"
 #include "security/noise_security.h"
 #include "security/plaintext_security.h"

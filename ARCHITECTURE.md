@@ -32,7 +32,7 @@ flowchart TB
 
     subgraph Facade["Node  (facade · src/node)"]
       Node["Node\nis-a ConnectionDelegate\nis-a PeerNetwork"]
-      Dir["PeerDirectory\n(PeerId → route+info)"]
+      Dir["PeerTable\n(PeerId → route+info)"]
       Router["MessageRouter\n(channel/type → handler)"]
     end
 
@@ -80,9 +80,11 @@ flowchart TB
 | **Bindings** | `src/bindings` | Thin C ABI (`rats_node_*`) over `Node`, the base for other languages. |
 | **Node (facade)** | `src/node` | Wires the layers together; the public C++ entry point. Owns everything below. |
 | **Subsystems** | `src/subsystems` | Optional features as plugins; reach the mesh only via `PeerNetwork`. |
-| **Net** | `src/net` | Wire framing, `PeerId`, `PeerDirectory`, `MessageRouter`, addresses. |
+| **Wire** | `src/wire` | The on‑the‑wire protocol: `frame` (two‑level framing, `MessageType`) and `MessageRouter`. |
+| **Peer** | `src/peer` | Everything about a peer: `Peer` (handle), `PeerId`, `PeerInfo`, `PeerTable`, `PeerStore`. |
 | **Security** | `src/security` | Handshake + per‑peer encryption (`Identity`, `Handshaker`, `Session`). |
-| **Core** | `src/core` | The reactor, connections, timers, buffers — the lock‑free I/O engine. |
+| **Transport** | `src/transport` | The live I/O engine: `Reactor`, `ReactorPool`, `Connection` (threads + sockets). |
+| **Core** | `src/core` | Passive primitives the engine is built from: buffers, timers, `socket`, `io_poller`, `bytes`, `types`, `Address`. |
 | **Crypto** | `src/crypto` | Self‑contained primitives: Noise, Curve25519, ChaCha20‑Poly1305, SHA, CRC32. |
 | **Engines** | `src/dht` `src/mdns` `src/nat` `src/bittorrent` | Standalone protocol implementations the subsystems wrap. |
 | **Util** | `src/util` | `fs`, `os`, `logger`, `network_utils`, `json`, `version`. |
@@ -95,13 +97,14 @@ flowchart TB
 src/
 ├── main.cpp                  # example chat node (the only file left at root)
 ├── bindings/   rats_node.{h,cpp}            — C ABI
-├── node/       node, message_router, config, peer (PeerHandle), peer_network
-├── net/        frame, peer_id, peer_info, peer_directory, peer_store, address
+├── node/       node, config, peer_network                 — the facade + plugin contract
+├── peer/       peer (Peer handle), peer_id, peer_info, peer_table, peer_store
+├── wire/       frame (framing + MessageType), message_router
 ├── security/   identity, handshaker (+ SecurityProvider), session,
 │               noise_security, plaintext_security
-├── core/       reactor, reactor_pool, connection, timer_queue, mpsc_queue,
-│               notifier, bytes, types, socket, io_poller,
-│               receive_buffer, chained_send_buffer, wakeup_pipe, threadmanager
+├── transport/  reactor, reactor_pool, connection          — live I/O engine (threads)
+├── core/       bytes, types, address, socket, io_poller, timer_queue, mpsc_queue,
+│               notifier, receive_buffer, chained_send_buffer, wakeup_pipe, threadmanager
 ├── crypto/     noise, curve25519, chacha20poly1305, sha256/512, blake2, hkdf,
 │               sha1, crc32
 ├── subsystems/ ping_service, pubsub, file_transfer, reconnection,
@@ -115,12 +118,13 @@ src/
                 rats_export
 ```
 
-**The cardinal rule of the rewrite:** dependencies point **downward**. A subsystem
-depends on `PeerNetwork` (an interface), never on `Node`. `Node` depends on the
-reactor/security/net layers. The reactor depends on nothing above it. There are no
-`friend` declarations crossing layers and no god‑class — the contrast with the old
-monolithic `RatsClient` (≈4,700 lines, ~250 methods, one giant `peers_mutex_`) is
-the whole point.
+**The cardinal rule of the rewrite:** dependencies point **downward**, and folders
+are **layers, not topics** — each one may only include the ones below it
+(`node → transport → {wire, peer, security} → core`). A subsystem depends on
+`PeerNetwork` (an interface), never on `Node`. The reactor depends on nothing above
+it. There are no `friend` declarations crossing layers and no god‑class — the
+contrast with the old monolithic `RatsClient` (≈4,700 lines, ~250 methods, one giant
+`peers_mutex_`) is the whole point.
 
 ---
 
@@ -133,7 +137,7 @@ keeps an object alive and who is allowed to free it.
 flowchart TD
     Node -->|"unique_ptr"| ReactorPool
     Node -->|"unique_ptr"| SecurityProvider
-    Node -->|"value"| PeerDirectory
+    Node -->|"value"| PeerTable
     Node -->|"value"| MessageRouter
     Node -->|"value"| Identity
     Node -->|"vector&lt;unique_ptr&gt;"| Subsystems
@@ -165,7 +169,7 @@ Key points:
   `Handshaker`. The `Session` is what actually encrypts/decrypts bytes.
 - **Subsystems hold a non‑owning `PeerNetwork*`** (which happens to be the `Node`).
   They never extend its lifetime and never see its concrete type.
-- **`PeerHandle` is a value**, not an owner: `{PeerId, PeerRoute, Node*}`. It is
+- **`Peer` is a value**, not an owner: `{PeerId, PeerRoute, Node*}`. It is
   handed to callbacks so the reply path can reach the right reactor with no lookup.
 
 ---
@@ -214,7 +218,7 @@ flowchart LR
 |-----------|-------|------|
 | `Connection`, recv/send buffers, handshake state | **none** | single reactor thread only |
 | Cross‑thread work into a reactor | `MpscQueue<Task>` + `Notifier` | the one synchronization point on the data path |
-| `PeerDirectory` | `shared_mutex` | off the per‑byte path; short critical sections |
+| `PeerTable` | `shared_mutex` | off the per‑byte path; short critical sections |
 | Each subsystem's own state | that subsystem's own mutex | independent, fine‑grained |
 
 There is no global `peers_mutex_`. Lock contention that dominated the old design is
@@ -280,7 +284,7 @@ the framing layer: during the handshake it is a raw Noise message; once establis
 it is the **encrypted** form of an **inner message**.
 
 ```
-Outer block (src/net/frame.*)            Inner message (decrypted body)
+Outer block (src/wire/frame.*)           Inner message (decrypted body)
 ┌────────────┬───────────────┐           ┌──────┬───────┬─────────┬───────────┐
 │ length u32 │     body      │           │ type │ flags │ channel │  payload  │
 │  4 bytes   │  length bytes │           │  u8  │  u8   │   u16   │    ...    │
@@ -358,26 +362,26 @@ self‑contained in `src/crypto` (no external crypto dependency).
 
 ---
 
-## 10. The control plane: PeerDirectory, PeerRoute, PeerHandle
+## 10. The control plane: PeerTable, PeerRoute, Peer
 
 These three carry identity/routing **off** the data path:
 
 - **`PeerRoute` `{reactor index, ConnId}`** — exactly where a peer's live
   connection is. `ConnId` is stable for the connection's life and never reused.
-- **`PeerDirectory`** — `PeerId → {PeerInfo, PeerRoute}`, guarded by a
+- **`PeerTable`** — `PeerId → {PeerInfo, PeerRoute}`, guarded by a
   `shared_mutex`. Written on connect/disconnect, read on by‑id lookups
   (`send(peerId,…)`, `peers()`). Never touched per frame.
-- **`PeerHandle`** — the value passed to callbacks. It already knows the route, so
+- **`Peer`** — the value passed to callbacks. It already knows the route, so
   `peer.send(...)` / `peer.disconnect()` reach the owning reactor **without** a
   directory lookup. `peer.info()` consults the directory on demand.
 
 ```mermaid
 flowchart LR
     subgraph DataPath["Per-frame data path (hot, lock-free)"]
-      ConnIn["Connection"] --> Handle["PeerHandle (route baked in)"] --> ReplyReactor["owning Reactor"]
+      ConnIn["Connection"] --> Handle["Peer (route baked in)"] --> ReplyReactor["owning Reactor"]
     end
     subgraph ControlPath["Control path (cold, shared_mutex)"]
-      Lookup["send(PeerId) / peers()"] --> Directory["PeerDirectory"] --> Route["PeerRoute"]
+      Lookup["send(PeerId) / peers()"] --> Directory["PeerTable"] --> Route["PeerRoute"]
     end
 ```
 
@@ -436,7 +440,7 @@ reactor thread runs (no concurrent writes to the handler registry):
 Node node(config);
 node.add_subsystem(std::make_unique<DhtDiscovery>(DhtDiscovery::Config{}));
 node.add_subsystem(std::make_unique<PingService>());
-node.on_message("chat", [](const PeerHandle& p, ByteView data){ /* ... */ });
+node.on_message("chat", [](const Peer& p, ByteView data){ /* ... */ });
 node.start();
 ```
 
@@ -501,8 +505,8 @@ header in a subdirectory is included as `"subdir/header.h"` (e.g.
 | If you have… | …you can reach | …because |
 |--------------|----------------|----------|
 | a `Node` | reactors, subsystems, directory, security | it owns them all |
-| a `PeerHandle` (in a callback) | that peer's reactor directly | the route is baked in |
-| a `PeerId` | a `PeerRoute` (if connected) | via `PeerDirectory::route()` |
+| a `Peer` (in a callback) | that peer's reactor directly | the route is baked in |
+| a `PeerId` | a `PeerRoute` (if connected) | via `PeerTable::route()` |
 | a `Connection` | its `Session`, buffers, `remote_id` | it owns them; reactor‑thread only |
 | a `Subsystem` | `connect/send/broadcast/on_*` | through its `PeerNetwork*` |
 | a reactor thread | every `Connection` it owns | single‑threaded, no locks |

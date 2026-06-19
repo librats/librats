@@ -1,5 +1,5 @@
-#include "core/connection.h"
-#include "core/reactor.h"
+#include "transport/connection.h"
+#include "transport/reactor.h"
 #include "core/io_poller.h"
 #include "util/logger.h"
 

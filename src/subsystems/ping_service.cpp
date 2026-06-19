@@ -22,7 +22,7 @@ PingService::~PingService() { stop(); }
 void PingService::attach(PeerNetwork& network) {
     network_ = &network;
     network_->on_message(MessageType::Ping,
-                         [this](const PeerHandle& peer, ByteView payload) { handle(peer, payload); });
+                         [this](const Peer& peer, ByteView payload) { handle(peer, payload); });
 }
 
 void PingService::start() {
@@ -58,7 +58,7 @@ void PingService::ping_all() {
         network_->send(id, MessageType::Ping, ByteView(probe, kProbeSize));
 }
 
-void PingService::handle(const PeerHandle& peer, ByteView payload) {
+void PingService::handle(const Peer& peer, ByteView payload) {
     if (payload.size() != kProbeSize) return;
     const uint8_t tag = payload.data()[0];
 
