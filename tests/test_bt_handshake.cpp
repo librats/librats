@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <cstring>
-#include "bt_handshake.h"
+#include "bittorrent/bt_handshake.h"
 
 using namespace librats;
 

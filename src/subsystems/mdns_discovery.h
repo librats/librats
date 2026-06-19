@@ -12,7 +12,7 @@
  */
 
 #include "node/peer_network.h"
-#include "mdns.h"
+#include "mdns/mdns.h"
 
 #include <atomic>
 #include <memory>

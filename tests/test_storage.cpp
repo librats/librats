@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include "storage.h"
+#include "storage/storage.h"
 #include "librats.h"
-#include "fs.h"
+#include "util/fs.h"
 #include <iostream>
 #include <string>
 #include <thread>

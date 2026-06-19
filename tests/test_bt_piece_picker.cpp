@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <set>
-#include "bt_piece_picker.h"
+#include "bittorrent/bt_piece_picker.h"
 
 using namespace librats;
 

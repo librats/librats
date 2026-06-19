@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
-#include "network_utils.h"
-#include "socket.h"
+#include "util/network_utils.h"
+#include "core/socket.h"
 #include <string>
 
 using namespace librats;

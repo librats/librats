@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include "bt_create_torrent.h"
-#include "bt_torrent_info.h"
-#include "fs.h"
+#include "bittorrent/bt_create_torrent.h"
+#include "bittorrent/bt_torrent_info.h"
+#include "util/fs.h"
 
 #include <fstream>
 #include <cstdlib>

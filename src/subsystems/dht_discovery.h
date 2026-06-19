@@ -15,7 +15,7 @@
  */
 
 #include "node/peer_network.h"
-#include "dht.h"
+#include "dht/dht.h"
 
 #include <atomic>
 #include <chrono>

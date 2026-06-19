@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "bt_bitfield.h"
+#include "bittorrent/bt_bitfield.h"
 #include <vector>
 
 using namespace librats;

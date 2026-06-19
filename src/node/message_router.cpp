@@ -1,5 +1,5 @@
 #include "node/message_router.h"
-#include "logger.h"
+#include "util/logger.h"
 
 namespace librats {
 

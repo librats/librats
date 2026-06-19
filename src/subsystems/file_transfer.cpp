@@ -1,7 +1,7 @@
 #include "subsystems/file_transfer.h"
 #include "crc32.h"
-#include "fs.h"
-#include "logger.h"
+#include "util/fs.h"
+#include "util/logger.h"
 
 #include <algorithm>
 #include <cstring>

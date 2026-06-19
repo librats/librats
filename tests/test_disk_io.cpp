@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "disk_io.h"
-#include "fs.h"
+#include "bittorrent/disk_io.h"
+#include "util/fs.h"
 #include "sha1.h"
 #include <thread>
 #include <chrono>

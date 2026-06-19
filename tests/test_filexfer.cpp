@@ -2,7 +2,7 @@
 
 #include "node/node.h"
 #include "subsystems/file_transfer.h"
-#include "fs.h"
+#include "util/fs.h"
 
 #include <atomic>
 #include <chrono>

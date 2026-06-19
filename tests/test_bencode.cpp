@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
-#include "bencode.h"
+#include "bittorrent/bencode.h"
 #include <vector>
 #include <string>
 #include <limits>

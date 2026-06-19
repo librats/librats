@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "bt_messages.h"
+#include "bittorrent/bt_messages.h"
 
 using namespace librats;
 

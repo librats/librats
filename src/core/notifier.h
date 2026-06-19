@@ -17,7 +17,7 @@
  * signal() does nothing, so the reactor simply falls back to its poll timeout.
  */
 
-#include "socket.h"
+#include "core/socket.h"
 
 #include <cstdint>
 

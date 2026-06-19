@@ -15,13 +15,13 @@
 
 #ifdef RATS_SEARCH_FEATURES
 
-#include "bt_resume_data.h"
-#include "bt_torrent.h"
-#include "bt_torrent_info.h"
-#include "bt_bitfield.h"
-#include "bt_types.h"
-#include "bencode.h"
-#include "fs.h"
+#include "bittorrent/bt_resume_data.h"
+#include "bittorrent/bt_torrent.h"
+#include "bittorrent/bt_torrent_info.h"
+#include "bittorrent/bt_bitfield.h"
+#include "bittorrent/bt_types.h"
+#include "bittorrent/bencode.h"
+#include "util/fs.h"
 
 #include <fstream>
 #include <cstring>

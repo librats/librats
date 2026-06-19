@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
-#include "dht.h"
-#include "socket.h"
+#include "dht/dht.h"
+#include "core/socket.h"
 #include <thread>
 #include <chrono>
 #include <vector>

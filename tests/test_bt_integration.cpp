@@ -4,21 +4,21 @@
 #include <chrono>
 #include <atomic>
 #include <cstring>
-#include "bt_types.h"
-#include "bt_bitfield.h"
-#include "bt_file_storage.h"
-#include "bt_torrent_info.h"
-#include "bt_piece_picker.h"
-#include "bt_messages.h"
-#include "bt_handshake.h"
-#include "bt_peer_connection.h"
-#include "bt_extension.h"
-#include "bt_choker.h"
-#include "bt_torrent.h"
-#include "bt_client.h"
-#include "bt_network.h"
-#include "bencode.h"
-#include "socket.h"
+#include "bittorrent/bt_types.h"
+#include "bittorrent/bt_bitfield.h"
+#include "bittorrent/bt_file_storage.h"
+#include "bittorrent/bt_torrent_info.h"
+#include "bittorrent/bt_piece_picker.h"
+#include "bittorrent/bt_messages.h"
+#include "bittorrent/bt_handshake.h"
+#include "bittorrent/bt_peer_connection.h"
+#include "bittorrent/bt_extension.h"
+#include "bittorrent/bt_choker.h"
+#include "bittorrent/bt_torrent.h"
+#include "bittorrent/bt_client.h"
+#include "bittorrent/bt_network.h"
+#include "bittorrent/bencode.h"
+#include "core/socket.h"
 
 // Helper: simulate receiving data into connection's buffer and processing it
 namespace {

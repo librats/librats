@@ -5,8 +5,8 @@
 
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
-#include "stun.h"
-#include "socket.h"
+#include "nat/stun.h"
+#include "core/socket.h"
 #include <thread>
 #include <chrono>
 #include <atomic>

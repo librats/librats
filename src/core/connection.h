@@ -25,9 +25,9 @@
 #include "net/frame.h"
 #include "net/peer_id.h"
 #include "security/handshaker.h"
-#include "receive_buffer.h"
-#include "chained_send_buffer.h"
-#include "socket.h"
+#include "core/receive_buffer.h"
+#include "core/chained_send_buffer.h"
+#include "core/socket.h"
 
 #include <memory>
 

@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "bt_peer_connection.h"
+#include "bittorrent/bt_peer_connection.h"
 #include <cstring>
 
 using namespace librats;

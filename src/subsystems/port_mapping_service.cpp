@@ -1,8 +1,8 @@
 #include "subsystems/port_mapping_service.h"
-#include "upnp.h"
-#include "natpmp.h"
-#include "network_utils.h"
-#include "logger.h"
+#include "nat/upnp.h"
+#include "nat/natpmp.h"
+#include "util/network_utils.h"
+#include "util/logger.h"
 
 namespace librats {
 

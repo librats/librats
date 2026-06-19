@@ -112,8 +112,8 @@ endif()
 
 # Configure version.h from template
 configure_file(
-    ${PROJECT_SOURCE_DIR}/src/version.h.in
-    ${PROJECT_BINARY_DIR}/src/version.h
+    ${PROJECT_SOURCE_DIR}/src/util/version.h.in
+    ${PROJECT_BINARY_DIR}/src/util/version.h
     @ONLY
 )
 
@@ -128,45 +128,45 @@ endif()
 
 # Define library sources
 set(LIBRARY_SOURCES
-    src/socket.cpp
-    src/socket.h
-    src/network_utils.cpp
-    src/network_utils.h
-    src/network_monitor.cpp
-    src/network_monitor.h
-    src/dht.cpp
-    src/dht.h
-    src/bencode.cpp
-    src/bencode.h
-    src/krpc.cpp
-    src/krpc.h
-    src/sha1.cpp
-    src/sha1.h
-    src/crc32.cpp
-    src/crc32.h
-    src/os.cpp
-    src/os.h
-    src/fs.cpp
-    src/fs.h
-    src/logger.h
-    src/logger.cpp
-    src/mdns.cpp
-    src/mdns.h
-    src/threadmanager.cpp
-    src/threadmanager.h
-    src/version.cpp
-    src/rats_export.h
-    ${PROJECT_BINARY_DIR}/src/version.h
+    src/core/socket.cpp
+    src/core/socket.h
+    src/util/network_utils.cpp
+    src/util/network_utils.h
+    src/util/network_monitor.cpp
+    src/util/network_monitor.h
+    src/dht/dht.cpp
+    src/dht/dht.h
+    src/bittorrent/bencode.cpp
+    src/bittorrent/bencode.h
+    src/dht/krpc.cpp
+    src/dht/krpc.h
+    src/crypto/sha1.cpp
+    src/crypto/sha1.h
+    src/crypto/crc32.cpp
+    src/crypto/crc32.h
+    src/util/os.cpp
+    src/util/os.h
+    src/util/fs.cpp
+    src/util/fs.h
+    src/util/logger.h
+    src/util/logger.cpp
+    src/mdns/mdns.cpp
+    src/mdns/mdns.h
+    src/core/threadmanager.cpp
+    src/core/threadmanager.h
+    src/util/version.cpp
+    src/util/rats_export.h
+    ${PROJECT_BINARY_DIR}/src/util/version.h
 
 # Buffer utilities for async I/O, file transfer, and bittorrent
-    src/receive_buffer.h
-    src/receive_buffer.cpp
-    src/chained_send_buffer.h
-    src/chained_send_buffer.cpp
+    src/core/receive_buffer.h
+    src/core/receive_buffer.cpp
+    src/core/chained_send_buffer.h
+    src/core/chained_send_buffer.cpp
 
 # Platform-optimal I/O multiplexing (epoll/kqueue/IOCP)
-    src/io_poller.h
-    src/io_poller.cpp
+    src/core/io_poller.h
+    src/core/io_poller.cpp
 
 # Core v2 (shared-nothing reactor redesign) — transport layer
     src/core/bytes.h
@@ -246,63 +246,63 @@ set(LIBRARY_SOURCES
     src/crypto/blake2_endian.h
 
 # Noise Protocol implementation
-    src/noise.cpp
-    src/noise.h
+    src/crypto/noise.cpp
+    src/crypto/noise.h
 
 # NAT traversal (STUN/TURN/ICE)
-    src/stun.cpp
-    src/stun.h
-    src/turn.cpp
-    src/turn.h
-    src/ice.cpp
-    src/ice.h
+    src/nat/stun.cpp
+    src/nat/stun.h
+    src/nat/turn.cpp
+    src/nat/turn.h
+    src/nat/ice.cpp
+    src/nat/ice.h
 
 # Automatic port forwarding (UPnP IGD / NAT-PMP)
-    src/port_mapping.h
-    src/upnp.cpp
-    src/upnp.h
-    src/natpmp.cpp
-    src/natpmp.h
+    src/nat/port_mapping.h
+    src/nat/upnp.cpp
+    src/nat/upnp.h
+    src/nat/natpmp.cpp
+    src/nat/natpmp.h
 )
 
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
 if(RATS_SEARCH_FEATURES)
     list(APPEND LIBRARY_SOURCES
-        src/bittorrent.cpp
-        src/bittorrent.h
-        src/bt_types.h
-        src/bt_bitfield.h
-        src/bt_bitfield.cpp
-        src/bt_file_storage.h
-        src/bt_file_storage.cpp
-        src/bt_torrent_info.h
-        src/bt_torrent_info.cpp
-        src/bt_piece_picker.h
-        src/bt_piece_picker.cpp
-        src/bt_messages.h
-        src/bt_messages.cpp
-        src/bt_handshake.h
-        src/bt_handshake.cpp
-        src/bt_peer_connection.h
-        src/bt_peer_connection.cpp
-        src/bt_extension.h
-        src/bt_extension.cpp
-        src/bt_choker.h
-        src/bt_choker.cpp
-        src/bt_torrent.h
-        src/bt_torrent.cpp
-        src/bt_client.h
-        src/bt_client.cpp
-        src/bt_network.h
-        src/bt_network.cpp
-        src/disk_io.cpp
-        src/disk_io.h
-        src/tracker.cpp
-        src/tracker.h
-        src/bt_create_torrent.h
-        src/bt_create_torrent.cpp
-        src/bt_resume_data.h
-        src/bt_resume_data.cpp
+        src/bittorrent/bittorrent.cpp
+        src/bittorrent/bittorrent.h
+        src/bittorrent/bt_types.h
+        src/bittorrent/bt_bitfield.h
+        src/bittorrent/bt_bitfield.cpp
+        src/bittorrent/bt_file_storage.h
+        src/bittorrent/bt_file_storage.cpp
+        src/bittorrent/bt_torrent_info.h
+        src/bittorrent/bt_torrent_info.cpp
+        src/bittorrent/bt_piece_picker.h
+        src/bittorrent/bt_piece_picker.cpp
+        src/bittorrent/bt_messages.h
+        src/bittorrent/bt_messages.cpp
+        src/bittorrent/bt_handshake.h
+        src/bittorrent/bt_handshake.cpp
+        src/bittorrent/bt_peer_connection.h
+        src/bittorrent/bt_peer_connection.cpp
+        src/bittorrent/bt_extension.h
+        src/bittorrent/bt_extension.cpp
+        src/bittorrent/bt_choker.h
+        src/bittorrent/bt_choker.cpp
+        src/bittorrent/bt_torrent.h
+        src/bittorrent/bt_torrent.cpp
+        src/bittorrent/bt_client.h
+        src/bittorrent/bt_client.cpp
+        src/bittorrent/bt_network.h
+        src/bittorrent/bt_network.cpp
+        src/bittorrent/disk_io.cpp
+        src/bittorrent/disk_io.h
+        src/bittorrent/tracker.cpp
+        src/bittorrent/tracker.h
+        src/bittorrent/bt_create_torrent.h
+        src/bittorrent/bt_create_torrent.cpp
+        src/bittorrent/bt_resume_data.h
+        src/bittorrent/bt_resume_data.cpp
     )
 endif()
 
@@ -311,8 +311,8 @@ endif()
 # RatsClient&); RATS_STORAGE will not build until storage is ported to Node.
 if(RATS_STORAGE)
     list(APPEND LIBRARY_SOURCES
-        src/storage.cpp
-        src/storage.h
+        src/storage/storage.cpp
+        src/storage/storage.h
     )
 endif()
 
@@ -620,7 +620,7 @@ if(RATS_INSTALL)
             PATTERN "*.h"
             PATTERN "*.hpp"
     )
-    install(FILES ${PROJECT_BINARY_DIR}/src/version.h
+    install(FILES ${PROJECT_BINARY_DIR}/src/util/version.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats
     )
 

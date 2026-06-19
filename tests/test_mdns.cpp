@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include "mdns.h"
-#include "logger.h"
-#include "socket.h"  // Add socket header for init/cleanup functions
+#include "mdns/mdns.h"
+#include "util/logger.h"
+#include "core/socket.h"  // Add socket header for init/cleanup functions
 #include <iostream>
 #include <thread>
 #include <chrono>

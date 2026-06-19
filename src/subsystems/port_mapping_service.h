@@ -19,7 +19,7 @@
  */
 
 #include "node/peer_network.h"
-#include "port_mapping.h"   // PortMappingConfig, PortMapResult, PortMapCallback
+#include "nat/port_mapping.h"   // PortMappingConfig, PortMapResult, PortMapCallback
 
 #include <cstdint>
 #include <memory>

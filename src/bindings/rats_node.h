@@ -16,7 +16,7 @@
  * it becomes the canonical C API once the legacy client is removed.)
  */
 
-#include "rats_export.h"
+#include "util/rats_export.h"
 
 #include <stddef.h>
 #include <stdint.h>

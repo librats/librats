@@ -1,5 +1,5 @@
 #include "net/frame.h"
-#include "socket.h"  // htonl/htons/ntohl/ntohs (winsock or arpa/inet)
+#include "core/socket.h"  // htonl/htons/ntohl/ntohs (winsock or arpa/inet)
 
 #include <cstring>
 

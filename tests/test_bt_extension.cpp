@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 #include <algorithm>
-#include "bt_extension.h"
-#include "bt_peer_connection.h"
-#include "bt_choker.h"
+#include "bittorrent/bt_extension.h"
+#include "bittorrent/bt_peer_connection.h"
+#include "bittorrent/bt_choker.h"
 
 using namespace librats;
 

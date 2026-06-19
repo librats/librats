@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "bt_file_storage.h"
+#include "bittorrent/bt_file_storage.h"
 
 using namespace librats;
 

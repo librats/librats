@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "bt_network.h"
+#include "bittorrent/bt_network.h"
 
 namespace librats {
 namespace {

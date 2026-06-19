@@ -6,7 +6,7 @@
 #include "security/identity.h"
 #include "security/noise_security.h"
 #include "security/plaintext_security.h"
-#include "socket.h"
+#include "core/socket.h"
 
 #include <atomic>
 #include <chrono>

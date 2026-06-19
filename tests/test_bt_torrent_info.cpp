@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "bt_torrent_info.h"
-#include "bencode.h"
+#include "bittorrent/bt_torrent_info.h"
+#include "bittorrent/bencode.h"
 
 using namespace librats;
 

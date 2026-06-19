@@ -1,8 +1,8 @@
 #include "node/node.h"
 #include "security/noise_security.h"
 #include "security/plaintext_security.h"
-#include "fs.h"
-#include "logger.h"
+#include "util/fs.h"
+#include "util/logger.h"
 
 #include <cstring>
 #include <memory>

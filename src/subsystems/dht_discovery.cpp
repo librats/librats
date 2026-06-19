@@ -1,6 +1,6 @@
 #include "subsystems/dht_discovery.h"
 #include "sha1.h"
-#include "logger.h"
+#include "util/logger.h"
 
 namespace librats {
 

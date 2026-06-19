@@ -3,7 +3,7 @@
 #include "node/node.h"
 #include "subsystems/reconnection.h"
 #include "net/peer_store.h"
-#include "fs.h"
+#include "util/fs.h"
 
 #include <algorithm>
 #include <chrono>

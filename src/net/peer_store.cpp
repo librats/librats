@@ -1,5 +1,5 @@
 #include "net/peer_store.h"
-#include "fs.h"
+#include "util/fs.h"
 
 #include <sstream>
 

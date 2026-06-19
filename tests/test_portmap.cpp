@@ -9,11 +9,11 @@
  */
 
 #include <gtest/gtest.h>
-#include "port_mapping.h"
-#include "upnp.h"
-#include "natpmp.h"
-#include "network_utils.h"
-#include "socket.h"
+#include "nat/port_mapping.h"
+#include "nat/upnp.h"
+#include "nat/natpmp.h"
+#include "util/network_utils.h"
+#include "core/socket.h"
 
 #include <atomic>
 #include <chrono>
