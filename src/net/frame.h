@@ -2,23 +2,30 @@
 
 /**
  * @file frame.h
- * @brief Binary wire framing for librats.
+ * @brief Two-level wire framing: outer length-prefixed blocks, inner messages.
  *
- * Every message on the wire is a single length-prefixed frame:
+ * The wire is a stream of length-prefixed **blocks**:
  *
- *   ┌──────────────┬──────┬───────┬─────────┬───────────────┐
- *   │ length (u32) │ type │ flags │ channel │   payload …   │
- *   │   4 bytes    │  u8  │  u8   │  u16    │  length-4 B   │
- *   └──────────────┴──────┴───────┴─────────┴───────────────┘
- *        big-endian            big-endian
+ *   ┌──────────────┬───────────────────────────┐
+ *   │ length (u32) │            body            │
+ *   │   4 bytes    │       length bytes         │
+ *   └──────────────┴───────────────────────────┘
  *
- * `length` counts everything after itself (the 4-byte fixed header + payload),
- * so the total bytes on the wire are `4 + length`. The message kind lives in
- * `type` and the application sub-channel in `channel`, which means the receiver
- * demultiplexes with a single byte read — no JSON parse, no string compare.
+ * A block's body is opaque at this layer. The Connection uses it for two things:
  *
- * Decoding is zero-copy: a decoded Frame's payload is a ByteView pointing into
- * the caller's receive buffer, valid only until that buffer is consumed.
+ *   - during the handshake, the body is a raw handshake message (Noise / id);
+ *   - once established, the body is the Session-encrypted bytes of an inner
+ *     **message**, which has its own fixed 4-byte header:
+ *
+ *       ┌──────┬───────┬─────────┬───────────────┐
+ *       │ type │ flags │ channel │   payload …   │
+ *       │  u8  │  u8   │   u16   │               │
+ *       └──────┴───────┴─────────┴───────────────┘
+ *
+ * Splitting "outer block" from "inner message" keeps encryption clean: the
+ * cipher wraps the whole inner message (type included), and the block layer
+ * never needs to understand it. Decoding is zero-copy — views point into the
+ * caller's buffer and are valid only until it is consumed.
  */
 
 #include "core/bytes.h"
@@ -27,24 +34,22 @@
 
 namespace librats {
 
-/// Top-level message kind. Reserved values let subsystems share the wire
-/// without colliding; application traffic rides on `App` with a `channel`.
+/// Inner-message kind. Application traffic uses App, addressed by `channel`.
 enum class MessageType : uint8_t {
-    Handshake = 0,  ///< Secure-channel handshake (security layer).
-    App       = 1,  ///< Application message, addressed by `channel`.
-    Control   = 2,  ///< Core control plane (peer exchange, ping…).
-    Gossip    = 3,  ///< GossipSub pub/sub.
-    FileChunk = 4,  ///< File-transfer binary chunk.
+    App       = 1,
+    Control   = 2,  ///< core control plane (peer exchange, ping…)
+    Gossip    = 3,
+    FileChunk = 4,
 };
 
-/// Per-frame metadata (the fixed header that follows the length prefix).
+/// Fixed header of an inner message.
 struct FrameHeader {
     MessageType type    = MessageType::App;
     uint8_t     flags   = 0;
-    uint16_t    channel = 0;  ///< Interned application channel id (0 for non-App).
+    uint16_t    channel = 0;  ///< interned application channel id (0 for non-App)
 };
 
-/// A decoded frame. `payload` is a non-owning view into the source buffer.
+/// A decoded inner message. `payload` is a non-owning view into the source bytes.
 struct Frame {
     FrameHeader header;
     ByteView    payload;
@@ -54,25 +59,34 @@ namespace framer {
 
 constexpr size_t   kLengthPrefixSize = 4;
 constexpr size_t   kHeaderSize       = 4;                  ///< type+flags+channel
-constexpr uint32_t kMaxFrameSize     = 64u * 1024 * 1024;  ///< body cap (length field)
+constexpr uint32_t kMaxBlockSize     = 64u * 1024 * 1024;  ///< body cap
 
-/// Append a complete length-prefixed frame to `out` (grows it in place).
-void encode(Bytes& out, FrameHeader header, ByteView payload);
+// ── Outer block (length-prefixed opaque body) ───────────────────────────────
 
-/// Result of attempting to decode one frame from the front of a buffer.
-struct Decoded {
-    enum Status {
-        Ok,          ///< A full frame was decoded; see `frame` and `consumed`.
-        Incomplete,  ///< Not enough bytes yet; wait for more and retry.
-        Error,       ///< Protocol violation (bad length); drop the connection.
-    } status = Incomplete;
+/// Append `[u32 len][body]` to `out`.
+void encode_block(Bytes& out, ByteView body);
 
-    size_t consumed = 0;  ///< Bytes to consume from the buffer (valid when Ok).
-    Frame  frame{};       ///< Decoded frame (valid when Ok; payload views input).
+struct Block {
+    enum Status { Ok, Incomplete, Error } status = Incomplete;
+    size_t   consumed = 0;  ///< bytes to consume from the buffer (when Ok)
+    ByteView body{};        ///< the block body (when Ok); views the input
 };
 
-/// Try to decode a single frame from `[data, data+size)` without copying.
-Decoded try_decode(const uint8_t* data, size_t size);
+/// Try to take one block from the front of `[data, data+size)` without copying.
+Block try_take_block(const uint8_t* data, size_t size);
+
+// ── Inner message (fixed header + payload, no length prefix) ─────────────────
+
+/// Append `[type][flags][channel][payload]` to `out` (no length prefix).
+void encode_message(Bytes& out, FrameHeader header, ByteView payload);
+
+struct Message {
+    bool  ok = false;
+    Frame frame{};
+};
+
+/// Parse an inner message from `inner` (header + payload). `ok` false if short.
+Message parse_message(ByteView inner);
 
 } // namespace framer
 } // namespace librats

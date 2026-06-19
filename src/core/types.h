@@ -26,8 +26,9 @@ enum class ConnRole {
 
 /// Connection lifecycle. A connection moves strictly forward through these.
 enum class ConnState {
-    Connecting,   ///< Outbound TCP handshake in flight (waiting for writable).
-    Established,  ///< Transport is up; frames may flow.
+    Connecting,   ///< Outbound TCP connect in flight (waiting for writable).
+    Handshaking,  ///< TCP up; secure-channel handshake in progress.
+    Established,  ///< Handshake done; application frames may flow.
     Closing,      ///< Marked for teardown; no further frames accepted.
     Closed,       ///< Removed from the reactor.
 };
@@ -38,7 +39,8 @@ enum class CloseReason {
     PeerClosed,        ///< Remote sent FIN (clean close).
     PeerReset,         ///< Connection reset / socket error.
     ConnectFailed,     ///< Outbound TCP connect never completed.
-    ProtocolError,     ///< Malformed frame on the wire.
+    HandshakeFailed,   ///< Secure-channel handshake failed or timed out.
+    ProtocolError,     ///< Malformed frame / decryption failure on the wire.
     SlowConsumer,      ///< Send buffer exceeded its high-water mark.
     ReactorShutdown,   ///< Reactor is stopping.
 };

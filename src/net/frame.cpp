@@ -6,66 +6,65 @@
 namespace librats {
 namespace framer {
 
-void encode(Bytes& out, FrameHeader header, ByteView payload) {
-    const uint32_t body = static_cast<uint32_t>(kHeaderSize + payload.size());
-    const size_t   at   = out.size();
-    out.resize(at + kLengthPrefixSize + body);
+// ── Outer block ─────────────────────────────────────────────────────────────
+
+void encode_block(Bytes& out, ByteView body) {
+    const uint32_t len = static_cast<uint32_t>(body.size());
+    const size_t   at  = out.size();
+    out.resize(at + kLengthPrefixSize + body.size());
 
     uint8_t* p = out.data() + at;
-
-    const uint32_t net_len = htonl(body);
+    const uint32_t net_len = htonl(len);
     std::memcpy(p, &net_len, 4);
-    p += 4;
-
-    *p++ = static_cast<uint8_t>(header.type);
-    *p++ = header.flags;
-
-    const uint16_t net_ch = htons(header.channel);
-    std::memcpy(p, &net_ch, 2);
-    p += 2;
-
-    if (!payload.empty()) {
-        std::memcpy(p, payload.data(), payload.size());
-    }
+    if (!body.empty()) std::memcpy(p + 4, body.data(), body.size());
 }
 
-Decoded try_decode(const uint8_t* data, size_t size) {
-    Decoded out;
-
-    if (size < kLengthPrefixSize) {
-        out.status = Decoded::Incomplete;
-        return out;
-    }
+Block try_take_block(const uint8_t* data, size_t size) {
+    Block out;
+    if (size < kLengthPrefixSize) { out.status = Block::Incomplete; return out; }
 
     uint32_t net_len = 0;
     std::memcpy(&net_len, data, 4);
-    const uint32_t body = ntohl(net_len);
+    const uint32_t len = ntohl(net_len);
 
-    // The body must at least contain the fixed header, and stay within the cap.
-    if (body < kHeaderSize || body > kMaxFrameSize) {
-        out.status = Decoded::Error;
-        return out;
-    }
+    if (len > kMaxBlockSize) { out.status = Block::Error; return out; }
 
-    const size_t total = kLengthPrefixSize + body;
-    if (size < total) {
-        out.status = Decoded::Incomplete;
-        return out;
-    }
+    const size_t total = kLengthPrefixSize + len;
+    if (size < total) { out.status = Block::Incomplete; return out; }
 
-    const uint8_t* p = data + kLengthPrefixSize;
+    out.status   = Block::Ok;
+    out.consumed = total;
+    out.body     = ByteView(data + kLengthPrefixSize, len);
+    return out;
+}
 
-    FrameHeader h;
-    h.type  = static_cast<MessageType>(p[0]);
-    h.flags = p[1];
+// ── Inner message ───────────────────────────────────────────────────────────
+
+void encode_message(Bytes& out, FrameHeader header, ByteView payload) {
+    const size_t at = out.size();
+    out.resize(at + kHeaderSize + payload.size());
+
+    uint8_t* p = out.data() + at;
+    *p++ = static_cast<uint8_t>(header.type);
+    *p++ = header.flags;
+    const uint16_t net_ch = htons(header.channel);
+    std::memcpy(p, &net_ch, 2);
+    p += 2;
+    if (!payload.empty()) std::memcpy(p, payload.data(), payload.size());
+}
+
+Message parse_message(ByteView inner) {
+    Message out;
+    if (inner.size() < kHeaderSize) return out;  // ok stays false
+
+    const uint8_t* p = inner.data();
+    out.frame.header.type  = static_cast<MessageType>(p[0]);
+    out.frame.header.flags = p[1];
     uint16_t net_ch = 0;
     std::memcpy(&net_ch, p + 2, 2);
-    h.channel = ntohs(net_ch);
-
-    out.status        = Decoded::Ok;
-    out.consumed      = total;
-    out.frame.header  = h;
-    out.frame.payload = ByteView(p + kHeaderSize, body - kHeaderSize);
+    out.frame.header.channel = ntohs(net_ch);
+    out.frame.payload = ByteView(p + kHeaderSize, inner.size() - kHeaderSize);
+    out.ok = true;
     return out;
 }
 

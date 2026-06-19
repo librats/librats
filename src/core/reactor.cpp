@@ -5,8 +5,8 @@
 
 namespace librats {
 
-Reactor::Reactor(uint8_t index, ConnectionDelegate& delegate)
-    : index_(index), delegate_(delegate), poller_(IOPoller::create()) {}
+Reactor::Reactor(uint8_t index, ConnectionDelegate& delegate, SecurityProvider& security)
+    : index_(index), delegate_(delegate), security_(security), poller_(IOPoller::create()) {}
 
 Reactor::~Reactor() {
     stop();
@@ -159,7 +159,7 @@ void Reactor::do_accept() {
         socket_t client = ::accept(server_socket_, nullptr, nullptr);
         if (!is_valid_socket(client)) break;  // EWOULDBLOCK / error → done this tick
         Connection* conn = adopt(client, ConnRole::Inbound);
-        conn->start_established();  // accepted sockets are already connected
+        conn->start_handshake();  // accepted sockets are already connected
     }
 }
 
@@ -175,20 +175,20 @@ Connection* Reactor::adopt(socket_t sock, ConnRole role) {
     conn_count_.fetch_add(1, std::memory_order_relaxed);
 
     // Inbound sockets are connected: watch for readable. Outbound sockets are
-    // still connecting: watch for writable, which signals connect completion,
-    // and arm a timeout so a connect that never completes is reaped.
-    if (role == ConnRole::Inbound) {
-        poller_->add(sock, PollIn);
-    } else {
-        poller_->add(sock, PollOut);
-        TimerId timer = timers_.schedule(kConnectTimeout, [this, sock] {
-            auto it = conns_.find(sock);
-            if (it != conns_.end() && it->second->state() == ConnState::Connecting) {
-                mark_for_close(sock, CloseReason::ConnectFailed);
-            }
-        });
-        raw->set_connect_timer(timer);
-    }
+    // still connecting: watch for writable, which signals connect completion.
+    poller_->add(sock, role == ConnRole::Inbound ? PollIn : PollOut);
+
+    // Reap connections that never reach Established (stuck connect or handshake).
+    TimerId timer = timers_.schedule(kEstablishTimeout, [this, sock] {
+        auto it = conns_.find(sock);
+        if (it == conns_.end()) return;
+        const ConnState st = it->second->state();
+        if (st != ConnState::Established && st != ConnState::Closing && st != ConnState::Closed) {
+            mark_for_close(sock, st == ConnState::Connecting ? CloseReason::ConnectFailed
+                                                             : CloseReason::HandshakeFailed);
+        }
+    });
+    raw->set_establish_timer(timer);
     return raw;
 }
 

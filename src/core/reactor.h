@@ -43,9 +43,10 @@ class Reactor {
 public:
     using Task = std::function<void()>;
 
-    /// @param index   This reactor's slot in its pool (for sharding/logging).
+    /// @param index    This reactor's slot in its pool (for sharding/logging).
     /// @param delegate Sink for all connection lifecycle/frame events.
-    Reactor(uint8_t index, ConnectionDelegate& delegate);
+    /// @param security Mints a Handshaker per connection (Noise / plaintext).
+    Reactor(uint8_t index, ConnectionDelegate& delegate, SecurityProvider& security);
     ~Reactor();
 
     Reactor(const Reactor&) = delete;
@@ -78,6 +79,9 @@ public:
     /// Adjust poll interest for a socket. Called by Connection; reactor thread.
     void set_interest(socket_t sock, uint32_t events);
 
+    /// The security provider used to mint per-connection handshakers.
+    SecurityProvider& security() noexcept { return security_; }
+
     /// Approximate live connection count (lock-free, eventually consistent).
     size_t connection_count() const noexcept {
         return conn_count_.load(std::memory_order_relaxed);
@@ -98,11 +102,18 @@ private:
     void shutdown_connections();
 
     static constexpr int kMaxEvents = 256;
-    static constexpr int kMaxPollMs = 1000;
-    static constexpr std::chrono::milliseconds kConnectTimeout{10000};
+    // Idle poll cap. Kept short as a stopgap for an IOCP quirk: connecting
+    // sockets live in WSAPoll-fallback mode and are only re-checked once per
+    // wait() iteration, so connect-completion latency is bounded by this value
+    // (see docs/core-v2-notes.md #4). Negligible idle cost; on epoll/kqueue the
+    // loop still wakes on real events, so this only caps idle latency.
+    static constexpr int kMaxPollMs = 50;
+    /// Deadline from adopt() to reaching Established (covers connect + handshake).
+    static constexpr std::chrono::milliseconds kEstablishTimeout{15000};
 
     uint8_t                   index_;
     ConnectionDelegate&       delegate_;
+    SecurityProvider&         security_;
     std::unique_ptr<IOPoller> poller_;
     Notifier                  wakeup_;
     MpscQueue<Task>           tasks_;

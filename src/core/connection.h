@@ -2,30 +2,34 @@
 
 /**
  * @file connection.h
- * @brief A single peer connection: socket + framing + lifecycle state machine.
+ * @brief A single peer connection: socket, secure-channel handshake, framing.
  *
  * A Connection is owned by exactly one Reactor and is only ever touched by that
  * reactor's thread. Because of that single-threaded ownership it holds NO locks
- * and uses NO atomics — all the synchronisation lives at the reactor boundary
- * (the task queue). This is the heart of the shared-nothing model.
+ * and uses NO atomics — all synchronisation lives at the reactor boundary (the
+ * task queue). This is the heart of the shared-nothing model.
  *
- * Responsibilities:
- *   - drain the socket on readable, extract complete frames, deliver them;
- *   - queue outbound frames and flush them on writable;
- *   - finish a non-blocking connect (outbound) before going Established;
- *   - enforce a send high-water mark (slow-consumer protection).
+ * Lifecycle: Connecting → Handshaking → Established → Closing/Closed.
+ *   - Connecting:  outbound TCP connect in flight (inbound skips this).
+ *   - Handshaking: a Handshaker (from the reactor's SecurityProvider) runs to
+ *                  completion, yielding a Session and the remote PeerId.
+ *   - Established: inbound blocks are decrypted into inner frames and delivered;
+ *                  outbound frames are encrypted and queued.
  *
- * The Connection reports lifecycle/data events through a ConnectionDelegate and
- * asks the Reactor to (dis)arm write-interest; it never reaches into the poller
- * directly.
+ * The Connection reports events through a ConnectionDelegate and asks the
+ * Reactor to (dis)arm write-interest; it never touches the poller directly.
  */
 
 #include "core/types.h"
 #include "core/bytes.h"
 #include "net/frame.h"
+#include "net/peer_id.h"
+#include "security/handshaker.h"
 #include "receive_buffer.h"
 #include "chained_send_buffer.h"
 #include "socket.h"
+
+#include <memory>
 
 namespace librats {
 
@@ -35,11 +39,10 @@ class Reactor;
 /**
  * @brief Sink for connection lifecycle and inbound frames.
  *
- * All callbacks run on the owning reactor's thread. `on_closed` is the last
- * call for a connection; the Connection reference is valid for the duration of
- * the callback only. Note: on_established/on_frame are invoked by the
- * Connection; on_closed is invoked by the Reactor as it tears the connection
- * down (so a delegate may safely request other connections close from within).
+ * All callbacks run on the owning reactor's thread. `on_established` fires once
+ * the secure handshake completes (so conn.remote_id() is valid). `on_closed` is
+ * the last call and is invoked by the Reactor during teardown, so a delegate may
+ * safely close other connections from within it.
  */
 class ConnectionDelegate {
 public:
@@ -52,7 +55,7 @@ public:
 class Connection {
 public:
     /// High-water mark for the send buffer; exceeding it closes the connection
-    /// with CloseReason::SlowConsumer. Tunable per connection.
+    /// with CloseReason::SlowConsumer.
     static constexpr size_t kDefaultSendHighWater = 8 * 1024 * 1024;
 
     Connection(ConnId id, socket_t sock, ConnRole role,
@@ -63,13 +66,15 @@ public:
     Connection& operator=(const Connection&) = delete;
 
     // — identity / state (reactor thread) —
-    ConnId    id() const noexcept     { return id_; }
-    socket_t  socket() const noexcept { return socket_; }
-    ConnRole  role() const noexcept   { return role_; }
-    ConnState state() const noexcept  { return state_; }
-    CloseReason close_reason() const noexcept { return close_reason_; }
+    ConnId        id() const noexcept        { return id_; }
+    socket_t      socket() const noexcept    { return socket_; }
+    ConnRole      role() const noexcept      { return role_; }
+    ConnState     state() const noexcept     { return state_; }
+    CloseReason   close_reason() const noexcept { return close_reason_; }
+    const PeerId& remote_id() const noexcept { return remote_id_; }
+    bool          is_secure() const noexcept { return session_ && session_->is_secure(); }
 
-    /// Queue a frame for delivery to the peer. No-op once closing/closed.
+    /// Queue an application frame for the peer. No-op unless Established.
     void send(FrameHeader header, ByteView payload);
 
     /// Convenience: send raw bytes on an application channel.
@@ -82,20 +87,24 @@ public:
     bool on_writable();
     bool on_error();
 
-    /// Bring an already-connected (inbound/loopback) socket up to Established
-    /// and notify the delegate. Called by the Reactor right after adopt().
-    void start_established();
+    /// Bring an accepted (inbound) socket up: it is already connected, so begin
+    /// the handshake immediately. Called by the Reactor right after adopt().
+    void start_handshake();
 
-    /// Associate the outbound connect-timeout timer so it can be cancelled once
-    /// the connection establishes. Set by the Reactor right after adopt().
-    void set_connect_timer(TimerId id) noexcept { connect_timer_ = id; }
+    /// Associate the establishment-timeout timer so it can be cancelled once the
+    /// connection reaches Established. Set by the Reactor after adopt().
+    void set_establish_timer(TimerId id) noexcept { establish_timer_ = id; }
 
 private:
-    void mark_established();
-    bool flush();               ///< drain tx_ to the socket; false ⇒ teardown
+    void begin_handshake();             ///< transport up → Handshaking
+    bool drive_handshake(ByteView body);///< feed one handshake block; false ⇒ teardown
+    bool deliver_frame(ByteView body);  ///< decrypt+parse+dispatch; false ⇒ teardown
+    void complete_established();         ///< handshake done → Established
+    void queue_block(ByteView body);    ///< length-prefix `body` into the send buffer
+    bool flush();                       ///< drain tx_ to the socket; false ⇒ teardown
     void arm_write();
     void disarm_write();
-    bool fail(CloseReason);     ///< record reason, return false (teardown)
+    bool fail(CloseReason);             ///< record reason, return false (teardown)
 
     ConnId              id_;
     socket_t            socket_;
@@ -105,11 +114,15 @@ private:
     Reactor&            reactor_;
     ConnectionDelegate& delegate_;
 
+    std::unique_ptr<Handshaker> handshaker_;  ///< non-null only while Handshaking
+    std::unique_ptr<Session>    session_;      ///< non-null once Established
+    PeerId                      remote_id_;
+
     ReceiveBuffer     rx_{512};   ///< grows lazily; small idle footprint
     ChainedSendBuffer tx_;
     bool              want_write_ = false;
     size_t            send_high_water_ = kDefaultSendHighWater;
-    TimerId           connect_timer_ = kInvalidTimerId;  ///< outbound connect timeout
+    TimerId           establish_timer_ = kInvalidTimerId;  ///< connect+handshake deadline
 };
 
 } // namespace librats
