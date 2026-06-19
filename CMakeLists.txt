@@ -224,6 +224,8 @@ set(LIBRARY_SOURCES
     src/subsystems/ping_service.cpp
     src/subsystems/pubsub.h
     src/subsystems/pubsub.cpp
+    src/subsystems/file_transfer.h
+    src/subsystems/file_transfer.cpp
 
 # Crypto algorithms including Noise Protocol
     src/crypto/curve25519.c
@@ -528,6 +530,7 @@ if(RATS_BUILD_TESTS)
         tests/test_node.cpp
         tests/test_subsystem.cpp
         tests/test_pubsub.cpp
+        tests/test_filexfer.cpp
     )
 
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled
