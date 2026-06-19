@@ -24,6 +24,7 @@ const char* to_string(CloseReason r) noexcept {
         case CloseReason::SlowConsumer:    return "SlowConsumer";
         case CloseReason::ReactorShutdown: return "ReactorShutdown";
         case CloseReason::DuplicateConn:   return "DuplicateConn";
+        case CloseReason::PeerLimit:       return "PeerLimit";
     }
     return "?";
 }

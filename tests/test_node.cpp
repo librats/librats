@@ -135,6 +135,62 @@ TEST(NodeTest, BroadcastToAllPeers) {
     hub.stop();
 }
 
+// A server with max_peers=1 admits one inbound peer and rejects the next.
+TEST(NodeTest, MaxPeersRejectsInbound) {
+    NodeConfig sc = server_config();
+    sc.max_peers = 1;
+    Node server(sc);
+    Node a(client_config());
+    Node b(client_config());
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(b.start());
+
+    a.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.peer_count() == 1; }));
+    EXPECT_TRUE(server.peer_limit_reached());
+
+    // b's inbound is refused (at accept or by the on_established backstop); the
+    // server never exceeds its cap and b never establishes a peer to it.
+    b.connect("127.0.0.1", server.listen_port());
+    std::this_thread::sleep_for(700ms);
+    EXPECT_EQ(server.peer_count(), 1u);
+    EXPECT_EQ(b.peer_count(), 0u);
+
+    a.stop();
+    b.stop();
+    server.stop();
+}
+
+// Raising the limit at runtime lets a previously-refused peer in.
+TEST(NodeTest, MaxPeersRuntimeRaise) {
+    NodeConfig sc = server_config();
+    sc.max_peers = 1;
+    Node server(sc);
+    Node a(client_config());
+    Node b(client_config());
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(b.start());
+
+    a.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.peer_count() == 1; }));
+
+    server.set_max_peers(2);
+    EXPECT_EQ(server.max_peers(), 2u);
+
+    b.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.peer_count() == 2; }))
+        << "b not admitted after raising the limit; server peers=" << server.peer_count();
+    EXPECT_TRUE(server.peer_limit_reached());  // now full again at 2/2
+
+    a.stop();
+    b.stop();
+    server.stop();
+}
+
 // Disconnecting one side fires the peer-disconnected event on the other.
 TEST(NodeTest, DisconnectNotifiesPeer) {
     Node server(server_config());

@@ -179,6 +179,16 @@ void Reactor::do_accept() {
     while (true) {
         socket_t client = ::accept(server_socket_, nullptr, nullptr);
         if (!is_valid_socket(client)) break;  // EWOULDBLOCK / error → done this tick
+
+        // Admission control: refuse new inbound peers when at capacity, before
+        // paying any handshake cost. Keep draining the backlog so the listener
+        // doesn't stay readable. The precise per-peer cap is enforced again at
+        // on_established (this coarse gate can't yet know the remote's identity).
+        if (!delegate_.admit_inbound()) {
+            close_socket(client);
+            continue;
+        }
+
         Connection* conn = adopt(client, ConnRole::Inbound);
         conn->start_handshake();  // accepted sockets are already connected
     }

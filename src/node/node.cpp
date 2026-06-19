@@ -51,7 +51,9 @@ Node::Node(NodeConfig config)
     : config_(std::move(config)),
       identity_(load_or_create_identity(config_.data_dir)),
       security_(make_security(config_.security, identity_)),
-      reactors_(std::make_unique<ReactorPool>(config_.reactor_threads, *this, *security_)) {}
+      reactors_(std::make_unique<ReactorPool>(config_.reactor_threads, *this, *security_)) {
+    max_peers_.store(config_.max_peers, std::memory_order_relaxed);
+}
 
 Node::~Node() {
     stop();
@@ -164,11 +166,33 @@ void Node::route_close(PeerRoute route) {
 
 // ── ConnectionDelegate (reactor thread) ─────────────────────────────────────
 
+bool Node::admit_inbound() {
+    // Coarse gate at accept time: refuse new inbound when at capacity, before any
+    // handshake cost. The exact per-peer cap (which can tell a reconnect of a
+    // known peer from a brand-new one) is enforced in on_established below.
+    const size_t cap = max_peers_.load(std::memory_order_relaxed);
+    return cap == 0 || directory_.size() < cap;
+}
+
 void Node::on_established(Connection& conn) {
     // Reject self-connections: a self-certifying handshake against our own
     // listener yields our own id. (Common once DHT/discovery starts dialing.)
     if (conn.remote_id() == identity_.id) {
         reactors_->by_index(conn.reactor_index()).close(conn.id(), CloseReason::LocalClose);
+        return;
+    }
+
+    // Peer-limit backstop. Inbound handshakes that raced past admit_inbound()
+    // before the cap was hit are rejected here, now that we know the remote id.
+    // A reconnect/duplicate of an already-known peer does not grow the count, so
+    // it is allowed through (the directory tie-break supersedes the old link).
+    // Our own outbound dials are intentional and never rejected.
+    const size_t cap = max_peers_.load(std::memory_order_relaxed);
+    if (cap != 0 && conn.role() == ConnRole::Inbound &&
+        directory_.size() >= cap && !directory_.contains(conn.remote_id())) {
+        LOG_DEBUG("node", "Rejecting inbound peer " << conn.remote_id().short_hex()
+                  << "; peer limit (" << cap << ") reached");
+        reactors_->by_index(conn.reactor_index()).close(conn.id(), CloseReason::PeerLimit);
         return;
     }
 

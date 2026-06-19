@@ -44,6 +44,7 @@ enum class CloseReason {
     SlowConsumer,      ///< Send buffer exceeded its high-water mark.
     ReactorShutdown,   ///< Reactor is stopping.
     DuplicateConn,     ///< Redundant connection to a peer we already hold; superseded.
+    PeerLimit,         ///< Inbound rejected: the configured peer limit is reached.
 };
 
 const char* to_string(ConnState) noexcept;

@@ -58,6 +58,12 @@ void rats_node_connect(rats_node_t node, const char* host, uint16_t port) {
 
 size_t rats_node_peer_count(rats_node_t node) { return as_node(node)->peer_count(); }
 
+void rats_node_set_max_peers(rats_node_t node, size_t max_peers) {
+    as_node(node)->set_max_peers(max_peers);
+}
+
+size_t rats_node_max_peers(rats_node_t node) { return as_node(node)->max_peers(); }
+
 void rats_node_send(rats_node_t node, const char* peer_id_hex,
                     const char* channel, const void* data, size_t len) {
     if (!peer_id_hex || !channel) return;

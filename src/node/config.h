@@ -23,6 +23,12 @@ struct NodeConfig {
     /// pools shard outbound connections across cores.
     size_t reactor_threads = 1;
 
+    /// Maximum number of established peers. 0 means unlimited. The limit guards
+    /// inbound connections (a flood is refused at accept, before any handshake);
+    /// outbound dials we initiate are always honored. Runtime-adjustable via
+    /// Node::set_max_peers().
+    size_t max_peers = 0;
+
     /// Secure channel to use for peer connections.
     enum class Security { Noise, Plaintext };
     Security security = Security::Noise;

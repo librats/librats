@@ -63,6 +63,14 @@ public:
     std::vector<PeerInfo>   peers() const { return directory_.snapshot(); }
     std::optional<Peer> peer(const PeerId& id);
 
+    // — peer admission limit (0 = unlimited; guards inbound, not our own dials) —
+    size_t max_peers() const noexcept { return max_peers_.load(std::memory_order_relaxed); }
+    void   set_max_peers(size_t n) noexcept { max_peers_.store(n, std::memory_order_relaxed); }
+    bool   peer_limit_reached() const noexcept {
+        const size_t cap = max_peers_.load(std::memory_order_relaxed);
+        return cap != 0 && directory_.size() >= cap;
+    }
+
     // — application messaging —
     void send(const PeerId& to, std::string_view channel, ByteView payload);
     void broadcast(std::string_view channel, ByteView payload);
@@ -83,6 +91,7 @@ private:
     friend class Peer;
 
     // ConnectionDelegate (reactor thread)
+    bool admit_inbound() override;
     void on_established(Connection& conn) override;
     void on_frame(Connection& conn, const Frame& frame) override;
     void on_closed(Connection& conn, CloseReason reason) override;
@@ -100,9 +109,10 @@ private:
 
     std::vector<std::unique_ptr<Subsystem>> subsystems_;
 
-    socket_t          listen_socket_ = INVALID_SOCKET_VALUE;
-    uint16_t          listen_port_   = 0;
-    std::atomic<bool> running_{false};
+    socket_t            listen_socket_ = INVALID_SOCKET_VALUE;
+    uint16_t            listen_port_   = 0;
+    std::atomic<bool>   running_{false};
+    std::atomic<size_t> max_peers_{0};  ///< established-peer cap; 0 = unlimited
 
     std::vector<PeerNetwork::PeerEventHandler>      peer_connected_;
     std::vector<PeerNetwork::PeerDisconnectHandler> peer_disconnected_;

@@ -54,6 +54,11 @@ RATS_API char*    rats_node_local_id(rats_node_t node);
 RATS_API void   rats_node_connect(rats_node_t node, const char* host, uint16_t port);
 RATS_API size_t rats_node_peer_count(rats_node_t node);
 
+/** Cap on established peers (0 = unlimited). Guards inbound; our dials are honored.
+ *  May be set before or after start(). */
+RATS_API void   rats_node_set_max_peers(rats_node_t node, size_t max_peers);
+RATS_API size_t rats_node_max_peers(rats_node_t node);
+
 /* — messaging (named application channel, raw bytes) — */
 
 RATS_API void rats_node_send(rats_node_t node, const char* peer_id_hex,

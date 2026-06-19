@@ -47,6 +47,13 @@ class Reactor;
 class ConnectionDelegate {
 public:
     virtual ~ConnectionDelegate() = default;
+
+    /// Admission gate for a freshly accepted inbound socket, asked by the Reactor
+    /// before it adopts the connection (i.e. before any handshake cost is paid).
+    /// Returning false makes the Reactor close the socket immediately. Runs on the
+    /// acceptor reactor thread. Default: always admit.
+    virtual bool admit_inbound() { return true; }
+
     virtual void on_established(Connection& conn) = 0;
     virtual void on_frame(Connection& conn, const Frame& frame) = 0;
     virtual void on_closed(Connection& conn, CloseReason reason) = 0;
