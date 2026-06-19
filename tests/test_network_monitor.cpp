@@ -13,7 +13,6 @@
 #include <gtest/gtest.h>
 #include "network_monitor.h"
 #include "network_utils.h"
-#include "librats.h"
 #include "socket.h"
 
 #include <atomic>
@@ -108,72 +107,4 @@ TEST_F(NetworkMonitorTest, BackendModeQueryIsConsistent) {
     (void)event_driven;
     EXPECT_TRUE(monitor.is_running());
     monitor.stop();
-}
-
-// ============================================================================
-// RatsClient integration
-// ============================================================================
-
-class NetworkChangeDetectionTest : public ::testing::Test {
-protected:
-    void SetUp() override { ASSERT_TRUE(init_socket_library()); }
-    void TearDown() override { cleanup_socket_library(); }
-};
-
-TEST_F(NetworkChangeDetectionTest, EnabledByDefault) {
-    RatsClient client(0);
-    EXPECT_TRUE(client.is_network_change_detection_enabled());
-}
-
-TEST_F(NetworkChangeDetectionTest, DisableBeforeStart) {
-    RatsClient client(0);
-    client.set_network_change_detection_enabled(false);
-    EXPECT_FALSE(client.is_network_change_detection_enabled());
-
-    ASSERT_TRUE(client.start());
-    // No monitor should have been started; stop must still be clean.
-    client.stop();
-
-    client.set_network_change_detection_enabled(true);
-    EXPECT_TRUE(client.is_network_change_detection_enabled());
-}
-
-TEST_F(NetworkChangeDetectionTest, ToggleWhileRunningIsClean) {
-    RatsClient client(0);
-    ASSERT_TRUE(client.start());
-
-    // Toggling at runtime tears down / brings up the monitor and must not hang.
-    auto t0 = std::chrono::steady_clock::now();
-    client.set_network_change_detection_enabled(false);
-    EXPECT_FALSE(client.is_network_change_detection_enabled());
-    client.set_network_change_detection_enabled(true);
-    EXPECT_TRUE(client.is_network_change_detection_enabled());
-    auto elapsed = std::chrono::steady_clock::now() - t0;
-    EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 5);
-
-    client.stop();
-}
-
-TEST_F(NetworkChangeDetectionTest, RegisterCallbackDoesNotCrash) {
-    RatsClient client(0);
-    std::atomic<int> changes{0};
-    client.on_network_changed([&](const std::vector<std::string>&) {
-        changes.fetch_add(1);
-    });
-    ASSERT_TRUE(client.start());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    client.stop();
-    // Callback may or may not fire depending on the host; the contract under test
-    // is only that registration + lifecycle are safe.
-    SUCCEED();
-}
-
-TEST_F(NetworkChangeDetectionTest, StartStopCyclesWithDetectionEnabled) {
-    RatsClient client(0);
-    for (int i = 0; i < 3; ++i) {
-        ASSERT_TRUE(client.start());
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        client.stop();
-    }
-    SUCCEED();
 }

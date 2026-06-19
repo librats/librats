@@ -140,17 +140,6 @@ set(LIBRARY_SOURCES
     src/bencode.h
     src/krpc.cpp
     src/krpc.h
-    src/librats.cpp
-    src/librats_discovery.cpp
-    src/librats_reconnection.cpp
-    src/librats_logging.cpp
-    src/librats_encryption.cpp
-    src/librats_file_transfer.cpp
-    src/librats_gossipsub.cpp
-    src/librats_mdns.cpp
-    src/librats_persistence.cpp
-    src/librats_statistic.cpp
-    src/librats.h
     src/sha1.cpp
     src/sha1.h
     src/os.cpp
@@ -163,10 +152,6 @@ set(LIBRARY_SOURCES
     src/mdns.h
     src/threadmanager.cpp
     src/threadmanager.h
-    src/gossipsub.cpp
-    src/gossipsub.h
-    src/file_transfer.cpp
-    src/file_transfer.h
     src/version.cpp
     src/rats_export.h
     ${PROJECT_BINARY_DIR}/src/version.h
@@ -267,7 +252,6 @@ set(LIBRARY_SOURCES
     src/turn.h
     src/ice.cpp
     src/ice.h
-    src/librats_ice.cpp
 
 # Automatic port forwarding (UPnP IGD / NAT-PMP)
     src/port_mapping.h
@@ -275,13 +259,11 @@ set(LIBRARY_SOURCES
     src/upnp.h
     src/natpmp.cpp
     src/natpmp.h
-    src/librats_portmap.cpp
 )
 
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
 if(RATS_SEARCH_FEATURES)
     list(APPEND LIBRARY_SOURCES
-        src/librats_bittorrent.cpp
         src/bittorrent.cpp
         src/bittorrent.h
         src/bt_types.h
@@ -321,20 +303,19 @@ if(RATS_SEARCH_FEATURES)
 endif()
 
 # Add Storage sources if RATS_STORAGE is enabled
+# NOTE: storage.{h,cpp} still target the old RatsClient (StorageManager takes a
+# RatsClient&); RATS_STORAGE will not build until storage is ported to Node.
 if(RATS_STORAGE)
     list(APPEND LIBRARY_SOURCES
         src/crc32.cpp
         src/crc32.h
         src/storage.cpp
         src/storage.h
-        src/librats_storage.cpp
     )
 endif()
 
 if(RATS_BINDINGS)
     list(APPEND LIBRARY_SOURCES
-        src/librats_c.cpp
-        src/librats_c.h
         src/bindings/rats_node.h
         src/bindings/rats_node.cpp
     )
@@ -504,16 +485,9 @@ if(RATS_BUILD_TESTS)
         tests/test_sha1.cpp
         tests/test_network_utils.cpp
         tests/test_dht.cpp
-        tests/test_rats_client.cpp
         tests/test_os.cpp
         tests/test_fs.cpp
-        tests/test_config_persistence.cpp
         tests/test_main.cpp
-        tests/test_message_exchange.cpp
-        tests/test_gossipsub.cpp
-        tests/test_logging_api_gtest.cpp
-        tests/test_file_transfer.cpp
-        tests/test_reconnection.cpp
 # Noise Protocol Crypto tests
         tests/test_crypto_curve25519.cpp
         tests/test_crypto_chacha_poly.cpp
@@ -577,7 +551,6 @@ if(RATS_BUILD_TESTS)
 
     if(RATS_BINDINGS)
         list(APPEND TEST_SOURCES
-            tests/test_librats_c_api.cpp
             tests/test_node_capi.cpp
         )
     endif()
