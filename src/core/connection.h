@@ -96,6 +96,16 @@ public:
     /// connection reaches Established. Set by the Reactor after adopt().
     void set_establish_timer(TimerId id) noexcept { establish_timer_ = id; }
 
+    /// Record the address this outbound connection was dialed at (so the peer's
+    /// reconnect address is known). Set by the Reactor after adopt(); reactor thread.
+    void set_dial_address(std::string host, uint16_t port) {
+        dial_host_ = std::move(host);
+        dial_port_ = port;
+    }
+    bool               has_dial_address() const noexcept { return dial_port_ != 0; }
+    const std::string& dial_host() const noexcept { return dial_host_; }
+    uint16_t           dial_port() const noexcept { return dial_port_; }
+
 private:
     void begin_handshake();             ///< transport up → Handshaking
     bool drive_handshake(ByteView body);///< feed one handshake block; false ⇒ teardown
@@ -124,6 +134,8 @@ private:
     bool              want_write_ = false;
     size_t            send_high_water_ = kDefaultSendHighWater;
     TimerId           establish_timer_ = kInvalidTimerId;  ///< connect+handshake deadline
+    std::string       dial_host_;                          ///< address we dialed (outbound)
+    uint16_t          dial_port_ = 0;
 };
 
 } // namespace librats

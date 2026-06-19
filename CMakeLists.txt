@@ -201,6 +201,8 @@ set(LIBRARY_SOURCES
     src/net/peer_info.h
     src/net/peer_directory.h
     src/net/peer_directory.cpp
+    src/net/peer_store.h
+    src/net/peer_store.cpp
 
 # Core v2 — security layer (Noise XX / plaintext) with self-certifying identity
     src/security/session.h
@@ -230,6 +232,8 @@ set(LIBRARY_SOURCES
     src/subsystems/dht_discovery.cpp
     src/subsystems/mdns_discovery.h
     src/subsystems/mdns_discovery.cpp
+    src/subsystems/reconnection.h
+    src/subsystems/reconnection.cpp
 
 # Crypto algorithms including Noise Protocol
     src/crypto/curve25519.c
@@ -539,6 +543,7 @@ if(RATS_BUILD_TESTS)
         tests/test_pubsub.cpp
         tests/test_filexfer.cpp
         tests/test_dht_discovery.cpp
+        tests/test_reconnection_v2.cpp
     )
 
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled

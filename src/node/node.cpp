@@ -175,6 +175,8 @@ void Node::on_established(Connection& conn) {
     PeerInfo info;
     info.id        = conn.remote_id();
     info.direction = conn.role();
+    if (conn.has_dial_address())  // outbound: remember the address we dialed
+        info.addresses.push_back(Address{conn.dial_host(), conn.dial_port()});
 
     PeerRoute route{conn.reactor_index(), conn.id()};
     directory_.add(info, route);

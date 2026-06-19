@@ -55,7 +55,8 @@ void Reactor::connect(std::string host, int port) {
             LOG_DEBUG("reactor", "Outbound connect to " << host << ":" << port << " failed to start");
             return;
         }
-        adopt(s, ConnRole::Outbound);
+        Connection* conn = adopt(s, ConnRole::Outbound);
+        conn->set_dial_address(host, static_cast<uint16_t>(port));
     });
 }
 
