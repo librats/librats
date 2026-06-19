@@ -228,6 +228,8 @@ set(LIBRARY_SOURCES
     src/subsystems/file_transfer.cpp
     src/subsystems/dht_discovery.h
     src/subsystems/dht_discovery.cpp
+    src/subsystems/mdns_discovery.h
+    src/subsystems/mdns_discovery.cpp
 
 # Crypto algorithms including Noise Protocol
     src/crypto/curve25519.c
@@ -574,6 +576,7 @@ if(RATS_BUILD_TESTS)
     # Add mDNS tests only on non-macOS platforms
     if(NOT APPLE)
         list(APPEND TEST_SOURCES tests/test_mdns.cpp)
+        list(APPEND TEST_SOURCES tests/test_mdns_discovery.cpp)
     endif()
     
     # Create test executable
