@@ -219,6 +219,8 @@ set(LIBRARY_SOURCES
     src/subsystems/mdns_discovery.cpp
     src/subsystems/reconnection.h
     src/subsystems/reconnection.cpp
+    src/subsystems/port_mapping_service.h
+    src/subsystems/port_mapping_service.cpp
 
 # Crypto algorithms including Noise Protocol
     src/crypto/curve25519.c

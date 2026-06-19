@@ -2,6 +2,7 @@
 
 #include "node/node.h"
 #include "subsystems/ping_service.h"
+#include "subsystems/port_mapping_service.h"
 
 #include <chrono>
 #include <memory>
@@ -75,6 +76,44 @@ TEST(SubsystemTest, PingServiceIdleStartStop) {
     node.add_subsystem(std::make_unique<PingService>(20ms));
     ASSERT_TRUE(node.start());
     std::this_thread::sleep_for(80ms);  // let the ping loop spin a few times
+    node.stop();
+    SUCCEED();
+}
+
+// The PortMappingService brings up its UPnP + NAT-PMP backends against the node's
+// listen port. With no router answering (the usual CI case) the backends simply
+// report failure; the contract under test is that attach/start/stop is clean and
+// joins the backend worker threads without hanging — and that no public address
+// is recorded when no usable mapping was established.
+TEST(SubsystemTest, PortMappingIdleStartStop) {
+    Node node(listening_config());
+    auto mapper = std::make_unique<PortMappingService>();
+    PortMappingService* raw = mapper.get();
+    node.add_subsystem(std::move(mapper));
+
+    ASSERT_TRUE(node.start());
+    ASSERT_NE(node.listen_port(), 0);
+    std::this_thread::sleep_for(150ms);  // let the backends attempt discovery
+
+    // Environment-independent: a router may or may not answer on the test host.
+    // If a public mapping WAS recorded, it must be internally consistent; if not,
+    // nullopt is fine. Either way the query must be safe to call.
+    if (auto pub = raw->mapped_public_address()) {
+        EXPECT_FALSE(pub->first.empty());
+        EXPECT_NE(pub->second, 0);
+    }
+    node.stop();
+    SUCCEED();
+}
+
+// Disabling both backends must make start() a no-op (no threads, no mapping).
+TEST(SubsystemTest, PortMappingDisabledIsNoOp) {
+    PortMappingConfig cfg;
+    cfg.enabled = false;
+    Node node(listening_config());
+    node.add_subsystem(std::make_unique<PortMappingService>(cfg));
+    ASSERT_TRUE(node.start());
+    std::this_thread::sleep_for(20ms);
     node.stop();
     SUCCEED();
 }

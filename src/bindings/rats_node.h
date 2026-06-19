@@ -76,6 +76,9 @@ RATS_API void rats_node_on_message(rats_node_t node, const char* channel, rats_m
 RATS_API void rats_node_enable_dht(rats_node_t node, uint16_t dht_port, const char* discovery_key);
 /** Local-network mDNS discovery. */
 RATS_API void rats_node_enable_mdns(rats_node_t node);
+/** Automatic NAT port forwarding for the listen port (UPnP IGD + NAT-PMP).
+ *  Pass non-zero to enable each backend; both run in parallel. */
+RATS_API void rats_node_enable_port_mapping(rats_node_t node, int enable_upnp, int enable_natpmp);
 
 /* — utility — */
 

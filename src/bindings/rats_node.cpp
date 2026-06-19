@@ -3,6 +3,7 @@
 #include "node/node.h"
 #include "subsystems/dht_discovery.h"
 #include "subsystems/mdns_discovery.h"
+#include "subsystems/port_mapping_service.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -100,6 +101,13 @@ void rats_node_enable_dht(rats_node_t node, uint16_t dht_port, const char* disco
 
 void rats_node_enable_mdns(rats_node_t node) {
     as_node(node)->add_subsystem(std::make_unique<MdnsDiscovery>());
+}
+
+void rats_node_enable_port_mapping(rats_node_t node, int enable_upnp, int enable_natpmp) {
+    PortMappingConfig config;
+    config.enable_upnp   = enable_upnp != 0;
+    config.enable_natpmp = enable_natpmp != 0;
+    as_node(node)->add_subsystem(std::make_unique<PortMappingService>(config));
 }
 
 void rats_node_string_free(char* str) { std::free(str); }

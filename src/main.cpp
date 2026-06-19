@@ -1,13 +1,15 @@
 // rats-client — a minimal P2P chat node built on the redesigned Node API.
 //
-//   rats-client <listen_port> [<host> <port>]   [--dht]
+//   rats-client <listen_port> [<host> <port>]   [--dht] [--upnp]
 //
 // Lines typed on stdin are broadcast on the "chat" channel to all peers;
-// messages from peers are printed. Pass a host+port to dial a peer, and --dht
-// to also discover peers over the DHT.
+// messages from peers are printed. Pass a host+port to dial a peer, --dht
+// to also discover peers over the DHT, and --upnp to forward the listen port
+// through the home router (UPnP + NAT-PMP) so peers behind NAT can reach us.
 
 #include "node/node.h"
 #include "subsystems/dht_discovery.h"
+#include "subsystems/port_mapping_service.h"
 
 #include <iostream>
 #include <memory>
@@ -27,11 +29,15 @@ int main(int argc, char** argv) {
 
     Node node(config);
 
-    bool use_dht = false;
-    for (int i = 2; i < argc; ++i)
-        if (std::string(argv[i]) == "--dht") use_dht = true;
+    bool use_dht = false, use_upnp = false;
+    for (int i = 2; i < argc; ++i) {
+        if (std::string(argv[i]) == "--dht")  use_dht = true;
+        if (std::string(argv[i]) == "--upnp") use_upnp = true;
+    }
     if (use_dht)
         node.add_subsystem(std::make_unique<DhtDiscovery>(DhtDiscovery::Config{}));
+    if (use_upnp)
+        node.add_subsystem(std::make_unique<PortMappingService>());
 
     node.on_peer_connected([](const PeerHandle& peer) {
         std::cout << "[+] peer connected: " << peer.id().short_hex() << "\n";
