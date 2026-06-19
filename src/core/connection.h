@@ -96,6 +96,11 @@ public:
     /// connection reaches Established. Set by the Reactor after adopt().
     void set_establish_timer(TimerId id) noexcept { establish_timer_ = id; }
 
+    /// Cancel the establishment-timeout timer if still armed; idempotent. Called
+    /// both on success (complete_established) and on teardown (Reactor::remove) so
+    /// the reaper can never outlive the connection and fire against a reused fd.
+    void cancel_establish_timer();
+
     /// Record the address this outbound connection was dialed at (so the peer's
     /// reconnect address is known). Set by the Reactor after adopt(); reactor thread.
     void set_dial_address(std::string host, uint16_t port) {

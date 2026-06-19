@@ -108,12 +108,16 @@ bool Connection::drive_handshake(ByteView body) {
     return true;
 }
 
-void Connection::complete_established() {
-    state_ = ConnState::Established;
+void Connection::cancel_establish_timer() {
     if (establish_timer_ != kInvalidTimerId) {
         reactor_.cancel(establish_timer_);
         establish_timer_ = kInvalidTimerId;
     }
+}
+
+void Connection::complete_established() {
+    state_ = ConnState::Established;
+    cancel_establish_timer();
     LOG_DEBUG("connection", "Peer " << remote_id_.short_hex() << " established ("
               << (role_ == ConnRole::Inbound ? "inbound" : "outbound")
               << (is_secure() ? ", encrypted)" : ", plaintext)"));
