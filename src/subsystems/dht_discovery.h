@@ -39,6 +39,13 @@ public:
         std::vector<Address>         bootstrap_nodes;       ///< empty → default internet nodes
         std::chrono::milliseconds search_interval{5000};
         std::chrono::milliseconds announce_interval{30000};
+
+        /// Probe a STUN server once at startup to learn our public IP and seed the
+        /// DHT node id per BEP 42. Without it we still converge via the slower
+        /// in-DHT "ip" voting, but bootstrap under the wrong node id until then.
+        bool                      discover_external_ip = true;
+        std::vector<Address>      stun_servers;          ///< empty → built-in public defaults
+        std::chrono::milliseconds stun_timeout{3000};
     };
 
     explicit DhtDiscovery(Config config);
@@ -52,11 +59,16 @@ public:
     uint16_t dht_port() const;
     InfoHash discovery_hash() const { return hash_; }
 
+    /// Our external (public) IP currently used to derive the DHT node id, learned
+    /// via STUN at startup or in-DHT "ip" voting. "" if not yet known / random.
+    std::string external_address() const;
+
     /// Map an application key to a stable 20-byte discovery hash (SHA-1).
     static InfoHash hash_for_key(const std::string& key);
 
 private:
     void loop();
+    void probe_external_ip();  ///< STUN → dht_->set_external_ip (runs on the loop thread)
     void on_peers(const std::vector<Address>& peers, const InfoHash& info_hash);
 
     Config                     config_;

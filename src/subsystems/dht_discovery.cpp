@@ -1,4 +1,5 @@
 #include "subsystems/dht_discovery.h"
+#include "nat/stun.h"
 #include "sha1.h"
 #include "util/logger.h"
 
@@ -10,6 +11,12 @@ int hex_val(char c) {
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return 0;
+}
+
+// A couple of well-known public STUN servers, tried in order. Kept short so a
+// total-outage startup costs at most a few timeouts before we fall back to voting.
+std::vector<Address> default_stun_servers() {
+    return { Address("stun.l.google.com", 19302), Address("stun1.l.google.com", 19302) };
 }
 } // namespace
 
@@ -59,7 +66,33 @@ bool DhtDiscovery::is_running() const { return running_.load() && dht_ && dht_->
 
 uint16_t DhtDiscovery::dht_port() const { return dht_ ? static_cast<uint16_t>(dht_->get_port()) : 0; }
 
+std::string DhtDiscovery::external_address() const { return dht_ ? dht_->get_external_address() : ""; }
+
+// Discover our reflexive (public) address via STUN and feed it to the DHT so the
+// node id is BEP-42-correct from the start instead of waiting for "ip" voting.
+// Runs on the loop thread; stop() joins that thread before resetting dht_, so the
+// dht_ access here can never touch a freed client.
+void DhtDiscovery::probe_external_ip() {
+    std::vector<Address> servers = config_.stun_servers.empty() ? default_stun_servers()
+                                                                : config_.stun_servers;
+    StunClient stun;
+    const int timeout = static_cast<int>(config_.stun_timeout.count());
+    for (const Address& s : servers) {
+        if (!running_.load()) return;  // stopping; don't keep probing
+        StunResult r = stun.binding_request(s.ip, s.port, timeout);
+        if (r.success && r.mapped_address) {
+            const std::string& ip = r.mapped_address->address;
+            LOG_INFO("dht-discovery", "STUN reflexive address " << ip << " (via " << s.ip << ":" << s.port << ")");
+            if (running_.load() && dht_) dht_->set_external_ip(ip);  // ignored if non-public / wrong family
+            return;
+        }
+    }
+    LOG_DEBUG("dht-discovery", "STUN external-IP discovery failed; relying on DHT ip voting");
+}
+
 void DhtDiscovery::loop() {
+    if (config_.discover_external_ip) probe_external_ip();
+
     auto last_announce = std::chrono::steady_clock::now() - config_.announce_interval;
     while (running_.load()) {
         const auto now = std::chrono::steady_clock::now();

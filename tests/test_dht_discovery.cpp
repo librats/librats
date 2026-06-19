@@ -2,9 +2,13 @@
 
 #include "node/node.h"
 #include "subsystems/dht_discovery.h"
+#include "nat/stun.h"
+#include "core/socket.h"
 
+#include <atomic>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <thread>
 
 using namespace librats;
@@ -21,6 +25,56 @@ bool wait_for(Pred pred, std::chrono::milliseconds timeout) {
     }
     return pred();
 }
+
+// A loopback STUN server that always reports a fixed (public) reflexive address,
+// so we can exercise the STUN → DHT node-id seeding path entirely offline.
+class FixedStunServer {
+public:
+    explicit FixedStunServer(std::string public_ip) : public_ip_(std::move(public_ip)) {}
+    ~FixedStunServer() { stop(); }
+
+    bool start() {
+        socket_ = create_udp_socket(0);
+        if (!is_valid_socket(socket_)) return false;
+        port_ = get_bound_port(socket_);
+        running_ = true;
+        thread_ = std::thread(&FixedStunServer::run, this);
+        return true;
+    }
+
+    void stop() {
+        running_ = false;
+        if (is_valid_socket(socket_)) { close_socket(socket_); socket_ = INVALID_SOCKET_VALUE; }
+        if (thread_.joinable()) thread_.join();
+    }
+
+    uint16_t port() const { return static_cast<uint16_t>(port_); }
+
+private:
+    void run() {
+        while (running_) {
+            Address sender;
+            auto data = receive_udp_data(socket_, 1500, sender, 100);
+            if (data.empty()) continue;
+            auto req = StunMessage::deserialize(data);
+            if (!req || !req->is_request()) continue;
+
+            StunMessage resp;
+            resp.type = StunMessageType::BindingSuccessResponse;
+            resp.transaction_id = req->transaction_id;
+            resp.add_xor_mapped_address(StunMappedAddress(StunAddressFamily::IPv4, public_ip_, 41234));
+            resp.add_software("FixedStunServer/1.0");
+            auto out = resp.serialize();
+            send_udp_data(socket_, out, sender.ip, sender.port);
+        }
+    }
+
+    std::string       public_ip_;
+    std::atomic<bool> running_{false};
+    socket_t          socket_ = INVALID_SOCKET_VALUE;
+    int               port_ = 0;
+    std::thread       thread_;
+};
 
 NodeConfig listening_config() {
     NodeConfig c; c.bind_address = "127.0.0.1"; c.security = NodeConfig::Security::Noise; return c;
@@ -53,6 +107,48 @@ TEST(DhtDiscoveryTest, StartsAndStopsCleanly) {
 
     ASSERT_TRUE(node.start());
     EXPECT_TRUE(wait_for([&] { return d->is_running() && d->dht_port() != 0; }, 5s));
+    node.stop();
+    EXPECT_FALSE(d->is_running());
+}
+
+// STUN seeds the DHT node id: a successful binding response with a public address
+// is fed to the DHT (BEP 42), so external_address() reflects it.
+TEST(DhtDiscoveryTest, SeedsNodeIdFromStun) {
+    FixedStunServer stun("1.2.3.4");
+    ASSERT_TRUE(stun.start());
+
+    Node node(listening_config());
+    auto cfg = disc_config({});  // offline, no bootstrap
+    cfg.discover_external_ip = true;
+    cfg.stun_servers = { Address("127.0.0.1", stun.port()) };
+    cfg.stun_timeout = 2000ms;
+    auto disc = std::make_unique<DhtDiscovery>(cfg);
+    DhtDiscovery* d = disc.get();
+    node.add_subsystem(std::move(disc));
+
+    ASSERT_TRUE(node.start());
+    EXPECT_TRUE(wait_for([&] { return d->external_address() == "1.2.3.4"; }, 10s))
+        << "external addr: '" << d->external_address() << "'";
+
+    node.stop();
+    stun.stop();
+}
+
+// When no STUN server answers, discovery still starts/stops cleanly and simply
+// leaves the node id random (the in-DHT voting fallback is unavailable offline).
+TEST(DhtDiscoveryTest, StartsCleanlyWhenStunUnreachable) {
+    Node node(listening_config());
+    auto cfg = disc_config({});
+    cfg.discover_external_ip = true;
+    cfg.stun_servers = { Address("127.0.0.1", 1) };  // nothing is listening there
+    cfg.stun_timeout = 300ms;
+    auto disc = std::make_unique<DhtDiscovery>(cfg);
+    DhtDiscovery* d = disc.get();
+    node.add_subsystem(std::move(disc));
+
+    ASSERT_TRUE(node.start());
+    EXPECT_TRUE(wait_for([&] { return d->is_running() && d->dht_port() != 0; }, 5s));
+    EXPECT_EQ(d->external_address(), "");
     node.stop();
     EXPECT_FALSE(d->is_running());
 }
