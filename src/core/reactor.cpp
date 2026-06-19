@@ -35,10 +35,16 @@ void Reactor::stop() {
 // ── Work submission ─────────────────────────────────────────────────────────
 
 bool Reactor::on_reactor_thread() const noexcept {
-    return std::this_thread::get_id() == thread_id_;
+    return std::this_thread::get_id() == thread_id_.load(std::memory_order_acquire);
 }
 
 void Reactor::post(Task task) {
+    // After stop() the loop has exited and (apart from the brief stopping window
+    // caught by the final drain in run()) the task will never run. Enqueue anyway
+    // so its captures are released at destruction, but flag the dropped work.
+    if (!running_.load(std::memory_order_acquire))
+        LOG_DEBUG("reactor", "Reactor " << static_cast<int>(index_)
+                  << " post() after stop; task may not run");
     tasks_.push(std::move(task));
     wakeup_.signal();
 }
@@ -126,6 +132,11 @@ void Reactor::run() {
         process_pending_close();
     }
 
+    // Graceful drain: run whatever was queued before/around stop() so in-flight
+    // sends flush and explicit closes settle, then tear everything down. (post()
+    // may still race in after this; such tasks are dropped — see post().)
+    drain_tasks(task_batch);
+    process_pending_close();
     shutdown_connections();
     LOG_INFO("reactor", "Reactor " << static_cast<int>(index_) << " stopped");
 }

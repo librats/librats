@@ -135,7 +135,9 @@ private:
     std::atomic<size_t> conn_count_{0};
     std::atomic<bool>   running_{false};
     std::thread         thread_;
-    std::thread::id     thread_id_;
+    // Published with release by the reactor thread in run(), read with acquire by
+    // any thread in on_reactor_thread(); plain access would be a data race.
+    std::atomic<std::thread::id> thread_id_{};
 };
 
 } // namespace librats
