@@ -328,9 +328,11 @@ if(RATS_STORAGE)
 endif()
 
 if(RATS_BINDINGS)
-    list(APPEND LIBRARY_SOURCES 
+    list(APPEND LIBRARY_SOURCES
         src/librats_c.cpp
         src/librats_c.h
+        src/bindings/rats_node.h
+        src/bindings/rats_node.cpp
     )
 endif()
 
@@ -568,8 +570,9 @@ if(RATS_BUILD_TESTS)
     endif()
 
     if(RATS_BINDINGS)
-        list(APPEND TEST_SOURCES 
+        list(APPEND TEST_SOURCES
             tests/test_librats_c_api.cpp
+            tests/test_node_capi.cpp
         )
     endif()
     
