@@ -293,6 +293,91 @@ bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr
     return false;
 }
 
+// ── Non-blocking connect (reactor-driven) ───────────────────────────────────
+
+static socket_t tcp_connect_start_family(int family, const std::string& resolved_ip, int port) {
+    socket_t s = socket(family, SOCK_STREAM, 0);
+    if (s == INVALID_SOCKET_VALUE) return INVALID_SOCKET_VALUE;
+
+    if (!set_socket_nonblocking(s)) {
+        close_socket(s);
+        return INVALID_SOCKET_VALUE;
+    }
+
+    sockaddr_storage ss;
+    memset(&ss, 0, sizeof(ss));
+    socklen_t addr_len = 0;
+
+    if (family == AF_INET) {
+        auto* a = reinterpret_cast<sockaddr_in*>(&ss);
+        a->sin_family = AF_INET;
+        a->sin_port = htons(static_cast<uint16_t>(port));
+        if (inet_pton(AF_INET, resolved_ip.c_str(), &a->sin_addr) <= 0) {
+            close_socket(s);
+            return INVALID_SOCKET_VALUE;
+        }
+        addr_len = sizeof(sockaddr_in);
+    } else {
+        auto* a = reinterpret_cast<sockaddr_in6*>(&ss);
+        a->sin6_family = AF_INET6;
+        a->sin6_port = htons(static_cast<uint16_t>(port));
+        if (inet_pton(AF_INET6, resolved_ip.c_str(), &a->sin6_addr) <= 0) {
+            close_socket(s);
+            return INVALID_SOCKET_VALUE;
+        }
+        addr_len = sizeof(sockaddr_in6);
+    }
+
+    int r = connect(s, reinterpret_cast<sockaddr*>(&ss), addr_len);
+    if (r == 0) {
+        return s;  // Connected synchronously (common on loopback).
+    }
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    if (e == WSAEWOULDBLOCK || e == WSAEINPROGRESS) return s;  // In progress.
+#else
+    if (errno == EINPROGRESS) return s;  // In progress.
+#endif
+    LOG_SOCKET_DEBUG("Non-blocking connect to " << resolved_ip << ":" << port << " failed to start");
+    close_socket(s);
+    return INVALID_SOCKET_VALUE;
+}
+
+socket_t tcp_connect_start(const std::string& host, int port) {
+    if (!validate_port(port)) return INVALID_SOCKET_VALUE;
+
+    // Prefer IPv6, fall back to IPv4 — same precedence as create_tcp_client().
+    // Note: fallback happens at *resolution* time; a v6 address that resolves
+    // but fails asynchronously surfaces later as ConnectFailed (happy-eyeballs
+    // sequencing belongs in the higher-level dialer).
+    std::string ip6 = network_utils::resolve_hostname_v6(host);
+    if (!ip6.empty()) {
+        socket_t s = tcp_connect_start_family(AF_INET6, ip6, port);
+        if (is_valid_socket(s)) return s;
+    }
+
+    std::string ip4 = network_utils::resolve_hostname(host);
+    if (!ip4.empty()) {
+        socket_t s = tcp_connect_start_family(AF_INET, ip4, port);
+        if (is_valid_socket(s)) return s;
+    }
+
+    return INVALID_SOCKET_VALUE;
+}
+
+int tcp_connect_result(socket_t socket) {
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (getsockopt(socket, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&err), &len) != 0) {
+#ifdef _WIN32
+        return WSAGetLastError();
+#else
+        return errno;
+#endif
+    }
+    return err;  // 0 == connected
+}
+
 // ── TCP Socket Functions ────────────────────────────────────────────────────
 
 socket_t create_tcp_client(const std::string& host, int port, int timeout_ms) {

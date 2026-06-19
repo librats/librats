@@ -181,6 +181,20 @@ set(LIBRARY_SOURCES
     src/io_poller.h
     src/io_poller.cpp
 
+# Core v2 (shared-nothing reactor redesign) — transport layer
+    src/core/bytes.h
+    src/core/types.h
+    src/core/types.cpp
+    src/core/mpsc_queue.h
+    src/core/timer_queue.h
+    src/core/notifier.h
+    src/core/connection.h
+    src/core/connection.cpp
+    src/core/reactor.h
+    src/core/reactor.cpp
+    src/net/frame.h
+    src/net/frame.cpp
+
 # Crypto algorithms including Noise Protocol
     src/crypto/curve25519.c
     src/crypto/curve25519.h
@@ -477,6 +491,9 @@ if(RATS_BUILD_TESTS)
 # Buffer utilities for file transfer and bittorrent
         tests/test_receive_buffer.cpp
         tests/test_chained_send_buffer.cpp
+# Core v2 redesign — wire framing + reactor transport
+        tests/test_frame.cpp
+        tests/test_reactor.cpp
     )
 
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled

@@ -182,9 +182,10 @@ docs/api/
 *.bak
 *.orig
 
-# Core dumps
-core
+# Core dumps (scoped so they don't shadow the src/core/ source directory)
+/core
 *.core
+core.[0-9]*
 
 # GDB
 .gdb_history

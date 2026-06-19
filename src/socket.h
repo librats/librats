@@ -78,6 +78,28 @@ void cleanup_socket_library();
 socket_t create_tcp_client(const std::string& host, int port, int timeout_ms = 0);
 
 /**
+ * Begin a non-blocking TCP connect (for use with an IOPoller / reactor).
+ *
+ * Creates a non-blocking socket and initiates connect() without waiting. The
+ * returned socket's connection is typically still in progress: register it for
+ * writable, and once it signals writable call tcp_connect_result() to learn the
+ * outcome. Prefers IPv6, falls back to IPv4 at resolution time.
+ *
+ * @param host The hostname or IP address to connect to
+ * @param port The port number to connect to
+ * @return A non-blocking socket with a connect in progress (or completed), or
+ *         INVALID_SOCKET_VALUE if the socket could not be created/resolved.
+ */
+socket_t tcp_connect_start(const std::string& host, int port);
+
+/**
+ * Report the result of a non-blocking connect once the socket is writable.
+ * @param socket The socket previously returned by tcp_connect_start()
+ * @return 0 if the connection succeeded, otherwise the socket error code.
+ */
+int tcp_connect_result(socket_t socket);
+
+/**
  * Create a TCP server socket and bind to a port
  * @param port The port number to bind to
  * @param backlog The maximum number of pending connections
