@@ -276,8 +276,8 @@ TrackerResponse HttpTrackerClient::parse_response(const std::vector<uint8_t>& da
     return response;
 }
 
-std::vector<Peer> HttpTrackerClient::parse_compact_peers(const std::string& peer_data) {
-    std::vector<Peer> peers;
+std::vector<Address> HttpTrackerClient::parse_compact_peers(const std::string& peer_data) {
+    std::vector<Address> peers;
     
     // Each peer is 6 bytes: 4 bytes IP + 2 bytes port
     if (peer_data.length() % 6 != 0) {
@@ -305,8 +305,8 @@ std::vector<Peer> HttpTrackerClient::parse_compact_peers(const std::string& peer
     return peers;
 }
 
-std::vector<Peer> HttpTrackerClient::parse_dict_peers(const BencodeValue& peers_list) {
-    std::vector<Peer> peers;
+std::vector<Address> HttpTrackerClient::parse_dict_peers(const BencodeValue& peers_list) {
+    std::vector<Address> peers;
     
     for (size_t i = 0; i < peers_list.size(); ++i) {
         const auto& peer_dict = peers_list[i];
@@ -678,7 +678,7 @@ std::vector<uint8_t> UdpTrackerClient::send_request(const std::vector<uint8_t>& 
     }
     
     // Receive response with timeout
-    Peer sender;
+    Address sender;
     std::vector<uint8_t> response = receive_udp_data(socket_, 2048, sender, timeout_ms);
     
     return response;
@@ -720,7 +720,7 @@ std::vector<uint8_t> UdpTrackerClient::build_announce_request(const TrackerReque
     std::memcpy(announce_req.data() + offset, request.info_hash.data(), 20);
     offset += 20;
     
-    // Peer ID (20 bytes)
+    // Address ID (20 bytes)
     std::memcpy(announce_req.data() + offset, request.peer_id.data(), 20);
     offset += 20;
     

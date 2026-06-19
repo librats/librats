@@ -13,7 +13,7 @@
 #include "core/bytes.h"
 #include "net/frame.h"   // MessageType
 #include "net/peer_id.h"
-#include "net/address.h"
+#include "core/address.h"
 
 #include <cstdint>
 #include <functional>

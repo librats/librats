@@ -1057,7 +1057,7 @@ std::optional<StunMessage> StunClient::send_request(socket_t socket,
         
         // Wait for response with current RTO
         int wait_time = (std::min)(rto, timeout_ms - total_time);
-        Peer sender;
+        Address sender;
         
         auto response_data = receive_udp_data(socket, STUN_MAX_MESSAGE_SIZE, sender, wait_time);
         

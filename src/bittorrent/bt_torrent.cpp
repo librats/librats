@@ -498,7 +498,7 @@ void Torrent::add_connection(std::shared_ptr<BtPeerConnection> connection) {
 
     // Extended callback (rats-search compatibility)
     if (on_peer_connected_ext_) {
-        Peer peer_address(connection->ip(), connection->port());
+        Address peer_address(connection->ip(), connection->port());
         on_peer_connected_ext_(peer_address);
     }
 }
@@ -818,7 +818,7 @@ void Torrent::on_peer_disconnected(BtPeerConnection* peer) {
     
     // Extended callback (rats-search compatibility)
     if (on_peer_disconnected_ext_) {
-        Peer p(peer->ip(), peer->port());
+        Address p(peer->ip(), peer->port());
         on_peer_disconnected_ext_(p);
     }
     
@@ -1748,7 +1748,7 @@ TorrentResumeData Torrent::generate_resume_data() const {
     data.download_limit = static_cast<int64_t>(config_.download_limit);
     data.upload_limit = static_cast<int64_t>(config_.upload_limit);
     
-    // Peer cache (save connected peers for quick reconnection)
+    // Address cache (save connected peers for quick reconnection)
     for (const auto& conn : connections_) {
         if (conn->is_connected()) {
             data.peers.emplace_back(conn->ip(), conn->port());

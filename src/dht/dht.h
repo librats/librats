@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/socket.h"
+#include "core/address.h"
 #include "dht/krpc.h"
 #include <string>
 #include <vector>
@@ -16,16 +17,9 @@
 #include <random>
 #include <condition_variable>
 
-// Hash specialization for Peer and NodeId (must be defined before use in unordered_map/set)
+// Hash specialization for NodeId (must be defined before use in unordered_map/set).
+// hash<librats::Address> lives in core/address.h.
 namespace std {
-    template<>
-    struct hash<librats::Peer> {
-        std::size_t operator()(const librats::Peer& peer) const noexcept {
-            std::hash<std::string> hasher;
-            return hasher(peer.ip + ":" + std::to_string(peer.port));
-        }
-    };
-    
     template<>
     struct hash<array<uint8_t, 20>> {
         std::size_t operator()(const array<uint8_t, 20>& id) const noexcept {
@@ -68,7 +62,7 @@ namespace SearchNodeFlags {
  */
 struct DhtNode {
     NodeId id;
-    Peer peer;
+    Address peer;
     std::chrono::steady_clock::time_point last_seen;
     
     // Round-trip time in milliseconds (0xffff = unknown, lower is better)
@@ -78,7 +72,7 @@ struct DhtNode {
     uint8_t fail_count = 0xff;
     
     DhtNode() : id(), last_seen(std::chrono::steady_clock::now()) {}
-    DhtNode(const NodeId& id, const Peer& peer)
+    DhtNode(const NodeId& id, const Address& peer)
         : id(id), peer(peer), last_seen(std::chrono::steady_clock::now()) {}
     
     // Has this node ever responded to us?
@@ -126,7 +120,7 @@ struct DhtNode {
 /**
  * Peer discovery callback
  */
-using PeerDiscoveryCallback = std::function<void(const std::vector<Peer>& peers, const InfoHash& info_hash)>;
+using PeerDiscoveryCallback = std::function<void(const std::vector<Address>& peers, const InfoHash& info_hash)>;
 
 #ifdef RATS_SEARCH_FEATURES
 /**
@@ -135,7 +129,7 @@ using PeerDiscoveryCallback = std::function<void(const std::vector<Peer>& peers,
  * @param info_hash The info hash being announced
  * @param peer The peer that is announcing (with the port they specified)
  */
-using SpiderAnnounceCallback = std::function<void(const InfoHash& info_hash, const Peer& peer)>;
+using SpiderAnnounceCallback = std::function<void(const InfoHash& info_hash, const Address& peer)>;
 #endif // RATS_SEARCH_FEATURES
 
 /**
@@ -144,7 +138,7 @@ using SpiderAnnounceCallback = std::function<void(const InfoHash& info_hash, con
  */
 struct DeferredCallbacks {
     std::vector<PeerDiscoveryCallback> callbacks;
-    std::vector<Peer> peers;
+    std::vector<Address> peers;
     InfoHash info_hash;
     bool should_invoke = false;
     
@@ -199,7 +193,7 @@ public:
      * @param bootstrap_nodes Vector of bootstrap nodes
      * @return true if successful, false otherwise
      */
-    bool bootstrap(const std::vector<Peer>& bootstrap_nodes);
+    bool bootstrap(const std::vector<Address>& bootstrap_nodes);
     
     /**
      * Find peers for a specific info hash
@@ -379,7 +373,7 @@ public:
      * IPv4 and IPv6 (nodes without an AAAA record are simply skipped on IPv6).
      * @return Vector of bootstrap nodes
      */
-    static std::vector<Peer> get_default_bootstrap_nodes();
+    static std::vector<Address> get_default_bootstrap_nodes();
 
     /**
      * Address family this DHT node operates on.
@@ -471,7 +465,7 @@ private:
         
         // Iterative search state - search_nodes is sorted by distance to info_hash (closest first)
         std::vector<DhtNode> search_nodes;
-        std::vector<Peer> found_peers;          // found peers for this search
+        std::vector<Address> found_peers;          // found peers for this search
         // Single map tracking node states using SearchNodeFlags bitfield
         // A node is "known" if it exists in this map (any flags set or value 0)
         std::unordered_map<NodeId, uint8_t> node_states;
@@ -501,11 +495,11 @@ private:
     struct SearchTransaction {
         std::string info_hash_hex;
         NodeId queried_node_id;
-        Peer queried_endpoint;          // endpoint we actually sent the query to (anti-spoofing)
+        Address queried_endpoint;          // endpoint we actually sent the query to (anti-spoofing)
         std::chrono::steady_clock::time_point sent_at;
 
         SearchTransaction() = default;
-        SearchTransaction(const std::string& hash, const NodeId& id, const Peer& endpoint)
+        SearchTransaction(const std::string& hash, const NodeId& id, const Address& endpoint)
             : info_hash_hex(hash), queried_node_id(id), queried_endpoint(endpoint),
               sent_at(std::chrono::steady_clock::now()) {}
     };
@@ -513,10 +507,10 @@ private:
     
     // Peer announcement storage (BEP 5 compliant)
     struct AnnouncedPeer {
-        Peer peer;
+        Address peer;
         std::chrono::steady_clock::time_point announced_at;
         
-        AnnouncedPeer(const Peer& p) 
+        AnnouncedPeer(const Address& p) 
             : peer(p), announced_at(std::chrono::steady_clock::now()) {}
     };
     // Map from info_hash (as hex string) to list of announced peers
@@ -592,25 +586,25 @@ private:
     // Helper functions
     void network_loop();
     void maintenance_loop();
-    void handle_message(const std::vector<uint8_t>& data, const Peer& sender);
+    void handle_message(const std::vector<uint8_t>& data, const Address& sender);
     
 
     
     // KRPC protocol handlers  
-    void handle_krpc_message(const KrpcMessage& message, const Peer& sender);
-    void handle_krpc_ping(const KrpcMessage& message, const Peer& sender);
-    void handle_krpc_find_node(const KrpcMessage& message, const Peer& sender);
-    void handle_krpc_get_peers(const KrpcMessage& message, const Peer& sender);
-    void handle_krpc_announce_peer(const KrpcMessage& message, const Peer& sender);
-    void handle_krpc_response(const KrpcMessage& message, const Peer& sender);
-    void handle_krpc_error(const KrpcMessage& message, const Peer& sender);
+    void handle_krpc_message(const KrpcMessage& message, const Address& sender);
+    void handle_krpc_ping(const KrpcMessage& message, const Address& sender);
+    void handle_krpc_find_node(const KrpcMessage& message, const Address& sender);
+    void handle_krpc_get_peers(const KrpcMessage& message, const Address& sender);
+    void handle_krpc_announce_peer(const KrpcMessage& message, const Address& sender);
+    void handle_krpc_response(const KrpcMessage& message, const Address& sender);
+    void handle_krpc_error(const KrpcMessage& message, const Address& sender);
     
     // KRPC protocol sending
-    bool send_krpc_message(const KrpcMessage& message, const Peer& peer);
-    void send_krpc_ping(const Peer& peer);
-    void send_krpc_find_node(const Peer& peer, const NodeId& target);
-    void send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash);
-    void send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token, bool implied_port = false);
+    bool send_krpc_message(const KrpcMessage& message, const Address& peer);
+    void send_krpc_ping(const Address& peer);
+    void send_krpc_find_node(const Address& peer, const NodeId& target);
+    void send_krpc_get_peers(const Address& peer, const InfoHash& info_hash);
+    void send_krpc_announce_peer(const Address& peer, const InfoHash& info_hash, uint16_t port, const std::string& token, bool implied_port = false);
     
     void add_node(const DhtNode& node, bool confirmed = true, bool no_verify = false);
     std::vector<DhtNode> find_closest_nodes(const NodeId& target, size_t count = K_BUCKET_SIZE);
@@ -621,7 +615,7 @@ private:
     // BEP 42 internals
     static bool is_public_address(const std::string& ip);
     void rebuild_routing_table_unlocked();  // re-bucket all nodes after node_id_ changed (routing_table_mutex_ held)
-    void maybe_update_external_ip(const std::string& reported_ip, const Peer& responder);
+    void maybe_update_external_ip(const std::string& reported_ip, const Address& responder);
     NodeId xor_distance(const NodeId& a, const NodeId& b);
     bool is_closer(const NodeId& a, const NodeId& b, const NodeId& target);
     
@@ -637,11 +631,11 @@ private:
     
     // BEP 5 write tokens: bound to the querier address + info_hash and authenticated with a rotating
     // secret. generate_token is called when answering get_peers; verify_token gates announce_peer.
-    std::string generate_token(const Peer& peer, const InfoHash& info_hash);
-    bool verify_token(const Peer& peer, const InfoHash& info_hash, const std::string& token);
+    std::string generate_token(const Address& peer, const InfoHash& info_hash);
+    bool verify_token(const Address& peer, const InfoHash& info_hash, const std::string& token);
     // Computes SHA1(secret || peer.ip || info_hash) as a hex digest. Port is intentionally excluded
     // (a NAT may present a different source port on the subsequent announce).
-    std::string compute_token_with_secret(const Peer& peer, const InfoHash& info_hash,
+    std::string compute_token_with_secret(const Address& peer, const InfoHash& info_hash,
                                           const std::array<uint8_t, 16>& secret) const;
     // Rotates the token secret if older than TOKEN_SECRET_ROTATION_MINUTES. Caller holds token_secret_mutex_.
     void maybe_rotate_token_secret_unlocked();
@@ -656,22 +650,22 @@ private:
     void cleanup_stale_searches();
     void cleanup_timed_out_search_requests();
     void cleanup_search_node_states();
-    void handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers);
-    void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes);
-    void handle_get_peers_empty_response(const std::string& transaction_id, const Peer& responder);
+    void handle_get_peers_response_for_search(const std::string& transaction_id, const Address& responder, const std::vector<Address>& peers);
+    void handle_get_peers_response_with_nodes(const std::string& transaction_id, const Address& responder, const std::vector<KrpcNode>& nodes);
+    void handle_get_peers_empty_response(const std::string& transaction_id, const Address& responder);
     void save_write_token(PendingSearch& search, const NodeId& node_id, const std::string& token);
     bool add_search_requests(PendingSearch& search, DeferredCallbacks& deferred);
     void add_node_to_search(PendingSearch& search, const DhtNode& node);
     void send_announce_to_closest_nodes(PendingSearch& search);
     
     // Peer announcement storage management
-    void store_announced_peer(const InfoHash& info_hash, const Peer& peer);
-    std::vector<Peer> get_announced_peers(const InfoHash& info_hash);
+    void store_announced_peer(const InfoHash& info_hash, const Address& peer);
+    std::vector<Address> get_announced_peers(const InfoHash& info_hash);
     void cleanup_stale_announced_peers();
     
     // Ping-before-replace eviction management
     void initiate_ping_verification(const DhtNode& candidate_node, const DhtNode& old_node, int bucket_index);
-    void handle_ping_verification_response(const std::string& transaction_id, const NodeId& responder_id, const Peer& responder);
+    void handle_ping_verification_response(const std::string& transaction_id, const NodeId& responder_id, const Address& responder);
     void cleanup_stale_ping_verifications();
     bool perform_replacement(const DhtNode& candidate_node, const DhtNode& node_to_replace, int bucket_index);
     

@@ -9,9 +9,8 @@
  * reactor directly — no PeerDirectory lookup on the reply path. info() does
  * consult the directory, on demand, for metadata.
  *
- * (Named PeerHandle rather than Peer because the legacy socket layer still
- * defines a `Peer` UDP-endpoint struct; the name will be reclaimed when that is
- * renamed during the final cleanup.)
+ * (Named PeerHandle rather than Peer for historical reasons; the legacy `Peer`
+ * UDP-endpoint struct has been removed in favour of the unified Address type.)
  */
 
 #include "core/bytes.h"

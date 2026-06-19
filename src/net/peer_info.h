@@ -10,7 +10,7 @@
  */
 
 #include "core/types.h"   // ConnRole
-#include "net/address.h"
+#include "core/address.h"
 #include "net/peer_id.h"
 
 #include <vector>

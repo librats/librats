@@ -26,7 +26,7 @@ NodeConfig listening_config() {
     NodeConfig c; c.bind_address = "127.0.0.1"; c.security = NodeConfig::Security::Noise; return c;
 }
 
-DhtDiscovery::Config disc_config(const std::vector<Peer>& bootstrap) {
+DhtDiscovery::Config disc_config(const std::vector<Address>& bootstrap) {
     DhtDiscovery::Config c;
     c.discovery_key = "librats-test-net";
     c.bind_address = "127.0.0.1";
@@ -70,7 +70,7 @@ TEST(DhtDiscoveryTest, TwoNodesDiscoverViaDht) {
 
     // b bootstraps from a's DHT node.
     Node b(listening_config());
-    std::vector<Peer> bootstrap{ Peer("127.0.0.1", da->dht_port()) };
+    std::vector<Address> bootstrap{ Address("127.0.0.1", da->dht_port()) };
     b.add_subsystem(std::make_unique<DhtDiscovery>(disc_config(bootstrap)));
     ASSERT_TRUE(b.start());
 

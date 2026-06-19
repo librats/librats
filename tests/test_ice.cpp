@@ -753,7 +753,7 @@ public:
 private:
     void run() {
         while (running_) {
-            Peer sender;
+            Address sender;
             auto data = receive_udp_data(socket_, 1500, sender, 100);
             
             if (data.empty()) continue;

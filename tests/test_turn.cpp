@@ -351,7 +351,7 @@ public:
 private:
     void run() {
         while (running_) {
-            Peer sender;
+            Address sender;
             auto data = receive_udp_data(socket_, 1500, sender, 100);
             
             if (data.empty()) continue;
@@ -384,7 +384,7 @@ private:
         }
     }
     
-    void handle_allocate(const StunMessage& request, StunMessage& response, const Peer& sender) {
+    void handle_allocate(const StunMessage& request, StunMessage& response, const Address& sender) {
         // Check for credentials
         const auto* username_attr = request.find_attribute(StunAttributeType::Username);
         

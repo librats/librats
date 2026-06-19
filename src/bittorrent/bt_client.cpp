@@ -737,7 +737,7 @@ size_t BtClient::total_peers() const {
 void BtClient::add_dht_node(const std::string& host, uint16_t port) {
     DhtClient* dht = external_dht_ ? external_dht_ : dht_client_.get();
     if (dht) {
-        std::vector<Peer> nodes = {{host, port}};
+        std::vector<Address> nodes = {{host, port}};
         dht->bootstrap(nodes);
     }
 }
@@ -763,7 +763,7 @@ void BtClient::announce_to_dht(const BtInfoHash& info_hash) {
     uint16_t port = network_manager_ ? network_manager_->listen_port() : config_.listen_port;
     
     dht->announce_peer(dht_hash, port, 
-        [this, info_hash](const std::vector<Peer>& peers, const InfoHash&) {
+        [this, info_hash](const std::vector<Address>& peers, const InfoHash&) {
             on_dht_peers_found(peers, info_hash);
         }
     );
@@ -779,7 +779,7 @@ void BtClient::find_peers_dht(const BtInfoHash& info_hash) {
     std::copy(info_hash.begin(), info_hash.end(), dht_hash.begin());
     
     dht->find_peers(dht_hash, 
-        [this, info_hash](const std::vector<Peer>& peers, const InfoHash&) {
+        [this, info_hash](const std::vector<Address>& peers, const InfoHash&) {
             on_dht_peers_found(peers, info_hash);
         }
     );
@@ -788,7 +788,7 @@ void BtClient::find_peers_dht(const BtInfoHash& info_hash) {
               info_hash_to_hex(info_hash).substr(0, 8) + "...");
 }
 
-void BtClient::on_dht_peers_found(const std::vector<Peer>& peers, const InfoHash& info_hash) {
+void BtClient::on_dht_peers_found(const std::vector<Address>& peers, const InfoHash& info_hash) {
     if (peers.empty()) {
         return;
     }

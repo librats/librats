@@ -179,7 +179,7 @@ bool NatPmpClient::ensure_gateway() {
         for (int timeout : kRetryTimeouts) {
             if (stop_requested_.load()) { close_socket(sock); return false; }
             if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) < 0) break;
-            Peer from;
+            Address from;
             auto resp = receive_udp_data(sock, 64, from, timeout, wakeup_.fd());
             if (resp.size() >= 12 && from.ip == gw && resp[0] == NATPMP_VERSION &&
                 resp[1] == (OP_EXTERNAL_IP | OP_RESPONSE_BIT)) {
@@ -229,7 +229,7 @@ bool NatPmpClient::request_external_ip(socket_t sock) {
     for (int timeout : kRetryTimeouts) {
         if (stop_requested_.load()) return false;
         if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) < 0) return false;
-        Peer from;
+        Address from;
         auto resp = receive_udp_data(sock, 64, from, timeout, wakeup_.fd());
         if (resp.size() >= 12 && from.ip == gw && resp[0] == NATPMP_VERSION &&
             resp[1] == (OP_EXTERNAL_IP | OP_RESPONSE_BIT) && get_u16(&resp[2]) == 0) {
@@ -291,7 +291,7 @@ bool NatPmpClient::send_map_request(socket_t sock, Mapping& m, bool remove) {
         if (stop_requested_.load()) return false;
         if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) < 0) return false;
 
-        Peer from;
+        Address from;
         auto resp = receive_udp_data(sock, 64, from, timeout, wakeup_.fd());
         if (resp.size() < 16 || from.ip != gw) continue;
         if (resp[0] != NATPMP_VERSION || resp[1] != expected_opcode) continue;

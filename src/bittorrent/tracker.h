@@ -35,7 +35,7 @@ struct TrackerResponse {
     uint32_t complete;           // Number of seeders
     uint32_t incomplete;         // Number of leechers
     uint32_t downloaded;         // Number of times downloaded (scrape only)
-    std::vector<Peer> peers;     // Peer list
+    std::vector<Address> peers;     // Peer list
     bool success;
     
     TrackerResponse() 
@@ -119,10 +119,10 @@ private:
     TrackerResponse parse_response(const std::vector<uint8_t>& data);
     
     // Parse compact peer list (BEP 23)
-    std::vector<Peer> parse_compact_peers(const std::string& peer_data);
+    std::vector<Address> parse_compact_peers(const std::string& peer_data);
     
     // Parse dictionary peer list
-    std::vector<Peer> parse_dict_peers(const BencodeValue& peers_list);
+    std::vector<Address> parse_dict_peers(const BencodeValue& peers_list);
     
     // HTTP GET request
     std::vector<uint8_t> http_get(const std::string& url);

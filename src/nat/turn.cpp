@@ -634,7 +634,7 @@ std::optional<std::pair<StunMappedAddress, std::vector<uint8_t>>> TurnClient::re
         return std::nullopt;
     }
     
-    Peer sender;
+    Address sender;
     auto data = receive_udp_data(socket_, STUN_MAX_MESSAGE_SIZE, sender, timeout_ms);
     
     if (data.empty()) {

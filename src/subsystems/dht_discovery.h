@@ -36,7 +36,7 @@ public:
         uint16_t                  dht_port = 0;          ///< 0 = ephemeral
         std::string               bind_address = "";
         std::string               discovery_key = "librats";  ///< app namespace
-        std::vector<Peer>         bootstrap_nodes;       ///< empty → default internet nodes
+        std::vector<Address>         bootstrap_nodes;       ///< empty → default internet nodes
         std::chrono::milliseconds search_interval{5000};
         std::chrono::milliseconds announce_interval{30000};
     };
@@ -57,7 +57,7 @@ public:
 
 private:
     void loop();
-    void on_peers(const std::vector<Peer>& peers, const InfoHash& info_hash);
+    void on_peers(const std::vector<Address>& peers, const InfoHash& info_hash);
 
     Config                     config_;
     InfoHash                   hash_;

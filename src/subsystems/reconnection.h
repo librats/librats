@@ -13,7 +13,7 @@
 
 #include "node/peer_network.h"
 #include "node/peer.h"
-#include "net/address.h"
+#include "core/address.h"
 #include "net/peer_id.h"
 #include "net/peer_store.h"
 

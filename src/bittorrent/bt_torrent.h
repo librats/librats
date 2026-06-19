@@ -15,7 +15,8 @@
 #include "bittorrent/bt_peer_connection.h"
 #include "bittorrent/bt_choker.h"
 #include "bittorrent/disk_io.h"
-#include "core/socket.h" // For Peer struct
+#include "core/socket.h"
+#include "core/address.h" // For Address
 
 // Forward declaration for resume data
 namespace librats { struct TorrentResumeData; }
@@ -173,10 +174,10 @@ public:
     using MetadataCompleteCallback = std::function<void(const TorrentInfo& info)>;
     
     /// Callback for peer connected (peer info)
-    using PeerConnectedCallback = std::function<void(const Peer& peer)>;
+    using PeerConnectedCallback = std::function<void(const Address& peer)>;
     
     /// Callback for peer disconnected (peer info)
-    using PeerDisconnectedCallback = std::function<void(const Peer& peer)>;
+    using PeerDisconnectedCallback = std::function<void(const Address& peer)>;
     
     //=========================================================================
     // Construction

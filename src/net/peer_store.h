@@ -8,7 +8,7 @@
  * per line). Used by the ReconnectionService to remember peers worth re-dialing.
  */
 
-#include "net/address.h"
+#include "core/address.h"
 
 #include <mutex>
 #include <string>

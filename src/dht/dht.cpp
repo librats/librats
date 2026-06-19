@@ -167,7 +167,7 @@ void DhtClient::shutdown_immediate() {
     shutdown_cv_.notify_all();
 }
 
-bool DhtClient::bootstrap(const std::vector<Peer>& bootstrap_nodes) {
+bool DhtClient::bootstrap(const std::vector<Address>& bootstrap_nodes) {
     if (!running_) {
         LOG_DHT_ERROR("DHT client not running");
         return false;
@@ -406,7 +406,7 @@ size_t DhtClient::get_active_announces_count() const {
     return count;
 }
 
-std::vector<Peer> DhtClient::get_default_bootstrap_nodes() {
+std::vector<Address> DhtClient::get_default_bootstrap_nodes() {
     // Hostnames are resolved to the instance's family at send time (A for IPv4, AAAA for
     // IPv6). dht.libtorrent.org publishes an AAAA record, giving the IPv6 network a
     // reliable bootstrap entry point.
@@ -423,7 +423,7 @@ void DhtClient::network_loop() {
     LOG_DHT_DEBUG("Network loop started");
     
     while (running_) {
-        Peer sender;
+        Address sender;
         auto data = receive_udp_data(socket_, 1500, sender, -1);  // MTU size, blocking
         
         if (!data.empty()) {
@@ -526,7 +526,7 @@ void DhtClient::maintenance_loop() {
     LOG_DHT_DEBUG("Maintenance loop stopped");
 }
 
-void DhtClient::handle_message(const std::vector<uint8_t>& data, const Peer& sender) {
+void DhtClient::handle_message(const std::vector<uint8_t>& data, const Address& sender) {
     LOG_DHT_DEBUG("Processing message of " << data.size() << " bytes from " << sender.ip << ":" << sender.port);
     
     auto krpc_message = KrpcProtocol::decode_message(data);
@@ -775,7 +775,7 @@ int DhtClient::get_bucket_index(const NodeId& id) {
 
 
 // KRPC message handling
-void DhtClient::handle_krpc_message(const KrpcMessage& message, const Peer& sender) {
+void DhtClient::handle_krpc_message(const KrpcMessage& message, const Address& sender) {
     LOG_DHT_DEBUG("Handling KRPC message type " << static_cast<int>(message.type) << " from " << sender.ip << ":" << sender.port);
     
     switch (message.type) {
@@ -804,7 +804,7 @@ void DhtClient::handle_krpc_message(const KrpcMessage& message, const Peer& send
     }
 }
 
-void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender) {
+void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Address& sender) {
     LOG_DHT_DEBUG("Handling KRPC PING from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
 #ifdef RATS_SEARCH_FEATURES
@@ -842,7 +842,7 @@ void DhtClient::handle_krpc_ping(const KrpcMessage& message, const Peer& sender)
     send_krpc_message(response, sender);
 }
 
-void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& sender) {
+void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Address& sender) {
     LOG_DHT_DEBUG("Handling KRPC FIND_NODE from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
 #ifdef RATS_SEARCH_FEATURES
@@ -884,7 +884,7 @@ void DhtClient::handle_krpc_find_node(const KrpcMessage& message, const Peer& se
     send_krpc_message(response, sender);
 }
 
-void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& sender) {
+void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Address& sender) {
     LOG_DHT_DEBUG("Handling KRPC GET_PEERS from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port << " for info_hash " << node_id_to_hex(message.info_hash));
     
 #ifdef RATS_SEARCH_FEATURES
@@ -940,7 +940,7 @@ void DhtClient::handle_krpc_get_peers(const KrpcMessage& message, const Peer& se
     send_krpc_message(response, sender);
 }
 
-void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer& sender) {
+void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Address& sender) {
     LOG_DHT_DEBUG("Handling KRPC ANNOUNCE_PEER from " << node_id_to_hex(message.sender_id) << " at " << sender.ip << ":" << sender.port);
     
 #ifdef RATS_SEARCH_FEATURES
@@ -990,7 +990,7 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
     uint16_t peer_port = message.implied_port ? sender.port : message.port;
     
     // Store the peer announcement
-    Peer announcing_peer(sender.ip, peer_port);
+    Address announcing_peer(sender.ip, peer_port);
     store_announced_peer(message.info_hash, announcing_peer);
     
 #ifdef RATS_SEARCH_FEATURES
@@ -1016,7 +1016,7 @@ void DhtClient::handle_krpc_announce_peer(const KrpcMessage& message, const Peer
     send_krpc_message(response, sender);
 }
 
-void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sender) {
+void DhtClient::handle_krpc_response(const KrpcMessage& message, const Address& sender) {
     LOG_DHT_DEBUG("Handling KRPC response from " << sender.ip << ":" << sender.port);
 
     // BEP 42: nodes echo our external address back in the top-level "ip" field. Responses
@@ -1132,14 +1132,14 @@ void DhtClient::handle_krpc_response(const KrpcMessage& message, const Peer& sen
     }
 }
 
-void DhtClient::handle_krpc_error(const KrpcMessage& message, const Peer& sender) {
+void DhtClient::handle_krpc_error(const KrpcMessage& message, const Address& sender) {
     LOG_DHT_WARN("Received KRPC error from " << sender.ip << ":" << sender.port 
                  << " - Code: " << static_cast<int>(message.error_code) 
                  << " Message: " << message.error_message);
 }
 
 // KRPC sending functions
-bool DhtClient::send_krpc_message(const KrpcMessage& message, const Peer& peer) {
+bool DhtClient::send_krpc_message(const KrpcMessage& message, const Address& peer) {
     // BEP 42: stamp the requester's external address into every response we send so the
     // remote node can derive an IP-based node ID. Only copy the message when needed.
     const KrpcMessage* out = &message;
@@ -1169,13 +1169,13 @@ bool DhtClient::send_krpc_message(const KrpcMessage& message, const Peer& peer) 
     return result > 0;
 }
 
-void DhtClient::send_krpc_ping(const Peer& peer) {
+void DhtClient::send_krpc_ping(const Address& peer) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_ping_query(transaction_id, node_id_);
     send_krpc_message(message, peer);
 }
 
-void DhtClient::send_krpc_find_node(const Peer& peer, const NodeId& target) {
+void DhtClient::send_krpc_find_node(const Address& peer, const NodeId& target) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_find_node_query(transaction_id, node_id_, target);
     // BEP 32: ask only for nodes of our own family (separate Kademlia networks)
@@ -1183,7 +1183,7 @@ void DhtClient::send_krpc_find_node(const Peer& peer, const NodeId& target) {
     send_krpc_message(message, peer);
 }
 
-void DhtClient::send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash) {
+void DhtClient::send_krpc_get_peers(const Address& peer, const InfoHash& info_hash) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_get_peers_query(transaction_id, node_id_, info_hash);
     // BEP 32: ask only for nodes of our own family (separate Kademlia networks)
@@ -1191,7 +1191,7 @@ void DhtClient::send_krpc_get_peers(const Peer& peer, const InfoHash& info_hash)
     send_krpc_message(message, peer);
 }
 
-void DhtClient::send_krpc_announce_peer(const Peer& peer, const InfoHash& info_hash, uint16_t port, const std::string& token, bool implied_port) {
+void DhtClient::send_krpc_announce_peer(const Address& peer, const InfoHash& info_hash, uint16_t port, const std::string& token, bool implied_port) {
     std::string transaction_id = KrpcProtocol::generate_transaction_id();
     auto message = KrpcProtocol::create_announce_peer_query(transaction_id, node_id_, info_hash, port, token, implied_port);
     send_krpc_message(message, peer);
@@ -1203,7 +1203,7 @@ KrpcNode DhtClient::dht_node_to_krpc_node(const DhtNode& node) {
 }
 
 DhtNode DhtClient::krpc_node_to_dht_node(const KrpcNode& node) {
-    Peer peer(node.ip, node.port);
+    Address peer(node.ip, node.port);
     return DhtNode(node.id, peer);
 }
 
@@ -1377,7 +1377,7 @@ std::string DhtClient::get_external_address() const {
     return external_address_;
 }
 
-void DhtClient::maybe_update_external_ip(const std::string& reported_ip, const Peer& responder) {
+void DhtClient::maybe_update_external_ip(const std::string& reported_ip, const Address& responder) {
     // Only consider public addresses of our own family.
     if (!is_public_address(reported_ip)) return;
     if (network_utils::is_valid_ipv6(reported_ip) != is_ipv6()) return;
@@ -1452,7 +1452,7 @@ void DhtClient::maybe_rotate_token_secret_unlocked() {
     }
 }
 
-std::string DhtClient::compute_token_with_secret(const Peer& peer, const InfoHash& info_hash,
+std::string DhtClient::compute_token_with_secret(const Address& peer, const InfoHash& info_hash,
                                                  const std::array<uint8_t, 16>& secret) const {
     // SHA1(secret || querier_ip || info_hash). Including the secret makes the token unforgeable;
     // including the info_hash binds it to a single target so one token cannot announce arbitrary hashes.
@@ -1464,13 +1464,13 @@ std::string DhtClient::compute_token_with_secret(const Peer& peer, const InfoHas
     return SHA1::hash_bytes(data);
 }
 
-std::string DhtClient::generate_token(const Peer& peer, const InfoHash& info_hash) {
+std::string DhtClient::generate_token(const Address& peer, const InfoHash& info_hash) {
     std::lock_guard<std::mutex> lock(token_secret_mutex_);
     maybe_rotate_token_secret_unlocked();
     return compute_token_with_secret(peer, info_hash, token_secret_);
 }
 
-bool DhtClient::verify_token(const Peer& peer, const InfoHash& info_hash, const std::string& token) {
+bool DhtClient::verify_token(const Address& peer, const InfoHash& info_hash, const std::string& token) {
     if (token.empty()) {
         return false;
     }
@@ -2011,7 +2011,7 @@ void DhtClient::cleanup_timed_out_search_requests() {
     }
 }
 
-void DhtClient::handle_get_peers_empty_response(const std::string& transaction_id, const Peer& responder) {
+void DhtClient::handle_get_peers_empty_response(const std::string& transaction_id, const Address& responder) {
     DeferredCallbacks deferred;
     {
         std::lock_guard<std::mutex> lock(pending_searches_mutex_);
@@ -2068,7 +2068,7 @@ void DhtClient::handle_get_peers_empty_response(const std::string& transaction_i
     deferred.invoke();
 }
 
-void DhtClient::handle_get_peers_response_for_search(const std::string& transaction_id, const Peer& responder, const std::vector<Peer>& peers) {
+void DhtClient::handle_get_peers_response_for_search(const std::string& transaction_id, const Address& responder, const std::vector<Address>& peers) {
     DeferredCallbacks deferred_immediate;   // For new peers callbacks
     DeferredCallbacks deferred_completion;  // For search completion callbacks
 
@@ -2128,14 +2128,14 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
                 // Accumulate peers (with deduplication) - continue search like reference implementation
                 if (!peers.empty()) {
                     // Collect only new (non-duplicate) peers for immediate callback
-                    std::vector<Peer> new_peers;
+                    std::vector<Address> new_peers;
                     new_peers.reserve(peers.size());
                     
                     for (const auto& peer : peers) {
                         // Check if peer already exists in found_peers
                         auto it = std::find_if(pending_search.found_peers.begin(), 
                                             pending_search.found_peers.end(),
-                                            [&peer](const Peer& p) { 
+                                            [&peer](const Address& p) { 
                                                 return p.ip == peer.ip && p.port == peer.port; 
                                             });
                         if (it == pending_search.found_peers.end()) {
@@ -2173,7 +2173,7 @@ void DhtClient::handle_get_peers_response_for_search(const std::string& transact
 }
 
 
-void DhtClient::handle_get_peers_response_with_nodes(const std::string& transaction_id, const Peer& responder, const std::vector<KrpcNode>& nodes) {
+void DhtClient::handle_get_peers_response_with_nodes(const std::string& transaction_id, const Address& responder, const std::vector<KrpcNode>& nodes) {
     // This function is called when get_peers returns nodes instead of peers
     // Add the new nodes to search_nodes and continue the search
     
@@ -2544,7 +2544,7 @@ bool DhtClient::add_search_requests(PendingSearch& search, DeferredCallbacks& de
 }
 
 // Peer announcement storage management
-void DhtClient::store_announced_peer(const InfoHash& info_hash, const Peer& peer) {
+void DhtClient::store_announced_peer(const InfoHash& info_hash, const Address& peer) {
     std::lock_guard<std::mutex> lock(announced_peers_mutex_);
     
     std::string hash_key = node_id_to_hex(info_hash);
@@ -2569,13 +2569,13 @@ void DhtClient::store_announced_peer(const InfoHash& info_hash, const Peer& peer
     }
 }
 
-std::vector<Peer> DhtClient::get_announced_peers(const InfoHash& info_hash) {
+std::vector<Address> DhtClient::get_announced_peers(const InfoHash& info_hash) {
     std::lock_guard<std::mutex> lock(announced_peers_mutex_);
     
     std::string hash_key = node_id_to_hex(info_hash);
     auto it = announced_peers_.find(hash_key);
     
-    std::vector<Peer> peers;
+    std::vector<Address> peers;
     if (it != announced_peers_.end()) {
         peers.reserve(it->second.size());
         for (const auto& announced : it->second) {
@@ -2647,7 +2647,7 @@ void DhtClient::initiate_ping_verification(const DhtNode& candidate_node, const 
     send_krpc_message(message, old_node.peer);
 }
 
-void DhtClient::handle_ping_verification_response(const std::string& transaction_id, const NodeId& responder_id, const Peer& responder) {
+void DhtClient::handle_ping_verification_response(const std::string& transaction_id, const NodeId& responder_id, const Address& responder) {
     std::lock_guard<std::mutex> ping_lock(pending_pings_mutex_);
     
     auto it = pending_pings_.find(transaction_id);
@@ -2944,7 +2944,7 @@ bool DhtClient::load_routing_table() {
                 }
 
                 NodeId node_id = hex_to_node_id(node_id_hex);
-                Peer peer(ip, port);
+                Address peer(ip, port);
                 DhtNode node(node_id, peer);
                 
                 // Restore RTT if available

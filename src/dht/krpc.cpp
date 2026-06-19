@@ -91,7 +91,7 @@ KrpcMessage KrpcProtocol::create_find_node_response(const std::string& transacti
     return message;
 }
 
-KrpcMessage KrpcProtocol::create_get_peers_response(const std::string& transaction_id, const NodeId& response_id, const std::vector<Peer>& peers, const std::string& token) {
+KrpcMessage KrpcProtocol::create_get_peers_response(const std::string& transaction_id, const NodeId& response_id, const std::vector<Address>& peers, const std::string& token) {
     KrpcMessage message;
     message.type = KrpcMessageType::Response;
     message.transaction_id = transaction_id;
@@ -246,7 +246,7 @@ BencodeValue KrpcProtocol::encode_response(const KrpcMessage& message) {
     // BEP 42: echo the requester's external address as a top-level "ip" field
     // (compact 6-byte IPv4 / 18-byte IPv6 ip+port).
     if (!message.external_ip.empty()) {
-        std::string compact = compact_peer_info(Peer(message.external_ip, message.external_port));
+        std::string compact = compact_peer_info(Address(message.external_ip, message.external_port));
         if (!compact.empty()) {
             root["ip"] = BencodeValue(compact);
         }
@@ -530,7 +530,7 @@ static std::string read_compact_address(const std::string& compact_info, size_t 
     return std::string(ip_str);
 }
 
-std::string KrpcProtocol::compact_peer_info(const Peer& peer) {
+std::string KrpcProtocol::compact_peer_info(const Address& peer) {
     std::string result;
     result.reserve(18);
 
@@ -561,8 +561,8 @@ std::string KrpcProtocol::compact_node_info(const KrpcNode& node) {
     return result;
 }
 
-std::vector<Peer> KrpcProtocol::parse_compact_peer_info(const std::string& compact_info) {
-    std::vector<Peer> peers;
+std::vector<Address> KrpcProtocol::parse_compact_peer_info(const std::string& compact_info) {
+    std::vector<Address> peers;
 
     // BEP 5/BEP 7: each "values" entry is a single compact peer: 6 bytes (IPv4) or 18 bytes (IPv6).
     // Detect the family from the entry length. An exact length of 18 is treated as one IPv6 peer;

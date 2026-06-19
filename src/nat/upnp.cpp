@@ -313,7 +313,7 @@ bool UpnpClient::discover_device(Device& out) {
 
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (std::chrono::steady_clock::now() < deadline && !stop_requested_.load()) {
-            Peer from;
+            Address from;
             auto resp = receive_udp_data(sock, 2048, from, 1000, wakeup_.fd());
             if (resp.empty()) continue;
 

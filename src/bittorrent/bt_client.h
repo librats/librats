@@ -391,7 +391,7 @@ private:
     
     void tick_loop();
     Torrent::Ptr create_torrent(const TorrentInfo& info, const std::string& save_path);
-    void on_dht_peers_found(const std::vector<Peer>& peers, const InfoHash& info_hash);
+    void on_dht_peers_found(const std::vector<Address>& peers, const InfoHash& info_hash);
     void on_peer_connected(const BtInfoHash& info_hash, 
                            std::shared_ptr<BtPeerConnection> connection,
                            socket_t socket, bool is_incoming);

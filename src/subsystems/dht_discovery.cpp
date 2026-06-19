@@ -39,7 +39,7 @@ void DhtDiscovery::start() {
         return;
     }
 
-    const std::vector<Peer> nodes =
+    const std::vector<Address> nodes =
         config_.bootstrap_nodes.empty() ? DhtClient::get_default_bootstrap_nodes() : config_.bootstrap_nodes;
     if (!nodes.empty()) dht_->bootstrap(nodes);
 
@@ -67,15 +67,15 @@ void DhtDiscovery::loop() {
             dht_->announce_peer(hash_, network_->listen_port());
             last_announce = now;
         }
-        dht_->find_peers(hash_, [this](const std::vector<Peer>& peers, const InfoHash& h) { on_peers(peers, h); });
+        dht_->find_peers(hash_, [this](const std::vector<Address>& peers, const InfoHash& h) { on_peers(peers, h); });
 
         std::unique_lock<std::mutex> lock(wait_mutex_);
         wake_.wait_for(lock, config_.search_interval, [this] { return !running_.load(); });
     }
 }
 
-void DhtDiscovery::on_peers(const std::vector<Peer>& peers, const InfoHash& /*info_hash*/) {
-    for (const Peer& peer : peers) {
+void DhtDiscovery::on_peers(const std::vector<Address>& peers, const InfoHash& /*info_hash*/) {
+    for (const Address& peer : peers) {
         if (peer.ip.empty() || peer.port == 0) continue;
         const std::string key = peer.ip + ":" + std::to_string(peer.port);
         {

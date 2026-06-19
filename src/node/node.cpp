@@ -100,7 +100,7 @@ void Node::stop() {
 
 // ── Connections ─────────────────────────────────────────────────────────────
 
-void Node::connect(const Address& address) { connect(address.host, address.port); }
+void Node::connect(const Address& address) { connect(address.ip, address.port); }
 
 void Node::connect(const std::string& host, uint16_t port) {
     reactors_->pick().connect(host, port);

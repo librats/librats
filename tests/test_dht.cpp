@@ -64,7 +64,7 @@ TEST_F(DhtTest, NodeIdInfoHashTest) {
 // Test DhtNode structure
 TEST_F(DhtTest, DhtNodeTest) {
     NodeId id = create_test_node_id(0x12);
-    Peer peer("127.0.0.1", 8080);
+    Address peer("127.0.0.1", 8080);
     
     DhtNode node(id, peer);
     
@@ -140,7 +140,7 @@ TEST_F(DhtTest, DhtClientPortBindingTest) {
 
 // Test bootstrap nodes
 TEST_F(DhtTest, BootstrapNodesTest) {
-    std::vector<Peer> bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
+    std::vector<Address> bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
     
     // Should have at least a few bootstrap nodes
     EXPECT_GT(bootstrap_nodes.size(), 0);
@@ -162,7 +162,7 @@ TEST_F(DhtTest, PeerDiscoveryBasicTest) {
     
     // Test find_peers - should not crash
     bool callback_called = false;
-    client.find_peers(test_hash, [&](const std::vector<Peer>& peers, const InfoHash& info_hash) {
+    client.find_peers(test_hash, [&](const std::vector<Address>& peers, const InfoHash& info_hash) {
         callback_called = true;
         // For basic test, we don't expect to find peers immediately
         // This is mainly testing that the function doesn't crash
@@ -272,10 +272,10 @@ TEST_F(DhtTest, ConstantsTest) {
 
 // Test Peer equality
 TEST_F(DhtTest, PeerEqualityTest) {
-    Peer peer1("127.0.0.1", 8080);
-    Peer peer2("127.0.0.1", 8080);
-    Peer peer3("127.0.0.1", 8081);
-    Peer peer4("192.168.1.1", 8080);
+    Address peer1("127.0.0.1", 8080);
+    Address peer2("127.0.0.1", 8080);
+    Address peer3("127.0.0.1", 8081);
+    Address peer4("192.168.1.1", 8080);
     
     EXPECT_EQ(peer1, peer2);
     EXPECT_NE(peer1, peer3);
@@ -319,7 +319,7 @@ TEST_F(DhtTest, ConcurrentOperationsTest) {
             hash.fill(static_cast<uint8_t>(i));
             
             // Test find_peers from multiple threads
-            client.find_peers(hash, [](const std::vector<Peer>& peers, const InfoHash& info_hash) {
+            client.find_peers(hash, [](const std::vector<Address>& peers, const InfoHash& info_hash) {
                 // Just a dummy callback
             });
             
@@ -345,7 +345,7 @@ TEST_F(DhtTest, MemoryManagementTest) {
         
         // Do some operations - just test the API, don't wait for timeouts
         InfoHash hash = create_test_info_hash(static_cast<uint8_t>(i));
-        client.find_peers(hash, [](const std::vector<Peer>& peers, const InfoHash& info_hash) {});
+        client.find_peers(hash, [](const std::vector<Address>& peers, const InfoHash& info_hash) {});
         client.announce_peer(hash, 8080);
         
         // Skip sleep to avoid delays
@@ -366,7 +366,7 @@ TEST_F(DhtTest, EdgeCasesTest) {
     client.find_peers(hash, nullptr);
     
     // Test with callback that throws (should not crash the client)
-    client.find_peers(hash, [](const std::vector<Peer>& peers, const InfoHash& info_hash) {
+    client.find_peers(hash, [](const std::vector<Address>& peers, const InfoHash& info_hash) {
         throw std::runtime_error("Test exception");
     });
     
@@ -566,7 +566,7 @@ TEST_F(DhtTest, CompactNodeInfoIPv6RoundTrip) {
 
 // Compact peer info encodes 6 bytes for IPv4 and 18 bytes for IPv6 (BEP 7)
 TEST_F(DhtTest, CompactPeerInfoFamilies) {
-    Peer v4("10.0.0.5", 1234);
+    Address v4("10.0.0.5", 1234);
     std::string c4 = KrpcProtocol::compact_peer_info(v4);
     EXPECT_EQ(c4.size(), 6u);
     auto p4 = KrpcProtocol::parse_compact_peer_info(c4);
@@ -574,7 +574,7 @@ TEST_F(DhtTest, CompactPeerInfoFamilies) {
     EXPECT_EQ(p4[0].ip, "10.0.0.5");
     EXPECT_EQ(p4[0].port, 1234);
 
-    Peer v6("2001:db8::dead:beef", 4321);
+    Address v6("2001:db8::dead:beef", 4321);
     std::string c6 = KrpcProtocol::compact_peer_info(v6);
     EXPECT_EQ(c6.size(), 18u);
     auto p6 = KrpcProtocol::parse_compact_peer_info(c6);

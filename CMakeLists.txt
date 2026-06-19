@@ -184,7 +184,6 @@ set(LIBRARY_SOURCES
     src/net/frame.cpp
     src/net/peer_id.h
     src/net/peer_id.cpp
-    src/net/address.h
     src/net/peer_info.h
     src/net/peer_directory.h
     src/net/peer_directory.cpp

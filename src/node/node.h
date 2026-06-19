@@ -17,7 +17,7 @@
 
 #include "core/connection.h"      // ConnectionDelegate
 #include "core/reactor_pool.h"
-#include "net/address.h"
+#include "core/address.h"
 #include "net/peer_directory.h"
 #include "net/peer_id.h"
 #include "net/peer_info.h"

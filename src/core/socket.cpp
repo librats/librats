@@ -46,7 +46,7 @@ static std::string socket_error_string(int error) {
 }
 
 // Extract sender peer info from sockaddr_storage (shared by UDP receive)
-static void extract_sender_peer(const sockaddr_storage& sender_addr, Peer& peer) {
+static void extract_sender_peer(const sockaddr_storage& sender_addr, Address& peer) {
     if (sender_addr.ss_family == AF_INET) {
         char ip_str[INET_ADDRSTRLEN];
         const auto* addr_in = reinterpret_cast<const sockaddr_in*>(&sender_addr);
@@ -928,7 +928,7 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data,
     return bytes_sent;
 }
 
-std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer& sender_peer,
+std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Address& sender_peer,
                                       int timeout_ms, socket_t interrupt_fd) {
     // Handle timeout (and optional interrupt socket) using select. When no interrupt
     // fd is supplied this path is identical to the plain timeout behavior.

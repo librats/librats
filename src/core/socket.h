@@ -1,5 +1,7 @@
 #pragma once
 
+#include "address.h"
+
 #include <string>
 #include <functional>
 #include <vector>
@@ -34,25 +36,6 @@ enum class AddressFamily {
     IPv4,       // IPv4 only
     IPv6,       // IPv6 only
     DualStack   // IPv6 socket with IPv4 support (default)
-};
-
-/**
- * UDP peer information
- */
-struct Peer {
-    std::string ip;
-    uint16_t port;
-    
-    Peer() : port(0) {}
-    Peer(const std::string& ip, uint16_t port) : ip(ip), port(port) {}
-    
-    bool operator==(const Peer& other) const {
-        return ip == other.ip && port == other.port;
-    }
-    
-    bool operator!=(const Peer& other) const {
-        return !(*this == other);
-    }
 };
 
 // Socket Library Initialization
@@ -197,7 +180,7 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const std::
  *                     blocking receive on shutdown). INVALID_SOCKET_VALUE disables it.
  * @return Received data, empty vector on timeout, error or interrupt
  */
-std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Peer& sender_peer,
+std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Address& sender_peer,
                                       int timeout_ms = -1,
                                       socket_t interrupt_fd = INVALID_SOCKET_VALUE);
 
