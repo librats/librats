@@ -1,8 +1,10 @@
 #include "node/node.h"
+#include "node/host_events.h"
 #include "security/noise_security.h"
 #include "security/plaintext_security.h"
 #include "util/fs.h"
 #include "util/logger.h"
+#include "util/network_monitor.h"
 
 #include <cstring>
 #include <memory>
@@ -81,13 +83,17 @@ bool Node::start() {
         reactors_->listen(listen_socket_);
     }
 
-    // Attach subsystems (registers their message handlers) BEFORE any reactor
-    // thread runs, so the router is fully built with no concurrent writes.
-    for (auto& s : subsystems_) s->attach(*this);
+    // Attach subsystems (registers their message handlers, event subscriptions
+    // and service providers) BEFORE any reactor thread runs, so the router and the
+    // event/service tables are fully built with no concurrent writes.
+    NodeContext ctx{*this, events_, services_};
+    for (auto& s : subsystems_) s->attach(ctx);
 
     reactors_->start();
 
     for (auto& s : subsystems_) s->start();
+
+    start_network_monitor();
 
     LOG_INFO("node", "Node " << identity_.id.short_hex() << " started on port " << listen_port_
              << " (" << reactors_->size() << " reactor(s), " << subsystems_.size() << " subsystem(s))");
@@ -96,8 +102,62 @@ bool Node::start() {
 
 void Node::stop() {
     if (!running_.exchange(false)) return;
+    stop_network_monitor();                 // no more NetworkChanged after this
     for (auto& s : subsystems_) s->stop();  // stop subsystem threads first
     reactors_->stop();                      // then join reactors; close connections
+}
+
+// ── Host network-change watch ────────────────────────────────────────────────
+//
+// One monitor, many reactors: the NetworkMonitor detects a change on its own
+// thread and hands the new address set to the maintenance thread, which performs
+// the (possibly slow) EventBus emit. Subscribers — PortMappingService, DhtDiscovery,
+// … — react independently without the monitor knowing they exist.
+
+void Node::start_network_monitor() {
+    if (!config_.enable_network_monitor) return;
+
+    maintenance_stop_ = false;
+    maintenance_thread_ = std::thread([this] { maintenance_loop(); });
+
+    monitor_ = std::make_unique<NetworkMonitor>();
+    monitor_->start([this](const std::vector<std::string>& addresses) {
+        // Runs on the monitor thread; just hand off and return promptly. Coalesces:
+        // a burst collapses to one emit carrying the latest address set.
+        {
+            std::lock_guard<std::mutex> lock(maintenance_mutex_);
+            pending_addresses_   = addresses;
+            maintenance_pending_ = true;
+        }
+        maintenance_cv_.notify_one();
+    });
+}
+
+void Node::stop_network_monitor() {
+    monitor_.reset();  // joins the monitor thread → no further hand-offs
+
+    {
+        std::lock_guard<std::mutex> lock(maintenance_mutex_);
+        maintenance_stop_ = true;
+    }
+    maintenance_cv_.notify_one();
+    if (maintenance_thread_.joinable()) maintenance_thread_.join();
+}
+
+void Node::maintenance_loop() {
+    for (;;) {
+        std::vector<std::string> addresses;
+        {
+            std::unique_lock<std::mutex> lock(maintenance_mutex_);
+            maintenance_cv_.wait(lock, [this] { return maintenance_pending_ || maintenance_stop_; });
+            if (maintenance_stop_) return;
+            maintenance_pending_ = false;
+            addresses = std::move(pending_addresses_);
+        }
+        LOG_INFO("node", "Network change: " << addresses.size()
+                 << " local address(es); notifying subsystems");
+        events_.emit(NetworkChanged{std::move(addresses)});
+    }
 }
 
 // ── Connections ─────────────────────────────────────────────────────────────

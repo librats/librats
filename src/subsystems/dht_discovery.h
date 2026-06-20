@@ -51,7 +51,7 @@ public:
     explicit DhtDiscovery(Config config);
     ~DhtDiscovery() override;
 
-    void attach(PeerNetwork& network) override;
+    void attach(NodeContext& ctx) override;
     void start() override;
     void stop() override;
 
@@ -78,6 +78,7 @@ private:
 
     std::thread             thread_;
     std::atomic<bool>       running_{false};
+    std::atomic<bool>       recover_pending_{false};  ///< network changed: re-STUN + re-announce
     std::mutex              wait_mutex_;
     std::condition_variable wake_;
 

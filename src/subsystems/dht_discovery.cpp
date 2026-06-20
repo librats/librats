@@ -1,4 +1,6 @@
 #include "subsystems/dht_discovery.h"
+#include "node/node_context.h"
+#include "node/host_events.h"
 #include "nat/stun.h"
 #include "sha1.h"
 #include "util/logger.h"
@@ -33,7 +35,17 @@ DhtDiscovery::DhtDiscovery(Config config)
 
 DhtDiscovery::~DhtDiscovery() { stop(); }
 
-void DhtDiscovery::attach(PeerNetwork& network) { network_ = &network; }
+void DhtDiscovery::attach(NodeContext& ctx) {
+    network_ = &ctx.network;
+    // A host network change means our public endpoint may have moved. Re-probe it
+    // via STUN and re-announce so the DHT advertises our current reachable address
+    // rather than the previous network's. We only flag + wake here (cheap, on the
+    // node's maintenance thread); the actual STUN runs on our own loop thread.
+    ctx.events.on<NetworkChanged>([this](const NetworkChanged&) {
+        recover_pending_.store(true);
+        wake_.notify_all();
+    });
+}
 
 void DhtDiscovery::start() {
     if (running_.exchange(true)) return;
@@ -95,6 +107,13 @@ void DhtDiscovery::loop() {
 
     auto last_announce = std::chrono::steady_clock::now() - config_.announce_interval;
     while (running_.load()) {
+        // Network changed: re-learn our public IP and force an immediate re-announce.
+        if (recover_pending_.exchange(false)) {
+            LOG_INFO("dht-discovery", "Network changed — re-probing STUN and re-announcing");
+            if (config_.discover_external_ip) probe_external_ip();
+            last_announce = std::chrono::steady_clock::now() - config_.announce_interval;
+        }
+
         const auto now = std::chrono::steady_clock::now();
         if (now - last_announce >= config_.announce_interval) {
             dht_->announce_peer(hash_, network_->listen_port());
@@ -103,7 +122,8 @@ void DhtDiscovery::loop() {
         dht_->find_peers(hash_, [this](const std::vector<Address>& peers, const InfoHash& h) { on_peers(peers, h); });
 
         std::unique_lock<std::mutex> lock(wait_mutex_);
-        wake_.wait_for(lock, config_.search_interval, [this] { return !running_.load(); });
+        wake_.wait_for(lock, config_.search_interval,
+                       [this] { return !running_.load() || recover_pending_.load(); });
     }
 }
 

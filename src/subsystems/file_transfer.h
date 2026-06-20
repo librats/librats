@@ -148,7 +148,7 @@ public:
     /// "."/".." component. Public + static so it can be unit-tested directly.
     static bool is_safe_relative_path(const std::string& p);
 
-    void attach(PeerNetwork& network) override;
+    void attach(NodeContext& ctx) override;
     void start() override;
     void stop() override;
 

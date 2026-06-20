@@ -97,14 +97,15 @@ flowchart TB
 src/
 ├── main.cpp                  # example chat node (the only file left at root)
 ├── bindings/   rats_node.{h,cpp}            — C ABI
-├── node/       node, config, peer_network                 — the facade + plugin contract
+├── node/       node, config, peer_network, node_context, host_events  — facade + plugin contract
 ├── peer/       peer (Peer handle), peer_id, peer_info, peer_table, peer_store
 ├── wire/       frame (framing + MessageType), message_router
 ├── security/   identity, handshaker (+ SecurityProvider), session,
 │               noise_security, plaintext_security
 ├── transport/  reactor, reactor_pool, connection          — live I/O engine (threads)
 ├── core/       bytes, types, address, socket, io_poller, timer_queue, mpsc_queue,
-│               notifier, receive_buffer, chained_send_buffer, wakeup_pipe, threadmanager
+│               notifier, event_bus, service_registry, receive_buffer,
+│               chained_send_buffer, wakeup_pipe, threadmanager
 ├── crypto/     noise, curve25519, chacha20poly1305, sha256/512, blake2, hkdf,
 │               sha1, crc32
 ├── subsystems/ ping_service, pubsub, file_transfer, reconnection,
@@ -193,9 +194,16 @@ flowchart LR
       DT["DHT / mDNS / port-map workers"]
     end
 
+    subgraph NodeThreads["Node-owned host watch"]
+      NM["NetworkMonitor (OS notify)"]
+      MT["Maintenance thread (emits NetworkChanged)"]
+    end
+
     A -->|"post(task) + wake"| Loop
     SubThreads -->|"send()/connect() = post(task)"| Loop
     Loop -->|"on_message / on_peer_* callbacks"| SubThreads
+    NM -->|"hand off + wake"| MT
+    MT -->|"EventBus.emit"| SubThreads
 ```
 
 - **Reactor thread(s)** — the heart. Each runs a single loop: wait on the
@@ -209,6 +217,11 @@ flowchart LR
   blocking work (PingService, ReconnectionService, FileTransfer's worker pool, the
   DHT/mDNS/port‑mapping engines). They reach the network the same way app threads
   do — through `PeerNetwork`, which posts to a reactor.
+- **Maintenance thread** — one per node, owned by `Node`. The `NetworkMonitor`
+  signals on its own OS‑notify thread and hands off; the maintenance thread does the
+  (possibly blocking) `EventBus.emit(NetworkChanged)` so a subscriber's slow recovery
+  never stalls change detection or the reactors. `EventBus` handlers therefore run on
+  this thread; subscribe at `attach()`.
 - **Callbacks** (`on_peer_connected`, `on_message`, …) run **on a reactor thread**.
   Register them before `start()`; do not block in them.
 
@@ -391,17 +404,24 @@ flowchart LR
 
 ## 11. Subsystems — the plugin model
 
-Every optional feature implements **`Subsystem`** and talks to the world only
-through **`PeerNetwork`**. That is the entire contract:
+Every optional feature implements **`Subsystem`** and reaches the rest of the node
+only through the **`NodeContext`** handed to it at `attach()`. That context bundles
+three separate, single‑purpose interfaces — the entire contract:
 
 ```cpp
 class Subsystem {
-    virtual void attach(PeerNetwork&) = 0;  // register handlers (before start)
+    virtual void attach(NodeContext&) = 0;  // wire up handlers/subscriptions (before start)
     virtual void start() = 0;               // spin up own threads, if any
     virtual void stop()  = 0;               // join threads, release resources
 };
 
-class PeerNetwork {                         // what a subsystem is allowed to do
+struct NodeContext {        // the node's gift to a plugin — three concerns, kept apart
+    PeerNetwork&     network;    // the peer mesh
+    EventBus&        events;     // fire‑and‑forget notifications, one→many
+    ServiceRegistry& services;   // targeted synchronous calls by interface, one→one
+};
+
+class PeerNetwork {                         // talking to peers
     const PeerId& local_id() const;
     uint16_t      listen_port() const;
     void          connect(const Address&);
@@ -414,13 +434,43 @@ class PeerNetwork {                         // what a subsystem is allowed to do
 };
 ```
 
-Because it depends on an interface, a subsystem is trivially unit‑tested against a
-fake `PeerNetwork`.
+The three are chosen by intent: **"talk to peers" → `network`; "something happened"
+→ `events`; "do X / give me Y from another module" → `services`.** Splitting them is
+deliberate — it is what stops any one of them growing into the next god‑class.
+Because each is an interface, a subsystem is trivially unit‑tested against fakes.
+
+### Cross‑module coordination — `EventBus` + `ServiceRegistry`
+
+Modules must cooperate without acquiring direct references to one another (the road
+back to `RatsClient`). Two small, generic primitives in `src/core` provide the two
+honest shapes of that cooperation:
+
+- **`EventBus`** (`event_bus.h`) — typed publish/subscribe. A publisher `emit`s an
+  event *value*; every subscriber registered for that type runs. The publisher
+  never names its subscribers. One→many, fire‑and‑forget, **no return value**. Use
+  for *"X happened"*. Handlers run on the emitter's thread; subscribe at `attach()`.
+- **`ServiceRegistry`** (`service_registry.h`) — interface‑keyed lookup. A module
+  `provide<I>(this)`s itself under a narrow capability interface `I`; another module
+  `get<I>()`s it and calls it directly — **with a return value, one→one** — yet
+  depends only on `I`, never the concrete type. `get` returns `nullptr` when the
+  provider is absent, so callers degrade gracefully. Use for *"do X / give me Y"*.
+
+The first producer is the node‑owned **`NetworkMonitor`** (host network‑change
+watch). On a change it hands the new local‑address set to the node's **maintenance
+thread**, which `emit`s a `NetworkChanged` (`node/host_events.h`). `PortMappingService`
+subscribes and renews its router mappings; `DhtDiscovery` subscribes and re‑probes
+its public IP via STUN then re‑announces. Neither knows the other exists, and the
+monitor knows neither — exactly the decoupling the rewrite is about. Running it on
+the dedicated maintenance thread keeps slow recovery off the monitor's detection
+loop and off the lock‑free reactors.
 
 ```mermaid
 flowchart TB
     Node -. implements .-> PeerNetwork
-    PeerNetwork --> Ping & PubSub & FileTransfer & Recon & Dht & Mdns & PM
+    Node -->|owns| EventBus & ServiceRegistry & NetworkMonitor
+    NetworkMonitor -->|"NetworkChanged (maintenance thread)"| EventBus
+    EventBus --> PM & Dht
+    NodeContext --> Ping & PubSub & FileTransfer & Recon & Dht & Mdns & PM
 ```
 
 The current subsystems:

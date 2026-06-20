@@ -24,18 +24,25 @@
 #include "security/identity.h"
 #include "security/handshaker.h"  // SecurityProvider
 #include "node/config.h"
+#include "node/node_context.h"    // NodeContext, EventBus, ServiceRegistry
 #include "peer/peer.h"
 #include "node/peer_network.h"
 #include "wire/message_router.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace librats {
+
+class NetworkMonitor;  // util/network_monitor.h — owned via unique_ptr, included in node.cpp
 
 class Node final : public ConnectionDelegate, public PeerNetwork {
 public:
@@ -58,6 +65,12 @@ public:
     /// Application protocol identity bound into the handshake (see NodeConfig).
     const std::string& protocol_name() const noexcept { return config_.protocol_name; }
     const std::string& protocol_version() const noexcept { return config_.protocol_version; }
+
+    // — node-scoped coordination, shared by subsystems and the app (see NodeContext) —
+    //   events()   : fire-and-forget notifications, one→many (host events, …)
+    //   services() : targeted synchronous calls by capability interface, one→one
+    EventBus&        events()   noexcept { return events_; }
+    ServiceRegistry& services() noexcept { return services_; }
 
     // — connections —
     void connect(const Address& address) override;
@@ -104,14 +117,31 @@ private:
     void route_send(PeerRoute route, FrameHeader header, Bytes payload);
     void route_close(PeerRoute route);
 
+    void start_network_monitor();   ///< spin up the monitor + maintenance thread
+    void stop_network_monitor();    ///< stop the monitor, drain + join maintenance
+    void maintenance_loop();        ///< off-monitor thread: emits NetworkChanged
+
     NodeConfig                        config_;
     Identity                          identity_;
     std::unique_ptr<SecurityProvider> security_;
     PeerTable                     directory_;
     MessageRouter                     router_;
+    EventBus                          events_;      ///< host/cross-module notifications
+    ServiceRegistry                   services_;    ///< capability lookup between modules
     std::unique_ptr<ReactorPool>      reactors_;
 
     std::vector<std::unique_ptr<Subsystem>> subsystems_;
+
+    // Host network-change watch. The monitor signals on its own thread; the
+    // maintenance thread does the (possibly blocking) EventBus emit off it, so
+    // subscribers may run slow recovery without stalling change detection.
+    std::unique_ptr<NetworkMonitor> monitor_;
+    std::thread                     maintenance_thread_;
+    std::mutex                      maintenance_mutex_;
+    std::condition_variable         maintenance_cv_;
+    std::vector<std::string>        pending_addresses_;
+    bool                            maintenance_pending_ = false;
+    bool                            maintenance_stop_    = false;
 
     socket_t            listen_socket_ = INVALID_SOCKET_VALUE;
     uint16_t            listen_port_   = 0;

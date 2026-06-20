@@ -1,4 +1,5 @@
 #include "subsystems/file_transfer.h"
+#include "node/node_context.h"
 #include "crc32.h"
 #include "util/fs.h"
 #include "util/logger.h"
@@ -73,8 +74,8 @@ FileTransfer::FileTransfer(std::string temp_dir) { config_.temp_directory = std:
 FileTransfer::FileTransfer(Config config) : config_(std::move(config)) {}
 FileTransfer::~FileTransfer() { stop(); }
 
-void FileTransfer::attach(PeerNetwork& network) {
-    network_ = &network;
+void FileTransfer::attach(NodeContext& ctx) {
+    network_ = &ctx.network;
     network_->on_message(MessageType::FileChunk,
                          [this](const Peer& peer, ByteView payload) { on_message(peer, payload); });
     network_->on_peer_disconnected([this](const PeerId& id) {

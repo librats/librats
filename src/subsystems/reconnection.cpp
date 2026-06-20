@@ -1,4 +1,5 @@
 #include "subsystems/reconnection.h"
+#include "node/node_context.h"
 #include "util/logger.h"
 
 #include <algorithm>
@@ -42,8 +43,8 @@ size_t ReconnectionService::target_count() const {
     return targets_.size();
 }
 
-void ReconnectionService::attach(PeerNetwork& network) {
-    network_ = &network;
+void ReconnectionService::attach(NodeContext& ctx) {
+    network_ = &ctx.network;
     network_->on_peer_connected([this](const Peer& peer) { on_connected(peer); });
     network_->on_peer_disconnected([this](const PeerId& id) { on_disconnected(id); });
 }

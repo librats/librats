@@ -1,4 +1,5 @@
 #include "subsystems/ping_service.h"
+#include "node/node_context.h"
 
 #include <cstring>
 
@@ -19,8 +20,8 @@ PingService::PingService(std::chrono::milliseconds interval) : interval_(interva
 
 PingService::~PingService() { stop(); }
 
-void PingService::attach(PeerNetwork& network) {
-    network_ = &network;
+void PingService::attach(NodeContext& ctx) {
+    network_ = &ctx.network;
     network_->on_message(MessageType::Ping,
                          [this](const Peer& peer, ByteView payload) { handle(peer, payload); });
 }

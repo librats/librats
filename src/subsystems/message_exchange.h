@@ -67,7 +67,7 @@ public:
               SendCallback cb = nullptr);
 
     // Subsystem — no background thread; purely event-driven.
-    void attach(PeerNetwork& network) override;
+    void attach(NodeContext& ctx) override;
     void start() override {}
     void stop() override {}
 

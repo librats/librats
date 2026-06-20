@@ -1,4 +1,5 @@
 #include "subsystems/mdns_discovery.h"
+#include "node/node_context.h"
 #include "util/logger.h"
 
 namespace librats {
@@ -9,7 +10,7 @@ MdnsDiscovery::MdnsDiscovery(Config config) : config_(std::move(config)) {}
 
 MdnsDiscovery::~MdnsDiscovery() { stop(); }
 
-void MdnsDiscovery::attach(PeerNetwork& network) { network_ = &network; }
+void MdnsDiscovery::attach(NodeContext& ctx) { network_ = &ctx.network; }
 
 void MdnsDiscovery::start() {
     if (running_.exchange(true)) return;

@@ -1,12 +1,13 @@
 #include "subsystems/message_exchange.h"
+#include "node/node_context.h"
 #include "util/logger.h"
 
 #include <algorithm>
 
 namespace librats {
 
-void MessageExchange::attach(PeerNetwork& network) {
-    network_ = &network;
+void MessageExchange::attach(NodeContext& ctx) {
+    network_ = &ctx.network;
     network_->on_message(MessageType::Typed,
         [this](const Peer& peer, ByteView payload) { on_typed(peer.id(), payload); });
 }

@@ -175,6 +175,8 @@ set(LIBRARY_SOURCES
     src/core/mpsc_queue.h
     src/core/timer_queue.h
     src/core/notifier.h
+    src/core/event_bus.h
+    src/core/service_registry.h
     src/transport/connection.h
     src/transport/connection.cpp
     src/transport/reactor.h
@@ -200,6 +202,8 @@ set(LIBRARY_SOURCES
 
 # Core v2 — node facade, peer handle, message router, plugin contract
     src/node/config.h
+    src/node/host_events.h
+    src/node/node_context.h
     src/peer/peer.h
     src/node/peer_network.h
     src/wire/message_router.h
@@ -515,6 +519,7 @@ if(RATS_BUILD_TESTS)
         tests/test_handshake.cpp
         tests/test_node.cpp
         tests/test_persistence.cpp
+        tests/test_event_bus.cpp
         tests/test_subsystem.cpp
         tests/test_pubsub.cpp
         tests/test_message_exchange.cpp

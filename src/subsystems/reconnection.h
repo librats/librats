@@ -48,7 +48,7 @@ public:
 
     size_t target_count() const;
 
-    void attach(PeerNetwork& network) override;
+    void attach(NodeContext& ctx) override;
     void start() override;
     void stop() override;
 

@@ -50,7 +50,7 @@ public:
     std::vector<PeerId>      peers_for_topic(const std::string& topic) const;
 
     // Subsystem (no background thread — fully event-driven).
-    void attach(PeerNetwork& network) override;
+    void attach(NodeContext& ctx) override;
     void start() override {}
     void stop() override {}
 

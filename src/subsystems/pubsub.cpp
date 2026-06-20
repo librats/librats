@@ -1,4 +1,5 @@
 #include "subsystems/pubsub.h"
+#include "node/node_context.h"
 
 #include <cstring>
 
@@ -43,8 +44,8 @@ std::string dedup_key(const PeerId& origin, uint64_t seqno) {
 
 } // namespace
 
-void PubSub::attach(PeerNetwork& network) {
-    network_ = &network;
+void PubSub::attach(NodeContext& ctx) {
+    network_ = &ctx.network;
     network_->on_message(MessageType::Gossip,
                          [this](const Peer& peer, ByteView payload) { on_gossip(peer, payload); });
     network_->on_peer_connected([this](const Peer& peer) { on_new_peer(peer); });

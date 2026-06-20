@@ -44,6 +44,12 @@ struct NodeConfig {
     /// identity each run). When set, the node's Noise keypair is loaded from /
     /// saved to "<data_dir>/identity.key", giving a stable PeerId across restarts.
     std::string data_dir = "";
+
+    /// Watch the host for network configuration changes (interface up/down, IP
+    /// add/remove, route flip, wake-from-sleep) and publish NetworkChanged on the
+    /// node's EventBus so subsystems can renew port mappings, re-run STUN and
+    /// re-announce. Costs one mostly-idle monitor thread. See node/host_events.h.
+    bool enable_network_monitor = true;
 };
 
 } // namespace librats

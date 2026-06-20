@@ -35,7 +35,7 @@ public:
     explicit PingService(std::chrono::milliseconds interval = std::chrono::seconds(10));
     ~PingService() override;
 
-    void attach(PeerNetwork& network) override;
+    void attach(NodeContext& ctx) override;
     void start() override;
     void stop() override;
 

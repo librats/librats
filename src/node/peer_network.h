@@ -45,12 +45,16 @@ public:
     virtual void                on_peer_disconnected(PeerDisconnectHandler handler) = 0;
 };
 
+struct NodeContext;  // node/node_context.h — bundles network + events + services
+
 /// A pluggable network subsystem. Owns its own threads/sockets if it needs them;
-/// reaches the peer mesh only through the PeerNetwork it is attached to.
+/// reaches the rest of the node only through the NodeContext it is attached to
+/// (the peer mesh via ctx.network, host events via ctx.events, sibling modules via
+/// ctx.services). A subsystem is mocked in tests by faking those interfaces.
 class Subsystem {
 public:
     virtual ~Subsystem() = default;
-    virtual void attach(PeerNetwork& network) = 0;
+    virtual void attach(NodeContext& ctx) = 0;
     virtual void start() = 0;
     virtual void stop() = 0;
 };

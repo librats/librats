@@ -1,4 +1,6 @@
 #include "subsystems/port_mapping_service.h"
+#include "node/node_context.h"
+#include "node/host_events.h"
 #include "nat/upnp.h"
 #include "nat/natpmp.h"
 #include "util/network_utils.h"
@@ -10,7 +12,20 @@ PortMappingService::PortMappingService(PortMappingConfig config) : config_(confi
 
 PortMappingService::~PortMappingService() { stop(); }
 
-void PortMappingService::attach(PeerNetwork& network) { network_ = &network; }
+void PortMappingService::attach(NodeContext& ctx) {
+    network_ = &ctx.network;
+    // On a host network change the LAN IP and/or gateway likely changed, so existing
+    // UPnP/NAT-PMP leases are stale or aimed at the wrong internal address. Tear them
+    // down and re-run discovery from scratch. The handler runs on the node's
+    // maintenance thread (dedicated to recovery), so the blocking stop()/start() is
+    // fine here.
+    ctx.events.on<NetworkChanged>([this](const NetworkChanged&) {
+        if (!config_.enabled) return;
+        LOG_INFO("portmap", "Network changed — renewing port mappings");
+        stop();
+        if (network_) start();
+    });
+}
 
 void PortMappingService::start() {
     if (!config_.enabled) {
