@@ -12,10 +12,10 @@ namespace librats {
 
 namespace {
 
-std::unique_ptr<SecurityProvider> make_security(NodeConfig::Security kind, const Identity& id) {
-    if (kind == NodeConfig::Security::Noise)
-        return std::make_unique<NoiseSecurity>(id);
-    return std::make_unique<PlaintextSecurity>(id);
+std::unique_ptr<SecurityProvider> make_security(const NodeConfig& cfg, const Identity& id) {
+    if (cfg.security == NodeConfig::Security::Noise)
+        return std::make_unique<NoiseSecurity>(id, cfg.protocol_name, cfg.protocol_version);
+    return std::make_unique<PlaintextSecurity>(id, cfg.protocol_name, cfg.protocol_version);
 }
 
 // Load a persisted identity from <data_dir>/identity.key, or generate one and
@@ -50,7 +50,7 @@ Identity load_or_create_identity(const std::string& data_dir) {
 Node::Node(NodeConfig config)
     : config_(std::move(config)),
       identity_(load_or_create_identity(config_.data_dir)),
-      security_(make_security(config_.security, identity_)),
+      security_(make_security(config_, identity_)),
       reactors_(std::make_unique<ReactorPool>(config_.reactor_threads, *this, *security_)) {
     max_peers_.store(config_.max_peers, std::memory_order_relaxed);
 }

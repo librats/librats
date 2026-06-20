@@ -191,6 +191,42 @@ TEST(NodeTest, MaxPeersRuntimeRaise) {
     server.stop();
 }
 
+// Nodes with a different protocol id cannot connect (the handshake prologue
+// diverges, failing the Noise handshake). Cross-application isolation.
+TEST(NodeTest, ProtocolMismatchPreventsConnection) {
+    NodeConfig sc = server_config(); sc.protocol_name = "app-a";
+    NodeConfig cc = client_config(); cc.protocol_name = "app-b";
+    Node server(sc);
+    Node client(cc);
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+
+    std::this_thread::sleep_for(700ms);  // ample time for a handshake to fail
+    EXPECT_EQ(server.peer_count(), 0u);
+    EXPECT_EQ(client.peer_count(), 0u);
+
+    client.stop();
+    server.stop();
+}
+
+// A matching custom protocol (name + version) connects normally.
+TEST(NodeTest, MatchingCustomProtocolConnects) {
+    NodeConfig sc = server_config(); sc.protocol_name = "myapp"; sc.protocol_version = "3.1";
+    NodeConfig cc = client_config(); cc.protocol_name = "myapp"; cc.protocol_version = "3.1";
+    Node server(sc);
+    Node client(cc);
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.peer_count() == 1 && client.peer_count() == 1; }));
+
+    client.stop();
+    server.stop();
+}
+
 // Disconnecting one side fires the peer-disconnected event on the other.
 TEST(NodeTest, DisconnectNotifiesPeer) {
     Node server(server_config());

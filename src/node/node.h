@@ -55,6 +55,10 @@ public:
     const PeerId& local_id() const noexcept override { return identity_.id; }
     uint16_t      listen_port() const noexcept override { return listen_port_; }
 
+    /// Application protocol identity bound into the handshake (see NodeConfig).
+    const std::string& protocol_name() const noexcept { return config_.protocol_name; }
+    const std::string& protocol_version() const noexcept { return config_.protocol_version; }
+
     // — connections —
     void connect(const Address& address) override;
     void connect(const std::string& host, uint16_t port);

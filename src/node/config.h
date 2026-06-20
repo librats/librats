@@ -33,6 +33,13 @@ struct NodeConfig {
     enum class Security { Noise, Plaintext };
     Security security = Security::Noise;
 
+    /// Application protocol identity. Bound into the Noise handshake prologue, so
+    /// two nodes whose (name, version) differ cannot complete a handshake — a
+    /// cheap, cryptographically-enforced way to keep separate apps from cross-
+    /// connecting. Both peers must match exactly. (No effect under Plaintext.)
+    std::string protocol_name = "librats";
+    std::string protocol_version = "1.0";
+
     /// Directory for persistent state. Empty = ephemeral (a fresh random
     /// identity each run). When set, the node's Noise keypair is loaded from /
     /// saved to "<data_dir>/identity.key", giving a stable PeerId across restarts.

@@ -326,8 +326,12 @@ public:
      * Start a new session
      * @param is_initiator true if initiating the connection
      * @param static_keypair Optional pre-generated static key pair
+     * @param prologue Optional prologue mixed into the handshake hash; both peers
+     *                 must supply identical prologue bytes or the handshake fails
+     * @param prologue_len Length of prologue
      */
-    NoiseError start(bool is_initiator, const NoiseKeyPair* static_keypair = nullptr);
+    NoiseError start(bool is_initiator, const NoiseKeyPair* static_keypair = nullptr,
+                     const uint8_t* prologue = nullptr, size_t prologue_len = 0);
     
     /**
      * Process handshake - call repeatedly until is_handshake_complete()

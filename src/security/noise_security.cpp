@@ -38,9 +38,10 @@ private:
 /// Drives the Noise XX message exchange via rats::NoiseSession::handshake_step.
 class NoiseHandshaker final : public Handshaker {
 public:
-    NoiseHandshaker(const Identity& identity, bool initiator)
+    NoiseHandshaker(const Identity& identity, bool initiator, ByteView prologue)
         : session_(std::make_unique<rats::NoiseSession>()), initiator_(initiator) {
-        session_->start(initiator, &identity.static_keypair);
+        session_->start(initiator, &identity.static_keypair,
+                        prologue.empty() ? nullptr : prologue.data(), prologue.size());
     }
 
     bool start(Bytes& out) override {
@@ -87,10 +88,11 @@ private:
 
 } // namespace
 
-NoiseSecurity::NoiseSecurity(Identity identity) : identity_(identity) {}
+NoiseSecurity::NoiseSecurity(Identity identity, std::string protocol_name, std::string protocol_version)
+    : identity_(identity), prologue_(protocol_id(protocol_name, protocol_version)) {}
 
 std::unique_ptr<Handshaker> NoiseSecurity::create(ConnRole role) {
-    return std::make_unique<NoiseHandshaker>(identity_, role == ConnRole::Outbound);
+    return std::make_unique<NoiseHandshaker>(identity_, role == ConnRole::Outbound, ByteView(prologue_));
 }
 
 } // namespace librats

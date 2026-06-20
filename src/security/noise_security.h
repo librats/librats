@@ -14,17 +14,24 @@
 #include "security/identity.h"
 
 #include <memory>
+#include <string>
 
 namespace librats {
 
 class NoiseSecurity final : public SecurityProvider {
 public:
-    explicit NoiseSecurity(Identity identity);
+    /// @param protocol_name/version Application protocol id, bound into the Noise
+    ///        handshake prologue. Peers whose (name, version) differ cannot
+    ///        complete a handshake — cross-application isolation, enforced
+    ///        cryptographically (a mismatch fails the handshake MAC).
+    explicit NoiseSecurity(Identity identity, std::string protocol_name = "librats",
+                           std::string protocol_version = "1.0");
     std::unique_ptr<Handshaker> create(ConnRole role) override;
     const PeerId& local_id() const override { return identity_.id; }
 
 private:
-    Identity identity_;
+    Identity    identity_;
+    std::string prologue_;  ///< length-prefixed name+version, mixed into every handshake
 };
 
 } // namespace librats

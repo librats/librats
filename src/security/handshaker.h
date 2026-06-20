@@ -19,8 +19,26 @@
 #include "security/session.h"
 
 #include <memory>
+#include <string>
 
 namespace librats {
+
+/// Canonical bytes identifying an application protocol (name + version). Bound
+/// into the handshake — as the Noise prologue, or exchanged-and-checked in the
+/// plaintext handshake — so peers whose protocol differs cannot connect. Fields
+/// are length-prefixed so distinct (name, version) pairs can never alias (e.g.
+/// {"a","b/c"} vs {"a/b","c"}).
+inline std::string protocol_id(const std::string& name, const std::string& version) {
+    auto put = [](std::string& p, const std::string& s) {
+        p.push_back(static_cast<char>((s.size() >> 8) & 0xFF));
+        p.push_back(static_cast<char>(s.size() & 0xFF));
+        p += s;
+    };
+    std::string p = "librats-proto\x1f";  // fixed context tag
+    put(p, name);
+    put(p, version);
+    return p;
+}
 
 class Handshaker {
 public:

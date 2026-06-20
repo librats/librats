@@ -75,7 +75,76 @@ void expect_bidirectional(Session& a, Session& b) {
     EXPECT_EQ(to_str(pt), "pong");
 }
 
+// Drive two handshakers, tolerating failure; true iff both reach a Session.
+bool handshake_completes(SecurityProvider& a_provider, SecurityProvider& b_provider) {
+    auto a = a_provider.create(ConnRole::Outbound);
+    auto b = b_provider.create(ConnRole::Inbound);
+
+    Bytes a_to_b, b_to_a, scratch;
+    if (!a->start(a_to_b) || !b->start(scratch)) return false;
+
+    bool a_done = false, b_done = false;
+    for (int guard = 0; guard < 8 && !(a_done && b_done); ++guard) {
+        if (!a_to_b.empty()) {
+            Bytes reply;
+            auto oc = b->consume(a_to_b, reply);
+            if (oc.status == Handshaker::Outcome::Failed) return false;
+            b_done = b_done || oc.status == Handshaker::Outcome::Done;
+            a_to_b.clear();
+            b_to_a = std::move(reply);
+        } else if (!b_to_a.empty()) {
+            Bytes reply;
+            auto oc = a->consume(b_to_a, reply);
+            if (oc.status == Handshaker::Outcome::Failed) return false;
+            a_done = a_done || oc.status == Handshaker::Outcome::Done;
+            b_to_a.clear();
+            a_to_b = std::move(reply);
+        } else {
+            break;
+        }
+    }
+    return a_done && b_done;
+}
+
 } // namespace
+
+// Matching protocol ids handshake fine; a mismatch fails the handshake (the
+// prologue diverges, so the encrypted static-key MAC in message 2 won't verify).
+TEST(HandshakeTest, ProtocolPrologueGuardsCrossAppConnections) {
+    Identity alice = Identity::generate(), bob = Identity::generate();
+
+    {  // same protocol → success
+        NoiseSecurity a(alice, "app", "1.0"), b(bob, "app", "1.0");
+        EXPECT_TRUE(handshake_completes(a, b));
+    }
+    {  // different name → failure
+        NoiseSecurity a(alice, "app", "1.0"), b(bob, "other", "1.0");
+        EXPECT_FALSE(handshake_completes(a, b));
+    }
+    {  // same name, different version → failure
+        NoiseSecurity a(alice, "app", "1.0"), b(bob, "app", "2.0");
+        EXPECT_FALSE(handshake_completes(a, b));
+    }
+    {  // library default on both sides → success (no surprise for existing nodes)
+        NoiseSecurity a(alice), b(bob);
+        EXPECT_TRUE(handshake_completes(a, b));
+    }
+}
+
+// The protocol guard also applies to the unencrypted (plaintext) handshake, so
+// two apps cannot cross-connect even without encryption.
+TEST(HandshakeTest, PlaintextAlsoGuardsProtocol) {
+    Identity alice = Identity::generate(), bob = Identity::generate();
+
+    {  // same protocol → ids exchanged, session established (just not encrypted)
+        PlaintextSecurity a(alice, "app", "1"), b(bob, "app", "1");
+        EXPECT_TRUE(handshake_completes(a, b));
+    }
+    {  // mismatched protocol → handshake refused
+        PlaintextSecurity a(alice, "app", "1"), b(bob, "app", "2");
+        EXPECT_FALSE(handshake_completes(a, b));
+    }
+}
 
 TEST(PeerIdTest, DerivedFromKeyIsStableAndHex) {
     Identity id = Identity::generate();

@@ -672,10 +672,11 @@ NoiseSession::~NoiseSession() {
     clear();
 }
 
-NoiseError NoiseSession::start(bool is_initiator, const NoiseKeyPair* static_keypair) {
+NoiseError NoiseSession::start(bool is_initiator, const NoiseKeyPair* static_keypair,
+                               const uint8_t* prologue, size_t prologue_len) {
     LOG_NOISE_INFO("Session starting as " << (is_initiator ? "initiator" : "responder"));
     transport_ready_ = false;
-    NoiseError err = handshake_.initialize(is_initiator, static_keypair);
+    NoiseError err = handshake_.initialize(is_initiator, static_keypair, prologue, prologue_len);
     if (err != NoiseError::OK) {
         LOG_NOISE_ERROR("Session start failed: " << static_cast<int>(err));
     }
