@@ -84,10 +84,6 @@ Node::~Node() {
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
-void Node::add_subsystem(std::unique_ptr<Subsystem> subsystem) {
-    subsystems_.push_back(std::move(subsystem));
-}
-
 bool Node::start() {
     if (running_.exchange(true)) return false;
     init_socket_library();

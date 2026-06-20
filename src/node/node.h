@@ -60,6 +60,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace librats {
@@ -75,8 +76,18 @@ public:
     Node& operator=(const Node&) = delete;
 
     /// Attach a subsystem (DHT, GossipSub, PingService…). Call before start();
-    /// the node owns it, gives it a PeerNetwork on start(), and stops it on stop().
-    void add_subsystem(std::unique_ptr<Subsystem> subsystem);
+    /// the node owns it (single ownership), gives it a PeerNetwork on start(), and
+    /// stops it on stop(). Returns a non-owning pointer to the just-added subsystem
+    /// so the caller can drive its API without a separate get()/move dance — valid
+    /// for the node's lifetime:
+    ///   auto* files = node.add_subsystem(std::make_unique<FileTransfer>("./dl"));
+    template <class T>
+    T* add_subsystem(std::unique_ptr<T> subsystem) {
+        static_assert(std::is_base_of<Subsystem, T>::value, "T must derive from Subsystem");
+        T* raw = subsystem.get();
+        subsystems_.push_back(std::move(subsystem));  // upcast to unique_ptr<Subsystem>
+        return raw;
+    }
 
     bool start();
     void stop();
