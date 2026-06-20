@@ -222,6 +222,73 @@ TEST(PubSubTest, LazyPullDeliversWithoutMesh) {
     server.node.stop();
 }
 
+// After unsubscribe, the peer stops being a topic member and no longer receives
+// publishes for it.
+TEST(PubSubTest, UnsubscribeStopsDelivery) {
+    PubSubNode server(listening_config(), fast_gossip());
+    PubSubNode client(dialing_config(), fast_gossip());
+
+    std::atomic<int> got{0};
+    client.ps->subscribe("live", [&](const PeerId&, const std::string&, ByteView) { got++; });
+
+    ASSERT_TRUE(server.node.start());
+    ASSERT_TRUE(client.node.start());
+    client.node.connect("127.0.0.1", server.node.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.ps->peers_for_topic("live").size() == 1; }));
+
+    // First publish gets through while subscribed.
+    server.ps->publish("live", ByteView(std::string("1")));
+    ASSERT_TRUE(wait_for([&] { return got.load() == 1; }));
+
+    // Unsubscribe and wait for the server to drop the client as a topic member.
+    client.ps->unsubscribe("live");
+    ASSERT_TRUE(wait_for([&] { return server.ps->peers_for_topic("live").empty(); }))
+        << "unsubscribe did not propagate";
+
+    server.ps->publish("live", ByteView(std::string("2")));
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(got.load(), 1) << "message delivered after unsubscribe";
+
+    client.node.stop();
+    server.node.stop();
+}
+
+// Every distinct message on a meshed topic is delivered exactly once — no loss,
+// no duplicates (exercises the (origin,seqno) dedup over a burst).
+TEST(PubSubTest, DeliversBurstExactlyOnce) {
+    PubSubNode server(listening_config(), fast_gossip());
+    PubSubNode client(dialing_config(), fast_gossip());
+
+    std::mutex mu;
+    std::vector<std::string> received;
+    client.ps->subscribe("burst", [&](const PeerId&, const std::string&, ByteView d) {
+        std::lock_guard<std::mutex> l(mu); received.push_back(str(d));
+    });
+    server.ps->subscribe("burst", [](const PeerId&, const std::string&, ByteView) {});
+
+    ASSERT_TRUE(server.node.start());
+    ASSERT_TRUE(client.node.start());
+    client.node.connect("127.0.0.1", server.node.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.ps->mesh_peers("burst").size() == 1; }));
+
+    constexpr int N = 50;
+    for (int i = 0; i < N; ++i) server.ps->publish("burst", ByteView(std::to_string(i)));
+
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(mu); return received.size() >= N; }))
+        << "not all messages delivered";
+    std::this_thread::sleep_for(150ms);  // give any duplicates a chance to arrive
+    {
+        std::lock_guard<std::mutex> l(mu);
+        EXPECT_EQ(received.size(), static_cast<size_t>(N)) << "duplicate or extra deliveries";
+        std::sort(received.begin(), received.end());
+        received.erase(std::unique(received.begin(), received.end()), received.end());
+        EXPECT_EQ(received.size(), static_cast<size_t>(N)) << "missing distinct messages";
+    }
+
+    client.node.stop();
+    server.node.stop();
+}
+
 // A REJECT validator drops a message before delivery; ACCEPT lets it through.
 TEST(PubSubTest, ValidatorRejectsMessages) {
     PubSubNode server(listening_config(), fast_gossip());

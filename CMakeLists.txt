@@ -526,6 +526,7 @@ if(RATS_BUILD_TESTS)
         tests/test_filexfer.cpp
         tests/test_dht_discovery.cpp
         tests/test_reconnection_v2.cpp
+        tests/test_logging.cpp
     )
 
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled

@@ -90,11 +90,38 @@ TEST(FilexferUnit, IsSafeRelativePath) {
     EXPECT_FALSE(FileTransfer::is_safe_relative_path("a/./b"));
 }
 
-// send_file on a path that is not a readable file returns 0 (no transfer).
-TEST(FilexferTest, SendMissingFileReturnsZero) {
+// send_file / send_directory on a path that does not exist returns 0 (no transfer).
+TEST(FilexferTest, SendMissingPathReturnsZero) {
     Pair p = make_pair();
     ASSERT_TRUE(bring_up(p));
     EXPECT_EQ(p.send->send_file(p.server->local_id(), "no_such_file_12345.bin"), 0u);
+    EXPECT_EQ(p.send->send_directory(p.server->local_id(), "no_such_dir_12345"), 0u);
+}
+
+// The sender can cancel an offer that the receiver never accepted; it completes
+// unsuccessfully on the sender and no data is ever streamed.
+TEST(FilexferTest, SenderCancelBeforeAccept) {
+    const std::string src = "ft_precancel_src.bin";
+    const auto content = make_pattern(512 * 1024);
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+
+    Pair p = make_pair();
+    std::atomic<bool> offered{false}, sdone{false}, sok{true};
+    std::atomic<uint64_t> offer_id{0};
+    // Receiver observes the offer but deliberately never accepts/rejects it.
+    p.recv->on_offer([&](const FileTransfer::Offer& o) { offer_id = o.id; offered = true; });
+    p.send->on_complete([&](uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    const uint64_t id = p.send->send_file(p.server->local_id(), src);
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(wait_for([&] { return offered.load(); }));
+
+    EXPECT_TRUE(p.send->cancel(p.server->local_id(), id));  // cancel from the sender side
+    ASSERT_TRUE(wait_for([&] { return sdone.load(); }));
+    EXPECT_FALSE(sok.load());
+
+    delete_file(src.c_str());
 }
 
 // A zero-byte file round-trips: no chunks, just the per-file SHA marker.

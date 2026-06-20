@@ -187,6 +187,35 @@ TEST(MessageExchangeTest, SendCallbackPeerNotConnected) {
     node.stop();
 }
 
+// A payload well past the receive ring-buffer size arrives whole and intact,
+// proving the framing reassembles a typed message across recv boundaries.
+TEST(MessageExchangeTest, LargeMessageIntegrity) {
+    Pair p;
+    p.connect();
+
+    std::mutex mu;
+    json got;
+    p.srv->on("bulk", [&](const PeerId&, const json& data) {
+        std::lock_guard<std::mutex> l(mu); got = data;
+    });
+
+    // ~64 KB of structured JSON — far beyond a single recv() worth of bytes.
+    json payload;
+    payload["tag"] = "bulk";
+    json arr = json::array();
+    for (int i = 0; i < 4000; ++i) arr.push_back(json{{"i", i}, {"s", "item-" + std::to_string(i)}});
+    payload["items"] = std::move(arr);
+
+    p.cli->send(p.server.local_id(), "bulk", payload);
+
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(mu); return !got.is_null(); }));
+    std::lock_guard<std::mutex> l(mu);
+    ASSERT_TRUE(got.contains("items"));
+    EXPECT_EQ(got["items"].size(), 4000u);          // nothing truncated
+    EXPECT_EQ(got["items"].back().value("i", -1), 3999);
+    EXPECT_EQ(got, payload);                          // byte-for-byte structural equality
+}
+
 // Broadcast with no peers reports failure via the callback.
 TEST(MessageExchangeTest, BroadcastNoPeersCallback) {
     Node node(server_config());

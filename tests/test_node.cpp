@@ -2,6 +2,7 @@
 
 #include "node/node.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -40,6 +41,13 @@ NodeConfig client_config() {
     NodeConfig c = server_config();
     c.enable_listen = false;    // dial-only
     return c;
+}
+
+// A repeating byte pattern, large enough to span many frames / recv boundaries.
+std::string big_payload(size_t n) {
+    std::string s(n, '\0');
+    for (size_t i = 0; i < n; ++i) s[i] = static_cast<char>((i * 131 + 7) & 0xFF);
+    return s;
 }
 
 } // namespace
@@ -245,4 +253,140 @@ TEST(NodeTest, DisconnectNotifiesPeer) {
     EXPECT_EQ(server.peer_count(), 0u);
 
     server.stop();
+}
+
+// A multi-megabyte payload round-trips byte-exact, under both security modes.
+// Exercises frame chunking + reassembly across recv boundaries (and per-frame
+// AEAD when encrypted). Parameterized over Noise / Plaintext.
+class NodeLargePayloadTest : public ::testing::TestWithParam<NodeConfig::Security> {};
+
+TEST_P(NodeLargePayloadTest, RoundTripsIntact) {
+    NodeConfig sc = server_config(); sc.security = GetParam();
+    NodeConfig cc = client_config(); cc.security = GetParam();
+    Node server(sc);
+    Node client(cc);
+
+    server.on_message("blob", [](const Peer& from, ByteView msg) { from.send("blob", msg); });
+
+    std::mutex mu;
+    std::string got;
+    client.on_message("blob", [&](const Peer&, ByteView msg) {
+        std::lock_guard<std::mutex> l(mu); got = str(msg);
+    });
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+
+    const std::string payload = big_payload(2 * 1024 * 1024 + 333);  // ~2MB, not frame-aligned
+    client.send(server.local_id(), "blob", ByteView(payload));
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(mu); return got.size() == payload.size(); }))
+        << "large payload not fully received";
+    {
+        std::lock_guard<std::mutex> l(mu);
+        EXPECT_EQ(got, payload);  // byte-exact, not just same length
+    }
+
+    client.stop();
+    server.stop();
+}
+
+INSTANTIATE_TEST_SUITE_P(Security, NodeLargePayloadTest,
+                         ::testing::Values(NodeConfig::Security::Noise, NodeConfig::Security::Plaintext));
+
+// Empty and single-byte payloads survive framing end to end (classic off-by-one
+// territory for length-prefixed frames).
+TEST(NodeTest, TinyPayloadsRoundTrip) {
+    Node server(server_config());
+    Node client(client_config());
+
+    server.on_message("echo", [](const Peer& from, ByteView msg) { from.send("echo", msg); });
+
+    std::mutex mu;
+    std::vector<size_t> sizes;
+    client.on_message("echo", [&](const Peer&, ByteView msg) {
+        std::lock_guard<std::mutex> l(mu); sizes.push_back(msg.size());
+    });
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+
+    client.send(server.local_id(), "echo", ByteView());                       // empty
+    client.send(server.local_id(), "echo", ByteView(std::string("x")));       // one byte
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(mu); return sizes.size() == 2; }));
+    {
+        std::lock_guard<std::mutex> l(mu);
+        std::sort(sizes.begin(), sizes.end());
+        EXPECT_EQ(sizes[0], 0u);
+        EXPECT_EQ(sizes[1], 1u);
+    }
+
+    client.stop();
+    server.stop();
+}
+
+// N near-simultaneous dials to the same peer collapse to a single connection
+// (duplicate-connection dedup), not N peers on either side.
+TEST(NodeTest, DuplicateDialsDedupToOnePeer) {
+    Node server(server_config());
+    Node client(client_config());
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    const uint16_t port = server.listen_port();
+    for (int i = 0; i < 6; ++i) client.connect("127.0.0.1", port);  // fire before any handshake settles
+
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }))
+        << "client=" << client.peer_count() << " server=" << server.peer_count();
+    std::this_thread::sleep_for(500ms);  // let any duplicates that were in flight surface
+    EXPECT_EQ(client.peer_count(), 1u);
+    EXPECT_EQ(server.peer_count(), 1u);
+
+    client.stop();
+    server.stop();
+}
+
+// One Node instance can be started, stopped, and started again — sockets rebind
+// and threads relaunch cleanly across cycles.
+TEST(NodeTest, RestartCycles) {
+    Node server(server_config());
+    Node client(client_config());
+
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        ASSERT_TRUE(server.start()) << "server start failed on cycle " << cycle;
+        ASSERT_TRUE(client.start()) << "client start failed on cycle " << cycle;
+
+        client.connect("127.0.0.1", server.listen_port());
+        ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }))
+            << "no connection on cycle " << cycle;
+
+        client.stop();
+        server.stop();
+    }
+}
+
+// Hostile / degenerate inputs are no-ops, not crashes.
+TEST(NodeTest, RobustAgainstBadInputs) {
+    // start() fails (returns false) when the bind address is not a local interface.
+    {
+        NodeConfig bad = server_config();
+        bad.bind_address = "192.0.2.123";  // TEST-NET-1: never a local address
+        Node node(bad);
+        EXPECT_FALSE(node.start()) << "start() should fail on an un-bindable address";
+    }
+
+    // A live node tolerates sends to unknown peers and dials to dead ports.
+    Node node(server_config());
+    ASSERT_TRUE(node.start());
+    EXPECT_NO_THROW(node.send(PeerId{}, "chat", ByteView(std::string("nobody"))));  // unknown id
+    EXPECT_NO_THROW(node.broadcast("chat", ByteView(std::string("noone"))));        // zero peers
+    EXPECT_NO_THROW(node.connect("127.0.0.1", 1));      // nothing listening on port 1
+    EXPECT_NO_THROW(node.connect("127.0.0.1", 0));      // degenerate port
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(node.peer_count(), 0u);
+    node.stop();
 }
