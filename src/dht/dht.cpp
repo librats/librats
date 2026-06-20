@@ -1,6 +1,7 @@
 #include "dht/dht.h"
 #include "util/network_utils.h"
 #include "util/logger.h"
+#include "util/fs.h"
 #include "core/socket.h"
 #include "sha1.h"
 #include "util/json.hpp"
@@ -2803,7 +2804,15 @@ std::string DhtClient::routing_table_file_path() const {
     // IPv6 instance uses a distinct filename suffix so it doesn't collide with the
     // IPv4 instance bound to the same port.
     const char* suffix = is_ipv6() ? "_v6" : "";
+
+    // An explicitly-configured data directory always wins, so routing tables land
+    // where the host node keeps the rest of its state (identity, peers, …) rather
+    // than the process cwd — in test and production builds alike.
+    if (!data_directory_.empty() && data_directory_ != ".")
+        return data_directory_ + "/dht_routing_" + std::to_string(port_) + suffix + ".json";
 #ifdef TESTING
+    // No explicit directory in a test: keep files unique per instance in the cwd so
+    // concurrent ephemeral-port instances don't collide on the same filename.
     if (port_ == 0) {
         std::ostringstream oss;
         oss << "dht_routing_" << this << suffix << ".json";
@@ -2854,6 +2863,10 @@ bool DhtClient::save_routing_table() {
 
         // Determine file path
         std::string file_path = routing_table_file_path();
+
+        // Make sure the target directory exists (ofstream will not create it).
+        if (!data_directory_.empty() && data_directory_ != ".")
+            create_directories(data_directory_.c_str());
 
         // Write to file
         std::ofstream file(file_path);

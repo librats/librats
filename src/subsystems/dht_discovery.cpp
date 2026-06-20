@@ -3,6 +3,7 @@
 #include "node/host_events.h"
 #include "nat/stun.h"
 #include "sha1.h"
+#include "util/fs.h"
 #include "util/logger.h"
 
 namespace librats {
@@ -60,7 +61,7 @@ std::unique_ptr<DhtClient> DhtDiscovery::make_client(AddressFamily family) {
     const char* label = v6 ? "IPv6" : "IPv4";
 
     auto client = std::make_unique<DhtClient>(config_.dht_port, bind_for(config_.bind_address, v6),
-                                              /*data_directory=*/"", family);
+                                              config_.data_dir, family);
     if (!client->start()) {
         LOG_WARN("dht-discovery", label << " DHT client failed to start (skipping this family)");
         return nullptr;
@@ -76,6 +77,9 @@ std::unique_ptr<DhtClient> DhtDiscovery::make_client(AddressFamily family) {
 
 void DhtDiscovery::start() {
     if (running_.exchange(true)) return;
+
+    // Make sure the routing-table directory exists before the clients try to use it.
+    if (!config_.data_dir.empty()) create_directories(config_.data_dir.c_str());
 
     if (config_.enable_ipv4) dht_  = make_client(AddressFamily::IPv4);
     if (config_.enable_ipv6) dht6_ = make_client(AddressFamily::IPv6);

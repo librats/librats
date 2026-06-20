@@ -151,8 +151,11 @@ int main(int argc, char** argv) {
     }
 
     // — optional subsystems, gated by flags —
-    if (use_dht)
-        node.add_subsystem(std::make_unique<DhtDiscovery>(DhtDiscovery::Config{}));
+    if (use_dht) {
+        DhtDiscovery::Config dc;
+        dc.data_dir = config.data_dir;  // co-locate routing tables with identity + peers
+        node.add_subsystem(std::make_unique<DhtDiscovery>(std::move(dc)));
+    }
     if (use_mdns)
         node.add_subsystem(std::make_unique<MdnsDiscovery>());
     if (use_upnp)

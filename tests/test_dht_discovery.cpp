@@ -4,6 +4,7 @@
 #include "subsystems/dht_discovery.h"
 #include "nat/stun.h"
 #include "core/socket.h"
+#include "util/fs.h"
 
 #include <atomic>
 #include <chrono>
@@ -202,6 +203,30 @@ TEST(DhtDiscoveryTest, BringsUpBothAddressFamilies) {
         << "v4 port=" << d->dht_port() << " v6 port=" << d->dht_port_v6();
     node.stop();
     EXPECT_FALSE(d->is_running());
+}
+
+// The routing table is persisted under the configured data_dir, not the cwd.
+TEST(DhtDiscoveryTest, PersistsRoutingTableUnderDataDir) {
+    const std::string dir  = "rats_test_dht_data";
+    const std::string path = dir + "/dht_routing_46991.json";
+    delete_file(path.c_str());
+
+    Node node(listening_config());
+    auto cfg = disc_config({});  // offline, no bootstrap
+    cfg.data_dir = dir;
+    cfg.dht_port = 46991;        // fixed port → predictable file name
+    cfg.enable_ipv6 = false;     // a single, predictably-named routing file
+    auto disc = std::make_unique<DhtDiscovery>(cfg);
+    DhtDiscovery* d = disc.get();
+    node.add_subsystem(std::move(disc));
+
+    ASSERT_TRUE(node.start());
+    ASSERT_TRUE(wait_for([&] { return d->is_running() && d->dht_port() != 0; }, 5s));
+    node.stop();  // DhtDiscovery::stop() → DhtClient::stop() saves the routing table
+
+    EXPECT_FALSE(read_file_text_cpp(path).empty())
+        << "routing table was not written under data_dir: " << path;
+    delete_file(path.c_str());
 }
 
 // A host with only IPv4 can disable the v6 family and still run the IPv4 DHT.

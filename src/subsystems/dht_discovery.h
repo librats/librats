@@ -41,6 +41,7 @@ public:
     struct Config {
         uint16_t                  dht_port = 0;          ///< 0 = ephemeral
         std::string               bind_address = "";
+        std::string               data_dir = "";         ///< routing-table persistence dir (empty = cwd). Set to the node's data_dir to co-locate state.
         bool                      enable_ipv4 = true;    ///< run the IPv4 Kademlia network
         bool                      enable_ipv6 = true;    ///< run the IPv6 Kademlia network (BEP 32)
         std::string               discovery_key = "librats";  ///< app namespace
