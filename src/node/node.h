@@ -13,6 +13,28 @@
  * Threading: connect/send/broadcast are non-blocking and thread-safe — they post
  * work to the owning reactor. Event callbacks (on_peer_connected / on_message /
  * on_peer_disconnected) run on a reactor thread; register them before start().
+ *
+ * ── What a bare Node does, and what it does NOT ──────────────────────────────
+ * A Node on its own is just the secure transport core. Out of the box it gives you:
+ *   - an encrypted TCP transport (Noise_XX, or plaintext per NodeConfig::security),
+ *     with a self-certifying PeerId and the app protocol bound into the handshake;
+ *   - manual dialing: connect(host, port) / connect(Address) — it never discovers
+ *     peers by itself;
+ *   - the peer directory + admission limit: peers(), peer(), peer_count(), max_peers;
+ *   - raw channel messaging: send(to, channel, bytes) / broadcast(channel, bytes)
+ *     / on_message(channel, …);
+ *   - peer connect/disconnect events and the node-scoped EventBus + ServiceRegistry;
+ *   - host network-change detection (NetworkChanged on the EventBus), if enabled;
+ *   - identity persistence (NodeConfig::data_dir → identity.key).
+ *
+ * Everything else is an opt-in Subsystem you attach with add_subsystem() BEFORE
+ * start(): peer discovery (DhtDiscovery, MdnsDiscovery), pub/sub (PubSub), typed
+ * JSON messaging (MessageExchange), file transfer (FileTransfer), liveness
+ * (PingService), NAT port mapping (PortMappingService), automatic reconnection
+ * (ReconnectionService), distributed storage (StorageManager). None of these are
+ * wired by default — a bare Node neither discovers peers nor reconnects on its own;
+ * the application composes exactly the capabilities it wants. This is deliberate:
+ * the node stays a small, predictable core, and you pay only for what you attach.
  */
 
 #include "transport/connection.h"      // ConnectionDelegate

@@ -38,6 +38,16 @@ void ReconnectionService::add(const Address& address) {
     wake_.notify_all();
 }
 
+void ReconnectionService::remove(const Address& address) {
+    bool erased;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        erased = targets_.erase(address.to_string()) > 0;
+    }
+    if (store_ && store_->remove(address)) store_->save();
+    if (erased) LOG_DEBUG("reconnect", "Stopped reconnecting to " << address.to_string());
+}
+
 size_t ReconnectionService::target_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return targets_.size();
@@ -122,17 +132,36 @@ void ReconnectionService::loop() {
     while (running_.load()) {
         const auto now = std::chrono::steady_clock::now();
 
-        std::vector<Address> to_dial;
+        std::vector<Address> to_dial, gave_up;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (auto& [key, target] : targets_) {
-                if (!target.connected && target.next_attempt <= now) {
-                    to_dial.push_back(target.address);
-                    target.attempts++;
-                    target.next_attempt = now + backoff_for(target.attempts);
+            for (auto it = targets_.begin(); it != targets_.end();) {
+                Target& target = it->second;
+                if (target.connected || target.next_attempt > now) { ++it; continue; }
+
+                // Give up on a persistently-dead target: drop it (and from the store
+                // below) instead of re-dialing forever. A reconnect resets attempts,
+                // so this only reaps addresses that never came back.
+                if (config_.max_attempts > 0 && target.attempts >= config_.max_attempts) {
+                    gave_up.push_back(target.address);
+                    it = targets_.erase(it);
+                    continue;
                 }
+
+                to_dial.push_back(target.address);
+                target.attempts++;
+                target.next_attempt = now + backoff_for(target.attempts);
+                ++it;
             }
         }
+        if (store_ && !gave_up.empty()) {
+            bool changed = false;
+            for (const Address& addr : gave_up) changed |= store_->remove(addr);
+            if (changed) store_->save();
+        }
+        for (const Address& addr : gave_up)
+            LOG_DEBUG("reconnect", "Giving up on " << addr.to_string() << " after "
+                      << config_.max_attempts << " attempts");
         for (const Address& addr : to_dial) {
             LOG_DEBUG("reconnect", "Dialing " << addr.to_string());
             network_->connect(addr);

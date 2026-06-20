@@ -60,6 +60,21 @@ TEST(PeerStoreTest, RoundTrip) {
     delete_file(path.c_str());
 }
 
+// remove() takes an address back out of the store.
+TEST(PeerStoreTest, Remove) {
+    const std::string path = "rats_test_peers_remove.txt";
+    delete_file(path.c_str());
+    PeerStore store(path);
+    store.add(*Address::parse("127.0.0.1:4001"));
+    store.add(*Address::parse("10.0.0.5:5002"));
+    EXPECT_TRUE(store.remove(*Address::parse("127.0.0.1:4001")));
+    EXPECT_FALSE(store.remove(*Address::parse("127.0.0.1:4001")));  // already gone
+    EXPECT_EQ(store.size(), 1u);
+    const auto all = store.all();
+    EXPECT_EQ(std::find(all.begin(), all.end(), *Address::parse("127.0.0.1:4001")), all.end());
+    delete_file(path.c_str());
+}
+
 // After a connection drops, the service re-dials the target and reconnects.
 TEST(ReconnectionServiceTest, ReestablishesAfterDrop) {
     Node server(listening_config());
@@ -86,6 +101,59 @@ TEST(ReconnectionServiceTest, ReestablishesAfterDrop) {
 
     client.stop();
     server.stop();
+}
+
+// remove() stops the service re-dialing an address after a drop.
+TEST(ReconnectionServiceTest, RemoveStopsReconnect) {
+    Node server(listening_config());
+    Node client(dialing_config());
+
+    auto reconnect = std::make_unique<ReconnectionService>(fast_reconnect());
+    ReconnectionService* svc = reconnect.get();
+    client.add_subsystem(std::move(reconnect));
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    const Address addr = *Address::parse("127.0.0.1:" + std::to_string(server.listen_port()));
+    svc->add(addr);
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1; })) << "initial connect failed";
+
+    // Stop reconnecting, then drop the live connection.
+    svc->remove(addr);
+    EXPECT_EQ(svc->target_count(), 0u);
+    auto peer = client.peer(server.local_id());
+    ASSERT_TRUE(peer.has_value());
+    peer->disconnect();
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 0; })) << "did not drop";
+
+    // It must stay down: no target means no re-dial (give it several ticks).
+    std::this_thread::sleep_for(800ms);
+    EXPECT_EQ(client.peer_count(), 0u) << "reconnected despite remove()";
+
+    client.stop();
+    server.stop();
+}
+
+// With max_attempts set, a target that never connects is given up on and dropped.
+TEST(ReconnectionServiceTest, GivesUpAfterMaxAttempts) {
+    Node client(dialing_config());
+
+    auto cfg = fast_reconnect();
+    cfg.max_attempts = 3;
+    auto reconnect = std::make_unique<ReconnectionService>(cfg);
+    ReconnectionService* svc = reconnect.get();
+    client.add_subsystem(std::move(reconnect));
+    ASSERT_TRUE(client.start());
+
+    // Nothing is listening here, so every dial fails and the target never connects.
+    svc->add(*Address::parse("127.0.0.1:1"));
+    EXPECT_EQ(svc->target_count(), 1u);
+
+    EXPECT_TRUE(wait_for([&] { return svc->target_count() == 0; }, 10s))
+        << "service did not give up after max_attempts";
+
+    client.stop();
 }
 
 // Outbound peers are auto-remembered (persist_discovered) and survive a restart

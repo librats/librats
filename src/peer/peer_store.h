@@ -29,6 +29,9 @@ public:
     /// Add an address. Returns true if it was not already present.
     bool add(const Address& address);
 
+    /// Remove an address. Returns true if it was present.
+    bool remove(const Address& address);
+
     std::vector<Address> all() const;
     size_t               size() const;
 

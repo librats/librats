@@ -39,6 +39,14 @@ bool PeerStore::add(const Address& address) {
     return true;
 }
 
+bool PeerStore::remove(const Address& address) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto it = addresses_.begin(); it != addresses_.end(); ++it) {
+        if (*it == address) { addresses_.erase(it); return true; }
+    }
+    return false;
+}
+
 std::vector<Address> PeerStore::all() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return addresses_;

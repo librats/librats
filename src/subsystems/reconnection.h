@@ -9,6 +9,11 @@
  * PeerNetwork: it dials via connect(), learns addresses from peer events, and
  * matches a disconnected peer back to its target by the address it was dialed at
  * (populated into PeerInfo for outbound connections).
+ *
+ * A target is dropped when the app calls remove(), or — if Config::max_attempts
+ * is set — after that many consecutive failed dials without ever connecting (it
+ * "gives up", freeing memory and pruning the store). A successful connection
+ * resets the attempt counter, so only persistently-dead addresses are reaped.
  */
 
 #include "node/peer_network.h"
@@ -34,6 +39,7 @@ public:
         std::string               store_path = "";          ///< persist targets (empty = memory only)
         bool                      persist_discovered = true; ///< remember dialed peers automatically
         size_t                    max_targets = 1024;        ///< cap on remembered targets (bounds memory + store growth)
+        size_t                    max_attempts = 0;          ///< give up (drop the target) after this many consecutive failed dials; 0 = retry forever
         std::chrono::milliseconds base_backoff{1000};
         std::chrono::milliseconds max_backoff{60000};
         std::chrono::milliseconds tick{1000};
@@ -45,6 +51,12 @@ public:
 
     /// Register an address to keep connected. Persists it if a store is configured.
     void add(const Address& address);
+
+    /// Stop reconnecting to an address: drops it as a target and from the store.
+    /// Use when the application intentionally parts with a peer and does not want
+    /// it re-dialed. (A later fresh connection to it may re-learn it if
+    /// persist_discovered is on.)
+    void remove(const Address& address);
 
     size_t target_count() const;
 
