@@ -57,8 +57,8 @@ TEST(NodeCApiTest, ConnectSendAndEcho) {
     rats_on_peer_connected(client, peer_cb, &client_ctx);
     rats_on_message(client, "chat", collect_cb, &client_ctx);
 
-    ASSERT_EQ(rats_start(server), 1);
-    ASSERT_EQ(rats_start(client), 1);
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
 
     rats_connect(client, "127.0.0.1", rats_listen_port(server));
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
@@ -92,7 +92,7 @@ TEST(NodeCApiTest, LocalIdAndLifecycle) {
     ASSERT_NE(idb, nullptr);
     EXPECT_STRNE(ida, idb);
 
-    EXPECT_EQ(rats_start(a), 1);
+    EXPECT_EQ(rats_start(a), RATS_OK);
     EXPECT_NE(rats_listen_port(a), 0);
     rats_stop(a);
 
@@ -135,13 +135,17 @@ TEST(NodeCApiTest, PubSubAndTypedMessaging) {
     // so each has the subsystem attached; we then assert on one direction.
     TopicCtx topic_ctx, client_topic_ctx;
     TypedCtx typed_ctx, server_typed_ctx;
+    ASSERT_EQ(rats_enable_pubsub(server), RATS_OK);
+    ASSERT_EQ(rats_enable_pubsub(client), RATS_OK);
+    ASSERT_EQ(rats_enable_messaging(server), RATS_OK);
+    ASSERT_EQ(rats_enable_messaging(client), RATS_OK);
     rats_subscribe(server, "news", topic_cb, &topic_ctx);
     rats_subscribe(client, "news", topic_cb, &client_topic_ctx);
     rats_on(client, "greet", typed_cb, &typed_ctx);
     rats_on(server, "greet", typed_cb, &server_typed_ctx);
 
-    ASSERT_EQ(rats_start(server), 1);
-    ASSERT_EQ(rats_start(client), 1);
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
 
     rats_connect(client, "127.0.0.1", rats_listen_port(server));
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1 && rats_peer_count(client) == 1; }));
@@ -192,9 +196,9 @@ TEST(NodeCApiTest, MaxPeersCapsInbound) {
     rats_set_max_peers(server, 1);
     EXPECT_EQ(rats_max_peers(server), 1u);
 
-    ASSERT_EQ(rats_start(server), 1);
-    ASSERT_EQ(rats_start(a), 1);
-    ASSERT_EQ(rats_start(b), 1);
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(a), RATS_OK);
+    ASSERT_EQ(rats_start(b), RATS_OK);
 
     uint16_t port = rats_listen_port(server);
     rats_connect(a, "127.0.0.1", port);
@@ -218,8 +222,8 @@ TEST(NodeCApiTest, DisconnectCallbackFires) {
         if (id && std::strlen(id) == 64) static_cast<std::atomic<int>*>(u)->fetch_add(1);
     }, &disconnects);
 
-    ASSERT_EQ(rats_start(server), 1);
-    ASSERT_EQ(rats_start(client), 1);
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
     rats_connect(client, "127.0.0.1", rats_listen_port(server));
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1; }));
 
@@ -251,8 +255,8 @@ TEST(NodeCApiTest, BinaryPayloadWithNuls) {
     BinCtx ctx;
     rats_on_message(server, "bin", bin_collect_cb, &ctx);
 
-    ASSERT_EQ(rats_start(server), 1);
-    ASSERT_EQ(rats_start(client), 1);
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
     rats_connect(client, "127.0.0.1", rats_listen_port(server));
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
 
@@ -275,16 +279,16 @@ TEST(NodeCApiTest, BinaryPayloadWithNuls) {
 TEST(NodeCApiTest, FileTransferNegativePaths) {
     rats_t node = rats_create(0);
     rats_enable_file_transfer(node, ".");
-    ASSERT_EQ(rats_start(node), 1);
+    ASSERT_EQ(rats_start(node), RATS_OK);
 
     char* self = rats_local_id(node);  // a valid 64-hex id (but no transfer exists for it)
 
     EXPECT_EQ(rats_send_file(node, "not-a-valid-hex-id", "whatever.bin"), 0u);   // bad hex
     EXPECT_EQ(rats_send_file(node, self, "no_such_file_98765.bin"), 0u);          // missing path
     EXPECT_EQ(rats_send_directory(node, self, "no_such_dir_98765"), 0u);          // missing dir
-    EXPECT_EQ(rats_cancel_file(node, self, 999999u), 0);                          // unknown transfer
-    EXPECT_EQ(rats_pause_file(node, self, 999999u), 0);
-    EXPECT_EQ(rats_resume_file(node, self, 999999u), 0);
+    EXPECT_EQ(rats_cancel_file(node, self, 999999u), RATS_ERR_NO_SUCH_PEER);       // unknown transfer
+    EXPECT_EQ(rats_pause_file(node, self, 999999u), RATS_ERR_NO_SUCH_PEER);
+    EXPECT_EQ(rats_resume_file(node, self, 999999u), RATS_ERR_NO_SUCH_PEER);
     EXPECT_NO_THROW(rats_accept_file(node, self, 999999u, "dest.bin"));           // no-op, no crash
     EXPECT_NO_THROW(rats_reject_file(node, self, 999999u));
 
@@ -300,14 +304,16 @@ TEST(NodeCApiTest, BroadcastRawAndTyped) {
 
     CollectCtx raw_ctx;
     TypedCtx typed_ctx, server_typed_ctx;
+    ASSERT_EQ(rats_enable_messaging(client), RATS_OK);
+    ASSERT_EQ(rats_enable_messaging(server), RATS_OK);
     rats_on_message(client, "raw", collect_cb, &raw_ctx);
     rats_on(client, "ev", typed_cb, &typed_ctx);
     // The server must own a MessageExchange before start() to broadcast typed
     // messages (subsystems attach pre-start), so register a handler on it too.
     rats_on(server, "ev", typed_cb, &server_typed_ctx);
 
-    ASSERT_EQ(rats_start(server), 1);
-    ASSERT_EQ(rats_start(client), 1);
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
     rats_connect(client, "127.0.0.1", rats_listen_port(server));
     ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1 && rats_peer_count(client) == 1; }));
 

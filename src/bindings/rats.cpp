@@ -21,15 +21,21 @@ using namespace librats;
 
 namespace {
 
-// A C handle is a thin owner of the Node plus non-owning pointers to the lazily
-// created subsystems (the Node owns those). Subsystems must be attached before
-// start(), so the *_enable / first-use calls below are "call before start()".
+// A C handle is a thin owner of the Node plus non-owning pointers to the
+// subsystems it has enabled (the Node owns those). Subsystems are explicit: each
+// rats_enable_* attaches one before start() and records it here; the *_enabled
+// flags dedup the enables that don't keep a pointer. `started` gates the
+// before-start contract so enables after start() can be rejected cleanly.
 struct RatsHandle {
     std::unique_ptr<Node> node;
     PubSub*          pubsub   = nullptr;
     MessageExchange* messages = nullptr;
     FileTransfer*    files    = nullptr;
     PingService*     ping     = nullptr;
+    bool dht_enabled     = false;
+    bool mdns_enabled    = false;
+    bool portmap_enabled = false;
+    bool started         = false;
 };
 
 RatsHandle* as_handle(rats_t handle) { return static_cast<RatsHandle*>(handle); }
@@ -41,45 +47,25 @@ char* dup_string(const std::string& s) {
     return out;
 }
 
-PubSub* ensure_pubsub(RatsHandle* h) {
-    if (!h->pubsub) {
-        auto p = std::make_unique<PubSub>();
-        h->pubsub = p.get();
-        h->node->add_subsystem(std::move(p));
-    }
-    return h->pubsub;
-}
-
-MessageExchange* ensure_messages(RatsHandle* h) {
-    if (!h->messages) {
-        auto m = std::make_unique<MessageExchange>();
-        h->messages = m.get();
-        h->node->add_subsystem(std::move(m));
-    }
-    return h->messages;
-}
-
-FileTransfer* ensure_files(RatsHandle* h, const std::string& temp_dir) {
-    if (!h->files) {
-        auto f = std::make_unique<FileTransfer>(temp_dir);
-        h->files = f.get();
-        h->node->add_subsystem(std::move(f));
-    }
-    return h->files;
-}
-
-PingService* ensure_ping(RatsHandle* h) {
-    if (!h->ping) {
-        auto p = std::make_unique<PingService>();
-        h->ping = p.get();
-        h->node->add_subsystem(std::move(p));
-    }
-    return h->ping;
-}
-
 } // namespace
 
 extern "C" {
+
+const char* rats_error_str(rats_error_t err) {
+    switch (err) {
+        case RATS_OK:                  return "RATS_OK";
+        case RATS_ERR_INVALID_ARG:     return "RATS_ERR_INVALID_ARG";
+        case RATS_ERR_NOT_STARTED:     return "RATS_ERR_NOT_STARTED";
+        case RATS_ERR_ALREADY_STARTED: return "RATS_ERR_ALREADY_STARTED";
+        case RATS_ERR_NOT_ENABLED:     return "RATS_ERR_NOT_ENABLED";
+        case RATS_ERR_NO_SUCH_PEER:    return "RATS_ERR_NO_SUCH_PEER";
+        case RATS_ERR_BIND:            return "RATS_ERR_BIND";
+        case RATS_ERR_INTERNAL:        return "RATS_ERR_INTERNAL";
+    }
+    return "RATS_ERR_UNKNOWN";
+}
+
+/* — construction / lifecycle — */
 
 rats_t rats_create(uint16_t listen_port) {
     NodeConfig config;
@@ -104,7 +90,13 @@ rats_t rats_create_ex(uint16_t listen_port, int enable_listen,
 
 void rats_destroy(rats_t node) { delete as_handle(node); }
 
-int rats_start(rats_t node) { return node_of(node)->start() ? 1 : 0; }
+rats_error_t rats_start(rats_t node) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (!h->node->start()) return RATS_ERR_BIND;
+    h->started = true;
+    return RATS_OK;
+}
 
 void rats_stop(rats_t node) { node_of(node)->stop(); }
 
@@ -112,8 +104,12 @@ uint16_t rats_listen_port(rats_t node) { return node_of(node)->listen_port(); }
 
 char* rats_local_id(rats_t node) { return dup_string(node_of(node)->local_id().to_hex()); }
 
-void rats_connect(rats_t node, const char* host, uint16_t port) {
-    if (host) node_of(node)->connect(std::string(host), port);
+/* — connections — */
+
+rats_error_t rats_connect(rats_t node, const char* host, uint16_t port) {
+    if (!host) return RATS_ERR_INVALID_ARG;
+    node_of(node)->connect(std::string(host), port);
+    return RATS_OK;
 }
 
 size_t rats_peer_count(rats_t node) { return node_of(node)->peer_count(); }
@@ -124,56 +120,81 @@ void rats_set_max_peers(rats_t node, size_t max_peers) {
 
 size_t rats_max_peers(rats_t node) { return node_of(node)->max_peers(); }
 
-void rats_send(rats_t node, const char* peer_id_hex,
-               const char* channel, const void* data, size_t len) {
-    if (!peer_id_hex || !channel) return;
+/* — messaging — */
+
+rats_error_t rats_send(rats_t node, const char* peer_id_hex,
+                       const char* channel, const void* data, size_t len) {
+    if (!peer_id_hex || !channel) return RATS_ERR_INVALID_ARG;
     auto id = PeerId::from_hex(peer_id_hex);
-    if (!id) return;
+    if (!id) return RATS_ERR_INVALID_ARG;
+    if (!node_of(node)->peer(*id)) return RATS_ERR_NO_SUCH_PEER;
     node_of(node)->send(*id, channel, ByteView(static_cast<const uint8_t*>(data), len));
+    return RATS_OK;
 }
 
-void rats_broadcast(rats_t node, const char* channel, const void* data, size_t len) {
-    if (!channel) return;
+rats_error_t rats_broadcast(rats_t node, const char* channel, const void* data, size_t len) {
+    if (!channel) return RATS_ERR_INVALID_ARG;
     node_of(node)->broadcast(channel, ByteView(static_cast<const uint8_t*>(data), len));
+    return RATS_OK;
 }
 
-void rats_on_peer_connected(rats_t node, rats_peer_cb cb, void* user) {
-    if (!cb) return;
+rats_error_t rats_on_peer_connected(rats_t node, rats_peer_cb cb, void* user) {
+    if (!cb) return RATS_ERR_INVALID_ARG;
     node_of(node)->on_peer_connected([cb, user](const Peer& peer) {
         cb(user, peer.id().to_hex().c_str());
     });
+    return RATS_OK;
 }
 
-void rats_on_peer_disconnected(rats_t node, rats_peer_cb cb, void* user) {
-    if (!cb) return;
+rats_error_t rats_on_peer_disconnected(rats_t node, rats_peer_cb cb, void* user) {
+    if (!cb) return RATS_ERR_INVALID_ARG;
     node_of(node)->on_peer_disconnected([cb, user](const PeerId& id) {
         cb(user, id.to_hex().c_str());
     });
+    return RATS_OK;
 }
 
-void rats_on_message(rats_t node, const char* channel, rats_message_cb cb, void* user) {
-    if (!channel || !cb) return;
+rats_error_t rats_on_message(rats_t node, const char* channel, rats_message_cb cb, void* user) {
+    if (!channel || !cb) return RATS_ERR_INVALID_ARG;
     node_of(node)->on_message(channel, [cb, user](const Peer& peer, ByteView data) {
         cb(user, peer.id().to_hex().c_str(), data.data(), data.size());
     });
+    return RATS_OK;
 }
 
-void rats_enable_dht(rats_t node, uint16_t dht_port, const char* discovery_key) {
+/* — discovery / NAT subsystems — */
+
+rats_error_t rats_enable_dht(rats_t node, uint16_t dht_port, const char* discovery_key) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (h->dht_enabled) return RATS_OK;
     DhtDiscovery::Config config;
     config.dht_port = dht_port;
     if (discovery_key) config.discovery_key = discovery_key;
-    node_of(node)->add_subsystem(std::make_unique<DhtDiscovery>(std::move(config)));
+    h->node->add_subsystem(std::make_unique<DhtDiscovery>(std::move(config)));
+    h->dht_enabled = true;
+    return RATS_OK;
 }
 
-void rats_enable_mdns(rats_t node) {
-    node_of(node)->add_subsystem(std::make_unique<MdnsDiscovery>());
+rats_error_t rats_enable_mdns(rats_t node) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (h->mdns_enabled) return RATS_OK;
+    h->node->add_subsystem(std::make_unique<MdnsDiscovery>());
+    h->mdns_enabled = true;
+    return RATS_OK;
 }
 
-void rats_enable_port_mapping(rats_t node, int enable_upnp, int enable_natpmp) {
+rats_error_t rats_enable_port_mapping(rats_t node, int enable_upnp, int enable_natpmp) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (h->portmap_enabled) return RATS_OK;
     PortMappingConfig config;
     config.enable_upnp   = enable_upnp != 0;
     config.enable_natpmp = enable_natpmp != 0;
-    node_of(node)->add_subsystem(std::make_unique<PortMappingService>(config));
+    h->node->add_subsystem(std::make_unique<PortMappingService>(config));
+    h->portmap_enabled = true;
+    return RATS_OK;
 }
 
 /* — peer enumeration — */
@@ -196,143 +217,205 @@ void rats_free_peer_ids(char** ids, size_t count) {
 
 /* — pub/sub — */
 
-void rats_subscribe(rats_t node, const char* topic, rats_topic_cb cb, void* user) {
-    if (!topic || !cb) return;
-    ensure_pubsub(as_handle(node))->subscribe(topic,
+rats_error_t rats_enable_pubsub(rats_t node) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (!h->pubsub) h->pubsub = h->node->add_subsystem(std::make_unique<PubSub>());
+    return RATS_OK;
+}
+
+rats_error_t rats_subscribe(rats_t node, const char* topic, rats_topic_cb cb, void* user) {
+    if (!topic || !cb) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->pubsub) return RATS_ERR_NOT_ENABLED;
+    h->pubsub->subscribe(topic,
         [cb, user](const PeerId& from, const std::string& t, ByteView data) {
             cb(user, from.to_hex().c_str(), t.c_str(), data.data(), data.size());
         });
+    return RATS_OK;
 }
 
-void rats_unsubscribe(rats_t node, const char* topic) {
-    if (!topic) return;
-    if (auto* ps = as_handle(node)->pubsub) ps->unsubscribe(topic);
+rats_error_t rats_unsubscribe(rats_t node, const char* topic) {
+    if (!topic) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->pubsub) return RATS_ERR_NOT_ENABLED;
+    h->pubsub->unsubscribe(topic);
+    return RATS_OK;
 }
 
-void rats_publish(rats_t node, const char* topic, const void* data, size_t len) {
-    if (!topic) return;
-    ensure_pubsub(as_handle(node))->publish(topic,
-        ByteView(static_cast<const uint8_t*>(data), len));
+rats_error_t rats_publish(rats_t node, const char* topic, const void* data, size_t len) {
+    if (!topic) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->pubsub) return RATS_ERR_NOT_ENABLED;
+    h->pubsub->publish(topic, ByteView(static_cast<const uint8_t*>(data), len));
+    return RATS_OK;
 }
 
 /* — typed JSON messaging — */
 
-void rats_on(rats_t node, const char* type, rats_typed_cb cb, void* user) {
-    if (!type || !cb) return;
-    ensure_messages(as_handle(node))->on(type,
-        [cb, user](const PeerId& from, const nlohmann::json& data) {
-            cb(user, from.to_hex().c_str(), data.dump().c_str());
-        });
+rats_error_t rats_enable_messaging(rats_t node) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (!h->messages) h->messages = h->node->add_subsystem(std::make_unique<MessageExchange>());
+    return RATS_OK;
 }
 
-void rats_off(rats_t node, const char* type) {
-    if (!type) return;
-    if (auto* mx = as_handle(node)->messages) mx->off(type);
+rats_error_t rats_on(rats_t node, const char* type, rats_typed_cb cb, void* user) {
+    if (!type || !cb) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->messages) return RATS_ERR_NOT_ENABLED;
+    h->messages->on(type, [cb, user](const PeerId& from, const nlohmann::json& data) {
+        cb(user, from.to_hex().c_str(), data.dump().c_str());
+    });
+    return RATS_OK;
 }
 
-void rats_send_typed(rats_t node, const char* peer_id_hex, const char* type, const char* json) {
-    if (!peer_id_hex || !type || !json) return;
+rats_error_t rats_off(rats_t node, const char* type) {
+    if (!type) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->messages) return RATS_ERR_NOT_ENABLED;
+    h->messages->off(type);
+    return RATS_OK;
+}
+
+rats_error_t rats_send_typed(rats_t node, const char* peer_id_hex, const char* type, const char* json) {
+    if (!peer_id_hex || !type || !json) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->messages) return RATS_ERR_NOT_ENABLED;
     auto id = PeerId::from_hex(peer_id_hex);
-    if (!id) return;
+    if (!id) return RATS_ERR_INVALID_ARG;
     auto j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded()) return;
-    ensure_messages(as_handle(node))->send(*id, type, j);
+    if (j.is_discarded()) return RATS_ERR_INVALID_ARG;
+    if (!h->node->peer(*id)) return RATS_ERR_NO_SUCH_PEER;
+    h->messages->send(*id, type, j);
+    return RATS_OK;
 }
 
-void rats_broadcast_typed(rats_t node, const char* type, const char* json) {
-    if (!type || !json) return;
+rats_error_t rats_broadcast_typed(rats_t node, const char* type, const char* json) {
+    if (!type || !json) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->messages) return RATS_ERR_NOT_ENABLED;
     auto j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
-    if (j.is_discarded()) return;
-    ensure_messages(as_handle(node))->send(type, j);
+    if (j.is_discarded()) return RATS_ERR_INVALID_ARG;
+    h->messages->send(type, j);
+    return RATS_OK;
 }
 
 /* — file transfer — */
 
-void rats_enable_file_transfer(rats_t node, const char* temp_dir) {
-    ensure_files(as_handle(node), temp_dir ? temp_dir : ".");
+rats_error_t rats_enable_file_transfer(rats_t node, const char* temp_dir) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (!h->files)
+        h->files = h->node->add_subsystem(std::make_unique<FileTransfer>(temp_dir ? temp_dir : "."));
+    return RATS_OK;
 }
 
-void rats_on_file_offer(rats_t node, rats_file_offer_cb cb, void* user) {
-    if (!cb) return;
-    ensure_files(as_handle(node), ".")->on_offer([cb, user](const FileTransfer::Offer& o) {
+rats_error_t rats_on_file_offer(rats_t node, rats_file_offer_cb cb, void* user) {
+    if (!cb) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->files) return RATS_ERR_NOT_ENABLED;
+    h->files->on_offer([cb, user](const FileTransfer::Offer& o) {
         cb(user, o.from.to_hex().c_str(), o.id, o.name.c_str(), o.size, o.is_directory ? 1 : 0);
     });
+    return RATS_OK;
 }
 
-void rats_on_file_progress(rats_t node, rats_file_progress_cb cb, void* user) {
-    if (!cb) return;
-    ensure_files(as_handle(node), ".")->on_progress([cb, user](const FileTransfer::Progress& p) {
+rats_error_t rats_on_file_progress(rats_t node, rats_file_progress_cb cb, void* user) {
+    if (!cb) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->files) return RATS_ERR_NOT_ENABLED;
+    h->files->on_progress([cb, user](const FileTransfer::Progress& p) {
         cb(user, p.id, p.peer.to_hex().c_str(), p.bytes_transferred, p.total_bytes,
            static_cast<int>(p.status));
     });
+    return RATS_OK;
 }
 
-void rats_on_file_complete(rats_t node, rats_file_complete_cb cb, void* user) {
-    if (!cb) return;
-    ensure_files(as_handle(node), ".")->on_complete(
-        [cb, user](uint64_t id, bool success, const std::string& path) {
-            cb(user, id, success ? 1 : 0, path.c_str());
-        });
+rats_error_t rats_on_file_complete(rats_t node, rats_file_complete_cb cb, void* user) {
+    if (!cb) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->files) return RATS_ERR_NOT_ENABLED;
+    h->files->on_complete([cb, user](uint64_t id, bool success, const std::string& path) {
+        cb(user, id, success ? 1 : 0, path.c_str());
+    });
+    return RATS_OK;
 }
 
 uint64_t rats_send_file(rats_t node, const char* peer_id_hex, const char* path) {
     if (!peer_id_hex || !path) return 0;
+    auto* h = as_handle(node);
+    if (!h->files) return 0;
     auto id = PeerId::from_hex(peer_id_hex);
     if (!id) return 0;
-    return ensure_files(as_handle(node), ".")->send_file(*id, path);
+    return h->files->send_file(*id, path);
 }
 
 uint64_t rats_send_directory(rats_t node, const char* peer_id_hex, const char* dir_path) {
     if (!peer_id_hex || !dir_path) return 0;
+    auto* h = as_handle(node);
+    if (!h->files) return 0;
     auto id = PeerId::from_hex(peer_id_hex);
     if (!id) return 0;
-    return ensure_files(as_handle(node), ".")->send_directory(*id, dir_path);
+    return h->files->send_directory(*id, dir_path);
 }
 
-void rats_accept_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id,
-                      const char* dest_path) {
-    if (!peer_id_hex || !dest_path) return;
-    auto* ft = as_handle(node)->files;
-    if (!ft) return;
+rats_error_t rats_accept_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id,
+                              const char* dest_path) {
+    if (!peer_id_hex || !dest_path) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->files) return RATS_ERR_NOT_ENABLED;
     auto id = PeerId::from_hex(peer_id_hex);
-    if (id) ft->accept(*id, transfer_id, dest_path);
+    if (!id) return RATS_ERR_INVALID_ARG;
+    h->files->accept(*id, transfer_id, dest_path);
+    return RATS_OK;
 }
 
-void rats_reject_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id) {
-    if (!peer_id_hex) return;
-    auto* ft = as_handle(node)->files;
-    if (!ft) return;
+rats_error_t rats_reject_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id) {
+    if (!peer_id_hex) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->files) return RATS_ERR_NOT_ENABLED;
     auto id = PeerId::from_hex(peer_id_hex);
-    if (id) ft->reject(*id, transfer_id);
+    if (!id) return RATS_ERR_INVALID_ARG;
+    h->files->reject(*id, transfer_id);
+    return RATS_OK;
 }
 
-int rats_cancel_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id) {
-    if (!peer_id_hex) return 0;
-    auto* ft = as_handle(node)->files;
-    if (!ft) return 0;
+rats_error_t rats_cancel_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id) {
+    if (!peer_id_hex) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->files) return RATS_ERR_NOT_ENABLED;
     auto id = PeerId::from_hex(peer_id_hex);
-    return (id && ft->cancel(*id, transfer_id)) ? 1 : 0;
+    if (!id) return RATS_ERR_INVALID_ARG;
+    return h->files->cancel(*id, transfer_id) ? RATS_OK : RATS_ERR_NO_SUCH_PEER;
 }
 
-int rats_pause_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id) {
-    if (!peer_id_hex) return 0;
-    auto* ft = as_handle(node)->files;
-    if (!ft) return 0;
+rats_error_t rats_pause_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id) {
+    if (!peer_id_hex) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->files) return RATS_ERR_NOT_ENABLED;
     auto id = PeerId::from_hex(peer_id_hex);
-    return (id && ft->pause(*id, transfer_id)) ? 1 : 0;
+    if (!id) return RATS_ERR_INVALID_ARG;
+    return h->files->pause(*id, transfer_id) ? RATS_OK : RATS_ERR_NO_SUCH_PEER;
 }
 
-int rats_resume_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id) {
-    if (!peer_id_hex) return 0;
-    auto* ft = as_handle(node)->files;
-    if (!ft) return 0;
+rats_error_t rats_resume_file(rats_t node, const char* peer_id_hex, uint64_t transfer_id) {
+    if (!peer_id_hex) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->files) return RATS_ERR_NOT_ENABLED;
     auto id = PeerId::from_hex(peer_id_hex);
-    return (id && ft->resume(*id, transfer_id)) ? 1 : 0;
+    if (!id) return RATS_ERR_INVALID_ARG;
+    return h->files->resume(*id, transfer_id) ? RATS_OK : RATS_ERR_NO_SUCH_PEER;
 }
 
 /* — liveness — */
 
-void rats_enable_ping(rats_t node) { ensure_ping(as_handle(node)); }
+rats_error_t rats_enable_ping(rats_t node) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (!h->ping) h->ping = h->node->add_subsystem(std::make_unique<PingService>());
+    return RATS_OK;
+}
 
 int64_t rats_peer_rtt_ms(rats_t node, const char* peer_id_hex) {
     if (!peer_id_hex) return -1;
