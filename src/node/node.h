@@ -102,6 +102,11 @@ public:
     std::vector<PeerInfo>   peers() const { return directory_.snapshot(); }
     std::optional<Peer> peer(const PeerId& id);
 
+    /// Our own addresses as remote peers reported observing us at — their observed
+    /// IP paired with our listen port. De-duplicated and bounded; populated as
+    /// peers send their identify message. Useful for NAT awareness / advertising.
+    std::vector<Address> observed_addresses() const;
+
     // — peer admission limit (0 = unlimited; guards inbound, not our own dials) —
     size_t max_peers() const noexcept { return max_peers_.load(std::memory_order_relaxed); }
     void   set_max_peers(size_t n) noexcept { max_peers_.store(n, std::memory_order_relaxed); }
@@ -139,6 +144,13 @@ private:
     void route_send(PeerRoute route, FrameHeader header, Bytes payload);
     void route_close(PeerRoute route);
 
+    // — identify: how peers learn each other's dialable addresses (reactor thread) —
+    void                 send_identify(Connection& conn);            ///< on establish
+    void                 handle_identify(Connection& conn, const Frame& frame);  ///< Control frame
+    std::vector<Address> advertised_addresses() const;              ///< our dialable addrs (sent in identify)
+    void                 rebuild_advertised_addresses(const std::vector<std::string>& local_ips);
+    void                 record_observed_address(const Address& addr);
+
     void start_network_monitor();   ///< spin up the monitor + maintenance thread
     void stop_network_monitor();    ///< stop the monitor, drain + join maintenance
     void maintenance_loop();        ///< off-monitor thread: emits NetworkChanged
@@ -172,6 +184,17 @@ private:
 
     std::vector<PeerNetwork::PeerEventHandler>      peer_connected_;
     std::vector<PeerNetwork::PeerDisconnectHandler> peer_disconnected_;
+
+    // Our own addresses as peers observe us (their reported IP + our listen port).
+    mutable std::mutex   observed_mutex_;
+    std::vector<Address> observed_addresses_;
+
+    // The dialable addresses we advertise to peers in identify. Derived from local
+    // interfaces (and, in future, promoted observed addresses). Rebuilt once at
+    // start() and on NetworkMonitor changes — never re-enumerated per connection,
+    // since interface enumeration is a syscall and the send path is hot.
+    mutable std::mutex   advertised_mutex_;
+    std::vector<Address> advertised_addresses_;
 };
 
 } // namespace librats

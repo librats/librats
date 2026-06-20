@@ -1,6 +1,7 @@
 #include "peer/peer_table.h"
 
-#include <mutex>  // std::unique_lock (shared_lock comes from <shared_mutex>)
+#include <algorithm>  // std::find
+#include <mutex>      // std::unique_lock (shared_lock comes from <shared_mutex>)
 
 namespace librats {
 
@@ -35,6 +36,23 @@ PeerTable::AddOutcome PeerTable::add(const PeerInfo& info, PeerRoute route,
         return {AddResult::Replaced, loser};
     }
     return {AddResult::Rejected, route};  // existing wins; caller closes the new connection
+}
+
+std::vector<Address> PeerTable::add_addresses(const PeerId& id, PeerRoute route,
+                                              const std::vector<Address>& addresses) {
+    std::vector<Address> added;
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = peers_.find(id);
+    if (it == peers_.end() || it->second.route != route) return added;
+
+    std::vector<Address>& known = it->second.info.addresses;
+    for (const Address& addr : addresses) {
+        if (known.size() >= kMaxAddressesPerPeer) break;
+        if (std::find(known.begin(), known.end(), addr) != known.end()) continue;  // dedup
+        known.push_back(addr);
+        added.push_back(addr);
+    }
+    return added;
 }
 
 bool PeerTable::remove(const PeerId& id, PeerRoute route) {

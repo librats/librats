@@ -1,11 +1,14 @@
 #include "node/node.h"
 #include "node/host_events.h"
+#include "node/identify.h"
 #include "security/noise_security.h"
 #include "security/plaintext_security.h"
 #include "util/fs.h"
 #include "util/logger.h"
 #include "util/network_monitor.h"
+#include "util/network_utils.h"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -25,6 +28,11 @@ AddressFamily family_for_bind(const std::string& bind_address) {
     if (bind_address.empty() || bind_address == "::") return AddressFamily::DualStack;
     if (bind_address.find(':') != std::string::npos)   return AddressFamily::IPv6;
     return AddressFamily::IPv4;
+}
+
+// A wildcard/empty IP is never a dialable endpoint; filter it out of identify.
+bool is_unspecified_ip(const std::string& ip) {
+    return ip.empty() || ip == "0.0.0.0" || ip == "::";
 }
 
 std::unique_ptr<SecurityProvider> make_security(const NodeConfig& cfg, const Identity& id) {
@@ -95,6 +103,10 @@ bool Node::start() {
         listen_port_ = static_cast<uint16_t>(get_bound_port(listen_socket_));
         reactors_->listen(listen_socket_);
     }
+
+    // Compute our advertised addresses once; the network monitor refreshes them
+    // on change. Done here (not per-connection) so the send path stays syscall-free.
+    rebuild_advertised_addresses(network_utils::get_local_interface_addresses());
 
     // Attach subsystems (registers their message handlers, event subscriptions
     // and service providers) BEFORE any reactor thread runs, so the router and the
@@ -169,6 +181,7 @@ void Node::maintenance_loop() {
         }
         LOG_INFO("node", "Network change: " << addresses.size()
                  << " local address(es); notifying subsystems");
+        rebuild_advertised_addresses(addresses);  // keep identify's advertised set fresh
         events_.emit(NetworkChanged{std::move(addresses)});
     }
 }
@@ -293,9 +306,20 @@ void Node::on_established(Connection& conn) {
         Peer handle = make_peer(conn.remote_id(), route);
         for (auto& cb : peer_connected_) cb(handle);
     }
+
+    // Tell the peer how to reach us, and what address we see it at. Skipped for a
+    // rejected duplicate (its connection was just closed above); sent on the
+    // surviving link otherwise — including the winner of a cross-connect race.
+    if (outcome.result != PeerTable::AddResult::Rejected)
+        send_identify(conn);
 }
 
 void Node::on_frame(Connection& conn, const Frame& frame) {
+    // Control is the node's own plane (identify); it never reaches the app router.
+    if (frame.header.type == MessageType::Control) {
+        handle_identify(conn, frame);
+        return;
+    }
     Peer peer = make_peer(conn.remote_id(), PeerRoute{conn.reactor_index(), conn.id()});
     if (!router_.dispatch(peer, frame)) {
         LOG_DEBUG("node", "No handler for frame from " << conn.remote_id().short_hex()
@@ -318,6 +342,93 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     if (!directory_.remove(id, route)) return;
     for (auto& cb : peer_disconnected_) cb(id);
     (void)reason;
+}
+
+// ── Identify: dialable-address discovery (reactor thread) ────────────────────
+//
+// A TCP socket only exposes a peer's ephemeral source port, so an inbound peer's
+// dialable address is unknowable from the connection alone. Right after the
+// handshake each side sends a Control/identify frame; the receiver pairs the
+// peer's advertised listen port with the IP it sees to recover the dialable
+// address, and learns its own public address from the peer's observation.
+
+void Node::send_identify(Connection& conn) {
+    IdentifyMessage msg;
+    msg.listen_port = listen_port_;
+    msg.addresses   = advertised_addresses();
+    const std::string seen_ip = conn.remote_ip();
+    if (!is_unspecified_ip(seen_ip))
+        msg.observed = Address{seen_ip, 0};  // port is the peer's ephemeral; IP is what matters
+
+    const Bytes payload = msg.encode();
+    conn.send(FrameHeader{MessageType::Control, 0, 0}, ByteView(payload));
+}
+
+void Node::handle_identify(Connection& conn, const Frame& frame) {
+    const auto msg = IdentifyMessage::decode(frame.payload);
+    if (!msg) {
+        LOG_DEBUG("node", "Ignoring malformed identify from " << conn.remote_id().short_hex());
+        return;
+    }
+
+    // The peer's dialable addresses: the address we see it at paired with its
+    // advertised listen port (the linchpin for inbound peers), plus any extra
+    // addresses it self-advertised. PeerTable de-duplicates and caps the set.
+    std::vector<Address> candidates;
+    const std::string seen_ip = conn.remote_ip();
+    if (msg->listen_port != 0 && !is_unspecified_ip(seen_ip))
+        candidates.push_back(Address{seen_ip, msg->listen_port});
+    for (const Address& a : msg->addresses)
+        if (a.port != 0 && !is_unspecified_ip(a.ip))
+            candidates.push_back(a);
+
+    if (!candidates.empty()) {
+        const PeerRoute route{conn.reactor_index(), conn.id()};
+        const auto added = directory_.add_addresses(conn.remote_id(), route, candidates);
+        if (!added.empty())
+            LOG_DEBUG("node", "Learned " << added.size() << " address(es) for peer "
+                      << conn.remote_id().short_hex() << " (e.g. " << added.front().to_string() << ")");
+    }
+
+    // Learn our own public address: pair the IP the peer saw us at with OUR listen
+    // port (its observed port is our ephemeral source port, not dialable).
+    if (msg->observed && listen_port_ != 0 && !is_unspecified_ip(msg->observed->ip))
+        record_observed_address(Address{msg->observed->ip, listen_port_});
+}
+
+std::vector<Address> Node::advertised_addresses() const {
+    std::lock_guard<std::mutex> lock(advertised_mutex_);
+    return advertised_addresses_;  // hot path: just hand back the stored snapshot
+}
+
+void Node::rebuild_advertised_addresses(const std::vector<std::string>& local_ips) {
+    // Pair each local interface IP with our listen port. A non-listening node has
+    // nothing dialable to advertise. Called off the hot path: once at start() and
+    // again whenever the NetworkMonitor reports the interface set changed.
+    std::vector<Address> fresh;
+    if (listen_port_ != 0) {
+        for (const std::string& ip : local_ips) {
+            if (is_unspecified_ip(ip)) continue;
+            fresh.push_back(Address{ip, listen_port_});
+            if (fresh.size() >= IdentifyMessage::kMaxAddresses) break;
+        }
+    }
+    std::lock_guard<std::mutex> lock(advertised_mutex_);
+    advertised_addresses_ = std::move(fresh);
+}
+
+void Node::record_observed_address(const Address& addr) {
+    std::lock_guard<std::mutex> lock(observed_mutex_);
+    if (std::find(observed_addresses_.begin(), observed_addresses_.end(), addr) != observed_addresses_.end())
+        return;
+    if (observed_addresses_.size() >= 16) return;  // bound (NAT remap churn / hostile peers)
+    observed_addresses_.push_back(addr);
+    LOG_DEBUG("node", "Observed own address " << addr.to_string() << " (reported by a peer)");
+}
+
+std::vector<Address> Node::observed_addresses() const {
+    std::lock_guard<std::mutex> lock(observed_mutex_);
+    return observed_addresses_;
 }
 
 // ── Peer handle methods (defined here for the full Node type) ────────────────

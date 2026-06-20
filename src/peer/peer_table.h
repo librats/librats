@@ -65,6 +65,17 @@ public:
     /// Route to a peer's live connection, if connected. Read lock.
     std::optional<PeerRoute> route(const PeerId& id) const;
 
+    /// Merge dialable addresses into a peer's metadata, de-duplicated and bounded
+    /// to kMaxAddressesPerPeer. Applies only if `route` is still the peer's live
+    /// route (a stale connection's late identify cannot mutate a newer link).
+    /// Returns the addresses actually added (i.e. not already known). Write lock.
+    std::vector<Address> add_addresses(const PeerId& id, PeerRoute route,
+                                       const std::vector<Address>& addresses);
+
+    /// Upper bound on stored addresses per peer — caps memory and stops a peer
+    /// from flooding us with bogus addresses via the identify/PEX path.
+    static constexpr size_t kMaxAddressesPerPeer = 32;
+
     /// Metadata snapshot for a peer. Read lock.
     std::optional<PeerInfo> info(const PeerId& id) const;
 

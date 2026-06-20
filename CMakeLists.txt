@@ -208,6 +208,8 @@ set(LIBRARY_SOURCES
     src/wire/message_router.cpp
     src/node/node.h
     src/node/node.cpp
+    src/node/identify.h
+    src/node/identify.cpp
 
 # Core v2 — subsystems (plugins on PeerNetwork)
     src/subsystems/ping_service.h
@@ -510,6 +512,7 @@ if(RATS_BUILD_TESTS)
         tests/test_reactor.cpp
         tests/test_handshake.cpp
         tests/test_node.cpp
+        tests/test_identify.cpp
         tests/test_persistence.cpp
         tests/test_event_bus.cpp
         tests/test_subsystem.cpp
