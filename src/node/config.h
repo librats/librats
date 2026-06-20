@@ -16,8 +16,15 @@ struct NodeConfig {
     uint16_t listen_port = 0;
     bool     enable_listen = true;
 
-    /// Interface to bind / advertise. IPv4 literal for now (dual-stack is TODO).
-    std::string bind_address = "127.0.0.1";
+    /// Interface to bind the listener to. The address family is derived from it:
+    ///   - ""  or "::"      → dual-stack wildcard: reachable over both IPv6 and IPv4
+    ///                        (IPv4-mapped) on all interfaces. This is the default.
+    ///   - "0.0.0.0"        → IPv4 on all interfaces.
+    ///   - an IPv6 literal  → IPv6-only, that interface (e.g. "::1" for v6 loopback).
+    ///   - an IPv4 literal  → IPv4, that interface (e.g. "127.0.0.1" for v4 loopback).
+    /// Bare IPv6 literals are written without brackets here; peer endpoints rendered
+    /// as text use bracketed "[ip]:port" form (see core/address.h).
+    std::string bind_address = "";
 
     /// Number of reactor threads. 1 is plenty for thousands of peers; larger
     /// pools shard outbound connections across cores.

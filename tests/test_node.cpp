@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include "node/node.h"
+#include "core/address.h"
+#include "core/socket.h"
 
 #include <algorithm>
 #include <atomic>
@@ -389,4 +391,90 @@ TEST(NodeTest, RobustAgainstBadInputs) {
     std::this_thread::sleep_for(200ms);
     EXPECT_EQ(node.peer_count(), 0u);
     node.stop();
+}
+
+// Address serialises IPv6 bracketed and round-trips exactly through parse().
+TEST(AddressTest, RoundTripsIPv4AndIPv6) {
+    auto v4 = Address::parse("127.0.0.1:8080");
+    ASSERT_TRUE(v4);
+    EXPECT_EQ(v4->ip, "127.0.0.1");
+    EXPECT_EQ(v4->port, 8080);
+    EXPECT_EQ(v4->to_string(), "127.0.0.1:8080");
+
+    auto v6 = Address::parse("[::1]:9000");
+    ASSERT_TRUE(v6);
+    EXPECT_EQ(v6->ip, "::1");                 // stored bare, no brackets
+    EXPECT_EQ(v6->port, 9000);
+    EXPECT_EQ(v6->to_string(), "[::1]:9000"); // rendered bracketed
+
+    auto v6full = Address::parse("[2001:db8::ff00:42:8329]:443");
+    ASSERT_TRUE(v6full);
+    EXPECT_EQ(v6full->ip, "2001:db8::ff00:42:8329");
+    EXPECT_EQ(v6full->port, 443);
+
+    // to_string() is the exact inverse of parse() for a constructed IPv6 endpoint
+    // (this is the path PeerStore persistence relies on).
+    Address a{"fe80::1", 1234};
+    EXPECT_EQ(a.to_string(), "[fe80::1]:1234");
+    auto reparsed = Address::parse(a.to_string());
+    ASSERT_TRUE(reparsed);
+    EXPECT_EQ(*reparsed, a);
+}
+
+TEST(AddressTest, RejectsMalformed) {
+    EXPECT_FALSE(Address::parse("127.0.0.1"));        // no port
+    EXPECT_FALSE(Address::parse("127.0.0.1:"));       // empty port
+    EXPECT_FALSE(Address::parse("127.0.0.1:0"));      // zero port
+    EXPECT_FALSE(Address::parse("127.0.0.1:70000"));  // out of range
+    EXPECT_FALSE(Address::parse("::1"));              // bare IPv6 — ambiguous port
+    EXPECT_FALSE(Address::parse("[::1]"));            // bracketed, no port
+    EXPECT_FALSE(Address::parse("[::1]:"));           // bracketed, empty port
+    EXPECT_FALSE(Address::parse(""));                 // empty
+}
+
+// A dual-stack listener ("::") is reachable over BOTH IPv4 and IPv6 loopback on
+// the same port — the core of restored dual-stack support.
+TEST(NodeTest, DualStackListenerAcceptsV4AndV6) {
+    NodeConfig scfg;
+    scfg.listen_port = 0;          // ephemeral
+    scfg.bind_address = "::";      // dual-stack wildcard
+    scfg.security = NodeConfig::Security::Noise;
+    Node server(scfg);
+    ASSERT_TRUE(server.start()) << "dual-stack listener failed to bind";
+    const uint16_t port = server.listen_port();
+    ASSERT_NE(port, 0);
+
+    // IPv4 dial reaches the dual-stack (IPv6) socket via IPv4-mapping.
+    Node clientV4(client_config());
+    ASSERT_TRUE(clientV4.start());
+    clientV4.connect("127.0.0.1", port);
+    ASSERT_TRUE(wait_for([&] { return clientV4.peer_count() == 1; }))
+        << "IPv4 dial to dual-stack listener did not establish";
+
+    // IPv6 dial reaches the same socket natively. Skip only if the host has no
+    // IPv6 loopback at all (rare; then the IPv4 path above already proved dual-stack).
+    const bool have_v6 = [] {
+        socket_t s = create_tcp_server(0, 1, "::1", AddressFamily::IPv6);
+        if (!is_valid_socket(s)) return false;
+        close_socket(s);
+        return true;
+    }();
+    if (!have_v6) {
+        clientV4.stop();
+        server.stop();
+        GTEST_SKIP() << "host has no IPv6 loopback; verified the IPv4-mapped path only";
+    }
+
+    Node clientV6(client_config());
+    ASSERT_TRUE(clientV6.start());
+    clientV6.connect("::1", port);
+    ASSERT_TRUE(wait_for([&] { return clientV6.peer_count() == 1; }))
+        << "IPv6 dial to dual-stack listener did not establish";
+
+    ASSERT_TRUE(wait_for([&] { return server.peer_count() == 2; }))
+        << "server should hold both the IPv4 and IPv6 peers";
+
+    clientV6.stop();
+    clientV4.stop();
+    server.stop();
 }

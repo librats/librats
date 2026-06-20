@@ -20,6 +20,14 @@ int hex_val(char c) {
 std::vector<Address> default_stun_servers() {
     return { Address("stun.l.google.com", 19302), Address("stun1.l.google.com", 19302) };
 }
+
+// The configured bind literal only applies to its own family; the other family
+// binds the wildcard. An empty config means wildcard for both.
+std::string bind_for(const std::string& cfg, bool want_v6) {
+    if (cfg.empty()) return "";
+    const bool cfg_is_v6 = cfg.find(':') != std::string::npos;
+    return (cfg_is_v6 == want_v6) ? cfg : "";
+}
 } // namespace
 
 InfoHash DhtDiscovery::hash_for_key(const std::string& key) {
@@ -47,38 +55,67 @@ void DhtDiscovery::attach(NodeContext& ctx) {
     });
 }
 
-void DhtDiscovery::start() {
-    if (running_.exchange(true)) return;
+std::unique_ptr<DhtClient> DhtDiscovery::make_client(AddressFamily family) {
+    const bool v6 = (family == AddressFamily::IPv6);
+    const char* label = v6 ? "IPv6" : "IPv4";
 
-    dht_ = std::make_unique<DhtClient>(config_.dht_port, config_.bind_address, /*data_directory=*/"");
-    if (!dht_->start()) {
-        LOG_ERROR("dht-discovery", "Failed to start DHT client");
-        running_.store(false);
-        dht_.reset();
-        return;
+    auto client = std::make_unique<DhtClient>(config_.dht_port, bind_for(config_.bind_address, v6),
+                                              /*data_directory=*/"", family);
+    if (!client->start()) {
+        LOG_WARN("dht-discovery", label << " DHT client failed to start (skipping this family)");
+        return nullptr;
     }
 
     const std::vector<Address> nodes =
         config_.bootstrap_nodes.empty() ? DhtClient::get_default_bootstrap_nodes() : config_.bootstrap_nodes;
-    if (!nodes.empty()) dht_->bootstrap(nodes);
+    if (!nodes.empty()) client->bootstrap(nodes);
+
+    LOG_INFO("dht-discovery", label << " DHT on UDP port " << client->get_port());
+    return client;
+}
+
+void DhtDiscovery::start() {
+    if (running_.exchange(true)) return;
+
+    if (config_.enable_ipv4) dht_  = make_client(AddressFamily::IPv4);
+    if (config_.enable_ipv6) dht6_ = make_client(AddressFamily::IPv6);
+
+    if (!dht_ && !dht6_) {
+        LOG_ERROR("dht-discovery", "Failed to start DHT client on any address family");
+        running_.store(false);
+        return;
+    }
 
     thread_ = std::thread(&DhtDiscovery::loop, this);
-    LOG_INFO("dht-discovery", "Started on UDP port " << dht_->get_port() << ", hash key '"
-             << config_.discovery_key << "'");
+    LOG_INFO("dht-discovery", "Started (" << (dht_ ? "IPv4" : "") << (dht_ && dht6_ ? "+" : "")
+             << (dht6_ ? "IPv6" : "") << "), hash key '" << config_.discovery_key << "'");
 }
 
 void DhtDiscovery::stop() {
     if (!running_.exchange(false)) return;
     wake_.notify_all();
     if (thread_.joinable()) thread_.join();
-    if (dht_) { dht_->stop(); dht_.reset(); }
+    if (dht_)  { dht_->stop();  dht_.reset(); }
+    if (dht6_) { dht6_->stop(); dht6_.reset(); }
 }
 
-bool DhtDiscovery::is_running() const { return running_.load() && dht_ && dht_->is_running(); }
+bool DhtDiscovery::is_running() const {
+    return running_.load() && ((dht_ && dht_->is_running()) || (dht6_ && dht6_->is_running()));
+}
 
 uint16_t DhtDiscovery::dht_port() const { return dht_ ? static_cast<uint16_t>(dht_->get_port()) : 0; }
 
-std::string DhtDiscovery::external_address() const { return dht_ ? dht_->get_external_address() : ""; }
+uint16_t DhtDiscovery::dht_port_v6() const { return dht6_ ? static_cast<uint16_t>(dht6_->get_port()) : 0; }
+
+std::string DhtDiscovery::external_address() const {
+    // The IPv4 reflexive address is the public-facing one most callers expect;
+    // fall back to the IPv6 client's view if only that family is up.
+    if (dht_) {
+        std::string a = dht_->get_external_address();
+        if (!a.empty()) return a;
+    }
+    return dht6_ ? dht6_->get_external_address() : "";
+}
 
 // Discover our reflexive (public) address via STUN and feed it to the DHT so the
 // node id is BEP-42-correct from the start instead of waiting for "ip" voting.
@@ -95,7 +132,9 @@ void DhtDiscovery::probe_external_ip() {
         if (r.success && r.mapped_address) {
             const std::string& ip = r.mapped_address->address;
             LOG_INFO("dht-discovery", "STUN reflexive address " << ip << " (via " << s.ip << ":" << s.port << ")");
-            if (running_.load() && dht_) dht_->set_external_ip(ip);  // ignored if non-public / wrong family
+            // Feed it to whichever clients are up; each ignores it if it's not a
+            // public address of its own family (e.g. a v4 reflexive on the v6 client).
+            if (running_.load()) for_each_client([&](DhtClient& c) { c.set_external_ip(ip); });
             return;
         }
     }
@@ -116,10 +155,12 @@ void DhtDiscovery::loop() {
 
         const auto now = std::chrono::steady_clock::now();
         if (now - last_announce >= config_.announce_interval) {
-            dht_->announce_peer(hash_, network_->listen_port());
+            for_each_client([&](DhtClient& c) { c.announce_peer(hash_, network_->listen_port()); });
             last_announce = now;
         }
-        dht_->find_peers(hash_, [this](const std::vector<Address>& peers, const InfoHash& h) { on_peers(peers, h); });
+        for_each_client([this](DhtClient& c) {
+            c.find_peers(hash_, [this](const std::vector<Address>& peers, const InfoHash& h) { on_peers(peers, h); });
+        });
 
         std::unique_lock<std::mutex> lock(wait_mutex_);
         wake_.wait_for(lock, config_.search_interval,

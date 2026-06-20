@@ -5,10 +5,16 @@
  * @brief Peer discovery via the Kademlia DHT — a thin adapter, not a rewrite.
  *
  * Wraps the existing, well-tested DhtClient (src/dht.h) as a Subsystem WITHOUT
- * modifying it. On start it brings up a DhtClient (its own UDP socket + threads),
+ * modifying it. On start it brings up DhtClients (their own UDP sockets + threads),
  * then periodically announces our TCP listen port under a discovery hash and
  * searches that hash, dialing any peers it finds through the node. The discovery
  * hash namespaces peers of the same application (same key → same hash).
+ *
+ * Dual-stack: IPv4 and IPv6 are separate Kademlia networks (BEP 32), so each runs
+ * its own DhtClient. Both announce/search the same hash and feed discovered peers
+ * to the same dial path, so a peer reachable over either family is found. Startup
+ * is best-effort per family: if one family can't bind (e.g. a host with no usable
+ * IPv6) the subsystem still runs on the other.
  *
  * Everything DHT-specific stays in DhtClient; this class only bridges its
  * callbacks to PeerNetwork::connect().
@@ -35,6 +41,8 @@ public:
     struct Config {
         uint16_t                  dht_port = 0;          ///< 0 = ephemeral
         std::string               bind_address = "";
+        bool                      enable_ipv4 = true;    ///< run the IPv4 Kademlia network
+        bool                      enable_ipv6 = true;    ///< run the IPv6 Kademlia network (BEP 32)
         std::string               discovery_key = "librats";  ///< app namespace
         std::vector<Address>         bootstrap_nodes;       ///< empty → default internet nodes
         std::chrono::milliseconds search_interval{5000};
@@ -56,7 +64,8 @@ public:
     void stop() override;
 
     bool     is_running() const;
-    uint16_t dht_port() const;
+    uint16_t dht_port() const;       ///< IPv4 DHT UDP port (0 if not running)
+    uint16_t dht_port_v6() const;    ///< IPv6 DHT UDP port (0 if not running)
     InfoHash discovery_hash() const { return hash_; }
 
     /// Our external (public) IP currently used to derive the DHT node id, learned
@@ -68,13 +77,25 @@ public:
 
 private:
     void loop();
-    void probe_external_ip();  ///< STUN → dht_->set_external_ip (runs on the loop thread)
+    void probe_external_ip();  ///< STUN → set_external_ip on each client (runs on the loop thread)
     void on_peers(const std::vector<Address>& peers, const InfoHash& info_hash);
+
+    /// Bring up one family's DhtClient (bind + bootstrap). Returns nullptr if it
+    /// could not bind/start, so the caller can run on whatever family did come up.
+    std::unique_ptr<DhtClient> make_client(AddressFamily family);
+
+    /// Run `fn` on each live client (IPv4 then IPv6). Loop-thread side.
+    template <typename Fn>
+    void for_each_client(Fn fn) {
+        if (dht_)  fn(*dht_);
+        if (dht6_) fn(*dht6_);
+    }
 
     Config                     config_;
     InfoHash                   hash_;
     PeerNetwork*               network_ = nullptr;
-    std::unique_ptr<DhtClient> dht_;
+    std::unique_ptr<DhtClient> dht_;    ///< IPv4 Kademlia network
+    std::unique_ptr<DhtClient> dht6_;   ///< IPv6 Kademlia network (BEP 32)
 
     std::thread             thread_;
     std::atomic<bool>       running_{false};

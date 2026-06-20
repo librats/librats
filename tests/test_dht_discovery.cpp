@@ -91,6 +91,13 @@ DhtDiscovery::Config disc_config(const std::vector<Address>& bootstrap) {
     return c;
 }
 
+bool ipv6_loopback_available() {
+    socket_t s = create_udp_socket(0, "::1", AddressFamily::IPv6);
+    if (!is_valid_socket(s)) return false;
+    close_socket(s);
+    return true;
+}
+
 } // namespace
 
 // The discovery hash is a deterministic function of the key.
@@ -169,6 +176,77 @@ TEST(DhtDiscoveryTest, TwoNodesDiscoverViaDht) {
     Node b(listening_config());
     std::vector<Address> bootstrap{ Address("127.0.0.1", da->dht_port()) };
     b.add_subsystem(std::make_unique<DhtDiscovery>(disc_config(bootstrap)));
+    ASSERT_TRUE(b.start());
+
+    EXPECT_TRUE(wait_for([&] { return a.peer_count() >= 1 && b.peer_count() >= 1; }, 30s))
+        << "discovered: a=" << a.peer_count() << " b=" << b.peer_count();
+
+    b.stop();
+    a.stop();
+}
+
+// Dual-stack: the subsystem brings up BOTH a v4 and a v6 Kademlia network, each on
+// its own UDP socket (BEP 32). Skipped only on hosts with no IPv6 loopback.
+TEST(DhtDiscoveryTest, BringsUpBothAddressFamilies) {
+    if (!ipv6_loopback_available()) GTEST_SKIP() << "host has no IPv6 loopback";
+
+    Node node(listening_config());
+    auto cfg = disc_config({});  // offline, no bootstrap
+    cfg.bind_address = "";       // wildcard so both families bind freely
+    auto disc = std::make_unique<DhtDiscovery>(cfg);
+    DhtDiscovery* d = disc.get();
+    node.add_subsystem(std::move(disc));
+
+    ASSERT_TRUE(node.start());
+    EXPECT_TRUE(wait_for([&] { return d->dht_port() != 0 && d->dht_port_v6() != 0; }, 5s))
+        << "v4 port=" << d->dht_port() << " v6 port=" << d->dht_port_v6();
+    node.stop();
+    EXPECT_FALSE(d->is_running());
+}
+
+// A host with only IPv4 can disable the v6 family and still run the IPv4 DHT.
+TEST(DhtDiscoveryTest, RunsIPv4OnlyWhenIPv6Disabled) {
+    Node node(listening_config());
+    auto cfg = disc_config({});
+    cfg.enable_ipv6 = false;
+    auto disc = std::make_unique<DhtDiscovery>(cfg);
+    DhtDiscovery* d = disc.get();
+    node.add_subsystem(std::move(disc));
+
+    ASSERT_TRUE(node.start());
+    EXPECT_TRUE(wait_for([&] { return d->is_running() && d->dht_port() != 0; }, 5s));
+    EXPECT_EQ(d->dht_port_v6(), 0);  // v6 family was not started
+    node.stop();
+}
+
+// Two nodes discover each other purely over the IPv6 DHT and form an encrypted
+// link, their TCP listeners reachable over IPv6 (dual-stack "::"). Offline.
+TEST(DhtDiscoveryTest, TwoNodesDiscoverViaIPv6Dht) {
+    if (!ipv6_loopback_available()) GTEST_SKIP() << "host has no IPv6 loopback";
+
+    auto v6_node_config = [] {
+        NodeConfig c;
+        c.bind_address = "::";  // dual-stack listener so IPv6 dials are accepted
+        c.security = NodeConfig::Security::Noise;
+        return c;
+    };
+    auto v6_disc_config = [](const std::vector<Address>& bootstrap) {
+        auto c = disc_config(bootstrap);
+        c.bind_address = "";    // wildcard
+        c.enable_ipv4 = false;  // IPv6-only DHT
+        return c;
+    };
+
+    Node a(v6_node_config());
+    auto disc_a = std::make_unique<DhtDiscovery>(v6_disc_config({}));  // seed: no bootstrap
+    DhtDiscovery* da = disc_a.get();
+    a.add_subsystem(std::move(disc_a));
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(wait_for([&] { return da->dht_port_v6() != 0; }, 5s));
+
+    Node b(v6_node_config());
+    std::vector<Address> bootstrap{ Address("::1", da->dht_port_v6()) };
+    b.add_subsystem(std::make_unique<DhtDiscovery>(v6_disc_config(bootstrap)));
     ASSERT_TRUE(b.start());
 
     EXPECT_TRUE(wait_for([&] { return a.peer_count() >= 1 && b.peer_count() >= 1; }, 30s))

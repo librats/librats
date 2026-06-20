@@ -14,6 +14,19 @@ namespace librats {
 
 namespace {
 
+// Pick the listen socket's address family from the bind address:
+//   - empty or "::"  → DualStack wildcard: one IPv6 socket that also accepts IPv4
+//                      (IPv4-mapped), so the node is reachable over both families.
+//   - other IPv6 literal (contains ':') → IPv6-only, bound to that interface.
+//   - IPv4 literal / hostname → IPv4.
+// A specific (non-wildcard) address pins a single interface, so dual-stack only
+// applies to the wildcard cases where binding both families is meaningful.
+AddressFamily family_for_bind(const std::string& bind_address) {
+    if (bind_address.empty() || bind_address == "::") return AddressFamily::DualStack;
+    if (bind_address.find(':') != std::string::npos)   return AddressFamily::IPv6;
+    return AddressFamily::IPv4;
+}
+
 std::unique_ptr<SecurityProvider> make_security(const NodeConfig& cfg, const Identity& id) {
     if (cfg.security == NodeConfig::Security::Noise)
         return std::make_unique<NoiseSecurity>(id, cfg.protocol_name, cfg.protocol_version);
@@ -73,7 +86,7 @@ bool Node::start() {
 
     if (config_.enable_listen) {
         listen_socket_ = create_tcp_server(config_.listen_port, 128, config_.bind_address,
-                                           AddressFamily::IPv4);
+                                           family_for_bind(config_.bind_address));
         if (!is_valid_socket(listen_socket_)) {
             LOG_ERROR("node", "Failed to listen on " << config_.bind_address << ":" << config_.listen_port);
             running_.store(false);
