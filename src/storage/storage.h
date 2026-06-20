@@ -207,7 +207,7 @@ public:
     // Subsystem
     // =========================================================================
 
-    void attach(PeerNetwork& network) override;
+    void attach(NodeContext& ctx) override;
     void start() override;
     void stop() override;
 

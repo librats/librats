@@ -1,4 +1,5 @@
 #include "storage/storage.h"
+#include "node/node_context.h"
 #include "crc32.h"
 #include "util/fs.h"
 #include "util/logger.h"
@@ -342,8 +343,8 @@ void StorageManager::persistence_thread_loop() {
 // Subsystem
 //=============================================================================
 
-void StorageManager::attach(PeerNetwork& network) {
-    network_ = &network;
+void StorageManager::attach(NodeContext& ctx) {
+    network_ = &ctx.network;
 
     if (!config_.enable_sync) return;
 
