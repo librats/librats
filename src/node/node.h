@@ -66,6 +66,7 @@
 namespace librats {
 
 class NetworkMonitor;  // util/network_monitor.h — owned via unique_ptr, included in node.cpp
+class MessageJson;     // subsystems/message_json.h — reached via json() (json.hpp stays out of node.h)
 
 class Node final : public ConnectionDelegate, public PeerNetwork {
 public:
@@ -134,13 +135,25 @@ public:
     //   listeners are supported, so subsystems and the app can both subscribe. —
     void on_peer_connected(PeerNetwork::PeerEventHandler cb) override { peer_connected_.push_back(std::move(cb)); }
     void on_peer_disconnected(PeerNetwork::PeerDisconnectHandler cb) override { peer_disconnected_.push_back(std::move(cb)); }
-    void on_message(std::string_view channel, MessageRouter::Handler cb) { router_.on_channel(channel, std::move(cb)); }
+    void on(std::string_view channel, MessageRouter::Handler cb) { router_.on_channel(channel, std::move(cb)); }
+
+    // — typed lookup of an attached subsystem (nullptr if none of that type) —
+    //   reaches a module's own API without threading a pointer from add_subsystem:
+    //     if (auto* j = node.json()) j->on("chat", …);
+    template <class T>
+    T* subsystem() noexcept {
+        for (auto& s : subsystems_) if (auto* p = dynamic_cast<T*>(s.get())) return p;
+        return nullptr;
+    }
+    /// The JSON messaging module if one was attached (add_subsystem<MessageJson>),
+    /// else nullptr. Convenience over subsystem<MessageJson>(); defined in node.cpp.
+    MessageJson* json() noexcept;
 
     // — PeerNetwork (for subsystems) —
     void                send(const PeerId& to, MessageType type, ByteView payload) override;
     void                broadcast(MessageType type, ByteView payload) override;
     std::vector<PeerId> connected_peers() const override;
-    void                on_message(MessageType type, PeerNetwork::MessageHandler cb) override { router_.on_type(type, std::move(cb)); }
+    void                on(MessageType type, PeerNetwork::MessageHandler cb) override { router_.on_type(type, std::move(cb)); }
 
 private:
     friend class Peer;

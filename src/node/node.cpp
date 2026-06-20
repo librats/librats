@@ -1,6 +1,7 @@
 #include "node/node.h"
 #include "node/host_events.h"
 #include "node/identify.h"
+#include "subsystems/message_json.h"
 #include "security/noise_security.h"
 #include "security/plaintext_security.h"
 #include "util/fs.h"
@@ -83,6 +84,8 @@ Node::~Node() {
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
+
+MessageJson* Node::json() noexcept { return subsystem<MessageJson>(); }
 
 bool Node::start() {
     if (running_.exchange(true)) return false;

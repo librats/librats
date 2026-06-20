@@ -99,7 +99,7 @@ typedef void (*rats_message_cb)(void* user, const char* peer_id_hex, const void*
 
 RATS_API rats_error_t rats_on_peer_connected(rats_t node, rats_peer_cb cb, void* user);
 RATS_API rats_error_t rats_on_peer_disconnected(rats_t node, rats_peer_cb cb, void* user);
-RATS_API rats_error_t rats_on_message(rats_t node, const char* channel, rats_message_cb cb, void* user);
+RATS_API rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb cb, void* user);
 
 /* — optional subsystems (enable before start) — */
 
@@ -134,18 +134,18 @@ RATS_API rats_error_t rats_publish(rats_t node, const char* topic, const void* d
 
 /* — typed JSON messaging (named message type; payload is JSON text) — */
 
-typedef void (*rats_typed_cb)(void* user, const char* peer_id_hex, const char* json);
+typedef void (*rats_json_cb)(void* user, const char* peer_id_hex, const char* json);
 
-/** Enable the typed-messaging subsystem. Call before start(). */
-RATS_API rats_error_t rats_enable_messaging(rats_t node);
-/** Register a handler for messages of `type`. `json` is compact JSON text owned by
- *  the library (valid only for the duration of the call). Additive: multiple
+/** Enable the JSON-messaging subsystem (the C view of MessageJson). Call before start(). */
+RATS_API rats_error_t rats_enable_json(rats_t node);
+/** Register a handler for JSON messages of `type`. `json` is compact JSON text owned
+ *  by the library (valid only for the duration of the call). Additive: multiple
  *  handlers may coexist. The sender id is the authenticated handshake PeerId. */
-RATS_API rats_error_t rats_on(rats_t node, const char* type, rats_typed_cb cb, void* user);
-RATS_API rats_error_t rats_off(rats_t node, const char* type);
-/** Send/broadcast a typed message. `json` must be valid JSON text (invalid → RATS_ERR_INVALID_ARG). */
-RATS_API rats_error_t rats_send_typed(rats_t node, const char* peer_id_hex, const char* type, const char* json);
-RATS_API rats_error_t rats_broadcast_typed(rats_t node, const char* type, const char* json);
+RATS_API rats_error_t rats_on_json(rats_t node, const char* type, rats_json_cb cb, void* user);
+RATS_API rats_error_t rats_off_json(rats_t node, const char* type);
+/** Send/broadcast a JSON message. `json` must be valid JSON text (invalid → RATS_ERR_INVALID_ARG). */
+RATS_API rats_error_t rats_send_json(rats_t node, const char* peer_id_hex, const char* type, const char* json);
+RATS_API rats_error_t rats_broadcast_json(rats_t node, const char* type, const char* json);
 
 /* — file transfer (push model; enable + register callbacks before start) — */
 

@@ -6,7 +6,7 @@
 #include "subsystems/mdns_discovery.h"
 #include "subsystems/port_mapping_service.h"
 #include "subsystems/pubsub.h"
-#include "subsystems/message_exchange.h"
+#include "subsystems/message_json.h"
 #include "subsystems/file_transfer.h"
 #include "subsystems/ping_service.h"
 #include "util/logger.h"
@@ -28,9 +28,9 @@ namespace {
 // before-start contract so enables after start() can be rejected cleanly.
 struct RatsHandle {
     std::unique_ptr<Node> node;
-    PubSub*          pubsub   = nullptr;
-    MessageExchange* messages = nullptr;
-    FileTransfer*    files    = nullptr;
+    PubSub*       pubsub   = nullptr;
+    MessageJson*  messages = nullptr;
+    FileTransfer* files    = nullptr;
     PingService*     ping     = nullptr;
     bool dht_enabled     = false;
     bool mdns_enabled    = false;
@@ -154,9 +154,9 @@ rats_error_t rats_on_peer_disconnected(rats_t node, rats_peer_cb cb, void* user)
     return RATS_OK;
 }
 
-rats_error_t rats_on_message(rats_t node, const char* channel, rats_message_cb cb, void* user) {
+rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb cb, void* user) {
     if (!channel || !cb) return RATS_ERR_INVALID_ARG;
-    node_of(node)->on_message(channel, [cb, user](const Peer& peer, ByteView data) {
+    node_of(node)->on(channel, [cb, user](const Peer& peer, ByteView data) {
         cb(user, peer.id().to_hex().c_str(), data.data(), data.size());
     });
     return RATS_OK;
@@ -253,14 +253,14 @@ rats_error_t rats_publish(rats_t node, const char* topic, const void* data, size
 
 /* — typed JSON messaging — */
 
-rats_error_t rats_enable_messaging(rats_t node) {
+rats_error_t rats_enable_json(rats_t node) {
     auto* h = as_handle(node);
     if (h->started) return RATS_ERR_ALREADY_STARTED;
-    if (!h->messages) h->messages = h->node->add_subsystem(std::make_unique<MessageExchange>());
+    if (!h->messages) h->messages = h->node->add_subsystem(std::make_unique<MessageJson>());
     return RATS_OK;
 }
 
-rats_error_t rats_on(rats_t node, const char* type, rats_typed_cb cb, void* user) {
+rats_error_t rats_on_json(rats_t node, const char* type, rats_json_cb cb, void* user) {
     if (!type || !cb) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->messages) return RATS_ERR_NOT_ENABLED;
@@ -270,7 +270,7 @@ rats_error_t rats_on(rats_t node, const char* type, rats_typed_cb cb, void* user
     return RATS_OK;
 }
 
-rats_error_t rats_off(rats_t node, const char* type) {
+rats_error_t rats_off_json(rats_t node, const char* type) {
     if (!type) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->messages) return RATS_ERR_NOT_ENABLED;
@@ -278,7 +278,7 @@ rats_error_t rats_off(rats_t node, const char* type) {
     return RATS_OK;
 }
 
-rats_error_t rats_send_typed(rats_t node, const char* peer_id_hex, const char* type, const char* json) {
+rats_error_t rats_send_json(rats_t node, const char* peer_id_hex, const char* type, const char* json) {
     if (!peer_id_hex || !type || !json) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->messages) return RATS_ERR_NOT_ENABLED;
@@ -291,7 +291,7 @@ rats_error_t rats_send_typed(rats_t node, const char* peer_id_hex, const char* t
     return RATS_OK;
 }
 
-rats_error_t rats_broadcast_typed(rats_t node, const char* type, const char* json) {
+rats_error_t rats_broadcast_json(rats_t node, const char* type, const char* json) {
     if (!type || !json) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->messages) return RATS_ERR_NOT_ENABLED;

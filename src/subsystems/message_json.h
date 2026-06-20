@@ -1,19 +1,18 @@
 #pragma once
 
 /**
- * @file message_exchange.h
+ * @file message_json.h
  * @brief Typed JSON message exchange over PeerNetwork.
  *
  * Restores the old client's `on`/`once`/`off` + `send` API as a Subsystem: an
  * application names a message *type* (a string) and exchanges nlohmann::json
- * payloads with peers, without caring about framing or channels.
+ * payloads with peers, without caring about framing or channels. Attach it like
+ * any subsystem; reach it later via node.json() (or subsystem<MessageJson>()):
  *
- *   auto mx = std::make_unique<MessageExchange>();
- *   MessageExchange* msg = mx.get();
- *   node.add_subsystem(std::move(mx));
- *   msg->on("chat", [](const PeerId& from, const json& j){ ... });
+ *   node.add_subsystem(std::make_unique<MessageJson>());
+ *   node.json()->on("chat", [](const PeerId& from, const json& j){ ... });
  *   node.start();
- *   msg->send(peer_id, "chat", json{{"text","hi"}});
+ *   node.json()->send(peer_id, "chat", json{{"text","hi"}});
  *
  * Differences from the old RatsClient version, on purpose:
  *   - the sender is the *authenticated* PeerId from the handshake, not a
@@ -42,7 +41,7 @@
 
 namespace librats {
 
-class MessageExchange final : public Subsystem {
+class MessageJson final : public Subsystem {
 public:
     using Handler      = std::function<void(const PeerId& from, const nlohmann::json& data)>;
     using SendCallback = std::function<void(bool ok, const std::string& error)>;

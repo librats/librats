@@ -216,8 +216,8 @@ set(LIBRARY_SOURCES
     src/subsystems/ping_service.cpp
     src/subsystems/pubsub.h
     src/subsystems/pubsub.cpp
-    src/subsystems/message_exchange.h
-    src/subsystems/message_exchange.cpp
+    src/subsystems/message_json.h
+    src/subsystems/message_json.cpp
     src/subsystems/file_transfer.h
     src/subsystems/file_transfer.cpp
     src/subsystems/dht_discovery.h
@@ -520,7 +520,7 @@ if(RATS_BUILD_TESTS)
         tests/test_subsystem.cpp
         tests/test_pubsub.cpp
         tests/test_peer_exchange.cpp
-        tests/test_message_exchange.cpp
+        tests/test_message_json.cpp
         tests/test_filexfer.cpp
         tests/test_dht_discovery.cpp
         tests/test_reconnection_v2.cpp

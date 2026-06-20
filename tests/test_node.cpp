@@ -64,11 +64,11 @@ TEST(NodeTest, ConnectAndEchoMessage) {
     client.on_peer_connected([&](const Peer&) { client_peers++; });
 
     // Server echoes whatever arrives on "chat" back to the sender.
-    server.on_message("chat", [](const Peer& from, ByteView msg) { from.send("chat", msg); });
+    server.on("chat", [](const Peer& from, ByteView msg) { from.send("chat", msg); });
 
     std::mutex mu;
     std::string got;
-    client.on_message("chat", [&](const Peer&, ByteView msg) {
+    client.on("chat", [&](const Peer&, ByteView msg) {
         std::lock_guard<std::mutex> lock(mu);
         got = str(msg);
     });
@@ -100,10 +100,10 @@ TEST(NodeTest, ReplyViaPeerHandle) {
     Node server(server_config());
     Node client(client_config());
 
-    server.on_message("ping", [](const Peer& from, ByteView) { from.send("pong", ByteView(std::string("ok"))); });
+    server.on("ping", [](const Peer& from, ByteView) { from.send("pong", ByteView(std::string("ok"))); });
 
     std::atomic<bool> ponged{false};
-    client.on_message("pong", [&](const Peer&, ByteView msg) { if (str(msg) == "ok") ponged = true; });
+    client.on("pong", [&](const Peer&, ByteView msg) { if (str(msg) == "ok") ponged = true; });
 
     ASSERT_TRUE(server.start());
     ASSERT_TRUE(client.start());
@@ -124,8 +124,8 @@ TEST(NodeTest, BroadcastToAllPeers) {
     Node b(client_config());
 
     std::atomic<int> got_a{0}, got_b{0};
-    a.on_message("news", [&](const Peer&, ByteView m) { if (str(m) == "extra") got_a++; });
-    b.on_message("news", [&](const Peer&, ByteView m) { if (str(m) == "extra") got_b++; });
+    a.on("news", [&](const Peer&, ByteView m) { if (str(m) == "extra") got_a++; });
+    b.on("news", [&](const Peer&, ByteView m) { if (str(m) == "extra") got_b++; });
 
     ASSERT_TRUE(hub.start());
     ASSERT_TRUE(a.start());
@@ -268,11 +268,11 @@ TEST_P(NodeLargePayloadTest, RoundTripsIntact) {
     Node server(sc);
     Node client(cc);
 
-    server.on_message("blob", [](const Peer& from, ByteView msg) { from.send("blob", msg); });
+    server.on("blob", [](const Peer& from, ByteView msg) { from.send("blob", msg); });
 
     std::mutex mu;
     std::string got;
-    client.on_message("blob", [&](const Peer&, ByteView msg) {
+    client.on("blob", [&](const Peer&, ByteView msg) {
         std::lock_guard<std::mutex> l(mu); got = str(msg);
     });
 
@@ -303,11 +303,11 @@ TEST(NodeTest, TinyPayloadsRoundTrip) {
     Node server(server_config());
     Node client(client_config());
 
-    server.on_message("echo", [](const Peer& from, ByteView msg) { from.send("echo", msg); });
+    server.on("echo", [](const Peer& from, ByteView msg) { from.send("echo", msg); });
 
     std::mutex mu;
     std::vector<size_t> sizes;
-    client.on_message("echo", [&](const Peer&, ByteView msg) {
+    client.on("echo", [&](const Peer&, ByteView msg) {
         std::lock_guard<std::mutex> l(mu); sizes.push_back(msg.size());
     });
 

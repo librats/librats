@@ -42,7 +42,7 @@ enum class MessageType : uint8_t {
     FileChunk = 4,
     Ping      = 5,  ///< liveness / RTT (PingService)
     Storage   = 6,  ///< distributed key-value store (StorageManager)
-    Typed     = 7,  ///< typed JSON message exchange (MessageExchange)
+    Typed     = 7,  ///< typed JSON message exchange (MessageJson)
     Pex       = 8,  ///< peer exchange — gossip of known peer addresses (PeerExchange)
 };
 

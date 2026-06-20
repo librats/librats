@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "node/node.h"
-#include "subsystems/message_exchange.h"
+#include "subsystems/message_json.h"
 
 #include <atomic>
 #include <chrono>
@@ -39,16 +39,16 @@ NodeConfig client_config() {
     return c;
 }
 
-// A connected server+client, each carrying a MessageExchange.
+// A connected server+client, each carrying a MessageJson.
 struct Pair {
     Node server{server_config()};
     Node client{client_config()};
-    MessageExchange* srv = nullptr;
-    MessageExchange* cli = nullptr;
+    MessageJson* srv = nullptr;
+    MessageJson* cli = nullptr;
 
     void connect() {
-        auto s = std::make_unique<MessageExchange>();
-        auto c = std::make_unique<MessageExchange>();
+        auto s = std::make_unique<MessageJson>();
+        auto c = std::make_unique<MessageJson>();
         srv = s.get();
         cli = c.get();
         server.add_subsystem(std::move(s));
@@ -66,7 +66,7 @@ struct Pair {
 
 // A targeted typed message reaches the right handler with its JSON intact, and
 // the reported sender is the peer's authenticated id.
-TEST(MessageExchangeTest, TargetedSendAndReceive) {
+TEST(MessageJsonTest, TargetedSendAndReceive) {
     Pair p;
     p.connect();
 
@@ -89,17 +89,17 @@ TEST(MessageExchangeTest, TargetedSendAndReceive) {
 }
 
 // Broadcast reaches every connected peer's handler.
-TEST(MessageExchangeTest, BroadcastReachesAllPeers) {
+TEST(MessageJsonTest, BroadcastReachesAllPeers) {
     Node hub(server_config());
     Node a(client_config());
     Node b(client_config());
 
-    auto hub_mx = std::make_unique<MessageExchange>();
-    auto a_mx = std::make_unique<MessageExchange>();
-    auto b_mx = std::make_unique<MessageExchange>();
-    MessageExchange* hmx = hub_mx.get();
-    MessageExchange* amx = a_mx.get();
-    MessageExchange* bmx = b_mx.get();
+    auto hub_mx = std::make_unique<MessageJson>();
+    auto a_mx = std::make_unique<MessageJson>();
+    auto b_mx = std::make_unique<MessageJson>();
+    MessageJson* hmx = hub_mx.get();
+    MessageJson* amx = a_mx.get();
+    MessageJson* bmx = b_mx.get();
     hub.add_subsystem(std::move(hub_mx));
     a.add_subsystem(std::move(a_mx));
     b.add_subsystem(std::move(b_mx));
@@ -128,7 +128,7 @@ TEST(MessageExchangeTest, BroadcastReachesAllPeers) {
 }
 
 // once() handlers fire exactly once and are then removed.
-TEST(MessageExchangeTest, OnceFiresOnce) {
+TEST(MessageJsonTest, OnceFiresOnce) {
     Pair p;
     p.connect();
 
@@ -144,7 +144,7 @@ TEST(MessageExchangeTest, OnceFiresOnce) {
 }
 
 // off() removes all handlers for a type.
-TEST(MessageExchangeTest, OffRemovesHandlers) {
+TEST(MessageJsonTest, OffRemovesHandlers) {
     Pair p;
     p.connect();
 
@@ -158,7 +158,7 @@ TEST(MessageExchangeTest, OffRemovesHandlers) {
 }
 
 // Multiple handlers for one type all fire, in registration order.
-TEST(MessageExchangeTest, MultipleHandlersAllFire) {
+TEST(MessageJsonTest, MultipleHandlersAllFire) {
     Pair p;
     p.connect();
 
@@ -171,10 +171,10 @@ TEST(MessageExchangeTest, MultipleHandlersAllFire) {
 }
 
 // The send callback reports failure for a peer we are not connected to.
-TEST(MessageExchangeTest, SendCallbackPeerNotConnected) {
+TEST(MessageJsonTest, SendCallbackPeerNotConnected) {
     Node node(server_config());
-    auto mx = std::make_unique<MessageExchange>();
-    MessageExchange* m = mx.get();
+    auto mx = std::make_unique<MessageJson>();
+    MessageJson* m = mx.get();
     node.add_subsystem(std::move(mx));
     ASSERT_TRUE(node.start());
 
@@ -189,7 +189,7 @@ TEST(MessageExchangeTest, SendCallbackPeerNotConnected) {
 
 // A payload well past the receive ring-buffer size arrives whole and intact,
 // proving the framing reassembles a typed message across recv boundaries.
-TEST(MessageExchangeTest, LargeMessageIntegrity) {
+TEST(MessageJsonTest, LargeMessageIntegrity) {
     Pair p;
     p.connect();
 
@@ -217,10 +217,10 @@ TEST(MessageExchangeTest, LargeMessageIntegrity) {
 }
 
 // Broadcast with no peers reports failure via the callback.
-TEST(MessageExchangeTest, BroadcastNoPeersCallback) {
+TEST(MessageJsonTest, BroadcastNoPeersCallback) {
     Node node(server_config());
-    auto mx = std::make_unique<MessageExchange>();
-    MessageExchange* m = mx.get();
+    auto mx = std::make_unique<MessageJson>();
+    MessageJson* m = mx.get();
     node.add_subsystem(std::move(mx));
     ASSERT_TRUE(node.start());
 

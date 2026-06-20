@@ -37,7 +37,7 @@ PeerExchange::~PeerExchange() { stop(); }
 
 void PeerExchange::attach(NodeContext& ctx) {
     network_ = &ctx.network;
-    network_->on_message(MessageType::Pex,
+    network_->on(MessageType::Pex,
                          [this](const Peer& peer, ByteView payload) { handle(peer, payload); });
     network_->on_peer_connected([this](const Peer& peer) { on_connected(peer); });
 }

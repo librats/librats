@@ -22,7 +22,7 @@ PingService::~PingService() { stop(); }
 
 void PingService::attach(NodeContext& ctx) {
     network_ = &ctx.network;
-    network_->on_message(MessageType::Ping,
+    network_->on(MessageType::Ping,
                          [this](const Peer& peer, ByteView payload) { handle(peer, payload); });
 }
 

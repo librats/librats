@@ -23,7 +23,7 @@
 #include "subsystems/dht_discovery.h"
 #include "subsystems/mdns_discovery.h"
 #include "subsystems/pubsub.h"
-#include "subsystems/message_exchange.h"
+#include "subsystems/message_json.h"
 #include "subsystems/file_transfer.h"
 #include "subsystems/ping_service.h"
 #include "subsystems/port_mapping_service.h"
@@ -50,7 +50,6 @@ namespace {
 // command loop exits and node.stop() runs.
 struct Subsystems {
     PubSub*               pubsub    = nullptr;
-    MessageExchange*      messaging = nullptr;
     FileTransfer*         files     = nullptr;
     PingService*          ping      = nullptr;
     ReconnectionService*  reconnect = nullptr;
@@ -141,9 +140,7 @@ int main(int argc, char** argv) {
         sub.pubsub = pubsub.get();
         node.add_subsystem(std::move(pubsub));
 
-        auto messaging = std::make_unique<MessageExchange>();
-        sub.messaging = messaging.get();
-        node.add_subsystem(std::move(messaging));
+        node.add_subsystem(std::make_unique<MessageJson>());  // reached via node.json()
 
         auto files = std::make_unique<FileTransfer>("./downloads");
         sub.files = files.get();
@@ -192,11 +189,11 @@ int main(int argc, char** argv) {
     node.on_peer_disconnected([](const PeerId& id) {
         std::cout << "[-] peer disconnected: " << id.short_hex() << "\n";
     });
-    node.on_message("chat", [](const Peer& peer, ByteView data) {
+    node.on("chat", [](const Peer& peer, ByteView data) {
         std::cout << peer.id().short_hex() << ": " << to_text(data) << "\n";
     });
 
-    sub.messaging->on("msg", [](const PeerId& from, const nlohmann::json& data) {
+    node.json()->on("msg", [](const PeerId& from, const nlohmann::json& data) {
         std::cout << "[msg] " << from.short_hex() << ": " << data.value("text", "") << "\n";
     });
 
@@ -265,7 +262,7 @@ int main(int argc, char** argv) {
         }
         else if (cmd == "/msg" && args.size() >= 2) {
             const std::string body = line.substr(line.find(args[1]));
-            sub.messaging->send("msg", nlohmann::json{{"text", body}});
+            node.json()->send("msg", nlohmann::json{{"text", body}});
         }
         else if (cmd == "/file" && args.size() >= 3) {
             PeerId to;

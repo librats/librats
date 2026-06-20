@@ -1,4 +1,4 @@
-#include "subsystems/message_exchange.h"
+#include "subsystems/message_json.h"
 #include "node/node_context.h"
 #include "util/logger.h"
 
@@ -6,32 +6,32 @@
 
 namespace librats {
 
-void MessageExchange::attach(NodeContext& ctx) {
+void MessageJson::attach(NodeContext& ctx) {
     network_ = &ctx.network;
-    network_->on_message(MessageType::Typed,
+    network_->on(MessageType::Typed,
         [this](const Peer& peer, ByteView payload) { on_typed(peer.id(), payload); });
 }
 
 // ── Registration ────────────────────────────────────────────────────────────
 
-void MessageExchange::on(const std::string& type, Handler handler) {
+void MessageJson::on(const std::string& type, Handler handler) {
     std::lock_guard<std::mutex> lock(mutex_);
     handlers_[type].push_back({std::move(handler), /*once=*/false});
 }
 
-void MessageExchange::once(const std::string& type, Handler handler) {
+void MessageJson::once(const std::string& type, Handler handler) {
     std::lock_guard<std::mutex> lock(mutex_);
     handlers_[type].push_back({std::move(handler), /*once=*/true});
 }
 
-void MessageExchange::off(const std::string& type) {
+void MessageJson::off(const std::string& type) {
     std::lock_guard<std::mutex> lock(mutex_);
     handlers_.erase(type);
 }
 
 // ── Sending ─────────────────────────────────────────────────────────────────
 
-Bytes MessageExchange::encode(const std::string& type, const nlohmann::json& data) {
+Bytes MessageJson::encode(const std::string& type, const nlohmann::json& data) {
     const std::string body = data.dump();
     Bytes out;
     out.reserve(2 + type.size() + body.size());
@@ -42,7 +42,7 @@ Bytes MessageExchange::encode(const std::string& type, const nlohmann::json& dat
     return out;
 }
 
-void MessageExchange::send(const std::string& type, const nlohmann::json& data, SendCallback cb) {
+void MessageJson::send(const std::string& type, const nlohmann::json& data, SendCallback cb) {
     if (!network_) { if (cb) cb(false, "not attached to a network"); return; }
 
     const Bytes payload = encode(type, data);
@@ -51,8 +51,8 @@ void MessageExchange::send(const std::string& type, const nlohmann::json& data, 
     if (cb) cb(n > 0, n > 0 ? "" : "no connected peers");
 }
 
-void MessageExchange::send(const PeerId& to, const std::string& type, const nlohmann::json& data,
-                           SendCallback cb) {
+void MessageJson::send(const PeerId& to, const std::string& type, const nlohmann::json& data,
+                       SendCallback cb) {
     if (!network_) { if (cb) cb(false, "not attached to a network"); return; }
 
     // A send() to an unknown peer is a safe no-op, so only pay for the directory
@@ -70,7 +70,7 @@ void MessageExchange::send(const PeerId& to, const std::string& type, const nloh
 
 // ── Receiving (reactor thread) ──────────────────────────────────────────────
 
-void MessageExchange::on_typed(const PeerId& from, ByteView payload) {
+void MessageJson::on_typed(const PeerId& from, ByteView payload) {
     const uint8_t* p = payload.data();
     const size_t   n = payload.size();
     if (n < 2) return;

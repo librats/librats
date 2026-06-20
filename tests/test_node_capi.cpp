@@ -53,9 +53,9 @@ TEST(NodeCApiTest, ConnectSendAndEcho) {
 
     EchoCtx echo{server};
     CollectCtx client_ctx;
-    rats_on_message(server, "chat", echo_cb, &echo);
+    rats_on(server, "chat", echo_cb, &echo);
     rats_on_peer_connected(client, peer_cb, &client_ctx);
-    rats_on_message(client, "chat", collect_cb, &client_ctx);
+    rats_on(client, "chat", collect_cb, &client_ctx);
 
     ASSERT_EQ(rats_start(server), RATS_OK);
     ASSERT_EQ(rats_start(client), RATS_OK);
@@ -137,12 +137,12 @@ TEST(NodeCApiTest, PubSubAndTypedMessaging) {
     TypedCtx typed_ctx, server_typed_ctx;
     ASSERT_EQ(rats_enable_pubsub(server), RATS_OK);
     ASSERT_EQ(rats_enable_pubsub(client), RATS_OK);
-    ASSERT_EQ(rats_enable_messaging(server), RATS_OK);
-    ASSERT_EQ(rats_enable_messaging(client), RATS_OK);
+    ASSERT_EQ(rats_enable_json(server), RATS_OK);
+    ASSERT_EQ(rats_enable_json(client), RATS_OK);
     rats_subscribe(server, "news", topic_cb, &topic_ctx);
     rats_subscribe(client, "news", topic_cb, &client_topic_ctx);
-    rats_on(client, "greet", typed_cb, &typed_ctx);
-    rats_on(server, "greet", typed_cb, &server_typed_ctx);
+    rats_on_json(client, "greet", typed_cb, &typed_ctx);
+    rats_on_json(server, "greet", typed_cb, &server_typed_ctx);
 
     ASSERT_EQ(rats_start(server), RATS_OK);
     ASSERT_EQ(rats_start(client), RATS_OK);
@@ -174,7 +174,7 @@ TEST(NodeCApiTest, PubSubAndTypedMessaging) {
     // typed JSON messaging: server → client.
     char* client_id = rats_local_id(client);
     ASSERT_TRUE(wait_for([&] {
-        rats_send_typed(server, client_id, "greet", "{\"text\":\"hi\"}");
+        rats_send_json(server, client_id, "greet", "{\"text\":\"hi\"}");
         std::lock_guard<std::mutex> l(typed_ctx.mu);
         return typed_ctx.json.find("\"text\"") != std::string::npos;
     })) << "typed message not delivered";
@@ -253,7 +253,7 @@ TEST(NodeCApiTest, BinaryPayloadWithNuls) {
     rats_t client = rats_create_ex(0, 0, "127.0.0.1", RATS_SECURITY_NOISE);
 
     BinCtx ctx;
-    rats_on_message(server, "bin", bin_collect_cb, &ctx);
+    rats_on(server, "bin", bin_collect_cb, &ctx);
 
     ASSERT_EQ(rats_start(server), RATS_OK);
     ASSERT_EQ(rats_start(client), RATS_OK);
@@ -304,13 +304,13 @@ TEST(NodeCApiTest, BroadcastRawAndTyped) {
 
     CollectCtx raw_ctx;
     TypedCtx typed_ctx, server_typed_ctx;
-    ASSERT_EQ(rats_enable_messaging(client), RATS_OK);
-    ASSERT_EQ(rats_enable_messaging(server), RATS_OK);
-    rats_on_message(client, "raw", collect_cb, &raw_ctx);
-    rats_on(client, "ev", typed_cb, &typed_ctx);
+    ASSERT_EQ(rats_enable_json(client), RATS_OK);
+    ASSERT_EQ(rats_enable_json(server), RATS_OK);
+    rats_on(client, "raw", collect_cb, &raw_ctx);
+    rats_on_json(client, "ev", typed_cb, &typed_ctx);
     // The server must own a MessageExchange before start() to broadcast typed
     // messages (subsystems attach pre-start), so register a handler on it too.
-    rats_on(server, "ev", typed_cb, &server_typed_ctx);
+    rats_on_json(server, "ev", typed_cb, &server_typed_ctx);
 
     ASSERT_EQ(rats_start(server), RATS_OK);
     ASSERT_EQ(rats_start(client), RATS_OK);
@@ -325,7 +325,7 @@ TEST(NodeCApiTest, BroadcastRawAndTyped) {
     })) << "raw broadcast not delivered";
 
     ASSERT_TRUE(wait_for([&] {
-        rats_broadcast_typed(server, "ev", "{\"k\":99}");
+        rats_broadcast_json(server, "ev", "{\"k\":99}");
         std::lock_guard<std::mutex> l(typed_ctx.mu);
         return typed_ctx.json.find("\"k\"") != std::string::npos;
     })) << "typed broadcast not delivered";

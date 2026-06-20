@@ -348,7 +348,7 @@ void StorageManager::attach(NodeContext& ctx) {
 
     if (!config_.enable_sync) return;
 
-    network_->on_message(MessageType::Storage,
+    network_->on(MessageType::Storage,
         [this](const Peer& peer, ByteView payload) { on_storage_message(peer.id(), payload); });
     network_->on_peer_connected(
         [this](const Peer& peer) { on_peer_connected(peer.id()); });
