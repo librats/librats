@@ -34,6 +34,7 @@ public:
     ~FixedStunServer() { stop(); }
 
     bool start() {
+        if (!init_socket_library()) return false;
         socket_ = create_udp_socket(0);
         if (!is_valid_socket(socket_)) return false;
         port_ = get_bound_port(socket_);
