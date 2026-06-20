@@ -3,19 +3,31 @@
 #include "util/logger.h"
 
 #include <algorithm>
+#include <chrono>
 #include <vector>
 
 namespace librats {
 
+namespace {
+// Wall clock at the edge, kept out of PeerBook so the book stays pure/testable.
+uint64_t now_secs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+} // namespace
+
 ReconnectionService::ReconnectionService() : ReconnectionService(Config()) {}
 
 ReconnectionService::ReconnectionService(Config config) : config_(std::move(config)) {
-    // Construct the store up front so the pointer is fixed for the object's life
-    // (no race with reactor-thread reads in on_connected) and so add() called
-    // before start() persists into an already-loaded set rather than clobbering it.
+    // Build the book up front so the pointer is fixed for the object's life (no race
+    // with reactor-thread reads in on_connected) and so add() before start() records
+    // into an already-loaded book rather than clobbering it.
     if (!config_.store_path.empty()) {
-        store_ = std::make_unique<PeerStore>(config_.store_path);
-        store_->load();
+        book_ = std::make_unique<PeerBook>(config_.store_path);
+        book_->load();
+        // Age out the long tail and cap the archive immediately on load.
+        book_->prune(now_secs(), static_cast<uint64_t>(config_.archive_max_age.count()), config_.archive_max);
+        book_->save();
     }
 }
 
@@ -27,14 +39,14 @@ void ReconnectionService::add(const Address& address) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (targets_.find(key) != targets_.end()) return;
         if (targets_.size() >= config_.max_targets) {
-            LOG_WARN("reconnect", "Target cap (" << config_.max_targets << ") reached; dropping " << key);
+            LOG_WARN("reconnect", "Active-target cap (" << config_.max_targets << ") reached; dropping " << key);
             return;
         }
         Target& t = targets_[key];
         t.address = address;
         t.next_attempt = std::chrono::steady_clock::now();
     }
-    if (store_ && store_->add(address)) store_->save();
+    if (book_) { book_->note_seen(address, now_secs()); book_->save(); }
     wake_.notify_all();
 }
 
@@ -44,13 +56,18 @@ void ReconnectionService::remove(const Address& address) {
         std::lock_guard<std::mutex> lock(mutex_);
         erased = targets_.erase(address.to_string()) > 0;
     }
-    if (store_ && store_->remove(address)) store_->save();
+    if (book_ && book_->remove(address)) book_->save();
     if (erased) LOG_DEBUG("reconnect", "Stopped reconnecting to " << address.to_string());
 }
 
 size_t ReconnectionService::target_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return targets_.size();
+}
+
+std::vector<Address> ReconnectionService::known_peers(size_t n) const {
+    if (!book_) return {};
+    return book_->best(n, now_secs(), static_cast<uint64_t>(config_.archive_max_age.count()));
 }
 
 void ReconnectionService::attach(NodeContext& ctx) {
@@ -62,9 +79,14 @@ void ReconnectionService::attach(NodeContext& ctx) {
 void ReconnectionService::start() {
     if (running_.exchange(true)) return;
 
-    if (store_) {
+    // Seed the active set with the most promising peers from the book — the
+    // working set is "best N recent", the rest of the book stays a passive
+    // reserve pool reachable via known_peers().
+    if (book_) {
+        const auto recent = book_->best(config_.startup_targets, now_secs(),
+                                        static_cast<uint64_t>(config_.archive_max_age.count()));
         std::lock_guard<std::mutex> lock(mutex_);
-        for (const Address& addr : store_->all()) {
+        for (const Address& addr : recent) {
             if (targets_.size() >= config_.max_targets) break;
             auto [it, inserted] = targets_.try_emplace(addr.to_string());
             if (inserted) { it->second.address = addr; it->second.next_attempt = std::chrono::steady_clock::now(); }
@@ -77,14 +99,15 @@ void ReconnectionService::stop() {
     if (!running_.exchange(false)) return;
     wake_.notify_all();
     if (thread_.joinable()) thread_.join();
-    if (store_) store_->save();
+    if (book_) book_->save();
 }
 
 void ReconnectionService::on_connected(const Peer& peer) {
     auto info = peer.info();
     if (!info) return;
 
-    std::vector<Address> learned;
+    const uint64_t now = now_secs();
+    bool book_changed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const Address& addr : info->addresses) {
@@ -92,21 +115,17 @@ void ReconnectionService::on_connected(const Peer& peer) {
             auto it = targets_.find(key);
             if (it == targets_.end()) {
                 if (!config_.persist_discovered) continue;
-                if (targets_.size() >= config_.max_targets) continue;  // bound discovered growth
+                if (targets_.size() >= config_.max_targets) continue;  // bound active growth
                 it = targets_.emplace(key, Target{}).first;
                 it->second.address = addr;
-                learned.push_back(addr);
             }
             it->second.connected = true;
             it->second.peer_id = peer.id();
             it->second.attempts = 0;
+            if (book_) { book_->note_connected(addr, peer.id(), now); book_changed = true; }
         }
     }
-    if (store_ && !learned.empty()) {
-        bool changed = false;
-        for (const Address& addr : learned) changed |= store_->add(addr);
-        if (changed) store_->save();
-    }
+    if (book_ && book_changed) book_->save();
 }
 
 void ReconnectionService::on_disconnected(const PeerId& id) {
@@ -139,10 +158,11 @@ void ReconnectionService::loop() {
                 Target& target = it->second;
                 if (target.connected || target.next_attempt > now) { ++it; continue; }
 
-                // Give up on a persistently-dead target: drop it (and from the store
-                // below) instead of re-dialing forever. A reconnect resets attempts,
-                // so this only reaps addresses that never came back.
-                if (config_.max_attempts > 0 && target.attempts >= config_.max_attempts) {
+                // Give up actively dialing a persistently-dead target: drop it from
+                // the active set (it stays in the book as history, ranked down by its
+                // failure streak, until it ages out). A reconnect resets attempts, so
+                // only addresses that never came back are reaped.
+                if (config_.max_attempts > 0 && target.attempts >= static_cast<int>(config_.max_attempts)) {
                     gave_up.push_back(target.address);
                     it = targets_.erase(it);
                     continue;
@@ -154,10 +174,10 @@ void ReconnectionService::loop() {
                 ++it;
             }
         }
-        if (store_ && !gave_up.empty()) {
-            bool changed = false;
-            for (const Address& addr : gave_up) changed |= store_->remove(addr);
-            if (changed) store_->save();
+        if (book_ && !gave_up.empty()) {
+            const uint64_t ts = now_secs();
+            for (const Address& addr : gave_up) book_->note_failure(addr, ts);
+            book_->save();
         }
         for (const Address& addr : gave_up)
             LOG_DEBUG("reconnect", "Giving up on " << addr.to_string() << " after "

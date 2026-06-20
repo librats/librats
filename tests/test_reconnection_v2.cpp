@@ -2,7 +2,7 @@
 
 #include "node/node.h"
 #include "subsystems/reconnection.h"
-#include "peer/peer_store.h"
+#include "peer/peer_book.h"
 #include "util/fs.h"
 
 #include <algorithm>
@@ -39,40 +39,82 @@ ReconnectionService::Config fast_reconnect() {
 
 } // namespace
 
-// The store round-trips addresses through a file.
-TEST(PeerStoreTest, RoundTrip) {
-    const std::string path = "rats_test_peers.txt";
+namespace {
+const PeerRecord* find_record(const std::vector<PeerRecord>& recs, const std::string& addr) {
+    for (const auto& r : recs) if (r.address.to_string() == addr) return &r;
+    return nullptr;
+}
+} // namespace
+
+// The book round-trips addresses AND their metadata (incl. IPv6) through a file.
+TEST(PeerBookTest, RoundTripWithMetadata) {
+    const std::string path = "rats_test_book.txt";
     delete_file(path.c_str());
     {
-        PeerStore store(path);
-        EXPECT_TRUE(store.add(*Address::parse("127.0.0.1:4001")));
-        EXPECT_TRUE(store.add(*Address::parse("10.0.0.5:5002")));
-        EXPECT_FALSE(store.add(*Address::parse("127.0.0.1:4001")));  // dup
-        store.save();
+        PeerBook book(path);
+        book.note_connected(*Address::parse("127.0.0.1:4001"), PeerId{}, /*now=*/1000);
+        book.note_connected(*Address::parse("127.0.0.1:4001"), PeerId{}, /*now=*/2000);  // 2nd connect
+        book.note_seen(*Address::parse("[::1]:5002"), /*now=*/1500);                      // IPv6, never connected
+        book.save();
     }
-    {
-        PeerStore store(path);
-        store.load();
-        EXPECT_EQ(store.size(), 2u);
-        const auto all = store.all();
-        EXPECT_NE(std::find(all.begin(), all.end(), *Address::parse("10.0.0.5:5002")), all.end());
-    }
+    PeerBook book(path);
+    book.load();
+    EXPECT_EQ(book.size(), 2u);
+
+    const auto recs = book.records();
+    const PeerRecord* a = find_record(recs, "127.0.0.1:4001");
+    ASSERT_NE(a, nullptr);
+    EXPECT_EQ(a->connect_count, 2u);
+    EXPECT_EQ(a->last_connected, 2000u);
+
+    const PeerRecord* v6 = find_record(recs, "[::1]:5002");
+    ASSERT_NE(v6, nullptr);              // IPv6 address survived the round-trip
+    EXPECT_EQ(v6->last_connected, 0u);  // seen but never connected
     delete_file(path.c_str());
 }
 
-// remove() takes an address back out of the store.
-TEST(PeerStoreTest, Remove) {
-    const std::string path = "rats_test_peers_remove.txt";
+// remove() takes an address back out of the book.
+TEST(PeerBookTest, Remove) {
+    const std::string path = "rats_test_book_remove.txt";
     delete_file(path.c_str());
-    PeerStore store(path);
-    store.add(*Address::parse("127.0.0.1:4001"));
-    store.add(*Address::parse("10.0.0.5:5002"));
-    EXPECT_TRUE(store.remove(*Address::parse("127.0.0.1:4001")));
-    EXPECT_FALSE(store.remove(*Address::parse("127.0.0.1:4001")));  // already gone
-    EXPECT_EQ(store.size(), 1u);
-    const auto all = store.all();
-    EXPECT_EQ(std::find(all.begin(), all.end(), *Address::parse("127.0.0.1:4001")), all.end());
+    PeerBook book(path);
+    book.note_seen(*Address::parse("127.0.0.1:4001"), 1);
+    book.note_seen(*Address::parse("10.0.0.5:5002"), 1);
+    EXPECT_TRUE(book.remove(*Address::parse("127.0.0.1:4001")));
+    EXPECT_FALSE(book.remove(*Address::parse("127.0.0.1:4001")));  // already gone
+    EXPECT_EQ(book.size(), 1u);
     delete_file(path.c_str());
+}
+
+// best() ranks ever-connected peers first, most-recently-connected ahead of older.
+TEST(PeerBookTest, BestRanking) {
+    PeerBook book("");  // memory only (empty path → save/load no-op)
+    book.note_seen(*Address::parse("10.0.0.1:1"), 100);                          // never connected
+    book.note_connected(*Address::parse("10.0.0.2:2"), PeerId{}, 200);           // connected, older
+    book.note_connected(*Address::parse("10.0.0.3:3"), PeerId{}, 300);           // connected, newest
+
+    const auto top = book.best(/*n=*/3, /*now=*/300, /*max_age=*/0);
+    ASSERT_EQ(top.size(), 3u);
+    EXPECT_EQ(top[0].to_string(), "10.0.0.3:3");  // most recently connected
+    EXPECT_EQ(top[1].to_string(), "10.0.0.2:2");  // connected, older
+    EXPECT_EQ(top[2].to_string(), "10.0.0.1:1");  // never connected → last
+}
+
+// prune() drops stale records (by age) and caps the total size, keeping the best.
+TEST(PeerBookTest, PruneByAgeAndSize) {
+    PeerBook book("");
+    book.note_connected(*Address::parse("10.0.0.1:1"), PeerId{}, /*now=*/1000);  // fresh
+    book.note_connected(*Address::parse("10.0.0.2:2"), PeerId{}, /*now=*/10);    // ancient
+
+    // now=1000, max_age=100 → the ancient one (last_seen=10) is stale.
+    EXPECT_EQ(book.prune(/*now=*/1000, /*max_age=*/100, /*max_size=*/0), 1u);
+    EXPECT_EQ(book.size(), 1u);
+
+    // Add two more, then cap to 1: only the single best survives.
+    book.note_connected(*Address::parse("10.0.0.3:3"), PeerId{}, 1000);
+    book.note_seen(*Address::parse("10.0.0.4:4"), 1000);
+    EXPECT_GE(book.prune(/*now=*/1000, /*max_age=*/0, /*max_size=*/1), 2u);
+    EXPECT_EQ(book.size(), 1u);
 }
 
 // After a connection drops, the service re-dials the target and reconnects.
@@ -180,12 +222,17 @@ TEST(ReconnectionServiceTest, PersistsDiscoveredAcrossRestart) {
         client.stop();
     }
 
-    // The store now contains the server address.
-    PeerStore store(store_path);
-    store.load();
-    EXPECT_GE(store.size(), 1u);
-    const auto all = store.all();
+    // The book now records the server address as a peer we connected to.
+    PeerBook book(store_path);
+    book.load();
+    EXPECT_GE(book.size(), 1u);
+    const auto all = book.all();
     EXPECT_NE(std::find(all.begin(), all.end(), *Address::parse(server_addr)), all.end());
+    const auto recs = book.records();
+    const PeerRecord* rec = find_record(recs, server_addr);
+    ASSERT_NE(rec, nullptr);
+    EXPECT_GT(rec->last_connected, 0u);   // recorded as actually connected
+    EXPECT_GE(rec->connect_count, 1u);
 
     // Second run: a fresh client with the same store reconnects with no explicit add().
     {
@@ -198,6 +245,37 @@ TEST(ReconnectionServiceTest, PersistsDiscoveredAcrossRestart) {
         client.stop();
     }
 
+    server.stop();
+    delete_file(store_path.c_str());
+}
+
+// known_peers() exposes the book as a passive reserve pool, ranking a peer we
+// actually connected to at the top.
+TEST(ReconnectionServiceTest, KnownPeersExposesBookPool) {
+    const std::string store_path = "rats_test_known_pool.txt";
+    delete_file(store_path.c_str());
+
+    Node server(listening_config());
+    ASSERT_TRUE(server.start());
+    const Address server_addr = *Address::parse("127.0.0.1:" + std::to_string(server.listen_port()));
+
+    Node client(dialing_config());
+    auto cfg = fast_reconnect();
+    cfg.store_path = store_path;
+    auto reconnect = std::make_unique<ReconnectionService>(cfg);
+    ReconnectionService* svc = reconnect.get();
+    client.add_subsystem(std::move(reconnect));
+    ASSERT_TRUE(client.start());
+
+    EXPECT_TRUE(svc->known_peers(10).empty());  // nothing known yet
+    svc->add(server_addr);
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1; }));
+
+    const auto pool = svc->known_peers(10);
+    ASSERT_FALSE(pool.empty());
+    EXPECT_EQ(pool[0].to_string(), server_addr.to_string());  // the connected peer ranks top
+
+    client.stop();
     server.stop();
     delete_file(store_path.c_str());
 }

@@ -189,8 +189,8 @@ set(LIBRARY_SOURCES
     src/peer/peer_info.h
     src/peer/peer_table.h
     src/peer/peer_table.cpp
-    src/peer/peer_store.h
-    src/peer/peer_store.cpp
+    src/peer/peer_book.h
+    src/peer/peer_book.cpp
 
 # Core v2 — security layer (Noise XX / plaintext) with self-certifying identity
     src/security/session.h

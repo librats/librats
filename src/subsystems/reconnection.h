@@ -20,7 +20,7 @@
 #include "peer/peer.h"
 #include "core/address.h"
 #include "peer/peer_id.h"
-#include "peer/peer_store.h"
+#include "peer/peer_book.h"
 
 #include <atomic>
 #include <chrono>
@@ -36,10 +36,13 @@ namespace librats {
 class ReconnectionService final : public Subsystem {
 public:
     struct Config {
-        std::string               store_path = "";          ///< persist targets (empty = memory only)
+        std::string               store_path = "";          ///< persist the peer book here (empty = memory only)
         bool                      persist_discovered = true; ///< remember dialed peers automatically
-        size_t                    max_targets = 1024;        ///< cap on remembered targets (bounds memory + store growth)
-        size_t                    max_attempts = 0;          ///< give up (drop the target) after this many consecutive failed dials; 0 = retry forever
+        size_t                    max_targets = 1024;        ///< cap on ACTIVE re-dial targets (bounds memory + dial fan-out)
+        size_t                    max_attempts = 0;          ///< give up actively dialing a target after this many consecutive failures; 0 = retry forever
+        size_t                    startup_targets = 32;      ///< on start, actively re-dial this many best peers from the book
+        size_t                    archive_max = 4096;        ///< cap on the persistent peer book (history of everyone we met)
+        std::chrono::seconds      archive_max_age{std::chrono::hours(24 * 30)};  ///< forget peers unseen this long (30 days)
         std::chrono::milliseconds base_backoff{1000};
         std::chrono::milliseconds max_backoff{60000};
         std::chrono::milliseconds tick{1000};
@@ -59,6 +62,12 @@ public:
     void remove(const Address& address);
 
     size_t target_count() const;
+
+    /// The passive reserve pool: up to n best-known peer addresses from the book
+    /// (history of everyone we have connected to), most promising first. Not dialed
+    /// automatically beyond the startup seed — exposed for the app / discovery to
+    /// use as a bootstrap source when peer count is low.
+    std::vector<Address> known_peers(size_t n) const;
 
     void attach(NodeContext& ctx) override;
     void start() override;
@@ -81,10 +90,10 @@ private:
     Config                      config_;
     PeerNetwork*                network_ = nullptr;
     // Built once in the constructor (when store_path is set) and never reassigned,
-    // so the pointer is safe to read from any thread; PeerStore is itself internally
+    // so the pointer is safe to read from any thread; PeerBook is itself internally
     // synchronized. (Creating it in start() raced reads from on_connected, which can
     // fire on a reactor thread before this subsystem's start() returns.)
-    std::unique_ptr<PeerStore>  store_;
+    std::unique_ptr<PeerBook>   book_;
 
     std::thread             thread_;
     std::atomic<bool>       running_{false};
