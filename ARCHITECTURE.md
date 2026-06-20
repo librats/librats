@@ -478,7 +478,7 @@ The current subsystems:
 | Subsystem | What it does | Own thread(s)? | Wire (`MessageType`) | Wraps engine |
 |-----------|--------------|----------------|----------------------|--------------|
 | **PingService** | Liveness + RTT; pings every peer, echoes pongs | yes (ping loop) | `Ping` | — |
-| **PubSub** | Subscription‑aware floodsub: publish to interested peers, dedup loops | no (event‑driven) | `Gossip` | — |
+| **PubSub** | GossipSub: per‑topic mesh (GRAFT/PRUNE), eager push, lazy IHAVE/IWANT pull, fanout, validators, dedup | yes (heartbeat loop) | `Gossip` | — |
 | **FileTransfer** | Push a file/directory tree; CRC32 per chunk + SHA‑256 per file; sliding‑window backpressure; pause/resume/cancel; idle timeout | yes (worker pool + reaper) | `FileChunk` | — |
 | **ReconnectionService** | Keep a set of addresses connected with exponential backoff; optional persistence | yes (dial loop) | — | `PeerStore` |
 | **DhtDiscovery** | Announce/find peers under a discovery hash on the Kademlia DHT | yes (search loop) | — | `src/dht` |

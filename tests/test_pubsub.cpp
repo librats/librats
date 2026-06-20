@@ -3,6 +3,7 @@
 #include "node/node.h"
 #include "subsystems/pubsub.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -43,12 +44,20 @@ NodeConfig dialing_config() {
 struct PubSubNode {
     Node node;
     PubSub* ps;
-    explicit PubSubNode(NodeConfig cfg) : node(std::move(cfg)) {
-        auto sub = std::make_unique<PubSub>();
+    explicit PubSubNode(NodeConfig cfg, PubSub::Config ps_cfg = {}) : node(std::move(cfg)) {
+        auto sub = std::make_unique<PubSub>(ps_cfg);
         ps = sub.get();
         node.add_subsystem(std::move(sub));
     }
 };
+
+// A GossipSub config with a fast heartbeat so mesh formation and IHAVE/IWANT
+// gossip converge within a test's patience.
+PubSub::Config fast_gossip() {
+    PubSub::Config c;
+    c.heartbeat_interval = std::chrono::milliseconds(50);
+    return c;
+}
 
 } // namespace
 
@@ -121,9 +130,10 @@ TEST(PubSubTest, RespectsSubscriptions) {
     hub.node.stop();
 }
 
-// A subscribed hub relays a publish among its subscribers (a → hub → b).
-// (Subscription-aware floodsub forwards to subscribed neighbours; multi-hop
-// through an UNsubscribed relay is a GossipSub mesh feature — a future layer.)
+// A subscribed hub relays a publish among its mesh (a → hub → b). The hub is in
+// the topic mesh with b, so a message it receives is forwarded along that mesh.
+// (Only subscribed mesh members relay — an UNsubscribed node never carries topic
+// traffic, which is correct GossipSub behaviour, not a gap.)
 TEST(PubSubTest, ForwardsAmongSubscribers) {
     PubSubNode hub(listening_config());
     PubSubNode a(dialing_config());
@@ -152,4 +162,98 @@ TEST(PubSubTest, ForwardsAmongSubscribers) {
     a.node.stop();
     b.node.stop();
     hub.node.stop();
+}
+
+// Two mutually-subscribed peers graft each other into the topic mesh.
+TEST(PubSubTest, FormsMeshBetweenSubscribers) {
+    PubSubNode server(listening_config(), fast_gossip());
+    PubSubNode client(dialing_config(), fast_gossip());
+
+    server.ps->subscribe("chat", [](const PeerId&, const std::string&, ByteView) {});
+    client.ps->subscribe("chat", [](const PeerId&, const std::string&, ByteView) {});
+
+    ASSERT_TRUE(server.node.start());
+    ASSERT_TRUE(client.node.start());
+    client.node.connect("127.0.0.1", server.node.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.node.peer_count() == 1 && client.node.peer_count() == 1; }));
+
+    // Each side grafts the other once it learns of the shared subscription.
+    ASSERT_TRUE(wait_for([&] {
+        return server.ps->mesh_peers("chat").size() == 1 &&
+               client.ps->mesh_peers("chat").size() == 1;
+    })) << "mesh did not form";
+    EXPECT_EQ(server.ps->mesh_peers("chat").front(), client.node.local_id());
+    EXPECT_EQ(client.ps->mesh_peers("chat").front(), server.node.local_id());
+
+    client.node.stop();
+    server.node.stop();
+}
+
+// With the mesh disabled (degree 0) there is no eager push, so a published
+// message can only reach a subscriber through the lazy IHAVE → IWANT pull path.
+TEST(PubSubTest, LazyPullDeliversWithoutMesh) {
+    PubSub::Config no_mesh = fast_gossip();
+    no_mesh.mesh_low = no_mesh.mesh_target = no_mesh.mesh_high = 0;  // never graft → empty mesh
+    no_mesh.gossip_factor = 16;                                     // but gossip IHAVE widely
+
+    PubSubNode server(listening_config(), no_mesh);
+    PubSubNode client(dialing_config(), no_mesh);
+
+    std::mutex mu;
+    std::string got;
+    client.ps->subscribe("feed", [&](const PeerId&, const std::string&, ByteView d) {
+        std::lock_guard<std::mutex> l(mu); got = str(d);
+    });
+    server.ps->subscribe("feed", [](const PeerId&, const std::string&, ByteView) {});  // so it emits IHAVE
+
+    ASSERT_TRUE(server.node.start());
+    ASSERT_TRUE(client.node.start());
+    client.node.connect("127.0.0.1", server.node.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.ps->peers_for_topic("feed").size() == 1; }));
+    // Sanity: the mesh really is empty, so eager push cannot be the delivery path.
+    ASSERT_TRUE(server.ps->mesh_peers("feed").empty());
+
+    server.ps->publish("feed", ByteView(std::string("pulled")));
+
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(mu); return got == "pulled"; }))
+        << "lazy IHAVE/IWANT pull did not deliver the message";
+
+    client.node.stop();
+    server.node.stop();
+}
+
+// A REJECT validator drops a message before delivery; ACCEPT lets it through.
+TEST(PubSubTest, ValidatorRejectsMessages) {
+    PubSubNode server(listening_config(), fast_gossip());
+    PubSubNode client(dialing_config(), fast_gossip());
+
+    std::mutex mu;
+    std::vector<std::string> delivered;
+    client.ps->subscribe("guarded", [&](const PeerId&, const std::string&, ByteView d) {
+        std::lock_guard<std::mutex> l(mu); delivered.push_back(str(d));
+    });
+    client.ps->set_validator("guarded", [](const PeerId&, const std::string&, ByteView d) {
+        return str(d) == "bad" ? ValidationResult::Reject : ValidationResult::Accept;
+    });
+
+    ASSERT_TRUE(server.node.start());
+    ASSERT_TRUE(client.node.start());
+    client.node.connect("127.0.0.1", server.node.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.ps->peers_for_topic("guarded").size() == 1; }));
+
+    server.ps->publish("guarded", ByteView(std::string("bad")));
+    server.ps->publish("guarded", ByteView(std::string("good")));
+
+    // "good" must arrive; "bad" must be rejected at the validator and never delivered.
+    ASSERT_TRUE(wait_for([&] {
+        std::lock_guard<std::mutex> l(mu);
+        return std::find(delivered.begin(), delivered.end(), "good") != delivered.end();
+    }));
+    {
+        std::lock_guard<std::mutex> l(mu);
+        EXPECT_EQ(std::find(delivered.begin(), delivered.end(), "bad"), delivered.end());
+    }
+
+    client.node.stop();
+    server.node.stop();
 }
