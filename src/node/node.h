@@ -99,7 +99,7 @@ public:
     void connect(const std::string& host, uint16_t port);
 
     size_t                  peer_count() const noexcept { return directory_.size(); }
-    std::vector<PeerInfo>   peers() const { return directory_.snapshot(); }
+    std::vector<PeerInfo>   peers() const override { return directory_.snapshot(); }
     std::optional<Peer> peer(const PeerId& id);
 
     /// Our own addresses as remote peers reported observing us at — their observed

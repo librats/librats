@@ -43,6 +43,7 @@ enum class MessageType : uint8_t {
     Ping      = 5,  ///< liveness / RTT (PingService)
     Storage   = 6,  ///< distributed key-value store (StorageManager)
     Typed     = 7,  ///< typed JSON message exchange (MessageExchange)
+    Pex       = 8,  ///< peer exchange — gossip of known peer addresses (PeerExchange)
 };
 
 /// Fixed header of an inner message.

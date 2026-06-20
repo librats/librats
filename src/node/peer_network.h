@@ -13,6 +13,7 @@
 #include "core/bytes.h"
 #include "wire/frame.h"   // MessageType
 #include "peer/peer_id.h"
+#include "peer/peer_info.h"
 #include "core/address.h"
 
 #include <cstdint>
@@ -37,6 +38,7 @@ public:
     virtual void                send(const PeerId& to, MessageType type, ByteView payload) = 0;
     virtual void                broadcast(MessageType type, ByteView payload) = 0;
     virtual std::vector<PeerId>  connected_peers() const = 0;
+    virtual std::vector<PeerInfo> peers() const = 0;  ///< snapshot incl. dialable addresses
     virtual void                on_message(MessageType type, MessageHandler handler) = 0;
 
     // Lifecycle hooks. Multiple subsystems (and the application) may subscribe;
