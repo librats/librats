@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "bindings/rats_node.h"
+#include "bindings/rats.h"
 
 #include <atomic>
 #include <chrono>
@@ -23,10 +23,10 @@ bool wait_for(Pred pred, std::chrono::milliseconds timeout = 10s) {
     return pred();
 }
 
-struct EchoCtx { rats_node_t node; };
+struct EchoCtx { rats_t node; };
 void echo_cb(void* user, const char* peer_id, const void* data, size_t len) {
     auto* ctx = static_cast<EchoCtx*>(user);
-    rats_node_send(ctx->node, peer_id, "chat", data, len);  // bounce back to sender
+    rats_send(ctx->node, peer_id, "chat", data, len);  // bounce back to sender
 }
 
 struct CollectCtx {
@@ -45,58 +45,139 @@ void collect_cb(void* user, const char*, const void* data, size_t len) {
 
 // Drive two nodes entirely through the C ABI: connect, send on a channel, echo.
 TEST(NodeCApiTest, ConnectSendAndEcho) {
-    rats_node_t server = rats_node_create(0);  // listening, ephemeral
-    rats_node_t client = rats_node_create_ex(0, /*enable_listen=*/0, "127.0.0.1", RATS_SECURITY_NOISE);
+    rats_t server = rats_create(0);  // listening, ephemeral
+    rats_t client = rats_create_ex(0, /*enable_listen=*/0, "127.0.0.1", RATS_SECURITY_NOISE);
     ASSERT_NE(server, nullptr);
     ASSERT_NE(client, nullptr);
 
     EchoCtx echo{server};
     CollectCtx client_ctx;
-    rats_node_on_message(server, "chat", echo_cb, &echo);
-    rats_node_on_peer_connected(client, peer_cb, &client_ctx);
-    rats_node_on_message(client, "chat", collect_cb, &client_ctx);
+    rats_on_message(server, "chat", echo_cb, &echo);
+    rats_on_peer_connected(client, peer_cb, &client_ctx);
+    rats_on_message(client, "chat", collect_cb, &client_ctx);
 
-    ASSERT_EQ(rats_node_start(server), 1);
-    ASSERT_EQ(rats_node_start(client), 1);
+    ASSERT_EQ(rats_start(server), 1);
+    ASSERT_EQ(rats_start(client), 1);
 
-    rats_node_connect(client, "127.0.0.1", rats_node_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_node_peer_count(client) == 1; }));
+    rats_connect(client, "127.0.0.1", rats_listen_port(server));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
     EXPECT_EQ(client_ctx.peers.load(), 1);
 
-    char* server_id = rats_node_local_id(server);
+    char* server_id = rats_local_id(server);
     ASSERT_NE(server_id, nullptr);
     EXPECT_EQ(std::strlen(server_id), 64u);
 
     const char* msg = "hello capi";
-    rats_node_send(client, server_id, "chat", msg, std::strlen(msg));
+    rats_send(client, server_id, "chat", msg, std::strlen(msg));
 
     ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(client_ctx.mu); return client_ctx.got == msg; }))
         << "no echo via C API";
 
-    rats_node_string_free(server_id);
-    rats_node_stop(client);
-    rats_node_stop(server);
-    rats_node_destroy(client);
-    rats_node_destroy(server);
+    rats_string_free(server_id);
+    rats_stop(client);
+    rats_stop(server);
+    rats_destroy(client);
+    rats_destroy(server);
 }
 
 // local_id is stable and distinct per node; lifecycle is clean.
 TEST(NodeCApiTest, LocalIdAndLifecycle) {
-    rats_node_t a = rats_node_create(0);
-    rats_node_t b = rats_node_create(0);
+    rats_t a = rats_create(0);
+    rats_t b = rats_create(0);
 
-    char* ida = rats_node_local_id(a);
-    char* idb = rats_node_local_id(b);
+    char* ida = rats_local_id(a);
+    char* idb = rats_local_id(b);
     ASSERT_NE(ida, nullptr);
     ASSERT_NE(idb, nullptr);
     EXPECT_STRNE(ida, idb);
 
-    EXPECT_EQ(rats_node_start(a), 1);
-    EXPECT_NE(rats_node_listen_port(a), 0);
-    rats_node_stop(a);
+    EXPECT_EQ(rats_start(a), 1);
+    EXPECT_NE(rats_listen_port(a), 0);
+    rats_stop(a);
 
-    rats_node_string_free(ida);
-    rats_node_string_free(idb);
-    rats_node_destroy(a);
-    rats_node_destroy(b);
+    rats_string_free(ida);
+    rats_string_free(idb);
+    rats_destroy(a);
+    rats_destroy(b);
+}
+
+namespace {
+struct TopicCtx {
+    std::mutex mu;
+    std::string topic, data;
+};
+void topic_cb(void* user, const char*, const char* topic, const void* data, size_t len) {
+    auto* ctx = static_cast<TopicCtx*>(user);
+    std::lock_guard<std::mutex> lock(ctx->mu);
+    ctx->topic = topic;
+    ctx->data.assign(static_cast<const char*>(data), len);
+}
+struct TypedCtx {
+    std::mutex mu;
+    std::string json;
+};
+void typed_cb(void* user, const char*, const char* json) {
+    auto* ctx = static_cast<TypedCtx*>(user);
+    std::lock_guard<std::mutex> lock(ctx->mu);
+    ctx->json = json;
+}
+} // namespace
+
+// Connect two nodes, then exercise pub/sub and typed JSON messaging via the C ABI.
+TEST(NodeCApiTest, PubSubAndTypedMessaging) {
+    rats_t server = rats_create(0);
+    rats_t client = rats_create_ex(0, /*enable_listen=*/0, "127.0.0.1", RATS_SECURITY_NOISE);
+    ASSERT_NE(server, nullptr);
+    ASSERT_NE(client, nullptr);
+
+    // Subsystems must be configured before start(). Both nodes subscribe / register
+    // so each has the subsystem attached; we then assert on one direction.
+    TopicCtx topic_ctx, client_topic_ctx;
+    TypedCtx typed_ctx, server_typed_ctx;
+    rats_subscribe(server, "news", topic_cb, &topic_ctx);
+    rats_subscribe(client, "news", topic_cb, &client_topic_ctx);
+    rats_on(client, "greet", typed_cb, &typed_ctx);
+    rats_on(server, "greet", typed_cb, &server_typed_ctx);
+
+    ASSERT_EQ(rats_start(server), 1);
+    ASSERT_EQ(rats_start(client), 1);
+
+    rats_connect(client, "127.0.0.1", rats_listen_port(server));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1 && rats_peer_count(client) == 1; }));
+
+    // peer enumeration: the client should list exactly the server's id.
+    char* server_id = rats_local_id(server);
+    size_t n = 0;
+    char** ids = rats_peer_ids(client, &n);
+    ASSERT_EQ(n, 1u);
+    ASSERT_NE(ids, nullptr);
+    EXPECT_STREQ(ids[0], server_id);
+    rats_free_peer_ids(ids, n);
+
+    // pub/sub: client publishes once the server's subscription has propagated.
+    const char* payload = "breaking";
+    ASSERT_TRUE(wait_for([&] {
+        rats_publish(client, "news", payload, std::strlen(payload));
+        std::lock_guard<std::mutex> l(topic_ctx.mu);
+        return topic_ctx.data == payload;
+    })) << "pub/sub message not delivered";
+    {
+        std::lock_guard<std::mutex> l(topic_ctx.mu);
+        EXPECT_EQ(topic_ctx.topic, "news");
+    }
+
+    // typed JSON messaging: server → client.
+    char* client_id = rats_local_id(client);
+    ASSERT_TRUE(wait_for([&] {
+        rats_send_typed(server, client_id, "greet", "{\"text\":\"hi\"}");
+        std::lock_guard<std::mutex> l(typed_ctx.mu);
+        return typed_ctx.json.find("\"text\"") != std::string::npos;
+    })) << "typed message not delivered";
+
+    rats_string_free(server_id);
+    rats_string_free(client_id);
+    rats_stop(client);
+    rats_stop(server);
+    rats_destroy(client);
+    rats_destroy(server);
 }

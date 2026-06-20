@@ -478,11 +478,25 @@ With an empty `data_dir`, the node is fully ephemeral: a fresh identity every ru
 
 ## 14. Bindings
 
-`src/bindings/rats_node.{h,cpp}` is a **C ABI** (`extern "C"`, opaque
-`rats_node_t`) over `Node`: create/start/stop, `connect`, `send`/`broadcast`,
-the three callbacks (peer up / peer down / message), and `enable_dht` /
-`enable_mdns` / `enable_port_mapping`. It is the foundation other language
-bindings build on.
+`src/bindings/rats.{h,cpp}` is a **C ABI** (`extern "C"`, opaque
+`rats_t`) over `Node` — the canonical surface other language bindings build on.
+The handle owns the `Node` plus non‑owning pointers to the subsystems it creates
+on demand, so the ABI can drive them after construction:
+
+- **lifecycle / mesh** — create/start/stop, `connect`, `peer_count`, `set_max_peers`,
+  peer enumeration (`rats_peer_ids`), the three callbacks (peer up / peer down /
+  message).
+- **messaging** — raw named channels (`rats_send`/`rats_broadcast`), topic
+  pub/sub (`rats_subscribe`/`rats_publish`), and typed JSON (`rats_on`/`rats_send_typed`).
+- **file transfer** — `rats_enable_file_transfer` + offer/progress/complete
+  callbacks and `rats_send_file`/`send_directory`/`accept`/`reject`/`cancel`/…
+- **discovery / NAT** — `enable_dht` / `enable_mdns` / `enable_port_mapping`.
+- **liveness & logging** — `rats_enable_ping` + `rats_peer_rtt_ms`, and the
+  process‑global `rats_set_log_level` / `rats_set_log_file`.
+
+Because subsystems attach to the lock‑free `MessageRouter` only at `start()` (no
+concurrent writes to the handler registry), **every subsystem must be configured
+before `rats_start()`** — including on a node that only publishes or sends.
 
 ---
 

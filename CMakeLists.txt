@@ -318,8 +318,8 @@ endif()
 
 if(RATS_BINDINGS)
     list(APPEND LIBRARY_SOURCES
-        src/bindings/rats_node.h
-        src/bindings/rats_node.cpp
+        src/bindings/rats.h
+        src/bindings/rats.cpp
     )
 endif()
 
