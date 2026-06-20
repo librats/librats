@@ -152,8 +152,6 @@ set(LIBRARY_SOURCES
     src/util/logger.cpp
     src/mdns/mdns.cpp
     src/mdns/mdns.h
-    src/core/threadmanager.cpp
-    src/core/threadmanager.h
     src/util/version.cpp
     src/util/rats_export.h
     ${PROJECT_BINARY_DIR}/src/util/version.h
@@ -254,13 +252,9 @@ set(LIBRARY_SOURCES
     src/crypto/noise.cpp
     src/crypto/noise.h
 
-# NAT traversal (STUN/TURN/ICE)
+# NAT traversal (STUN: public-IP discovery for DHT/BEP-42)
     src/nat/stun.cpp
     src/nat/stun.h
-    src/nat/turn.cpp
-    src/nat/turn.h
-    src/nat/ice.cpp
-    src/nat/ice.h
 
 # Automatic port forwarding (UPnP IGD / NAT-PMP)
     src/nat/port_mapping.h
@@ -500,10 +494,8 @@ if(RATS_BUILD_TESTS)
         tests/test_crypto_sha2.cpp
         tests/test_crypto_blake2.cpp
         tests/test_noise.cpp
-# NAT traversal tests (STUN/TURN/ICE)
+# NAT traversal tests (STUN)
         tests/test_stun.cpp
-        tests/test_turn.cpp
-        tests/test_ice.cpp
 # Automatic port forwarding tests (UPnP/NAT-PMP)
         tests/test_portmap.cpp
 # Network change detection tests
