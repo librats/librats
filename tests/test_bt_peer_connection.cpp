@@ -118,9 +118,11 @@ TEST(BtPeerConnectionTest, StateToString) {
 }
 
 TEST(BtPeerConnectionTest, StateCallback) {
-    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
-    
+    // last_state must outlive conn: ~BtPeerConnection fires the state callback from
+    // close(), so it has to be declared first (destroyed last) or the callback writes
+    // to an out-of-scope local. (ASAN: stack-use-after-scope.)
     PeerConnectionState last_state = PeerConnectionState::Disconnected;
+    BtPeerConnection conn(make_test_hash(), make_test_peer_id(), 100);
     conn.set_state_callback([&last_state](BtPeerConnection*, PeerConnectionState state) {
         last_state = state;
     });
