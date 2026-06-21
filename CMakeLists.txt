@@ -126,47 +126,17 @@ if(WIN32)
     )
 endif()
 
-# Define library sources
+# Define library sources, grouped by subsystem (mirrors the src/ layout)
 set(LIBRARY_SOURCES
-    src/core/socket.cpp
+# core/ — sockets, async I/O buffers, platform I/O multiplexing, reactor primitives
     src/core/socket.h
-    src/util/network_utils.cpp
-    src/util/network_utils.h
-    src/util/network_monitor.cpp
-    src/util/network_monitor.h
-    src/dht/dht.cpp
-    src/dht/dht.h
-    src/bittorrent/bencode.cpp
-    src/bittorrent/bencode.h
-    src/dht/krpc.cpp
-    src/dht/krpc.h
-    src/crypto/sha1.cpp
-    src/crypto/sha1.h
-    src/crypto/crc32.cpp
-    src/crypto/crc32.h
-    src/util/os.cpp
-    src/util/os.h
-    src/util/fs.cpp
-    src/util/fs.h
-    src/util/logger.h
-    src/util/logger.cpp
-    src/mdns/mdns.cpp
-    src/mdns/mdns.h
-    src/util/version.cpp
-    src/util/rats_export.h
-    ${PROJECT_BINARY_DIR}/src/util/version.h
-
-# Buffer utilities for async I/O, file transfer, and bittorrent
+    src/core/socket.cpp
     src/core/receive_buffer.h
     src/core/receive_buffer.cpp
     src/core/chained_send_buffer.h
     src/core/chained_send_buffer.cpp
-
-# Platform-optimal I/O multiplexing (epoll/kqueue/IOCP)
     src/core/io_poller.h
     src/core/io_poller.cpp
-
-# Core v2 (shared-nothing reactor redesign) — transport layer
     src/core/bytes.h
     src/core/types.h
     src/core/types.cpp
@@ -175,22 +145,46 @@ set(LIBRARY_SOURCES
     src/core/notifier.h
     src/core/event_bus.h
     src/core/service_registry.h
+
+# util/ — networking helpers, OS/filesystem, logging, version
+    src/util/network_utils.h
+    src/util/network_utils.cpp
+    src/util/network_monitor.h
+    src/util/network_monitor.cpp
+    src/util/os.h
+    src/util/os.cpp
+    src/util/fs.h
+    src/util/fs.cpp
+    src/util/logger.h
+    src/util/logger.cpp
+    src/util/version.cpp
+    src/util/rats_export.h
+    ${PROJECT_BINARY_DIR}/src/util/version.h
+
+# wire/ — length-prefixed frame format + type-routed dispatch
+    src/wire/frame.h
+    src/wire/frame.cpp
+    src/wire/message_router.h
+    src/wire/message_router.cpp
+
+# transport/ — shared-nothing reactor, per-connection state machine
     src/transport/connection.h
     src/transport/connection.cpp
     src/transport/reactor.h
     src/transport/reactor.cpp
     src/transport/reactor_pool.h
-    src/wire/frame.h
-    src/wire/frame.cpp
+
+# peer/ — self-certifying peer ids, routing/connection tables
     src/peer/peer_id.h
     src/peer/peer_id.cpp
     src/peer/peer_info.h
+    src/peer/peer.h
     src/peer/peer_table.h
     src/peer/peer_table.cpp
     src/peer/peer_book.h
     src/peer/peer_book.cpp
 
-# Core v2 — security layer (Noise XX / plaintext) with self-certifying identity
+# security/ — Noise XX / plaintext over a self-certifying identity
     src/security/session.h
     src/security/identity.h
     src/security/handshaker.h
@@ -198,20 +192,17 @@ set(LIBRARY_SOURCES
     src/security/noise_security.cpp
     src/security/plaintext_security.h
 
-# Core v2 — node facade, peer handle, message router, plugin contract
+# node/ — node facade, peer-network contract, identify handshake
     src/node/config.h
     src/node/host_events.h
     src/node/node_context.h
-    src/peer/peer.h
     src/node/peer_network.h
-    src/wire/message_router.h
-    src/wire/message_router.cpp
     src/node/node.h
     src/node/node.cpp
     src/node/identify.h
     src/node/identify.cpp
 
-# Core v2 — subsystems (plugins on PeerNetwork)
+# subsystems/ — opt-in plugins attached to a Node
     src/subsystems/ping_service.h
     src/subsystems/ping_service.cpp
     src/subsystems/pubsub.h
@@ -231,7 +222,23 @@ set(LIBRARY_SOURCES
     src/subsystems/port_mapping_service.h
     src/subsystems/port_mapping_service.cpp
 
-# Crypto algorithms including Noise Protocol
+# dht/ — Kademlia DHT + KRPC (bencode is shared with bittorrent, always built)
+    src/dht/dht.h
+    src/dht/dht.cpp
+    src/dht/krpc.h
+    src/dht/krpc.cpp
+    src/bittorrent/bencode.h
+    src/bittorrent/bencode.cpp
+
+# mdns/ — local-network service discovery
+    src/mdns/mdns.h
+    src/mdns/mdns.cpp
+
+# crypto/ — hashes, ciphers, KDFs
+    src/crypto/sha1.h
+    src/crypto/sha1.cpp
+    src/crypto/crc32.h
+    src/crypto/crc32.cpp
     src/crypto/curve25519.c
     src/crypto/curve25519.h
     src/crypto/chacha.c
@@ -252,20 +259,18 @@ set(LIBRARY_SOURCES
     src/crypto/blake2b.h
     src/crypto/blake2_endian.h
 
-# Noise Protocol implementation
+# crypto/ — Noise Protocol framework (Noise_XX transport encryption)
     src/crypto/noise.cpp
     src/crypto/noise.h
 
-# NAT traversal (STUN: public-IP discovery for DHT/BEP-42)
-    src/nat/stun.cpp
+# nat/ — STUN public-IP discovery + UPnP IGD / NAT-PMP port forwarding
     src/nat/stun.h
-
-# Automatic port forwarding (UPnP IGD / NAT-PMP)
+    src/nat/stun.cpp
     src/nat/port_mapping.h
-    src/nat/upnp.cpp
     src/nat/upnp.h
-    src/nat/natpmp.cpp
+    src/nat/upnp.cpp
     src/nat/natpmp.h
+    src/nat/natpmp.cpp
 )
 
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
@@ -509,7 +514,7 @@ if(RATS_BUILD_TESTS)
 # Buffer utilities for file transfer and bittorrent
         tests/test_receive_buffer.cpp
         tests/test_chained_send_buffer.cpp
-# Core v2 redesign — wire framing + reactor transport
+# Wire framing, reactor transport, node + subsystems
         tests/test_frame.cpp
         tests/test_reactor.cpp
         tests/test_handshake.cpp
@@ -523,7 +528,7 @@ if(RATS_BUILD_TESTS)
         tests/test_message_json.cpp
         tests/test_filexfer.cpp
         tests/test_dht_discovery.cpp
-        tests/test_reconnection_v2.cpp
+        tests/test_reconnection.cpp
         tests/test_logging.cpp
     )
 

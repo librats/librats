@@ -109,9 +109,9 @@ private:
     static constexpr int kMaxEvents = 256;
     // Idle poll cap. Kept short as a stopgap for an IOCP quirk: connecting
     // sockets live in WSAPoll-fallback mode and are only re-checked once per
-    // wait() iteration, so connect-completion latency is bounded by this value
-    // (see docs/core-v2-notes.md #4). Negligible idle cost; on epoll/kqueue the
-    // loop still wakes on real events, so this only caps idle latency.
+    // wait() iteration, so connect-completion latency is bounded by this value.
+    // Negligible idle cost; on epoll/kqueue the loop still wakes on real events,
+    // so this only caps idle latency.
     static constexpr int kMaxPollMs = 50;
     /// Deadline from adopt() to reaching Established (covers connect + handshake).
     static constexpr std::chrono::milliseconds kEstablishTimeout{15000};

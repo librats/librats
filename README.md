@@ -10,1337 +10,523 @@
 
 **A high-performance, lightweight peer-to-peer networking library with C++, C, Node.js, Java, Python, and Android support**
 
-librats is a modern P2P networking library designed for **superior performance** and **simplicity**. Built from the ground up in C++17 with comprehensive language bindings, it provides enterprise-grade P2P networking capabilities with minimal overhead and maximum efficiency.
+librats is a modern P2P networking library designed for **superior performance** and **simplicity**. Built from the ground up in C++17 with comprehensive language bindings, it provides enterprise-grade P2P networking with minimal overhead and maximum efficiency.
 
 **Official Website**: [https://librats.com](https://librats.com)
 
+## 🧱 Design at a glance
+
+librats is built around a small, predictable core (`Node`) and a set of **opt-in subsystems** you attach explicitly. A bare `Node` is just the secure transport: an encrypted TCP channel (Noise_XX) with a self-certifying peer identity, manual dialing, and raw channel messaging. Everything else — discovery, pub/sub, typed messaging, file transfer, liveness, NAT port mapping, reconnection — is a `Subsystem` you add **before** `start()`. You pay only for what you attach, and the core stays small and easy to reason about.
+
+```cpp
+librats::NodeConfig config;
+config.listen_port = 8080;
+librats::Node node(config);
+
+// attach only the capabilities you need
+node.add_subsystem(std::make_unique<librats::PubSub>());
+node.add_subsystem(std::make_unique<librats::DhtDiscovery>(dht_config));
+
+node.start();
+```
+
 ## ✨ Key Features
 
-### **Core Architecture**
+### **Core**
 - **Native C++17** implementation for maximum performance
-- **Cross-platform** support (Windows, Linux, macOS)
-- **Thread-safe** design with modern concurrency patterns using `ThreadManager`
-- **Zero-copy** data handling where possible
-- **Automatic configuration persistence** with JSON-based settings (`config.json`)
-- **Historical peer tracking** with automatic reconnection (`peers.rats`, `peers_ever.rats`)
+- **Cross-platform** support (Windows, Linux, macOS, Android)
+- **Shared-nothing reactor** transport — connections are sharded across reactor threads with no cross-thread locking on the hot path
+- **Self-certifying identity**: every node has a Curve25519 keypair; its `PeerId` *is* its public key, so peers authenticate each other with no PKI or central authority
+- **Stable identity persistence**: point a node at a `data_dir` and its keypair (and therefore its `PeerId`) survives restarts
+- **Composable subsystems**: opt-in plugins attached to a `Node`; a bare node neither discovers peers nor reconnects on its own
 
-### **Advanced Networking**
-- **DHT Discovery**: Supports peer discovery over the DHT protocol. librats DHT Discovery is fully compatible with the **BitTorrent Mainline DHT** — the largest distributed hash table network in the world with **millions of active nodes**.
-- **mDNS Discovery**: Automatic local network peer discovery with service advertisement
-- **IPv4/IPv6 Dual Stack**: Full support for modern internet protocols
-- **Multi-layer Discovery**: DHT (wide-area) + mDNS (local)
-- **Automatic Reconnection**: Smart reconnection system with configurable retry intervals, stable peer detection, and exponential backoff (enabled by default)
-- **GossipSub Protocol**: Scalable publish-subscribe messaging with mesh networking
-- **Message Validation**: Configurable message validation and filtering
-- **Topic-based Communication**: Organized messaging with topic subscriptions
+### **Discovery & Networking**
+- **DHT Discovery**: peer discovery over a Kademlia DHT, fully compatible with the **BitTorrent Mainline DHT** — the largest distributed hash table in the world, with **millions of active nodes** (IPv4 + IPv6 / BEP 32)
+- **mDNS Discovery**: automatic local-network peer discovery with service advertisement
+- **IPv4/IPv6 Dual Stack**: bind dual-stack by default; full support for modern internet protocols
+- **Peer Exchange (PEX)**: peers gossip known addresses to grow the mesh
+- **Automatic Reconnection**: re-dials dropped peers with exponential backoff; targets persist to disk when a `data_dir` is set
+- **Network-change awareness**: an optional monitor detects interface/route changes and notifies subsystems so they can re-announce and renew port mappings
+
+### **Pub/Sub (GossipSub)**
+- **Scalable publish-subscribe** with mesh networking
+- **Topic-based communication** with per-topic subscriptions
+- **Message validation**: configurable per-topic validators to accept/reject/ignore messages
 
 ### **I/O Multiplexing**
-- **Platform-Optimal Polling**: Unified abstraction over the best OS-specific I/O multiplexer
-- **Linux**: `epoll` — O(1) per event, scales to millions of file descriptors
-- **macOS/BSD**: `kqueue` — O(1) per event, scales to millions of file descriptors
-- **Windows**: `IOCP` (I/O Completion Ports) — true async completion, O(1) per event
+- **Platform-optimal polling** behind one abstraction:
+  - **Linux** — `epoll` (O(1) per event)
+  - **macOS/BSD** — `kqueue` (O(1) per event)
+  - **Windows** — `IOCP` (true async completion, O(1) per event)
 
 ### **File Transfer**
-- **Streaming Transfers**: Files streamed in order over the reliable peer connection — bounded memory regardless of file size
-- **Directory Transfer**: Whole directory trees sent recursively as one transfer
-- **Backpressure**: Windowed flow control keeps the sender from outrunning the receiver
-- **Integrity**: Per-chunk CRC32 plus a whole-file SHA-256 verified before the file is delivered
-- **Atomic Delivery**: Received data lands in a temp file and is renamed to its destination only after verification
-- **Transfer Control**: Pause, resume, and cancel from either side, with real-time progress callbacks
-- **Offer/Accept Model**: Incoming transfers are offered to the application, which chooses to accept (with a destination) or reject
+- **Streaming transfers**: files streamed in order over the reliable peer connection — bounded memory regardless of file size
+- **Directory transfer**: whole directory trees sent recursively as one transfer
+- **Backpressure**: windowed flow control keeps the sender from outrunning the receiver
+- **Integrity**: per-chunk CRC32 plus a whole-file SHA-256 verified before delivery
+- **Atomic delivery**: data lands in a temp file and is renamed to its destination only after verification
+- **Transfer control**: pause, resume, and cancel from either side, with real-time progress callbacks
+- **Offer/Accept model**: incoming transfers are offered to the application, which accepts (with a destination) or rejects
 
-### **Enterprise Security**
-- **Noise Protocol Encryption**: End-to-end encryption with Curve25519 + ChaCha20-Poly1305
-- **Automatic Key Management**: Keys generated, persisted, and rotated automatically
-- **Mutual Authentication**: Both peers verify each other's identity
-- **Perfect Forward Secrecy**: Session keys are ephemeral and secure
-- **Configurable Encryption**: Enable/disable on demand with `set_encryption_enabled()`
+### **Security**
+- **Noise Protocol encryption** (Noise_XX): Curve25519 key exchange + ChaCha20-Poly1305 AEAD on every connection by default
+- **Mutual authentication**: both peers prove possession of the private key behind their `PeerId`
+- **Perfect forward secrecy**: per-session ephemeral keys
+- **Protocol binding**: your app's `(protocol_name, protocol_version)` is bound into the handshake prologue, so nodes from different apps cryptographically cannot cross-connect
+- **Plaintext option**: select `Security::Plaintext` for local debugging or trusted networks
 
-### **NAT Traversal (UPnP/NAT-PMP/ICE/STUN/TURN)**
-- **Automatic Port Forwarding**: Built-in **UPnP IGD** and **NAT-PMP** support — RatsClient asks the home router to forward the listen port on startup (both backends run in parallel, whichever the router supports wins), so peers behind a NAT can accept inbound connections with zero manual router configuration. Mappings are refreshed automatically and removed on `stop()`.
-- **ICE-lite Implementation**: RFC 5245 compliant NAT traversal for P2P connectivity
-- **STUN Support**: Discover public IP address through STUN servers (compatible with Google's public STUN servers)
-- **TURN Relay**: Fallback relay connectivity when direct P2P connection fails
-- **Automatic Candidate Gathering**: Host, server-reflexive, and relay candidates
-- **Connectivity Checks**: Automatic NAT traversal with candidate pair prioritization
-- **Trickle ICE**: Support for incremental candidate exchange
-- **Public Address Discovery**: Simple API to discover your public IP address
-- **Event-Driven API**: Callbacks for gathering state, connection state, and candidate events
+### **NAT Traversal**
+- **Automatic port forwarding**: built-in **UPnP IGD** and **NAT-PMP** — the `PortMappingService` asks the router to forward the listen port on startup (both backends run in parallel; whichever the router supports wins), so peers behind a NAT can accept inbound connections with zero manual configuration. Mappings are refreshed automatically and removed on `stop()`.
+- **STUN**: public-IP discovery used by the DHT (BEP-42 node-id derivation and external-address reporting)
 
-### **Modern Developer Experience**
-- **Event-Driven API**: Register message handlers with `on()`, `once()`, `off()` methods
-- **JSON Message Exchange**: Built-in structured communication with callbacks
-- **Promise-style Callbacks**: Modern async patterns for network operations
-- **Real-time Connection Tracking**: Monitor peer states and connection quality
-- **Comprehensive Logging API**: Full control over logging levels, file rotation, and output formatting
-- **Custom Protocol Support**: Configure custom protocol names and versions
-- **Unified API Design**: Consistent patterns across P2P messaging and pub-sub
-- **Topic-based Messaging**: Subscribe to topics and publish messages with automatic routing
-- **Enhanced Peer Management**: Detailed peer information with encryption status
-
-### **Distributed Storage** (Optional, requires `RATS_STORAGE`)
-- **Key-Value Storage**: Simple, typed key-value storage with string, int64, double, binary, and JSON support
-- **Automatic P2P Synchronization**: Real-time sync across connected peers via GossipSub
-- **Last-Write-Wins (LWW)**: Automatic conflict resolution based on timestamps
-- **Disk Persistence**: Optional persistence to disk with efficient binary format
-- **Change Notifications**: Callbacks for storage changes (local and remote)
-- **Prefix Queries**: Find keys matching a prefix pattern
-- **Configurable**: Adjustable sync batch size, compression, and storage limits
+### **Distributed Storage** (optional, requires `RATS_STORAGE`)
+- **Key-value storage**: typed string / int64 / double / binary / JSON values
+- **Automatic P2P synchronization** across connected peers via GossipSub
+- **Last-Write-Wins (LWW)** conflict resolution based on timestamps
+- **Disk persistence** with an efficient binary format
+- **Change notifications** for local and remote updates
 
 ### **Multi-Language Support**
-- **Native C++17**: Core implementation with full feature set and maximum performance
-- **C API**: Clean C interface for legacy systems and FFI bindings
-- **Node.js Bindings**: Native addon with async/await support and full TypeScript definitions ([npm package](https://www.npmjs.com/package/librats))
-- **Java/Android**: Complete JNI wrapper with high-level Java API for Android development
-- **Python Bindings**: Full-featured Python package with ctypes wrapper and asyncio support
-- **Cross-Platform**: Consistent API across Windows, Linux, macOS, and Android platforms
+- **Native C++17**: core implementation with the full feature set
+- **C API** (`bindings/rats.h`): clean opaque-pointer C ABI — the foundation for all FFI bindings
+- **Node.js**: native addon with async/await and TypeScript definitions ([npm package](https://www.npmjs.com/package/librats))
+- **Java/Android**: JNI wrapper with a high-level Java API
+- **Python**: ctypes-based package with asyncio support
 
 ## 🚀 Quick Start
 
-### 1. Basic P2P Connection
+> Examples use the C++ `Node` API. The equivalent C API (`rats_*`) is shown in the [C API](#c-api-bindingsratsh) section.
+
+### 1. Basic P2P connection
 
 ```cpp
-#include "librats.h"
+#include "node/node.h"
 #include <iostream>
-#include <thread>
-#include <chrono>
+
+using namespace librats;
 
 int main() {
-    // Create a simple P2P client
-    librats::RatsClient client(8080);
-    
-    // Set up connection callback
-    client.set_connection_callback([](socket_t socket, const std::string& peer_id) {
-        std::cout << "✅ New peer connected: " << peer_id << std::endl;
+    NodeConfig config;
+    config.listen_port = 8080;       // 0 = ephemeral
+    config.bind_address = "::";      // dual-stack (IPv6 + IPv4-mapped); the default
+
+    Node node(config);
+
+    // Register events BEFORE start(). They run on a reactor thread.
+    node.on_peer_connected([](const Peer& peer) {
+        std::cout << "[+] peer connected: " << peer.id().short_hex() << "\n";
     });
-    
-    // Set up message callback
-    client.set_string_data_callback([](socket_t socket, const std::string& peer_id, const std::string& message) {
-        std::cout << "💬 Message from " << peer_id << ": " << message << std::endl;
+    node.on("chat", [](const Peer& peer, ByteView data) {
+        std::cout << peer.id().short_hex() << ": "
+                  << std::string(reinterpret_cast<const char*>(data.data()), data.size()) << "\n";
     });
-    
-    // Start the client
-    if (!client.start()) {
-        std::cerr << "Failed to start client" << std::endl;
+
+    if (!node.start()) {
+        std::cerr << "failed to start node\n";
         return 1;
     }
-    
-    std::cout << "🐀 librats client running on port 8080" << std::endl;
-    
-    // Connect to another peer (optional)
-    // client.connect_to_peer("127.0.0.1", 8081);
-    
-    // Send a message to all connected peers
-    client.broadcast_string_to_peers("Hello from librats!");
-    
-    // Keep running
-    std::this_thread::sleep_for(std::chrono::minutes(1));
-    
+    std::cout << "node " << node.local_id().short_hex()
+              << " listening on " << node.listen_port() << "\n";
+
+    // Dial another peer (non-blocking; connects asynchronously).
+    node.connect("127.0.0.1", 8081);
+
+    // Send raw bytes on a named channel to every connected peer.
+    node.broadcast("chat", ByteView(std::string("Hello from librats!")));
+
+    std::string line;
+    while (std::getline(std::cin, line)) node.broadcast("chat", ByteView(line));
+
+    node.stop();
     return 0;
 }
 ```
 
-### 2. Custom Protocol Setup
+### 2. Custom protocol & stable identity
 
 ```cpp
-#include "librats.h"
-#include <iostream>
+NodeConfig config;
+config.listen_port = 8080;
+config.protocol_name = "my_app";      // bound into the handshake — only matching
+config.protocol_version = "1.0";      // (name, version) peers can connect
+config.data_dir = "./node-data";      // persist identity.key → stable PeerId across restarts
 
-int main() {
-    librats::RatsClient client(8080);
-    
-    // Configure custom protocol for your application
-    client.set_protocol_name("my_app");
-    client.set_protocol_version("1.0");
-    
-    std::cout << "Protocol: " << client.get_protocol_name() 
-              << " v" << client.get_protocol_version() << std::endl;
-    std::cout << "Discovery hash: " << client.get_discovery_hash() << std::endl;
-    
-    client.start();
-    
-    // Start DHT discovery with custom protocol
-    if (client.start_dht_discovery()) {
-        // Announce our presence
-        client.announce_for_hash(client.get_discovery_hash());
-        
-        // Search for other peers using same protocol
-        client.find_peers_by_hash(client.get_discovery_hash(), 
-            [](const std::vector<std::string>& peers) {
-                std::cout << "Found " << peers.size() << " peers" << std::endl;
-            });
-    }
-    
-    return 0;
-}
+Node node(config);
+node.start();
+
+std::cout << "protocol: " << node.protocol_name() << " v" << node.protocol_version() << "\n";
+std::cout << "peer id:  " << node.local_id().to_hex() << "\n";
 ```
 
-### 3. Chat Application with Message Exchange API
+Two nodes whose `(protocol_name, protocol_version)` differ cannot complete a handshake — a cheap, cryptographically-enforced way to keep separate apps (or app versions) from cross-connecting. See [Private Network Formation](#private-network-formation).
+
+### 3. Typed JSON messaging
+
+Attach the `MessageJson` subsystem and reach it through `node.json()`.
 
 ```cpp
-#include "librats.h"
-#include <iostream>
-#include <string>
+#include "node/node.h"
+#include "subsystems/message_json.h"
 
-int main() {
-    librats::RatsClient client(8080);
-    
-    // Set up message handlers using the modern API
-    client.on("chat", [](const std::string& peer_id, const nlohmann::json& data) {
-        std::cout << "[CHAT] " << peer_id << ": " << data["message"].get<std::string>() << std::endl;
-    });
-    
-    client.on("user_join", [](const std::string& peer_id, const nlohmann::json& data) {
-        std::cout << "[JOIN] " << data["username"].get<std::string>() << " joined" << std::endl;
-    });
-    
-    // Connection callback
-    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
-        std::cout << "✅ Peer connected: " << peer_id << std::endl;
-        
-        // Send welcome message
-        nlohmann::json welcome;
-        welcome["username"] = "User_" + client.get_our_peer_id().substr(0, 8);
-        client.send("user_join", welcome);
-    });
-    
-    client.start();
-    
-    // Send a chat message
-    nlohmann::json chat_msg;
-    chat_msg["message"] = "Hello, P2P chat!";
-    chat_msg["timestamp"] = std::time(nullptr);
-    client.send("chat", chat_msg);
-    
-    return 0;
-}
+Node node(NodeConfig{/*listen_port=*/8080});
+node.add_subsystem(std::make_unique<MessageJson>());
+
+// Handlers are additive and keyed by message type. `from` is the authenticated PeerId.
+node.json()->on("chat", [](const PeerId& from, const nlohmann::json& data) {
+    std::cout << "[chat] " << from.short_hex() << ": " << data.value("text", "") << "\n";
+});
+
+node.start();
+
+// Broadcast / direct send.
+node.json()->send("chat", nlohmann::json{{"text", "Hello, P2P chat!"}});
+node.json()->send(some_peer_id, "chat", nlohmann::json{{"text", "private hi"}});
 ```
 
-### 4. GossipSub Publish-Subscribe
+### 4. GossipSub publish-subscribe
 
 ```cpp
-#include "librats.h"
-#include <iostream>
+#include "node/node.h"
+#include "subsystems/pubsub.h"
 
-int main() {
-    librats::RatsClient client(8080);
-    
-    // Set up topic message handlers
-    client.on_topic_message("news", [](const std::string& peer_id, const std::string& topic, const std::string& message) {
-        std::cout << "📰 [" << topic << "] " << peer_id << ": " << message << std::endl;
-    });
-    
-    client.on_topic_json_message("events", [](const std::string& peer_id, const std::string& topic, const nlohmann::json& data) {
-        std::cout << "🎉 [" << topic << "] Event: " << data["type"].get<std::string>() << std::endl;
-    });
-    
-    // Peer join/leave notifications
-    client.on_topic_peer_joined("news", [](const std::string& peer_id, const std::string& topic) {
-        std::cout << "➕ " << peer_id << " joined " << topic << std::endl;
-    });
-    
-    client.start();
-    client.start_dht_discovery();
-    
-    // Subscribe to topics
-    client.subscribe_to_topic("news");
-    client.subscribe_to_topic("events");
-    
-    // Publish messages
-    client.publish_to_topic("news", "Breaking: librats is awesome!");
-    
-    nlohmann::json event;
-    event["type"] = "celebration";
-    event["reason"] = "successful_connection";
-    client.publish_json_to_topic("events", event);
-    
-    std::cout << "📊 Peers in 'news': " << client.get_topic_peers("news").size() << std::endl;
-    
-    return 0;
-}
+Node node(NodeConfig{8080});
+auto* pubsub = node.add_subsystem(std::make_unique<PubSub>());
+
+pubsub->subscribe("news", [](const PeerId& from, const std::string& topic, ByteView data) {
+    std::cout << "[" << topic << "] " << from.short_hex() << ": "
+              << std::string(reinterpret_cast<const char*>(data.data()), data.size()) << "\n";
+});
+
+node.start();
+
+pubsub->publish("news", ByteView(std::string("Breaking: librats is awesome!")));
+
+std::cout << "subscribers in 'news': " << pubsub->peers_for_topic("news").size() << "\n";
 ```
 
-### 5. File and Directory Transfer
+### 5. File and directory transfer
 
 ```cpp
-#include "librats.h"
-#include <iostream>
+#include "node/node.h"
+#include "subsystems/file_transfer.h"
 
-int main() {
-    librats::RatsClient client(8080);
-    
-    // Set up file transfer callbacks
-    client.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
-        std::cout << "📁 Transfer " << progress.transfer_id.substr(0, 8) 
-                  << ": " << progress.get_completion_percentage() << "% complete"
-                  << " (" << (progress.transfer_rate_bps / 1024) << " KB/s)" << std::endl;
-    });
-    
-    client.on_file_transfer_completed([](const std::string& transfer_id, bool success, const std::string& error) {
-        if (success) {
-            std::cout << "✅ Transfer completed: " << transfer_id.substr(0, 8) << std::endl;
-        } else {
-            std::cout << "❌ Transfer failed: " << error << std::endl;
-        }
-    });
-    
-    // Handle incoming offers — accept (with a destination) or reject.
-    // Without this callback every incoming offer is auto-rejected.
-    client.on_file_transfer_request([&client](const librats::IncomingTransferOffer& offer) {
-        std::cout << "📥 Incoming: " << offer.name 
-                  << " (" << offer.total_size << " bytes, "
-                  << offer.files.size() << " file(s)) from "
-                  << offer.peer_id.substr(0, 8) << std::endl;
-        // Auto-accept transfers smaller than 100MB
-        if (offer.total_size < 100 * 1024 * 1024) {
-            client.accept_file_transfer(offer.transfer_id, "./downloads/" + offer.name);
-        } else {
-            client.reject_file_transfer(offer.transfer_id, "Too large");
-        }
-    });
-    
-    client.start();
-    
-    // Configure transfer settings
-    librats::FileTransferConfig config;
-    config.chunk_size = 64 * 1024;        // 64KB network chunks
-    config.window_bytes = 4 * 1024 * 1024;// max un-acknowledged bytes in flight
-    config.verify_integrity = true;       // per-chunk CRC32 + whole-file SHA-256
-    client.set_file_transfer_config(config);
-    
-    // Example transfers (replace "peer_id" with actual peer ID)
-    // std::string file_transfer = client.send_file("peer_id", "my_file.txt");
-    // std::string dir_transfer = client.send_directory("peer_id", "./my_folder");
-    
-    std::cout << "File transfer ready. Connect peers and exchange files!" << std::endl;
-    
-    return 0;
-}
+Node node(NodeConfig{8080});
+auto* files = node.add_subsystem(std::make_unique<FileTransfer>("./downloads"));  // temp dir
+
+// Incoming offers must be accepted (with a destination) or rejected.
+files->on_offer([&](const FileTransfer::Offer& offer) {
+    std::cout << "[file] offer from " << offer.from.short_hex() << ": " << offer.name
+              << " (" << offer.size << " bytes)\n";
+    if (offer.size < 100 * 1024 * 1024)
+        files->accept(offer.from, offer.id, "./downloads/" + offer.name);
+    else
+        files->reject(offer.from, offer.id);
+});
+files->on_progress([](const FileTransfer::Progress& p) { /* p.bytes_transferred / p.total_bytes */ });
+files->on_complete([](uint64_t id, bool ok, const std::string& path) {
+    std::cout << "[file] transfer " << id << (ok ? " complete: " : " FAILED: ") << path << "\n";
+});
+
+node.start();
+
+// Push a file / directory to a connected peer (returns a transfer id, 0 on failure).
+uint64_t id  = files->send_file(peer_id, "my_file.txt");
+uint64_t dir = files->send_directory(peer_id, "./my_folder");
+// Control either side: files->pause(peer, id) / resume(...) / cancel(...)
 ```
 
-### 6. Encryption
+### 6. Security
+
+Encryption is **on by default** — every connection runs Noise_XX (Curve25519 + ChaCha20-Poly1305) with mutual authentication. There is nothing to enable.
 
 ```cpp
-#include "librats.h"
-#include <iostream>
+NodeConfig config;
+config.listen_port = 8080;
+config.security = NodeConfig::Security::Noise;   // default; Plaintext for trusted/debug nets
+config.data_dir = "./node-data";                 // persist the Noise keypair → stable PeerId
 
-int main() {
-    librats::RatsClient client(8080);
-    
-    // Enable Noise Protocol encryption - that's it!
-    client.initialize_encryption(true);
-    
-    client.set_connection_callback([](socket_t socket, const std::string& peer_id) {
-        std::cout << "🔒 Peer connected (encrypted): " << peer_id.substr(0, 16) << std::endl;
-    });
-    
-    client.set_string_data_callback([](socket_t socket, const std::string& peer_id, const std::string& message) {
-        std::cout << "💬 Message from " << peer_id.substr(0, 8) << ": " << message << std::endl;
-    });
-    
-    client.start();
-    
-    std::cout << "🐀 Encrypted P2P client running on port 8080" << std::endl;
-    
-    // All messages are automatically encrypted with Noise Protocol
-    // (Curve25519 key exchange + ChaCha20-Poly1305 encryption)
-    client.broadcast_string_to_peers("This message is end-to-end encrypted!");
-    
-    std::this_thread::sleep_for(std::chrono::minutes(1));
-    return 0;
-}
+Node node(config);
+node.start();
+// node.local_id() is the node's static public key — peers authenticate it during the handshake.
 ```
 
-### 7. NAT Traversal (UPnP/NAT-PMP + ICE/STUN/TURN)
+### 7. NAT traversal (UPnP / NAT-PMP)
+
+Attach `PortMappingService` to forward the listen port automatically on startup. Both UPnP IGD and NAT-PMP are attempted in parallel; whichever the router supports wins. The mapping is refreshed automatically and removed on `stop()`.
 
 ```cpp
-#include "librats.h"
-#include <iostream>
+#include "node/node.h"
+#include "subsystems/port_mapping_service.h"
 
-int main() {
-    librats::RatsClient client(8080);
-    
-    // =========================================================================
-    // Automatic Port Forwarding (UPnP IGD + NAT-PMP) — enabled by default
-    // =========================================================================
-    
-    // On start() librats automatically asks the router to forward the listen
-    // port via UPnP and NAT-PMP in parallel (whichever the router supports wins),
-    // and removes the mapping on stop(). Get notified when a mapping is ready:
-    client.on_port_mapping([](const librats::PortMapResult& result) {
-        if (result.success) {
-            std::cout << "🔌 Port forwarded via " << librats::to_string(result.transport)
-                      << ": " << result.external_ip << ":" << result.external_port
-                      << " -> :" << result.internal_port << std::endl;
-        } else {
-            std::cout << "⚠️ Port mapping failed: " << result.error << std::endl;
-        }
-    });
-    
-    // Optionally tune or disable it before start():
-    // librats::PortMappingConfig pm;
-    // pm.enable_upnp = true;       // UPnP IGD backend
-    // pm.enable_natpmp = true;     // NAT-PMP backend
-    // pm.lease_duration_seconds = 3600;
-    // client.set_port_mapping_config(pm);
-    // client.set_port_mapping_enabled(false);  // turn it off entirely
-    
-    client.start();
-    
-    // Map an extra port (e.g. a DHT UDP port) on top of the listen port:
-    // client.add_port_mapping(librats::PortMapProtocol::UDP, 6881);
-    
-    // Read back the public address the router assigned:
-    if (auto mapped = client.get_mapped_public_address()) {
-        std::cout << "🌐 Mapped public address: "
-                  << mapped->first << ":" << mapped->second << std::endl;
-    }
-    
-    // =========================================================================
-    // Simple Public Address Discovery
-    // =========================================================================
-    
-    // Quick way to discover your public IP address
-    auto public_addr = client.discover_public_address("stun.l.google.com", 19302, 5000);
-    if (public_addr) {
-        std::cout << "🌐 Your public address: " << public_addr->address 
-                  << ":" << public_addr->port << std::endl;
-    } else {
-        std::cout << "❌ Could not discover public address" << std::endl;
-    }
-    
-    // =========================================================================
-    // Full ICE Setup for NAT Traversal
-    // =========================================================================
-    
-    // Add STUN servers for public address discovery
-    client.add_stun_server("stun.l.google.com", 19302);
-    client.add_stun_server("stun1.l.google.com", 19302);
-    
-    // Add TURN server for relay fallback (when direct connection fails)
-    // client.add_turn_server("turn.example.com", 3478, "username", "password");
-    
-    // Configure ICE settings
-    librats::IceConfig ice_config;
-    ice_config.gather_host_candidates = true;      // Local interface addresses
-    ice_config.gather_srflx_candidates = true;     // Public addresses via STUN
-    ice_config.gather_relay_candidates = false;    // TURN relay (requires TURN server)
-    ice_config.gathering_timeout_ms = 5000;        // 5 second timeout
-    client.set_ice_config(ice_config);
-    
-    // Set up ICE event callbacks
-    client.on_ice_gathering_state_changed([](librats::IceGatheringState state) {
-        switch (state) {
-            case librats::IceGatheringState::New:
-                std::cout << "📡 ICE: Not started" << std::endl;
-                break;
-            case librats::IceGatheringState::Gathering:
-                std::cout << "📡 ICE: Gathering candidates..." << std::endl;
-                break;
-            case librats::IceGatheringState::Complete:
-                std::cout << "📡 ICE: Gathering complete!" << std::endl;
-                break;
-        }
-    });
-    
-    client.on_ice_connection_state_changed([](librats::IceConnectionState state) {
-        switch (state) {
-            case librats::IceConnectionState::Checking:
-                std::cout << "🔄 ICE: Checking connectivity..." << std::endl;
-                break;
-            case librats::IceConnectionState::Connected:
-                std::cout << "✅ ICE: Connected!" << std::endl;
-                break;
-            case librats::IceConnectionState::Completed:
-                std::cout << "✅ ICE: Connection established!" << std::endl;
-                break;
-            case librats::IceConnectionState::Failed:
-                std::cout << "❌ ICE: Connection failed" << std::endl;
-                break;
-            default:
-                break;
-        }
-    });
-    
-    // Callback for each new candidate (trickle ICE)
-    client.on_ice_new_candidate([](const librats::IceCandidate& candidate) {
-        std::cout << "🆕 New candidate: " << candidate.type_string() 
-                  << " " << candidate.address << ":" << candidate.port << std::endl;
-        
-        // In a real app, send this to remote peer via signaling channel
-        std::string sdp = candidate.to_sdp_attribute();
-        std::cout << "   SDP: " << sdp << std::endl;
-    });
-    
-    // Callback when all candidates gathered
-    client.on_ice_candidates_gathered([](const std::vector<librats::IceCandidate>& candidates) {
-        std::cout << "📋 Gathered " << candidates.size() << " candidates:" << std::endl;
-        for (const auto& c : candidates) {
-            std::cout << "   - " << c.type_string() << ": " 
-                      << c.address << ":" << c.port << std::endl;
-        }
-    });
-    
-    // Callback when best candidate pair is selected
-    client.on_ice_selected_pair([](const librats::IceCandidatePair& pair) {
-        std::cout << "🎯 Selected pair: " << std::endl;
-        std::cout << "   Local:  " << pair.local.address << ":" << pair.local.port << std::endl;
-        std::cout << "   Remote: " << pair.remote.address << ":" << pair.remote.port << std::endl;
-    });
-    
-    // Start gathering ICE candidates
-    if (client.gather_ice_candidates()) {
-        std::cout << "🚀 Started ICE candidate gathering" << std::endl;
-    }
-    
-    // Wait for gathering to complete
-    while (!client.is_ice_gathering_complete()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    
-    // Get our local candidates
-    auto local_candidates = client.get_ice_candidates();
-    std::cout << "📤 Send these candidates to remote peer:" << std::endl;
-    for (const auto& c : local_candidates) {
-        std::cout << c.to_sdp_attribute() << std::endl;
-    }
-    
-    // In a real app, receive remote candidates via signaling and add them:
-    // std::vector<std::string> remote_sdp_lines = { /* from signaling */ };
-    // client.add_remote_ice_candidates_from_sdp(remote_sdp_lines);
-    // client.end_of_remote_ice_candidates();  // Signal end of trickle ICE
-    
-    // Start connectivity checks
-    // client.start_ice_checks();
-    
-    // Check if connected
-    if (client.is_ice_connected()) {
-        auto selected = client.get_ice_selected_pair();
-        if (selected) {
-            std::cout << "🔗 Connected via: " 
-                      << selected->local.address << ":" << selected->local.port
-                      << " -> " 
-                      << selected->remote.address << ":" << selected->remote.port 
-                      << std::endl;
-        }
-    }
-    
-    // Restart ICE if needed (e.g., network change)
-    // client.restart_ice();
-    
-    // Clean up
-    // client.close_ice();
-    
-    std::this_thread::sleep_for(std::chrono::minutes(1));
-    
-    return 0;
-}
+Node node(NodeConfig{8080});
+auto* portmap = node.add_subsystem(std::make_unique<PortMappingService>());
+node.start();
+
+// Public endpoint as seen from outside the NAT (if a mapping succeeded).
+if (auto pub = portmap->mapped_public_address())
+    std::cout << "public: " << pub->first << ":" << pub->second << "\n";
 ```
 
-### 8. Configuration Persistence
+### 8. Peer discovery (DHT + mDNS) and reconnection
 
 ```cpp
-#include "librats.h"
-#include <iostream>
+#include "node/node.h"
+#include "subsystems/dht_discovery.h"
+#include "subsystems/mdns_discovery.h"
+#include "subsystems/reconnection.h"
 
-int main() {
-    librats::RatsClient client(8080);
-    
-    // Set custom data directory for config files
-    client.set_data_directory("./my_app_data");
-    
-    // Load saved configuration (if exists)
-    if (client.load_configuration()) {
-        std::cout << "📄 Loaded existing configuration" << std::endl;
-    } else {
-        std::cout << "📄 Using default configuration" << std::endl;
-    }
-    
-    // Get our persistent peer ID
-    std::cout << "🆔 Our peer ID: " << client.get_our_peer_id() << std::endl;
-    
-    client.start();
-    
-    // Try to reconnect to previously connected peers
-    int reconnect_attempts = client.load_and_reconnect_peers();
-    std::cout << "🔄 Attempted to reconnect to " << reconnect_attempts << " previous peers" << std::endl;
-    
-    // Configuration is automatically saved when client stops
-    // Files created: config.json, peers.rats, peers_ever.rats
-    
-    // Manual save if needed
-    client.save_configuration();
-    client.save_historical_peers();
-    
-    std::cout << "💾 Configuration will be saved to: " << client.get_data_directory() << std::endl;
-    
-    return 0;
-}
+NodeConfig config;
+config.listen_port = 8080;
+config.data_dir = "./node-data";
+Node node(config);
+
+// Wide-area discovery via the BitTorrent Mainline DHT (IPv4 + IPv6).
+DhtDiscovery::Config dc;
+dc.data_dir = config.data_dir;          // co-locate the routing tables with identity + peers
+node.add_subsystem(std::make_unique<DhtDiscovery>(std::move(dc)));
+
+// Local-network discovery.
+node.add_subsystem(std::make_unique<MdnsDiscovery>());
+
+// Auto-reconnect dropped peers with exponential backoff; persist targets to disk.
+ReconnectionService::Config rc;
+rc.store_path = config.data_dir + "/peers.txt";
+rc.max_attempts = 10;
+auto* reconnect = node.add_subsystem(std::make_unique<ReconnectionService>(rc));
+
+node.start();
+reconnect->add(Address{"203.0.113.7", 8080});   // keep this target connected
 ```
 
-### 9. Logging Configuration
+### 9. Liveness (RTT probing)
 
 ```cpp
-#include "librats.h"
-#include <iostream>
+#include "subsystems/ping_service.h"
 
-int main() {
-    librats::RatsClient client(8080);
-    
-    // Disable console logging (useful for production/embedding)
-    // Log messages will only go to file, not stdout/stderr
-    client.set_console_logging_enabled(false);
-    
-    // Enable and configure file logging
-    client.set_logging_enabled(true);
-    client.set_log_file_path("librats_app.log");
-    client.set_log_level("INFO");  // DEBUG, INFO, WARN, ERROR
-    client.set_log_colors_enabled(true);
-    client.set_log_timestamps_enabled(true);
-    
-    // Configure log file rotation
-    client.set_log_rotation_size(5 * 1024 * 1024);  // 5MB max file size
-    client.set_log_retention_count(3);               // Keep 3 old log files
-    
-    std::cout << "📝 Logging to: " << client.get_log_file_path() << std::endl;
-    std::cout << "📊 Log level: " << static_cast<int>(client.get_log_level()) << std::endl;
-    std::cout << "🔇 Console logging: " << (client.is_console_logging_enabled() ? "Yes" : "No") << std::endl;
-    
-    client.start();
-    
-    // All librats operations will now be logged to file only
-    client.broadcast_string_to_peers("This action will be logged to file!");
-    
-    // Re-enable console logging if needed
-    // client.set_console_logging_enabled(true);
-    
-    // Clear log file if needed (uncomment to use)
-    // client.clear_log_file();
-    
-    return 0;
-}
+auto* ping = node.add_subsystem(std::make_unique<PingService>());
+node.start();
+// ...later:
+if (auto rtt = ping->last_rtt(peer_id))
+    std::cout << "rtt = " << rtt->count() << "ms\n";
 ```
 
-### 10. Distributed Storage (requires `RATS_STORAGE`)
+### 10. Distributed storage (requires `RATS_STORAGE`)
 
 ```cpp
-#include "librats.h"
-#include <iostream>
+#include "storage/storage.h"
 
-int main() {
-    librats::RatsClient client(8080);
-    
-    // Start the client first
-    client.start();
-    client.start_dht_discovery();
-    
-    // Check if storage is available (requires RATS_STORAGE build flag)
-    if (!client.is_storage_available()) {
-        std::cerr << "Storage not available (rebuild with RATS_STORAGE=ON)" << std::endl;
-        return 1;
-    }
-    
-    // Store different types of data
-    client.storage_put("user:name", "Alice");
-    client.storage_put("user:age", int64_t(25));
-    client.storage_put("user:score", 98.5);
-    client.storage_put_json("user:preferences", {{"theme", "dark"}, {"notifications", true}});
-    
-    // Store binary data
-    std::vector<uint8_t> avatar_data = {0x89, 0x50, 0x4E, 0x47}; // PNG header
-    client.storage_put("user:avatar", avatar_data);
-    
-    // Read data back with type-safe getters
-    auto name = client.storage_get_string("user:name");
-    auto age = client.storage_get_int("user:age");
-    auto score = client.storage_get_double("user:score");
-    auto prefs = client.storage_get_json("user:preferences");
-    
-    if (name) std::cout << "Name: " << *name << std::endl;
-    if (age) std::cout << "Age: " << *age << std::endl;
-    if (score) std::cout << "Score: " << *score << std::endl;
-    if (prefs) std::cout << "Theme: " << (*prefs)["theme"] << std::endl;
-    
-    // Check if key exists
-    if (client.storage_has("user:name")) {
-        std::cout << "User name is stored" << std::endl;
-    }
-    
-    // Query keys by prefix
-    std::vector<std::string> user_keys = client.storage_keys_with_prefix("user:");
-    std::cout << "Found " << user_keys.size() << " user keys" << std::endl;
-    
-    // Delete a key
-    client.storage_delete("user:avatar");
-    
-    // Get storage statistics
-    auto stats = client.get_storage_statistics();
-    std::cout << "Total entries: " << stats["total_entries"] << std::endl;
-    std::cout << "Synced: " << (client.is_storage_synced() ? "Yes" : "No") << std::endl;
-    
-    // Request sync from connected peers
-    client.storage_request_sync();
-    
-    // Keep running to allow P2P sync
-    std::this_thread::sleep_for(std::chrono::minutes(1));
-    
-    return 0;
-}
+auto* storage = node.add_subsystem(std::make_unique<StorageManager>());
+node.start();
+
+storage->put("greeting", "hello");                       // syncs to connected peers via GossipSub
+if (auto v = storage->get_string("greeting")) std::cout << *v << "\n";
 ```
-
-### 11. Node.js Quick Start
-
-For more Node.js examples and TypeScript usage, see the [Node.js documentation](nodejs/README.md).
 
 ## 📖 API Documentation
 
-### Core Classes
+### `Node` — the entry point
 
-#### `RatsClient`
-The main class providing comprehensive P2P networking capabilities:
+`Node` (in `node/node.h`) owns the reactor pool, the security provider, the peer directory and the message router. `connect`/`send`/`broadcast` are non-blocking and thread-safe; event callbacks run on a reactor thread, so **register them before `start()`**.
 
 ```cpp
-// Constructor
-RatsClient(int listen_port, int max_peers = 10, const std::string& bind_address = "");
+// Construction
+explicit Node(NodeConfig config);
 
-// Core lifecycle
-bool start();
-void stop();
-void shutdown_all_threads();
-bool is_running() const;
+// Lifecycle
+bool start();                  // open listener + reactors + subsystems; false if bind fails
+void stop();                   // stop subsystems (reverse order), close connections, join
 
-// Connection methods
-bool connect_to_peer(const std::string& host, int port);
+// Identity & protocol
+const PeerId&      local_id() const;          // our self-certifying id (== public key)
+uint16_t           listen_port() const;       // actual bound port (when config requested 0)
+const std::string& protocol_name() const;
+const std::string& protocol_version() const;
 
-// Custom protocol configuration
-void set_protocol_name(const std::string& protocol_name);
-void set_protocol_version(const std::string& protocol_version);
-std::string get_protocol_name() const;
-std::string get_protocol_version() const;
-std::string get_discovery_hash() const;
+// Subsystems (attach BEFORE start(); the node owns them and returns a non-owning pointer)
+template <class T> T* add_subsystem(std::unique_ptr<T> subsystem);
+template <class T> T* subsystem();            // typed lookup, nullptr if not attached
+MessageJson*          json();                 // shortcut for subsystem<MessageJson>()
 
-// Message exchange API
-void on(const std::string& message_type, MessageCallback callback);
-void once(const std::string& message_type, MessageCallback callback);
-void off(const std::string& message_type);
-void send(const std::string& message_type, const nlohmann::json& data, SendCallback callback = nullptr);
-void send(const std::string& peer_id, const std::string& message_type, const nlohmann::json& data, SendCallback callback = nullptr);
+// Connections
+void   connect(const Address& address);
+void   connect(const std::string& host, uint16_t port);
+size_t peer_count() const;
+std::vector<PeerInfo> peers() const;          // snapshot: id, addresses, direction
+std::optional<Peer>   peer(const PeerId& id);
+std::vector<Address>  observed_addresses() const;  // our addresses as peers report them
 
-// Configuration persistence
-bool load_configuration();
-bool save_configuration();
-bool set_data_directory(const std::string& directory_path);
-std::string get_data_directory() const;
-int load_and_reconnect_peers();
-bool load_historical_peers();
-bool save_historical_peers();
-void clear_historical_peers();
-std::vector<RatsPeer> get_historical_peers() const;
+// Peer admission limit (0 = unlimited; guards inbound, not our own dials)
+size_t max_peers() const;
+void   set_max_peers(size_t n);
+bool   peer_limit_reached() const;
 
-// GossipSub publish-subscribe messaging
-GossipSub& get_gossipsub();
-bool is_gossipsub_available() const;
+// Messaging (raw bytes on a named channel)
+void send(const PeerId& to, std::string_view channel, ByteView payload);
+void broadcast(std::string_view channel, ByteView payload);
 
-// GossipSub convenience methods - Topic Management
-bool subscribe_to_topic(const std::string& topic);
-bool unsubscribe_from_topic(const std::string& topic);
-bool is_subscribed_to_topic(const std::string& topic) const;
-std::vector<std::string> get_subscribed_topics() const;
+// Events (additive; run on a reactor thread)
+void on_peer_connected(PeerEventHandler cb);     // (const Peer&)
+void on_peer_disconnected(PeerDisconnectHandler cb);  // (const PeerId&)
+void on(std::string_view channel, MessageRouter::Handler cb);  // (const Peer&, ByteView)
 
-// GossipSub convenience methods - Publishing
-bool publish_to_topic(const std::string& topic, const std::string& message);
-bool publish_json_to_topic(const std::string& topic, const nlohmann::json& message);
-
-// GossipSub convenience methods - Event Handlers
-void on_topic_message(const std::string& topic, std::function<void(const std::string&, const std::string&, const std::string&)> callback);
-void on_topic_json_message(const std::string& topic, std::function<void(const std::string&, const std::string&, const nlohmann::json&)> callback);
-void on_topic_peer_joined(const std::string& topic, std::function<void(const std::string&, const std::string&)> callback);
-void on_topic_peer_left(const std::string& topic, std::function<void(const std::string&, const std::string&)> callback);
-void set_topic_message_validator(const std::string& topic, std::function<ValidationResult(const std::string&, const std::string&, const std::string&)> validator);
-void off_topic(const std::string& topic);
-
-// GossipSub convenience methods - Information
-std::vector<std::string> get_topic_peers(const std::string& topic) const;
-std::vector<std::string> get_topic_mesh_peers(const std::string& topic) const;
-nlohmann::json get_gossipsub_statistics() const;
-bool is_gossipsub_running() const;
-
-// Peer management
-int get_peer_count() const;
-std::vector<RatsPeer> get_all_peers() const;
-std::vector<RatsPeer> get_validated_peers() const;
-const RatsPeer* get_peer_by_id(const std::string& peer_id) const;
-std::string get_our_peer_id() const;
-
-// Logging Control API
-void set_console_logging_enabled(bool enabled);  // Disable/enable console output
-bool is_console_logging_enabled() const;
-void set_logging_enabled(bool enabled);          // Enable/disable file logging
-bool is_logging_enabled() const;
-void set_log_file_path(const std::string& file_path);
-std::string get_log_file_path() const;
-void set_log_level(LogLevel level);
-void set_log_level(const std::string& level_str);
-LogLevel get_log_level() const;
-void set_log_colors_enabled(bool enabled);
-bool is_log_colors_enabled() const;
-void set_log_timestamps_enabled(bool enabled);
-bool is_log_timestamps_enabled() const;
-void set_log_rotation_size(size_t max_size_bytes);
-void set_log_retention_count(int count);
-void clear_log_file();
-
-// File Transfer API
-FileTransferManager& get_file_transfer_manager();
-bool is_file_transfer_available() const;
-
-// File Transfer Operations (push-only: the sender offers, the receiver accepts)
-std::string send_file(const std::string& peer_id, const std::string& file_path, const std::string& remote_filename = "");
-std::string send_directory(const std::string& peer_id, const std::string& directory_path, const std::string& remote_name = "");
-
-// Transfer Control
-bool accept_file_transfer(const std::string& transfer_id, const std::string& local_path);
-bool reject_file_transfer(const std::string& transfer_id, const std::string& reason = "");
-bool pause_file_transfer(const std::string& transfer_id);
-bool resume_file_transfer(const std::string& transfer_id);
-bool cancel_file_transfer(const std::string& transfer_id);
-
-// Transfer Information
-std::shared_ptr<FileTransferProgress> get_file_transfer_progress(const std::string& transfer_id) const;
-std::vector<std::shared_ptr<FileTransferProgress>> get_active_file_transfers() const;
-nlohmann::json get_file_transfer_statistics() const;
-void set_file_transfer_config(const FileTransferConfig& config);
-FileTransferConfig get_file_transfer_config() const;
-
-// Transfer Event Handlers
-void on_file_transfer_progress(TransferProgressCallback callback);
-void on_file_transfer_completed(TransferCompletedCallback callback);
-void on_file_transfer_request(TransferOfferCallback callback);  // incoming offer
-
-// Automatic Port Forwarding API (UPnP IGD + NAT-PMP)
-// Enabled by default: the listen port is forwarded on start() and removed on stop().
-void set_port_mapping_enabled(bool enabled);
-bool is_port_mapping_enabled() const;
-void set_port_mapping_config(const PortMappingConfig& config);
-PortMappingConfig get_port_mapping_config() const;
-void add_port_mapping(PortMapProtocol protocol, uint16_t port);  // map an extra port (e.g. DHT UDP)
-std::optional<std::pair<std::string, uint16_t>> get_mapped_public_address() const;
-void on_port_mapping(PortMapCallback callback);  // fired on map/refresh/remove/fail
-
-// ICE/NAT Traversal API
-IceManager& get_ice_manager();
-bool is_ice_available() const;
-
-// ICE Server Configuration
-void add_stun_server(const std::string& host, uint16_t port = 3478);
-void add_turn_server(const std::string& host, uint16_t port,
-                     const std::string& username, const std::string& password);
-void clear_ice_servers();
-
-// ICE Candidate Gathering
-bool gather_ice_candidates();
-std::vector<IceCandidate> get_ice_candidates() const;
-bool is_ice_gathering_complete() const;
-
-// Public Address Discovery
-std::optional<std::pair<std::string, uint16_t>> get_public_address() const;
-std::optional<StunMappedAddress> discover_public_address(
-    const std::string& server = "stun.l.google.com",
-    uint16_t port = 19302, int timeout_ms = 5000);
-
-// Remote Candidates (from signaling)
-void add_remote_ice_candidate(const IceCandidate& candidate);
-void add_remote_ice_candidates_from_sdp(const std::vector<std::string>& sdp_lines);
-void end_of_remote_ice_candidates();
-
-// ICE Connectivity
-void start_ice_checks();
-IceConnectionState get_ice_connection_state() const;
-IceGatheringState get_ice_gathering_state() const;
-bool is_ice_connected() const;
-std::optional<IceCandidatePair> get_ice_selected_pair() const;
-
-// ICE Event Callbacks
-void on_ice_candidates_gathered(IceCandidatesCallback callback);
-void on_ice_new_candidate(IceNewCandidateCallback callback);
-void on_ice_gathering_state_changed(IceGatheringStateCallback callback);
-void on_ice_connection_state_changed(IceConnectionStateCallback callback);
-void on_ice_selected_pair(IceSelectedPairCallback callback);
-
-// ICE Configuration and Lifecycle
-void set_ice_config(const IceConfig& config);
-const IceConfig& get_ice_config() const;
-void close_ice();
-void restart_ice();
-
-// Encryption API
-bool initialize_encryption(bool enable);
-void set_encryption_enabled(bool enabled);
-bool is_encryption_enabled() const;
-bool is_peer_encrypted(const std::string& peer_id) const;
-bool set_noise_static_keypair(const uint8_t private_key[32]);
-std::vector<uint8_t> get_noise_static_public_key() const;
-std::vector<uint8_t> get_peer_noise_public_key(const std::string& peer_id) const;
-std::vector<uint8_t> get_peer_handshake_hash(const std::string& peer_id) const;
-
-// Automatic Reconnection API (enabled by default)
-void set_reconnect_enabled(bool enabled);
-bool is_reconnect_enabled() const;
-void set_reconnect_config(const ReconnectConfig& config);
-const ReconnectConfig& get_reconnect_config() const;
-size_t get_reconnect_queue_size() const;
-void clear_reconnect_queue();
-std::vector<ReconnectInfo> get_reconnect_queue() const;
+// Node-scoped coordination shared with subsystems
+EventBus&        events();      // fire-and-forget, one→many (e.g. NetworkChanged)
+ServiceRegistry& services();    // targeted capability lookup, one→one
 ```
 
-### Configuration Structures
-
-#### `ReconnectConfig`
-Automatic reconnection configuration structure:
+### `NodeConfig`
 
 ```cpp
-struct ReconnectConfig {
-    int max_attempts = 3;                                      // Maximum reconnection attempts
-    std::vector<int> retry_intervals_seconds = {5, 30, 120};   // Intervals between attempts
-    int stable_connection_threshold_seconds = 60;              // Duration to be considered "stable"
-    int stable_first_retry_seconds = 2;                        // First retry for stable peers (faster)
-    bool enabled = true;                                       // Auto-reconnection enabled by default
+struct NodeConfig {
+    uint16_t    listen_port = 0;            // 0 = ephemeral; ignored if !enable_listen
+    bool        enable_listen = true;       // false = dial-only (no listener)
+    std::string bind_address = "";          // "" / "::" dual-stack, "0.0.0.0", or an IP literal
+    size_t      reactor_threads = 1;        // 1 handles thousands of peers; more shards cores
+    size_t      max_peers = 0;              // 0 = unlimited (guards inbound only)
+    enum class Security { Noise, Plaintext };
+    Security    security = Security::Noise; // Noise_XX by default
+    std::string protocol_name = "librats";  // bound into the handshake; must match to connect
+    std::string protocol_version = "1.0";
+    std::string data_dir = "";              // "" = ephemeral identity; else identity.key persists
+    bool        enable_network_monitor = true;  // watch host network changes → NetworkChanged
 };
 ```
 
-#### `ReconnectInfo`
-Information about a peer pending reconnection:
+### Subsystems
 
-```cpp
-struct ReconnectInfo {
-    std::string peer_id;                                       // Peer ID for identification
-    std::string ip;                                            // IP address to reconnect to
-    uint16_t port;                                             // Port number
-    int attempt_count;                                         // Current reconnection attempt number
-    std::chrono::milliseconds connection_duration;             // How long peer was connected
-    bool is_stable;                                            // Was this a stable connection?
-    std::chrono::steady_clock::time_point next_attempt_time;   // When to attempt next reconnection
-};
+Each subsystem is attached with `node.add_subsystem(std::make_unique<T>(...))` **before** `start()`. A bare node has none of these.
+
+| Subsystem | Header | What it adds |
+|-----------|--------|--------------|
+| `PubSub` | `subsystems/pubsub.h` | GossipSub topics: `subscribe` / `unsubscribe` / `publish`, per-topic validators |
+| `MessageJson` | `subsystems/message_json.h` | Typed JSON messaging: `on` / `once` / `off` / `send`; reached via `node.json()` |
+| `FileTransfer` | `subsystems/file_transfer.h` | Push file/dir transfer: `send_file` / `send_directory` / `accept` / `reject` / `pause` / `resume` / `cancel` |
+| `DhtDiscovery` | `subsystems/dht_discovery.h` | Wide-area discovery over the BitTorrent Mainline DHT (IPv4 + IPv6) |
+| `MdnsDiscovery` | `subsystems/mdns_discovery.h` | Local-network discovery + advertisement |
+| `PingService` | `subsystems/ping_service.h` | Periodic liveness ping/pong + `last_rtt(id)` |
+| `ReconnectionService` | `subsystems/reconnection.h` | Auto-reconnect with exponential backoff; persistent targets |
+| `PortMappingService` | `subsystems/port_mapping_service.h` | UPnP IGD + NAT-PMP automatic port forwarding |
+| `PeerExchange` | `subsystems/peer_exchange.h` | PEX: gossip known peer addresses to grow the mesh |
+| `StorageManager` | `storage/storage.h` | Distributed key-value store (requires `RATS_STORAGE`) |
+
+### C API (`bindings/rats.h`)
+
+The canonical opaque-pointer C ABI — the foundation for every language binding. A `rats_t` wraps a `Node`. Fallible calls return `rats_error_t` (`RATS_OK == 0`); pure getters return their value directly. Subsystems are opt-in: enable each with the matching `rats_enable_*()` **before** `rats_start()`. Strings returned by the library are heap-allocated — free them with `rats_string_free()`.
+
+```c
+#include "bindings/rats.h"
+#include <stdio.h>
+
+static void on_connected(void* user, const char* peer_id_hex) {
+    printf("[+] connected: %s\n", peer_id_hex);
+}
+static void on_chat(void* user, const char* peer_id_hex, const void* data, size_t len) {
+    printf("%s: %.*s\n", peer_id_hex, (int)len, (const char*)data);
+}
+
+int main(void) {
+    rats_t node = rats_create(8080);
+
+    rats_on_peer_connected(node, on_connected, NULL);
+    rats_on(node, "chat", on_chat, NULL);
+
+    rats_enable_pubsub(node);          // before start
+    rats_enable_dht(node, 0, NULL);
+
+    if (rats_start(node) != RATS_OK) return 1;
+
+    rats_connect(node, "127.0.0.1", 8081);
+    rats_broadcast(node, "chat", "hello", 5);
+
+    /* ... run ... */
+    rats_stop(node);
+    rats_destroy(node);
+    return 0;
+}
 ```
 
-#### `RatsPeer`
-Comprehensive peer information structure:
-
-```cpp
-struct RatsPeer {
-    std::string peer_id;                       // Unique hash ID
-    std::string ip;                            // IP address
-    uint16_t port;                             // Port number
-    socket_t socket;                           // Socket handle
-    std::string normalized_address;            // For duplicate detection
-    std::chrono::steady_clock::time_point connected_at;
-    bool is_outgoing;                          // Connection direction
-    
-    // Handshake state
-    enum class HandshakeState { PENDING, SENT, COMPLETED, FAILED };
-    HandshakeState handshake_state;
-    std::string version;                       // Protocol version
-    
-    // Encryption state
-    bool encryption_enabled;
-    bool noise_handshake_completed;
-    std::shared_ptr<rats::NoiseCipherState> send_cipher;
-    std::shared_ptr<rats::NoiseCipherState> recv_cipher;
-    std::vector<uint8_t> remote_static_key;
-    
-    // Helper methods
-    bool is_handshake_completed() const;
-    bool is_handshake_failed() const;
-    bool is_noise_encrypted() const;
-};
-```
-
-#### `FileTransferConfig`
-File transfer configuration structure:
-
-```cpp
-struct FileTransferConfig {
-    uint32_t chunk_size            = 64 * 1024;        // payload bytes per network chunk
-    uint32_t window_bytes          = 4 * 1024 * 1024;  // max un-acknowledged bytes in flight
-    uint32_t progress_interval     = 256 * 1024;       // receiver sends an ack every N bytes
-    uint32_t transfer_timeout_secs = 60;               // abort a transfer idle for this long
-    uint32_t worker_threads        = 4;                // concurrent outgoing transfers
-    bool     verify_integrity      = true;             // per-chunk CRC32 + whole-file SHA-256
-    std::string temp_directory     = "./rats_file_transfers"; // holds in-progress downloads
-};
-```
-
-#### `FileTransferProgress`
-Immutable snapshot of a transfer's progress, returned by queries and passed to the progress callback:
-
-```cpp
-struct FileTransferProgress {
-    std::string transfer_id;
-    std::string peer_id;
-    FileTransferDirection direction;   // SENDING or RECEIVING
-    FileTransferStatus    status;      // PENDING / IN_PROGRESS / COMPLETED / ...
-
-    std::string filename;              // file name, or directory name
-    std::string local_path;            // local source (send) or destination (receive)
-    bool        is_directory;
-
-    uint64_t bytes_transferred;        // bytes completed
-    uint64_t total_bytes;              // total bytes in the transfer
-    uint32_t files_completed;          // files finished (1 for a single-file transfer)
-    uint32_t total_files;              // total files in the transfer
-
-    double transfer_rate_bps;          // recent throughput, bytes/second
-    double average_rate_bps;           // average throughput since start
-
-    std::chrono::milliseconds elapsed_time;
-    std::chrono::milliseconds estimated_time_remaining;
-
-    std::string error_message;         // populated when status == FAILED
-
-    double get_completion_percentage() const;  // 0.0 to 100.0
-    std::chrono::milliseconds get_elapsed_time() const;
-};
-```
-
-#### `IncomingTransferOffer`
-Description of an incoming transfer, passed to the offer callback so the application can `accept_file_transfer()` or `reject_file_transfer()` it:
-
-```cpp
-struct FileInfo {
-    std::string relative_path;   // POSIX-style path relative to the transfer root
-    uint64_t    size;            // file size in bytes
-};
-
-struct IncomingTransferOffer {
-    std::string transfer_id;
-    std::string peer_id;
-    std::string name;            // file name, or directory name
-    bool        is_directory;
-    uint64_t    total_size;      // sum of all file sizes
-    std::vector<FileInfo> files; // full manifest
-};
-```
-
-#### `PortMappingConfig`
-Automatic port forwarding configuration (UPnP IGD + NAT-PMP). Both backends run in parallel by default; whichever the router supports succeeds:
-
-```cpp
-struct PortMappingConfig {
-    bool enabled = true;                    // Master switch for automatic port forwarding
-    bool enable_upnp = true;                // Use the UPnP IGD backend
-    bool enable_natpmp = true;              // Use the NAT-PMP backend
-    uint32_t lease_duration_seconds = 3600; // Requested lease duration
-};
-```
-
-#### `PortMapResult`
-Result of a port mapping attempt, passed to the `on_port_mapping()` callback:
-
-```cpp
-struct PortMapResult {
-    PortMapTransport transport;        // UPnP or NatPMP — backend that produced this result
-    PortMapProtocol  protocol;         // TCP or UDP
-    bool             success = false;  // Whether the mapping is currently active
-    uint16_t         internal_port = 0;// Local (LAN) port that was mapped
-    uint16_t         external_port = 0;// Public (WAN) port assigned by the router
-    std::string      external_ip;      // Discovered public IP (may be empty)
-    std::string      error;            // Human readable error when !success
-};
-```
-
-#### `StunMappedAddress`
-Structure returned by STUN public address discovery:
-
-```cpp
-struct StunMappedAddress {
-    StunAddressFamily family;   // IPv4 or IPv6
-    std::string address;        // Public IP address
-    uint16_t port;              // Mapped port number
-    
-    bool is_valid() const;      // Check if address is valid
-};
-```
-
-#### `IceConfig`
-ICE configuration structure for NAT traversal:
-
-```cpp
-struct IceConfig {
-    std::vector<IceServer> ice_servers;     // STUN/TURN servers
-    bool gather_host_candidates = true;      // Gather local interface addresses
-    bool gather_srflx_candidates = true;     // Gather public addresses via STUN
-    bool gather_relay_candidates = false;    // Gather TURN relay addresses
-    int gathering_timeout_ms = 5000;         // Candidate gathering timeout
-    int check_timeout_ms = 500;              // Connectivity check timeout per attempt
-    int check_max_retries = 5;               // Max connectivity check retries
-    std::string software = "librats";        // Software attribute for STUN
-    
-    // Helper methods
-    void add_stun_server(const std::string& host, uint16_t port = 3478);
-    void add_turn_server(const std::string& host, uint16_t port,
-                         const std::string& username, const std::string& password);
-};
-```
-
-#### `IceCandidate`
-ICE candidate structure representing a network endpoint:
-
-```cpp
-struct IceCandidate {
-    IceCandidateType type;          // Host, ServerReflexive, PeerReflexive, Relay
-    std::string foundation;          // Unique identifier for candidate
-    uint32_t component_id;           // Component ID (typically 1)
-    IceTransportProtocol transport;  // UDP or TCP
-    uint32_t priority;               // Candidate priority
-    std::string address;             // IP address
-    uint16_t port;                   // Port number
-    std::string related_address;     // Related address (for srflx/relay)
-    uint16_t related_port;           // Related port
-    
-    // Helper methods
-    std::string to_sdp_attribute() const;   // Format as SDP "a=candidate:..."
-    static std::optional<IceCandidate> from_sdp_attribute(const std::string& sdp);
-    std::string type_string() const;        // "host", "srflx", "prflx", "relay"
-    std::string address_string() const;     // "ip:port" format
-    
-    // Priority calculation (RFC 5245)
-    static uint32_t compute_priority(IceCandidateType type, 
-                                     uint32_t local_preference = 65535,
-                                     uint32_t component_id = 1);
-};
-```
-
-#### `IceCandidatePair`
-ICE candidate pair representing a local-remote connection attempt:
-
-```cpp
-struct IceCandidatePair {
-    IceCandidate local;              // Local candidate
-    IceCandidate remote;             // Remote candidate
-    IceCandidatePairState state;     // Frozen, Waiting, InProgress, Succeeded, Failed
-    uint64_t priority;               // Pair priority
-    bool nominated;                  // Nominated for use
-    int check_count;                 // Number of checks performed
-    
-    std::string key() const;         // Unique identifier for the pair
-    
-    // Priority calculation (RFC 5245)
-    static uint64_t compute_priority(uint32_t controlling_priority,
-                                     uint32_t controlled_priority,
-                                     bool is_controlling);
-};
-```
-
-#### `IceConnectionState`
-ICE connection state enumeration:
-
-```cpp
-enum class IceConnectionState {
-    New,            // Initial state
-    Gathering,      // Gathering candidates
-    Checking,       // Performing connectivity checks
-    Connected,      // At least one valid pair found
-    Completed,      // ICE processing complete
-    Failed,         // ICE processing failed
-    Disconnected,   // Connection lost
-    Closed          // ICE agent closed
-};
-```
-
-#### `IceGatheringState`
-ICE gathering state enumeration:
-
-```cpp
-enum class IceGatheringState {
-    New,            // Not started
-    Gathering,      // Gathering in progress
-    Complete        // Gathering complete
-};
-```
-
-#### `StorageConfig` (requires `RATS_STORAGE`)
-Distributed storage configuration structure:
-
-```cpp
-struct StorageConfig {
-    std::string data_directory;      // Directory for storage files (default: "./storage")
-    std::string database_name;       // Database filename prefix (default: "rats_storage")
-    bool enable_compression;         // Enable LZ4 compression for values (default: false)
-    bool enable_sync;                // Enable network synchronization (default: true)
-    uint32_t sync_batch_size;        // Number of entries per sync batch (default: 100)
-    uint32_t compaction_threshold;   // Number of tombstones before compaction (default: 1000)
-    uint32_t max_value_size;         // Maximum value size in bytes (default: 16MB)
-    bool persist_to_disk;            // Whether to persist data to disk (default: true)
-};
-```
-
-#### `StorageEntry` (requires `RATS_STORAGE`)
-Storage entry structure representing a single key-value pair:
-
-```cpp
-struct StorageEntry {
-    std::string key;                 // Key string
-    StorageValueType type;           // Value type (BINARY, STRING, INT64, DOUBLE, JSON)
-    std::vector<uint8_t> data;       // Serialized value data
-    uint64_t timestamp_ms;           // Unix timestamp in milliseconds (for LWW)
-    std::string origin_peer_id;      // Peer that created/modified this entry
-    uint32_t checksum;               // CRC32 checksum for integrity
-    bool deleted;                    // Tombstone marker for deleted entries
-    
-    // Compare for LWW resolution (returns true if this entry wins)
-    bool wins_over(const StorageEntry& other) const;
-};
-```
-
-#### `StorageChangeEvent` (requires `RATS_STORAGE`)
-Storage change event structure passed to change callbacks:
-
-```cpp
-struct StorageChangeEvent {
-    StorageOperation operation;      // PUT or DELETE
-    std::string key;                 // Affected key
-    StorageValueType type;           // Value type (for PUT)
-    std::vector<uint8_t> old_data;   // Previous value (if any)
-    std::vector<uint8_t> new_data;   // New value (for PUT)
-    uint64_t timestamp_ms;           // Operation timestamp
-    std::string origin_peer_id;      // Peer that made the change
-    bool is_remote;                  // True if change came from another peer
-};
-```
-
-#### Storage API Methods (requires `RATS_STORAGE`)
-
-The `RatsClient` class provides the following storage methods when built with `RATS_STORAGE`:
-
-```cpp
-// Storage availability
-StorageManager& get_storage_manager();
-bool is_storage_available() const;
-
-// Put operations (store values)
-bool storage_put(const std::string& key, const std::string& value);
-bool storage_put(const std::string& key, int64_t value);
-bool storage_put(const std::string& key, double value);
-bool storage_put(const std::string& key, const std::vector<uint8_t>& value);
-bool storage_put_json(const std::string& key, const nlohmann::json& value);
-
-// Get operations (retrieve values)
-std::optional<std::string> storage_get_string(const std::string& key) const;
-std::optional<int64_t> storage_get_int(const std::string& key) const;
-std::optional<double> storage_get_double(const std::string& key) const;
-std::optional<std::vector<uint8_t>> storage_get_binary(const std::string& key) const;
-std::optional<nlohmann::json> storage_get_json(const std::string& key) const;
-
-// Delete and query operations
-bool storage_delete(const std::string& key);
-bool storage_has(const std::string& key) const;
-std::vector<std::string> storage_keys() const;
-std::vector<std::string> storage_keys_with_prefix(const std::string& prefix) const;
-size_t storage_size() const;
-
-// Synchronization
-bool storage_request_sync();
-bool is_storage_synced() const;
-
-// Statistics and configuration
-nlohmann::json get_storage_statistics() const;
-void set_storage_config(const StorageConfig& config);
-const StorageConfig& get_storage_config() const;
-
-// Event handlers
-void on_storage_change(StorageChangeCallback callback);
-void on_storage_sync_complete(StorageSyncCompleteCallback callback);
-```
+Key entry points: `rats_create` / `rats_create_config` / `rats_config_default` / `rats_destroy`, `rats_start` / `rats_stop`, `rats_connect`, `rats_send` / `rats_broadcast`, `rats_on` / `rats_on_peer_connected` / `rats_on_peer_disconnected`, `rats_enable_{dht,mdns,pubsub,json,file_transfer,ping,reconnect,port_mapping}`, `rats_subscribe` / `rats_publish`, `rats_on_json` / `rats_send_json`, `rats_send_file` / `rats_accept_file`, `rats_peer_ids`, `rats_local_id`, `rats_protocol_name` / `rats_protocol_version`, `rats_version` / `rats_version_string` / `rats_git_describe` / `rats_abi`, `rats_set_log_level` / `rats_set_log_file`.
 
 ## 🏢 Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Applications Layer                                               │
-│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │ Message Exchange│ │   File Sharing  │ │   IoT Sensors   │    │
-│ │      API        │ │      Apps       │ │     & More      │    │
-│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
-├─────────────────────────────────────────────────────────────────┤
-│ librats Core (RatsClient)                      │
-│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │   Event-Driven  │ │   GossipSub     │ │   Encryption    │    │
-│ │   Message API   │ │  Pub-Sub Mesh   │ │ (Noise Protocol)│    │
-│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
-│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │ Config & Peer   │ │ Topic Routing   │ │ Message Validation│   │
-│ │  Persistence    │ │ & Mesh Management│ │ & Filtering     │    │
-│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
-│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │ File Transfer   │ │Distributed Storage│ │ BitTorrent      │   │
-│ │    Manager      │ │   (RATS_STORAGE)│ │(RATS_SEARCH)    │    │
-│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
-├─────────────────────────────────────────────────────────────────┤
-│ Discovery & Networking Layer                                    │
-│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │ DHT (Wide-Area) │ │ mDNS (Local Net)│ │ ICE/STUN/TURN   │    │
-│ │ BT Mainline DHT │ │   224.0.0.251   │ │  NAT Traversal  │    │
-│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
-│ ┌─────────────────────────────────────────────────────────┐    │
-│ │     Automatic Port Forwarding - UPnP IGD + NAT-PMP      │    │
-│ └─────────────────────────────────────────────────────────┘    │
-│ ┌─────────────────────────────────────────────────────────┐    │
-│ │           Direct Sockets - IPv4/IPv6 Stack              │    │
-│ └─────────────────────────────────────────────────────────┘    │
-├─────────────────────────────────────────────────────────────────┤
-│ Platform Abstraction Layer                                      │
-│ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐    │
-│ │   Windows       │ │      Linux      │ │     macOS       │    │
-│ │ WinSock2/bcrypt │ │  BSD Sockets    │ │  BSD Sockets    │    │
-│ └─────────────────┘ └─────────────────┘ └─────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│ Application                                                        │
+│   composes a Node + exactly the subsystems it needs               │
+├──────────────────────────────────────────────────────────────────┤
+│ Subsystems (opt-in plugins attached to a Node)                    │
+│ ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐       │
+│ │  PubSub    │ │ MessageJson│ │ FileTransfer│ │ Reconnect  │      │
+│ │ (GossipSub)│ │ (typed JSON)│ │  (push)    │ │  Service   │      │
+│ └────────────┘ └────────────┘ └────────────┘ └────────────┘       │
+│ ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐       │
+│ │ DhtDiscovery│ │MdnsDiscovery│ │PingService │ │PortMapping │      │
+│ │  (Mainline)│ │  (local)   │ │ (liveness) │ │UPnP/NAT-PMP │      │
+│ └────────────┘ └────────────┘ └────────────┘ └────────────┘       │
+│ ┌─────────────────────────┐ ┌─────────────────────────────┐       │
+│ │ PeerExchange (PEX)       │ │ StorageManager (RATS_STORAGE)│     │
+│ └─────────────────────────┘ └─────────────────────────────┘       │
+├──────────────────────────────────────────────────────────────────┤
+│ Node core                                                         │
+│   peer directory · message router · EventBus · ServiceRegistry    │
+├──────────────────────────────────────────────────────────────────┤
+│ Security  — Noise_XX (Curve25519 + ChaCha20-Poly1305) / plaintext │
+│             over a self-certifying PeerId                          │
+├──────────────────────────────────────────────────────────────────┤
+│ Transport — shared-nothing reactor pool, per-connection state      │
+│             machine, length-prefixed wire framing                  │
+├──────────────────────────────────────────────────────────────────┤
+│ I/O multiplexing — epoll (Linux) · kqueue (macOS/BSD) · IOCP (Win) │
+├──────────────────────────────────────────────────────────────────┤
+│ Platform — WinSock2/bcrypt (Windows) · BSD sockets (Linux/macOS)   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-## Frequently Asking Questions (FAQ)
+The source tree mirrors these layers: `src/core`, `src/util`, `src/wire`, `src/transport`, `src/peer`, `src/security`, `src/node`, `src/subsystems`, `src/dht`, `src/mdns`, `src/nat`, `src/crypto`, `src/bittorrent`, `src/storage`, `src/bindings`.
 
-### Understanding DHT vs Peer Connections
+## Frequently Asked Questions (FAQ)
+
+### Understanding DHT vs peer connections
 
 **librats has two distinct peer systems that serve different purposes:**
 
-| Layer | Protocol | Purpose | APIs |
-|-------|----------|---------|------|
-| **DHT Layer** | UDP (Kademlia) | **Peer Discovery** only | `get_dht_routing_table_size()`, `find_peers_by_hash()`, `announce_for_hash()` |
-| **Peer Connection Layer** | TCP | **Message Exchange** | `get_all_peers()`, `get_validated_peers()`, `send_*()`, `broadcast_*()` |
+| Layer | Protocol | Purpose | Where |
+|-------|----------|---------|-------|
+| **DHT layer** | UDP (Kademlia) | **Peer discovery** only | `DhtDiscovery` subsystem |
+| **Peer connection layer** | TCP (Noise) | **Message exchange** | `Node` core: `peers()`, `send`, `broadcast` |
 
-**Key Points:**
-- The **DHT routing table** is NOT your connected peers. It contains DHT nodes (often from the global BitTorrent Mainline DHT) that help you *discover* peers.
-- `get_dht_routing_table_size()` may return values larger than your peer count because it includes nodes from the global DHT network.
-- **Peer connections** (`get_all_peers()`, `get_validated_peers()`) are the actual TCP connections used for communication.
-- The DHT is designed for **discovery**, not message routing. For messaging, use the Peer Connection Layer or GossipSub.
+**Key points:**
+- The **DHT routing table** is NOT your connected peers. It holds DHT nodes (often from the global BitTorrent Mainline DHT) that help you *discover* peers.
+- **Peer connections** (`node.peers()`, `node.peer_count()`) are the actual authenticated TCP connections used for communication.
+- The DHT is for **discovery**, not message routing. For messaging, use the Node core (channels), `MessageJson`, or `PubSub`.
 
 ### Private Network Formation
 
-To create a private overlay that only includes your application's peers:
+To create a private overlay limited to your application's peers:
 
-1. **Set a unique protocol name and version BEFORE starting discovery:**
+1. **Set a unique protocol name and version before starting:**
 
 ```cpp
-client.set_protocol_name("my_private_app");
-client.set_protocol_version("1.0");
-client.start();
-client.start_dht_discovery();  // Now uses your unique discovery hash
+NodeConfig config;
+config.protocol_name = "my_private_app";
+config.protocol_version = "1.0";
+Node node(config);
+node.add_subsystem(std::make_unique<DhtDiscovery>(dht_config));
+node.start();   // discovery uses a hash derived from your protocol identity
 ```
 
 2. **How it works:**
-   - librats generates a unique `discovery_hash` via SHA1 of `{protocol_name}_peer_discovery_v{version}`
-   - Peers announce themselves under this hash in the global DHT
-   - Only peers with the same protocol name/version will discover each other
-   - Once discovered via DHT, peers connect via TCP and form a mesh via peer exchange
+   - `DhtDiscovery` derives a discovery hash from your protocol identity and announces under it in the global DHT.
+   - Only peers with the **same** `(protocol_name, protocol_version)` discover each other — and even if a stranger dials you, the protocol identity is bound into the Noise handshake, so the connection cannot complete.
+   - Once discovered, peers connect over authenticated TCP and grow the mesh via Peer Exchange.
 
 3. **Discovery timing:**
-   - DHT discovery is asynchronous and takes 1-30 seconds for initial peer discovery
-   - For faster local testing, use **mDNS discovery**: `client.start_mdns_discovery("my_service");`
+   - DHT discovery is asynchronous — initial peers typically appear in 1–30 seconds.
+   - For fast local testing, attach `MdnsDiscovery` instead (or as well).
 
 ## 🛠️ Building
 
 ### Supported Platforms & Language Bindings
-
-librats provides comprehensive cross-platform support with bindings for multiple programming languages:
 
 #### Native C++ Support
 
@@ -1353,40 +539,18 @@ librats provides comprehensive cross-platform support with bindings for multiple
 
 #### Language Bindings & Wrappers
 
-| Language/Platform | Binding Type | Status | Timeline | Notes |
-|-------------------|--------------|--------|----------|-------|
-| **C/C++** | Native Library | ✅ **Fully Supported** | **Available Now** | Core implementation with full feature set |
-| **Android (NDK)** | Native C++ | ✅ **Fully Supported** | **Available Now** | Android NDK integration with JNI bindings |
-| **Android (Java)** | JNI Wrapper | ✅ **Fully Supported** | **Available Now** | High-level Java API for Android apps |
-| **Node.js** | Native Addon | ✅ **Fully Supported** | **Available Now** | Native addon with async/await support ([npm](https://www.npmjs.com/package/librats)) |
-| **Python** | C Extension | ✅ **Fully Supported** | **Available Now** | CPython extension with asyncio integration |
-| **Rust** | FFI Bindings | 📋 **Planned** | **Soon** | Safe Rust bindings with tokio async support |
-| **Go** | CGO Bindings | 📋 **Future** | **Soon** | CGO wrapper for Go applications |
-| **C#/.NET** | P/Invoke | 📋 **Future** | **Soon** | .NET bindings for Windows/Linux/macOS |
+| Language/Platform | Binding Type | Status | Notes |
+|-------------------|--------------|--------|-------|
+| **C/C++** | Native Library | ✅ **Fully Supported** | Core implementation with the full feature set |
+| **Android (NDK)** | Native C++ | ✅ **Fully Supported** | Android NDK integration with JNI bindings |
+| **Android (Java)** | JNI Wrapper | ✅ **Fully Supported** | High-level Java API for Android apps |
+| **Node.js** | Native Addon | ✅ **Fully Supported** | async/await support ([npm](https://www.npmjs.com/package/librats)) |
+| **Python** | C Extension | ✅ **Fully Supported** | CPython extension with asyncio integration |
+| **Rust** | FFI Bindings | 📋 **Planned** | Safe bindings with tokio async support |
+| **Go** | CGO Bindings | 📋 **Future** | CGO wrapper for Go applications |
+| **C#/.NET** | P/Invoke | 📋 **Future** | .NET bindings for Windows/Linux/macOS |
 
-#### Mobile Platform Support
-
-| Platform | Implementation | Status | Features |
-|----------|----------------|--------|----------|
-| **Android** | NDK + JNI | ✅ **Fully Supported** | Full P2P networking, file transfer, GossipSub |
-| **iOS** | Native C++ | 📋 **Planned** | Swift/Objective-C bindings planned |
-| **React Native** | Native Module | 📋 **Future** | Cross-platform mobile development |
-| **Flutter** | FFI Plugin | 📋 **Future** | Dart FFI integration |
-
-#### Web Platform Support
-
-| Platform | Technology | Status | Limitations |
-|----------|------------|--------|-------------|
-| **Browser (WASM)** | WebAssembly | 📋 **Research** | Limited by browser networking APIs |
-| **Electron** | Node.js Module | 📋 **Planned** | Desktop app development |
-| **Tauri** | Rust Bindings | 📋 **Future** | Lightweight desktop apps |
-
-**Legend:**
-- ✅ **Fully Supported**: Production-ready with comprehensive testing
-- 🔶 **In Development**: Active development, preview/beta available
-- 📋 **Planned**: Confirmed for development, timeline estimated
-- 📋 **Future**: Under consideration, timeline not confirmed
-- 📋 **Research**: Investigating feasibility and implementation approach
+**Legend:** ✅ Fully Supported · 🔶 In Development · 📋 Planned/Future/Research
 
 ### Prerequisites
 - **CMake 3.10+**
@@ -1412,7 +576,7 @@ make -j$(nproc)
 git clone https://github.com/DEgITx/librats.git
 cd librats
 mkdir build && cd build
-cmake .. -G "Visual Studio 16 2019"
+cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release
 ```
 
@@ -1431,18 +595,18 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 
 ### Complete Build Configuration Options
 
-librats provides several CMake options to customize your build:
-
 | Option | Default | Description |
 |--------|---------|-------------|
 | `RATS_BUILD_TESTS` | `ON` | Build unit tests with GoogleTest |
+| `RATS_BUILD_EXAMPLES` | `ON` | Build the `rats-client` demo application |
 | `RATS_ENABLE_ASAN` | `OFF` | Enable AddressSanitizer for memory debugging |
-| `RATS_BINDINGS` | `ON` | Enable C API bindings for FFI support |
+| `RATS_ENABLE_TSAN` | `OFF` | Enable ThreadSanitizer for data-race debugging |
+| `RATS_BINDINGS` | `ON` | Build the C API bindings for FFI support |
 | `RATS_CROSSCOMPILING` | `OFF` | Force cross-compilation flags |
 | `RATS_SHARED_LIBRARY` | `OFF` | Build as shared library (.dll/.so/.dylib) |
 | `RATS_STATIC_LIBRARY` | `ON` | Build as static library (.a/.lib) |
-| `RATS_SEARCH_FEATURES` | `OFF` | Enable Rats Search feature (like Bittorrent / DHT spider algorithm) |
-| `RATS_STORAGE` | `OFF` | Enable distributed key-value storage with P2P synchronization |
+| `RATS_SEARCH_FEATURES` | `OFF` | Enable Rats Search features (BitTorrent / DHT spider) |
+| `RATS_STORAGE` | `OFF` | Enable the distributed key-value storage subsystem |
 
 **Examples:**
 
@@ -1468,166 +632,47 @@ cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake
 
 ### Integrating librats Into Your Application
 
-#### Method 1: Using CMake FetchContent (Recommended)
-
-Add librats directly to your CMakeLists.txt:
+#### Method 1: CMake FetchContent (recommended)
 
 ```cmake
 cmake_minimum_required(VERSION 3.10)
 project(MyP2PApp)
-
 set(CMAKE_CXX_STANDARD 17)
 
-# Fetch librats from GitHub
 include(FetchContent)
 FetchContent_Declare(
     librats
     GIT_REPOSITORY https://github.com/DEgITx/librats.git
-    GIT_TAG master  # or specify a specific version/tag
+    GIT_TAG master  # or a specific version/tag
 )
-
-# Configure librats build options before making it available
 set(RATS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(RATS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-
 FetchContent_MakeAvailable(librats)
 
-# Create your application
 add_executable(my_p2p_app main.cpp)
-
-# Link against librats
 target_link_libraries(my_p2p_app PRIVATE rats)
 ```
 
-#### Method 2: Using CMake add_subdirectory
-
-Clone librats into your project or as a git submodule:
+#### Method 2: CMake add_subdirectory
 
 ```bash
 # As a git submodule
 git submodule add https://github.com/DEgITx/librats.git external/librats
-
-# Or just clone it
-git clone https://github.com/DEgITx/librats.git external/librats
 ```
 
-Then in your CMakeLists.txt:
-
 ```cmake
-cmake_minimum_required(VERSION 3.10)
-project(MyP2PApp)
-
-set(CMAKE_CXX_STANDARD 17)
-
-# Configure librats options
 set(RATS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(RATS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-
-# Add librats subdirectory
 add_subdirectory(external/librats)
 
-# Create your application
 add_executable(my_p2p_app main.cpp)
-
-# Link against librats
 target_link_libraries(my_p2p_app PRIVATE rats)
-
-# Include directories are automatically propagated
-```
-
-#### Method 3: Using Pre-built Library
-
-If you've built librats separately:
-
-```cmake
-cmake_minimum_required(VERSION 3.10)
-project(MyP2PApp)
-
-set(CMAKE_CXX_STANDARD 17)
-
-# Specify librats location
-set(LIBRATS_DIR "/path/to/librats")
-
-# Create your application
-add_executable(my_p2p_app main.cpp)
-
-# Link against pre-built librats
-target_include_directories(my_p2p_app PRIVATE 
-    ${LIBRATS_DIR}/src
-    ${LIBRATS_DIR}/build/src
-)
-
-target_link_libraries(my_p2p_app PRIVATE 
-    ${LIBRATS_DIR}/build/lib/librats.a
-    # Add system libraries based on platform
-    $<$<PLATFORM_ID:Windows>:ws2_32 iphlpapi bcrypt>
-    Threads::Threads
-)
-
-# Find threading library
-find_package(Threads REQUIRED)
-```
-
-#### Method 4: Manual Compilation and Linking
-
-**Compile your application:**
-
-```bash
-# Linux/macOS
-g++ -std=c++17 -I/path/to/librats/src -I/path/to/librats/build/src \
-    my_app.cpp /path/to/librats/build/lib/librats.a \
-    -lpthread -o my_p2p_app
-
-# Windows (MinGW)
-g++ -std=c++17 -I/path/to/librats/src -I/path/to/librats/build/src \
-    my_app.cpp /path/to/librats/build/lib/librats.a \
-    -lws2_32 -liphlpapi -lbcrypt -o my_p2p_app.exe
-
-# Windows (MSVC)
-cl /std:c++17 /EHsc /I"C:\path\to\librats\src" /I"C:\path\to\librats\build\src" \
-   my_app.cpp "C:\path\to\librats\build\lib\rats.lib" \
-   ws2_32.lib iphlpapi.lib bcrypt.lib
-```
-
-#### Simple Integration Example
-
-```cpp
-// my_p2p_app.cpp
-#include "librats.h"
-#include <iostream>
-
-int main() {
-    // Create client on port 8080
-    librats::RatsClient client(8080);
-    
-    // Set up callbacks
-    client.set_connection_callback([](auto socket, const std::string& peer_id) {
-        std::cout << "Peer connected: " << peer_id << std::endl;
-    });
-    
-    client.set_string_data_callback([](auto socket, const std::string& peer_id, 
-                                       const std::string& message) {
-        std::cout << "Message from " << peer_id << ": " << message << std::endl;
-    });
-    
-    // Start the client
-    if (!client.start()) {
-        std::cerr << "Failed to start client" << std::endl;
-        return 1;
-    }
-    
-    std::cout << "P2P client running on port 8080" << std::endl;
-    
-    // Your application logic here
-    std::this_thread::sleep_for(std::chrono::hours(24));
-    
-    return 0;
-}
+# Include directories are propagated automatically (use #include "node/node.h").
 ```
 
 #### Required System Libraries
 
-When linking against librats, include these system libraries:
+When linking against a pre-built librats, add these system libraries:
 
 | Platform | Required Libraries |
 |----------|-------------------|
@@ -1639,10 +684,10 @@ When linking against librats, include these system libraries:
 ### Running Tests
 
 ```bash
-# In build directory
+# In the build directory
 ctest -j$(nproc) --output-on-failure
 
-# Or run directly
+# Or run the test binary directly
 ./bin/librats_tests
 ```
 
@@ -1650,198 +695,70 @@ ctest -j$(nproc) --output-on-failure
 
 After building, you'll find:
 - **Library**: `build/lib/librats.a` (static library)
-- **Executable**: `build/bin/rats-client` (demo application)
+- **Executable**: `build/bin/rats-client` (reference/demo application)
 - **Tests**: `build/bin/librats_tests` (if `RATS_BUILD_TESTS=ON`)
 
 ## 🎯 Usage Examples
 
-### Simple Chat Application
+### The reference application
+
+`rats-client` (built from `src/main.cpp`) wires up the full set of subsystems so every capability can be exercised from one binary:
 
 ```bash
-# Terminal 1: Start first node
-./build/bin/rats-client 8080
+# Terminal 1: start a node on port 8080 with DHT + mDNS discovery
+./build/bin/rats-client 8080 --dht --mdns
 
-# Terminal 2: Start second node and connect
-./build/bin/rats-client 8081 localhost 8080
+# Terminal 2: start a second node and dial the first
+./build/bin/rats-client 8081 --connect 127.0.0.1 8080
 ```
 
-### File Sharing Application
+Options: `--bind <addr>`, `--data <dir>` (stable identity + reconnect store), `--connect <host> <port>` (repeatable), `--dht`, `--mdns`, `--upnp`, `--reconnect`, `--no-ping`. Pub/sub, typed JSON messaging and file transfer are always on. Type `/help` once running for the interactive command list (`/peers`, `/connect`, `/sub`, `/pub`, `/msg`, `/file`, …).
+
+### Minimal chat
 
 ```cpp
-#include "librats.h"
-
-class FileShareApp {
-private:
-    librats::RatsClient client_;
-    
-public:
-    FileShareApp(int port) : client_(port) {
-        // Set up file transfer callbacks
-        client_.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
-            std::cout << "📊 " << progress.filename << ": " 
-                      << progress.get_completion_percentage() << "% complete" << std::endl;
-            std::cout << "Rate: " << (progress.transfer_rate_bps / 1024 / 1024) << " MB/s" << std::endl;
-        });
-        
-        client_.on_file_transfer_completed([](const std::string& transfer_id, bool success, const std::string& error) {
-            if (success) {
-                std::cout << "✅ Transfer completed: " << transfer_id.substr(0, 8) << std::endl;
-            } else {
-                std::cout << "❌ Transfer failed: " << error << std::endl;
-            }
-        });
-        
-        client_.on_file_transfer_request([this](const librats::IncomingTransferOffer& offer) {
-            std::cout << "📥 Offer from " << offer.peer_id.substr(0, 8) << ": "
-                      << offer.name << " (" << offer.total_size << " bytes)" << std::endl;
-            
-            // Auto-accept transfers smaller than 100MB
-            if (offer.total_size < 100 * 1024 * 1024) {
-                client_.accept_file_transfer(offer.transfer_id, "./downloads/" + offer.name);
-            } else {
-                client_.reject_file_transfer(offer.transfer_id, "Too large");
-            }
-        });
-        
-        // Set up connection callbacks
-        client_.set_connection_callback([](auto socket, const std::string& peer_id) {
-            std::cout << "Peer connected: " << peer_id.substr(0, 8) << std::endl;
-        });
-        
-        // Configure file transfer settings
-        librats::FileTransferConfig config;
-        config.chunk_size = 256 * 1024;          // 256KB network chunks
-        config.window_bytes = 8 * 1024 * 1024;   // 8MB of un-acknowledged data in flight
-        config.verify_integrity = true;          // CRC32 + SHA-256 verification
-        client_.set_file_transfer_config(config);
-        
-        // Start all services
-        client_.start();
-        client_.start_dht_discovery();
-        client_.start_mdns_discovery("file-share");
-    }
-    
-    std::string share_file(const std::string& peer_id, const std::string& file_path) {
-        return client_.send_file(peer_id, file_path);
-    }
-    
-    std::string share_directory(const std::string& peer_id, const std::string& directory_path) {
-        return client_.send_directory(peer_id, directory_path);
-    }
-    
-    void pause_transfer(const std::string& transfer_id) {
-        client_.pause_file_transfer(transfer_id);
-    }
-    
-    void resume_transfer(const std::string& transfer_id) {
-        client_.resume_file_transfer(transfer_id);
-    }
-    
-    void get_transfer_stats() {
-        auto stats = client_.get_file_transfer_statistics();
-        std::cout << "Total bytes sent: " << stats["total_bytes_sent"] << std::endl;
-        std::cout << "Total bytes received: " << stats["total_bytes_received"] << std::endl;
-        std::cout << "Active transfers: " << stats["active_transfers"] << std::endl;
-    }
-    
-    void connect_to(const std::string& host, int port) {
-        client_.connect_to_peer(host, port);
-    }
-};
-```
-
-## 🎯 More Examples
-
-### Complete Chat Application
-
-```cpp
-#include "librats.h"
+#include "node/node.h"
+#include "subsystems/message_json.h"
 #include <iostream>
-#include <string>
-#include <thread>
+
+using namespace librats;
 
 int main() {
-    librats::RatsClient client(8080);
-    
-    // Set up chat message handling
-    client.on("chat_message", [](const std::string& peer_id, const nlohmann::json& data) {
-        std::string username = data.value("username", "Unknown");
-        std::string message = data.value("message", "");
-        std::cout << "[" << username << "]: " << message << std::endl;
+    Node node(NodeConfig{/*listen_port=*/8080});
+    node.add_subsystem(std::make_unique<MessageJson>());
+
+    node.json()->on("chat", [](const PeerId& from, const nlohmann::json& d) {
+        std::cout << "[" << d.value("user", "?") << "]: " << d.value("text", "") << "\n";
     });
-    
-    // Handle user join/leave
-    client.on("user_joined", [](const std::string& peer_id, const nlohmann::json& data) {
-        std::cout << "*** " << data["username"].get<std::string>() << " joined the chat ***" << std::endl;
-    });
-    
-    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
-        // Announce our presence
-        nlohmann::json join_msg;
-        join_msg["username"] = "User_" + client.get_our_peer_id().substr(0, 8);
-        client.send("user_joined", join_msg);
-    });
-    
-    client.start();
-    client.start_dht_discovery(); // Auto-discover other chat users
-    
-    std::cout << "🐀 librats Chat - Type messages and press Enter" << std::endl;
-    std::cout << "Type 'quit' to exit" << std::endl;
-    
-    std::string input;
-    while (std::getline(std::cin, input)) {
-        if (input == "quit") break;
-        
-        if (!input.empty()) {
-            nlohmann::json chat_msg;
-            chat_msg["username"] = "User_" + client.get_our_peer_id().substr(0, 8);
-            chat_msg["message"] = input;
-            chat_msg["timestamp"] = std::time(nullptr);
-            client.send("chat_message", chat_msg);
-        }
+
+    node.start();
+
+    const std::string user = "User_" + node.local_id().short_hex();
+    std::cout << "🐀 librats chat — type messages, 'quit' to exit\n";
+
+    std::string line;
+    while (std::getline(std::cin, line) && line != "quit") {
+        if (!line.empty())
+            node.json()->send("chat", nlohmann::json{{"user", user}, {"text", line}});
     }
-    
+    node.stop();
     return 0;
 }
 ```
 
-## 📚 Documentation
+## 🔧 Persistent State
 
-Comprehensive documentation is available:
+When a node is given a `data_dir`, it co-locates its persistent state there:
 
-- **[File Transfer Example](docs/FILE_TRANSFER_EXAMPLE.md)** - Efficient P2P file and directory transfer
-- **[Custom Protocol Setup](docs/CUSTOM_PROTOCOL.md)** - How to configure custom protocols
-- **[Message Exchange API](docs/MESSAGE_EXCHANGE_API.md)** - Event-driven messaging system  
-- **[GossipSub Example](docs/GOSSIPSUB_EXAMPLE.md)** - Publish-subscribe messaging with GossipSub
-- **[mDNS Discovery](docs/MDNS_DISCOVERY.md)** - Local network peer discovery
-- **[Noise Encryption](docs/NOISE_ENCRYPTION.md)** - End-to-end encryption details
-- **[BitTorrent Example](docs/BITTORRENT_EXAMPLE.md)** - BitTorrent protocol implementation
-- **Distributed Storage** - Synchronized key-value storage (see API examples above, requires `RATS_STORAGE`)
+- **`identity.key`** — the node's Noise/Curve25519 private key. Loaded on startup (or generated and saved on first run), giving a **stable `PeerId` across restarts**. An empty `data_dir` means a fresh random identity each run.
+- **`peers.txt`** — reconnection targets, written by `ReconnectionService` when configured with a `store_path` (typically `<data_dir>/peers.txt`).
+- **DHT routing tables** — persisted by `DhtDiscovery` when its `Config::data_dir` is set, so the DHT warm-starts on the next run.
 
-## 🔧 Configuration Files
-
-librats automatically creates and manages these files:
-
-- **`config.json`**: Main configuration (protocol, encryption keys, settings)
-- **`peers.rats`**: Current active peers for reconnection
-- **`peers_ever.rats`**: Historical peers for discovery
-
-### Sample config.json
-```json
-{
-    "protocol_name": "rats",
-    "protocol_version": "1.0",
-    "peer_id": "550e8400-e29b-41d4-a716-446655440000",
-    "encryption_enabled": true,
-    "encryption_key": "a1b2c3d4e5f6...",
-    "listen_port": 8080,
-    "max_peers": 10
-}
-```
+There is no central `config.json`: configuration is supplied programmatically via `NodeConfig` and each subsystem's `Config`.
 
 ## 🚀 Benchmark Performance
 
-librats is **engineered for resource efficiency**, making it ideal for **low-power devices**, **edge computing**, and **embedded systems** where memory and CPU resources are precious.
+librats is **engineered for resource efficiency**, making it ideal for **low-power devices**, **edge computing**, and **embedded systems** where memory and CPU are precious.
 
 ### Performance Comparison vs libp2p (JavaScript)
 
@@ -1861,38 +778,29 @@ librats is **engineered for resource efficiency**, making it ideal for **low-pow
 |--------|---------|
 | **DHT Discovery (idle)** | ~350-450 bytes/sec |
 
-The DHT discovery process uses minimal network bandwidth — only **350-450 bytes per second** during continuous peer discovery. This ultra-low network footprint makes librats ideal for bandwidth-constrained environments, mobile devices, and applications where network efficiency is critical.
+DHT discovery uses minimal bandwidth — only **350-450 bytes per second** during continuous peer discovery — making librats ideal for bandwidth-constrained environments and mobile devices.
 
 ## Why Choose librats?
 
 ### **Performance**
-- **Native C++17**: Maximum performance with minimal overhead
-- **Zero-copy operations**: Efficient data handling where possible
-- **Thread-safe design**: Modern concurrency with `ThreadManager`
-- **Optimized protocols**: Custom implementations tuned for speed
+- **Native C++17**: maximum performance with minimal overhead
+- **Shared-nothing reactor**: no cross-thread locking on the connection hot path
+- **Platform-optimal I/O**: epoll / kqueue / IOCP behind one abstraction
 
-### **Reliability** 
-- **Production tested**: Used in real-world applications
-- **Comprehensive testing**: Unit tests and integration tests covering all components
+### **Reliability**
+- **Comprehensive testing**: unit and integration tests across all components
 - **Memory safety**: RAII and smart pointers throughout
-- **Cross-platform**: Consistent behavior across Windows, Linux, and macOS
+- **Cross-platform**: consistent behaviour across Windows, Linux, and macOS
 
 ### **Developer Experience**
-- **Simple API**: Easy to learn and integrate
-- **Modern C++**: Takes advantage of C++17 features
-- **Excellent documentation**: Comprehensive guides and examples
-- **Active development**: Regular updates and improvements
-- **Configuration persistence**: Automatic saving and loading of settings
+- **Small, predictable core**: a bare `Node` does exactly one thing — secure transport
+- **Composable subsystems**: attach only the capabilities you need
+- **Self-certifying identity**: authentication with no PKI or central authority
+- **Modern C++**: takes advantage of C++17 features
 
 ## Contributing
 
-We welcome contributions from the community! There are many ways to contribute:
-
-Please see our [Contributing Guide](CONTRIBUTING.md) for detailed guidelines on:
-- Code style and conventions
-- Setting up your development environment
-- Running tests
-- Submitting pull requests
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for guidelines on code style, development setup, running tests, and submitting pull requests.
 
 ### Quick Start for Contributors
 
@@ -1911,5 +819,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-- **nlohmann/json**: For the excellent JSON library integration
-- **Contributors**: Everyone who has contributed to making librats better
+- **nlohmann/json**: for the excellent JSON library integration
+- **Contributors**: everyone who has helped make librats better
