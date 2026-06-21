@@ -5,16 +5,21 @@
 // It wires up the full set of opt-in subsystems so every capability of the
 // library can be exercised from one binary. A bare Node is only the encrypted
 // transport core (see node/node.h); everything below is attached explicitly.
+// Every module is enabled by default ("all modules on"); use the --no-* flags to
+// turn individual ones off.
 //
 // Options:
 //   --bind <addr>          bind address (default "::" = dual-stack). e.g. 0.0.0.0, 127.0.0.1, ::1
-//   --data <dir>           data directory (stable identity + reconnect store)
+//   --data <dir>           data directory (stable identity + reconnect/DHT store)
 //   --connect <host> <port>  dial a peer at startup (repeatable)
-//   --dht                  enable DHT peer discovery (IPv4 + IPv6)
-//   --mdns                 enable mDNS (local-network) discovery
-//   --upnp                 enable UPnP / NAT-PMP port mapping
-//   --reconnect            enable auto-reconnection (persists targets under --data)
-//   --no-ping              disable liveness ping (on by default)
+//   --no-dht               disable DHT peer discovery (IPv4 + IPv6)
+//   --no-mdns              disable mDNS (local-network) discovery
+//   --no-upnp              disable UPnP / NAT-PMP port mapping
+//   --no-pex               disable peer exchange (PEX)
+//   --no-reconnect         disable auto-reconnection (persists targets under --data)
+//   --no-ping              disable liveness ping
+//   --no-bittorrent        disable BitTorrent      (only with RATS_SEARCH_FEATURES)
+//   --bt-port <port>       BitTorrent listen port  (only with RATS_SEARCH_FEATURES; default 6881)
 //
 // Pub/sub, typed JSON messaging and file transfer are always enabled. Type
 // "/help" once running for the interactive command list.
@@ -27,14 +32,19 @@
 #include "subsystems/file_transfer.h"
 #include "subsystems/ping_service.h"
 #include "subsystems/port_mapping_service.h"
+#include "subsystems/peer_exchange.h"
 #include "subsystems/reconnection.h"
 #include "core/address.h"
 #include "util/fs.h"
 #include "util/json.hpp"
+#ifdef RATS_SEARCH_FEATURES
+#include "subsystems/bittorrent.h"
+#endif
 #ifdef RATS_STORAGE
 #include "storage/storage.h"
 #endif
 
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -53,6 +63,10 @@ struct Subsystems {
     FileTransfer*         files     = nullptr;
     PingService*          ping      = nullptr;
     ReconnectionService*  reconnect = nullptr;
+    DhtDiscovery*         dht       = nullptr;
+#ifdef RATS_SEARCH_FEATURES
+    Bittorrent*           bittorrent = nullptr;
+#endif
 #ifdef RATS_STORAGE
     StorageManager*       storage   = nullptr;
 #endif
@@ -70,6 +84,33 @@ std::string to_text(ByteView v) {
     return std::string(reinterpret_cast<const char*>(v.data()), v.size());
 }
 
+// Parse a 40-character hex string into a 20-byte DHT info hash. Returns false if
+// the input is not exactly 40 hex digits (so the caller can fall back to hashing
+// a free-form key instead).
+bool parse_info_hash(const std::string& hex, InfoHash& out) {
+    if (hex.size() != out.size() * 2) return false;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < out.size(); ++i) {
+        const int hi = nibble(hex[2 * i]), lo = nibble(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+    return true;
+}
+
+std::string info_hash_hex(const InfoHash& h) {
+    static const char* digits = "0123456789abcdef";
+    std::string s;
+    s.reserve(h.size() * 2);
+    for (uint8_t b : h) { s.push_back(digits[b >> 4]); s.push_back(digits[b & 0xf]); }
+    return s;
+}
+
 void print_help() {
     std::cout <<
         "commands:\n"
@@ -83,6 +124,13 @@ void print_help() {
         "  /file <peer#> <path>       send a file to a peer (index from /peers)\n"
         "  /reconnect <host> <port>   add an auto-reconnect target\n"
         "  /rmreconnect <host> <port> remove an auto-reconnect target\n"
+        "  /dhtfind <hash|key>        find peers via DHT (40-hex infohash, or a key string)\n"
+#ifdef RATS_SEARCH_FEATURES
+        "  /magnet <uri>              add a magnet link (downloads into ./downloads)\n"
+        "  /torrent <file>            add a .torrent file\n"
+        "  /spider <on|off>           toggle DHT spider mode (infohash crawler)\n"
+        "  /bt                        show BitTorrent status\n"
+#endif
 #ifdef RATS_STORAGE
         "  /put <key> <value>         set a distributed-storage key\n"
         "  /get <key>                 read a distributed-storage key\n"
@@ -104,7 +152,12 @@ bool peer_at(Node& node, size_t index, PeerId& out) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: " << argv[0] << " <listen_port> [--bind addr] [--data dir]"
-                     " [--connect host port] [--dht] [--mdns] [--upnp] [--reconnect] [--no-ping]\n";
+                     " [--connect host port] [--no-dht] [--no-mdns] [--no-upnp] [--no-pex]"
+                     " [--no-reconnect] [--no-ping]"
+#ifdef RATS_SEARCH_FEATURES
+                     " [--no-bittorrent] [--bt-port port]"
+#endif
+                     "\n";
         return 1;
     }
 
@@ -112,7 +165,13 @@ int main(int argc, char** argv) {
     config.listen_port = static_cast<uint16_t>(std::stoi(argv[1]));
     config.bind_address = "::";  // dual-stack by default
 
-    bool use_dht = false, use_mdns = false, use_upnp = false, use_reconnect = false, use_ping = true;
+    // Every module is on by default; --no-* turns one off. ("enable all modules")
+    bool use_dht = true, use_mdns = true, use_upnp = true, use_pex = true,
+         use_reconnect = true, use_ping = true;
+#ifdef RATS_SEARCH_FEATURES
+    bool use_bittorrent = true;
+    uint16_t bt_port = 6881;
+#endif
     std::vector<Address> dial_at_start;
 
     for (int i = 2; i < argc; ++i) {
@@ -123,11 +182,16 @@ int main(int argc, char** argv) {
             dial_at_start.push_back(Address{argv[i + 1], static_cast<uint16_t>(std::stoi(argv[i + 2]))});
             i += 2;
         }
-        else if (arg == "--dht")       use_dht = true;
-        else if (arg == "--mdns")      use_mdns = true;
-        else if (arg == "--upnp")      use_upnp = true;
-        else if (arg == "--reconnect") use_reconnect = true;
-        else if (arg == "--no-ping")   use_ping = false;
+        else if (arg == "--no-dht")       use_dht = false;
+        else if (arg == "--no-mdns")      use_mdns = false;
+        else if (arg == "--no-upnp")      use_upnp = false;
+        else if (arg == "--no-pex")       use_pex = false;
+        else if (arg == "--no-reconnect") use_reconnect = false;
+        else if (arg == "--no-ping")      use_ping = false;
+#ifdef RATS_SEARCH_FEATURES
+        else if (arg == "--no-bittorrent") use_bittorrent = false;
+        else if (arg == "--bt-port" && i + 1 < argc) bt_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+#endif
         else std::cerr << "ignoring unknown argument: " << arg << "\n";
     }
 
@@ -147,16 +211,22 @@ int main(int argc, char** argv) {
         node.add_subsystem(std::move(files));
     }
 
-    // — optional subsystems, gated by flags —
+    // — optional subsystems, all enabled by default (gated by --no-* flags) —
+    // DHT is attached BEFORE BitTorrent so the BitTorrent client can borrow this
+    // same Kademlia node (one shared swarm) instead of standing up a second one.
     if (use_dht) {
         DhtDiscovery::Config dc;
         dc.data_dir = config.data_dir;  // co-locate routing tables with identity + peers
-        node.add_subsystem(std::make_unique<DhtDiscovery>(std::move(dc)));
+        auto dht = std::make_unique<DhtDiscovery>(std::move(dc));
+        sub.dht = dht.get();
+        node.add_subsystem(std::move(dht));
     }
     if (use_mdns)
         node.add_subsystem(std::make_unique<MdnsDiscovery>());
     if (use_upnp)
         node.add_subsystem(std::make_unique<PortMappingService>());
+    if (use_pex)
+        node.add_subsystem(std::make_unique<PeerExchange>());
     if (use_ping) {
         auto ping = std::make_unique<PingService>();
         sub.ping = ping.get();
@@ -170,6 +240,17 @@ int main(int argc, char** argv) {
         sub.reconnect = reconnect.get();
         node.add_subsystem(std::move(reconnect));
     }
+#ifdef RATS_SEARCH_FEATURES
+    if (use_bittorrent) {
+        Bittorrent::Config bc;
+        bc.client.listen_port  = bt_port;
+        bc.client.download_path = "./downloads";
+        bc.use_node_dht = use_dht;  // share the node's DHT swarm when DHT is on
+        auto bittorrent = std::make_unique<Bittorrent>(bc);
+        sub.bittorrent = bittorrent.get();
+        node.add_subsystem(std::move(bittorrent));
+    }
+#endif
 #ifdef RATS_STORAGE
     {
         auto storage = std::make_unique<StorageManager>();
@@ -214,7 +295,11 @@ int main(int argc, char** argv) {
     }
     std::cout << "node " << node.local_id().short_hex() << " listening on port " << node.listen_port()
               << " (dht=" << use_dht << " mdns=" << use_mdns << " upnp=" << use_upnp
-              << " reconnect=" << use_reconnect << " ping=" << use_ping << ")\n"
+              << " pex=" << use_pex << " reconnect=" << use_reconnect << " ping=" << use_ping
+#ifdef RATS_SEARCH_FEATURES
+              << " bittorrent=" << use_bittorrent
+#endif
+              << ")\n"
               << "type /help for commands\n";
 
     for (const Address& a : dial_at_start) {
@@ -271,13 +356,57 @@ int main(int argc, char** argv) {
             std::cout << (id ? "sending file, transfer id " + std::to_string(id) : std::string("send failed")) << "\n";
         }
         else if (cmd == "/reconnect" && args.size() >= 3) {
-            if (!sub.reconnect) { std::cout << "reconnect not enabled (--reconnect)\n"; continue; }
+            if (!sub.reconnect) { std::cout << "reconnect not enabled (--no-reconnect)\n"; continue; }
             sub.reconnect->add(Address{args[1], static_cast<uint16_t>(std::stoi(args[2]))});
         }
         else if (cmd == "/rmreconnect" && args.size() >= 3) {
-            if (!sub.reconnect) { std::cout << "reconnect not enabled (--reconnect)\n"; continue; }
+            if (!sub.reconnect) { std::cout << "reconnect not enabled (--no-reconnect)\n"; continue; }
             sub.reconnect->remove(Address{args[1], static_cast<uint16_t>(std::stoi(args[2]))});
         }
+        else if (cmd == "/dhtfind" && args.size() >= 2) {
+            if (!sub.dht) { std::cout << "dht not enabled (--no-dht)\n"; continue; }
+            DhtClient* dht = sub.dht->dht_client();
+            if (!dht) { std::cout << "dht not running yet\n"; continue; }
+            // Accept a 40-hex infohash directly; otherwise treat the argument as a
+            // free-form key and hash it (same scheme DhtDiscovery uses internally).
+            InfoHash hash;
+            if (!parse_info_hash(args[1], hash)) hash = DhtDiscovery::hash_for_key(args[1]);
+            std::cout << "searching DHT for " << info_hash_hex(hash) << " ...\n";
+            // The callback fires on a DHT thread, possibly several times as peers
+            // trickle in. Capture nothing but std::cout (process-lived).
+            dht->find_peers(hash, [](const std::vector<Address>& peers, const InfoHash& h) {
+                std::cout << "[dht] " << peers.size() << " peer(s) for " << info_hash_hex(h) << ":\n";
+                for (const Address& a : peers) std::cout << "    " << a.to_string() << "\n";
+            });
+        }
+#ifdef RATS_SEARCH_FEATURES
+        else if (cmd == "/magnet" && args.size() >= 2) {
+            if (!sub.bittorrent) { std::cout << "bittorrent not enabled (--no-bittorrent)\n"; continue; }
+            auto t = sub.bittorrent->client()->add_magnet(args[1], "./downloads");
+            std::cout << (t ? "added magnet\n" : "failed to add magnet\n");
+        }
+        else if (cmd == "/torrent" && args.size() >= 2) {
+            if (!sub.bittorrent) { std::cout << "bittorrent not enabled (--no-bittorrent)\n"; continue; }
+            auto t = sub.bittorrent->client()->add_torrent_file(args[1], "./downloads");
+            std::cout << (t ? "added torrent\n" : "failed to add torrent\n");
+        }
+        else if (cmd == "/spider" && args.size() >= 2) {
+            if (!sub.bittorrent) { std::cout << "bittorrent not enabled (--no-bittorrent)\n"; continue; }
+            const std::string& v = args[1];
+            sub.bittorrent->set_spider_mode(v == "on" || v == "1" || v == "true");
+            std::cout << "spider mode " << (sub.bittorrent->is_spider_mode() ? "on" : "off") << "\n";
+        }
+        else if (cmd == "/bt") {
+            if (!sub.bittorrent) { std::cout << "bittorrent not enabled (--no-bittorrent)\n"; continue; }
+            auto* c = sub.bittorrent->client();
+            std::cout << "torrents=" << c->num_torrents()
+                      << " dl=" << c->total_download_rate() << "B/s"
+                      << " ul=" << c->total_upload_rate() << "B/s"
+                      << " peers=" << c->total_peers()
+                      << " dht=" << (sub.bittorrent->using_node_dht() ? "shared" : "own")
+                      << " spider=" << (sub.bittorrent->is_spider_mode() ? "on" : "off") << "\n";
+        }
+#endif
 #ifdef RATS_STORAGE
         else if (cmd == "/put" && args.size() >= 3) {
             sub.storage->put(args[1], args[2]);
