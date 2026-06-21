@@ -93,6 +93,11 @@ DhtDiscovery::Config disc_config(const std::vector<Address>& bootstrap) {
 }
 
 bool ipv6_loopback_available() {
+    // Winsock must be up before any socket() call; this probe can run before the
+    // first Node::start() (which is what otherwise initialises it), so do it here —
+    // otherwise the probe always fails on Windows and the dual-stack tests skip on
+    // hosts that actually have IPv6 loopback.
+    if (!init_socket_library()) return false;
     socket_t s = create_udp_socket(0, "::1", AddressFamily::IPv6);
     if (!is_valid_socket(s)) return false;
     close_socket(s);
