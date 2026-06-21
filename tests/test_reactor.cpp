@@ -218,7 +218,7 @@ TEST_F(ReactorTest, Sustains1000Connections) {
     constexpr int kWave = 100;
     const auto t0 = std::chrono::steady_clock::now();
     for (int sent = 0; sent < kConns; sent += kWave) {
-        const int n = std::min(kWave, kConns - sent);
+        const int n = (std::min)(kWave, kConns - sent);
         for (int i = 0; i < n; ++i) client.connect("127.0.0.1", port);
         ASSERT_TRUE(wait_for([&] { return collect.established_.load() >= sent + n; }, 20s))
             << "established " << collect.established_.load() << " after dialing " << (sent + n);

@@ -144,7 +144,7 @@ std::chrono::milliseconds ReconnectionService::backoff_for(int attempts) const {
     // base * 2^(attempts-1), capped at max.
     auto delay = config_.base_backoff;
     for (int i = 1; i < attempts && delay < config_.max_backoff; ++i) delay *= 2;
-    return std::min(delay, config_.max_backoff);
+    return (std::min)(delay, config_.max_backoff);  // parenthesized: dodge windows.h min macro
 }
 
 void ReconnectionService::loop() {
