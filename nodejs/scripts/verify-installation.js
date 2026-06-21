@@ -34,11 +34,14 @@ try {
     // Check 3: Constants
     console.log('3. Checking constants...');
     try {
-        if (typeof librats.ConnectionStrategy.DIRECT_ONLY === 'number') {
-            console.log('   ✅ ConnectionStrategy constants defined');
+        if (typeof librats.Security.NOISE === 'number') {
+            console.log('   ✅ Security constants defined');
         }
-        if (typeof librats.ErrorCodes.SUCCESS === 'number') {
-            console.log('   ✅ ErrorCodes constants defined\n');
+        if (typeof librats.LogLevel.INFO === 'number') {
+            console.log('   ✅ LogLevel constants defined');
+        }
+        if (typeof librats.constants.ERRORS.OK === 'number') {
+            console.log('   ✅ Error-code constants defined\n');
         }
     } catch (err) {
         console.log('   ❌ Constants check failed:', err.message);
@@ -56,23 +59,19 @@ try {
         // Check 5: Can we start and stop?
         console.log('5. Testing start/stop...');
         try {
-            const started = client.start();
-            if (started) {
-                console.log('   ✅ Client started successfully');
-                
-                const peerId = client.getOurPeerId();
-                if (peerId && typeof peerId === 'string') {
-                    console.log(`   ✅ Got peer ID: ${peerId}`);
-                }
-                
-                const peerCount = client.getPeerCount();
-                console.log(`   ✅ Peer count: ${peerCount}`);
-                
-                client.stop();
-                console.log('   ✅ Client stopped successfully\n');
-            } else {
-                console.log('   ⚠️  Warning: Client failed to start (port may be in use)\n');
+            client.start(); // throws on failure
+            console.log('   ✅ Client started successfully');
+
+            const peerId = client.getOurPeerId();
+            if (peerId && typeof peerId === 'string') {
+                console.log(`   ✅ Got peer ID: ${peerId}`);
             }
+
+            const peerCount = client.getPeerCount();
+            console.log(`   ✅ Peer count: ${peerCount}`);
+
+            client.stop();
+            console.log('   ✅ Client stopped successfully\n');
         } catch (err) {
             console.log('   ❌ Start/stop test failed:', err.message);
             allChecksPassed = false;

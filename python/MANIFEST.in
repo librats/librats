@@ -1,8 +1,8 @@
 include README.md
+include PYTHON_BINDINGS.md
 include requirements.txt
 include LICENSE
 recursive-include librats_py *.py
-recursive-include examples *.py
-recursive-include tests *.py
+recursive-include librats_py *.so *.so.* *.dll *.dylib
 global-exclude __pycache__
 global-exclude *.py[co]

@@ -1,374 +1,261 @@
 # LibRats Android Library
 
-This directory contains the Android JNI bindings for LibRats, enabling peer-to-peer networking capabilities in Android applications.
+Android JNI bindings for LibRats, a C++ peer-to-peer networking library. This
+module wraps the canonical LibRats C ABI (`src/bindings/rats.h`) in a JNI bridge
+(`librats_jni.cpp`) and a high-level Java API (`com.librats.RatsClient`).
+
+## Model
+
+A `RatsClient` wraps a native node. The model is peer-id-centric:
+
+- **Peers** are identified by 64-char lowercase hex ids.
+- **Messages** flow over named **channels** (raw bytes), typed **JSON** message
+  types, or pub/sub **topics**.
+- **Subsystems are opt-in.** DHT, mDNS, port mapping, pub/sub, JSON messaging,
+  file transfer, ping (RTT), and reconnection must each be enabled with the
+  matching `enable*()` method **before** `start()`. Enabling after start returns
+  `ERR_ALREADY_STARTED`; using a subsystem before enabling it returns
+  `ERR_NOT_ENABLED`.
+- **Security** is Noise XX (encrypted + authenticated) by default, or plaintext.
 
 ## Features
 
-- **Peer-to-peer networking**: Direct connections between Android devices
-- **NAT traversal**: Support for STUN, ICE, and TURN protocols
-- **Multiple connection strategies**: Direct, STUN-assisted, ICE, TURN relay, and auto-adaptive
-- **Message types**: String, binary, and JSON message support
-- **File transfer**: Send and receive files between peers
-- **Service discovery**: mDNS and DHT-based peer discovery
-- **Encryption**: Optional end-to-end encryption using Noise protocol
-- **Gossip protocol**: Support for gossip-based messaging
+- Direct peer connections (`connect`), peer enumeration, max-peer cap
+- Raw-byte messaging on named channels (`send` / `broadcast` / `on`)
+- Pub/sub topics (`enablePubsub` + `subscribe` / `publish`)
+- Typed JSON messaging (`enableJson` + `onJson` / `sendJson` / `broadcastJson`)
+- File and directory transfer (offer / accept / reject / progress / complete)
+- Discovery: DHT (`enableDht`), mDNS (`enableMdns`)
+- NAT port mapping (`enablePortMapping`, UPnP + NAT-PMP)
+- Liveness: ping/RTT (`enablePing` + `getPeerRttMs`)
+- Automatic reconnection (`enableReconnect` + `addReconnect`)
 
 ## Directory Structure
 
 ```
 android/
 ├── src/main/
-│   ├── cpp/                    # JNI C++ wrapper code
-│   │   ├── librats_jni.cpp    # Main JNI implementation
-│   │   └── CMakeLists.txt     # CMake build configuration
-│   ├── java/com/librats/      # Java API classes
-│   │   ├── RatsClient.java    # Main client class
-│   │   ├── *Callback.java     # Callback interfaces
-│   │   └── RatsException.java # Exception handling
-│   └── AndroidManifest.xml    # Required permissions
-├── examples/                   # Example Android app
-├── build.gradle              # Library build configuration
-├── proguard-rules.pro        # ProGuard rules
-└── README.md                 # This file
+│   ├── cpp/
+│   │   ├── librats_jni.cpp    # JNI bridge to src/bindings/rats.h
+│   │   └── CMakeLists.txt     # builds core + JNI
+│   ├── java/com/librats/
+│   │   ├── RatsClient.java        # main API
+│   │   ├── RatsException.java     # keyed off rats_error_t
+│   │   └── *Callback.java         # callback interfaces
+│   └── AndroidManifest.xml
+├── examples/                  # example app
+└── README.md
 ```
 
 ## Integration
 
-### Add to your Android project
-
-1. **Copy the library**:
-   ```bash
-   cp -r android/ your-project/librats/
-   ```
-
-2. **Add to settings.gradle**:
+1. **Copy the library** into your project (e.g. `librats/`).
+2. **settings.gradle**:
    ```gradle
    include ':librats'
    project(':librats').projectDir = new File('librats')
    ```
-
-3. **Add dependency in app/build.gradle**:
+3. **app/build.gradle**:
    ```gradle
-   dependencies {
-       implementation project(':librats')
-   }
+   dependencies { implementation project(':librats') }
    ```
 
 ### Required Permissions
-
-Add these permissions to your app's `AndroidManifest.xml`:
 
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-<uses-permission android:name="android.permission.WAKE_LOCK" />
 ```
 
 ## Quick Start
 
-### Basic Usage
-
 ```java
 import com.librats.RatsClient;
-import com.librats.ConnectionCallback;
-import com.librats.StringMessageCallback;
+import com.librats.MessageCallback;
+import java.nio.charset.StandardCharsets;
 
-public class MainActivity extends AppCompatActivity {
-    private RatsClient ratsClient;
-    
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        
-        // Create client
-        ratsClient = new RatsClient(8080); // Listen on port 8080
-        
-        // Set up callbacks
-        ratsClient.setConnectionCallback(new ConnectionCallback() {
-            @Override
-            public void onConnection(String peerId) {
-                Log.d("LibRats", "Connected to peer: " + peerId);
-            }
-        });
-        
-        ratsClient.setStringCallback(new StringMessageCallback() {
-            @Override
-            public void onStringMessage(String peerId, String message) {
-                Log.d("LibRats", "Received: " + message);
-            }
-        });
-        
-        // Start the client
-        ratsClient.start();
-    }
-    
-    private void connectToPeer() {
-        // Connect to another peer
-        ratsClient.connectWithStrategy("192.168.1.100", 8080, 
-                                     RatsClient.STRATEGY_AUTO_ADAPTIVE);
-    }
-    
-    private void sendMessage() {
-        // Send a message to all connected peers
-        ratsClient.broadcastString("Hello from Android!");
-    }
-    
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (ratsClient != null) {
-            ratsClient.stop();
-            ratsClient.destroy();
-        }
-    }
-}
+RatsClient client = new RatsClient(8080); // listen on 8080
+
+// Register callbacks and enable subsystems BEFORE start().
+client.setConnectionCallback(peerId -> Log.d("LibRats", "connected: " + peerId));
+client.setDisconnectCallback(peerId -> Log.d("LibRats", "disconnected: " + peerId));
+client.on("chat", (peerId, data) ->
+        Log.d("LibRats", peerId + ": " + new String(data, StandardCharsets.UTF_8)));
+client.enableMdns();
+
+client.start();
+
+// Dial a peer and broadcast on a channel.
+client.connect("192.168.1.100", 8080);
+client.broadcast("chat", "Hello!".getBytes(StandardCharsets.UTF_8));
 ```
 
-### Connection Strategies
+### Full Configuration
 
 ```java
-// Direct connection only
-ratsClient.connectWithStrategy(host, port, RatsClient.STRATEGY_DIRECT_ONLY);
-
-// STUN-assisted connection
-ratsClient.connectWithStrategy(host, port, RatsClient.STRATEGY_STUN_ASSISTED);
-
-// Full ICE with STUN/TURN
-ratsClient.connectWithStrategy(host, port, RatsClient.STRATEGY_ICE_FULL);
-
-// TURN relay only
-ratsClient.connectWithStrategy(host, port, RatsClient.STRATEGY_TURN_RELAY);
-
-// Auto-adaptive (recommended)
-ratsClient.connectWithStrategy(host, port, RatsClient.STRATEGY_AUTO_ADAPTIVE);
+RatsClient.Config cfg = new RatsClient.Config();
+cfg.listenPort = 8080;
+cfg.enableListen = true;            // false = dial-only node
+cfg.bindAddress = null;             // null = dual-stack "::"
+cfg.security = RatsClient.SECURITY_NOISE;   // or SECURITY_PLAINTEXT
+cfg.dataDir = "/data/.../rats";     // persistent identity + subsystem state
+cfg.protocolName = "myapp";
+cfg.protocolVersion = "1.0";
+cfg.maxPeers = 50;                  // 0 = unlimited
+RatsClient client = new RatsClient(cfg);
 ```
 
-### Message Types
+### Messaging
 
 ```java
-// String messages
-ratsClient.sendString(peerId, "Hello!");
-ratsClient.broadcastString("Hello everyone!");
+// Raw bytes on a named channel.
+client.send(peerId, "chat", payload);
+client.broadcast("chat", payload);
+client.on("chat", (peer, data) -> { /* ... */ });
 
-// Binary data
-byte[] data = {0x01, 0x02, 0x03};
-ratsClient.sendBinary(peerId, data);
-ratsClient.broadcastBinary(data);
+// Typed JSON messaging.
+client.enableJson();                                  // before start()
+client.onJson("ping", (peer, json) -> { /* ... */ }); // before start()
+client.sendJson(peerId, "ping", "{\"t\":1}");
+client.broadcastJson("announce", "{\"hi\":true}");
 
-// JSON messages
-ratsClient.sendJson(peerId, "{\"type\":\"ping\"}");
-ratsClient.broadcastJson("{\"type\":\"announcement\"}");
+// Pub/sub topics.
+client.enablePubsub();                                // before start()
+client.subscribe("news", (peer, topic, data) -> { /* ... */ }); // before start()
+client.publish("news", payload);
+client.unsubscribe("news");
 ```
 
 ### File Transfer
 
-Transfers are push-only: a peer sends an offer and the receiver accepts (or rejects) it.
+Push model: a peer offers a file/directory and the receiver accepts or rejects
+by `(peerId, transferId)`.
 
 ```java
-// Send a file or a directory (directories are always recursive)
-String transferId = ratsClient.sendFile(peerId, "/path/to/file.txt", "remote_file.txt");
-ratsClient.sendDirectory(peerId, "/path/to/dir", "remote_dir");
+client.enableFileTransfer("/data/.../tmp");           // before start()
+client.setFileOfferCallback((peerId, transferId, name, size, isDir) ->
+        client.acceptFile(peerId, transferId, "/data/.../downloads/" + name));
+client.setFileProgressCallback((transferId, peerId, sent, total, status) -> {});
+client.setFileCompleteCallback((transferId, success, path) -> {});
 
-// Track progress for both files and directories
-ratsClient.setFileProgressCallback(new FileProgressCallback() {
-    @Override
-    public void onFileProgress(String transferId, int progress, String status) {
-        // Handle progress updates
-    }
-});
-
-// Handle incoming offers, then accept or reject (remotePath is always empty)
-ratsClient.setFileRequestCallback(new FileRequestCallback() {
-    @Override
-    public void onFileRequest(String peerId, String transferId, String remotePath, String filename) {
-        ratsClient.acceptFileTransfer(transferId, "/path/to/save/" + filename);
-        // or: ratsClient.rejectFileTransfer(transferId, "Not accepting files");
-    }
-});
+long id = client.sendFile(peerId, "/path/to/file.txt");   // 0 on failure
+long dirId = client.sendDirectory(peerId, "/path/to/dir");
+// Live control: cancelFile / pauseFile / resumeFile(peerId, transferId)
 ```
 
-### Service Discovery
+### Discovery, NAT, Liveness, Reconnect
 
 ```java
-// Start mDNS discovery
-ratsClient.startMdnsDiscovery("my-app-service");
+client.enableDht(0, null);            // DHT (ephemeral port, default key)
+client.enableMdns();                  // local-network discovery
+client.enablePortMapping(true, true); // UPnP + NAT-PMP
 
-// Start DHT discovery
-ratsClient.startDhtDiscovery(6881);
+client.enablePing();                  // before start()
+long rtt = client.getPeerRttMs(peerId);   // ms, or -1 if unknown
 
-// Set discovery callback
-ratsClient.setPeerDiscoveredCallback(new PeerDiscoveredCallback() {
-    @Override
-    public void onPeerDiscovered(String host, int port, String serviceName) {
-        // Auto-connect to discovered peer
-        ratsClient.connect(host, port);
-    }
-});
-```
-
-### Encryption
-
-```java
-// Enable encryption
-ratsClient.setEncryptionEnabled(true);
-
-// Generate a new key
-String key = ratsClient.generateEncryptionKey();
-
-// Set a specific key
-ratsClient.setEncryptionKey("your-hex-key-here");
+client.enableReconnect();             // before start()
+client.addReconnect("192.168.1.100", 8080);
+client.removeReconnect("192.168.1.100", 8080);
 ```
 
 ## API Reference
 
-### RatsClient Class
+### RatsClient
 
-#### Lifecycle Methods
-- `RatsClient(int listenPort)` - Create client
-- `int start()` - Start the client
-- `void stop()` - Stop the client
-- `void destroy()` - Destroy and cleanup
+**Lifecycle / identity**
+- `RatsClient(int listenPort)`, `RatsClient(Config)`
+- `int start()`, `void stop()`, `void destroy()`
+- `int getListenPort()`, `String getLocalId()`
+- `String getProtocolName()`, `String getProtocolVersion()`
 
-#### Connection Methods
-- `int connect(String host, int port)` - Simple connect
-- `int connectWithStrategy(String host, int port, int strategy)` - Connect with strategy
-- `int getPeerCount()` - Get number of connected peers
-- `String[] getPeerIds()` - Get all peer IDs
+**Connections**
+- `int connect(String host, int port)`
+- `int getPeerCount()`, `String[] getPeerIds()`
+- `void setMaxPeers(long)`, `long getMaxPeers()`
 
-#### Messaging Methods
-- `int sendString(String peerId, String message)` - Send string to peer
-- `int broadcastString(String message)` - Broadcast string to all
-- `int sendBinary(String peerId, byte[] data)` - Send binary to peer
-- `int broadcastBinary(byte[] data)` - Broadcast binary to all
-- `int sendJson(String peerId, String json)` - Send JSON to peer
-- `int broadcastJson(String json)` - Broadcast JSON to all
+**Messaging (channels)**
+- `int send(String peerId, String channel, byte[] data)`
+- `int broadcast(String channel, byte[] data)`
+- `int on(String channel, MessageCallback)`
+- `int setConnectionCallback(ConnectionCallback)`
+- `int setDisconnectCallback(DisconnectCallback)`
 
-#### File Transfer Methods
-- `String sendFile(String peerId, String path, String filename)` - Send file
-- `String sendDirectory(String peerId, String path, String remoteName)` - Send directory (always recursive)
-- `int acceptFileTransfer(String transferId, String path)` - Accept an incoming file/directory offer
-- `int rejectFileTransfer(String transferId, String reason)` - Reject an incoming offer
-- `int pauseFileTransfer(String transferId)` / `int resumeFileTransfer(String transferId)` - Pause/resume a transfer
-- `String getFileTransferProgressJson(String transferId)` / `String getFileTransferStatisticsJson()` - Query progress/stats
+**Pub/sub**
+- `int enablePubsub()`
+- `int subscribe(String topic, TopicMessageCallback)`, `int unsubscribe(String topic)`
+- `int publish(String topic, byte[] data)`
 
-#### Discovery Methods
-- `int startMdnsDiscovery(String serviceName)` - Start mDNS
-- `void stopMdnsDiscovery()` - Stop mDNS
-- `int startDhtDiscovery(int port)` - Start DHT
-- `void stopDhtDiscovery()` - Stop DHT
+**Typed JSON**
+- `int enableJson()`
+- `int onJson(String type, JsonMessageCallback)`, `int onceJson(...)`, `int offJson(String type)`
+- `int sendJson(String peerId, String type, String json)`, `int broadcastJson(String type, String json)`
 
-#### Encryption Methods
-- `int setEncryptionEnabled(boolean enabled)` - Enable/disable encryption
-- `String generateEncryptionKey()` - Generate new key
-- `int setEncryptionKey(String key)` - Set encryption key
+**File transfer**
+- `int enableFileTransfer(String tempDir)`
+- `int setFileOfferCallback(FileOfferCallback)`, `int setFileProgressCallback(FileProgressCallback)`, `int setFileCompleteCallback(FileCompleteCallback)`
+- `long sendFile(String peerId, String path)`, `long sendDirectory(String peerId, String dirPath)`
+- `int acceptFile(String peerId, long transferId, String destPath)`, `int rejectFile(String peerId, long transferId)`
+- `int cancelFile(...)`, `int pauseFile(...)`, `int resumeFile(...)`
 
-#### Static Methods
-- `String getVersionString()` - Get library version
-- `void setLoggingEnabled(boolean enabled)` - Enable/disable logging
-- `void setLogLevel(String level)` - Set log level
+**Discovery / NAT / liveness / reconnect**
+- `int enableDht(int dhtPort, String discoveryKey)`, `int enableDht()`, `int enableMdns()`
+- `int enablePortMapping(boolean upnp, boolean natpmp)`
+- `int enablePing()`, `long getPeerRttMs(String peerId)`
+- `int enableReconnect()`, `int addReconnect(String host, int port)`, `int removeReconnect(String host, int port)`
+
+**Static**
+- `void setLogLevel(int level)` (`LOG_DEBUG/INFO/WARN/ERROR`), `void setLogFile(String path)`
+- `String getVersionString()`, `int[] getVersion()`, `String getGitDescribe()`, `int getAbi()`
+- `String errorString(int error)`
 
 ### Callback Interfaces
 
-- `ConnectionCallback` - Peer connections
-- `StringMessageCallback` - String messages
-- `BinaryMessageCallback` - Binary messages
-- `JsonMessageCallback` - JSON messages
-- `DisconnectCallback` - Peer disconnections
-- `PeerDiscoveredCallback` - Service discovery
-- `FileProgressCallback` - File/directory transfer progress
-- `FileRequestCallback` - Incoming file/directory transfer offers
+- `ConnectionCallback` — `onConnected(String peerId)`
+- `DisconnectCallback` — `onDisconnected(String peerId)`
+- `MessageCallback` — `onMessage(String peerId, byte[] data)`
+- `TopicMessageCallback` — `onTopicMessage(String peerId, String topic, byte[] data)`
+- `JsonMessageCallback` — `onJsonMessage(String peerId, String json)`
+- `FileOfferCallback` — `onFileOffer(String peerId, long transferId, String name, long size, boolean isDirectory)`
+- `FileProgressCallback` — `onFileProgress(long transferId, String peerId, long bytesTransferred, long totalBytes, int status)`
+- `FileCompleteCallback` — `onFileComplete(long transferId, boolean success, String path)`
 
-### Constants
+### Error codes (`rats_error_t`)
 
-#### Connection Strategies
-- `STRATEGY_DIRECT_ONLY` - Direct connection only
-- `STRATEGY_STUN_ASSISTED` - STUN-assisted connection
-- `STRATEGY_ICE_FULL` - Full ICE with STUN/TURN
-- `STRATEGY_TURN_RELAY` - TURN relay only
-- `STRATEGY_AUTO_ADAPTIVE` - Auto-adaptive (recommended)
-
-#### Error Codes
-- `SUCCESS` - Operation successful
-- `ERROR_INVALID_HANDLE` - Invalid client handle
-- `ERROR_INVALID_PARAMETER` - Invalid parameter
-- `ERROR_NOT_RUNNING` - Client not running
-- `ERROR_OPERATION_FAILED` - Operation failed
-- `ERROR_PEER_NOT_FOUND` - Peer not found
-- `ERROR_MEMORY_ALLOCATION` - Memory allocation failed
-- `ERROR_JSON_PARSE` - JSON parse error
+`OK` (0), `ERR_INVALID_ARG` (1), `ERR_NOT_STARTED` (2), `ERR_ALREADY_STARTED`
+(3), `ERR_NOT_ENABLED` (4), `ERR_NO_SUCH_PEER` (5), `ERR_BIND` (6),
+`ERR_INTERNAL` (7). Methods return one of these; `RatsException` carries the
+code via `getErrorCode()`.
 
 ## Building
 
-### Prerequisites
-
-- Android Studio 4.0+
-- Android NDK 21+
-- CMake 3.18.1+
-- MinSDK 21 (Android 5.0)
-
-### Build Steps
-
-1. Open the project in Android Studio
-2. The library will build automatically with the app
-3. Native libraries will be built for: arm64-v8a, armeabi-v7a, x86_64, x86
-
-### Manual Build
+- Android Studio, NDK 21+, CMake 3.22.1+, minSDK 21.
+- The native build pulls in the repository-root `CMakeLists.txt` (with
+  `RATS_BINDINGS ON`) to compile the core library + C ABI, then links the JNI
+  bridge against it. ABIs: arm64-v8a, armeabi-v7a, x86_64, x86.
 
 ```bash
 cd android
 ./gradlew assembleRelease
 ```
 
-## Example App
+## Threading
 
-The `examples/` directory contains a complete Android app demonstrating LibRats usage:
+Callbacks fire on an internal reactor thread — do not block in them, and marshal
+to the UI thread (`runOnUiThread`) before touching views. Call `destroy()` to
+release native resources.
 
-- Basic peer-to-peer messaging
-- Connection management
-- Real-time message display
-- Error handling
+## Removed in the rewrite
 
-To run the example:
-
-1. Open `examples/` in Android Studio
-2. Build and run on two devices
-3. Start both clients
-4. Connect one to the other using IP address
-5. Send messages between devices
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Library not found**: Ensure NDK is properly installed and CMake version matches
-2. **Permission denied**: Check that all required permissions are granted
-3. **Connection fails**: Verify both devices are on same network and ports are open
-4. **Native crash**: Check logcat for JNI errors and ensure proper lifecycle management
-
-### Debugging
-
-Enable verbose logging:
-```java
-RatsClient.setLoggingEnabled(true);
-RatsClient.setLogLevel("DEBUG");
-```
-
-Check native logs:
-```bash
-adb logcat -s LibRatsJNI
-```
-
-## Performance Considerations
-
-- **Threading**: Callbacks are called on background threads, use `runOnUiThread()` for UI updates
-- **Memory**: Call `destroy()` to properly cleanup native resources
-- **Battery**: Consider using wake locks for background operations
-- **Network**: Monitor network state changes and reconnect as needed
+The following old-API features no longer exist and have been removed: ICE /
+STUN / TURN and connection strategies, encryption enable/keys and Noise key
+inspection, configuration load/save (use `Config.dataDir`), granular logging
+(colors / timestamps / rotation / retention / console toggles — use
+`setLogLevel` / `setLogFile`), historical peers, statistics JSON
+(connection / gossipsub / file-transfer), and automatic-discovery toggles (use
+`enableDht` / `enableMdns`).
 
 ## License
 
-This library follows the same license as the main LibRats project.
+Follows the main LibRats project license.

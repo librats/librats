@@ -14,7 +14,7 @@ npm install librats
 npm run verify
 
 # Use it in your code
-node -e "const {RatsClient} = require('librats'); console.log('Ready!');"
+node -e "const {RatsClient, Security} = require('librats'); const c = new RatsClient({listenPort: 8080, security: Security.NOISE}); c.start(); console.log('Ready:', c.getOurPeerId()); c.stop();"
 ```
 
 That's it! No manual build steps needed.
@@ -28,8 +28,8 @@ That's it! No manual build steps needed.
 ## 📋 Prerequisites Users Need
 
 - **Node.js** >= 20.0.0
-- **CMake** >= 3.10
-- **C++ Compiler**:
+- **CMake** >= 3.14
+- **C++ Compiler** (C++17):
   - Windows: Visual Studio Build Tools 2017+
   - Linux: `sudo apt install build-essential cmake`
   - macOS: `xcode-select --install`

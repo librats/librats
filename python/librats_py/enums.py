@@ -1,87 +1,68 @@
 """
 Enumerations and constants for librats Python bindings.
+
+These mirror the enums declared in the C ABI (``src/bindings/rats.h``).
 """
 
 from enum import IntEnum
 
 
 class RatsError(IntEnum):
-    """Error codes returned by librats functions."""
-    SUCCESS = 0
-    INVALID_HANDLE = -1
-    INVALID_PARAMETER = -2
-    NOT_RUNNING = -3
-    OPERATION_FAILED = -4
-    PEER_NOT_FOUND = -5
-    MEMORY_ALLOCATION = -6
-    JSON_PARSE = -7
+    """``rats_error_t`` result codes returned by fallible C functions.
+
+    ``OK`` is 0; any non-zero value is an error.
+    """
+    OK = 0
+    INVALID_ARG = 1     # null/malformed argument (bad peer id, null ptr, bad json)
+    NOT_STARTED = 2     # operation requires a started node
+    ALREADY_STARTED = 3  # enable/attach called after start()
+    NOT_ENABLED = 4     # subsystem not enabled — call the matching enable_*()
+    NO_SUCH_PEER = 5    # peer not connected, or transfer id not found
+    BIND = 6            # listen/bind failed during start()
+    INTERNAL = 7
 
 
-class MessageDataType(IntEnum):
-    """Message data types for librats messages."""
-    BINARY = 1
-    STRING = 2
-    JSON = 3
-
-
-class FileTransferStatus(IntEnum):
-    """File transfer status values."""
-    PENDING = 0
-    STARTING = 1
-    IN_PROGRESS = 2
-    PAUSED = 3
-    COMPLETED = 4
-    FAILED = 5
-    CANCELLED = 6
-    RESUMING = 7
+class Security(IntEnum):
+    """``rats_security_t`` — transport security mode."""
+    NOISE = 0      # Noise XX, encrypted + authenticated (default)
+    PLAINTEXT = 1  # unencrypted, ids exchanged in the clear
 
 
 class LogLevel(IntEnum):
-    """Logging levels."""
+    """``rats_log_level_t`` — process-global logging verbosity."""
     DEBUG = 0
     INFO = 1
     WARN = 2
     ERROR = 3
 
 
-class IceConnectionState(IntEnum):
-    """ICE connection states."""
-    NEW = 0
-    GATHERING = 1
-    CHECKING = 2
-    CONNECTED = 3
-    COMPLETED = 4
-    FAILED = 5
-    DISCONNECTED = 6
-    CLOSED = 7
+class FileTransferStatus(IntEnum):
+    """File-transfer status reported by the progress callback.
+
+    Mirrors ``FileTransfer::Status`` in the C++ core.
+    """
+    PENDING = 0
+    ACTIVE = 1
+    PAUSED = 2
+    COMPLETED = 3
+    FAILED = 4
+    CANCELLED = 5
 
 
-class IceGatheringState(IntEnum):
-    """ICE gathering states."""
-    NEW = 0
-    GATHERING = 1
-    COMPLETE = 2
-
-
-class IceCandidateType(IntEnum):
-    """ICE candidate types."""
-    HOST = 0
-    SRFLX = 1
-    PRFLX = 2
-    RELAY = 3
-
-
-# Version information helper
 class VersionInfo:
-    """Version information container."""
+    """Library version information container."""
+
     def __init__(self, major: int, minor: int, patch: int, build: int):
         self.major = major
         self.minor = minor
         self.patch = patch
         self.build = build
-    
+
     def __str__(self) -> str:
         return f"{self.major}.{self.minor}.{self.patch}.{self.build}"
-    
+
     def __repr__(self) -> str:
-        return f"VersionInfo(major={self.major}, minor={self.minor}, patch={self.patch}, build={self.build})"
+        return (
+            f"VersionInfo(major={self.major}, minor={self.minor}, "
+            f"patch={self.patch}, build={self.build})"
+        )

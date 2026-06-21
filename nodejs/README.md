@@ -1,410 +1,310 @@
 # LibRats Node.js Bindings
 
-Node.js bindings for librats - A high-performance peer-to-peer networking library with support for DHT, GossipSub, file transfer, NAT traversal, and more.
+Node.js bindings for librats — a high-performance peer-to-peer networking library with secure transport, DHT/mDNS discovery, pub/sub, typed JSON messaging and file transfer.
 
 ## Features
 
-- **Peer-to-peer networking** - Direct connections between peers
-- **DHT (Distributed Hash Table)** - Decentralized peer discovery
-- **GossipSub** - Topic-based publish/subscribe messaging
-- **File Transfer** - Send and receive files and directories
-- **mDNS Discovery** - Local network peer discovery
-- **NAT Traversal** - STUN/ICE support for connecting through firewalls
-- **Encryption** - End-to-end encryption using Noise protocol
-- **Message Exchange** - String, binary, and JSON message types
-- **Configuration Persistence** - Save and restore client settings
+- **Peer-to-peer networking** — direct, authenticated connections between peers
+- **Secure transport** — Noise XX encryption + authentication by default (or plaintext)
+- **DHT discovery** — decentralized peer discovery
+- **mDNS discovery** — local-network peer discovery
+- **NAT port mapping** — automatic UPnP / NAT-PMP port forwarding
+- **Raw channel messaging** — named channels carrying arbitrary bytes
+- **Pub/Sub (GossipSub)** — topic-based publish/subscribe
+- **Typed JSON messaging** — route JSON payloads by message type
+- **File transfer** — send/receive files and directories (push model)
+- **Liveness** — per-peer RTT probing
+- **Automatic reconnection** — re-dial dropped peers with backoff
+
+## Design: opt-in subsystems
+
+Subsystems are explicit. Discovery, pub/sub, typed JSON, file transfer, ping and
+reconnect must each be turned on with the matching `enable*()` **before**
+`start()`. Callbacks must also be registered before `start()`. Native calls
+**throw** an `Error` (message `librats: <CODE>`) on a non-OK result.
 
 ## Installation
-
-### Quick Install
-
-Install directly from npm:
 
 ```bash
 npm install librats
 ```
 
-The installation process will automatically:
-1. Download all necessary source files
-2. Build the native librats library using CMake
-3. Build the Node.js native addon
-4. Set up the bindings
-
-**No additional build steps required!**
+The install builds the native librats library with CMake, then compiles the
+Node.js addon against it.
 
 ### Prerequisites
 
-The following build tools are required and will be used automatically during installation:
-
-- **Node.js**: 20.0.0 or higher
-- **CMake**: Version 3.10 or higher ([download here](https://cmake.org/download/))
-- **C++ Compiler and Build Tools**:
-  - **Windows**: Visual Studio Build Tools 2017 or later ([download here](https://visualstudio.microsoft.com/downloads/))
-  - **Linux**: `build-essential` and `cmake` packages
-    ```bash
-    sudo apt install build-essential cmake
-    ```
-  - **macOS**: Xcode Command Line Tools
-    ```bash
-    xcode-select --install
-    ```
-
-### Verifying Installation
-
-After installation, you can verify everything is working:
-
-```bash
-npm run verify
-```
-
-This will check that the native addon is built correctly and all features are available.
-
-### Building from Source
-
-If you're developing or need to rebuild:
-
-```bash
-# Clone the repository
-git clone https://github.com/librats/librats.git
-cd librats/nodejs
-
-# Install (builds everything automatically)
-npm install
-
-# Verify the installation
-npm run verify
-
-# Or build manually
-npm run build
-```
+- **Node.js** 20.0.0 or higher
+- **CMake** 3.14 or higher ([download](https://cmake.org/download/))
+- **C++ toolchain**:
+  - Windows: Visual Studio Build Tools 2017+
+  - Linux: `sudo apt install build-essential cmake`
+  - macOS: `xcode-select --install`
 
 ## Quick Start
 
-### Basic Example
+### Basic messaging
 
 ```javascript
-const { RatsClient, ConnectionStrategy } = require('librats');
+const { RatsClient, Security } = require('librats');
 
-// Create a client listening on port 8080
-const client = new RatsClient(8080);
+// Listen on port 8080 (Noise transport is the default).
+const client = new RatsClient({ listenPort: 8080, security: Security.NOISE });
 
-// Set up event handlers
-client.onConnection((peerId) => {
+// Register callbacks BEFORE start().
+client.onPeerConnected((peerId) => {
   console.log(`Peer connected: ${peerId}`);
-  client.sendString(peerId, 'Hello from Node.js!');
+  client.send(peerId, 'chat', 'Hello from Node.js!');
 });
 
-client.onString((peerId, message) => {
-  console.log(`Received: ${message} from ${peerId}`);
+client.on('chat', (peerId, data) => {
+  console.log(`[chat] ${peerId}: ${data.toString('utf8')}`);
 });
 
-// Start the client
 client.start();
-
-// Connect to another peer
 client.connect('127.0.0.1', 8081);
 ```
 
-### File Transfer Example
+### File transfer
 
 ```javascript
 const { RatsClient } = require('librats');
 
 const client = new RatsClient(8080);
 
-// Set up file transfer progress monitoring
-client.onFileProgress((transferId, progressPercent, status) => {
-  console.log(`Transfer ${transferId}: ${progressPercent}% - ${status}`);
+// Enable the subsystem and register callbacks BEFORE start().
+client.enableFileTransfer('./tmp');
+
+client.onFileOffer((peerId, transferId, name, size, isDirectory) => {
+  console.log(`Offer "${name}" (${size} bytes) from ${peerId}`);
+  client.acceptFile(peerId, transferId, `./downloads/${name}`);
 });
 
-// Accept incoming transfer offers (transfers are push-only)
-client.onFileRequest((peerId, transferId, filename) => {
-  console.log(`Incoming offer "${filename}" from ${peerId}`);
-  client.acceptFileTransfer(transferId, `./downloads/${filename}`);
+client.onFileProgress((transferId, peerId, sent, total, status) => {
+  console.log(`Transfer ${transferId}: ${sent}/${total}`);
+});
+
+client.onFileComplete((transferId, success, path) => {
+  console.log(`Transfer ${transferId} ${success ? 'done' : 'failed'}: ${path}`);
 });
 
 client.start();
 
-// Send a file to a peer
-const transferId = client.sendFile('peer_id_here', './myfile.txt', 'remote_file.txt');
-console.log(`File transfer started: ${transferId}`);
+// Returns a numeric transfer id (0 on failure).
+const transferId = client.sendFile('peer_id_here', './myfile.txt');
 ```
 
-### GossipSub Chat Example
+### Pub/Sub chat
 
 ```javascript
 const { RatsClient } = require('librats');
 
 const client = new RatsClient(8080);
+
+// Enable pub/sub and subscribe BEFORE start().
+client.enablePubsub();
+client.subscribe('general-chat', (peerId, topic, data) => {
+  console.log(`[${topic}] ${peerId}: ${data.toString('utf8')}`);
+});
+
+client.start();
+client.publish('general-chat', JSON.stringify({ username: 'Alice', message: 'Hi!' }));
+```
+
+### Typed JSON messaging
+
+```javascript
+const { RatsClient } = require('librats');
+
+const client = new RatsClient(8080);
+client.enableJson();
+client.onJson('greeting', (peerId, json) => {
+  console.log(`greeting from ${peerId}:`, JSON.parse(json));
+});
 client.start();
 
-// Subscribe to a topic
-client.subscribeToTopic('general-chat');
-
-// Publish a message
-const message = {
-  type: 'chat',
-  username: 'Alice',
-  message: 'Hello everyone!',
-  timestamp: Date.now()
-};
-
-client.publishJsonToTopic('general-chat', JSON.stringify(message));
+// json must be valid JSON text.
+client.broadcastJson('greeting', JSON.stringify({ hello: 'world' }));
 ```
 
 ## API Reference
 
-### RatsClient
+### Construction
 
-#### Constructor
+- `new RatsClient(port)` — listen on `port` (0 = ephemeral), Noise transport.
+- `new RatsClient(config)` — full config object:
+  - `listenPort?: number` (0 = ephemeral)
+  - `enableListen?: boolean` (false = dial-only)
+  - `bindAddress?: string` (default `"::"`)
+  - `security?: Security` (`Security.NOISE` | `Security.PLAINTEXT`)
+  - `dataDir?: string` (persistent identity + subsystem state; empty = ephemeral)
+  - `protocolName?: string` / `protocolVersion?: string` (handshake identity)
+  - `maxPeers?: number` (0 = unlimited)
 
-- `new RatsClient(listenPort: number)` - Create a new client instance
+### Lifecycle / core
 
-#### Basic Operations
+- `start(): void` — throws on bind failure or if already started
+- `stop(): void`
+- `getListenPort(): number`
+- `getOurPeerId(): string | null` — 64-char hex
+- `getProtocolName(): string | null` / `getProtocolVersion(): string | null`
 
-- `start(): boolean` - Start the client
-- `stop(): void` - Stop the client
-- `connect(host: string, port: number): boolean` - Connect to a peer
-- `connectWithStrategy(host: string, port: number, strategy: number): boolean` - Connect with specific strategy
-- `disconnect(peerId: string): void` - Disconnect from a peer
+### Connections
 
-#### Messaging
+- `connect(host, port): void`
+- `getPeerCount(): number`
+- `getPeerIds(): string[]`
+- `setMaxPeers(maxPeers): void` / `getMaxPeers(): number`
 
-- `sendString(peerId: string, message: string): boolean` - Send string message
-- `sendBinary(peerId: string, data: Buffer): boolean` - Send binary data
-- `sendJson(peerId: string, jsonStr: string): boolean` - Send JSON data
-- `broadcastString(message: string): number` - Broadcast string to all peers
-- `broadcastBinary(data: Buffer): number` - Broadcast binary to all peers
-- `broadcastJson(jsonStr: string): number` - Broadcast JSON to all peers
+### Raw channel messaging
 
-#### Information
+- `send(peerId, channel, data): void` — `data` is `string | Buffer`
+- `broadcast(channel, data): void`
+- `on(channel, (peerId, data: Buffer) => void): void` *(before start)*
 
-- `getPeerCount(): number` - Get number of connected peers
-- `getOurPeerId(): string | null` - Get our peer ID
-- `getPeerIds(): string[]` - Get list of connected peer IDs
-- `getConnectionStatistics(): string | null` - Get connection statistics as JSON
+### Peer events *(before start)*
 
-#### File Transfer
+- `onPeerConnected((peerId) => void): void`
+- `onPeerDisconnected((peerId) => void): void`
 
-- `sendFile(peerId: string, filePath: string, remoteFilename?: string): string | null` - Send file
-- `sendDirectory(peerId: string, dirPath: string, remoteDirName?: string): string | null` - Send directory (always recursive)
-- `acceptFileTransfer(transferId: string, localPath: string): boolean` - Accept an incoming file/directory transfer offer
-- `rejectFileTransfer(transferId: string, reason?: string): boolean` - Reject file transfer
-- `cancelFileTransfer(transferId: string): boolean` - Cancel file transfer
-- `pauseFileTransfer(transferId: string): boolean` - Pause file transfer
-- `resumeFileTransfer(transferId: string): boolean` - Resume file transfer
+### Discovery / NAT *(enable before start)*
 
-#### GossipSub
+- `enableDht(dhtPort?, discoveryKey?): void`
+- `enableMdns(): void`
+- `enablePortMapping(enableUpnp?, enableNatpmp?): void`
 
-- `isGossipsubAvailable(): boolean` - Check if GossipSub is available
-- `subscribeToTopic(topic: string): boolean` - Subscribe to topic
-- `unsubscribeFromTopic(topic: string): boolean` - Unsubscribe from topic
-- `publishToTopic(topic: string, message: string): boolean` - Publish message
-- `publishJsonToTopic(topic: string, jsonStr: string): boolean` - Publish JSON
-- `getSubscribedTopics(): string[]` - Get subscribed topics
-- `getTopicPeers(topic: string): string[]` - Get peers in topic
+### Pub/Sub *(enable before start)*
 
-#### DHT
+- `enablePubsub(): void`
+- `subscribe(topic, (peerId, topic, data: Buffer) => void): void` *(before start)*
+- `unsubscribe(topic): void`
+- `publish(topic, data): void`
 
-- `startDhtDiscovery(dhtPort: number): boolean` - Start DHT discovery
-- `stopDhtDiscovery(): void` - Stop DHT discovery
-- `isDhtRunning(): boolean` - Check if DHT is running
-- `announceForHash(contentHash: string, port: number, callback?: (peers: string[]) => void): boolean` - Announce for hash with optional peer discovery callback
+### Typed JSON *(enable before start)*
 
-#### Encryption
+- `enableJson(): void`
+- `onJson(type, (peerId, json) => void): void`
+- `onceJson(type, (peerId, json) => void): void`
+- `offJson(type): void`
+- `sendJson(peerId, type, json): void`
+- `broadcastJson(type, json): void`
 
-- `setEncryptionEnabled(enabled: boolean): boolean` - Enable/disable encryption
-- `isEncryptionEnabled(): boolean` - Check if encryption is enabled
-- `generateEncryptionKey(): string | null` - Generate new encryption key
-- `setEncryptionKey(keyHex: string): boolean` - Set encryption key
-- `getEncryptionKey(): string | null` - Get current encryption key
+### File transfer *(enable + register callbacks before start)*
 
-#### Event Handlers
+- `enableFileTransfer(tempDir?): void`
+- `onFileOffer((peerId, transferId, name, size, isDirectory) => void): void`
+- `onFileProgress((transferId, peerId, bytesTransferred, totalBytes, status) => void): void`
+- `onFileComplete((transferId, success, path) => void): void`
+- `sendFile(peerId, filePath): number` — transfer id (0 on failure)
+- `sendDirectory(peerId, dirPath): number`
+- `acceptFile(peerId, transferId, destPath): void`
+- `rejectFile(peerId, transferId): void`
+- `cancelFile / pauseFile / resumeFile (peerId, transferId): void`
 
-- `onConnection(callback: (peerId: string) => void): void` - Set connection callback
-- `onString(callback: (peerId: string, message: string) => void): void` - Set string message callback
-- `onBinary(callback: (peerId: string, data: Buffer) => void): void` - Set binary message callback
-- `onJson(callback: (peerId: string, jsonStr: string) => void): void` - Set JSON message callback
-- `onDisconnect(callback: (peerId: string) => void): void` - Set disconnect callback
-- `onFileProgress(callback: (transferId: string, progressPercent: number, status: string) => void): void` - Set file progress callback
-- `onFileRequest(callback: (peerId: string, transferId: string, filename: string) => void): void` - Set incoming transfer offer callback (respond with `acceptFileTransfer`/`rejectFileTransfer`)
+### Liveness / reconnect *(enable before start)*
 
-### Utility Functions
+- `enablePing(): void`
+- `getPeerRttMs(peerId): number` — ms, or -1 if unknown
+- `enableReconnect(): void`
+- `addReconnect(host, port): void` / `removeReconnect(host, port): void`
 
-- `getVersionString(): string` - Get librats version string
-- `getVersion(): VersionInfo` - Get version components
-- `getGitDescribe(): string` - Get git describe string
-- `getAbi(): number` - Get ABI version
+### Module-level
 
-### Constants
-
-#### ConnectionStrategy
-
-- `ConnectionStrategy.DIRECT_ONLY` - Direct connection only
-- `ConnectionStrategy.STUN_ASSISTED` - STUN-assisted connection
-- `ConnectionStrategy.ICE_FULL` - Full ICE negotiation
-- `ConnectionStrategy.TURN_RELAY` - TURN relay connection
-- `ConnectionStrategy.AUTO_ADAPTIVE` - Automatic strategy selection
-
-#### ErrorCodes
-
-- `ErrorCodes.SUCCESS` - Operation successful
-- `ErrorCodes.INVALID_HANDLE` - Invalid client handle
-- `ErrorCodes.INVALID_PARAMETER` - Invalid parameter
-- `ErrorCodes.NOT_RUNNING` - Client not running
-- `ErrorCodes.OPERATION_FAILED` - Operation failed
-- `ErrorCodes.PEER_NOT_FOUND` - Peer not found
-- `ErrorCodes.MEMORY_ALLOCATION` - Memory allocation error
-- `ErrorCodes.JSON_PARSE` - JSON parsing error
+- `getVersionString(): string`
+- `getVersion(): { major, minor, patch, build }`
+- `getGitDescribe(): string`
+- `getAbi(): number`
+- `setLogLevel(level: LogLevel): void`
+- `setLogFile(path?): void` — omit/empty to disable file logging
+- `Security` — `{ NOISE, PLAINTEXT }`
+- `LogLevel` — `{ DEBUG, INFO, WARN, ERROR }`
+- `constants` — native `SECURITY` / `LOG_LEVELS` / `ERRORS` tables
 
 ## Examples
 
-The `examples/` directory contains comprehensive examples:
+The `examples/` directory contains:
 
-- **`basic_client.js`** - Basic peer-to-peer networking and messaging
-- **`file_transfer.js`** - File and directory transfer with interactive CLI
-- **`gossipsub_chat.js`** - Topic-based chat using GossipSub
-
-### Running Examples
+- **`basic_client.js`** — peer events + raw-channel and typed-JSON messaging
+- **`file_transfer.js`** — file/directory transfer with interactive CLI
+- **`gossipsub_chat.js`** — topic-based chat over pub/sub
 
 ```bash
-# Basic client (listens on port 8080)
-node examples/basic_client.js
-
-# Basic client connecting to another peer
+node examples/basic_client.js 8080
 node examples/basic_client.js 8081 127.0.0.1 8080
-
-# File transfer client
 node examples/file_transfer.js 8080
-
-# GossipSub chat
-node examples/gossipsub_chat.js 8080 Alice
+node examples/gossipsub_chat.js 8080 Alice lobby
 ```
 
 ## Testing
-
-Run the test suite:
 
 ```bash
 npm test
 ```
 
-Or run the simple test script:
+## TypeScript
 
-```bash
-node test/test.js
-```
-
-## Building from Source
-
-### Debug Build
-
-```bash
-npm run build
-```
-
-### Clean Build
-
-```bash
-npm run clean
-npm run build
-```
-
-## TypeScript Support
-
-Full TypeScript definitions are included. Import types:
+Full TypeScript definitions are included:
 
 ```typescript
-import { RatsClient, ConnectionStrategy, ErrorCodes, VersionInfo } from 'librats';
+import { RatsClient, Security, LogLevel } from 'librats';
 
-const client: RatsClient = new RatsClient(8080);
+const client = new RatsClient({ listenPort: 8080, security: Security.NOISE });
 client.start();
 ```
 
-## Error Handling
+## Migrating from the old binding
 
-Most operations return boolean values indicating success/failure. For detailed error information, check the console output or use the statistics functions:
+The C ABI was rewritten. Notable changes:
 
-```javascript
-const stats = client.getConnectionStatistics();
-if (stats) {
-  const parsed = JSON.parse(stats);
-  console.log('Connection stats:', parsed);
-}
-```
+- `onConnection` / `onDisconnect` → `onPeerConnected` / `onPeerDisconnected`.
+- `sendString` / `sendBinary` (untyped) → `send(peerId, channel, data)` on a
+  **named channel**; receive with `on(channel, cb)`. `broadcastString` /
+  `broadcastBinary` → `broadcast(channel, data)`.
+- `sendJson(peerId, json)` (untyped) → `sendJson(peerId, type, json)` routed by
+  message **type**; `enableJson()` first, receive with `onJson(type, cb)`.
+- `subscribeToTopic` / `publishToTopic` → `enablePubsub()` then
+  `subscribe(topic, cb)` / `publish(topic, data)`.
+- File transfer ids are now **numbers**. `onFileRequest` → `onFileOffer`;
+  `acceptFileTransfer(transferId, path)` → `acceptFile(peerId, transferId, path)`;
+  added `onFileComplete`. Control calls take `(peerId, transferId)`.
+- `startDhtDiscovery(port)` / `startMdnsDiscovery()` → `enableDht(port, key)` /
+  `enableMdns()` (call before `start()`).
+- New: `enablePing()` + `getPeerRttMs()`, `enableReconnect()` +
+  `addReconnect()`, `enablePortMapping()`.
+- Operations now **throw** on error instead of returning booleans.
 
-## Performance Considerations
+### Removed features
 
-- Use binary messages for large data transfers
-- Enable encryption only when needed (adds overhead)
-- Monitor file transfer progress for large files
-- Use appropriate connection strategies for your network environment
+These were dropped with the C ABI rewrite and are no longer available:
+
+- ICE / STUN / TURN (`addStunServer`, `addTurnServer`, `gatherIceCandidates`, …)
+- Encryption toggles / key introspection (`setEncryptionEnabled`,
+  `getNoiseStaticPublicKey`, …) — security is fixed at construction via
+  `config.security`.
+- Configuration load/save (`loadConfiguration`, `saveConfiguration`,
+  `setDataDirectory`) — replaced by `config.dataDir`.
+- Granular logging controls (console toggle, colors, timestamps, rotation) —
+  replaced by `setLogLevel` / `setLogFile`.
+- Statistics JSON (`getConnectionStatistics`, `getGossipsubStatistics`,
+  `getFileTransferStatistics`), historical peers, and discovery on/off toggles.
 
 ## Platform Support
 
-- **Windows** - Requires Visual Studio Build Tools
-- **Linux** - Requires build-essential
-- **macOS** - Requires Xcode Command Line Tools
-- **Android** - Supported via native Android bindings (separate package)
+- **Windows** — Visual Studio Build Tools
+- **Linux** — build-essential
+- **macOS** — Xcode Command Line Tools
 
-## Contributing
+## Debug logging
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Submit a pull request
+```bash
+LIBRATS_DEBUG=1 node examples/basic_client.js
+```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Troubleshooting
-
-### Build Issues
-
-**Windows**: Ensure Visual Studio Build Tools are installed
-```bash
-npm install --global windows-build-tools
-```
-
-**Linux**: Install build dependencies
-```bash
-sudo apt install build-essential python3
-```
-
-**macOS**: Install Xcode Command Line Tools
-```bash
-xcode-select --install
-```
-
-### Runtime Issues
-
-**Port already in use**: Choose a different port or kill the process using the port
-```bash
-# Find process using port
-netstat -tulpn | grep :8080
-
-# Kill process
-kill -9 <pid>
-```
-
-**Permission denied**: Run with appropriate permissions or use ports > 1024
-
-**Connection timeout**: Check firewall settings and ensure peers are reachable
-
-### Debug Mode
-
-Enable debug logging by setting environment variable:
-```bash
-export LIBRATS_DEBUG=1
-node examples/basic_client.js
-```
+MIT — see the LICENSE file.
 
 ## Support
 
 - [GitHub Issues](https://github.com/librats/librats/issues)
-- [Documentation](https://librats.github.io/)
-- [Examples Repository](https://github.com/librats/librats/tree/main/nodejs/examples)
-
-For more advanced usage, see the [C API documentation](../docs/) and the [main project README](../README.md).
+- [Main project README](../README.md)

@@ -22,7 +22,7 @@ def read_requirements():
 
 setup(
     name='librats-py',
-    version='1.0.0',
+    version='2.0.0',
     author='librats contributors',
     author_email='',
     description='Python bindings for librats P2P networking library',
@@ -69,8 +69,8 @@ setup(
     },
     include_package_data=True,
     package_data={
-        'librats_py': ['*.so', '*.dll', '*.dylib'],
+        'librats_py': ['*.so', '*.so.*', '*.dll', '*.dylib'],
     },
     zip_safe=False,
-    keywords='p2p networking nat-traversal file-transfer gossipsub dht',
+    keywords='p2p networking file-transfer gossipsub pubsub dht mdns noise',
 )

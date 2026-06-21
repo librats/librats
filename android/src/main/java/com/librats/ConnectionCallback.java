@@ -1,13 +1,17 @@
 package com.librats;
 
 /**
- * Callback interface for peer connection events.
+ * Callback invoked when a peer connection is established.
+ *
+ * <p>Register with {@link RatsClient#setConnectionCallback} before
+ * {@link RatsClient#start()}. Fires on an internal reactor thread; marshal to
+ * the UI thread before touching views.</p>
  */
 public interface ConnectionCallback {
     /**
-     * Called when a new peer connects to this client.
-     * 
-     * @param peerId The ID of the connected peer
+     * Called when a peer handshake completes.
+     *
+     * @param peerId 64-char lowercase hex of the connected peer's id
      */
-    void onConnection(String peerId);
+    void onConnected(String peerId);
 }

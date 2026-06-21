@@ -1,15 +1,22 @@
 package com.librats;
 
 /**
- * Callback interface for file and directory transfer progress events.
+ * Callback invoked with progress updates for an in-flight transfer.
+ *
+ * <p>Register with {@link RatsClient#setFileProgressCallback} before
+ * {@link RatsClient#start()}. Requires the file-transfer subsystem
+ * ({@link RatsClient#enableFileTransfer(String)}). Fires on an internal reactor
+ * thread.</p>
  */
 public interface FileProgressCallback {
     /**
-     * Called with progress updates for an in-flight transfer.
+     * Called as bytes are transferred.
      *
-     * @param transferId The unique transfer identifier
-     * @param progressPercent Completion percentage (0-100)
-     * @param status The transfer status (e.g. "IN_PROGRESS", "COMPLETED", "FAILED", "CANCELLED")
+     * @param transferId       unique transfer identifier
+     * @param peerId           64-char lowercase hex of the remote peer's id
+     * @param bytesTransferred bytes moved so far
+     * @param totalBytes       total bytes for the transfer
+     * @param status           subsystem status code for the transfer
      */
-    void onFileProgress(String transferId, int progressPercent, String status);
+    void onFileProgress(long transferId, String peerId, long bytesTransferred, long totalBytes, int status);
 }

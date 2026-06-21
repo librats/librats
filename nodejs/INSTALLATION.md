@@ -41,7 +41,7 @@ nodejs/
 │   ├── index.js             # JavaScript wrapper (loads native addon)
 │   └── index.d.ts           # TypeScript definitions
 ├── src/
-│   └── librats_node.cpp     # Node.js binding C++ code
+│   └── librats_node.cpp     # N-API addon over the C ABI (src/bindings/rats.h)
 ├── scripts/
 │   ├── build-librats.js     # Builds the native librats library
 │   ├── postinstall.js       # Post-installation verification
@@ -88,8 +88,8 @@ The `files` field in `package.json` ensures these are included:
 Users need these tools installed (automatic detection with helpful errors):
 
 1. **Node.js** (>= 20.0.0)
-2. **CMake** (>= 3.10)
-3. **C++ Compiler**:
+2. **CMake** (>= 3.14)
+3. **C++ Compiler** (C++17):
    - Windows: Visual Studio Build Tools 2017+
    - Linux: build-essential (gcc, g++, make)
    - macOS: Xcode Command Line Tools

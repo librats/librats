@@ -1,208 +1,127 @@
-const { RatsClient, ConnectionStrategy } = require('../lib/index');
+const { RatsClient, Security } = require('../lib/index');
 
 /**
- * Basic client example demonstrating connection and message exchange
+ * Basic client example: peer events + raw-channel and typed-JSON messaging.
+ *
+ * Subsystems and callbacks are registered BEFORE start(). Raw messages travel
+ * on named channels; typed JSON messages travel by message "type".
  */
 class BasicClientExample {
   constructor(port = 8080) {
-    this.client = new RatsClient(port);
+    // Noise transport (the default) gives encrypted, authenticated channels.
+    this.client = new RatsClient({ listenPort: port, security: Security.NOISE });
     this.setupCallbacks();
   }
 
   setupCallbacks() {
-    // Set up event handlers
-    this.client.onConnection((peerId) => {
-      console.log(`✅ Peer connected: ${peerId}`);
-      
-      // Send a welcome message to the new peer
-      this.client.sendString(peerId, "Hello! Welcome to the network.");
+    // Peer lifecycle.
+    this.client.onPeerConnected((peerId) => {
+      console.log(`Peer connected: ${peerId}`);
+      // Greet the new peer on the "chat" channel.
+      this.client.send(peerId, 'chat', 'Hello! Welcome to the network.');
     });
 
-    this.client.onString((peerId, message) => {
-      console.log(`📝 String message from ${peerId}: ${message}`);
-      
-      // Echo the message back
-      this.client.sendString(peerId, `Echo: ${message}`);
+    this.client.onPeerDisconnected((peerId) => {
+      console.log(`Peer disconnected: ${peerId}`);
     });
 
-    this.client.onBinary((peerId, data) => {
-      console.log(`📦 Binary message from ${peerId}, size: ${data.length} bytes`);
-      console.log(`📦 Data: ${data.toString('hex')}`);
+    // Raw-channel handler: data arrives as a Buffer.
+    this.client.on('chat', (peerId, data) => {
+      console.log(`[chat] from ${peerId}: ${data.toString('utf8')}`);
     });
 
-    this.client.onJson((peerId, jsonStr) => {
-      try {
-        const data = JSON.parse(jsonStr);
-        console.log(`🔧 JSON message from ${peerId}:`, data);
-      } catch (e) {
-        console.log(`❌ Invalid JSON from ${peerId}: ${jsonStr}`);
-      }
-    });
-
-    this.client.onDisconnect((peerId) => {
-      console.log(`❌ Peer disconnected: ${peerId}`);
+    // Typed JSON requires the JSON subsystem.
+    this.client.enableJson();
+    this.client.onJson('greeting', (peerId, json) => {
+      const data = JSON.parse(json);
+      console.log(`[greeting] from ${peerId}:`, data);
     });
   }
 
-  async start() {
-    console.log('🚀 Starting RatsClient...');
-    
-    if (!this.client.start()) {
-      throw new Error('Failed to start client');
-    }
-
-    console.log(`✅ Client started successfully`);
-    console.log(`📋 Our peer ID: ${this.client.getOurPeerId()}`);
-    
-    // Enable encryption for secure communication
-    this.client.setEncryptionEnabled(true);
-    const encKey = this.client.generateEncryptionKey();
-    console.log(`🔐 Generated encryption key: ${encKey}`);
+  start() {
+    console.log('Starting RatsClient...');
+    this.client.start(); // throws on failure
+    console.log('Client started.');
+    console.log(`Our peer ID: ${this.client.getOurPeerId()}`);
+    console.log(`Listening on port: ${this.client.getListenPort()}`);
   }
 
-  connectToPeer(host, port, strategy = ConnectionStrategy.AUTO_ADAPTIVE) {
-    console.log(`🔗 Connecting to ${host}:${port} using strategy ${strategy}`);
-    
-    if (this.client.connectWithStrategy(host, port, strategy)) {
-      console.log(`✅ Connection initiated successfully`);
-    } else {
-      console.log(`❌ Failed to initiate connection`);
+  connectToPeer(host, port) {
+    console.log(`Connecting to ${host}:${port}`);
+    try {
+      this.client.connect(host, port);
+      console.log('Connection initiated.');
+    } catch (e) {
+      console.log(`Failed to initiate connection: ${e.message}`);
     }
-  }
-
-  sendTestMessages() {
-    const peerIds = this.client.getPeerIds();
-    
-    if (peerIds.length === 0) {
-      console.log('No peers connected to send messages to');
-      return;
-    }
-
-    console.log(`📤 Sending test messages to ${peerIds.length} peer(s)`);
-
-    // Send different types of messages
-    peerIds.forEach(peerId => {
-      // String message
-      this.client.sendString(peerId, `Hello from ${this.client.getOurPeerId()}!`);
-      
-      // Binary message
-      const binaryData = Buffer.from('Hello World!', 'utf8');
-      this.client.sendBinary(peerId, binaryData);
-      
-      // JSON message
-      const jsonData = {
-        type: 'greeting',
-        from: this.client.getOurPeerId(),
-        timestamp: Date.now(),
-        message: 'Hello from Node.js!'
-      };
-      this.client.sendJson(peerId, JSON.stringify(jsonData));
-    });
   }
 
   broadcastTestMessages() {
-    console.log('📡 Broadcasting test messages...');
-    
-    // Broadcast string
-    const stringCount = this.client.broadcastString('Broadcast message from Node.js!');
-    console.log(`📤 String broadcast sent to ${stringCount} peers`);
-    
-    // Broadcast binary
-    const binaryData = Buffer.from('Binary broadcast data', 'utf8');
-    const binaryCount = this.client.broadcastBinary(binaryData);
-    console.log(`📤 Binary broadcast sent to ${binaryCount} peers`);
-    
-    // Broadcast JSON
-    const jsonData = {
-      type: 'broadcast',
+    // Raw broadcast on a channel.
+    this.client.broadcast('chat', 'Broadcast message from Node.js!');
+
+    // Typed JSON broadcast.
+    const payload = {
       from: this.client.getOurPeerId(),
       timestamp: Date.now(),
-      message: 'This is a JSON broadcast'
+      message: 'Hello from Node.js!',
     };
-    const jsonCount = this.client.broadcastJson(JSON.stringify(jsonData));
-    console.log(`📤 JSON broadcast sent to ${jsonCount} peers`);
+    this.client.broadcastJson('greeting', JSON.stringify(payload));
   }
 
   printStatus() {
-    console.log('\n📊 Client Status:');
-    console.log(`   Peer Count: ${this.client.getPeerCount()}`);
-    console.log(`   Our Peer ID: ${this.client.getOurPeerId()}`);
-    console.log(`   Max Peers: ${this.client.getMaxPeers()}`);
-    console.log(`   Peer Limit Reached: ${this.client.isPeerLimitReached()}`);
-    console.log(`   Encryption Enabled: ${this.client.isEncryptionEnabled()}`);
-    
-    const stats = this.client.getConnectionStatistics();
-    if (stats) {
-      console.log(`   Connection Statistics: ${stats}`);
-    }
-    
+    console.log('\nClient status:');
+    console.log(`   Peer count: ${this.client.getPeerCount()}`);
+    console.log(`   Our peer ID: ${this.client.getOurPeerId()}`);
+    console.log(`   Max peers: ${this.client.getMaxPeers()}`);
     const peerIds = this.client.getPeerIds();
     if (peerIds.length > 0) {
-      console.log(`   Connected Peers: ${peerIds.join(', ')}`);
+      console.log(`   Connected peers: ${peerIds.join(', ')}`);
     }
     console.log('');
   }
 
   stop() {
-    console.log('🛑 Stopping client...');
+    console.log('Stopping client...');
     this.client.stop();
   }
 }
 
-// Example usage
 async function main() {
   const args = process.argv.slice(2);
   const port = args[0] ? parseInt(args[0]) : 8080;
-  
+
   const client = new BasicClientExample(port);
-  
+
   try {
-    await client.start();
-    
-    // Print status every 10 seconds
-    const statusInterval = setInterval(() => {
-      client.printStatus();
-    }, 10000);
-    
-    // If host and port are provided, connect to a peer
+    client.start();
+
+    const statusInterval = setInterval(() => client.printStatus(), 10000);
+
     if (args.length >= 2) {
       const host = args[1];
       const peerPort = parseInt(args[2]) || 8081;
-      
-      setTimeout(() => {
-        client.connectToPeer(host, peerPort);
-      }, 1000);
+      setTimeout(() => client.connectToPeer(host, peerPort), 1000);
     }
-    
-    // Send test messages every 15 seconds if we have peers
-    const messageInterval = setInterval(() => {
-      if (client.client.getPeerCount() > 0) {
-        client.sendTestMessages();
-      }
-    }, 15000);
-    
-    // Broadcast test messages every 30 seconds if we have peers
+
     const broadcastInterval = setInterval(() => {
       if (client.client.getPeerCount() > 0) {
         client.broadcastTestMessages();
       }
-    }, 30000);
-    
-    // Handle graceful shutdown
+    }, 15000);
+
     process.on('SIGINT', () => {
-      console.log('\n🛑 Received SIGINT, shutting down gracefully...');
+      console.log('\nShutting down...');
       clearInterval(statusInterval);
-      clearInterval(messageInterval);
       clearInterval(broadcastInterval);
       client.stop();
       process.exit(0);
     });
-    
-    console.log('✅ Client is running. Press Ctrl+C to stop.');
-    console.log('💡 Usage: node basic_client.js [listen_port] [connect_host] [connect_port]');
-    
+
+    console.log('Client is running. Press Ctrl+C to stop.');
+    console.log('Usage: node basic_client.js [listen_port] [connect_host] [connect_port]');
   } catch (error) {
-    console.error('❌ Error:', error.message);
+    console.error('Error:', error.message);
     process.exit(1);
   }
 }

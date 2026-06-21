@@ -3,278 +3,129 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * File transfer example demonstrating sending and receiving files
+ * File transfer example (push model).
+ *
+ * The sender offers a file/directory with sendFile()/sendDirectory(); the
+ * receiver gets an onFileOffer() callback and accepts with acceptFile() (the
+ * (peerId, transferId) pair names the transfer). Progress and completion arrive
+ * via onFileProgress()/onFileComplete(). The file-transfer subsystem and its
+ * callbacks are registered BEFORE start().
  */
 class FileTransferExample {
   constructor(port = 8080) {
     this.client = new RatsClient(port);
-    this.transfers = new Map(); // Track active transfers
+    this.transfers = new Map(); // transferId -> metadata
+    this.downloadDir = path.join(__dirname, 'transfers', 'downloads');
+    fs.mkdirSync(this.downloadDir, { recursive: true });
     this.setupCallbacks();
   }
 
   setupCallbacks() {
-    // Connection callbacks
-    this.client.onConnection((peerId) => {
-      console.log(`✅ Peer connected: ${peerId}`);
+    this.client.onPeerConnected((peerId) => console.log(`Peer connected: ${peerId}`));
+    this.client.onPeerDisconnected((peerId) => console.log(`Peer disconnected: ${peerId}`));
+
+    // Enable the subsystem first; temp dir holds in-progress downloads.
+    this.client.enableFileTransfer(path.join(__dirname, 'transfers', 'temp'));
+
+    // Incoming offer: auto-accept and save under downloadDir.
+    this.client.onFileOffer((peerId, transferId, name, size, isDirectory) => {
+      const dest = path.join(this.downloadDir, name);
+      console.log(
+        `Incoming ${isDirectory ? 'directory' : 'file'} offer "${name}" ` +
+        `(${size} bytes) from ${peerId} [transfer ${transferId}]`
+      );
+      console.log(`Accepting, saving to: ${dest}`);
+      this.client.acceptFile(peerId, transferId, dest);
+      this.transfers.set(transferId, { type: 'receive', peerId, dest, startTime: Date.now() });
     });
 
-    this.client.onDisconnect((peerId) => {
-      console.log(`❌ Peer disconnected: ${peerId}`);
+    this.client.onFileProgress((transferId, peerId, bytesTransferred, totalBytes, status) => {
+      const pct = totalBytes > 0 ? Math.round((bytesTransferred / totalBytes) * 100) : 0;
+      console.log(`Transfer ${transferId}: ${pct}% (${bytesTransferred}/${totalBytes}) status=${status}`);
     });
 
-    // File transfer progress callback
-    this.client.onFileProgress((transferId, progressPercent, status) => {
-      console.log(`📊 Transfer ${transferId}: ${progressPercent}% - ${status}`);
-      
-      if (status === 'COMPLETED') {
-        console.log(`✅ Transfer ${transferId} completed successfully!`);
-        this.transfers.delete(transferId);
-      } else if (status === 'FAILED' || status === 'CANCELLED') {
-        console.log(`❌ Transfer ${transferId} ${status.toLowerCase()}`);
-        this.transfers.delete(transferId);
+    this.client.onFileComplete((transferId, success, filePath) => {
+      if (success) {
+        console.log(`Transfer ${transferId} completed: ${filePath}`);
+      } else {
+        console.log(`Transfer ${transferId} failed`);
       }
-    });
-
-    // Incoming transfer offers (file or directory). Transfers are push-only:
-    // a peer sends us an offer and we accept (or reject) it here.
-    this.client.onFileRequest((peerId, transferId, filename) => {
-      const downloadPath = path.join(__dirname, 'transfers', 'downloads', filename);
-      const downloadDir = path.dirname(downloadPath);
-      if (!fs.existsSync(downloadDir)) {
-        fs.mkdirSync(downloadDir, { recursive: true });
-      }
-      console.log(`📥 Incoming offer "${filename}" from ${peerId} (transfer ${transferId})`);
-      console.log(`📁 Accepting, will save to: ${downloadPath}`);
-      this.client.acceptFileTransfer(transferId, downloadPath);
-      this.transfers.set(transferId, {
-        type: 'receive',
-        peerId,
-        localPath: downloadPath,
-        startTime: Date.now()
-      });
-    });
-
-    // String message callback for simple commands
-    this.client.onString((peerId, message) => {
-      console.log(`📝 Message from ${peerId}: ${message}`);
-
-      // Handle simple file transfer commands
-      if (message.startsWith('send:')) {
-        const filePath = message.substring(5).trim();
-        this.sendFileToPool(filePath);
-      }
+      this.transfers.delete(transferId);
     });
   }
 
-  async start() {
-    console.log('🚀 Starting File Transfer Client...');
-    
-    if (!this.client.start()) {
-      throw new Error('Failed to start client');
-    }
-
-    console.log(`✅ Client started successfully`);
-    console.log(`📋 Our peer ID: ${this.client.getOurPeerId()}`);
-    
-    // Enable encryption for secure file transfers
-    this.client.setEncryptionEnabled(true);
-    const encKey = this.client.generateEncryptionKey();
-    console.log(`🔐 Generated encryption key: ${encKey}`);
-    
-    // Set up a data directory for transfers
-    const dataDir = path.join(__dirname, 'transfers');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    this.client.setDataDirectory(dataDir);
-    console.log(`📁 Data directory: ${dataDir}`);
+  start() {
+    console.log('Starting file transfer client...');
+    this.client.start(); // throws on failure
+    console.log('Client started.');
+    console.log(`Our peer ID: ${this.client.getOurPeerId()}`);
+    console.log(`Downloads: ${this.downloadDir}`);
   }
 
   connectToPeer(host, port) {
-    console.log(`🔗 Connecting to ${host}:${port}`);
-    
-    if (this.client.connect(host, port)) {
-      console.log(`✅ Connection initiated successfully`);
-    } else {
-      console.log(`❌ Failed to initiate connection`);
+    console.log(`Connecting to ${host}:${port}`);
+    try {
+      this.client.connect(host, port);
+      console.log('Connection initiated.');
+    } catch (e) {
+      console.log(`Failed to initiate connection: ${e.message}`);
     }
   }
 
-  sendFileToPool(filePath) {
-    const peerIds = this.client.getPeerIds();
-    
-    if (peerIds.length === 0) {
-      console.log('❌ No peers connected to send file to');
-      return;
-    }
-
+  sendFileToPeer(peerId, filePath) {
     if (!fs.existsSync(filePath)) {
-      console.log(`❌ File not found: ${filePath}`);
-      return;
+      console.log(`File not found: ${filePath}`);
+      return 0;
     }
-
-    console.log(`📤 Sending file "${filePath}" to ${peerIds.length} peer(s)...`);
-    
-    peerIds.forEach(peerId => {
-      this.sendFileToPeer(peerId, filePath);
-    });
-  }
-
-  sendFileToPeer(peerId, filePath, remoteFilename = null) {
-    if (!fs.existsSync(filePath)) {
-      console.log(`❌ File not found: ${filePath}`);
-      return null;
-    }
-
-    const filename = remoteFilename || path.basename(filePath);
-    console.log(`📤 Sending file "${filePath}" to peer ${peerId} as "${filename}"`);
-    
-    const transferId = this.client.sendFile(peerId, filePath, filename);
-    
+    const transferId = this.client.sendFile(peerId, filePath);
     if (transferId) {
-      this.transfers.set(transferId, {
-        type: 'send',
-        peerId,
-        filePath,
-        remoteFilename: filename,
-        startTime: Date.now()
-      });
-      console.log(`✅ File transfer initiated with ID: ${transferId}`);
-      return transferId;
+      this.transfers.set(transferId, { type: 'send', peerId, filePath, startTime: Date.now() });
+      console.log(`Sending "${filePath}" to ${peerId} [transfer ${transferId}]`);
     } else {
-      console.log(`❌ Failed to initiate file transfer`);
-      return null;
+      console.log('Failed to initiate file transfer (subsystem enabled? peer connected?)');
     }
+    return transferId;
   }
 
-  sendDirectoryToPeer(peerId, dirPath, remoteDirName = null) {
+  sendDirectoryToPeer(peerId, dirPath) {
     if (!fs.existsSync(dirPath)) {
-      console.log(`❌ Directory not found: ${dirPath}`);
-      return null;
+      console.log(`Directory not found: ${dirPath}`);
+      return 0;
     }
-
-    const dirName = remoteDirName || path.basename(dirPath);
-    console.log(`📂 Sending directory "${dirPath}" to peer ${peerId} as "${dirName}"`);
-
-    const transferId = this.client.sendDirectory(peerId, dirPath, dirName);
-
+    const transferId = this.client.sendDirectory(peerId, dirPath);
     if (transferId) {
-      this.transfers.set(transferId, {
-        type: 'send_dir',
-        peerId,
-        dirPath,
-        remoteDirName: dirName,
-        startTime: Date.now()
-      });
-      console.log(`✅ Directory transfer initiated with ID: ${transferId}`);
-      return transferId;
+      this.transfers.set(transferId, { type: 'send_dir', peerId, dirPath, startTime: Date.now() });
+      console.log(`Sending directory "${dirPath}" to ${peerId} [transfer ${transferId}]`);
     } else {
-      console.log(`❌ Failed to initiate directory transfer`);
-      return null;
+      console.log('Failed to initiate directory transfer');
     }
-  }
-
-  pauseTransfer(transferId) {
-    if (this.client.pauseFileTransfer(transferId)) {
-      console.log(`⏸️ Transfer ${transferId} paused`);
-    } else {
-      console.log(`❌ Failed to pause transfer ${transferId}`);
-    }
-  }
-
-  resumeTransfer(transferId) {
-    if (this.client.resumeFileTransfer(transferId)) {
-      console.log(`▶️ Transfer ${transferId} resumed`);
-    } else {
-      console.log(`❌ Failed to resume transfer ${transferId}`);
-    }
-  }
-
-  cancelTransfer(transferId) {
-    if (this.client.cancelFileTransfer(transferId)) {
-      console.log(`❌ Transfer ${transferId} cancelled`);
-      this.transfers.delete(transferId);
-    } else {
-      console.log(`❌ Failed to cancel transfer ${transferId}`);
-    }
-  }
-
-  getTransferProgress(transferId) {
-    const progressJson = this.client.getFileTransferProgress(transferId);
-    if (progressJson) {
-      try {
-        const progress = JSON.parse(progressJson);
-        console.log(`📊 Transfer ${transferId} progress:`, progress);
-        return progress;
-      } catch (e) {
-        console.log(`❌ Failed to parse progress for transfer ${transferId}`);
-      }
-    } else {
-      console.log(`❌ No progress information for transfer ${transferId}`);
-    }
-    return null;
-  }
-
-  printTransferStatistics() {
-    const statsJson = this.client.getFileTransferStatistics();
-    if (statsJson) {
-      try {
-        const stats = JSON.parse(statsJson);
-        console.log('\n📊 File Transfer Statistics:');
-        console.log(JSON.stringify(stats, null, 2));
-      } catch (e) {
-        console.log('❌ Failed to parse transfer statistics');
-      }
-    } else {
-      console.log('❌ No transfer statistics available');
-    }
-  }
-
-  printActiveTransfers() {
-    console.log('\n🔄 Active Transfers:');
-    if (this.transfers.size === 0) {
-      console.log('   No active transfers');
-    } else {
-      this.transfers.forEach((transfer, transferId) => {
-        const elapsed = Math.round((Date.now() - transfer.startTime) / 1000);
-        console.log(`   ${transferId}: ${transfer.type} - ${elapsed}s elapsed`);
-        
-        // Get current progress
-        this.getTransferProgress(transferId);
-      });
-    }
-    console.log('');
+    return transferId;
   }
 
   stop() {
-    console.log('🛑 Stopping file transfer client...');
+    console.log('Stopping file transfer client...');
     this.client.stop();
   }
 }
 
-// Interactive CLI
 function setupInteractiveCLI(client) {
   const readline = require('readline');
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: 'librats> '
+    prompt: 'librats> ',
   });
 
-  console.log('\n💡 Interactive File Transfer CLI');
+  console.log('\nInteractive file transfer CLI');
   console.log('Commands:');
-  console.log('  connect <host> <port>     - Connect to a peer');
-  console.log('  send <peer_id> <file>     - Send file to peer');
-  console.log('  senddir <peer_id> <dir>   - Send directory to peer');
-  console.log('  pause <transfer_id>       - Pause transfer');
-  console.log('  resume <transfer_id>      - Resume transfer');
-  console.log('  cancel <transfer_id>      - Cancel transfer');
-  console.log('  progress <transfer_id>    - Get transfer progress');
-  console.log('  transfers                 - List active transfers');
-  console.log('  stats                     - Show transfer statistics');
-  console.log('  peers                     - List connected peers');
-  console.log('  quit                      - Exit the program');
-  console.log('');
+  console.log('  connect <host> <port>          - Connect to a peer');
+  console.log('  send <peerId> <file>           - Send a file to a peer');
+  console.log('  senddir <peerId> <dir>         - Send a directory to a peer');
+  console.log('  cancel <peerId> <transferId>   - Cancel a transfer');
+  console.log('  pause <peerId> <transferId>    - Pause a transfer');
+  console.log('  resume <peerId> <transferId>   - Resume a transfer');
+  console.log('  peers                          - List connected peers');
+  console.log('  quit                           - Exit\n');
 
   rl.prompt();
 
@@ -285,141 +136,77 @@ function setupInteractiveCLI(client) {
     try {
       switch (command) {
         case 'connect':
-          if (args.length >= 3) {
-            client.connectToPeer(args[1], parseInt(args[2]));
-          } else {
-            console.log('Usage: connect <host> <port>');
-          }
+          if (args.length >= 3) client.connectToPeer(args[1], parseInt(args[2]));
+          else console.log('Usage: connect <host> <port>');
           break;
-
         case 'send':
-          if (args.length >= 3) {
-            client.sendFileToPeer(args[1], args[2]);
-          } else {
-            console.log('Usage: send <peer_id> <file_path>');
-          }
+          if (args.length >= 3) client.sendFileToPeer(args[1], args[2]);
+          else console.log('Usage: send <peerId> <file>');
           break;
-
         case 'senddir':
-          if (args.length >= 3) {
-            client.sendDirectoryToPeer(args[1], args[2]);
-          } else {
-            console.log('Usage: senddir <peer_id> <directory_path>');
-          }
+          if (args.length >= 3) client.sendDirectoryToPeer(args[1], args[2]);
+          else console.log('Usage: senddir <peerId> <dir>');
           break;
-
-        case 'pause':
-          if (args.length >= 2) {
-            client.pauseTransfer(args[1]);
-          } else {
-            console.log('Usage: pause <transfer_id>');
-          }
-          break;
-
-        case 'resume':
-          if (args.length >= 2) {
-            client.resumeTransfer(args[1]);
-          } else {
-            console.log('Usage: resume <transfer_id>');
-          }
-          break;
-
         case 'cancel':
-          if (args.length >= 2) {
-            client.cancelTransfer(args[1]);
-          } else {
-            console.log('Usage: cancel <transfer_id>');
-          }
+          if (args.length >= 3) client.client.cancelFile(args[1], parseInt(args[2]));
+          else console.log('Usage: cancel <peerId> <transferId>');
           break;
-
-        case 'progress':
-          if (args.length >= 2) {
-            client.getTransferProgress(args[1]);
-          } else {
-            console.log('Usage: progress <transfer_id>');
-          }
+        case 'pause':
+          if (args.length >= 3) client.client.pauseFile(args[1], parseInt(args[2]));
+          else console.log('Usage: pause <peerId> <transferId>');
           break;
-
-        case 'transfers':
-          client.printActiveTransfers();
+        case 'resume':
+          if (args.length >= 3) client.client.resumeFile(args[1], parseInt(args[2]));
+          else console.log('Usage: resume <peerId> <transferId>');
           break;
-
-        case 'stats':
-          client.printTransferStatistics();
-          break;
-
         case 'peers':
-          const peerIds = client.client.getPeerIds();
-          console.log(`Connected peers: ${peerIds.join(', ') || 'None'}`);
+          console.log(`Connected peers: ${client.client.getPeerIds().join(', ') || 'None'}`);
           break;
-
         case 'quit':
         case 'exit':
-          console.log('Goodbye!');
           client.stop();
           process.exit(0);
           break;
-
         default:
-          if (command) {
-            console.log(`Unknown command: ${command}`);
-          }
+          if (command) console.log(`Unknown command: ${command}`);
           break;
       }
     } catch (error) {
       console.error('Error:', error.message);
     }
-
     rl.prompt();
   });
 
   rl.on('close', () => {
-    console.log('\nGoodbye!');
     client.stop();
     process.exit(0);
   });
 }
 
-// Example usage
 async function main() {
   const args = process.argv.slice(2);
   const port = args[0] ? parseInt(args[0]) : 8080;
-  
+
   const client = new FileTransferExample(port);
-  
+
   try {
-    await client.start();
-    
-    // If host and port are provided, connect to a peer
+    client.start();
+
     if (args.length >= 2) {
       const host = args[1];
       const peerPort = parseInt(args[2]) || 8081;
-      
-      setTimeout(() => {
-        client.connectToPeer(host, peerPort);
-      }, 1000);
+      setTimeout(() => client.connectToPeer(host, peerPort), 1000);
     }
-    
-    // Print active transfers every 30 seconds
-    const transferInterval = setInterval(() => {
-      if (client.transfers.size > 0) {
-        client.printActiveTransfers();
-      }
-    }, 30000);
-    
-    // Start interactive CLI
+
     setupInteractiveCLI(client);
-    
-    // Handle graceful shutdown
+
     process.on('SIGINT', () => {
-      console.log('\n🛑 Received SIGINT, shutting down gracefully...');
-      clearInterval(transferInterval);
+      console.log('\nShutting down...');
       client.stop();
       process.exit(0);
     });
-    
   } catch (error) {
-    console.error('❌ Error:', error.message);
+    console.error('Error:', error.message);
     process.exit(1);
   }
 }

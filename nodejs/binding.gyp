@@ -8,8 +8,13 @@
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
+        # librats headers. "bindings/rats.h" is the canonical C ABI; it pulls in
+        # util/rats_export.h, both under src/. native-src/src is used when the
+        # package is installed from npm (sources bundled there); ../src in dev.
         "native-src/src",
         "../src",
+        # Generated headers (version.h) produced by the CMake build into
+        # build-native/src/. Mirrors PROJECT_BINARY_DIR/src in CMakeLists.txt.
         "build-native/src"
       ],
       "dependencies": [
@@ -17,20 +22,26 @@
       ],
       "cflags!": [ "-fno-exceptions" ],
       "cflags_cc!": [ "-fno-exceptions" ],
+      "cflags_cc": [ "-std=c++17" ],
       "xcode_settings": {
         "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
         "CLANG_CXX_LIBRARY": "libc++",
-        "MACOSX_DEPLOYMENT_TARGET": "10.7"
+        "CLANG_CXX_LANGUAGE_STANDARD": "c++17",
+        "MACOSX_DEPLOYMENT_TARGET": "10.13"
       },
       "msvs_settings": {
-        "VCCLCompilerTool": { 
+        "VCCLCompilerTool": {
           "ExceptionHandling": 1,
-          "RuntimeLibrary": 2
+          "RuntimeLibrary": 2,
+          "AdditionalOptions": [ "/std:c++17" ]
         }
       },
       "defines": [ "NAPI_DISABLE_CPP_EXCEPTIONS" ],
       "conditions": [
         ["OS=='win'", {
+          # Link the prebuilt static archive produced by scripts/build-librats.js
+          # (CMake builds rats.lib with RATS_BINDINGS=ON, so the rats_* C ABI is
+          # already inside). Plus the platform networking/crypto libs.
           "configurations": {
             "Debug": {
               "msvs_settings": {

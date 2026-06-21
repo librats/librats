@@ -157,10 +157,10 @@ const criticalFiles = [
     { path: path.join(nodejsRoot, 'scripts', 'build-librats.js'), desc: 'Build script' },
     { path: path.join(nodejsRoot, 'scripts', 'postinstall.js'), desc: 'Post-install script' },
     { path: path.join(nativeSrcDir, 'CMakeLists.txt'), desc: 'CMake configuration (copied)' },
-    { path: path.join(nativeSrcDir, 'src', 'librats.cpp'), desc: 'Librats main source (copied)' },
-    { path: path.join(nativeSrcDir, 'src', 'librats.h'), desc: 'Librats main header (copied)' },
-    { path: path.join(nativeSrcDir, 'src', 'librats_c.cpp'), desc: 'Librats C API (copied)' },
-    { path: path.join(nativeSrcDir, 'src', 'librats_c.h'), desc: 'Librats C API header (copied)' },
+    { path: path.join(nativeSrcDir, 'src', 'node', 'node.cpp'), desc: 'Librats node core (copied)' },
+    { path: path.join(nativeSrcDir, 'src', 'node', 'node.h'), desc: 'Librats node header (copied)' },
+    { path: path.join(nativeSrcDir, 'src', 'bindings', 'rats.cpp'), desc: 'Librats C ABI (copied)' },
+    { path: path.join(nativeSrcDir, 'src', 'bindings', 'rats.h'), desc: 'Librats C ABI header (copied)' },
 ];
 
 let allFilesPresent = true;

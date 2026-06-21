@@ -1,358 +1,163 @@
-# librats Python Bindings
+# librats Python Bindings — Technical Notes
 
-This document provides technical details about the Python bindings for librats.
+Technical details of the Python bindings, which target the librats C ABI
+(`src/bindings/rats.h`) via `ctypes`.
 
-## Architecture Overview
-
-The Python bindings provide a high-level, Pythonic interface to the librats C library using ctypes:
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Python Application                       │
-├─────────────────────────────────────────────────────────────────┤
-│                      librats_py Package                        │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────────────┐ │
-│  │    core.py  │  │ exceptions.py │  │      callbacks.py       │ │
-│  │             │  │              │  │                         │ │
-│  │ RatsClient  │  │  RatsError   │  │ Callback Type Defs      │ │
-│  └─────────────┘  └──────────────┘  └─────────────────────────┘ │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │                 ctypes_wrapper.py                          │ │
-│  │           Low-level C API bindings                         │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-├─────────────────────────────────────────────────────────────────┤
-│                    librats C Library                           │
-│                  (librats.so/.dll/.dylib)                      │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                     Python Application                       │
+├─────────────────────────────────────────────────────────────┤
+│                      librats_py package                      │
+│  core.py (RatsClient)   exceptions.py   enums.py             │
+│  callbacks.py (CFUNCTYPE prototypes + Pythonic aliases)      │
+│  ctypes_wrapper.py (CDLL + argtypes/restypes, RatsConfig)    │
+├─────────────────────────────────────────────────────────────┤
+│         librats shared library — C ABI: src/bindings/rats.h  │
+│              (rats.dll / librats.so / librats.dylib)         │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Module Structure
+## Module structure
 
-### Core Modules
+| File | Role |
+| --- | --- |
+| `core.py` | `RatsClient` — the high-level node wrapper |
+| `ctypes_wrapper.py` | `CDLL` load, `RatsConfig` struct, all argtypes/restypes, `take_string` helper |
+| `callbacks.py` | Raw `CFUNCTYPE` prototypes mirroring `rats.h` + Pythonic type aliases |
+| `enums.py` | `RatsError`/`Security`/`LogLevel`/`FileTransferStatus`, `VersionInfo` |
+| `exceptions.py` | Exception hierarchy + `check_error` |
+| `examples/`, `tests/` | Demos and tests |
 
-- **`core.py`** - Main `RatsClient` class with high-level API
-- **`ctypes_wrapper.py`** - Low-level ctypes bindings to C library
-- **`exceptions.py`** - Exception classes and error handling
-- **`enums.py`** - Enumerations and constants
-- **`callbacks.py`** - Callback type definitions
+## The C ABI contract that shapes the bindings
 
-### Supporting Files
+* **Opaque handle.** `rats_t` is a `void*`; declared `c_void_p`. Constructed via
+  `rats_create_config(&cfg)` from a `rats_config_t` obtained from
+  `rats_config_default()` (see `RatsConfig` in `ctypes_wrapper.py`). The struct
+  must start from the defaults — zero-initialising it would yield a dial-only
+  node.
+* **Error model.** Fallible calls return `rats_error_t` (`RATS_OK == 0`). The
+  bindings route non-OK codes through `check_error`, which raises the matching
+  exception. This inverts the old "non-zero == success" convention.
+* **Heap vs static strings.** `rats_local_id`, `rats_protocol_name`,
+  `rats_protocol_version` and each entry of `rats_peer_ids` are heap-allocated
+  and must be freed with `rats_string_free`. They are declared `c_void_p` (NOT
+  `c_char_p`, which auto-converts and would leak/lose the pointer) and read via
+  `take_string`, which copies the bytes then frees the original.
+  `rats_version_string`, `rats_git_describe`, `rats_error_str` return static
+  strings declared `c_char_p` — never freed.
+* **Peer id arrays.** `rats_peer_ids(node, &count)` returns `char**`; declared
+  `POINTER(c_void_p)`. Each element is copied out, then the whole array is freed
+  with `rats_free_peer_ids(arr, count)`.
 
-- **`examples/`** - Example applications demonstrating usage
-- **`tests/`** - Unit and integration tests
-- **`setup.py`** - Package installation configuration
-- **`pyproject.toml`** - Modern Python packaging configuration
+## Callback bridging
 
-## Design Principles
+The raw `CFUNCTYPE` prototypes in `callbacks.py` mirror the C typedefs exactly.
+Each C callback takes `void* user` first. Payloads arrive as a `void*`
+(`c_void_p`) + `size_t` length pair; ids/topics/JSON arrive as `c_char_p`.
 
-### 1. Pythonic Interface
+`core.py` wraps each user callback in a *trampoline* that:
 
-The bindings provide a clean, Pythonic API that hides C-specific details:
+1. decodes `c_char_p` ids/topics to `str`,
+2. copies payload bytes via `string_at(ptr, length)` into a Python `bytes`,
+3. parses JSON for the typed-JSON path,
+4. **catches every exception** (`_report`) so nothing propagates into C.
 
 ```python
-# Pythonic - context manager, exceptions, typed parameters
-with RatsClient(8080) as client:
-    client.start()
-    client.connect("localhost", 8081)
-    client.send_string(peer_id, "Hello!")
-
-# Not this (C-style)
-handle = rats_create(8080)
-result = rats_start(handle)
-if result != RATS_SUCCESS:
-    # handle error
+def trampoline(user, peer_id_ptr, data_ptr, length):
+    try:
+        peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
+        data = string_at(data_ptr, length) if (data_ptr and length) else b""
+        callback(peer_id, data)
+    except Exception as exc:
+        _report(exc, "message callback")
+c_cb = MessageCallbackType(trampoline)
+self._c_callbacks["on:chat"] = c_cb   # keep the CFUNCTYPE object alive
 ```
 
-### 2. Memory Management
+### Keeping callbacks alive
 
-Python handles memory management automatically:
-
-- C strings returned from librats are automatically freed
-- Python objects manage callback lifetime
-- Context managers ensure proper cleanup
-
-### 3. Type Safety
-
-Strong typing with proper Python types:
-
-```python
-def send_string(self, peer_id: str, message: str) -> None:
-def get_peer_count(self) -> int:
-def get_connection_statistics(self) -> Dict[str, Any]:
-```
-
-### 4. Error Handling
-
-Python exceptions instead of error codes:
-
-```python
-try:
-    client.connect("invalid-host", 8080)
-except RatsConnectionError as e:
-    print(f"Connection failed: {e}")
-```
-
-## Callback System
-
-The callback system bridges C function pointers with Python functions:
-
-### C Callback Types
-
-```c
-typedef void (*rats_connection_cb)(void* user_data, const char* peer_id);
-typedef void (*rats_string_cb)(void* user_data, const char* peer_id, const char* message);
-```
-
-### Python Callback Wrapper
-
-```python
-def _create_string_callback(self, callback: StringCallback):
-    def c_callback(user_data, peer_id_ptr, message_ptr):
-        if callback and peer_id_ptr and message_ptr:
-            peer_id = peer_id_ptr.decode('utf-8')
-            message = message_ptr.decode('utf-8')
-            try:
-                callback(peer_id, message)
-            except Exception as e:
-                print(f"Error in string callback: {e}")
-    return StringCallbackType(c_callback)
-```
-
-### Thread Safety
-
-- Callbacks are executed in C library threads
-- Python GIL protects callback execution
-- Exception handling prevents crashes
-
-## Error Handling Strategy
-
-### Exception Hierarchy
-
-```
-RatsError (base)
-├── RatsConnectionError
-├── RatsInvalidParameterError  
-├── RatsNotRunningError
-├── RatsPeerNotFoundError
-└── RatsJsonParseError
-```
-
-### Error Code Mapping
-
-C error codes are automatically converted to appropriate Python exceptions:
-
-```python
-def check_error(error_code: int, operation: str = "Operation"):
-    if error_code == ErrorCode.SUCCESS:
-        return
-    
-    error_enum = ErrorCode(error_code)
-    if error_enum == ErrorCode.INVALID_PARAMETER:
-        raise RatsInvalidParameterError(f"{operation} failed")
-    # ... etc
-```
-
-## Library Loading
-
-The bindings automatically locate the librats shared library:
-
-### Search Strategy
-
-1. Current directory
-2. Relative build directories (`../build`, `../../build`)  
-3. System library paths (`/usr/lib`, `/usr/local/lib`)
-4. Environment paths (`LD_LIBRARY_PATH`, `PATH`)
-5. Package-bundled libraries
-
-### Platform-Specific Names
-
-- **Windows**: `librats.dll`, `rats.dll`
-- **macOS**: `librats.dylib`, `librats.so`  
-- **Linux**: `librats.so`, `librats.so.1`
-
-## Testing Strategy
-
-### Test Categories
-
-1. **Unit Tests** (`test_client.py`)
-   - Test individual methods and properties
-   - Mock/skip tests when library unavailable
-   - Focus on API correctness
-
-2. **Integration Tests** (`test_integration.py`)
-   - Test actual P2P communication
-   - Multiple client scenarios
-   - Real network operations
-
-3. **Example Tests**
-   - Verify examples import and run
-   - Syntax and basic functionality checks
-
-### Test Execution
-
-```bash
-# Run all tests
-python -m pytest librats_py/tests/ -v
-
-# Run only unit tests (works without native library)  
-python -m pytest librats_py/tests/test_client.py -v
-
-# Run integration tests (requires native library)
-python -m pytest librats_py/tests/test_integration.py -v
-
-# Run with coverage
-python -m pytest --cov=librats_py librats_py/tests/
-```
-
-## Build Process
-
-### Development Build
-
-```bash
-# Build native library
-mkdir build && cd build
-cmake ..
-make
-
-# Install Python bindings  
-cd ../python
-pip install -e .
-```
-
-### Using Build Script
-
-```bash
-cd python
-
-# Full build process
-python build.py --all
-
-# Individual steps
-python build.py --build-native
-python build.py --install
-python build.py --test
-```
-
-## Deployment Considerations
-
-### Library Distribution
-
-**Option 1: Separate Installation**
-- User builds/installs librats C library separately
-- Python package finds library at runtime
-- Smaller Python package size
-
-**Option 2: Bundled Libraries**
-- Include compiled libraries in Python package
-- Platform-specific wheels
-- Larger package but easier installation
-
-### Platform Support
-
-- **Linux**: Primary development platform
-- **Windows**: Supported via MSVC or MinGW builds
-- **macOS**: Supported with clang/cmake
-
-### Python Version Support
-
-- **Minimum**: Python 3.7
-- **Tested**: Python 3.7, 3.8, 3.9, 3.10, 3.11, 3.12
-- **Dependencies**: Only standard library (ctypes)
-
-## Performance Considerations
-
-### ctypes Overhead
-
-- Function calls have some overhead compared to native extensions
-- Negligible for network operations (I/O bound)
-- Critical paths still in C library
-
-### Memory Efficiency
-
-- Minimal Python object overhead
-- C library handles heavy lifting
-- String conversions only at API boundaries
+Every `CFUNCTYPE` object is stored in `RatsClient._c_callbacks` for the node's
+lifetime. If a wrapper were garbage-collected while C still held the pointer,
+the next invocation on the reactor thread would crash. JSON `on_json` handlers
+are additive, so each registration uses a unique key (`json:<type>:<id>`);
+`off_json(type)` drops all retained trampolines for that type.
 
 ### Threading
 
-- C library manages threads internally
-- Python callbacks executed with GIL
-- Non-blocking operations encouraged
+Callbacks run on the librats internal reactor thread. The GIL serialises Python
+execution, but user callbacks should not block — they stall the reactor.
 
-## Extension Points
+## Lifecycle ordering
 
-### Adding New APIs
+Register callbacks and call `enable_*` **before** `start()`:
 
-1. **Add C function signature** in `ctypes_wrapper.py`:
-```python
-self.lib.rats_new_function.argtypes = [c_void_p, c_char_p]
-self.lib.rats_new_function.restype = c_int
+* `enable_*` after `start()` → `RATS_ERR_ALREADY_STARTED` → `RatsAlreadyStartedError`.
+* subsystem op before its `enable_*` → `RATS_ERR_NOT_ENABLED` → `RatsNotEnabledError`.
+
+`set_max_peers` / `add_reconnect` / `remove_reconnect` may be called before or
+after start.
+
+## Error / exception mapping
+
+```
+RatsError (base, error_code = rats_error_t)
+├── RatsInvalidArgError       (INVALID_ARG)
+├── RatsNotStartedError       (NOT_STARTED)
+├── RatsAlreadyStartedError   (ALREADY_STARTED)
+├── RatsNotEnabledError       (NOT_ENABLED)
+├── RatsNoSuchPeerError       (NO_SUCH_PEER)
+├── RatsBindError             (BIND)
+└── RatsConnectionError       (connection helpers)
 ```
 
-2. **Add Python wrapper** in `core.py`:
-```python
-def new_function(self, param: str) -> None:
-    param_bytes = param.encode('utf-8')
-    result = self._lib.lib.rats_new_function(self._handle, param_bytes)
-    check_error(result, "New function")
+`send_file` / `send_directory` return a `uint64` transfer id (0 = failure);
+the wrappers raise `RatsError` on a 0 id rather than returning it.
+
+## Library loading
+
+`find_librats_library()` searches: alongside the package, `.`,
+`../../build/{lib,bin}`, `../build`, `../../build`, `../../../build`,
+`/usr/local/lib`, `/usr/lib`, then `LD_LIBRARY_PATH` / `PATH`, then the bare
+name via the OS loader. Names: `rats.dll`/`librats.dll`, `librats.dylib`,
+`librats.so`/`librats.so.1`.
+
+## Building the native library
+
+`build.py --build-native` runs CMake with `-DRATS_SHARED_LIBRARY=ON`
+(tests/examples off), then copies the shared library next to the package. CMake
+compiles the full `LIBRARY_SOURCES` set, including `src/bindings/rats.cpp` (gated
+by `RATS_BINDINGS`, default ON), and links `ws2_32`/`iphlpapi`/`bcrypt` on
+Windows and `pthread` elsewhere — include paths `src/`, `src/crypto/`, and the
+generated `version.h` directory.
+
+`build.py --compile-direct` prints a CMake-free recipe that mirrors
+`LIBRARY_SOURCES` for environments without CMake. The canonical source list
+lives in `CMakeLists.txt`; keep `build.py`'s `LIBRARY_SOURCES` in sync.
+
+## Tests
+
+```bash
+python -m pytest librats_py/tests/test_client.py        # unit (skips if no lib)
+python -m pytest librats_py/tests/test_integration.py   # needs native library
 ```
 
-### Custom Callbacks
+## Adding a new C function
 
-Add new callback types in `callbacks.py` and implement wrappers in `core.py`.
+1. Declare it in `ctypes_wrapper.py` (`argtypes` / `restype`, matching
+   `rats.h`; use `c_void_p` for heap strings, `c_char_p` for static ones).
+2. Add a method in `core.py`, routing the result through `check_error` for
+   `rats_error_t` returns and `take_string` for heap strings.
+3. For a new callback, add the `CFUNCTYPE` prototype + Pythonic alias in
+   `callbacks.py` and a trampoline that keeps the object alive in
+   `_c_callbacks`.
 
-## Troubleshooting
+## Removed features
 
-### Common Issues
-
-1. **Library Not Found**
-   - Check build completed successfully
-   - Verify library in search path
-   - Check platform-specific library name
-
-2. **Import Errors**
-   - Usually indicates missing native library
-   - Tests will skip automatically if library unavailable
-
-3. **Callback Crashes**
-   - Exception in callback causes print, not crash
-   - Check callback signature matches expected type
-
-4. **Memory Issues**
-   - Use context managers (`with` statements)
-   - Don't keep references to freed C objects
-
-### Debug Mode
-
-Enable verbose logging to diagnose issues:
-
-```python
-RatsClient.set_logging_enabled(True)
-RatsClient.set_log_level(LogLevel.DEBUG)
-```
-
-## Future Enhancements
-
-### Async Support
-
-Consider adding asyncio support for non-blocking operations:
-
-```python
-async with AsyncRatsClient(8080) as client:
-    await client.start()
-    await client.connect("localhost", 8081)
-```
-
-### Type Stubs
-
-Generate `.pyi` stub files for better IDE support and static analysis.
-
-### Cython Alternative
-
-For performance-critical applications, consider Cython-based bindings as an alternative to ctypes.
-
-### Documentation
-
-- Auto-generate API docs from docstrings
-- Interactive examples in documentation
-- Video tutorials for common use cases
+ICE/STUN/TURN, encryption enable/keys, configuration load/save, granular logging
+(colours/timestamps/rotation/retention/console), historical peers, statistics
+JSON (connection/gossipsub/file-transfer) and automatic-discovery toggles are
+not part of the new C ABI and have no Python surface. See the README migration
+table for replacements (`enable_port_mapping`, the `security`/`data_dir`
+constructor args, `enable_dht`/`enable_mdns`, `enable_reconnect`).

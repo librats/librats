@@ -19,3 +19,16 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Keep the public LibRats API and native bridge.
+-keep public class com.librats.** { *; }
+
+# Native methods are resolved by name from librats_jni.cpp.
+-keepclasseswithmembernames class com.librats.RatsClient {
+    native <methods>;
+}
+
+# Callback interfaces and their methods are invoked from native code via
+# GetMethodID (onConnected/onDisconnected/onMessage/onTopicMessage/
+# onJsonMessage/onFileOffer/onFileProgress/onFileComplete) — keep their names.
+-keep interface com.librats.*Callback { *; }

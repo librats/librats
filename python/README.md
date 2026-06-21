@@ -1,374 +1,281 @@
 # librats Python Bindings
 
-Python bindings for the librats peer-to-peer networking library, providing high-level access to P2P networking, file transfers, NAT traversal, and GossipSub messaging.
+Python bindings for the **librats** peer-to-peer networking library. They target
+the librats C ABI (`src/bindings/rats.h`) via `ctypes` and expose a high-level
+`RatsClient` for P2P messaging, pub/sub, typed JSON messaging, file transfer,
+discovery (DHT / mDNS), NAT port mapping, ping/RTT and automatic reconnection.
 
-### Prerequisites
+> **Migrating from the old bindings?** The C ABI was rewritten. See
+> [Migration](#migration-from-the-old-api) for the old → new mapping and the
+> features that were removed.
 
-1. **Build the librats C library** first (see main README)
-2. **Python 3.7+** is required
+## Prerequisites
 
-### Installing the Python Package
+1. Build the librats C shared library first (see main README / build script).
+2. Python 3.7+.
 
-```bash
-cd python
-pip install -e .
-```
-
-Or install from PyPI (when available):
-
-```bash
-pip install librats-py
-```
-
-### Development Installation
-
-For development with additional tools:
+## Installing
 
 ```bash
 cd python
-pip install -e ".[dev]"
+pip install -e .              # development install
+# or: pip install -e ".[dev]" # with test/lint tooling
 ```
 
-## Quick Start
+Build the native library and copy it next to the package:
 
-### Basic Client
+```bash
+cd python
+python build.py --build-native    # CMake: -DRATS_SHARED_LIBRARY=ON
+```
+
+## Core concepts
+
+* A `RatsClient` wraps a single librats node (`rats_t`).
+* **Register callbacks and enable subsystems _before_ `start()`.** Enabling a
+  subsystem after start raises `RatsAlreadyStartedError`; using a subsystem
+  before enabling it raises `RatsNotEnabledError`.
+* Peer ids are 64-character lowercase hex strings.
+* Callbacks fire on an internal reactor thread — keep them short and
+  non-blocking. Exceptions raised inside a callback are logged, not propagated
+  into C.
+* Transport security defaults to **Noise XX** (encrypted + authenticated).
+
+## Quick start
+
+### Basic messaging (named channel, raw bytes)
 
 ```python
 from librats_py import RatsClient
 
-# Create and start a client
 with RatsClient(listen_port=8080) as client:
+    client.on_peer_connected(lambda pid: print("connected:", pid))
+    client.on("chat", lambda peer_id, data: print(peer_id, data.decode()))
+
     client.start()
-    
-    # Set up callbacks
-    client.set_connection_callback(lambda peer_id: print(f"Connected: {peer_id}"))
-    client.set_string_callback(lambda peer_id, msg: print(f"Message: {msg}"))
-    
-    # Connect to another peer
+    print("local id:", client.local_id)
+
     client.connect("192.168.1.100", 8081)
-    
-    # Send messages
-    client.broadcast_string("Hello, P2P world!")
-    
-    # Keep running
+    client.broadcast("chat", b"Hello, P2P world!")
     input("Press Enter to exit...")
 ```
 
-### File Transfer
+### Configured node
 
 ```python
-from librats_py import RatsClient
+from librats_py import RatsClient, Security
 
+client = RatsClient(
+    listen_port=8080,
+    security=Security.NOISE,        # or Security.PLAINTEXT
+    data_dir="./state",             # persistent identity + subsystem state
+    protocol_name="myapp",
+    protocol_version="1.0",
+    max_peers=50,
+)
+```
+
+### Pub/sub (GossipSub)
+
+```python
 with RatsClient(8080) as client:
+    client.enable_pubsub()                                   # before start()
+    client.subscribe("room", lambda pid, topic, data: print(topic, data))
     client.start()
-    
-    # Connect to a peer
-    client.connect("192.168.1.100", 8081)
-    
-    # Send a file
-    peer_id = "some_peer_id"
+    client.publish("room", b"Hello everyone!")
+```
+
+### Typed JSON messaging
+
+```python
+with RatsClient(8080) as client:
+    client.enable_json()                                     # before start()
+    client.on_json("greeting", lambda pid, payload: print(pid, payload))
+    client.start()
+    client.broadcast_json("greeting", {"hi": "there"})
+```
+
+### File transfer (push model)
+
+```python
+with RatsClient(8080) as client:
+    client.enable_file_transfer(temp_dir="./downloads")      # before start()
+
+    def on_offer(peer_id, transfer_id, name, size, is_dir):
+        client.accept_file(peer_id, transfer_id, f"./downloads/{name}")
+
+    client.on_file_offer(on_offer)
+    client.on_file_progress(lambda tid, pid, done, total, status:
+                            print(tid, done, total, status))
+    client.on_file_complete(lambda tid, ok, path: print(tid, ok, path))
+    client.start()
+
+    # Sender side:
     transfer_id = client.send_file(peer_id, "/path/to/file.txt")
-    print(f"File transfer started: {transfer_id}")
+    # transfer_id = client.send_directory(peer_id, "/path/to/dir")
 ```
 
-### GossipSub Messaging
+### Discovery, NAT, ping, reconnect
 
 ```python
-from librats_py import RatsClient
-
 with RatsClient(8080) as client:
+    client.enable_dht(dht_port=0, discovery_key="myapp")     # before start()
+    client.enable_mdns()
+    client.enable_port_mapping(enable_upnp=True, enable_natpmp=True)
+    client.enable_ping()
+    client.enable_reconnect()
     client.start()
-    
-    # Subscribe to a topic
-    client.subscribe_to_topic("chat")
-    
-    # Set up topic message handler
-    def on_topic_message(peer_id, topic, message):
-        print(f"[{topic}] {peer_id}: {message}")
-    
-    # Note: Topic callbacks need to be set up via the C API
-    # This is a simplified example
-    
-    # Publish messages
-    client.publish_to_topic("chat", "Hello everyone!")
+
+    client.add_reconnect("192.168.1.100", 8081)
+    rtt = client.peer_rtt_ms(some_peer_id)                   # -1 if unknown
 ```
 
-## API Reference
+## API reference
 
-### RatsClient
-
-The main client class for P2P networking.
-
-#### Constructor
+### Construction
 
 ```python
-RatsClient(listen_port: int = 0)
+RatsClient(listen_port=0, *, enable_listen=True, bind_address=None,
+           security=Security.NOISE, data_dir=None,
+           protocol_name=None, protocol_version=None, max_peers=0)
 ```
 
-- `listen_port`: Port to listen on (0 for automatic assignment)
+### Lifecycle / identity
 
-#### Core Methods
+| Method / property | Description |
+| --- | --- |
+| `start()` / `stop()` | Start / stop the node |
+| `is_running() -> bool` | Whether started |
+| `destroy()` | Explicitly destroy (else on GC) |
+| `local_id -> str` | Our 64-hex peer id |
+| `listen_port -> int` | Actual listen port |
+| `protocol_name` / `protocol_version` | Handshake identity |
 
-##### Connection Management
+### Connections / peers
 
-```python
-client.start()                    # Start the client
-client.stop()                     # Stop the client
-client.is_running() -> bool       # Check if running
+`connect(host, port)`, `peer_count() -> int`, `peer_ids() -> list[str]`,
+`set_max_peers(n)`, `get_max_peers() -> int`.
 
-client.connect(host: str, port: int)
-client.disconnect_peer(peer_id: str)
-```
+### Raw messaging
 
-##### Messaging
+`send(peer_id, channel, data: bytes)`, `broadcast(channel, data: bytes)`,
+`on(channel, cb)` where `cb(peer_id: str, data: bytes)`.
 
-```python
-# Send to specific peer
-client.send_string(peer_id: str, message: str)
-client.send_binary(peer_id: str, data: bytes)
-client.send_json(peer_id: str, data: dict)
+### Peer events
 
-# Broadcast to all peers
-client.broadcast_string(message: str) -> int
-client.broadcast_binary(data: bytes) -> int
-client.broadcast_json(data: dict) -> int
-```
+`on_peer_connected(cb)`, `on_peer_disconnected(cb)` where `cb(peer_id: str)`.
 
-##### Information
+### Pub/sub
 
-```python
-client.get_peer_count() -> int
-client.get_our_peer_id() -> str
-client.get_connection_statistics() -> dict
-client.get_max_peers() -> int
-client.set_max_peers(count: int)
-```
+`enable_pubsub()`, `subscribe(topic, cb)` (`cb(peer_id, topic, data: bytes)`),
+`unsubscribe(topic)`, `publish(topic, data: bytes)`.
 
-#### Discovery Methods
+### Typed JSON
 
-```python
-# DHT Discovery
-client.start_dht_discovery(port: int = 6881)
-client.stop_dht_discovery()
-client.is_dht_running() -> bool
+`enable_json()`, `on_json(type, cb)`, `once_json(type, cb)`, `off_json(type)`
+(`cb(peer_id, payload)`), `send_json(peer_id, type, payload)`,
+`broadcast_json(type, payload)`. Payloads are JSON-encoded (dict/list/etc).
 
-# GossipSub
-client.subscribe_to_topic(topic: str)
-client.unsubscribe_from_topic(topic: str)
-client.publish_to_topic(topic: str, message: str)
-client.is_gossipsub_available() -> bool
-```
+### File transfer
 
-#### File Transfer
+`enable_file_transfer(temp_dir=None)`, `on_file_offer(cb)`,
+`on_file_progress(cb)`, `on_file_complete(cb)`, `send_file(peer_id, path) -> int`,
+`send_directory(peer_id, dir_path) -> int`,
+`accept_file(peer_id, transfer_id, dest_path)`,
+`reject_file(peer_id, transfer_id)`, `cancel_file(...)`, `pause_file(...)`,
+`resume_file(...)`.
 
-# Transfers are push-only: a peer sends an offer and the receiver accepts it.
-```python
-# Send files and directories (directories are always recursive)
-client.send_file(peer_id: str, file_path: str, remote_filename: str = None) -> str
-client.send_directory(peer_id: str, directory_path: str, remote_directory_name: str) -> str
+Callback signatures:
 
-# Handle incoming offers (file or directory). remote_path is always empty.
-def on_offer(peer_id, transfer_id, remote_path, filename):
-    client.accept_file_transfer(transfer_id, f"./downloads/{filename}")
-client.set_file_request_callback(on_offer)
-client.set_file_progress_callback(lambda tid, pct, status: print(tid, pct, status))
+* offer: `(peer_id, transfer_id, name, size, is_directory)`
+* progress: `(transfer_id, peer_id, bytes_transferred, total_bytes, status)`
+  where `status` is a `FileTransferStatus`
+* complete: `(transfer_id, success, path)`
 
-# Respond to / control transfers
-client.accept_file_transfer(transfer_id: str, local_path: str)
-client.reject_file_transfer(transfer_id: str, reason: str = "")
-client.cancel_file_transfer(transfer_id: str)
-```
+### Discovery / NAT / liveness / reconnect
 
-#### Encryption
+`enable_dht(dht_port=0, discovery_key=None)`, `enable_mdns()`,
+`enable_port_mapping(enable_upnp=True, enable_natpmp=True)`, `enable_ping()`,
+`peer_rtt_ms(peer_id) -> int`, `enable_reconnect()`,
+`add_reconnect(host, port)`, `remove_reconnect(host, port)`.
 
-```python
-client.set_encryption_enabled(enabled: bool)
-client.is_encryption_enabled() -> bool
-client.generate_encryption_key() -> str
-client.set_encryption_key(key_hex: str)
-client.get_encryption_key() -> str
-```
+### Logging / info (static)
 
-#### Callbacks
-
-```python
-# Set event handlers
-client.set_connection_callback(callback: Callable[[str], None])
-client.set_disconnect_callback(callback: Callable[[str], None])
-client.set_string_callback(callback: Callable[[str, str], None])
-client.set_binary_callback(callback: Callable[[str, bytes], None])
-client.set_json_callback(callback: Callable[[str, dict], None])
-```
+`RatsClient.set_log_level(LogLevel)`, `RatsClient.set_log_file(path|None)`,
+`RatsClient.get_version_string()`, `RatsClient.get_version() -> VersionInfo`,
+`RatsClient.get_git_describe()`, `RatsClient.get_abi() -> int`,
+`RatsClient.error_str(code) -> str`.
 
 ### Enums
 
-#### LogLevel
-
-```python
-LogLevel.DEBUG    # Debug messages
-LogLevel.INFO     # Informational messages
-LogLevel.WARN     # Warning messages
-LogLevel.ERROR    # Error messages only
-```
+* `Security` — `NOISE`, `PLAINTEXT`
+* `LogLevel` — `DEBUG`, `INFO`, `WARN`, `ERROR`
+* `FileTransferStatus` — `PENDING`, `ACTIVE`, `PAUSED`, `COMPLETED`, `FAILED`, `CANCELLED`
+* `ErrorCode` (`rats_error_t`) — `OK`, `INVALID_ARG`, `NOT_STARTED`, `ALREADY_STARTED`, `NOT_ENABLED`, `NO_SUCH_PEER`, `BIND`, `INTERNAL`
 
 ### Exceptions
 
-All librats operations can raise `RatsError` or its subclasses:
-
-- `RatsError` - Base exception
-- `RatsConnectionError` - Connection-related errors
-- `RatsInvalidParameterError` - Invalid parameters
-- `RatsNotRunningError` - Client not running
-- `RatsPeerNotFoundError` - Peer not found
-- `RatsJsonParseError` - JSON parsing errors
+`RatsError` (base) with subclasses keyed off `rats_error_t`:
+`RatsInvalidArgError`, `RatsNotStartedError`, `RatsAlreadyStartedError`,
+`RatsNotEnabledError`, `RatsNoSuchPeerError`, `RatsBindError`,
+`RatsConnectionError`.
 
 ## Examples
 
-The `examples/` directory contains several demonstration scripts:
-
-### Basic Client (`examples/basic_client.py`)
-
-Interactive P2P client with command-line interface:
-
 ```bash
 python -m librats_py.examples.basic_client 8080
-```
-
-### File Transfer (`examples/file_transfer.py`)
-
-File transfer demonstration:
-
-```bash
-python -m librats_py.examples.file_transfer 8080
-```
-
-### GossipSub Chat (`examples/gossipsub_chat.py`)
-
-Chat room using GossipSub:
-
-```bash
-python -m librats_py.examples.gossipsub_chat 8080 alice
+python -m librats_py.examples.file_transfer 8080 ./downloads
+python -m librats_py.examples.gossipsub_chat 8080 alice general
 ```
 
 ## Testing
 
-Run the test suite:
-
 ```bash
-# Install test dependencies
 pip install -e ".[dev]"
-
-# Run tests
 python -m pytest librats_py/tests/
-
-# Run with coverage
-python -m pytest --cov=librats_py librats_py/tests/
 ```
 
-Note: Integration tests require the librats shared library to be built and available.
+Integration tests require the native shared library to be built and importable.
 
-## Building from Source
+## Migration from the old API
 
-### Requirements
+| Old binding | New binding |
+| --- | --- |
+| `set_connection_callback` / `set_disconnect_callback` | `on_peer_connected` / `on_peer_disconnected` |
+| `send_string` / `broadcast_string` / `send_binary` / `broadcast_binary` | `send(peer, channel, bytes)` / `broadcast(channel, bytes)` + `on(channel, cb)` |
+| `send_json` / `broadcast_json` + `set_json_callback` | `enable_json` + `send_json(peer, type, payload)` / `broadcast_json(type, payload)` + `on_json` |
+| `subscribe_to_topic` / `publish_to_topic` + topic callbacks | `enable_pubsub` + `subscribe(topic, cb)` / `publish(topic, bytes)` |
+| `send_file` / `accept_file_transfer` (string ids) | `enable_file_transfer` + `send_file`/`send_directory` (returns int id) + `on_file_offer/progress/complete` |
+| `start_dht_discovery` | `enable_dht` (before start) |
+| `start_mdns_discovery` | `enable_mdns` (before start) |
+| `get_our_peer_id` | `local_id` |
+| `get_peer_count` / `get_peer_ids` | `peer_count` / `peer_ids` |
+| `set_max_peers` / `get_max_peers` | same names |
+| `set_log_level(name_str)` | `set_log_level(LogLevel)` |
 
-- librats C library built and installed
-- Python 3.7+
-- ctypes (included with Python)
+### Removed features
 
-### Build Steps
+The following no longer exist in the C ABI and were dropped from the Python API:
 
-1. **Build librats C library**:
-   ```bash
-   mkdir build && cd build
-   cmake ..
-   make
-   ```
+* **ICE / STUN / TURN** NAT traversal — use `enable_port_mapping` (UPnP/NAT-PMP).
+* **Encryption enable/keys** — security is fixed at construction via the
+  `security` parameter (`Security.NOISE` / `Security.PLAINTEXT`).
+* **Configuration load/save** — use the `data_dir` constructor argument for
+  persistent identity and subsystem state.
+* **Granular logging** (colours, timestamps, rotation, retention, per-node
+  console toggles) — only `set_log_level` / `set_log_file` remain.
+* **Historical peers** and **automatic-discovery toggles** — use
+  `enable_reconnect` / `add_reconnect` and `enable_dht` / `enable_mdns`.
+* **Statistics JSON** (connection / gossipsub / file-transfer) — removed.
 
-2. **Install Python bindings**:
-   ```bash
-   cd python
-   pip install -e .
-   ```
+## Library loading
 
-3. **Verify installation**:
-   ```bash
-   python -c "from librats_py import RatsClient; print('Success!')"
-   ```
-
-## Architecture
-
-The Python bindings use ctypes to interface with the librats C library:
-
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Python App    │    │   librats_py     │    │   librats.so    │
-│                 │◄──►│                  │◄──►│                 │
-│  (Your Code)    │    │  (Python API)    │    │   (C Library)   │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-```
-
-- **High-level API**: Pythonic interface with proper error handling
-- **ctypes layer**: Low-level binding to C functions
-- **C library**: Core librats functionality
-
-## Library Location
-
-The Python bindings automatically search for the librats shared library in common locations:
-
-- Current directory
-- `../build/`, `../../build/`, etc.
-- System library paths (`/usr/lib`, `/usr/local/lib`)
-- Paths in `LD_LIBRARY_PATH` (Linux/macOS) or `PATH` (Windows)
-
-You can also set the library path explicitly by placing the library file in the package directory.
-
-## Troubleshooting
-
-### "LibratsNotFoundError"
-
-The shared library couldn't be found. Ensure:
-
-1. The librats C library is built (`make` or `cmake --build build`)
-2. The library is in your system path or the search paths
-3. On Linux: Check `LD_LIBRARY_PATH`
-4. On Windows: Check `PATH` or place DLL in Python package directory
-
-### Import Errors
-
-```python
-ImportError: Could not import librats_py
-```
-
-Usually indicates the native library isn't available. The Python package will still import but functionality will be limited.
-
-### Connection Issues
-
-- Check firewall settings
-- Ensure ports are not blocked
-- Try different connection strategies
-- Enable logging for detailed diagnostics
-
-### Performance Tips
-
-- Use binary data for large messages instead of JSON/strings
-- Enable encryption only when needed
-- Tune `max_peers` based on your use case
-- Use GossipSub for efficient broadcast messaging
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
+The bindings search for the shared library next to the package, in `../build`
+(and `build/lib`, `build/bin`), system library paths, and `LD_LIBRARY_PATH` /
+`PATH`. Platform names: `rats.dll`/`librats.dll` (Windows),
+`librats.dylib` (macOS), `librats.so` (Linux). `python build.py --build-native`
+copies the freshly built library next to the package automatically.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Links
-
-- [Main librats repository](https://github.com/your-org/librats)
-- [Documentation](https://your-org.github.io/librats)
-- [Issue tracker](https://github.com/your-org/librats/issues)
+MIT — see the LICENSE file.

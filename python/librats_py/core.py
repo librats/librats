@@ -1,1412 +1,575 @@
 """
-Core RatsClient implementation for Python bindings.
+High-level :class:`RatsClient` over the librats C ABI (``src/bindings/rats.h``).
+
+A :class:`RatsClient` wraps a single ``rats_t`` node. The lifecycle mirrors the
+C contract:
+
+* Register callbacks and enable subsystems **before** :meth:`start`.
+  Enabling a subsystem after start raises :class:`RatsAlreadyStartedError`;
+  calling a subsystem op before its enable raises :class:`RatsNotEnabledError`.
+* Callbacks fire on an internal reactor thread — do not block in them. The
+  wrappers here swallow Python exceptions so they never propagate into C.
+* All ``CFUNCTYPE`` callback objects are retained on the instance for the
+  node's lifetime so they are not garbage-collected while C holds a pointer.
 """
 
 import json
 import threading
 import weakref
-from typing import Optional, List, Dict, Any, Callable
-from ctypes import c_void_p, c_char_p, create_string_buffer, byref, cast, c_int, string_at
+from typing import Any, Dict, List, Optional
 
-from .ctypes_wrapper import get_librats
-from .enums import RatsError as ErrorCode, LogLevel, VersionInfo
+from ctypes import byref, c_size_t, c_int, string_at
+
+from .ctypes_wrapper import get_librats, take_string, RatsConfig
+from .enums import RatsError as ErrorCode, Security, LogLevel, VersionInfo
 from .exceptions import RatsError, RatsConnectionError, check_error
-from .callbacks import *
+from .callbacks import (
+    PeerCallback, MessageCallback, TopicCallback, JsonCallback,
+    FileOfferCallback, FileProgressCallback, FileCompleteCallback,
+    PeerCallbackType, MessageCallbackType, TopicCallbackType, JsonCallbackType,
+    FileOfferCallbackType, FileProgressCallbackType, FileCompleteCallbackType,
+)
+
+
+def _b(s: Optional[str]) -> Optional[bytes]:
+    """Encode an optional ``str`` to UTF-8 bytes (``None`` stays ``None``)."""
+    return s.encode('utf-8') if s is not None else None
 
 
 class RatsClient:
-    """
-    Python wrapper for the librats C client.
-    
-    This class provides a high-level Python interface to the librats P2P networking library.
-    """
-    
-    def __init__(self, listen_port: int = 0):
-        """
-        Initialize a new RatsClient.
-        
+    """Pythonic wrapper around a librats node (``rats_t``)."""
+
+    def __init__(
+        self,
+        listen_port: int = 0,
+        *,
+        enable_listen: bool = True,
+        bind_address: Optional[str] = None,
+        security: Security = Security.NOISE,
+        data_dir: Optional[str] = None,
+        protocol_name: Optional[str] = None,
+        protocol_version: Optional[str] = None,
+        max_peers: int = 0,
+    ):
+        """Create a node.
+
         Args:
-            listen_port: Port to listen on for incoming connections (0 for random)
+            listen_port: Inbound TCP port (0 = ephemeral).
+            enable_listen: ``False`` makes a dial-only node (no listener).
+            bind_address: Bind address; ``None`` → ``"::"`` dual-stack wildcard.
+            security: :class:`~librats_py.enums.Security` mode (default Noise).
+            data_dir: Persistent state dir; ``None``/"" → ephemeral identity.
+            protocol_name: Handshake app namespace; ``None`` → ``"librats"``.
+            protocol_version: Handshake app version; ``None`` → ``"1.0"``.
+            max_peers: Established-peer cap (0 = unlimited).
         """
         self._lib = get_librats()
-        self._handle = self._lib.lib.rats_create(listen_port)
+
+        cfg: RatsConfig = self._lib.config_default()
+        cfg.listen_port = listen_port
+        cfg.enable_listen = 1 if enable_listen else 0
+        cfg.security = int(security)
+        cfg.max_peers = max_peers
+        # Keep bytes alive for the duration of the create call.
+        self._cfg_keepalive = [
+            _b(bind_address), _b(data_dir),
+            _b(protocol_name), _b(protocol_version),
+        ]
+        if bind_address is not None:
+            cfg.bind_address = self._cfg_keepalive[0]
+        if data_dir is not None:
+            cfg.data_dir = self._cfg_keepalive[1]
+        if protocol_name is not None:
+            cfg.protocol_name = self._cfg_keepalive[2]
+        if protocol_version is not None:
+            cfg.protocol_version = self._cfg_keepalive[3]
+
+        self._handle = self._lib.lib.rats_create_config(byref(cfg))
         if not self._handle:
-            raise RatsError("Failed to create RatsClient")
-        
-        self._listen_port = listen_port
+            raise RatsError("Failed to create RatsClient node")
+
         self._running = False
-        self._callbacks_lock = threading.Lock()
-        
-        # Store Python callbacks to prevent garbage collection
-        self._callbacks = {}
-        
-        # Store C callback functions
-        self._c_callbacks = {}
-        
-        # Weak reference for cleanup
-        self._finalizer = weakref.finalize(self, self._cleanup, self._handle, self._lib)
-    
+        self._lock = threading.Lock()
+
+        # Retain every CFUNCTYPE object so the GC cannot collect it while the
+        # native side still holds the pointer. Keys are stable per-slot.
+        self._c_callbacks: Dict[str, Any] = {}
+
+        self._finalizer = weakref.finalize(
+            self, self._cleanup, self._handle, self._lib)
+
+    # ------------------------------------------------------------------ #
+    # Lifecycle
+    # ------------------------------------------------------------------ #
     @staticmethod
     def _cleanup(handle, lib):
-        """Cleanup function called when object is garbage collected."""
         if handle:
             lib.lib.rats_destroy(handle)
-    
+
     def __enter__(self):
-        """Context manager entry."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
         self.stop()
-    
+        return False
+
     def start(self) -> None:
-        """
-        Start the RatsClient and begin listening for connections.
-        
-        Raises:
-            RatsError: If starting the client fails
-        """
-        result = self._lib.lib.rats_start(self._handle)
-        check_error(result, "Starting client")
+        """Start the node. Raises on bind failure or if already started."""
+        check_error(self._lib.lib.rats_start(self._handle), "Starting node")
         self._running = True
-    
+
     def stop(self) -> None:
-        """Stop the RatsClient and close all connections."""
-        if self._handle:
+        """Stop the node and close all connections (idempotent)."""
+        if self._handle and self._running:
             self._lib.lib.rats_stop(self._handle)
             self._running = False
-    
+
     def is_running(self) -> bool:
-        """Check if the client is currently running."""
+        """Return whether :meth:`start` has been called and not stopped."""
         return self._running
-    
-    def connect(self, host: str, port: int) -> None:
-        """
-        Connect to a peer via direct TCP connection.
-        
-        Args:
-            host: Target host/IP address
-            port: Target port
-            
-        Raises:
-            RatsError: If connection fails
-        """
-        host_bytes = host.encode('utf-8')
-        result = self._lib.lib.rats_connect(self._handle, host_bytes, port)
-        if result != 1:
-            raise RatsConnectionError(f"Failed to connect to {host}:{port}")
-    
-    def disconnect_peer(self, peer_id: str) -> None:
-        """
-        Disconnect from a specific peer.
-        
-        Args:
-            peer_id: Peer ID to disconnect
-            
-        Raises:
-            RatsError: If disconnection fails
-        """
-        peer_id_bytes = peer_id.encode('utf-8')
-        result = self._lib.lib.rats_disconnect_peer_by_id(self._handle, peer_id_bytes)
-        check_error(result, f"Disconnecting peer {peer_id}")
-    
-    def send_string(self, peer_id: str, message: str) -> None:
-        """
-        Send a string message to a specific peer.
-        
-        Args:
-            peer_id: Target peer ID
-            message: String message to send
-            
-        Raises:
-            RatsError: If sending fails
-        """
-        peer_id_bytes = peer_id.encode('utf-8')
-        message_bytes = message.encode('utf-8')
-        result = self._lib.lib.rats_send_string(self._handle, peer_id_bytes, message_bytes)
-        check_error(result, f"Sending string to peer {peer_id}")
-    
-    def send_binary(self, peer_id: str, data: bytes) -> None:
-        """
-        Send binary data to a specific peer.
-        
-        Args:
-            peer_id: Target peer ID
-            data: Binary data to send
-            
-        Raises:
-            RatsError: If sending fails
-        """
-        peer_id_bytes = peer_id.encode('utf-8')
-        result = self._lib.lib.rats_send_binary(
-            self._handle, peer_id_bytes, data, len(data)
-        )
-        check_error(result, f"Sending binary data to peer {peer_id}")
-    
-    def send_json(self, peer_id: str, data: Dict[str, Any]) -> None:
-        """
-        Send JSON data to a specific peer.
-        
-        Args:
-            peer_id: Target peer ID
-            data: Dictionary to send as JSON
-            
-        Raises:
-            RatsError: If sending fails
-        """
-        peer_id_bytes = peer_id.encode('utf-8')
-        json_bytes = json.dumps(data).encode('utf-8')
-        result = self._lib.lib.rats_send_json(self._handle, peer_id_bytes, json_bytes)
-        check_error(result, f"Sending JSON to peer {peer_id}")
-    
-    def broadcast_string(self, message: str) -> int:
-        """
-        Broadcast a string message to all connected peers.
-        
-        Args:
-            message: String message to broadcast
-            
-        Returns:
-            Number of peers the message was sent to
-        """
-        message_bytes = message.encode('utf-8')
-        return self._lib.lib.rats_broadcast_string(self._handle, message_bytes)
-    
-    def broadcast_binary(self, data: bytes) -> int:
-        """
-        Broadcast binary data to all connected peers.
-        
-        Args:
-            data: Binary data to broadcast
-            
-        Returns:
-            Number of peers the data was sent to
-        """
-        return self._lib.lib.rats_broadcast_binary(self._handle, data, len(data))
-    
-    def broadcast_json(self, data: Dict[str, Any]) -> int:
-        """
-        Broadcast JSON data to all connected peers.
-        
-        Args:
-            data: Dictionary to broadcast as JSON
-            
-        Returns:
-            Number of peers the data was sent to
-        """
-        json_bytes = json.dumps(data).encode('utf-8')
-        return self._lib.lib.rats_broadcast_json(self._handle, json_bytes)
-    
-    def get_peer_count(self) -> int:
-        """Get the number of currently connected peers."""
-        return self._lib.lib.rats_get_peer_count(self._handle)
-    
+
+    def destroy(self) -> None:
+        """Explicitly destroy the node (otherwise destroyed on GC)."""
+        self._finalizer()
+        self._handle = None
+
+    # ------------------------------------------------------------------ #
+    # Identity / info
+    # ------------------------------------------------------------------ #
+    @property
+    def listen_port(self) -> int:
+        """The actual port the node is listening on."""
+        return self._lib.lib.rats_listen_port(self._handle)
+
     def get_listen_port(self) -> int:
-        """Get the port the client is listening on."""
-        return self._lib.lib.rats_get_listen_port(self._handle)
-    
-    def get_our_peer_id(self) -> str:
-        """Get our own peer ID."""
-        result = self._lib.lib.rats_get_our_peer_id(self._handle)
-        if not result:
-            return ""
-        peer_id = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return peer_id
-    
-    def get_connection_statistics(self) -> Dict[str, Any]:
-        """Get connection statistics as a dictionary."""
-        result = self._lib.lib.rats_get_connection_statistics_json(self._handle)
-        if not result:
-            return {}
-        
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return {}
-    
-    def get_validated_peer_ids(self) -> List[str]:
-        """Get list of validated peer IDs."""
-        count = c_int()
-        result = self._lib.lib.rats_get_validated_peer_ids(self._handle, byref(count))
-        if not result or count.value == 0:
-            return []
-        
-        peer_ids = []
-        for i in range(count.value):
-            if result[i]:
-                peer_id = string_at(result[i]).decode('utf-8')
-                peer_ids.append(peer_id)
-                self._lib.lib.rats_string_free(result[i])
-        
-        # Free the array itself
-        self._lib.lib.rats_string_free(cast(result, c_void_p))
-        return peer_ids
-    
-    def get_peer_ids(self) -> List[str]:
-        """Get list of all peer IDs."""
-        count = c_int()
-        result = self._lib.lib.rats_get_peer_ids(self._handle, byref(count))
-        if not result or count.value == 0:
-            return []
-        
-        peer_ids = []
-        for i in range(count.value):
-            if result[i]:
-                peer_id = string_at(result[i]).decode('utf-8')
-                peer_ids.append(peer_id)
-                self._lib.lib.rats_string_free(result[i])
-        
-        # Free the array itself
-        self._lib.lib.rats_string_free(cast(result, c_void_p))
-        return peer_ids
-    
-    def get_peer_info(self, peer_id: str) -> Dict[str, Any]:
-        """Get detailed information about a specific peer."""
-        peer_id_bytes = peer_id.encode('utf-8')
-        result = self._lib.lib.rats_get_peer_info_json(self._handle, peer_id_bytes)
-        if not result:
-            return {}
-        
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return {}
-    
-    # Peer configuration
+        return self.listen_port
+
+    @property
+    def local_id(self) -> str:
+        """Our self-certifying peer id (64-char lowercase hex)."""
+        return take_string(self._lib, self._lib.lib.rats_local_id(self._handle))
+
+    def get_local_id(self) -> str:
+        return self.local_id
+
+    @property
+    def protocol_name(self) -> str:
+        """Application protocol name bound into the handshake."""
+        return take_string(self._lib, self._lib.lib.rats_protocol_name(self._handle))
+
+    @property
+    def protocol_version(self) -> str:
+        """Application protocol version bound into the handshake."""
+        return take_string(self._lib, self._lib.lib.rats_protocol_version(self._handle))
+
+    # ------------------------------------------------------------------ #
+    # Connections / peers
+    # ------------------------------------------------------------------ #
+    def connect(self, host: str, port: int) -> None:
+        """Dial a peer at ``host:port`` (best-effort; queued)."""
+        check_error(
+            self._lib.lib.rats_connect(self._handle, _b(host), port),
+            f"Connecting to {host}:{port}")
+
+    def peer_count(self) -> int:
+        """Number of currently-connected peers."""
+        return self._lib.lib.rats_peer_count(self._handle)
+
+    def get_peer_count(self) -> int:
+        return self.peer_count()
+
     def set_max_peers(self, max_peers: int) -> None:
-        """Set maximum number of peers."""
-        result = self._lib.lib.rats_set_max_peers(self._handle, max_peers)
-        check_error(result, "Setting max peers")
-    
+        """Set the established-peer cap (0 = unlimited)."""
+        self._lib.lib.rats_set_max_peers(self._handle, max_peers)
+
     def get_max_peers(self) -> int:
-        """Get maximum number of peers."""
-        return self._lib.lib.rats_get_max_peers(self._handle)
-    
-    def is_peer_limit_reached(self) -> bool:
-        """Check if peer limit has been reached."""
-        return bool(self._lib.lib.rats_is_peer_limit_reached(self._handle))
-    
-    # DHT Discovery
-    def start_dht_discovery(self, dht_port: int = 6881) -> None:
-        """Start DHT discovery."""
-        result = self._lib.lib.rats_start_dht_discovery(self._handle, dht_port)
-        check_error(result, "Starting DHT discovery")
-    
-    def stop_dht_discovery(self) -> None:
-        """Stop DHT discovery."""
-        self._lib.lib.rats_stop_dht_discovery(self._handle)
-    
-    def is_dht_running(self) -> bool:
-        """Check if DHT is running."""
-        return bool(self._lib.lib.rats_is_dht_running(self._handle))
-    
-    def announce_for_hash(self, content_hash: str, port: int = 0, callback: PeersFoundCallback = None) -> None:
-        """Announce availability for a specific content hash.
-        
-        Args:
-            content_hash: The 40-character hex hash to announce for.
-            port: Port to announce (0 = use listen port).
-            callback: Optional callback to receive discovered peers during DHT traversal.
-                      Signature: callback(peer_addresses: list[str]) -> None
-        """
-        content_hash_bytes = content_hash.encode('utf-8')
-        
-        c_callback = None
-        if callback:
-            def c_callback_wrapper(user_data, peer_addresses, count):
-                peers = []
-                for i in range(count):
-                    if peer_addresses[i]:
-                        peers.append(peer_addresses[i].decode('utf-8'))
-                callback(peers)
-            c_callback = PeersFoundCallbackType(c_callback_wrapper)
-            # Store reference to prevent garbage collection
-            self._peers_found_callback = c_callback
-        
-        result = self._lib.lib.rats_announce_for_hash(self._handle, content_hash_bytes, port, c_callback, None)
-        check_error(result, f"Announcing for hash {content_hash}")
-    
-    def get_dht_routing_table_size(self) -> int:
-        """Get the size of the DHT routing table."""
-        return self._lib.lib.rats_get_dht_routing_table_size(self._handle)
-    
-    # Automatic peer discovery
-    def start_automatic_peer_discovery(self) -> None:
-        """Start automatic peer discovery."""
-        self._lib.lib.rats_start_automatic_peer_discovery(self._handle)
-    
-    def stop_automatic_peer_discovery(self) -> None:
-        """Stop automatic peer discovery."""
-        self._lib.lib.rats_stop_automatic_peer_discovery(self._handle)
-    
-    def is_automatic_discovery_running(self) -> bool:
-        """Check if automatic discovery is running."""
-        return bool(self._lib.lib.rats_is_automatic_discovery_running(self._handle))
-    
-    def get_discovery_hash(self) -> str:
-        """Get the discovery hash for this client."""
-        result = self._lib.lib.rats_get_discovery_hash(self._handle)
-        if not result:
-            return ""
-        hash_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return hash_str
-    
-    @staticmethod
-    def get_rats_peer_discovery_hash() -> str:
-        """Get the default RATS peer discovery hash."""
-        lib = get_librats()
-        result = lib.lib.rats_get_rats_peer_discovery_hash()
-        if not result:
-            return ""
-        hash_str = string_at(result).decode('utf-8')
-        lib.lib.rats_string_free(result)
-        return hash_str
-    
-    # mDNS Discovery
-    def start_mdns_discovery(self, service_name: str = "rats-peer") -> None:
-        """Start mDNS discovery with a service name."""
-        service_name_bytes = service_name.encode('utf-8')
-        result = self._lib.lib.rats_start_mdns_discovery(self._handle, service_name_bytes)
-        check_error(result, f"Starting mDNS discovery with service {service_name}")
-    
-    def stop_mdns_discovery(self) -> None:
-        """Stop mDNS discovery."""
-        self._lib.lib.rats_stop_mdns_discovery(self._handle)
-    
-    def is_mdns_running(self) -> bool:
-        """Check if mDNS discovery is running."""
-        return bool(self._lib.lib.rats_is_mdns_running(self._handle))
-    
-    def query_mdns_services(self) -> None:
-        """Query for mDNS services."""
-        result = self._lib.lib.rats_query_mdns_services(self._handle)
-        check_error(result, "Querying mDNS services")
-    
-    # Protocol configuration
-    def set_protocol_name(self, protocol_name: str) -> None:
-        """Set the protocol name."""
-        protocol_name_bytes = protocol_name.encode('utf-8')
-        result = self._lib.lib.rats_set_protocol_name(self._handle, protocol_name_bytes)
-        check_error(result, f"Setting protocol name to {protocol_name}")
-    
-    def set_protocol_version(self, protocol_version: str) -> None:
-        """Set the protocol version."""
-        protocol_version_bytes = protocol_version.encode('utf-8')
-        result = self._lib.lib.rats_set_protocol_version(self._handle, protocol_version_bytes)
-        check_error(result, f"Setting protocol version to {protocol_version}")
-    
-    def get_protocol_name(self) -> str:
-        """Get the current protocol name."""
-        result = self._lib.lib.rats_get_protocol_name(self._handle)
-        if not result:
-            return ""
-        protocol_name = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return protocol_name
-    
-    def get_protocol_version(self) -> str:
-        """Get the current protocol version."""
-        result = self._lib.lib.rats_get_protocol_version(self._handle)
-        if not result:
-            return ""
-        protocol_version = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return protocol_version
-    
-    # Basic Encryption
-    def set_encryption_enabled(self, enabled: bool) -> None:
-        """Enable or disable encryption."""
-        result = self._lib.lib.rats_set_encryption_enabled(self._handle, int(enabled))
-        check_error(result, "Setting encryption")
-    
-    def is_encryption_enabled(self) -> bool:
-        """Check if encryption is enabled."""
-        return bool(self._lib.lib.rats_is_encryption_enabled(self._handle))
-    
-    # Enhanced Encryption API
-    def initialize_encryption(self, enable: bool) -> None:
-        """Initialize encryption system."""
-        result = self._lib.lib.rats_initialize_encryption(self._handle, int(enable))
-        check_error(result, "Initializing encryption")
-    
-    def is_peer_encrypted(self, peer_id: str) -> bool:
-        """Check if a specific peer connection is encrypted."""
-        peer_id_bytes = peer_id.encode('utf-8')
-        return bool(self._lib.lib.rats_is_peer_encrypted(self._handle, peer_id_bytes))
-    
-    def set_noise_static_keypair(self, private_key_hex: str) -> None:
-        """Set custom Noise Protocol static keypair (32-byte private key as hex string)."""
-        key_bytes = private_key_hex.encode('utf-8')
-        result = self._lib.lib.rats_set_noise_static_keypair(self._handle, key_bytes)
-        check_error(result, "Setting Noise static keypair")
-    
-    def get_noise_static_public_key(self) -> str:
-        """Get our Noise Protocol static public key as hex string."""
-        result = self._lib.lib.rats_get_noise_static_public_key(self._handle)
-        if not result:
-            return ""
-        key = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return key
-    
-    def get_peer_noise_public_key(self, peer_id: str) -> str:
-        """Get remote peer's Noise static public key as hex string."""
-        peer_id_bytes = peer_id.encode('utf-8')
-        result = self._lib.lib.rats_get_peer_noise_public_key(self._handle, peer_id_bytes)
-        if not result:
-            return ""
-        key = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return key
-    
-    def get_peer_handshake_hash(self, peer_id: str) -> str:
-        """Get handshake hash for channel binding as hex string."""
-        peer_id_bytes = peer_id.encode('utf-8')
-        result = self._lib.lib.rats_get_peer_handshake_hash(self._handle, peer_id_bytes)
-        if not result:
-            return ""
-        hash_hex = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return hash_hex
-    
-    # ICE (NAT Traversal) API
-    def is_ice_available(self) -> bool:
-        """Check if ICE is available."""
-        return bool(self._lib.lib.rats_is_ice_available(self._handle))
-    
-    def add_stun_server(self, host: str, port: int = 3478) -> None:
-        """Add a STUN server for NAT traversal."""
-        host_bytes = host.encode('utf-8')
-        self._lib.lib.rats_add_stun_server(self._handle, host_bytes, port)
-    
-    def add_turn_server(self, host: str, port: int, username: str, password: str) -> None:
-        """Add a TURN server for relay-based NAT traversal."""
-        host_bytes = host.encode('utf-8')
-        username_bytes = username.encode('utf-8')
-        password_bytes = password.encode('utf-8')
-        self._lib.lib.rats_add_turn_server(self._handle, host_bytes, port,
-                                           username_bytes, password_bytes)
-    
-    def clear_ice_servers(self) -> None:
-        """Clear all ICE (STUN/TURN) servers."""
-        self._lib.lib.rats_clear_ice_servers(self._handle)
-    
-    def gather_ice_candidates(self) -> bool:
-        """Start gathering ICE candidates."""
-        return bool(self._lib.lib.rats_gather_ice_candidates(self._handle))
-    
-    def get_ice_candidates(self) -> List[Dict[str, Any]]:
-        """Get local ICE candidates."""
-        result = self._lib.lib.rats_get_ice_candidates_json(self._handle)
-        if not result:
+        """Get the established-peer cap."""
+        return self._lib.lib.rats_max_peers(self._handle)
+
+    def peer_ids(self) -> List[str]:
+        """Hex ids of currently-connected peers."""
+        count = c_size_t()
+        arr = self._lib.lib.rats_peer_ids(self._handle, byref(count))
+        if not arr or count.value == 0:
             return []
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return []
-    
-    def is_ice_gathering_complete(self) -> bool:
-        """Check if ICE candidate gathering is complete."""
-        return bool(self._lib.lib.rats_is_ice_gathering_complete(self._handle))
-    
-    def get_public_address(self) -> Optional[str]:
-        """Get public address discovered via STUN (ip:port format)."""
-        result = self._lib.lib.rats_get_public_address(self._handle)
-        if not result:
-            return None
-        address = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return address
-    
-    def discover_public_address(self, stun_server: str = "stun.l.google.com",
-                                port: int = 19302, timeout_ms: int = 5000) -> Optional[str]:
-        """Perform a simple STUN binding request to discover public address."""
-        server_bytes = stun_server.encode('utf-8')
-        result = self._lib.lib.rats_discover_public_address(
-            self._handle, server_bytes, port, timeout_ms
-        )
-        if not result:
-            return None
-        address = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return address
-    
-    def add_remote_ice_candidate(self, candidate_sdp: str) -> None:
-        """Add a remote ICE candidate from SDP."""
-        candidate_bytes = candidate_sdp.encode('utf-8')
-        self._lib.lib.rats_add_remote_ice_candidate(self._handle, candidate_bytes)
-    
-    def end_of_remote_ice_candidates(self) -> None:
-        """Signal end of remote ICE candidates (trickle ICE complete)."""
-        self._lib.lib.rats_end_of_remote_ice_candidates(self._handle)
-    
-    def start_ice_checks(self) -> None:
-        """Start ICE connectivity checks."""
-        self._lib.lib.rats_start_ice_checks(self._handle)
-    
-    def get_ice_connection_state(self) -> int:
-        """Get current ICE connection state."""
-        return self._lib.lib.rats_get_ice_connection_state(self._handle)
-    
-    def get_ice_gathering_state(self) -> int:
-        """Get ICE gathering state."""
-        return self._lib.lib.rats_get_ice_gathering_state(self._handle)
-    
-    def is_ice_connected(self) -> bool:
-        """Check if ICE is connected."""
-        return bool(self._lib.lib.rats_is_ice_connected(self._handle))
-    
-    def get_ice_selected_pair(self) -> Optional[Dict[str, Any]]:
-        """Get the selected ICE candidate pair."""
-        result = self._lib.lib.rats_get_ice_selected_pair_json(self._handle)
-        if not result:
-            return None
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return None
-    
-    def close_ice(self) -> None:
-        """Close ICE manager and release resources."""
-        self._lib.lib.rats_close_ice(self._handle)
-    
-    def restart_ice(self) -> None:
-        """Restart ICE (re-gather candidates and restart checks)."""
-        self._lib.lib.rats_restart_ice(self._handle)
-    
-    # Message Exchange API
-    def on_message(self, message_type: str, callback: MessageCallback) -> None:
-        """Register a callback for a specific message type."""
-        with self._callbacks_lock:
-            callback_key = f"message_{message_type}"
-            self._callbacks[callback_key] = callback
-            
-            if callback:
-                c_callback = self._create_message_callback(callback)
-                self._c_callbacks[callback_key] = c_callback
-                message_type_bytes = message_type.encode('utf-8')
-                result = self._lib.lib.rats_on_message(
-                    self._handle, message_type_bytes, c_callback, None
-                )
-                check_error(result, f"Setting message callback for type {message_type}")
-            else:
-                message_type_bytes = message_type.encode('utf-8')
-                result = self._lib.lib.rats_on_message(
-                    self._handle, message_type_bytes, None, None
-                )
-                check_error(result, f"Clearing message callback for type {message_type}")
-    
-    def send_message(self, peer_id: str, message_type: str, data: str) -> None:
-        """Send a typed message to a specific peer."""
-        peer_id_bytes = peer_id.encode('utf-8')
-        message_type_bytes = message_type.encode('utf-8')
-        data_bytes = data.encode('utf-8')
-        result = self._lib.lib.rats_send_message(
-            self._handle, peer_id_bytes, message_type_bytes, data_bytes
-        )
-        check_error(result, f"Sending message type {message_type} to peer {peer_id}")
-    
-    def broadcast_message(self, message_type: str, data: str) -> None:
-        """Broadcast a typed message to all connected peers."""
-        message_type_bytes = message_type.encode('utf-8')
-        data_bytes = data.encode('utf-8')
-        result = self._lib.lib.rats_broadcast_message(
-            self._handle, message_type_bytes, data_bytes
-        )
-        check_error(result, f"Broadcasting message type {message_type}")
-    
-    # File Transfer
-    def send_file(self, peer_id: str, file_path: str, 
-                  remote_filename: Optional[str] = None) -> str:
+            result = []
+            for i in range(count.value):
+                ptr = arr[i]
+                if ptr:
+                    result.append(string_at(ptr).decode('utf-8', errors='replace'))
+            return result
+        finally:
+            self._lib.lib.rats_free_peer_ids(arr, count.value)
+
+    def get_peer_ids(self) -> List[str]:
+        return self.peer_ids()
+
+    # ------------------------------------------------------------------ #
+    # Raw channel messaging
+    # ------------------------------------------------------------------ #
+    def send(self, peer_id: str, channel: str, data: bytes) -> None:
+        """Send raw ``data`` on a named ``channel`` to one peer."""
+        check_error(
+            self._lib.lib.rats_send(self._handle, _b(peer_id), _b(channel),
+                                    data, len(data)),
+            f"Sending on channel {channel} to {peer_id}")
+
+    def broadcast(self, channel: str, data: bytes) -> None:
+        """Broadcast raw ``data`` on a named ``channel`` to all peers."""
+        check_error(
+            self._lib.lib.rats_broadcast(self._handle, _b(channel), data, len(data)),
+            f"Broadcasting on channel {channel}")
+
+    def on(self, channel: str, callback: MessageCallback) -> None:
+        """Register a handler for raw messages on ``channel``.
+
+        ``callback(peer_id: str, data: bytes)``. Register before :meth:`start`.
         """
-        Send a file to a peer.
-        
-        Args:
-            peer_id: Target peer ID
-            file_path: Local file path to send
-            remote_filename: Optional remote filename
-            
-        Returns:
-            Transfer ID if successful
-            
-        Raises:
-            RatsError: If sending fails
+        def trampoline(user, peer_id_ptr, data_ptr, length):
+            try:
+                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
+                data = string_at(data_ptr, length) if (data_ptr and length) else b""
+                callback(peer_id, data)
+            except Exception as exc:  # never propagate into C
+                _report(exc, "message callback")
+        c_cb = MessageCallbackType(trampoline)
+        self._c_callbacks[f"on:{channel}"] = c_cb
+        check_error(
+            self._lib.lib.rats_on(self._handle, _b(channel), c_cb, None),
+            f"Registering channel handler {channel}")
+
+    # ------------------------------------------------------------------ #
+    # Peer connect / disconnect events
+    # ------------------------------------------------------------------ #
+    def on_peer_connected(self, callback: PeerCallback) -> None:
+        """Register a ``callback(peer_id: str)`` for new peer connections."""
+        self._register_peer_cb("connected", "rats_on_peer_connected", callback)
+
+    def on_peer_disconnected(self, callback: PeerCallback) -> None:
+        """Register a ``callback(peer_id: str)`` for peer disconnections."""
+        self._register_peer_cb("disconnected", "rats_on_peer_disconnected", callback)
+
+    def _register_peer_cb(self, slot: str, c_func_name: str, callback: PeerCallback):
+        def trampoline(user, peer_id_ptr):
+            try:
+                callback(peer_id_ptr.decode('utf-8') if peer_id_ptr else "")
+            except Exception as exc:
+                _report(exc, f"peer {slot} callback")
+        c_cb = PeerCallbackType(trampoline)
+        self._c_callbacks[f"peer:{slot}"] = c_cb
+        check_error(
+            getattr(self._lib.lib, c_func_name)(self._handle, c_cb, None),
+            f"Registering peer {slot} handler")
+
+    # ------------------------------------------------------------------ #
+    # Discovery / port mapping subsystems (enable before start)
+    # ------------------------------------------------------------------ #
+    def enable_dht(self, dht_port: int = 0, discovery_key: Optional[str] = None) -> None:
+        """Enable DHT discovery. ``dht_port`` 0 = ephemeral."""
+        check_error(
+            self._lib.lib.rats_enable_dht(self._handle, dht_port, _b(discovery_key)),
+            "Enabling DHT")
+
+    def enable_mdns(self) -> None:
+        """Enable local-network mDNS discovery."""
+        check_error(self._lib.lib.rats_enable_mdns(self._handle), "Enabling mDNS")
+
+    def enable_port_mapping(self, enable_upnp: bool = True,
+                            enable_natpmp: bool = True) -> None:
+        """Enable automatic NAT port forwarding (UPnP IGD + NAT-PMP)."""
+        check_error(
+            self._lib.lib.rats_enable_port_mapping(
+                self._handle, 1 if enable_upnp else 0, 1 if enable_natpmp else 0),
+            "Enabling port mapping")
+
+    # ------------------------------------------------------------------ #
+    # Pub/sub (GossipSub)
+    # ------------------------------------------------------------------ #
+    def enable_pubsub(self) -> None:
+        """Enable the pub/sub (GossipSub) subsystem. Call before start()."""
+        check_error(self._lib.lib.rats_enable_pubsub(self._handle), "Enabling pubsub")
+
+    def subscribe(self, topic: str, callback: TopicCallback) -> None:
+        """Subscribe to ``topic``; ``callback(peer_id, topic, data: bytes)``."""
+        def trampoline(user, peer_id_ptr, topic_ptr, data_ptr, length):
+            try:
+                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
+                top = topic_ptr.decode('utf-8') if topic_ptr else ""
+                data = string_at(data_ptr, length) if (data_ptr and length) else b""
+                callback(peer_id, top, data)
+            except Exception as exc:
+                _report(exc, "topic callback")
+        c_cb = TopicCallbackType(trampoline)
+        self._c_callbacks[f"sub:{topic}"] = c_cb
+        check_error(
+            self._lib.lib.rats_subscribe(self._handle, _b(topic), c_cb, None),
+            f"Subscribing to {topic}")
+
+    def unsubscribe(self, topic: str) -> None:
+        """Unsubscribe from ``topic``."""
+        check_error(
+            self._lib.lib.rats_unsubscribe(self._handle, _b(topic)),
+            f"Unsubscribing from {topic}")
+        self._c_callbacks.pop(f"sub:{topic}", None)
+
+    def publish(self, topic: str, data: bytes) -> None:
+        """Publish raw ``data`` to ``topic``."""
+        check_error(
+            self._lib.lib.rats_publish(self._handle, _b(topic), data, len(data)),
+            f"Publishing to {topic}")
+
+    # ------------------------------------------------------------------ #
+    # Typed JSON messaging
+    # ------------------------------------------------------------------ #
+    def enable_json(self) -> None:
+        """Enable the typed JSON messaging subsystem. Call before start()."""
+        check_error(self._lib.lib.rats_enable_json(self._handle), "Enabling JSON")
+
+    def on_json(self, type_name: str, callback: JsonCallback) -> None:
+        """Register a handler for JSON messages of ``type_name``.
+
+        ``callback(peer_id: str, payload)`` where ``payload`` is parsed JSON.
+        Additive: multiple handlers may coexist for a type.
         """
-        peer_id_bytes = peer_id.encode('utf-8')
-        file_path_bytes = file_path.encode('utf-8')
-        remote_filename_bytes = (remote_filename or "").encode('utf-8')
-        
-        result = self._lib.lib.rats_send_file(
-            self._handle, peer_id_bytes, file_path_bytes, remote_filename_bytes
-        )
-        
-        if not result:
-            raise RatsError(f"Failed to send file {file_path} to peer {peer_id}")
-        
-        transfer_id = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return transfer_id
-    
-    def accept_file_transfer(self, transfer_id: str, local_path: str) -> None:
-        """Accept an incoming file transfer."""
-        transfer_id_bytes = transfer_id.encode('utf-8')
-        local_path_bytes = local_path.encode('utf-8')
-        result = self._lib.lib.rats_accept_file_transfer(
-            self._handle, transfer_id_bytes, local_path_bytes
-        )
-        check_error(result, f"Accepting file transfer {transfer_id}")
-    
-    def reject_file_transfer(self, transfer_id: str, reason: str = "") -> None:
-        """Reject an incoming file transfer."""
-        transfer_id_bytes = transfer_id.encode('utf-8')
-        reason_bytes = reason.encode('utf-8')
-        result = self._lib.lib.rats_reject_file_transfer(
-            self._handle, transfer_id_bytes, reason_bytes
-        )
-        check_error(result, f"Rejecting file transfer {transfer_id}")
-    
-    def cancel_file_transfer(self, transfer_id: str) -> None:
-        """Cancel an active file transfer."""
-        transfer_id_bytes = transfer_id.encode('utf-8')
-        result = self._lib.lib.rats_cancel_file_transfer(self._handle, transfer_id_bytes)
-        check_error(result, f"Cancelling file transfer {transfer_id}")
-    
-    def send_directory(self, peer_id: str, directory_path: str,
-                      remote_directory_name: str) -> str:
+        self._register_json_cb("rats_on_json", type_name, callback, once=False)
+
+    def once_json(self, type_name: str, callback: JsonCallback) -> None:
+        """Like :meth:`on_json` but the handler fires at most once."""
+        self._register_json_cb("rats_once_json", type_name, callback, once=True)
+
+    def off_json(self, type_name: str) -> None:
+        """Remove JSON handlers for ``type_name``."""
+        check_error(
+            self._lib.lib.rats_off_json(self._handle, _b(type_name)),
+            f"Removing JSON handler {type_name}")
+        # Drop any retained trampolines for this type.
+        for key in [k for k in self._c_callbacks
+                    if k.startswith(f"json:{type_name}:")]:
+            self._c_callbacks.pop(key, None)
+
+    def _register_json_cb(self, c_func_name, type_name, callback, once):
+        def trampoline(user, peer_id_ptr, json_ptr):
+            try:
+                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
+                payload = None
+                if json_ptr:
+                    text = json_ptr.decode('utf-8')
+                    payload = json.loads(text) if text else None
+                callback(peer_id, payload)
+            except Exception as exc:
+                _report(exc, "json callback")
+        c_cb = JsonCallbackType(trampoline)
+        # Additive registration: use a unique key so multiple handlers survive.
+        key = f"json:{type_name}:{id(callback)}"
+        self._c_callbacks[key] = c_cb
+        check_error(
+            getattr(self._lib.lib, c_func_name)(self._handle, _b(type_name), c_cb, None),
+            f"Registering JSON handler {type_name}")
+
+    def send_json(self, peer_id: str, type_name: str, payload: Any) -> None:
+        """Send a typed JSON message to one peer. ``payload`` is JSON-encoded."""
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        check_error(
+            self._lib.lib.rats_send_json(self._handle, _b(peer_id),
+                                         _b(type_name), _b(text)),
+            f"Sending JSON {type_name} to {peer_id}")
+
+    def broadcast_json(self, type_name: str, payload: Any) -> None:
+        """Broadcast a typed JSON message to all peers."""
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        check_error(
+            self._lib.lib.rats_broadcast_json(self._handle, _b(type_name), _b(text)),
+            f"Broadcasting JSON {type_name}")
+
+    # ------------------------------------------------------------------ #
+    # File transfer
+    # ------------------------------------------------------------------ #
+    def enable_file_transfer(self, temp_dir: Optional[str] = None) -> None:
+        """Enable the file-transfer subsystem. ``temp_dir`` holds partials."""
+        check_error(
+            self._lib.lib.rats_enable_file_transfer(self._handle, _b(temp_dir)),
+            "Enabling file transfer")
+
+    def on_file_offer(self, callback: FileOfferCallback) -> None:
+        """Register an incoming-offer handler.
+
+        ``callback(peer_id, transfer_id, name, size, is_directory)``. Respond
+        with :meth:`accept_file` or :meth:`reject_file`.
         """
-        Send a directory to a peer. Directory transfers are always recursive.
+        def trampoline(user, peer_id_ptr, transfer_id, name_ptr, size, is_dir):
+            try:
+                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
+                name = name_ptr.decode('utf-8') if name_ptr else ""
+                callback(peer_id, int(transfer_id), name, int(size), bool(is_dir))
+            except Exception as exc:
+                _report(exc, "file offer callback")
+        c_cb = FileOfferCallbackType(trampoline)
+        self._c_callbacks["file:offer"] = c_cb
+        check_error(
+            self._lib.lib.rats_on_file_offer(self._handle, c_cb, None),
+            "Registering file offer handler")
 
-        Args:
-            peer_id: Target peer ID
-            directory_path: Local directory path to send
-            remote_directory_name: Remote directory name
+    def on_file_progress(self, callback: FileProgressCallback) -> None:
+        """Register a progress handler.
 
-        Returns:
-            Transfer ID if successful
-
-        Raises:
-            RatsError: If sending fails
+        ``callback(transfer_id, peer_id, bytes_transferred, total_bytes, status)``
+        where ``status`` is a :class:`~librats_py.enums.FileTransferStatus`.
         """
-        peer_id_bytes = peer_id.encode('utf-8')
-        directory_path_bytes = directory_path.encode('utf-8')
-        remote_directory_name_bytes = remote_directory_name.encode('utf-8')
+        def trampoline(user, transfer_id, peer_id_ptr, done, total, status):
+            try:
+                peer_id = peer_id_ptr.decode('utf-8') if peer_id_ptr else ""
+                callback(int(transfer_id), peer_id, int(done), int(total), int(status))
+            except Exception as exc:
+                _report(exc, "file progress callback")
+        c_cb = FileProgressCallbackType(trampoline)
+        self._c_callbacks["file:progress"] = c_cb
+        check_error(
+            self._lib.lib.rats_on_file_progress(self._handle, c_cb, None),
+            "Registering file progress handler")
 
-        # Directory transfers are always recursive; the trailing flag is ignored.
-        result = self._lib.lib.rats_send_directory(
-            self._handle, peer_id_bytes, directory_path_bytes,
-            remote_directory_name_bytes, 1
-        )
+    def on_file_complete(self, callback: FileCompleteCallback) -> None:
+        """Register a completion handler ``callback(transfer_id, success, path)``."""
+        def trampoline(user, transfer_id, success, path_ptr):
+            try:
+                path = path_ptr.decode('utf-8') if path_ptr else ""
+                callback(int(transfer_id), bool(success), path)
+            except Exception as exc:
+                _report(exc, "file complete callback")
+        c_cb = FileCompleteCallbackType(trampoline)
+        self._c_callbacks["file:complete"] = c_cb
+        check_error(
+            self._lib.lib.rats_on_file_complete(self._handle, c_cb, None),
+            "Registering file complete handler")
 
-        if not result:
-            raise RatsError(f"Failed to send directory {directory_path} to peer {peer_id}")
+    def send_file(self, peer_id: str, path: str) -> int:
+        """Offer a file to ``peer_id``. Returns the transfer id (0 on failure)."""
+        transfer_id = self._lib.lib.rats_send_file(self._handle, _b(peer_id), _b(path))
+        if transfer_id == 0:
+            raise RatsError(f"Failed to send file {path} to {peer_id}",
+                            ErrorCode.NO_SUCH_PEER)
+        return int(transfer_id)
 
-        transfer_id = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return transfer_id
+    def send_directory(self, peer_id: str, dir_path: str) -> int:
+        """Offer a directory tree to ``peer_id``. Returns the transfer id."""
+        transfer_id = self._lib.lib.rats_send_directory(
+            self._handle, _b(peer_id), _b(dir_path))
+        if transfer_id == 0:
+            raise RatsError(f"Failed to send directory {dir_path} to {peer_id}",
+                            ErrorCode.NO_SUCH_PEER)
+        return int(transfer_id)
 
-    def pause_file_transfer(self, transfer_id: str) -> None:
-        """Pause an active file transfer."""
-        transfer_id_bytes = transfer_id.encode('utf-8')
-        result = self._lib.lib.rats_pause_file_transfer(self._handle, transfer_id_bytes)
-        check_error(result, f"Pausing file transfer {transfer_id}")
-    
-    def resume_file_transfer(self, transfer_id: str) -> None:
-        """Resume a paused file transfer."""
-        transfer_id_bytes = transfer_id.encode('utf-8')
-        result = self._lib.lib.rats_resume_file_transfer(self._handle, transfer_id_bytes)
-        check_error(result, f"Resuming file transfer {transfer_id}")
-    
-    def get_file_transfer_progress(self, transfer_id: str) -> Dict[str, Any]:
-        """Get progress information for a file transfer."""
-        transfer_id_bytes = transfer_id.encode('utf-8')
-        result = self._lib.lib.rats_get_file_transfer_progress_json(
-            self._handle, transfer_id_bytes
-        )
-        if not result:
-            return {}
-        
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return {}
-    
-    def get_file_transfer_statistics(self) -> Dict[str, Any]:
-        """Get overall file transfer statistics."""
-        result = self._lib.lib.rats_get_file_transfer_statistics_json(self._handle)
-        if not result:
-            return {}
-        
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return {}
-    
-    # GossipSub
-    def is_gossipsub_available(self) -> bool:
-        """Check if GossipSub is available."""
-        return bool(self._lib.lib.rats_is_gossipsub_available(self._handle))
-    
-    def subscribe_to_topic(self, topic: str) -> None:
-        """Subscribe to a GossipSub topic."""
-        topic_bytes = topic.encode('utf-8')
-        result = self._lib.lib.rats_subscribe_to_topic(self._handle, topic_bytes)
-        check_error(result, f"Subscribing to topic {topic}")
-    
-    def unsubscribe_from_topic(self, topic: str) -> None:
-        """Unsubscribe from a GossipSub topic."""
-        topic_bytes = topic.encode('utf-8')
-        result = self._lib.lib.rats_unsubscribe_from_topic(self._handle, topic_bytes)
-        check_error(result, f"Unsubscribing from topic {topic}")
-    
-    def publish_to_topic(self, topic: str, message: str) -> None:
-        """Publish a message to a GossipSub topic."""
-        topic_bytes = topic.encode('utf-8')
-        message_bytes = message.encode('utf-8')
-        result = self._lib.lib.rats_publish_to_topic(self._handle, topic_bytes, message_bytes)
-        check_error(result, f"Publishing to topic {topic}")
-    
-    def is_gossipsub_running(self) -> bool:
-        """Check if GossipSub is running."""
-        return bool(self._lib.lib.rats_is_gossipsub_running(self._handle))
-    
-    def is_subscribed_to_topic(self, topic: str) -> bool:
-        """Check if we are subscribed to a specific topic."""
-        topic_bytes = topic.encode('utf-8')
-        return bool(self._lib.lib.rats_is_subscribed_to_topic(self._handle, topic_bytes))
-    
-    def get_subscribed_topics(self) -> List[str]:
-        """Get list of topics we are subscribed to."""
-        count = c_int()
-        result = self._lib.lib.rats_get_subscribed_topics(self._handle, byref(count))
-        if not result or count.value == 0:
-            return []
-        
-        topics = []
-        for i in range(count.value):
-            if result[i]:
-                topic = string_at(result[i]).decode('utf-8')
-                topics.append(topic)
-                self._lib.lib.rats_string_free(result[i])
-        
-        # Free the array itself
-        self._lib.lib.rats_string_free(cast(result, c_void_p))
-        return topics
-    
-    def publish_json_to_topic(self, topic: str, data: Dict[str, Any]) -> None:
-        """Publish JSON data to a GossipSub topic."""
-        topic_bytes = topic.encode('utf-8')
-        json_bytes = json.dumps(data).encode('utf-8')
-        result = self._lib.lib.rats_publish_json_to_topic(self._handle, topic_bytes, json_bytes)
-        check_error(result, f"Publishing JSON to topic {topic}")
-    
-    def get_topic_peers(self, topic: str) -> List[str]:
-        """Get list of peers subscribed to a topic."""
-        topic_bytes = topic.encode('utf-8')
-        count = c_int()
-        result = self._lib.lib.rats_get_topic_peers(self._handle, topic_bytes, byref(count))
-        if not result or count.value == 0:
-            return []
-        
-        peers = []
-        for i in range(count.value):
-            if result[i]:
-                peer_id = string_at(result[i]).decode('utf-8')
-                peers.append(peer_id)
-                self._lib.lib.rats_string_free(result[i])
-        
-        # Free the array itself
-        self._lib.lib.rats_string_free(cast(result, c_void_p))
-        return peers
-    
-    def get_topic_mesh_peers(self, topic: str) -> List[str]:
-        """Get list of mesh peers for a topic."""
-        topic_bytes = topic.encode('utf-8')
-        count = c_int()
-        result = self._lib.lib.rats_get_topic_mesh_peers(self._handle, topic_bytes, byref(count))
-        if not result or count.value == 0:
-            return []
-        
-        peers = []
-        for i in range(count.value):
-            if result[i]:
-                peer_id = string_at(result[i]).decode('utf-8')
-                peers.append(peer_id)
-                self._lib.lib.rats_string_free(result[i])
-        
-        # Free the array itself
-        self._lib.lib.rats_string_free(cast(result, c_void_p))
-        return peers
-    
-    def get_gossipsub_statistics(self) -> Dict[str, Any]:
-        """Get GossipSub statistics."""
-        result = self._lib.lib.rats_get_gossipsub_statistics_json(self._handle)
-        if not result:
-            return {}
-        
-        json_str = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            return {}
-    
-    # Address blocking
-    def add_ignored_address(self, ip_address: str) -> None:
-        """Add an IP address to the ignore list."""
-        ip_address_bytes = ip_address.encode('utf-8')
-        self._lib.lib.rats_add_ignored_address(self._handle, ip_address_bytes)
-    
-    # Configuration persistence
-    def load_configuration(self) -> None:
-        """Load configuration from persistent storage."""
-        result = self._lib.lib.rats_load_configuration(self._handle)
-        check_error(result, "Loading configuration")
-    
-    def save_configuration(self) -> None:
-        """Save configuration to persistent storage."""
-        result = self._lib.lib.rats_save_configuration(self._handle)
-        check_error(result, "Saving configuration")
-    
-    def set_data_directory(self, directory_path: str) -> None:
-        """Set the data directory path."""
-        directory_path_bytes = directory_path.encode('utf-8')
-        result = self._lib.lib.rats_set_data_directory(self._handle, directory_path_bytes)
-        check_error(result, f"Setting data directory to {directory_path}")
-    
-    def get_data_directory(self) -> str:
-        """Get the current data directory path."""
-        result = self._lib.lib.rats_get_data_directory(self._handle)
-        if not result:
-            return ""
-        directory = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return directory
-    
-    def load_and_reconnect_peers(self) -> int:
-        """Load and reconnect to historical peers."""
-        return self._lib.lib.rats_load_and_reconnect_peers(self._handle)
-    
-    def load_historical_peers(self) -> int:
-        """Load historical peers list."""
-        return self._lib.lib.rats_load_historical_peers(self._handle)
-    
-    def save_historical_peers(self) -> int:
-        """Save current peers to historical list."""
-        return self._lib.lib.rats_save_historical_peers(self._handle)
-    
-    def clear_historical_peers(self) -> None:
-        """Clear the historical peers list."""
-        self._lib.lib.rats_clear_historical_peers(self._handle)
-    
-    def get_historical_peer_ids(self) -> List[str]:
-        """Get list of historical peer IDs."""
-        count = c_int()
-        result = self._lib.lib.rats_get_historical_peer_ids(self._handle, byref(count))
-        if not result or count.value == 0:
-            return []
-        
-        peer_ids = []
-        for i in range(count.value):
-            if result[i]:
-                peer_id = string_at(result[i]).decode('utf-8')
-                peer_ids.append(peer_id)
-                self._lib.lib.rats_string_free(result[i])
-        
-        # Free the array itself
-        self._lib.lib.rats_string_free(cast(result, c_void_p))
-        return peer_ids
-    
-    # Logging instance methods
-    def set_log_file_path(self, file_path: str) -> None:
-        """Set log file path for this client."""
-        file_path_bytes = file_path.encode('utf-8')
-        self._lib.lib.rats_set_log_file_path(self._handle, file_path_bytes)
-    
-    def get_log_file_path(self) -> str:
-        """Get the current log file path."""
-        result = self._lib.lib.rats_get_log_file_path(self._handle)
-        if not result:
-            return ""
-        path = string_at(result).decode('utf-8')
-        self._lib.lib.rats_string_free(result)
-        return path
-    
-    def set_log_colors_enabled(self, enabled: bool) -> None:
-        """Enable or disable log colors."""
-        self._lib.lib.rats_set_log_colors_enabled(self._handle, int(enabled))
-    
-    def is_log_colors_enabled(self) -> bool:
-        """Check if log colors are enabled."""
-        return bool(self._lib.lib.rats_is_log_colors_enabled(self._handle))
-    
-    def set_log_timestamps_enabled(self, enabled: bool) -> None:
-        """Enable or disable log timestamps."""
-        self._lib.lib.rats_set_log_timestamps_enabled(self._handle, int(enabled))
-    
-    def is_log_timestamps_enabled(self) -> bool:
-        """Check if log timestamps are enabled."""
-        return bool(self._lib.lib.rats_is_log_timestamps_enabled(self._handle))
-    
-    def set_log_rotation_size(self, max_size_bytes: int) -> None:
-        """Set log rotation size in bytes."""
-        self._lib.lib.rats_set_log_rotation_size(self._handle, max_size_bytes)
-    
-    def set_log_retention_count(self, count: int) -> None:
-        """Set log retention count."""
-        self._lib.lib.rats_set_log_retention_count(self._handle, count)
-    
-    def clear_log_file(self) -> None:
-        """Clear the log file."""
-        self._lib.lib.rats_clear_log_file(self._handle)
-    
-    # Callback management
-    def _create_connection_callback(self, callback: ConnectionCallback):
-        """Create a C callback wrapper for connection events."""
-        def c_callback(user_data, peer_id_ptr):
-            if callback and peer_id_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                try:
-                    callback(peer_id)
-                except Exception as e:
-                    print(f"Error in connection callback: {e}")
-        return ConnectionCallbackType(c_callback)
-    
-    def _create_string_callback(self, callback: StringCallback):
-        """Create a C callback wrapper for string messages."""
-        def c_callback(user_data, peer_id_ptr, message_ptr):
-            if callback and peer_id_ptr and message_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                message = message_ptr.decode('utf-8')
-                try:
-                    callback(peer_id, message)
-                except Exception as e:
-                    print(f"Error in string callback: {e}")
-        return StringCallbackType(c_callback)
-    
-    def _create_binary_callback(self, callback: BinaryCallback):
-        """Create a C callback wrapper for binary data."""
-        def c_callback(user_data, peer_id_ptr, data_ptr, size):
-            if callback and peer_id_ptr and data_ptr and size:
-                peer_id = peer_id_ptr.decode('utf-8')
-                data_bytes = string_at(data_ptr, size)
-                try:
-                    callback(peer_id, data_bytes)
-                except Exception as e:
-                    print(f"Error in binary callback: {e}")
-        return BinaryCallbackType(c_callback)
-    
-    def _create_json_callback(self, callback: JsonCallback):
-        """Create a C callback wrapper for JSON messages."""
-        def c_callback(user_data, peer_id_ptr, json_ptr):
-            if callback and peer_id_ptr and json_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                json_str = json_ptr.decode('utf-8')
-                try:
-                    data = json.loads(json_str)
-                    callback(peer_id, data)
-                except (json.JSONDecodeError, Exception) as e:
-                    print(f"Error in JSON callback: {e}")
-        return JsonCallbackType(c_callback)
-    
-    def _create_disconnect_callback(self, callback: DisconnectCallback):
-        """Create a C callback wrapper for disconnect events."""
-        def c_callback(user_data, peer_id_ptr):
-            if callback and peer_id_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                try:
-                    callback(peer_id)
-                except Exception as e:
-                    print(f"Error in disconnect callback: {e}")
-        return DisconnectCallbackType(c_callback)
-    
-    def set_connection_callback(self, callback: ConnectionCallback) -> None:
-        """Set callback for new peer connections."""
-        with self._callbacks_lock:
-            self._callbacks['connection'] = callback
-            if callback:
-                c_callback = self._create_connection_callback(callback)
-                self._c_callbacks['connection'] = c_callback
-                self._lib.lib.rats_set_connection_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_connection_callback(self._handle, None, None)
-    
-    def set_string_callback(self, callback: StringCallback) -> None:
-        """Set callback for string messages."""
-        with self._callbacks_lock:
-            self._callbacks['string'] = callback
-            if callback:
-                c_callback = self._create_string_callback(callback)
-                self._c_callbacks['string'] = c_callback
-                self._lib.lib.rats_set_string_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_string_callback(self._handle, None, None)
-    
-    def set_binary_callback(self, callback: BinaryCallback) -> None:
-        """Set callback for binary data."""
-        with self._callbacks_lock:
-            self._callbacks['binary'] = callback
-            if callback:
-                c_callback = self._create_binary_callback(callback)
-                self._c_callbacks['binary'] = c_callback
-                self._lib.lib.rats_set_binary_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_binary_callback(self._handle, None, None)
-    
-    def set_json_callback(self, callback: JsonCallback) -> None:
-        """Set callback for JSON messages."""
-        with self._callbacks_lock:
-            self._callbacks['json'] = callback
-            if callback:
-                c_callback = self._create_json_callback(callback)
-                self._c_callbacks['json'] = c_callback
-                self._lib.lib.rats_set_json_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_json_callback(self._handle, None, None)
-    
-    def set_disconnect_callback(self, callback: DisconnectCallback) -> None:
-        """Set callback for peer disconnections."""
-        with self._callbacks_lock:
-            self._callbacks['disconnect'] = callback
-            if callback:
-                c_callback = self._create_disconnect_callback(callback)
-                self._c_callbacks['disconnect'] = c_callback
-                self._lib.lib.rats_set_disconnect_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_disconnect_callback(self._handle, None, None)
-    
-    # Additional callback creators and setters
-    def _create_message_callback(self, callback: MessageCallback):
-        """Create a C callback wrapper for message events."""
-        def c_callback(user_data, peer_id_ptr, message_data_ptr):
-            if callback and peer_id_ptr and message_data_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                message_data = message_data_ptr.decode('utf-8')
-                try:
-                    callback(peer_id, message_data)
-                except Exception as e:
-                    print(f"Error in message callback: {e}")
-        return MessageCallbackType(c_callback)
-    
-    def _create_file_request_callback(self, callback: FileRequestCallback):
-        """Create a C callback wrapper for incoming transfer offers (file or directory).
+    def accept_file(self, peer_id: str, transfer_id: int, dest_path: str) -> None:
+        """Accept an offered transfer, writing to ``dest_path``."""
+        check_error(
+            self._lib.lib.rats_accept_file(self._handle, _b(peer_id),
+                                           transfer_id, _b(dest_path)),
+            f"Accepting transfer {transfer_id}")
 
-        Transfers are push-only, so ``remote_path`` is always empty; the offered
-        file/directory name is delivered as ``filename``.
-        """
-        def c_callback(user_data, peer_id_ptr, transfer_id_ptr, remote_path_ptr, filename_ptr):
-            if callback and peer_id_ptr and transfer_id_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                transfer_id = transfer_id_ptr.decode('utf-8')
-                remote_path = remote_path_ptr.decode('utf-8') if remote_path_ptr else ""
-                filename = filename_ptr.decode('utf-8') if filename_ptr else ""
-                try:
-                    callback(peer_id, transfer_id, remote_path, filename)
-                except Exception as e:
-                    print(f"Error in file request callback: {e}")
-        return FileRequestCallbackType(c_callback)
+    def reject_file(self, peer_id: str, transfer_id: int) -> None:
+        """Reject an offered transfer."""
+        check_error(
+            self._lib.lib.rats_reject_file(self._handle, _b(peer_id), transfer_id),
+            f"Rejecting transfer {transfer_id}")
 
-    def _create_file_progress_callback(self, callback: FileProgressCallback):
-        """Create a C callback wrapper for file progress events."""
-        def c_callback(user_data, transfer_id_ptr, progress_percent, status_ptr):
-            if callback and transfer_id_ptr and status_ptr:
-                transfer_id = transfer_id_ptr.decode('utf-8')
-                status = status_ptr.decode('utf-8')
-                try:
-                    callback(transfer_id, progress_percent, status)
-                except Exception as e:
-                    print(f"Error in file progress callback: {e}")
-        return FileProgressCallbackType(c_callback)
+    def cancel_file(self, peer_id: str, transfer_id: int) -> None:
+        """Cancel a live transfer (either side)."""
+        check_error(
+            self._lib.lib.rats_cancel_file(self._handle, _b(peer_id), transfer_id),
+            f"Cancelling transfer {transfer_id}")
 
-    def _create_peer_discovered_callback(self, callback: PeerDiscoveredCallback):
-        """Create a C callback wrapper for peer discovery events."""
-        def c_callback(user_data, host_ptr, port, service_name_ptr):
-            if callback and host_ptr and service_name_ptr:
-                host = host_ptr.decode('utf-8')
-                service_name = service_name_ptr.decode('utf-8')
-                try:
-                    callback(host, port, service_name)
-                except Exception as e:
-                    print(f"Error in peer discovered callback: {e}")
-        return PeerDiscoveredCallbackType(c_callback)
-    
-    def _create_topic_message_callback(self, callback: TopicMessageCallback):
-        """Create a C callback wrapper for topic message events."""
-        def c_callback(user_data, peer_id_ptr, topic_ptr, message_ptr):
-            if callback and peer_id_ptr and topic_ptr and message_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                topic = topic_ptr.decode('utf-8')
-                message = message_ptr.decode('utf-8')
-                try:
-                    callback(peer_id, topic, message)
-                except Exception as e:
-                    print(f"Error in topic message callback: {e}")
-        return TopicMessageCallbackType(c_callback)
-    
-    def _create_topic_json_message_callback(self, callback: TopicJsonMessageCallback):
-        """Create a C callback wrapper for topic JSON message events."""
-        def c_callback(user_data, peer_id_ptr, topic_ptr, json_ptr):
-            if callback and peer_id_ptr and topic_ptr and json_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                topic = topic_ptr.decode('utf-8')
-                json_str = json_ptr.decode('utf-8')
-                try:
-                    data = json.loads(json_str)
-                    callback(peer_id, topic, data)
-                except (json.JSONDecodeError, Exception) as e:
-                    print(f"Error in topic JSON message callback: {e}")
-        return TopicJsonMessageCallbackType(c_callback)
-    
-    def _create_topic_peer_joined_callback(self, callback: TopicPeerJoinedCallback):
-        """Create a C callback wrapper for topic peer joined events."""
-        def c_callback(user_data, peer_id_ptr, topic_ptr):
-            if callback and peer_id_ptr and topic_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                topic = topic_ptr.decode('utf-8')
-                try:
-                    callback(peer_id, topic)
-                except Exception as e:
-                    print(f"Error in topic peer joined callback: {e}")
-        return TopicPeerJoinedCallbackType(c_callback)
-    
-    def _create_topic_peer_left_callback(self, callback: TopicPeerLeftCallback):
-        """Create a C callback wrapper for topic peer left events."""
-        def c_callback(user_data, peer_id_ptr, topic_ptr):
-            if callback and peer_id_ptr and topic_ptr:
-                peer_id = peer_id_ptr.decode('utf-8')
-                topic = topic_ptr.decode('utf-8')
-                try:
-                    callback(peer_id, topic)
-                except Exception as e:
-                    print(f"Error in topic peer left callback: {e}")
-        return TopicPeerLeftCallbackType(c_callback)
-    
-    # Additional callback setters
-    def set_file_request_callback(self, callback: FileRequestCallback) -> None:
-        """Set callback for incoming transfer offers (file or directory).
+    def pause_file(self, peer_id: str, transfer_id: int) -> None:
+        """Pause a live transfer."""
+        check_error(
+            self._lib.lib.rats_pause_file(self._handle, _b(peer_id), transfer_id),
+            f"Pausing transfer {transfer_id}")
 
-        The callback receives ``(peer_id, transfer_id, remote_path, filename)``.
-        Transfers are push-only, so ``remote_path`` is always empty; respond by
-        calling :meth:`accept_file_transfer` or :meth:`reject_file_transfer`.
-        """
-        with self._callbacks_lock:
-            self._callbacks['file_request'] = callback
-            if callback:
-                c_callback = self._create_file_request_callback(callback)
-                self._c_callbacks['file_request'] = c_callback
-                self._lib.lib.rats_set_file_request_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_file_request_callback(self._handle, None, None)
+    def resume_file(self, peer_id: str, transfer_id: int) -> None:
+        """Resume a paused transfer."""
+        check_error(
+            self._lib.lib.rats_resume_file(self._handle, _b(peer_id), transfer_id),
+            f"Resuming transfer {transfer_id}")
 
-    def set_file_progress_callback(self, callback: FileProgressCallback) -> None:
-        """Set callback for file/directory transfer progress."""
-        with self._callbacks_lock:
-            self._callbacks['file_progress'] = callback
-            if callback:
-                c_callback = self._create_file_progress_callback(callback)
-                self._c_callbacks['file_progress'] = c_callback
-                self._lib.lib.rats_set_file_progress_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_file_progress_callback(self._handle, None, None)
+    # ------------------------------------------------------------------ #
+    # Liveness (ping/RTT)
+    # ------------------------------------------------------------------ #
+    def enable_ping(self) -> None:
+        """Enable periodic ping/pong RTT probing. Call before start()."""
+        check_error(self._lib.lib.rats_enable_ping(self._handle), "Enabling ping")
 
-    def set_peer_discovered_callback(self, callback: PeerDiscoveredCallback) -> None:
-        """Set callback for peer discovery events."""
-        with self._callbacks_lock:
-            self._callbacks['peer_discovered'] = callback
-            if callback:
-                c_callback = self._create_peer_discovered_callback(callback)
-                self._c_callbacks['peer_discovered'] = c_callback
-                self._lib.lib.rats_set_peer_discovered_callback(self._handle, c_callback, None)
-            else:
-                self._lib.lib.rats_set_peer_discovered_callback(self._handle, None, None)
-    
-    def set_topic_message_callback(self, topic: str, callback: TopicMessageCallback) -> None:
-        """Set callback for topic messages."""
-        with self._callbacks_lock:
-            callback_key = f"topic_message_{topic}"
-            self._callbacks[callback_key] = callback
-            
-            if callback:
-                c_callback = self._create_topic_message_callback(callback)
-                self._c_callbacks[callback_key] = c_callback
-                topic_bytes = topic.encode('utf-8')
-                self._lib.lib.rats_set_topic_message_callback(
-                    self._handle, topic_bytes, c_callback, None
-                )
-            else:
-                topic_bytes = topic.encode('utf-8')
-                self._lib.lib.rats_set_topic_message_callback(
-                    self._handle, topic_bytes, None, None
-                )
-    
-    def set_topic_json_message_callback(self, topic: str, callback: TopicJsonMessageCallback) -> None:
-        """Set callback for topic JSON messages."""
-        with self._callbacks_lock:
-            callback_key = f"topic_json_message_{topic}"
-            self._callbacks[callback_key] = callback
-            
-            if callback:
-                c_callback = self._create_topic_json_message_callback(callback)
-                self._c_callbacks[callback_key] = c_callback
-                topic_bytes = topic.encode('utf-8')
-                self._lib.lib.rats_set_topic_json_message_callback(
-                    self._handle, topic_bytes, c_callback, None
-                )
-            else:
-                topic_bytes = topic.encode('utf-8')
-                self._lib.lib.rats_set_topic_json_message_callback(
-                    self._handle, topic_bytes, None, None
-                )
-    
-    def set_topic_peer_joined_callback(self, topic: str, callback: TopicPeerJoinedCallback) -> None:
-        """Set callback for topic peer joined events."""
-        with self._callbacks_lock:
-            callback_key = f"topic_peer_joined_{topic}"
-            self._callbacks[callback_key] = callback
-            
-            if callback:
-                c_callback = self._create_topic_peer_joined_callback(callback)
-                self._c_callbacks[callback_key] = c_callback
-                topic_bytes = topic.encode('utf-8')
-                self._lib.lib.rats_set_topic_peer_joined_callback(
-                    self._handle, topic_bytes, c_callback, None
-                )
-            else:
-                topic_bytes = topic.encode('utf-8')
-                self._lib.lib.rats_set_topic_peer_joined_callback(
-                    self._handle, topic_bytes, None, None
-                )
-    
-    def set_topic_peer_left_callback(self, topic: str, callback: TopicPeerLeftCallback) -> None:
-        """Set callback for topic peer left events."""
-        with self._callbacks_lock:
-            callback_key = f"topic_peer_left_{topic}"
-            self._callbacks[callback_key] = callback
-            
-            if callback:
-                c_callback = self._create_topic_peer_left_callback(callback)
-                self._c_callbacks[callback_key] = c_callback
-                topic_bytes = topic.encode('utf-8')
-                self._lib.lib.rats_set_topic_peer_left_callback(
-                    self._handle, topic_bytes, c_callback, None
-                )
-            else:
-                topic_bytes = topic.encode('utf-8')
-                self._lib.lib.rats_set_topic_peer_left_callback(
-                    self._handle, topic_bytes, None, None
-                )
-    
-    def clear_topic_callbacks(self, topic: str) -> None:
-        """Clear all callbacks for a specific topic."""
-        topic_bytes = topic.encode('utf-8')
-        self._lib.lib.rats_clear_topic_callbacks(self._handle, topic_bytes)
-        
-        # Also clear from our Python callback storage
-        with self._callbacks_lock:
-            keys_to_remove = [k for k in self._callbacks.keys() if k.endswith(f"_{topic}")]
-            for key in keys_to_remove:
-                if key in self._callbacks:
-                    del self._callbacks[key]
-                if key in self._c_callbacks:
-                    del self._c_callbacks[key]
-    
-    # Static logging methods
-    @staticmethod
-    def set_console_logging_enabled(enabled: bool) -> None:
-        """
-        Enable or disable console logging.
-        
-        When disabled, log messages will not be printed to stdout/stderr.
-        File logging (if enabled) will still work.
-        
-        Args:
-            enabled: Whether to enable console logging (default: True)
-        """
-        lib = get_librats()
-        lib.lib.rats_set_console_logging_enabled(int(enabled))
-    
-    @staticmethod
-    def is_console_logging_enabled() -> bool:
-        """
-        Check if console logging is currently enabled.
-        
-        Returns:
-            True if console logging is enabled
-        """
-        lib = get_librats()
-        return bool(lib.lib.rats_is_console_logging_enabled())
-    
-    @staticmethod
-    def set_logging_enabled(enabled: bool) -> None:
-        """Enable or disable file logging."""
-        lib = get_librats()
-        lib.lib.rats_set_logging_enabled(int(enabled))
-    
+    def peer_rtt_ms(self, peer_id: str) -> int:
+        """Last measured RTT to a peer in ms, or -1 if unknown."""
+        return int(self._lib.lib.rats_peer_rtt_ms(self._handle, _b(peer_id)))
+
+    # ------------------------------------------------------------------ #
+    # Automatic reconnection
+    # ------------------------------------------------------------------ #
+    def enable_reconnect(self) -> None:
+        """Enable the reconnection subsystem. Call before start()."""
+        check_error(self._lib.lib.rats_enable_reconnect(self._handle),
+                    "Enabling reconnect")
+
+    def add_reconnect(self, host: str, port: int) -> None:
+        """Keep ``host:port`` connected (re-dialed on drop)."""
+        check_error(
+            self._lib.lib.rats_add_reconnect(self._handle, _b(host), port),
+            f"Adding reconnect target {host}:{port}")
+
+    def remove_reconnect(self, host: str, port: int) -> None:
+        """Stop reconnecting to ``host:port``."""
+        check_error(
+            self._lib.lib.rats_remove_reconnect(self._handle, _b(host), port),
+            f"Removing reconnect target {host}:{port}")
+
+    # ------------------------------------------------------------------ #
+    # Logging (process-global)
+    # ------------------------------------------------------------------ #
     @staticmethod
     def set_log_level(level: LogLevel) -> None:
-        """Set global log level."""
-        lib = get_librats()
-        level_str = level.name.encode('utf-8')
-        lib.lib.rats_set_log_level(level_str)
-    
-    # Static version methods
+        """Set the process-global log verbosity."""
+        get_librats().lib.rats_set_log_level(int(level))
+
+    @staticmethod
+    def set_log_file(path: Optional[str]) -> None:
+        """Mirror logs to ``path`` (``None``/"" disables file logging)."""
+        get_librats().lib.rats_set_log_file(_b(path))
+
+    # ------------------------------------------------------------------ #
+    # Library info (process-global)
+    # ------------------------------------------------------------------ #
     @staticmethod
     def get_version_string() -> str:
-        """Get version string."""
-        lib = get_librats()
-        result = lib.lib.rats_get_version_string()
-        if not result:
-            return ""
-        version = string_at(result).decode('utf-8')
-        lib.lib.rats_string_free(result)
-        return version
-    
+        """Library version string, e.g. ``"1.2.3"`` (static; not freed)."""
+        ptr = get_librats().lib.rats_version_string()
+        return ptr.decode('utf-8') if ptr else ""
+
     @staticmethod
     def get_version() -> VersionInfo:
-        """Get detailed version information."""
+        """Detailed library version components."""
         lib = get_librats()
-        major = c_int()
-        minor = c_int()
-        patch = c_int()
-        build = c_int()
-        lib.lib.rats_get_version(byref(major), byref(minor), byref(patch), byref(build))
+        major, minor, patch, build = c_int(), c_int(), c_int(), c_int()
+        lib.lib.rats_version(byref(major), byref(minor), byref(patch), byref(build))
         return VersionInfo(major.value, minor.value, patch.value, build.value)
-    
+
     @staticmethod
     def get_git_describe() -> str:
-        """Get git describe string."""
-        lib = get_librats()
-        result = lib.lib.rats_get_git_describe()
-        if not result:
-            return ""
-        git_desc = string_at(result).decode('utf-8')
-        lib.lib.rats_string_free(result)
-        return git_desc
-    
+        """Git describe of the build (static; not freed)."""
+        ptr = get_librats().lib.rats_git_describe()
+        return ptr.decode('utf-8') if ptr else ""
+
     @staticmethod
     def get_abi() -> int:
-        """Get ABI version."""
-        lib = get_librats()
-        return lib.lib.rats_get_abi()
+        """Packed ABI id ``(major<<16)|(minor<<8)|patch``."""
+        return get_librats().lib.rats_abi()
+
+    @staticmethod
+    def error_str(error_code: int) -> str:
+        """Static human-readable name for a ``rats_error_t`` code."""
+        ptr = get_librats().lib.rats_error_str(int(error_code))
+        return ptr.decode('utf-8') if ptr else ""
 
 
-# The RatsError exception is imported from exceptions module in __init__.py
+def _report(exc: Exception, where: str) -> None:
+    """Log an exception raised inside a reactor-thread callback (never reraise)."""
+    import sys
+    print(f"[librats_py] error in {where}: {exc!r}", file=sys.stderr)

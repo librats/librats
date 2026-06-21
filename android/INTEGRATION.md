@@ -2,45 +2,40 @@
 
 ## Overview
 
-This Android library provides JNI bindings for the LibRats C++ peer-to-peer networking library. It enables Android applications to:
+This module provides JNI bindings for the LibRats C++ peer-to-peer networking
+library, wrapping the canonical C ABI (`src/bindings/rats.h`). Android apps can:
 
-- Connect to peers using various NAT traversal strategies
-- Send/receive string, binary, and JSON messages
-- Transfer files between devices
-- Discover peers using mDNS and DHT
-- Use end-to-end encryption
+- Dial peers and accept inbound connections
+- Send/receive raw-byte messages on named channels
+- Use typed JSON messaging and pub/sub topics
+- Transfer files and directories between peers
+- Discover peers via DHT and mDNS
+- Probe peer RTT and auto-reconnect to dropped peers
+
+Security is Noise XX (encrypted + authenticated) by default.
 
 ## Quick Integration
 
 ### 1. Add to Your Project
 
-Copy the entire `android/` directory to your project:
+Copy the `android/` directory into your project, e.g. `librats-android`.
 
-```bash
-cp -r /path/to/librats/android /path/to/your/project/librats-android
-```
-
-### 2. Update settings.gradle
+### 2. settings.gradle
 
 ```gradle
 include ':librats-android'
 project(':librats-android').projectDir = new File('librats-android')
 ```
 
-### 3. Add Dependency
-
-In your app's `build.gradle`:
+### 3. Dependency (app/build.gradle)
 
 ```gradle
 dependencies {
     implementation project(':librats-android')
-    // ... other dependencies
 }
 ```
 
-### 4. Update AndroidManifest.xml
-
-Add required permissions:
+### 4. AndroidManifest.xml
 
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
@@ -53,37 +48,31 @@ Add required permissions:
 
 ```java
 import com.librats.RatsClient;
-import com.librats.ConnectionCallback;
-import com.librats.StringMessageCallback;
+import java.nio.charset.StandardCharsets;
 
 public class P2PService {
     private RatsClient client;
-    
+
     public void initializeP2P() {
-        // Create client listening on port 8080
-        client = new RatsClient(8080);
-        
-        // Set up callbacks
-        client.setConnectionCallback(peerId -> {
-            Log.d("P2P", "Peer connected: " + peerId);
-        });
-        
-        client.setStringCallback((peerId, message) -> {
-            Log.d("P2P", "Message from " + peerId + ": " + message);
-        });
-        
-        // Start the client
+        client = new RatsClient(8080); // listen on 8080
+
+        // Register callbacks and enable subsystems BEFORE start().
+        client.setConnectionCallback(peerId -> Log.d("P2P", "connected: " + peerId));
+        client.on("chat", (peerId, data) ->
+                Log.d("P2P", peerId + ": " + new String(data, StandardCharsets.UTF_8)));
+        client.enableMdns();
+
         client.start();
     }
-    
+
     public void connectToPeer(String host, int port) {
-        client.connectWithStrategy(host, port, RatsClient.STRATEGY_AUTO_ADAPTIVE);
+        client.connect(host, port);
     }
-    
-    public void sendMessage(String message) {
-        client.broadcastString(message);
+
+    public void broadcast(String message) {
+        client.broadcast("chat", message.getBytes(StandardCharsets.UTF_8));
     }
-    
+
     public void cleanup() {
         if (client != null) {
             client.stop();
@@ -103,101 +92,69 @@ public class P2PService {
 ├─────────────────────────────────────────┤
 │         JNI Layer (librats_jni.cpp)     │
 ├─────────────────────────────────────────┤
-│        LibRats C API (librats_c.h)      │
+│      LibRats C ABI (bindings/rats.h)    │
 ├─────────────────────────────────────────┤
-│       LibRats Core (C++ Implementation) │
+│       LibRats Core (C++ implementation) │
 └─────────────────────────────────────────┘
 ```
 
-## File Structure
+## Key Concepts
 
-- **`src/main/cpp/`**: JNI C++ wrapper and CMake build config
-- **`src/main/java/com/librats/`**: Java API classes and interfaces  
-- **`examples/`**: Complete Android app demonstrating usage
-- **`build.gradle`**: Library build configuration
-- **`README.md`**: Comprehensive documentation
-
-## Key Components
-
-### RatsClient
-Main class providing all LibRats functionality:
-- Client lifecycle management
-- Connection methods with different strategies
-- Message sending (string, binary, JSON)
-- File transfer capabilities
-- Service discovery (mDNS, DHT)
-- Encryption support
+- **Peer-id-centric.** Peers are 64-char lowercase hex ids (no socket handles).
+  `ConnectionCallback` / `DisconnectCallback` deliver a peer-id `String`.
+- **Opt-in subsystems.** Call the matching `enable*()` and register callbacks
+  **before** `start()`. Enabling after start returns `ERR_ALREADY_STARTED`;
+  using a subsystem before enabling returns `ERR_NOT_ENABLED`.
+- **Error model.** Fallible methods return a `rats_error_t` code
+  (`RatsClient.OK == 0`); `RatsClient.errorString(code)` gives a name.
 
 ### Callback Interfaces
-- `ConnectionCallback`: Peer connection events
-- `StringMessageCallback`: String message reception
-- `BinaryMessageCallback`: Binary data reception
-- `JsonMessageCallback`: JSON message reception
-- `DisconnectCallback`: Peer disconnection events
 
-### Connection Strategies
-- `STRATEGY_DIRECT_ONLY`: Direct connections only
-- `STRATEGY_STUN_ASSISTED`: STUN-assisted NAT traversal
-- `STRATEGY_ICE_FULL`: Full ICE with STUN/TURN support
-- `STRATEGY_TURN_RELAY`: TURN relay connections
-- `STRATEGY_AUTO_ADAPTIVE`: Automatic strategy selection
+- `ConnectionCallback` — `onConnected(String peerId)`
+- `DisconnectCallback` — `onDisconnected(String peerId)`
+- `MessageCallback` — `onMessage(String peerId, byte[] data)` (channel bytes)
+- `TopicMessageCallback` — `onTopicMessage(String peerId, String topic, byte[] data)`
+- `JsonMessageCallback` — `onJsonMessage(String peerId, String json)`
+- `FileOfferCallback` / `FileProgressCallback` / `FileCompleteCallback`
 
 ## Building
 
-The library uses CMake to build the native components:
+The native build pulls in the repository-root `CMakeLists.txt` with
+`RATS_BINDINGS ON`, compiling the core `rats` library plus the C ABI
+(`src/bindings/rats.cpp`) and the generated `version.h`, then links the JNI
+bridge (`librats_jni.so`) against it.
 
-1. LibRats C++ source files are compiled into `librats.so`
-2. JNI wrapper is compiled into `librats_jni.so`
-3. Both libraries are packaged with the Android AAR
-
-Supported ABIs:
-- arm64-v8a (64-bit ARM)
-- armeabi-v7a (32-bit ARM)
-- x86_64 (64-bit x86)
-- x86 (32-bit x86)
-
-## Testing
-
-Use the example app to test the integration:
-
-1. Build and install on two Android devices
-2. Connect both to the same WiFi network
-3. Start the client on both devices
-4. Connect one to the other using IP address
-5. Send messages and verify reception
+Supported ABIs: arm64-v8a, armeabi-v7a, x86_64, x86.
 
 ## Requirements
 
-- **Minimum SDK**: Android 5.0 (API 21)
-- **Target SDK**: Android 15 (API 35)
-- **NDK**: 21 or higher
-- **CMake**: 3.18.1 or higher
+- Minimum SDK: Android 5.0 (API 21)
+- NDK: 21+
+- CMake: 3.22.1+
 
-## Performance Notes
+## Threading
 
-- Callbacks run on background threads
-- Use `runOnUiThread()` for UI updates
-- Call `destroy()` to properly release native resources
-- Consider using services for background P2P operations
+- Callbacks run on an internal reactor thread; do not block in them.
+- Use `runOnUiThread()` for UI updates.
+- Call `destroy()` to release native resources.
+
+## Removed from the previous binding
+
+ICE/STUN/TURN and connection strategies, encryption enable/keys, configuration
+load/save (use `Config.dataDir`), granular logging controls, historical peers,
+statistics JSON, and automatic-discovery toggles have been removed. Use
+`enableDht` / `enableMdns` for discovery and `setLogLevel` / `setLogFile` for
+logging.
 
 ## Troubleshooting
 
-### Build Issues
-- Ensure NDK and CMake are properly installed
-- Check that all LibRats source files are accessible
-- Verify CMake version compatibility
-
-### Runtime Issues
-- Check all required permissions are granted
-- Enable logging for debugging: `RatsClient.setLoggingEnabled(true)`
-- Monitor logcat for native errors: `adb logcat -s LibRatsJNI`
-
-### Network Issues
-- Verify devices are on same network
-- Check firewall/router settings
-- Test with direct connection strategy first
-- Ensure ports are not blocked
+- Build: ensure NDK and CMake are installed and the repository root is reachable
+  from the module so core sources compile.
+- Runtime: grant the required permissions; raise verbosity with
+  `RatsClient.setLogLevel(RatsClient.LOG_DEBUG)`; check native logs with
+  `adb logcat -s LibRatsJNI`.
+- Network: verify peers are reachable and ports are open.
 
 ## License
 
-This Android library follows the same license as the main LibRats project.
+Follows the main LibRats project license.
