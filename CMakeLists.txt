@@ -157,6 +157,8 @@ set(LIBRARY_SOURCES
     src/util/fs.cpp
     src/util/logger.h
     src/util/logger.cpp
+    src/util/json.h
+    src/util/json.cpp
     src/util/version.cpp
     src/util/rats_export.h
     ${PROJECT_BINARY_DIR}/src/util/version.h
@@ -499,6 +501,7 @@ if(RATS_BUILD_TESTS)
         tests/test_dht.cpp
         tests/test_os.cpp
         tests/test_fs.cpp
+        tests/test_json.cpp
         tests/test_main.cpp
 # Noise Protocol Crypto tests
         tests/test_crypto_curve25519.cpp

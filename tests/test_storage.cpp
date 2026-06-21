@@ -254,7 +254,7 @@ TEST_F(StorageManagerTest, PutAndGetBinary) {
 TEST_F(StorageManagerTest, PutAndGetJson) {
     storage_ = std::make_unique<StorageManager>(config_);
 
-    nlohmann::json json_data = {
+    librats::Json json_data = {
         {"name", "test"},
         {"count", 42},
         {"nested", {{"a", 1}, {"b", 2}}},
@@ -377,7 +377,7 @@ TEST_F(StorageManagerTest, SaveAndLoad) {
         storage->put("int", int64_t(42));
         storage->put("dbl", 3.14);
         storage->put("bin", std::vector<uint8_t>{1, 2, 3});
-        storage->put_json("json", nlohmann::json({{"a", 1}}));
+        storage->put_json("json", librats::Json({{"a", 1}}));
 
         ASSERT_TRUE(storage->save());
     }
@@ -390,7 +390,7 @@ TEST_F(StorageManagerTest, SaveAndLoad) {
         EXPECT_EQ(*storage->get_int("int"), 42);
         EXPECT_DOUBLE_EQ(*storage->get_double("dbl"), 3.14);
         EXPECT_EQ(*storage->get_binary("bin"), (std::vector<uint8_t>{1, 2, 3}));
-        EXPECT_EQ(*storage->get_json("json"), nlohmann::json({{"a", 1}}));
+        EXPECT_EQ(*storage->get_json("json"), librats::Json({{"a", 1}}));
     }
 }
 

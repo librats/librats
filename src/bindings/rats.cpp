@@ -12,7 +12,7 @@
 #include "subsystems/reconnection.h"
 #include "core/address.h"
 #include "util/logger.h"
-#include "util/json.hpp"
+#include "util/json.h"
 #include "util/version.h"
 
 #include <cstdlib>
@@ -305,7 +305,7 @@ rats_error_t rats_on_json(rats_t node, const char* type, rats_json_cb cb, void* 
     if (!type || !cb) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->messages) return RATS_ERR_NOT_ENABLED;
-    h->messages->on(type, [cb, user](const PeerId& from, const nlohmann::json& data) {
+    h->messages->on(type, [cb, user](const PeerId& from, const librats::Json& data) {
         cb(user, from.to_hex().c_str(), data.dump().c_str());
     });
     return RATS_OK;
@@ -315,7 +315,7 @@ rats_error_t rats_once_json(rats_t node, const char* type, rats_json_cb cb, void
     if (!type || !cb) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->messages) return RATS_ERR_NOT_ENABLED;
-    h->messages->once(type, [cb, user](const PeerId& from, const nlohmann::json& data) {
+    h->messages->once(type, [cb, user](const PeerId& from, const librats::Json& data) {
         cb(user, from.to_hex().c_str(), data.dump().c_str());
     });
     return RATS_OK;
@@ -335,7 +335,7 @@ rats_error_t rats_send_json(rats_t node, const char* peer_id_hex, const char* ty
     if (!h->messages) return RATS_ERR_NOT_ENABLED;
     auto id = PeerId::from_hex(peer_id_hex);
     if (!id) return RATS_ERR_INVALID_ARG;
-    auto j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
+    auto j = librats::Json::parse(json, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded()) return RATS_ERR_INVALID_ARG;
     if (!h->node->peer(*id)) return RATS_ERR_NO_SUCH_PEER;
     h->messages->send(*id, type, j);
@@ -346,7 +346,7 @@ rats_error_t rats_broadcast_json(rats_t node, const char* type, const char* json
     if (!type || !json) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->messages) return RATS_ERR_NOT_ENABLED;
-    auto j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
+    auto j = librats::Json::parse(json, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded()) return RATS_ERR_INVALID_ARG;
     h->messages->send(type, j);
     return RATS_OK;

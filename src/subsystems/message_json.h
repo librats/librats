@@ -5,7 +5,7 @@
  * @brief Typed JSON message exchange over PeerNetwork.
  *
  * A familiar `on`/`once`/`off` + `send` messaging API as a Subsystem: an
- * application names a message *type* (a string) and exchanges nlohmann::json
+ * application names a message *type* (a string) and exchanges librats::Json
  * payloads with peers, without caring about framing or channels. Attach it like
  * any subsystem; reach it later via node.json() (or subsystem<MessageJson>()):
  *
@@ -31,7 +31,7 @@
 #include "peer/peer.h"
 #include "peer/peer_id.h"
 #include "core/bytes.h"
-#include "util/json.hpp"
+#include "util/json.h"
 
 #include <functional>
 #include <mutex>
@@ -43,7 +43,7 @@ namespace librats {
 
 class MessageJson final : public Subsystem {
 public:
-    using Handler      = std::function<void(const PeerId& from, const nlohmann::json& data)>;
+    using Handler      = std::function<void(const PeerId& from, const librats::Json& data)>;
     using SendCallback = std::function<void(bool ok, const std::string& error)>;
 
     /// Register a handler for `type`. Additive: multiple handlers may coexist and
@@ -58,11 +58,11 @@ public:
 
     /// Broadcast `data` of `type` to all connected peers. `cb`, if given, reports
     /// whether there was at least one peer to send to.
-    void send(const std::string& type, const nlohmann::json& data, SendCallback cb = nullptr);
+    void send(const std::string& type, const librats::Json& data, SendCallback cb = nullptr);
 
     /// Send `data` of `type` to one peer. `cb`, if given, reports success or the
     /// reason it could not be sent (e.g. the peer is not connected).
-    void send(const PeerId& to, const std::string& type, const nlohmann::json& data,
+    void send(const PeerId& to, const std::string& type, const librats::Json& data,
               SendCallback cb = nullptr);
 
     // Subsystem — no background thread; purely event-driven.
@@ -72,7 +72,7 @@ public:
 
 private:
     void on_typed(const PeerId& from, ByteView payload);
-    static Bytes encode(const std::string& type, const nlohmann::json& data);
+    static Bytes encode(const std::string& type, const librats::Json& data);
 
     struct Entry {
         Handler handler;

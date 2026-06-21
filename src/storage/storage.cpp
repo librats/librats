@@ -396,7 +396,7 @@ bool StorageManager::put(const std::string& key, const std::vector<uint8_t>& val
     return put_internal(key, StorageValueType::BINARY, value);
 }
 
-bool StorageManager::put_json(const std::string& key, const nlohmann::json& value) {
+bool StorageManager::put_json(const std::string& key, const librats::Json& value) {
     std::string json_str = value.dump();
     return put_internal(key, StorageValueType::JSON, serialize_value(json_str));
 }
@@ -531,7 +531,7 @@ std::optional<std::vector<uint8_t>> StorageManager::get_binary(const std::string
     return it->second.data;
 }
 
-std::optional<nlohmann::json> StorageManager::get_json(const std::string& key) const {
+std::optional<librats::Json> StorageManager::get_json(const std::string& key) const {
     std::lock_guard<std::mutex> lock(storage_mutex_);
 
     auto it = entries_.find(key);
@@ -545,7 +545,7 @@ std::optional<nlohmann::json> StorageManager::get_json(const std::string& key) c
 
     try {
         std::string json_str = deserialize_string(it->second.data);
-        return nlohmann::json::parse(json_str);
+        return librats::Json::parse(json_str);
     } catch (const std::exception& e) {
         LOG_STORAGE_ERROR("Failed to parse JSON for key '" << key << "': " << e.what());
         return std::nullopt;
@@ -843,10 +843,10 @@ StorageStatistics StorageManager::get_statistics() const {
     return result;
 }
 
-nlohmann::json StorageManager::get_statistics_json() const {
+librats::Json StorageManager::get_statistics_json() const {
     StorageStatistics stats = get_statistics();
 
-    nlohmann::json result;
+    librats::Json result;
     result["total_entries"] = stats.total_entries;
     result["deleted_entries"] = stats.deleted_entries;
     result["total_data_bytes"] = stats.total_data_bytes;

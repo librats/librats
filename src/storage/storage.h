@@ -32,7 +32,7 @@
 #include "peer/peer.h"
 #include "peer/peer_id.h"
 #include "core/bytes.h"
-#include "util/json.hpp"
+#include "util/json.h"
 
 #include <string>
 #include <vector>
@@ -226,7 +226,7 @@ public:
     bool put(const std::string& key, int64_t value);
     bool put(const std::string& key, double value);
     bool put(const std::string& key, const std::vector<uint8_t>& value);
-    bool put_json(const std::string& key, const nlohmann::json& value);
+    bool put_json(const std::string& key, const librats::Json& value);
 
     // =========================================================================
     // Get Operations (Read)
@@ -236,7 +236,7 @@ public:
     std::optional<int64_t> get_int(const std::string& key) const;
     std::optional<double> get_double(const std::string& key) const;
     std::optional<std::vector<uint8_t>> get_binary(const std::string& key) const;
-    std::optional<nlohmann::json> get_json(const std::string& key) const;
+    std::optional<librats::Json> get_json(const std::string& key) const;
     std::optional<StorageValueType> get_type(const std::string& key) const;
 
     // =========================================================================
@@ -280,7 +280,7 @@ public:
     // =========================================================================
 
     StorageStatistics get_statistics() const;
-    nlohmann::json get_statistics_json() const;
+    librats::Json get_statistics_json() const;
 
 private:
     // Network message handlers (run on a reactor thread).

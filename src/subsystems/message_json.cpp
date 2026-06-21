@@ -31,7 +31,7 @@ void MessageJson::off(const std::string& type) {
 
 // ── Sending ─────────────────────────────────────────────────────────────────
 
-Bytes MessageJson::encode(const std::string& type, const nlohmann::json& data) {
+Bytes MessageJson::encode(const std::string& type, const librats::Json& data) {
     const std::string body = data.dump();
     Bytes out;
     out.reserve(2 + type.size() + body.size());
@@ -42,7 +42,7 @@ Bytes MessageJson::encode(const std::string& type, const nlohmann::json& data) {
     return out;
 }
 
-void MessageJson::send(const std::string& type, const nlohmann::json& data, SendCallback cb) {
+void MessageJson::send(const std::string& type, const librats::Json& data, SendCallback cb) {
     if (!network_) { if (cb) cb(false, "not attached to a network"); return; }
 
     const Bytes payload = encode(type, data);
@@ -51,7 +51,7 @@ void MessageJson::send(const std::string& type, const nlohmann::json& data, Send
     if (cb) cb(n > 0, n > 0 ? "" : "no connected peers");
 }
 
-void MessageJson::send(const PeerId& to, const std::string& type, const nlohmann::json& data,
+void MessageJson::send(const PeerId& to, const std::string& type, const librats::Json& data,
                        SendCallback cb) {
     if (!network_) { if (cb) cb(false, "not attached to a network"); return; }
 
@@ -79,7 +79,7 @@ void MessageJson::on_typed(const PeerId& from, ByteView payload) {
     if (2 + type_len > n) return;
 
     std::string type(reinterpret_cast<const char*>(p + 2), type_len);
-    nlohmann::json data = nlohmann::json::parse(p + 2 + type_len, p + n, nullptr, /*allow_exceptions=*/false);
+    librats::Json data = librats::Json::parse(p + 2 + type_len, p + n, nullptr, /*allow_exceptions=*/false);
     if (data.is_discarded()) {
         LOG_WARN("msgex", "Malformed JSON for type '" << type << "' from " << from.short_hex());
         return;

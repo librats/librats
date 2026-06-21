@@ -11,7 +11,7 @@
 #include <thread>
 
 using namespace librats;
-using json = nlohmann::json;
+using json = librats::Json;
 using namespace std::chrono_literals;
 
 namespace {

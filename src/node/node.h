@@ -65,7 +65,7 @@
 namespace librats {
 
 class NetworkMonitor;  // util/network_monitor.h — owned via unique_ptr, included in node.cpp
-class MessageJson;     // subsystems/message_json.h — reached via json() (json.hpp stays out of node.h)
+class MessageJson;     // subsystems/message_json.h — reached via json() (json.h stays out of node.h)
 
 class Node final : public ConnectionDelegate, public PeerNetwork {
 public:

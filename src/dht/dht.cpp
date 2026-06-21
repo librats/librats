@@ -4,7 +4,7 @@
 #include "util/fs.h"
 #include "core/socket.h"
 #include "sha1.h"
-#include "util/json.hpp"
+#include "util/json.h"
 #include <random>
 #include <algorithm>
 #include <sstream>
@@ -2828,13 +2828,13 @@ bool DhtClient::save_routing_table() {
     std::lock_guard<std::mutex> lock(routing_table_mutex_);
 
     try {
-        nlohmann::json routing_data;
+        librats::Json routing_data;
         routing_data["version"] = 1;
         routing_data["family"] = is_ipv6() ? "ipv6" : "ipv4";
         routing_data["node_id"] = node_id_to_hex(node_id_);
         routing_data["saved_at"] = std::chrono::system_clock::now().time_since_epoch().count();
         
-        nlohmann::json nodes_array = nlohmann::json::array();
+        librats::Json nodes_array = librats::Json::array();
         
         // Save only good nodes (confirmed with fail_count == 0)
         size_t saved_count = 0;
@@ -2842,7 +2842,7 @@ bool DhtClient::save_routing_table() {
             for (const auto& node : bucket) {
                 // Only save confirmed good nodes
                 if (node.confirmed()) {
-                    nlohmann::json node_data;
+                    librats::Json node_data;
                     node_data["id"] = node_id_to_hex(node.id);
                     node_data["ip"] = node.peer.ip;
                     node_data["port"] = node.peer.port;
@@ -2902,7 +2902,7 @@ bool DhtClient::load_routing_table() {
         }
         
         // Parse JSON
-        nlohmann::json routing_data;
+        librats::Json routing_data;
         file >> routing_data;
         file.close();
         

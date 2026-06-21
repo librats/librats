@@ -36,7 +36,7 @@
 #include "subsystems/reconnection.h"
 #include "core/address.h"
 #include "util/fs.h"
-#include "util/json.hpp"
+#include "util/json.h"
 #ifdef RATS_SEARCH_FEATURES
 #include "subsystems/bittorrent.h"
 #endif
@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
         std::cout << peer.id().short_hex() << ": " << to_text(data) << "\n";
     });
 
-    node.json()->on("msg", [](const PeerId& from, const nlohmann::json& data) {
+    node.json()->on("msg", [](const PeerId& from, const librats::Json& data) {
         std::cout << "[msg] " << from.short_hex() << ": " << data.value("text", "") << "\n";
     });
 
@@ -347,7 +347,7 @@ int main(int argc, char** argv) {
         }
         else if (cmd == "/msg" && args.size() >= 2) {
             const std::string body = line.substr(line.find(args[1]));
-            node.json()->send("msg", nlohmann::json{{"text", body}});
+            node.json()->send("msg", librats::Json{{"text", body}});
         }
         else if (cmd == "/file" && args.size() >= 3) {
             PeerId to;
