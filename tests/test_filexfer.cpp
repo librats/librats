@@ -288,9 +288,9 @@ TEST(FilexferTest, ProgressReportsRateAndEta) {
             const int64_t e = pr.elapsed.count();
             if (e < last_elapsed_ms) elapsed_regressed = true;
             last_elapsed_ms = e;
-            max_elapsed_ms  = std::max(max_elapsed_ms, e);
-            max_rate = std::max(max_rate, pr.transfer_rate_bps);
-            max_avg  = std::max(max_avg,  pr.average_rate_bps);
+            max_elapsed_ms  = (std::max)(max_elapsed_ms, e);
+            max_rate = (std::max)(max_rate, pr.transfer_rate_bps);
+            max_avg  = (std::max)(max_avg,  pr.average_rate_bps);
             if (pr.estimated_time_remaining.count() > 0) saw_eta = true;
         }
         // Pause once, right after data starts — synchronously here (as in
