@@ -278,7 +278,18 @@ std::string resolve_hostname_v6(const std::string& hostname) {
         LOG_NETUTILS_DEBUG("Already an IPv6 address: " << hostname);
         return hostname;
     }
-    
+
+    // An IPv4 literal has no genuine IPv6 form, so report "no v6" and let the
+    // caller dial it over IPv4. Without this, macOS/BSD getaddrinfo() synthesises
+    // an IPv4-mapped "::ffff:a.b.c.d" for a numeric IPv4 host even without
+    // AI_V4MAPPED (Linux/Windows return an error here). That made us dial IPv4
+    // endpoints over an AF_INET6 socket, so getpeername()/remote_ip() reported
+    // "::ffff:127.0.0.1" instead of "127.0.0.1"
+    if (is_valid_ipv4(hostname)) {
+        LOG_NETUTILS_DEBUG("IPv4 literal has no IPv6 form: " << hostname);
+        return "";
+    }
+
     struct addrinfo hints, *result;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET6;
