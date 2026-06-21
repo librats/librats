@@ -103,6 +103,12 @@ RATS_API uint16_t     rats_listen_port(rats_t node);
 /** Our self-certifying peer id as hex. Caller frees with rats_string_free(). */
 RATS_API char*    rats_local_id(rats_t node);
 
+/** Application protocol identity bound into the handshake (see rats_config_t).
+ *  Two nodes whose (name, version) differ cannot complete a handshake. Caller
+ *  frees the returned string with rats_string_free(). */
+RATS_API char*    rats_protocol_name(rats_t node);
+RATS_API char*    rats_protocol_version(rats_t node);
+
 /* — connections — */
 
 RATS_API rats_error_t rats_connect(rats_t node, const char* host, uint16_t port);
@@ -242,6 +248,18 @@ typedef enum {
 RATS_API void rats_set_log_level(rats_log_level_t level);
 /** Mirror logs to `path` (NULL/empty disables file logging). */
 RATS_API void rats_set_log_file(const char* path);
+
+/* — library info (process-global; no node required) — */
+
+/** Library version as a static string, e.g. "1.2.3" (do not free). */
+RATS_API const char* rats_version_string(void);
+/** Library version components. Any out-pointer may be NULL. */
+RATS_API void        rats_version(int* major, int* minor, int* patch, int* build);
+/** Git describe of the build, e.g. "v1.2.3-4-gabcdef" (static; do not free). */
+RATS_API const char* rats_git_describe(void);
+/** Packed ABI id as (major<<16)|(minor<<8)|patch — MAJOR bumps on breaking
+ *  changes, MINOR on additive ones. */
+RATS_API uint32_t    rats_abi(void);
 
 /* — utility — */
 

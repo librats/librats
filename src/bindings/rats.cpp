@@ -13,6 +13,7 @@
 #include "core/address.h"
 #include "util/logger.h"
 #include "util/json.hpp"
+#include "util/version.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -520,6 +521,35 @@ void rats_set_log_file(const char* path) {
     } else {
         logger.set_file_logging_enabled(false);
     }
+}
+
+/* — protocol identity (node-scoped) — */
+
+char* rats_protocol_name(rats_t node) {
+    return dup_string(node_of(node)->protocol_name());
+}
+
+char* rats_protocol_version(rats_t node) {
+    return dup_string(node_of(node)->protocol_version());
+}
+
+/* — library info (process-global) — */
+
+const char* rats_version_string(void) { return version::STRING; }
+
+void rats_version(int* major, int* minor, int* patch, int* build) {
+    if (major) *major = version::MAJOR;
+    if (minor) *minor = version::MINOR;
+    if (patch) *patch = version::PATCH;
+    if (build) *build = version::BUILD;
+}
+
+const char* rats_git_describe(void) { return version::GIT_DESCRIBE; }
+
+uint32_t rats_abi(void) {
+    return (static_cast<uint32_t>(version::MAJOR) << 16) |
+           (static_cast<uint32_t>(version::MINOR) << 8) |
+           (static_cast<uint32_t>(version::PATCH));
 }
 
 /* — utility — */
