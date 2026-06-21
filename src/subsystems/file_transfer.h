@@ -9,8 +9,7 @@
  * a destination) or rejects; the sender streams the data; the receiver verifies a
  * per-chunk CRC32 and a whole-file SHA-256 before moving each temp file into
  * place. All control + data ride on MessageType::FileChunk as compact binary
- * opcodes (no JSON). This restores the full feature set of the legacy
- * FileTransferManager onto the Node/Subsystem plugin model.
+ * opcodes (no JSON), implemented on the Node/Subsystem plugin model.
  *
  * Integrity: every chunk carries a CRC32; every file ends with its SHA-256. A
  * mismatch (or a disk-write failure) fails the whole transfer — a temp file is

@@ -8,9 +8,6 @@
  * route (which reactor + connection), so send()/disconnect() reach the right
  * reactor directly — no PeerTable lookup on the reply path. info() does
  * consult the directory, on demand, for metadata.
- *
- * (Named Peer rather than Peer for historical reasons; the legacy `Peer`
- * UDP-endpoint struct has been removed in favour of the unified Address type.)
  */
 
 #include "core/bytes.h"

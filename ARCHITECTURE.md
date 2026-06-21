@@ -16,8 +16,8 @@
 librats is a C++17 peer‑to‑peer networking library. A **`Node`** listens on a TCP
 port, dials other nodes, performs an authenticated **Noise XX** handshake, and then
 exchanges length‑framed, encrypted messages. Everything above the raw connection —
-peer discovery (DHT, mDNS), NAT traversal (UPnP/NAT‑PMP, STUN/TURN/ICE), pub/sub,
-file transfer, liveness — is a **pluggable subsystem** that talks to the network
+peer discovery (DHT, mDNS), NAT port mapping (UPnP/NAT‑PMP), pub/sub, file
+transfer, liveness — is a **pluggable subsystem** that talks to the network
 through one small interface and never sees the Node's internals. The design is
 **shared‑nothing**: every connection lives on exactly one I/O thread that owns it
 outright, so the hot path holds **no locks**.
@@ -77,11 +77,11 @@ flowchart TB
 
 | Layer | Directory | Responsibility |
 |------|-----------|----------------|
-| **Bindings** | `src/bindings` | Thin C ABI (`rats_node_*`) over `Node`, the base for other languages. |
+| **Bindings** | `src/bindings` | Thin C ABI (`rats_*`) over `Node`, the base for other languages. |
 | **Node (facade)** | `src/node` | Wires the layers together; the public C++ entry point. Owns everything below. |
 | **Subsystems** | `src/subsystems` | Optional features as plugins; reach the mesh only via `PeerNetwork`. |
 | **Wire** | `src/wire` | The on‑the‑wire protocol: `frame` (two‑level framing, `MessageType`) and `MessageRouter`. |
-| **Peer** | `src/peer` | Everything about a peer: `Peer` (handle), `PeerId`, `PeerInfo`, `PeerTable`, `PeerStore`. |
+| **Peer** | `src/peer` | Everything about a peer: `Peer` (handle), `PeerId`, `PeerInfo`, `PeerTable`, `PeerBook`. |
 | **Security** | `src/security` | Handshake + per‑peer encryption (`Identity`, `Handshaker`, `Session`). |
 | **Transport** | `src/transport` | The live I/O engine: `Reactor`, `ReactorPool`, `Connection` (threads + sockets). |
 | **Core** | `src/core` | Passive primitives the engine is built from: buffers, timers, `socket`, `io_poller`, `bytes`, `types`, `Address`. |
@@ -96,23 +96,23 @@ flowchart TB
 ```
 src/
 ├── main.cpp                  # example chat node (the only file left at root)
-├── bindings/   rats_node.{h,cpp}            — C ABI
-├── node/       node, config, peer_network, node_context, host_events  — facade + plugin contract
-├── peer/       peer (Peer handle), peer_id, peer_info, peer_table, peer_store
+├── bindings/   rats.{h,cpp}                 — C ABI
+├── node/       node, config, peer_network, node_context, host_events, identify  — facade + plugin contract
+├── peer/       peer (Peer handle), peer_id, peer_info, peer_table, peer_book
 ├── wire/       frame (framing + MessageType), message_router
 ├── security/   identity, handshaker (+ SecurityProvider), session,
 │               noise_security, plaintext_security
 ├── transport/  reactor, reactor_pool, connection          — live I/O engine (threads)
 ├── core/       bytes, types, address, socket, io_poller, timer_queue, mpsc_queue,
 │               notifier, event_bus, service_registry, receive_buffer,
-│               chained_send_buffer, wakeup_pipe, threadmanager
+│               chained_send_buffer, wakeup_pipe
 ├── crypto/     noise, curve25519, chacha20poly1305, sha256/512, blake2, hkdf,
 │               sha1, crc32
-├── subsystems/ ping_service, pubsub, file_transfer, reconnection,
-│               dht_discovery, mdns_discovery, port_mapping_service
+├── subsystems/ ping_service, pubsub, message_json, file_transfer, reconnection,
+│               peer_exchange, dht_discovery, mdns_discovery, port_mapping_service
 ├── dht/        dht (Kademlia/Mainline), krpc, bencode
 ├── mdns/       mdns
-├── nat/        stun, turn, ice, upnp, natpmp, port_mapping
+├── nat/        stun, upnp, natpmp, port_mapping
 ├── bittorrent/ bittorrent, bt_*, disk_io, tracker   (optional: RATS_SEARCH_FEATURES)
 ├── storage/    storage                               (optional: RATS_STORAGE)
 └── util/       fs, os, logger, network_utils, network_monitor, json, version,
@@ -123,9 +123,8 @@ src/
 are **layers, not topics** — each one may only include the ones below it
 (`node → transport → {wire, peer, security} → core`). A subsystem depends on
 `PeerNetwork` (an interface), never on `Node`. The reactor depends on nothing above
-it. There are no `friend` declarations crossing layers and no god‑class — the
-contrast with the old monolithic `RatsClient` (≈4,700 lines, ~250 methods, one giant
-`peers_mutex_`) is the whole point.
+it. There are no `friend` declarations crossing layers and no god‑class: the core
+stays small and every feature is a guest that only speaks `PeerNetwork`.
 
 ---
 
@@ -201,7 +200,7 @@ flowchart LR
 
     A -->|"post(task) + wake"| Loop
     SubThreads -->|"send()/connect() = post(task)"| Loop
-    Loop -->|"on_message / on_peer_* callbacks"| SubThreads
+    Loop -->|"on(channel) / on_peer_* callbacks"| SubThreads
     NM -->|"hand off + wake"| MT
     MT -->|"EventBus.emit"| SubThreads
 ```
@@ -222,8 +221,8 @@ flowchart LR
   (possibly blocking) `EventBus.emit(NetworkChanged)` so a subscriber's slow recovery
   never stalls change detection or the reactors. `EventBus` handlers therefore run on
   this thread; subscribe at `attach()`.
-- **Callbacks** (`on_peer_connected`, `on_message`, …) run **on a reactor thread**.
-  Register them before `start()`; do not block in them.
+- **Callbacks** (`on_peer_connected`, `on(channel, …)`, …) run **on a reactor
+  thread**. Register them before `start()`; do not block in them.
 
 ### Concurrency rules (the short version)
 
@@ -234,8 +233,9 @@ flowchart LR
 | `PeerTable` | `shared_mutex` | off the per‑byte path; short critical sections |
 | Each subsystem's own state | that subsystem's own mutex | independent, fine‑grained |
 
-There is no global `peers_mutex_`. Lock contention that dominated the old design is
-structurally gone.
+There is no global peers lock on the data path: per‑frame I/O is lock‑free
+(single‑threaded per connection), and lock contention is structurally avoided
+because each subsystem owns its own fine‑grained state.
 
 ---
 
@@ -323,7 +323,8 @@ views point into the receive buffer and are valid only until consumed.
 | 4 | `FileChunk` | `FileTransfer` |
 | 5 | `Ping` | `PingService` |
 | 6 | `Storage` | `StorageManager` |
-| 7 | `Typed` | `MessageExchange` (typed JSON messaging) |
+| 7 | `Typed` | `MessageJson` (typed JSON messaging) |
+| 8 | `Pex` | `PeerExchange` (gossip of known peer addresses) |
 
 ---
 
@@ -333,9 +334,9 @@ views point into the receive buffer and are valid only until consumed.
 
 - **Application channels** — `MessageType::App` frames are dispatched by a 16‑bit
   channel id, which is an FNV‑1a hash of a channel **name** (`"chat"`, `"orders"`,
-  …). `node.on_message("chat", cb)`.
+  …). `node.on("chat", cb)`.
 - **Message types** — non‑App frames dispatch by `MessageType`. This is how
-  subsystems register: `network.on_message(MessageType::Gossip, cb)`.
+  subsystems register: `network.on(MessageType::Gossip, cb)`.
 
 ```mermaid
 flowchart LR
@@ -428,7 +429,7 @@ class PeerNetwork {                         // talking to peers
     void          send(const PeerId&, MessageType, ByteView);
     void          broadcast(MessageType, ByteView);
     std::vector<PeerId> connected_peers() const;
-    void on_message(MessageType, MessageHandler);
+    void on(MessageType, MessageHandler);
     void on_peer_connected(PeerEventHandler);
     void on_peer_disconnected(PeerDisconnectHandler);
 };
@@ -441,9 +442,9 @@ Because each is an interface, a subsystem is trivially unit‑tested against fak
 
 ### Cross‑module coordination — `EventBus` + `ServiceRegistry`
 
-Modules must cooperate without acquiring direct references to one another (the road
-back to `RatsClient`). Two small, generic primitives in `src/core` provide the two
-honest shapes of that cooperation:
+Modules must cooperate without acquiring direct references to one another (which
+would pull the small core back toward a god‑class). Two small, generic primitives
+in `src/core` provide the two honest shapes of that cooperation:
 
 - **`EventBus`** (`event_bus.h`) — typed publish/subscribe. A publisher `emit`s an
   event *value*; every subscriber registered for that type runs. The publisher
@@ -479,11 +480,13 @@ The current subsystems:
 |-----------|--------------|----------------|----------------------|--------------|
 | **PingService** | Liveness + RTT; pings every peer, echoes pongs | yes (ping loop) | `Ping` | — |
 | **PubSub** | GossipSub: per‑topic mesh (GRAFT/PRUNE), eager push, lazy IHAVE/IWANT pull, fanout, validators, dedup | yes (heartbeat loop) | `Gossip` | — |
+| **MessageJson** | Typed JSON messaging by message *type* (`on`/`once`/`off`/`send`) | no (event‑driven) | `Typed` | — |
 | **FileTransfer** | Push a file/directory tree; CRC32 per chunk + SHA‑256 per file; sliding‑window backpressure; pause/resume/cancel; idle timeout | yes (worker pool + reaper) | `FileChunk` | — |
-| **ReconnectionService** | Keep a set of addresses connected with exponential backoff; optional persistence | yes (dial loop) | — | `PeerStore` |
+| **ReconnectionService** | Keep a set of addresses connected with exponential backoff; optional persistence | yes (dial loop) | — | `PeerBook` |
+| **PeerExchange** | Gossip known peer addresses so the mesh self‑bootstraps | no (event‑driven) | `Pex` | — |
 | **DhtDiscovery** | Announce/find peers under a discovery hash on the Kademlia DHT | yes (search loop) | — | `src/dht` |
 | **MdnsDiscovery** | Announce + browse the LAN; dial discovered instances | via engine | — | `src/mdns` |
-| **PortMappingService** | Forward the listen port through the router (UPnP + NAT‑PMP); detects double‑NAT | via engines | — | `src/nat` |
+| **PortMappingService** | Forward the listen port through the router (UPnP + NAT‑PMP) | via engines | — | `src/nat` |
 
 Subsystems are attached **before** `start()` so the router is fully built before any
 reactor thread runs (no concurrent writes to the handler registry):
@@ -492,7 +495,7 @@ reactor thread runs (no concurrent writes to the handler registry):
 Node node(config);
 node.add_subsystem(std::make_unique<DhtDiscovery>(DhtDiscovery::Config{}));
 node.add_subsystem(std::make_unique<PingService>());
-node.on_message("chat", [](const Peer& p, ByteView data){ /* ... */ });
+node.on("chat", [](const Peer& p, ByteView data){ /* ... */ });
 node.start();
 ```
 
@@ -507,8 +510,10 @@ protocol logic stays where it was:
 - **`src/dht`** — Kademlia DHT compatible with BitTorrent Mainline (`DhtClient`,
   `krpc`, `bencode`). `DhtDiscovery` drives it.
 - **`src/mdns`** — `MdnsClient` for LAN discovery. `MdnsDiscovery` drives it.
-- **`src/nat`** — `stun`/`turn`/`ice` (NAT traversal) and `upnp`/`natpmp` (port
-  mapping). `PortMappingService` drives the latter.
+- **`src/nat`** — `upnp`/`natpmp` (port mapping) and `stun` (public‑IP discovery,
+  used by `DhtDiscovery` for a BEP‑42 node id). `PortMappingService` drives the
+  port‑mapping backends. (There is no UDP ICE/TURN path: the TCP transport reaches
+  NAT'd peers via router port forwarding plus public‑IP discovery.)
 - **`src/bittorrent`** — full BT client (peer wire protocol, piece picker, disk
   I/O, trackers, torrent creation, BEP‑9 metadata). Optional
   (`-DRATS_SEARCH_FEATURES=ON`).
@@ -520,7 +525,7 @@ protocol logic stays where it was:
 | File | Written by | Contents |
 |------|-----------|----------|
 | `data_dir/identity.key` | `Node` (via `Identity`) | 32‑byte static private key → stable `PeerId` |
-| reconnection store | `PeerStore` (used by `ReconnectionService`) | addresses to keep re‑dialing across restarts |
+| reconnection store | `PeerBook` (used by `ReconnectionService`) | addresses to keep re‑dialing across restarts |
 
 With an empty `data_dir`, the node is fully ephemeral: a fresh identity every run.
 
@@ -530,23 +535,31 @@ With an empty `data_dir`, the node is fully ephemeral: a fresh identity every ru
 
 `src/bindings/rats.{h,cpp}` is a **C ABI** (`extern "C"`, opaque
 `rats_t`) over `Node` — the canonical surface other language bindings build on.
-The handle owns the `Node` plus non‑owning pointers to the subsystems it creates
-on demand, so the ABI can drive them after construction:
+The handle owns the `Node` plus non‑owning pointers to the subsystems it enables,
+so the ABI can drive them after construction. Fallible calls return
+`rats_error_t` (`RATS_OK == 0`):
 
-- **lifecycle / mesh** — create/start/stop, `connect`, `peer_count`, `set_max_peers`,
-  peer enumeration (`rats_peer_ids`), the three callbacks (peer up / peer down /
-  message).
-- **messaging** — raw named channels (`rats_send`/`rats_broadcast`), topic
-  pub/sub (`rats_subscribe`/`rats_publish`), and typed JSON (`rats_on`/`rats_send_typed`).
+- **construction** — `rats_create` (quick) or `rats_create_config` with a
+  `rats_config_t` (start it from `rats_config_default()`) for full control:
+  listen/bind, security, `data_dir`, protocol identity, max peers.
+- **lifecycle / mesh** — `rats_start`/`rats_stop`, `connect`, `peer_count`,
+  `set_max_peers`, peer enumeration (`rats_peer_ids`), and the callbacks
+  (peer up / peer down / `rats_on` channel message).
+- **messaging** — raw named channels (`rats_send`/`rats_broadcast`/`rats_on`),
+  topic pub/sub (`rats_subscribe`/`rats_publish`), and typed JSON
+  (`rats_on_json`/`rats_once_json`/`rats_send_json`/`rats_broadcast_json`).
 - **file transfer** — `rats_enable_file_transfer` + offer/progress/complete
   callbacks and `rats_send_file`/`send_directory`/`accept`/`reject`/`cancel`/…
-- **discovery / NAT** — `enable_dht` / `enable_mdns` / `enable_port_mapping`.
+- **discovery / NAT / reconnect** — `rats_enable_dht` / `_mdns` /
+  `_port_mapping` / `_reconnect` (+ `rats_add_reconnect`).
 - **liveness & logging** — `rats_enable_ping` + `rats_peer_rtt_ms`, and the
   process‑global `rats_set_log_level` / `rats_set_log_file`.
 
-Because subsystems attach to the lock‑free `MessageRouter` only at `start()` (no
-concurrent writes to the handler registry), **every subsystem must be configured
-before `rats_start()`** — including on a node that only publishes or sends.
+Subsystems are explicit and opt‑in: each `rats_enable_*` attaches one, and
+because subsystems attach to the lock‑free `MessageRouter` only at `start()`,
+**every subsystem must be enabled before `rats_start()`**. Enabling after start
+returns `RATS_ERR_ALREADY_STARTED`; using a subsystem call before its enable
+returns `RATS_ERR_NOT_ENABLED`.
 
 ---
 
@@ -554,7 +567,8 @@ before `rats_start()`** — including on a node that only publishes or sends.
 
 | Option | Default | Effect |
 |--------|---------|--------|
-| `RATS_BUILD_TESTS` | OFF | builds `librats_tests` (GoogleTest) |
+| `RATS_BUILD_TESTS` | ON | builds `librats_tests` (GoogleTest) |
+| `RATS_BINDINGS` | ON | builds the C ABI (`src/bindings/rats.{h,cpp}`) |
 | `RATS_SEARCH_FEATURES` | OFF | compiles the BitTorrent client (`src/bittorrent`) |
 | `RATS_STORAGE` | OFF | compiles distributed storage (`src/storage`) |
 | `RATS_SHARED_LIBRARY` | OFF | build a shared lib (disables tests) |

@@ -6,7 +6,8 @@
  *
  * Subsystems (DHT, GossipSub, file transfer, …) talk to the network only through
  * PeerNetwork. They never see Node's internals, never hold a Node& or are
- * `friend`s of it — which is exactly what made the old RatsClient a god-class.
+ * `friend`s of it — this narrow contract is what keeps the node a small core
+ * instead of a god-class that every feature reaches into.
  * A subsystem is mocked in tests by implementing this one interface.
  */
 

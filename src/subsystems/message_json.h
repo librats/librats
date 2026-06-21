@@ -4,7 +4,7 @@
  * @file message_json.h
  * @brief Typed JSON message exchange over PeerNetwork.
  *
- * Restores the old client's `on`/`once`/`off` + `send` API as a Subsystem: an
+ * A familiar `on`/`once`/`off` + `send` messaging API as a Subsystem: an
  * application names a message *type* (a string) and exchanges nlohmann::json
  * payloads with peers, without caring about framing or channels. Attach it like
  * any subsystem; reach it later via node.json() (or subsystem<MessageJson>()):
@@ -14,7 +14,7 @@
  *   node.start();
  *   node.json()->send(peer_id, "chat", json{{"text","hi"}});
  *
- * Differences from the old RatsClient version, on purpose:
+ * Two deliberate properties:
  *   - the sender is the *authenticated* PeerId from the handshake, not a
  *     self-reported field in the payload (which could be spoofed);
  *   - no JSON envelope on the wire — just [type][payload], encrypted by the

@@ -6,12 +6,11 @@
  *
  * Records every peer we have successfully connected to (and addresses we have
  * learned), with light metadata: when we first/last saw it, when we last
- * connected, how many times, and the current consecutive-failure streak. This
- * single store backs BOTH needs the old design split across two files — the
- * "reconnect to recent peers" working set and the "remember everyone we ever
- * met" archive. Callers query best() for the most promising addresses and rely
- * on prune() to age out the long tail (replaces master's peers.rats +
- * peers_ever.rats with one ranked source of truth).
+ * connected, how many times, and the current consecutive-failure streak. One
+ * ranked store serves BOTH needs at once — the "reconnect to recent peers"
+ * working set and the "remember everyone we ever met" archive. Callers query
+ * best() for the most promising addresses and rely on prune() to age out the
+ * long tail.
  *
  * Time is passed in (unix seconds) rather than read here, so the book stays a
  * pure, testable data structure; the wall clock lives at the call site.

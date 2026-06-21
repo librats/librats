@@ -8,7 +8,8 @@
  * home router to forward an external (WAN) port to a local (LAN) port so that
  * inbound peer connections can reach a host behind NAT. They share the small set
  * of vocabulary types defined here: the transport protocol of the mapping, which
- * backend produced a result, and the result/callback shape RatsClient consumes.
+ * backend produced a result, and the result/callback shape PortMappingService
+ * consumes.
  */
 
 #include <cstdint>
@@ -63,7 +64,7 @@ struct PortMapResult {
 using PortMapCallback = std::function<void(const PortMapResult&)>;
 
 /**
- * Configuration for RatsClient's automatic port forwarding.
+ * Configuration for automatic port forwarding (see PortMappingService).
  *
  * Both backends run in parallel by default; whichever the router supports
  * succeeds. Disabling one (or all) of them is a matter of flipping a flag.

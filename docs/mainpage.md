@@ -1,107 +1,109 @@
 # librats API Reference {#mainpage}
 
-Welcome to the **librats** API documentation. librats is a high-performance, lightweight peer-to-peer networking library with C++, C, Node.js, Java, Python, and Android support.
+Welcome to the **librats** API documentation. librats is a high-performance,
+lightweight peer-to-peer networking library written in C++17, with a stable C
+ABI and language bindings.
 
 ## Quick Links
 
 - [Main Website](https://librats.com)
 - [GitHub Repository](https://github.com/DEgITx/librats)
-- [npm Package](https://www.npmjs.com/package/librats)
+- [Architecture overview](https://github.com/DEgITx/librats/blob/master/ARCHITECTURE.md)
 
-## Getting Started
+## The model in one minute
 
-The main entry point for librats is the librats::RatsClient class. Here's a quick example:
+The entry point is librats::Node — a thin, secure transport **core**. On its own
+a Node gives you an encrypted TCP transport (Noise_XX), a self-certifying
+librats::PeerId, manual dialing, a peer directory, and raw channel messaging.
+Everything else — discovery, pub/sub, file transfer, NAT port mapping,
+reconnection — is an opt-in librats::Subsystem you attach with
+`add_subsystem()` **before** `start()`. You pay only for what you attach.
 
 ```cpp
-#include "librats.h"
+#include "node/node.h"
+#include "subsystems/dht_discovery.h"
+#include "subsystems/message_json.h"
+
+using namespace librats;
 
 int main() {
-    // Create a P2P client on port 8080
-    librats::RatsClient client(8080);
-    
-    // Set up callbacks
-    client.set_connection_callback([](socket_t socket, const std::string& peer_id) {
-        std::cout << "Peer connected: " << peer_id << std::endl;
+    NodeConfig config;
+    config.listen_port = 8080;
+
+    Node node(config);
+    node.add_subsystem(std::make_unique<DhtDiscovery>(DhtDiscovery::Config{}));
+    node.add_subsystem(std::make_unique<MessageJson>());
+
+    // raw bytes on a named channel
+    node.on("chat", [](const Peer& from, ByteView data) {
+        std::printf("%s: %.*s\n", from.id().short_hex().c_str(),
+                    (int)data.size(), (const char*)data.data());
     });
-    
-    client.set_string_data_callback([](socket_t socket, const std::string& peer_id, 
-                                       const std::string& message) {
-        std::cout << "Message: " << message << std::endl;
+
+    // typed JSON messages (via the MessageJson subsystem)
+    node.json()->on("hello", [](const PeerId& from, const nlohmann::json& j) {
+        std::printf("hello from %s: %s\n", from.short_hex().c_str(),
+                    j.value("text", "").c_str());
     });
-    
-    // Start the client
-    client.start();
-    
-    // Connect to another peer
-    client.connect_to_peer("192.168.1.100", 8080);
-    
-    return 0;
+
+    if (!node.start()) return 1;
+    node.connect("192.168.1.100", 8080);
+    // ... run ...
+    node.stop();
 }
 ```
 
-## Core Modules
+## Core types
 
-### Connection Management
-- librats::RatsClient - Main P2P client class
-- librats::RatsPeer - Peer information structure
-- librats::NatTraversalConfig - NAT traversal configuration
+- librats::Node — the P2P node facade (transport core + subsystem host)
+- librats::NodeConfig — node construction options
+- librats::Peer / librats::PeerId / librats::PeerInfo — peer identity and handles
+- librats::Subsystem / librats::PeerNetwork — the contract every subsystem builds on
+- librats::EventBus / librats::ServiceRegistry — node-scoped coordination buses
+- librats::MessageType — inner-message kinds on the wire
 
-### Messaging
-- Message Exchange API (`on()`, `once()`, `off()`, `send()`)
-- librats::GossipSub - Publish-subscribe messaging
+## Messaging surfaces
 
-### File Transfer
-- librats::FileTransferManager - File transfer management
-- librats::FileTransferConfig - Transfer configuration
-- librats::FileTransferProgress - Transfer progress tracking
+| Surface | API | Payload |
+|---------|-----|---------|
+| Raw channel | `node.on/send/broadcast(channel, …)` | bytes |
+| Typed JSON | `node.json()->on/send(type, …)` (librats::MessageJson) | nlohmann::json |
+| Pub/sub topics | librats::PubSub `subscribe/publish` | bytes, GossipSub mesh |
 
-### Discovery
-- librats::DhtClient - DHT peer discovery
-- librats::MdnsClient - Local network discovery
-- librats::StunClient - STUN/NAT traversal
+## Subsystems
 
-### Security
-- Noise Protocol encryption (Curve25519 + ChaCha20-Poly1305)
-- librats::NoiseKey - Encryption key management
+- librats::DhtDiscovery — Kademlia/Mainline-DHT peer discovery
+- librats::MdnsDiscovery — local-network discovery
+- librats::PubSub — GossipSub topic pub/sub
+- librats::MessageJson — typed JSON messaging
+- librats::FileTransfer — streaming file/directory transfer with integrity
+- librats::PingService — liveness / RTT probing
+- librats::PortMappingService — automatic UPnP IGD + NAT-PMP port forwarding
+- librats::ReconnectionService — re-dial dropped peers with backoff
 
-## Feature Highlights
+## Security
 
-### NAT Traversal
-librats provides industry-leading NAT traversal with 99%+ success rate:
-- ICE (Interactive Connectivity Establishment)
-- STUN for public IP discovery
-- TURN relay support
-- UDP/TCP hole punching
+Connections use the Noise_XX_25519_ChaChaPoly_SHA256 handshake by default
+(mutual authentication, perfect forward secrecy). The application protocol
+name/version is bound into the handshake prologue, so apps that disagree cannot
+connect. Set `NodeConfig::security` to `Plaintext` to disable encryption.
 
-### GossipSub Messaging
-Scalable publish-subscribe messaging:
-```cpp
-client.subscribe_to_topic("chat");
-client.publish_to_topic("chat", "Hello, world!");
+## C ABI
 
-client.on_topic_message("chat", [](const std::string& peer_id, 
-    const std::string& topic, const std::string& message) {
-    std::cout << "Received: " << message << std::endl;
-});
-```
-
-### File Transfer
-Streaming file and directory transfers with integrity verification:
-```cpp
-client.send_file("peer_id", "/path/to/file.txt");
-client.send_directory("peer_id", "/path/to/folder");
-```
+For FFI and language bindings, the canonical C API is declared in
+[bindings/rats.h](@ref rats.h): an opaque `rats_t` wraps a Node, subsystems are
+enabled with `rats_enable_*()` before `rats_start()`, and fallible calls return
+`rats_error_t`.
 
 ## Build Configuration
 
-librats supports various build options:
-
 | Option | Description |
 |--------|-------------|
-| `RATS_BUILD_TESTS` | Build unit tests |
-| `RATS_STORAGE` | Enable distributed storage |
+| `RATS_BUILD_TESTS` | Build unit tests (GoogleTest) |
+| `RATS_BINDINGS` | Build the C ABI |
+| `RATS_STORAGE` | Enable distributed key-value storage |
 | `RATS_SEARCH_FEATURES` | Enable BitTorrent features |
-| `RATS_SHARED_LIBRARY` | Build as shared library |
+| `RATS_SHARED_LIBRARY` | Build as a shared library |
 
 ## License
 

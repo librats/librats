@@ -8,9 +8,7 @@
  * backends into the Node lifecycle. On start() it asks the home router to forward
  * the node's TCP listen port so peers behind NAT can accept inbound connections;
  * on stop() it removes the mapping. Both backends run in parallel on their own
- * worker threads — whichever the router supports wins. This is the Node-era
- * replacement for the old RatsClient::start_port_mapping() wiring that was lost
- * in the rewrite.
+ * worker threads — whichever the router supports wins.
  *
  * Threading: the backends invoke our result callback from their own worker
  * threads, so all shared state is guarded by mutex_. stop() moves the clients out

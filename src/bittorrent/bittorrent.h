@@ -57,16 +57,16 @@
 namespace librats {
 
 //=============================================================================
-// Type aliases for compatibility with existing librats API
+// Public type aliases for the BitTorrent API
 //=============================================================================
 
-/// Alias for TorrentDownload (used by RatsClient API)
+/// Alias for TorrentDownload (public BitTorrent API)
 using TorrentDownload = Torrent;
 
-/// Alias for BitTorrentClient (used by RatsClient API)
+/// Alias for BitTorrentClient (public BitTorrent API)
 using BitTorrentClient = BtClient;
 
-/// Alias for InfoHash (used by RatsClient API) - 20-byte hash
+/// Alias for InfoHash (public BitTorrent API) - 20-byte hash
 using InfoHash = BtInfoHash;
 
 } // namespace librats

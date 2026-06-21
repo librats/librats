@@ -7,12 +7,11 @@
  * Node owns the reactor pool, the security provider, the peer directory and the
  * message router, and it IS the ConnectionDelegate the reactors report to. It is
  * deliberately thin — it composes the layers and exposes a small async API; the
- * logic lives in those layers, not here. (Contrast the old RatsClient, which was
- * all of them at once behind ~250 methods.)
+ * logic lives in those layers, not here.
  *
  * Threading: connect/send/broadcast are non-blocking and thread-safe — they post
- * work to the owning reactor. Event callbacks (on_peer_connected / on_message /
- * on_peer_disconnected) run on a reactor thread; register them before start().
+ * work to the owning reactor. Event callbacks (on_peer_connected / on(channel,…)
+ * / on_peer_disconnected) run on a reactor thread; register them before start().
  *
  * ── What a bare Node does, and what it does NOT ──────────────────────────────
  * A Node on its own is just the secure transport core. Out of the box it gives you:
@@ -22,14 +21,14 @@
  *     peers by itself;
  *   - the peer directory + admission limit: peers(), peer(), peer_count(), max_peers;
  *   - raw channel messaging: send(to, channel, bytes) / broadcast(channel, bytes)
- *     / on_message(channel, …);
+ *     / on(channel, …);
  *   - peer connect/disconnect events and the node-scoped EventBus + ServiceRegistry;
  *   - host network-change detection (NetworkChanged on the EventBus), if enabled;
  *   - identity persistence (NodeConfig::data_dir → identity.key).
  *
  * Everything else is an opt-in Subsystem you attach with add_subsystem() BEFORE
  * start(): peer discovery (DhtDiscovery, MdnsDiscovery), pub/sub (PubSub), typed
- * JSON messaging (MessageExchange), file transfer (FileTransfer), liveness
+ * JSON messaging (MessageJson), file transfer (FileTransfer), liveness
  * (PingService), NAT port mapping (PortMappingService), automatic reconnection
  * (ReconnectionService), distributed storage (StorageManager). None of these are
  * wired by default — a bare Node neither discovers peers nor reconnects on its own;
@@ -70,7 +69,10 @@ class MessageJson;     // subsystems/message_json.h — reached via json() (json
 
 class Node final : public ConnectionDelegate, public PeerNetwork {
 public:
+    /// Construct a node from its configuration (see NodeConfig). This only loads
+    /// the identity and prepares the layers; no socket is opened until start().
     explicit Node(NodeConfig config);
+    /// Stops the node if still running, then releases all resources.
     ~Node() override;
 
     Node(const Node&) = delete;
@@ -90,10 +92,18 @@ public:
         return raw;
     }
 
+    /// Bring the node up: open the listener (if enabled), start the reactor pool,
+    /// then start every attached subsystem. Register callbacks and attach
+    /// subsystems BEFORE calling this.
+    /// @return true on success; false if the listener could not bind.
     bool start();
+    /// Tear the node down: stop subsystems (reverse order), close all
+    /// connections, and join the reactor pool. Safe to call once; idempotent.
     void stop();
 
+    /// Our self-certifying peer identity (the public key peers authenticate).
     const PeerId& local_id() const noexcept override { return identity_.id; }
+    /// The bound listen port (the actual port when the config requested 0).
     uint16_t      listen_port() const noexcept override { return listen_port_; }
 
     /// Application protocol identity bound into the handshake (see NodeConfig).
@@ -107,11 +117,18 @@ public:
     ServiceRegistry& services() noexcept { return services_; }
 
     // — connections —
+    /// Dial a peer. Non-blocking: the connection (TCP + handshake) completes
+    /// asynchronously and surfaces via on_peer_connected. A duplicate or
+    /// self-connection is detected and dropped after the handshake.
     void connect(const Address& address) override;
+    /// @copydoc connect(const Address&)
     void connect(const std::string& host, uint16_t port);
 
+    /// Number of currently-established peers.
     size_t                  peer_count() const noexcept { return directory_.size(); }
+    /// Snapshot of all established peers (id, addresses, direction, timing).
     std::vector<PeerInfo>   peers() const override { return directory_.snapshot(); }
+    /// Handle to a connected peer by id, or std::nullopt if not connected.
     std::optional<Peer> peer(const PeerId& id);
 
     /// Our own addresses as remote peers reported observing us at — their observed
@@ -127,14 +144,24 @@ public:
         return cap != 0 && directory_.size() >= cap;
     }
 
-    // — application messaging —
+    // — application messaging (raw bytes on a named channel) —
+    /// Send raw bytes to one peer on a named channel. Non-blocking; the payload
+    /// is copied into the peer's send queue. No-op if the peer is not connected.
+    /// @param to      destination peer id
+    /// @param channel application channel name (interned to a 16-bit id)
+    /// @param payload message bytes (copied)
     void send(const PeerId& to, std::string_view channel, ByteView payload);
+    /// Send raw bytes on a named channel to every connected peer.
     void broadcast(std::string_view channel, ByteView payload);
 
     // — events (register before start(); invoked on a reactor thread). Multiple
     //   listeners are supported, so subsystems and the app can both subscribe. —
+    /// Subscribe to peer-connected events. The handler runs on a reactor thread.
     void on_peer_connected(PeerNetwork::PeerEventHandler cb) override { peer_connected_.push_back(std::move(cb)); }
+    /// Subscribe to peer-disconnected events. The handler runs on a reactor thread.
     void on_peer_disconnected(PeerNetwork::PeerDisconnectHandler cb) override { peer_disconnected_.push_back(std::move(cb)); }
+    /// Register a handler for inbound messages on a named channel. Additive:
+    /// multiple handlers may coexist. The handler runs on a reactor thread.
     void on(std::string_view channel, MessageRouter::Handler cb) { router_.on_channel(channel, std::move(cb)); }
 
     // — typed lookup of an attached subsystem (nullptr if none of that type) —
