@@ -105,6 +105,17 @@ public:
         uint64_t   total_bytes = 0;
         uint32_t   files_completed = 0;
         uint32_t   total_files = 0;
+
+        double transfer_rate_bps = 0.0;  ///< recent (smoothed) throughput, bytes/sec
+        double average_rate_bps  = 0.0;  ///< mean throughput since the transfer went live
+        std::chrono::milliseconds elapsed{0};                  ///< time since it went live
+        std::chrono::milliseconds estimated_time_remaining{0}; ///< ETA at the recent rate (0 = unknown)
+
+        /// Completion in [0, 100].
+        double percent() const {
+            if (total_bytes == 0) return status == Status::Completed ? 100.0 : 0.0;
+            return static_cast<double>(bytes_transferred) / static_cast<double>(total_bytes) * 100.0;
+        }
     };
 
     /// Aggregate counters.
@@ -152,6 +163,42 @@ public:
     void stop() override;
 
 private:
+    // Smoothed throughput + elapsed/ETA tracking for one transfer. Accessed only
+    // under the owning transfer's mutex. The clock starts lazily on the first
+    // sample (first byte activity); a long gap (pause/idle) is treated as a
+    // discontinuity so it doesn't register as a throughput dip.
+    struct RateTracker {
+        using clock = std::chrono::steady_clock;
+        clock::time_point start{};      ///< first byte activity (transfer went live)
+        clock::time_point mark{};       ///< last rate-sample instant
+        uint64_t          mark_bytes = 0;
+        double            rate_bps   = 0.0;  ///< EWMA of recent throughput
+
+        void sample(uint64_t bytes, clock::time_point now) {
+            constexpr int64_t kMinMs = 250, kMaxMs = 2000;
+            constexpr double  kAlpha = 0.4;
+            if (start == clock::time_point{}) { start = mark = now; mark_bytes = bytes; return; }
+            const int64_t dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - mark).count();
+            if (dt < kMinMs) return;                              // too soon: hold the prior rate
+            if (dt > kMaxMs) { mark = now; mark_bytes = bytes; return; }  // gap: reset, don't pollute
+            const double inst = static_cast<double>(bytes - mark_bytes) * 1000.0 / static_cast<double>(dt);
+            rate_bps = rate_bps <= 0.0 ? inst : kAlpha * inst + (1.0 - kAlpha) * rate_bps;
+            mark = now; mark_bytes = bytes;
+        }
+
+        void fill(Progress& p, uint64_t bytes, uint64_t total, clock::time_point now) const {
+            if (start == clock::time_point{}) return;            // not live yet
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
+            p.elapsed = ms;
+            p.transfer_rate_bps = rate_bps;
+            if (ms.count() > 0)
+                p.average_rate_bps = static_cast<double>(bytes) * 1000.0 / static_cast<double>(ms.count());
+            if (rate_bps > 1.0 && total > bytes)
+                p.estimated_time_remaining = std::chrono::milliseconds(
+                    static_cast<int64_t>(static_cast<double>(total - bytes) / rate_bps * 1000.0));
+        }
+    };
+
     // ── Per-transfer state (held via shared_ptr so workers/handlers keep it
     //    alive past map removal) ──────────────────────────────────────────────
     struct Outgoing {
@@ -176,6 +223,7 @@ private:
         bool                     finished = false;
         sha256_context_t         hash{};
         std::chrono::steady_clock::time_point last_activity{};
+        RateTracker              rate;
     };
 
     struct IncomingFile {
@@ -207,6 +255,7 @@ private:
         sha256_context_t           hash{};
         uint8_t                    computed_sha[SHA256_HASH_SIZE]{};
         std::chrono::steady_clock::time_point last_activity{};
+        RateTracker                rate;
     };
 
     // ── message handling (reactor thread) ─────────────────────────────────────

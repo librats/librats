@@ -787,22 +787,28 @@ bool FileTransfer::resume(const PeerId& peer, uint64_t id) {
 
 void FileTransfer::emit_progress(const std::shared_ptr<Outgoing>& t) {
     if (!progress_handler_) return;
+    const auto now = std::chrono::steady_clock::now();
     Progress p;
     { std::lock_guard<std::mutex> lk(t->mtx);
+      t->rate.sample(t->bytes_done, now);
       p.id = t->id; p.peer = t->peer; p.direction = Direction::Sending; p.status = t->status;
       p.bytes_transferred = t->bytes_done; p.total_bytes = t->total_bytes;
-      p.files_completed = t->files_done; p.total_files = static_cast<uint32_t>(t->files.size()); }
+      p.files_completed = t->files_done; p.total_files = static_cast<uint32_t>(t->files.size());
+      t->rate.fill(p, t->bytes_done, t->total_bytes, now); }
     progress_handler_(p);
 }
 
 void FileTransfer::emit_progress(const std::shared_ptr<Incoming>& t) {
     if (!progress_handler_) return;
+    const auto now = std::chrono::steady_clock::now();
     Progress p;
     { std::lock_guard<std::mutex> lk(t->mtx);
+      uint64_t total = 0; for (auto& f : t->files) total += f.size;
+      t->rate.sample(t->bytes_done, now);
       p.id = t->id; p.peer = t->peer; p.direction = Direction::Receiving; p.status = t->status;
-      p.bytes_transferred = t->bytes_done;
-      uint64_t total = 0; for (auto& f : t->files) total += f.size; p.total_bytes = total;
-      p.files_completed = t->files_done; p.total_files = static_cast<uint32_t>(t->files.size()); }
+      p.bytes_transferred = t->bytes_done; p.total_bytes = total;
+      p.files_completed = t->files_done; p.total_files = static_cast<uint32_t>(t->files.size());
+      t->rate.fill(p, t->bytes_done, total, now); }
     progress_handler_(p);
 }
 

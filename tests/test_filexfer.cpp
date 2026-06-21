@@ -4,10 +4,12 @@
 #include "subsystems/file_transfer.h"
 #include "util/fs.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -248,6 +250,73 @@ TEST(FilexferTest, PauseAndResume) {
     EXPECT_TRUE(rok.load());
     EXPECT_TRUE(sok.load());
     EXPECT_EQ(read_all(dst), content);
+
+    delete_file(src.c_str());
+    delete_file(dst.c_str());
+}
+
+// Progress snapshots carry timing/throughput: elapsed only advances, percent()
+// stays in [0,100] and ends at 100, and the smoothed rate + ETA get populated.
+// A brief pause stretches the transfer past one rate-sample window (250 ms) so
+// the recent-rate EWMA is exercised deterministically rather than racing a
+// sub-250 ms loopback transfer.
+TEST(FilexferTest, ProgressReportsRateAndEta) {
+    const std::string src = "ft_rate_src.bin", dst = "ft_rate_dst.bin";
+    const auto content = make_pattern(4 * 1024 * 1024);
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+    delete_file(dst.c_str());
+
+    Pair p = make_pair();
+    const PeerId server_id = p.server->local_id();
+    std::atomic<bool> rdone{false}, rok{false}, sdone{false}, sok{false}, paused{false};
+
+    // Aggregated from the sender's progress snapshots (worker thread → guard m).
+    std::mutex m;
+    double  max_rate = 0.0, max_avg = 0.0;
+    int64_t max_elapsed_ms = 0, last_elapsed_ms = -1;
+    bool    saw_eta = false, bad_percent = false, elapsed_regressed = false;
+
+    p.recv->on_offer([&](const FileTransfer::Offer& o) { p.recv->accept(o.from, o.id, dst); });
+    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    p.send->on_complete([&](uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
+    p.send->on_progress([&](const FileTransfer::Progress& pr) {
+        if (pr.direction != FileTransfer::Direction::Sending) return;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            const double pct = pr.percent();
+            if (pct < 0.0 || pct > 100.0) bad_percent = true;
+            const int64_t e = pr.elapsed.count();
+            if (e < last_elapsed_ms) elapsed_regressed = true;
+            last_elapsed_ms = e;
+            max_elapsed_ms  = std::max(max_elapsed_ms, e);
+            max_rate = std::max(max_rate, pr.transfer_rate_bps);
+            max_avg  = std::max(max_avg,  pr.average_rate_bps);
+            if (pr.estimated_time_remaining.count() > 0) saw_eta = true;
+        }
+        // Pause once, right after data starts — synchronously here (as in
+        // PauseAndResume) so the sender can't race to completion first.
+        if (pr.bytes_transferred > 0 && !paused.exchange(true)) p.send->pause(pr.peer, pr.id);
+    });
+    ASSERT_TRUE(bring_up(p));
+
+    const uint64_t id = p.send->send_file(server_id, src);
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(wait_for([&] { return paused.load(); }));
+    std::this_thread::sleep_for(350ms);                 // span > one 250 ms sample window
+    EXPECT_TRUE(p.send->resume(server_id, id));
+
+    ASSERT_TRUE(wait_for([&] { return rdone.load() && sdone.load(); }));
+    EXPECT_TRUE(rok.load());
+    EXPECT_TRUE(sok.load());
+    EXPECT_EQ(read_all(dst), content);                  // integrity still holds
+
+    std::lock_guard<std::mutex> lk(m);
+    EXPECT_FALSE(bad_percent)       << "percent() left [0,100]";
+    EXPECT_FALSE(elapsed_regressed) << "elapsed went backwards";
+    EXPECT_GT(max_elapsed_ms, 0)    << "elapsed never advanced";
+    EXPECT_GT(max_avg,  0.0)        << "average rate never computed";
+    EXPECT_GT(max_rate, 0.0)        << "recent rate never sampled";
+    EXPECT_TRUE(saw_eta)            << "ETA never populated";
 
     delete_file(src.c_str());
     delete_file(dst.c_str());
