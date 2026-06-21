@@ -333,11 +333,13 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
 }
 
 void FileTransfer::finish_outgoing(const std::shared_ptr<Outgoing>& t, bool success) {
+    bool cancelled;
     {
         std::lock_guard<std::mutex> lk(t->mtx);
         if (t->finished) return;
         t->finished = true;
-        if (t->status != Status::Cancelled)
+        cancelled = (t->status == Status::Cancelled);
+        if (!cancelled)
             t->status = success ? Status::Completed : Status::Failed;
         t->cv.notify_all();
     }
@@ -347,6 +349,9 @@ void FileTransfer::finish_outgoing(const std::shared_ptr<Outgoing>& t, bool succ
     }
     { std::lock_guard<std::mutex> lk(stats_mutex_); success ? ++stats_.completed : ++stats_.failed; }
     emit_progress(t);
+    if (cancelled)      LOG_INFO("filexfer", "Send [" << t->id << "] cancelled");
+    else if (success)   LOG_INFO("filexfer", "Send [" << t->id << "] completed (" << t->root << ")");
+    else                LOG_WARN("filexfer", "Send [" << t->id << "] failed");
     if (complete_handler_) complete_handler_(t->id, success, t->root);
 }
 
@@ -467,11 +472,13 @@ void FileTransfer::try_finalize_file(const std::shared_ptr<Incoming>& t, size_t 
 
 void FileTransfer::finish_incoming(const std::shared_ptr<Incoming>& t, bool success, const std::string& error) {
     std::string dest;
+    bool cancelled;
     {
         std::lock_guard<std::mutex> lk(t->mtx);
         if (t->finished) return;
         t->finished = true;
-        if (t->status != Status::Cancelled)
+        cancelled = (t->status == Status::Cancelled);
+        if (!cancelled)
             t->status = success ? Status::Completed : Status::Failed;
         dest = t->dest_root;
         if (!success)  // reclaim partial temp files
@@ -484,7 +491,10 @@ void FileTransfer::finish_incoming(const std::shared_ptr<Incoming>& t, bool succ
     }
     { std::lock_guard<std::mutex> lk(stats_mutex_); success ? ++stats_.completed : ++stats_.failed; }
     emit_progress(t);
-    if (!error.empty()) LOG_WARN("filexfer", "transfer " << t->id << " ended: " << error);
+    if (cancelled)        LOG_INFO("filexfer", "Receive [" << t->id << "] cancelled");
+    else if (success)     LOG_INFO("filexfer", "Receive [" << t->id << "] completed -> " << dest);
+    else if (error.empty()) LOG_WARN("filexfer", "Receive [" << t->id << "] failed");
+    else                  LOG_WARN("filexfer", "Receive [" << t->id << "] failed: " << error);
     if (complete_handler_) complete_handler_(t->id, success, dest);
 }
 

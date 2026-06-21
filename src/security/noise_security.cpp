@@ -1,8 +1,25 @@
 #include "security/noise_security.h"
 #include "noise.h"
+#include "util/logger.h"
 
 namespace librats {
 namespace {
+
+// Human-readable Noise failure reason for handshake diagnostics. Kept local: the
+// crypto layer deliberately exposes only the enum, and this is its sole logger.
+const char* noise_error_name(rats::NoiseError e) {
+    switch (e) {
+        case rats::NoiseError::OK:                         return "ok";
+        case rats::NoiseError::INVALID_STATE:              return "invalid-state";
+        case rats::NoiseError::DECRYPT_FAILED:             return "decrypt-failed";
+        case rats::NoiseError::MESSAGE_TOO_LARGE:          return "message-too-large";
+        case rats::NoiseError::HANDSHAKE_NOT_COMPLETE:     return "handshake-not-complete";
+        case rats::NoiseError::HANDSHAKE_ALREADY_COMPLETE: return "handshake-already-complete";
+        case rats::NoiseError::INVALID_KEY:                return "invalid-key";
+        case rats::NoiseError::INTERNAL_ERROR:             return "internal-error";
+    }
+    return "unknown";
+}
 
 /// Session backed by a completed rats::NoiseSession (owns its transport ciphers).
 class NoiseSessionAdapter final : public Session {
@@ -71,13 +88,20 @@ private:
         // larger before it reaches the state machine. Defense in depth: the
         // block layer admits frames up to kMaxBlockSize (64 MB), so without
         // this an oversized handshake frame would be fed straight in.
-        if (received_len > rats::NOISE_MAX_MESSAGE_SIZE) return false;
+        if (received_len > rats::NOISE_MAX_MESSAGE_SIZE) {
+            LOG_DEBUG("noise", "Rejecting oversized handshake message (" << received_len << " B)");
+            return false;
+        }
 
         uint8_t buffer[rats::NOISE_MAX_MESSAGE_SIZE];
         size_t  len = sizeof(buffer);
         bool    need_to_send = false;
         const auto err = session_->handshake_step(received, received_len, buffer, &len, &need_to_send);
-        if (err != rats::NoiseError::OK) return false;
+        if (err != rats::NoiseError::OK) {
+            LOG_DEBUG("noise", "Handshake step failed: " << noise_error_name(err)
+                      << " (" << (initiator_ ? "initiator" : "responder") << ")");
+            return false;
+        }
         if (need_to_send) out.insert(out.end(), buffer, buffer + len);
         return true;
     }
