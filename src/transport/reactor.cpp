@@ -247,7 +247,7 @@ void Reactor::remove(socket_t sock, CloseReason reason) {
     conn->cancel_establish_timer();  // stop the reaper before this fd can be reused
     conn_count_.fetch_sub(1, std::memory_order_relaxed);
 
-    LOG_DEBUG("reactor", "Peer " << conn->id() << " closed (" << to_string(reason) << ")");
+    LOG_DEBUG("reactor", "Connection " << conn->id() << " closed (" << to_string(reason) << ")");
     delegate_.on_closed(*conn, reason);
     close_socket(sock);
 }

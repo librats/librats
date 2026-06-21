@@ -132,6 +132,7 @@ void Node::stop() {
     // before the dependency it borrowed is itself stopped and destroyed.
     for (auto it = subsystems_.rbegin(); it != subsystems_.rend(); ++it) (*it)->stop();
     reactors_->stop();                      // then join reactors; close connections
+    LOG_INFO("node", "Node " << identity_.id.short_hex() << " stopped");
 }
 
 // ── Host network-change watch ────────────────────────────────────────────────
@@ -305,6 +306,8 @@ void Node::on_established(Connection& conn) {
     // Fire "connected" only on the 0→1 transition. A reconnect/duplicate that
     // merely swapped the live route keeps the peer connected from the app's view.
     if (outcome.result == PeerTable::AddResult::NewPeer) {
+        LOG_INFO("node", "Peer " << conn.remote_id().short_hex() << " connected ("
+                 << (conn.role() == ConnRole::Inbound ? "inbound" : "outbound") << ")");
         Peer handle = make_peer(conn.remote_id(), route);
         for (auto& cb : peer_connected_) cb(handle);
     }
@@ -342,8 +345,8 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     // under its route, so removing it is a no-op and must NOT surface a disconnect
     // for a peer that is still connected over the surviving link.
     if (!directory_.remove(id, route)) return;
+    LOG_INFO("node", "Peer " << id.short_hex() << " disconnected (" << to_string(reason) << ")");
     for (auto& cb : peer_disconnected_) cb(id);
-    (void)reason;
 }
 
 // ── Identify: dialable-address discovery (reactor thread) ────────────────────
