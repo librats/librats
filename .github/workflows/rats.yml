@@ -70,7 +70,9 @@ jobs:
           mkdir -p artifacts/linux/include
           cp build/bin/rats-client artifacts/linux/
           cp build/lib/librats.a artifacts/linux/
-          cp src/*.h artifacts/linux/include/
+          # Headers live under src/<subsystem>/ and are included as "core/...", "node/..."
+          # etc., so preserve the directory tree (src/*.h matches nothing post-refactor).
+          rsync -am --include='*/' --include='*.h' --exclude='*' src/ artifacts/linux/include/
           cd artifacts
           if [ "${{ github.event_name }}" == "release" ]; then
             VERSION=${{ github.ref_name }}
@@ -85,7 +87,14 @@ jobs:
           mkdir -p artifacts/windows/include
           cp build/bin/Release/rats-client.exe artifacts/windows/
           cp build/lib/Release/rats.lib artifacts/windows/
-          cp src/*.h artifacts/windows/include/
+          # Headers live under src/<subsystem>/ and are included as "core/...", "node/..."
+          # etc., so preserve the directory tree (src/*.h matches nothing post-refactor).
+          $src = (Resolve-Path src).Path
+          Get-ChildItem -Path src -Recurse -Filter *.h | ForEach-Object {
+            $dest = Join-Path artifacts/windows/include $_.FullName.Substring($src.Length + 1)
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+            Copy-Item $_.FullName -Destination $dest
+          }
           cd artifacts
           if ("${{ github.event_name }}" -eq "release") {
             $VERSION = "${{ github.ref_name }}"
@@ -100,7 +109,9 @@ jobs:
           mkdir -p artifacts/macos/include
           cp build/bin/rats-client artifacts/macos/
           cp build/lib/librats.a artifacts/macos/
-          cp src/*.h artifacts/macos/include/
+          # Headers live under src/<subsystem>/ and are included as "core/...", "node/..."
+          # etc., so preserve the directory tree (src/*.h matches nothing post-refactor).
+          rsync -am --include='*/' --include='*.h' --exclude='*' src/ artifacts/macos/include/
           cd artifacts
           if [ "${{ github.event_name }}" == "release" ]; then
             VERSION=${{ github.ref_name }}

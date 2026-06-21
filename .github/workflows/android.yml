@@ -151,9 +151,11 @@ jobs:
             cp build/lib/* artifacts/android-${{ env.ARCH_NAME }}/ 2>/dev/null || true
           fi
           
-          # Copy headers if they exist
+          # Copy headers if they exist. They live under src/<subsystem>/ and are
+          # included as "core/...", "node/..." etc., so preserve the directory tree
+          # (src/*.h matches nothing post-refactor).
           if [ -d "src" ]; then
-            cp src/*.h artifacts/android-${{ env.ARCH_NAME }}/include/ 2>/dev/null || true
+            rsync -am --include='*/' --include='*.h' --exclude='*' src/ artifacts/android-${{ env.ARCH_NAME }}/include/ 2>/dev/null || true
           fi
           if [ -d "include" ]; then
             cp include/*.h artifacts/android-${{ env.ARCH_NAME }}/include/ 2>/dev/null || true
