@@ -21,6 +21,7 @@
  */
 
 #include "node/peer_network.h"
+#include "subsystems/dht_service.h"
 #include "dht/dht.h"
 
 #include <atomic>
@@ -36,7 +37,7 @@
 
 namespace librats {
 
-class DhtDiscovery final : public Subsystem {
+class DhtDiscovery final : public Subsystem, public DhtService {
 public:
     struct Config {
         uint16_t                  dht_port = 0;          ///< 0 = ephemeral
@@ -65,6 +66,12 @@ public:
     void stop() override;
 
     bool     is_running() const;
+
+    /// DhtService: hand out the live Kademlia node so siblings (e.g. Bittorrent)
+    /// can share this swarm. IPv4 preferred, IPv6 fallback; nullptr before start()
+    /// / after stop(). Borrow it during start() and drop it in stop() (see DhtService).
+    DhtClient* dht_client() override { return dht_ ? dht_.get() : dht6_.get(); }
+
     uint16_t dht_port() const;       ///< IPv4 DHT UDP port (0 if not running)
     uint16_t dht_port_v6() const;    ///< IPv6 DHT UDP port (0 if not running)
     InfoHash discovery_hash() const { return hash_; }

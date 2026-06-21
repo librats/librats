@@ -127,7 +127,10 @@ bool Node::start() {
 void Node::stop() {
     if (!running_.exchange(false)) return;
     stop_network_monitor();                 // no more NetworkChanged after this
-    for (auto& s : subsystems_) s->stop();  // stop subsystem threads first
+    // Stop subsystems in reverse attach order, so a subsystem that depends on an
+    // earlier one (e.g. Bittorrent borrowing DhtDiscovery's DhtClient) tears down
+    // before the dependency it borrowed is itself stopped and destroyed.
+    for (auto it = subsystems_.rbegin(); it != subsystems_.rend(); ++it) (*it)->stop();
     reactors_->stop();                      // then join reactors; close connections
 }
 

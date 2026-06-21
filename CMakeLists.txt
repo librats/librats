@@ -211,6 +211,7 @@ set(LIBRARY_SOURCES
     src/subsystems/message_json.cpp
     src/subsystems/file_transfer.h
     src/subsystems/file_transfer.cpp
+    src/subsystems/dht_service.h
     src/subsystems/dht_discovery.h
     src/subsystems/dht_discovery.cpp
     src/subsystems/mdns_discovery.h
@@ -311,6 +312,8 @@ if(RATS_SEARCH_FEATURES)
         src/bittorrent/bt_create_torrent.cpp
         src/bittorrent/bt_resume_data.h
         src/bittorrent/bt_resume_data.cpp
+        src/subsystems/bittorrent.h
+        src/subsystems/bittorrent.cpp
     )
 endif()
 
@@ -550,6 +553,7 @@ if(RATS_BUILD_TESTS)
             tests/test_bt_integration.cpp
             tests/test_bt_create_torrent.cpp
             tests/test_bt_resume_data.cpp
+            tests/test_node_bittorrent.cpp
         )
     endif()
 

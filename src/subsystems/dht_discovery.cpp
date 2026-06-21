@@ -46,6 +46,9 @@ DhtDiscovery::~DhtDiscovery() { stop(); }
 
 void DhtDiscovery::attach(NodeContext& ctx) {
     network_ = &ctx.network;
+    // Publish the DHT as a borrowable capability so a sibling subsystem (e.g.
+    // Bittorrent) can share this Kademlia node instead of running a second one.
+    ctx.services.provide<DhtService>(this);
     // A host network change means our public endpoint may have moved. Re-probe it
     // via STUN and re-announce so the DHT advertises our current reachable address
     // rather than the previous network's. We only flag + wake here (cheap, on the
