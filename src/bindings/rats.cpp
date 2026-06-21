@@ -9,6 +9,8 @@
 #include "subsystems/message_json.h"
 #include "subsystems/file_transfer.h"
 #include "subsystems/ping_service.h"
+#include "subsystems/reconnection.h"
+#include "core/address.h"
 #include "util/logger.h"
 #include "util/json.hpp"
 
@@ -28,15 +30,27 @@ namespace {
 // before-start contract so enables after start() can be rejected cleanly.
 struct RatsHandle {
     std::unique_ptr<Node> node;
-    PubSub*       pubsub   = nullptr;
-    MessageJson*  messages = nullptr;
-    FileTransfer* files    = nullptr;
-    PingService*     ping     = nullptr;
+    PubSub*              pubsub    = nullptr;
+    MessageJson*         messages  = nullptr;
+    FileTransfer*        files     = nullptr;
+    PingService*         ping      = nullptr;
+    ReconnectionService* reconnect = nullptr;
+    std::string data_dir;  ///< copied from NodeConfig so subsystems can co-locate state
     bool dht_enabled     = false;
     bool mdns_enabled    = false;
     bool portmap_enabled = false;
     bool started         = false;
 };
+
+// Build a handle around a freshly-constructed Node, remembering the data_dir
+// (the config is moved into the Node, so copy it out first) for subsystems that
+// co-locate persistent state (DHT routing table, reconnection store).
+RatsHandle* make_handle(NodeConfig config) {
+    auto* h = new RatsHandle();
+    h->data_dir = config.data_dir;
+    h->node = std::make_unique<Node>(std::move(config));
+    return h;
+}
 
 RatsHandle* as_handle(rats_t handle) { return static_cast<RatsHandle*>(handle); }
 Node*       node_of(rats_t handle)   { return as_handle(handle)->node.get(); }
@@ -67,12 +81,39 @@ const char* rats_error_str(rats_error_t err) {
 
 /* — construction / lifecycle — */
 
+rats_config_t rats_config_default(void) {
+    rats_config_t c;
+    c.listen_port      = 0;
+    c.enable_listen    = 1;
+    c.bind_address     = nullptr;
+    c.security         = RATS_SECURITY_NOISE;
+    c.data_dir         = nullptr;
+    c.protocol_name    = nullptr;
+    c.protocol_version = nullptr;
+    c.max_peers        = 0;
+    return c;
+}
+
+rats_t rats_create_config(const rats_config_t* cfg) {
+    NodeConfig config;
+    if (cfg) {
+        config.listen_port   = cfg->listen_port;
+        config.enable_listen = cfg->enable_listen != 0;
+        if (cfg->bind_address)     config.bind_address     = cfg->bind_address;
+        config.security = (cfg->security == RATS_SECURITY_PLAINTEXT) ? NodeConfig::Security::Plaintext
+                                                                     : NodeConfig::Security::Noise;
+        if (cfg->data_dir)         config.data_dir         = cfg->data_dir;
+        if (cfg->protocol_name)    config.protocol_name    = cfg->protocol_name;
+        if (cfg->protocol_version) config.protocol_version = cfg->protocol_version;
+        config.max_peers = cfg->max_peers;
+    }
+    return make_handle(std::move(config));
+}
+
 rats_t rats_create(uint16_t listen_port) {
     NodeConfig config;
     config.listen_port = listen_port;
-    auto* h = new RatsHandle();
-    h->node = std::make_unique<Node>(std::move(config));
-    return h;
+    return make_handle(std::move(config));
 }
 
 rats_t rats_create_ex(uint16_t listen_port, int enable_listen,
@@ -83,9 +124,7 @@ rats_t rats_create_ex(uint16_t listen_port, int enable_listen,
     if (bind_address) config.bind_address = bind_address;
     config.security = (security == RATS_SECURITY_PLAINTEXT) ? NodeConfig::Security::Plaintext
                                                             : NodeConfig::Security::Noise;
-    auto* h = new RatsHandle();
-    h->node = std::make_unique<Node>(std::move(config));
-    return h;
+    return make_handle(std::move(config));
 }
 
 void rats_destroy(rats_t node) { delete as_handle(node); }
@@ -170,6 +209,7 @@ rats_error_t rats_enable_dht(rats_t node, uint16_t dht_port, const char* discove
     if (h->dht_enabled) return RATS_OK;
     DhtDiscovery::Config config;
     config.dht_port = dht_port;
+    config.data_dir = h->data_dir;  // co-locate routing tables with identity (else cwd)
     if (discovery_key) config.discovery_key = discovery_key;
     h->node->add_subsystem(std::make_unique<DhtDiscovery>(std::move(config)));
     h->dht_enabled = true;
@@ -265,6 +305,16 @@ rats_error_t rats_on_json(rats_t node, const char* type, rats_json_cb cb, void* 
     auto* h = as_handle(node);
     if (!h->messages) return RATS_ERR_NOT_ENABLED;
     h->messages->on(type, [cb, user](const PeerId& from, const nlohmann::json& data) {
+        cb(user, from.to_hex().c_str(), data.dump().c_str());
+    });
+    return RATS_OK;
+}
+
+rats_error_t rats_once_json(rats_t node, const char* type, rats_json_cb cb, void* user) {
+    if (!type || !cb) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->messages) return RATS_ERR_NOT_ENABLED;
+    h->messages->once(type, [cb, user](const PeerId& from, const nlohmann::json& data) {
         cb(user, from.to_hex().c_str(), data.dump().c_str());
     });
     return RATS_OK;
@@ -425,6 +475,35 @@ int64_t rats_peer_rtt_ms(rats_t node, const char* peer_id_hex) {
     if (!id) return -1;
     auto rtt = p->last_rtt(*id);
     return rtt ? static_cast<int64_t>(rtt->count()) : -1;
+}
+
+/* — automatic reconnection — */
+
+rats_error_t rats_enable_reconnect(rats_t node) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (!h->reconnect) {
+        ReconnectionService::Config rc;
+        if (!h->data_dir.empty()) rc.store_path = h->data_dir + "/peers.txt";
+        h->reconnect = h->node->add_subsystem(std::make_unique<ReconnectionService>(rc));
+    }
+    return RATS_OK;
+}
+
+rats_error_t rats_add_reconnect(rats_t node, const char* host, uint16_t port) {
+    if (!host) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->reconnect) return RATS_ERR_NOT_ENABLED;
+    h->reconnect->add(Address{host, port});
+    return RATS_OK;
+}
+
+rats_error_t rats_remove_reconnect(rats_t node, const char* host, uint16_t port) {
+    if (!host) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->reconnect) return RATS_ERR_NOT_ENABLED;
+    h->reconnect->remove(Address{host, port});
+    return RATS_OK;
 }
 
 /* — logging — */

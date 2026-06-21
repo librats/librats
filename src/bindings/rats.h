@@ -60,10 +60,38 @@ RATS_API const char* rats_error_str(rats_error_t err);
 
 /* — construction / lifecycle — */
 
-/** Create a listening node (Noise, binds 127.0.0.1, ephemeral if port 0). */
+/** Full node configuration. Obtain a sane-defaults instance with
+ *  rats_config_default(), set the fields you care about, then pass it to
+ *  rats_create_config(). Zero-initialising this struct yourself is NOT safe
+ *  (enable_listen would be 0 → a dial-only node); always start from the default.
+ *  String fields are borrowed only for the duration of the create call; NULL on
+ *  any of them selects the library default shown below. */
+typedef struct {
+    uint16_t        listen_port;      /* inbound port; 0 = ephemeral */
+    int             enable_listen;    /* 0 = dial-only node (no listener) */
+    const char*     bind_address;     /* NULL → "::" dual-stack wildcard */
+    rats_security_t security;         /* RATS_SECURITY_NOISE / _PLAINTEXT */
+    const char*     data_dir;         /* persistent state dir; NULL/"" → ephemeral identity each run */
+    const char*     protocol_name;    /* handshake app namespace; NULL → "librats" */
+    const char*     protocol_version; /* handshake app version;   NULL → "1.0" */
+    size_t          max_peers;        /* established-peer cap; 0 = unlimited */
+} rats_config_t;
+
+/** A config pre-filled with the library defaults (listening, Noise, ephemeral
+ *  identity, unlimited peers). Mutate the returned struct and pass to
+ *  rats_create_config(). */
+RATS_API rats_config_t rats_config_default(void);
+
+/** Create a node from a full config (NULL → all defaults). When data_dir is set,
+ *  the identity persists across restarts and subsystems (DHT routing table,
+ *  reconnection store) co-locate their state there. */
+RATS_API rats_t rats_create_config(const rats_config_t* config);
+
+/** Create a listening node (Noise, dual-stack, ephemeral identity, port 0 = ephemeral). */
 RATS_API rats_t rats_create(uint16_t listen_port);
 
-/** Create with full control. enable_listen=0 makes a dial-only node. */
+/** Create with basic control. enable_listen=0 makes a dial-only node. For
+ *  data_dir / protocol identity / max_peers use rats_create_config(). */
 RATS_API rats_t rats_create_ex(uint16_t listen_port, int enable_listen,
                                          const char* bind_address, rats_security_t security);
 
@@ -142,6 +170,8 @@ RATS_API rats_error_t rats_enable_json(rats_t node);
  *  by the library (valid only for the duration of the call). Additive: multiple
  *  handlers may coexist. The sender id is the authenticated handshake PeerId. */
 RATS_API rats_error_t rats_on_json(rats_t node, const char* type, rats_json_cb cb, void* user);
+/** Like rats_on_json, but the handler is removed right after it fires once. */
+RATS_API rats_error_t rats_once_json(rats_t node, const char* type, rats_json_cb cb, void* user);
 RATS_API rats_error_t rats_off_json(rats_t node, const char* type);
 /** Send/broadcast a JSON message. `json` must be valid JSON text (invalid → RATS_ERR_INVALID_ARG). */
 RATS_API rats_error_t rats_send_json(rats_t node, const char* peer_id_hex, const char* type, const char* json);
@@ -186,6 +216,19 @@ RATS_API rats_error_t rats_enable_ping(rats_t node);
 /** Last measured round-trip time to a peer in milliseconds, or -1 if unknown
  *  (ping not enabled, or no pong received yet). */
 RATS_API int64_t rats_peer_rtt_ms(rats_t node, const char* peer_id_hex);
+
+/* — automatic reconnection — */
+
+/** Enable the reconnection subsystem: re-dials dropped peers with exponential
+ *  backoff. Dialed peers are remembered automatically; when the node has a
+ *  data_dir, targets persist to "<data_dir>/peers.txt" across restarts. Call
+ *  before start(). A bare node never reconnects on its own. */
+RATS_API rats_error_t rats_enable_reconnect(rats_t node);
+/** Add an address to keep connected (re-dialed on drop). Persisted if a store is
+ *  configured. May be called before or after start(). */
+RATS_API rats_error_t rats_add_reconnect(rats_t node, const char* host, uint16_t port);
+/** Stop reconnecting to an address and drop it from the store. */
+RATS_API rats_error_t rats_remove_reconnect(rats_t node, const char* host, uint16_t port);
 
 /* — logging (process-global; no node required) — */
 

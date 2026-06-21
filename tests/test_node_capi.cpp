@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -185,6 +186,97 @@ TEST(NodeCApiTest, PubSubAndTypedMessaging) {
     rats_stop(server);
     rats_destroy(client);
     rats_destroy(server);
+}
+
+// rats_config_default + rats_create_config: a data_dir makes the identity stable
+// across restarts (PeerId persisted to <data_dir>/identity.key), and protocol
+// fields are accepted. Proves the construction-time config is bridged.
+TEST(NodeCApiTest, ConfigDataDirPersistsIdentity) {
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "librats_capi_identity_test";
+    std::filesystem::remove_all(dir);
+
+    rats_config_t cfg = rats_config_default();
+    const std::string dir_str = dir.string();
+    cfg.data_dir         = dir_str.c_str();
+    cfg.protocol_name    = "capi-test";
+    cfg.protocol_version = "2.0";
+
+    rats_t a = rats_create_config(&cfg);
+    ASSERT_NE(a, nullptr);
+    char* id_a = rats_local_id(a);
+    ASSERT_NE(id_a, nullptr);
+    const std::string first(id_a);
+    EXPECT_EQ(first.size(), 64u);
+    rats_string_free(id_a);
+    rats_destroy(a);
+
+    // A second node over the SAME data_dir must load the same identity.
+    rats_t b = rats_create_config(&cfg);
+    char* id_b = rats_local_id(b);
+    EXPECT_EQ(std::string(id_b), first) << "identity not persisted via data_dir";
+    rats_string_free(id_b);
+    rats_destroy(b);
+
+    std::filesystem::remove_all(dir);
+}
+
+// Reconnection subsystem: an added target is actively dialed, so the node
+// connects without an explicit rats_connect. Error codes guard the contract.
+TEST(NodeCApiTest, ReconnectDialsTarget) {
+    rats_t server = rats_create(0);
+    rats_t client = rats_create_ex(0, /*enable_listen=*/0, "127.0.0.1", RATS_SECURITY_NOISE);
+
+    // Before enabling, add/remove report NOT_ENABLED.
+    EXPECT_EQ(rats_add_reconnect(client, "127.0.0.1", 1234), RATS_ERR_NOT_ENABLED);
+
+    ASSERT_EQ(rats_enable_reconnect(client), RATS_OK);
+    EXPECT_EQ(rats_enable_reconnect(client), RATS_OK);  // idempotent
+
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+
+    // Enabling a subsystem after start() is rejected.
+    EXPECT_EQ(rats_enable_reconnect(server), RATS_ERR_ALREADY_STARTED);
+
+    // Register the server's address as a reconnect target; the subsystem dials it.
+    ASSERT_EQ(rats_add_reconnect(client, "127.0.0.1", rats_listen_port(server)), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }, 15s))
+        << "reconnect did not dial the added target";
+
+    EXPECT_EQ(rats_remove_reconnect(client, "127.0.0.1", rats_listen_port(server)), RATS_OK);
+
+    rats_stop(client); rats_stop(server);
+    rats_destroy(client); rats_destroy(server);
+}
+
+// rats_once_json fires exactly once, then auto-removes.
+TEST(NodeCApiTest, OnceJsonFiresOnce) {
+    rats_t server = rats_create(0);
+    rats_t client = rats_create_ex(0, 0, "127.0.0.1", RATS_SECURITY_NOISE);
+
+    std::atomic<int> hits{0};
+    ASSERT_EQ(rats_enable_json(server), RATS_OK);
+    ASSERT_EQ(rats_enable_json(client), RATS_OK);
+    rats_once_json(client, "ping", [](void* u, const char*, const char*) {
+        static_cast<std::atomic<int>*>(u)->fetch_add(1);
+    }, &hits);
+
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    rats_connect(client, "127.0.0.1", rats_listen_port(server));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(server) == 1; }));
+
+    char* client_id = rats_local_id(client);
+    for (int i = 0; i < 3; ++i) rats_send_json(server, client_id, "ping", "{}");
+    // Give all three a chance to arrive; only the first should be delivered.
+    ASSERT_TRUE(wait_for([&] { return hits.load() >= 1; }));
+    std::this_thread::sleep_for(300ms);
+    EXPECT_EQ(hits.load(), 1) << "once handler fired more than once";
+
+    rats_string_free(client_id);
+    rats_stop(client); rats_stop(server);
+    rats_destroy(client); rats_destroy(server);
 }
 
 // max_peers is settable/readable via the ABI and actually caps inbound peers.
