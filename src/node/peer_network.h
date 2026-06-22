@@ -32,6 +32,7 @@ public:
 
     using PeerEventHandler       = std::function<void(const Peer&)>;
     using PeerDisconnectHandler  = std::function<void(const PeerId&)>;
+    using DialFailedHandler      = std::function<void(const Address&)>;
 
     virtual const PeerId&       local_id() const = 0;
     virtual uint16_t            listen_port() const = 0;     ///< our advertised TCP port
@@ -46,6 +47,11 @@ public:
     // all run on a reactor thread. Register before start().
     virtual void                on_peer_connected(PeerEventHandler handler) = 0;
     virtual void                on_peer_disconnected(PeerDisconnectHandler handler) = 0;
+    // An outbound dial WE initiated closed before it ever established (TCP connect
+    // refused/timed out, or the handshake failed). Carries the address we dialed.
+    // There is no on_peer_disconnected for a connection that never came up, so this
+    // is the only signal a redial policy gets that an in-flight dial has resolved.
+    virtual void                on_dial_failed(DialFailedHandler handler) = 0;
 };
 
 struct NodeContext;  // node/node_context.h — bundles network + events + services

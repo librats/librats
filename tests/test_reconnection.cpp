@@ -34,6 +34,8 @@ ReconnectionService::Config fast_reconnect() {
     ReconnectionService::Config c;
     c.tick = 100ms;
     c.base_backoff = 100ms;
+    c.dial_timeout = 2s;  // backstop for an in-flight dial; keeps give-up bounded if a
+                          // failed-dial event is slow, while still > any loopback handshake
     return c;
 }
 

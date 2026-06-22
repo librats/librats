@@ -46,6 +46,7 @@ public:
         std::chrono::milliseconds base_backoff{1000};
         std::chrono::milliseconds max_backoff{60000};
         std::chrono::milliseconds tick{1000};
+        std::chrono::milliseconds dial_timeout{15000};  ///< assume an in-flight dial is dead after this if no connect/fail event arrives (backstop only)
     };
 
     ReconnectionService();
@@ -77,13 +78,16 @@ private:
     struct Target {
         Address                               address;
         bool                                  connected = false;
+        bool                                  dialing = false;  ///< a connect() is in flight; don't pile on a duplicate
         PeerId                                peer_id;
         int                                   attempts = 0;
         std::chrono::steady_clock::time_point next_attempt;
+        std::chrono::steady_clock::time_point dial_deadline;  ///< backstop: give up waiting on the in-flight dial after this
     };
 
     void on_connected(const Peer& peer);
     void on_disconnected(const PeerId& id);
+    void on_dial_failed(const Address& address);
     void loop();
     std::chrono::milliseconds backoff_for(int attempts) const;
 

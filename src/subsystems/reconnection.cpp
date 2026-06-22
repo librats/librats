@@ -74,6 +74,7 @@ void ReconnectionService::attach(NodeContext& ctx) {
     network_ = &ctx.network;
     network_->on_peer_connected([this](const Peer& peer) { on_connected(peer); });
     network_->on_peer_disconnected([this](const PeerId& id) { on_disconnected(id); });
+    network_->on_dial_failed([this](const Address& addr) { on_dial_failed(addr); });
 }
 
 void ReconnectionService::start() {
@@ -120,6 +121,7 @@ void ReconnectionService::on_connected(const Peer& peer) {
                 it->second.address = addr;
             }
             it->second.connected = true;
+            it->second.dialing = false;
             it->second.peer_id = peer.id();
             it->second.attempts = 0;
             if (book_) { book_->note_connected(addr, peer.id(), now); book_changed = true; }
@@ -133,11 +135,23 @@ void ReconnectionService::on_disconnected(const PeerId& id) {
     for (auto& [key, target] : targets_) {
         if (target.connected && target.peer_id == id) {
             target.connected = false;
+            target.dialing = false;
             target.attempts = 0;
             target.next_attempt = std::chrono::steady_clock::now();  // re-dial promptly
             wake_.notify_all();
         }
     }
+}
+
+// An outbound dial we asked for closed before establishing. Clear the in-flight
+// flag so the target becomes eligible again — it then re-dials on its own backoff
+// schedule (next_attempt, set when we dispatched the dial). Without this signal
+// the target would stay "dialing" until the dial_deadline backstop, needlessly
+// stretching every retry to that timeout.
+void ReconnectionService::on_dial_failed(const Address& address) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = targets_.find(address.to_string());
+    if (it != targets_.end()) it->second.dialing = false;
 }
 
 std::chrono::milliseconds ReconnectionService::backoff_for(int attempts) const {
@@ -156,7 +170,16 @@ void ReconnectionService::loop() {
             std::lock_guard<std::mutex> lock(mutex_);
             for (auto it = targets_.begin(); it != targets_.end();) {
                 Target& target = it->second;
-                if (target.connected || target.next_attempt > now) { ++it; continue; }
+                if (target.connected) { ++it; continue; }
+
+                // A dial is already in flight: don't pile on a duplicate while the
+                // handshake completes (a duplicate connection to the same peer is
+                // deduped by the node, but the loser-route teardown races the app's
+                // peer handle). We clear `dialing` on connect / disconnect / dial
+                // failure; dial_deadline is only a backstop for the case where none
+                // of those ever arrive.
+                if (target.dialing && now < target.dial_deadline) { ++it; continue; }
+                if (target.next_attempt > now) { ++it; continue; }
 
                 // Give up actively dialing a persistently-dead target: drop it from
                 // the active set (it stays in the book as history, ranked down by its
@@ -170,6 +193,8 @@ void ReconnectionService::loop() {
 
                 to_dial.push_back(target.address);
                 target.attempts++;
+                target.dialing = true;
+                target.dial_deadline = now + config_.dial_timeout;
                 target.next_attempt = now + backoff_for(target.attempts);
                 ++it;
             }

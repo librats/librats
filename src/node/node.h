@@ -160,6 +160,8 @@ public:
     void on_peer_connected(PeerNetwork::PeerEventHandler cb) override { peer_connected_.push_back(std::move(cb)); }
     /// Subscribe to peer-disconnected events. The handler runs on a reactor thread.
     void on_peer_disconnected(PeerNetwork::PeerDisconnectHandler cb) override { peer_disconnected_.push_back(std::move(cb)); }
+    /// Subscribe to failed-outbound-dial events. The handler runs on a reactor thread.
+    void on_dial_failed(PeerNetwork::DialFailedHandler cb) override { dial_failed_.push_back(std::move(cb)); }
     /// Register a handler for inbound messages on a named channel. Additive:
     /// multiple handlers may coexist. The handler runs on a reactor thread.
     void on(std::string_view channel, MessageRouter::Handler cb) { router_.on_channel(channel, std::move(cb)); }
@@ -235,6 +237,7 @@ private:
 
     std::vector<PeerNetwork::PeerEventHandler>      peer_connected_;
     std::vector<PeerNetwork::PeerDisconnectHandler> peer_disconnected_;
+    std::vector<PeerNetwork::DialFailedHandler>     dial_failed_;
 
     // Our own addresses as peers observe us (their reported IP + our listen port).
     mutable std::mutex   observed_mutex_;

@@ -335,7 +335,17 @@ void Node::on_frame(Connection& conn, const Frame& frame) {
 
 void Node::on_closed(Connection& conn, CloseReason reason) {
     // Only peers that actually established were registered.
-    if (conn.remote_id().is_zero()) return;
+    if (conn.remote_id().is_zero()) {
+        // An outbound dial that never came up (connect refused/timed out, or a
+        // failed handshake). There is no peer-disconnected event for it, so report
+        // it as a failed dial — a redial policy (ReconnectionService) needs to know
+        // its in-flight dial resolved, or it would wait out a timeout to retry.
+        if (conn.role() == ConnRole::Outbound && conn.has_dial_address()) {
+            const Address addr{conn.dial_host(), conn.dial_port()};
+            for (auto& cb : dial_failed_) cb(addr);
+        }
+        return;
+    }
 
     const PeerId    id = conn.remote_id();
     const PeerRoute route{conn.reactor_index(), conn.id()};
