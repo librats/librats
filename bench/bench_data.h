@@ -180,6 +180,88 @@ inline std::string make_large_object_json(int n) {
     return s;
 }
 
+// One wide object whose keys are deliberately LONG (well past libstdc++'s 15-char
+// SSO buffer), so each key forces a heap-allocated std::string. This isolates the
+// object-key insertion path: the parser builds the key once, then hands it to the
+// object — moving it (current) vs copying it (pre-90ec5c4) is one heap allocation
+// + memcpy per key saved, which short SSO keys (make_large_object_json) hide.
+inline std::string make_long_key_object_json(int n, int keylen) {
+    Rng rng(0x0BADF00Dull);
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_";
+    std::string s = "{";
+    char buf[32];
+    for (int i = 0; i < n; ++i) {
+        if (i) s += ',';
+        s += '"';
+        // Prefix keeps keys unique; the random tail pads each one past SSO length.
+        int plen = std::snprintf(buf, sizeof buf, "field_%d_", i);
+        s.append(buf, static_cast<std::size_t>(plen));
+        for (int k = plen; k < keylen; ++k) s += alphabet[rng.next() % 63];
+        s += "\":";
+        int vlen = std::snprintf(buf, sizeof buf, "%d", i);
+        s.append(buf, static_cast<std::size_t>(vlen));
+    }
+    s += "}";
+    return s;
+}
+
+// The "kitchen sink": one big array of richly-mixed records, each combining every
+// shape the other datasets isolate — long heap keys, nested objects, mixed-type
+// arrays, escape/Unicode-heavy strings, long escape-free blobs, full-range int64,
+// signed/exponent doubles, booleans and nulls. A single realistic worst case that
+// exercises the parser, the serializer and the DOM all at once, so any path the
+// hot-path commits touched shows up here under a mixed load instead of in isolation.
+inline std::string make_kitchen_sink_json(int records) {
+    Rng rng(0xDEADBEEFull);
+    static const char b64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string s = "[";
+    char buf[64];
+    for (int i = 0; i < records; ++i) {
+        if (i) s += ',';
+        s += '{';
+
+        // 1) a long, heap-allocated key carrying a full-range int64 value
+        std::snprintf(buf, sizeof buf, "\"identifier_field_%08x_hash\":", static_cast<unsigned>(rng.next()));
+        s += buf;
+        std::snprintf(buf, sizeof buf, "%lld", static_cast<long long>(rng.next()));
+        s += buf;
+
+        // 2) escape- and Unicode-heavy string value under a long key
+        s += ",\"display_label_with_long_key\":\"row ";
+        s += std::to_string(i);
+        s += ":\\t\\\"q\\\"\\n caf\\u00e9 \\\\ path\\\\to\"";
+
+        // 3) nested object with its own long keys, doubles (signed + exponent)
+        s += ",\"nested_metadata_object\":{\"coordinate_latitude\":";
+        std::snprintf(buf, sizeof buf, "%.10f", rng.unit() * 180.0 - 90.0);
+        s += buf;
+        s += ",\"coordinate_longitude\":";
+        std::snprintf(buf, sizeof buf, "%.10f", rng.unit() * 360.0 - 180.0);
+        s += buf;
+        s += ",\"scientific_value\":";
+        std::snprintf(buf, sizeof buf, "%.6e", (rng.unit() - 0.5) * 1e9);
+        s += buf;
+        s += ",\"is_active_flag\":";
+        s += (rng.next() & 1) ? "true" : "false";
+        s += ",\"optional_field\":null}";
+
+        // 4) mixed-type array: ints, a bool, a null, a long escape-free blob
+        s += ",\"mixed_payload_array\":[";
+        for (int k = 0; k < 6; ++k) {
+            if (k) s += ',';
+            std::snprintf(buf, sizeof buf, "%lld", static_cast<long long>(rng.next()));
+            s += buf;
+        }
+        s += ",true,false,null,\"";
+        for (int k = 0; k < 96; ++k) s += b64[rng.next() & 63];
+        s += "\"]}";
+    }
+    s += "]";
+    return s;
+}
+
 // A chain of nested objects {"n":{"n":{ … 0 … }}} — stresses the recursive
 // descent and the dump recursion (depth stays under the parser's 1000 guard).
 inline std::string make_deep_json(int depth) {

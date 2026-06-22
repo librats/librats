@@ -57,6 +57,8 @@ int main() {
     const std::string integers_src = make_integers_json(10000);
     const std::string longstr_src  = make_long_strings_json(500, 256);
     const std::string bigobj_src   = make_large_object_json(1000);
+    const std::string longkey_src  = make_long_key_object_json(1000, 40);
+    const std::string sink_src     = make_kitchen_sink_json(2000);
     const std::string deep_src     = make_deep_json(256);
     // A valid-looking peers array truncated to malformed: the parser scans the
     // whole payload before rejecting, so this measures reject throughput.
@@ -79,10 +81,11 @@ int main() {
     std::printf(" rapidjson");
 #endif
     std::printf("\ndatasets: peers=%zuB  config=%zuB  numbers=%zuB  strings=%zuB\n"
-                "          integers=%zuB  longstr=%zuB  bigobj=%zuB  deep=%zuB\n",
+                "          integers=%zuB  longstr=%zuB  bigobj=%zuB  longkeys=%zuB\n"
+                "          sink=%zuB  deep=%zuB\n",
                 peers_src.size(), config_src.size(), numbers_src.size(),
                 strings_src.size(), integers_src.size(), longstr_src.size(),
-                bigobj_src.size(), deep_src.size());
+                bigobj_src.size(), longkey_src.size(), sink_src.size(), deep_src.size());
 
     bench::Bench b("librats::Json vs reference DOM libraries");
     b.config().min_time = 0.5;
@@ -121,6 +124,8 @@ int main() {
     parse_group("Parse · integers (10000 int64)", integers_src);
     parse_group("Parse · longstr  (500 × 256B, no escapes)", longstr_src);
     parse_group("Parse · bigobj   (1000-key object)", bigobj_src);
+    parse_group("Parse · longkeys (1000 × 40B keys, heap keys)", longkey_src);
+    parse_group("Parse · sink     (2000 mixed records, everything)", sink_src);
     parse_group("Parse · deep     (256-level nesting)", deep_src);
 
     // Pre-parsed DOMs reused by serialize / access benchmarks.
@@ -475,6 +480,67 @@ int main() {
         rapidjson::Document d;
         d.Parse(peers_bad.c_str(), peers_bad.size());
         do_not_optimize(d);
+    });
+#endif
+
+    // ── SERIALIZE · kitchen sink (mixed compact + pretty under one load) ──────
+    librats::Json lr_sink = librats::Json::parse(sink_src);
+    librats_stable::Json st_sink = librats_stable::Json::parse(sink_src);
+#ifdef HAVE_NLOHMANN
+    nlohmann::json nl_sink = nlohmann::json::parse(sink_src);
+#endif
+#ifdef HAVE_RAPIDJSON
+    rapidjson::Document rj_sink;
+    rj_sink.Parse(sink_src.c_str(), sink_src.size());
+#endif
+
+    b.group("Serialize compact · sink");
+    b.bytes(static_cast<double>(sink_src.size()));
+    b.run("librats", [&] {
+        std::string s = lr_sink.dump();
+        do_not_optimize(s);
+    });
+    b.run("stable", [&] {
+        std::string s = st_sink.dump();
+        do_not_optimize(s);
+    });
+#ifdef HAVE_NLOHMANN
+    b.run("nlohmann", [&] {
+        std::string s = nl_sink.dump();
+        do_not_optimize(s);
+    });
+#endif
+#ifdef HAVE_RAPIDJSON
+    b.run("rapidjson", [&] {
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> w(sb);
+        rj_sink.Accept(w);
+        do_not_optimize(sb);
+    });
+#endif
+
+    b.group("Serialize pretty · sink  (2-space indent)");
+    b.run("librats", [&] {
+        std::string s = lr_sink.dump(2);
+        do_not_optimize(s);
+    });
+    b.run("stable", [&] {
+        std::string s = st_sink.dump(2);
+        do_not_optimize(s);
+    });
+#ifdef HAVE_NLOHMANN
+    b.run("nlohmann", [&] {
+        std::string s = nl_sink.dump(2);
+        do_not_optimize(s);
+    });
+#endif
+#ifdef HAVE_RAPIDJSON
+    b.run("rapidjson", [&] {
+        rapidjson::StringBuffer sb;
+        rapidjson::PrettyWriter<rapidjson::StringBuffer> w(sb);
+        w.SetIndent(' ', 2);
+        rj_sink.Accept(w);
+        do_not_optimize(sb);
     });
 #endif
 

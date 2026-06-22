@@ -175,6 +175,8 @@ int main() {
     const std::string integers_src = make_integers_json(10000);
     const std::string longstr_src  = make_long_strings_json(500, 256);
     const std::string bigobj_src   = make_large_object_json(1000);
+    const std::string longkey_src  = make_long_key_object_json(1000, 40);
+    const std::string sink_src     = make_kitchen_sink_json(2000);
 
     std::printf("JSON DOM memory footprint  "
                 "(resident heap held by a parsed DOM, and allocation count)\n");
@@ -197,6 +199,8 @@ int main() {
     report_dataset("integers", integers_src);
     report_dataset("longstr", longstr_src);
     report_dataset("bigobj", bigobj_src);
+    report_dataset("longkeys", longkey_src);
+    report_dataset("sink", sink_src);
 
     std::printf("\nlower resident bytes and fewer allocations are better\n");
     return 0;
