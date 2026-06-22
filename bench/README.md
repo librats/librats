@@ -52,3 +52,25 @@ cmake --build bench/build
 `librats/src/util/json.cpp` is compiled directly into the benchmark with `-O3`,
 so the code under test is optimized identically to the reference libraries
 (independent of how the main library tree was configured).
+
+The dataset generators live in `bench_data.h` (shared with the memory benchmark);
+they cover librats' real traffic (peers, config, float/string blobs) plus a few
+general-purpose shapes — integer arrays, long escape-free strings, wide objects
+and deep nesting.
+
+## The memory benchmark
+
+`bench_mem` reports the **resident heap a parsed DOM holds** and the **number of
+allocations** it took to build, for the same datasets. It overrides the global
+`operator new`/`delete` to tag every block with its size, and gives RapidJSON a
+custom allocator that forwards to the same hook, so all three libraries are
+measured on equal terms (the per-value `sizeof` is printed too).
+
+```bash
+./bench/build/bin/bench_mem
+```
+
+It is a **separate executable on purpose**: the allocation instrumentation would
+otherwise add per-allocation overhead to `bench_json`'s timings and unfairly
+penalise allocation-heavy DOMs. It links the C++ runtime statically so the
+`operator new` override is the only one in the program.

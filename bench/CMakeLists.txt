@@ -77,6 +77,26 @@ target_include_directories(bench_json PRIVATE
 )
 target_compile_definitions(bench_json PRIVATE ${BENCH_DEFS})
 
-set_target_properties(bench_json PROPERTIES
+# Memory-footprint benchmark — a separate binary so its allocation instrumentation
+# never perturbs bench_json's timing numbers.
+add_executable(bench_mem
+    bench_mem.cpp
+    ${LIBRATS_ROOT}/src/util/json.cpp
+)
+target_include_directories(bench_mem PRIVATE
+    ${LIBRATS_ROOT}/src
+    ${BENCH_INCLUDES}
+)
+target_compile_definitions(bench_mem PRIVATE ${BENCH_DEFS})
+
+# The global operator new/delete override must be the only one in the program,
+# so statically link the C++ runtime — otherwise a shared libstdc++ has its own
+# operator new and blocks allocated here would be freed across a DLL boundary
+# with the wrong size header.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_link_options(bench_mem PRIVATE -static)
+endif()
+
+set_target_properties(bench_json bench_mem PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin
 )
