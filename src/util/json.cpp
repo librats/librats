@@ -44,20 +44,26 @@ void Json::Object::reindex() {
     }
 }
 
-Json& Json::Object::operator[](const std::string& key) {
+template <typename K>
+Json& Json::Object::emplace_key(K&& key) {
     if (indexed_) {
         auto it = index_.find(key);
         if (it != index_.end()) return items_[it->second].second;
+        // The map needs its own copy of the key; the vector then takes the
+        // original by perfect-forward (a move when the caller passed an rvalue).
         index_.emplace(key, items_.size());
-        items_.emplace_back(key, Json());
+        items_.emplace_back(std::forward<K>(key), Json());
         return items_.back().second;
     }
     for (auto& kv : items_)
         if (kv.first == key) return kv.second;
-    items_.emplace_back(key, Json());
+    items_.emplace_back(std::forward<K>(key), Json());
     if (items_.size() > kIndexThreshold) build_index();
     return items_.back().second;
 }
+
+Json& Json::Object::operator[](const std::string& key) { return emplace_key(key); }
+Json& Json::Object::operator[](std::string&& key) { return emplace_key(std::move(key)); }
 
 const Json* Json::Object::find(const std::string& key) const {
     if (indexed_) {
@@ -612,7 +618,7 @@ private:
             skip_ws();
             if (peek() != ':') error("expected ':' after object key");
             ++p_;
-            o[key] = parse_value(depth + 1);
+            o[std::move(key)] = parse_value(depth + 1);
             skip_ws();
             char c = peek();
             if (c == ',') { ++p_; continue; }
