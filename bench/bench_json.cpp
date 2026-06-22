@@ -14,6 +14,11 @@
 
 #include "bench.h"
 #include "util/json.h"
+// "stable" baseline: the json.{h,cpp} from the previous commit (HEAD~1, fc81b94),
+// dropped in under namespace librats_stable so it links side-by-side with the
+// current librats::Json. Lets us see whether the latest commit actually moved
+// the needle on each hot path.
+#include "stable_json.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -91,6 +96,10 @@ int main() {
             auto j = librats::Json::parse(src);
             do_not_optimize(j);
         });
+        b.run("stable", [&] {
+            auto j = librats_stable::Json::parse(src);
+            do_not_optimize(j);
+        });
 #ifdef HAVE_NLOHMANN
         b.run("nlohmann", [&] {
             auto j = nlohmann::json::parse(src);
@@ -118,6 +127,9 @@ int main() {
     librats::Json lr_peers = librats::Json::parse(peers_src);
     librats::Json lr_ints  = librats::Json::parse(integers_src);
     librats::Json lr_bigobj = librats::Json::parse(bigobj_src);
+    librats_stable::Json st_peers  = librats_stable::Json::parse(peers_src);
+    librats_stable::Json st_ints   = librats_stable::Json::parse(integers_src);
+    librats_stable::Json st_bigobj = librats_stable::Json::parse(bigobj_src);
 #ifdef HAVE_NLOHMANN
     nlohmann::json nl_peers = nlohmann::json::parse(peers_src);
     nlohmann::json nl_ints  = nlohmann::json::parse(integers_src);
@@ -139,6 +151,10 @@ int main() {
         std::string s = lr_peers.dump();
         do_not_optimize(s);
     });
+    b.run("stable", [&] {
+        std::string s = st_peers.dump();
+        do_not_optimize(s);
+    });
 #ifdef HAVE_NLOHMANN
     b.run("nlohmann", [&] {
         std::string s = nl_peers.dump();
@@ -158,6 +174,10 @@ int main() {
     b.group("Serialize pretty · peers  (2-space indent)");
     b.run("librats", [&] {
         std::string s = lr_peers.dump(2);
+        do_not_optimize(s);
+    });
+    b.run("stable", [&] {
+        std::string s = st_peers.dump(2);
         do_not_optimize(s);
     });
 #ifdef HAVE_NLOHMANN
@@ -183,6 +203,21 @@ int main() {
         librats::Json arr = librats::Json::array();
         for (const Peer& p : peers) {
             librats::Json o = librats::Json::object();
+            o["id"]        = p.id;
+            o["ip"]        = p.ip;
+            o["port"]      = p.port;
+            o["last_seen"] = p.last_seen;
+            o["score"]     = p.score;
+            o["seed"]      = p.seed;
+            o["agent"]     = p.agent;
+            arr.push_back(std::move(o));
+        }
+        do_not_optimize(arr);
+    });
+    b.run("stable", [&] {
+        librats_stable::Json arr = librats_stable::Json::array();
+        for (const Peer& p : peers) {
+            librats_stable::Json o = librats_stable::Json::object();
             o["id"]        = p.id;
             o["ip"]        = p.ip;
             o["port"]      = p.port;
@@ -246,6 +281,18 @@ int main() {
         do_not_optimize(acc);
         do_not_optimize(sc);
     });
+    b.run("stable", [&] {
+        long long acc = 0;
+        double sc = 0;
+        for (librats_stable::Json& e : st_peers.as_array()) {
+            acc += e["port"].get<long long>();
+            acc += e["last_seen"].get<long long>();
+            sc  += e["score"].get<double>();
+            if (e["seed"].get<bool>()) ++acc;
+        }
+        do_not_optimize(acc);
+        do_not_optimize(sc);
+    });
 #ifdef HAVE_NLOHMANN
     b.run("nlohmann", [&] {
         long long acc = 0;
@@ -282,6 +329,10 @@ int main() {
         std::string s = lr_ints.dump();
         do_not_optimize(s);
     });
+    b.run("stable", [&] {
+        std::string s = st_ints.dump();
+        do_not_optimize(s);
+    });
 #ifdef HAVE_NLOHMANN
     b.run("nlohmann", [&] {
         std::string s = nl_ints.dump();
@@ -299,6 +350,7 @@ int main() {
 
     // ── SERIALIZE compact · longstr (escape-free run batching) ───────────────
     librats::Json lr_long = librats::Json::parse(longstr_src);
+    librats_stable::Json st_long = librats_stable::Json::parse(longstr_src);
 #ifdef HAVE_NLOHMANN
     nlohmann::json nl_long = nlohmann::json::parse(longstr_src);
 #endif
@@ -310,6 +362,10 @@ int main() {
     b.bytes(static_cast<double>(longstr_src.size()));
     b.run("librats", [&] {
         std::string s = lr_long.dump();
+        do_not_optimize(s);
+    });
+    b.run("stable", [&] {
+        std::string s = st_long.dump();
         do_not_optimize(s);
     });
 #ifdef HAVE_NLOHMANN
@@ -338,6 +394,11 @@ int main() {
     b.bytes(static_cast<double>(bigobj_src.size()));
     b.run("librats", [&] {
         librats::Json o = librats::Json::object();
+        for (int i = 0; i < kBigKeys; ++i) o[keys[i]] = i;
+        do_not_optimize(o);
+    });
+    b.run("stable", [&] {
+        librats_stable::Json o = librats_stable::Json::object();
         for (int i = 0; i < kBigKeys; ++i) o[keys[i]] = i;
         do_not_optimize(o);
     });
@@ -370,6 +431,12 @@ int main() {
         for (const std::string& k : keys) acc += o[k].get<long long>();
         do_not_optimize(acc);
     });
+    b.run("stable", [&] {
+        const librats_stable::Json& o = st_bigobj;
+        long long acc = 0;
+        for (const std::string& k : keys) acc += o[k].get<long long>();
+        do_not_optimize(acc);
+    });
 #ifdef HAVE_NLOHMANN
     b.run("nlohmann", [&] {
         const nlohmann::json& o = nl_bigobj;
@@ -391,6 +458,10 @@ int main() {
     b.bytes(static_cast<double>(peers_bad.size()));
     b.run("librats", [&] {
         auto j = librats::Json::parse(peers_bad, nullptr, false);
+        do_not_optimize(j);
+    });
+    b.run("stable", [&] {
+        auto j = librats_stable::Json::parse(peers_bad, nullptr, false);
         do_not_optimize(j);
     });
 #ifdef HAVE_NLOHMANN

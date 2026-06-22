@@ -70,9 +70,11 @@ endif()
 add_executable(bench_json
     bench_json.cpp
     ${LIBRATS_ROOT}/src/util/json.cpp
+    stable_json.cpp                       # previous-commit baseline (namespace librats_stable)
 )
 target_include_directories(bench_json PRIVATE
     ${LIBRATS_ROOT}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}           # so stable_json.cpp finds "stable_json.h"
     ${BENCH_INCLUDES}
 )
 target_compile_definitions(bench_json PRIVATE ${BENCH_DEFS})
@@ -82,9 +84,11 @@ target_compile_definitions(bench_json PRIVATE ${BENCH_DEFS})
 add_executable(bench_mem
     bench_mem.cpp
     ${LIBRATS_ROOT}/src/util/json.cpp
+    stable_json.cpp                       # previous-commit baseline (namespace librats_stable)
 )
 target_include_directories(bench_mem PRIVATE
     ${LIBRATS_ROOT}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}           # so stable_json.cpp finds "stable_json.h"
     ${BENCH_INCLUDES}
 )
 target_compile_definitions(bench_mem PRIVATE ${BENCH_DEFS})
