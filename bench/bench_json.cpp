@@ -154,6 +154,64 @@ std::string make_strings_json(int n) {
     return s;
 }
 
+// Flat array of full-range signed 64-bit integers — isolates the integer
+// conversion path (from_chars / to_chars) that the float blob never touches.
+std::string make_integers_json(int n) {
+    Rng rng(0xABCDEF01ull);
+    std::string s = "[";
+    char buf[32];
+    for (int i = 0; i < n; ++i) {
+        if (i) s += ',';
+        int64_t v = static_cast<int64_t>(rng.next());  // spans negatives and >2^53
+        std::snprintf(buf, sizeof buf, "%lld", static_cast<long long>(v));
+        s += buf;
+    }
+    s += "]";
+    return s;
+}
+
+// Array of long, escape-free strings (base64-like blobs — certs, payloads): the
+// case the run-batching serializer/parser is built for, and the mirror image of
+// the deliberately escape-heavy make_strings_json above.
+std::string make_long_strings_json(int n, int len) {
+    Rng rng(0x55AA55AAull);
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string s = "[";
+    for (int i = 0; i < n; ++i) {
+        if (i) s += ',';
+        s += '"';
+        for (int k = 0; k < len; ++k) s += alphabet[rng.next() & 63];
+        s += '"';
+    }
+    s += "]";
+    return s;
+}
+
+// One wide object whose key count is well past the lazy-index threshold, so the
+// hash-backed lookup path (not just the small-object linear scan) is exercised.
+std::string make_large_object_json(int n) {
+    std::string s = "{";
+    char buf[40];
+    for (int i = 0; i < n; ++i) {
+        if (i) s += ',';
+        int klen = std::snprintf(buf, sizeof buf, "\"key_%d\":%d", i, i);
+        s.append(buf, static_cast<std::size_t>(klen));
+    }
+    s += "}";
+    return s;
+}
+
+// A chain of nested objects {"n":{"n":{ … 0 … }}} — stresses the recursive
+// descent and the dump recursion (depth stays under the parser's 1000 guard).
+std::string make_deep_json(int depth) {
+    std::string s;
+    for (int i = 0; i < depth; ++i) s += "{\"n\":";
+    s += "0";
+    for (int i = 0; i < depth; ++i) s += "}";
+    return s;
+}
+
 }  // namespace
 
 // ── Per-library benchmark wiring ─────────────────────────────────────────────
@@ -163,10 +221,18 @@ std::string make_strings_json(int n) {
 
 int main() {
     const auto peers = make_peers(256);
-    const std::string peers_src   = peers_to_json(peers);
-    const std::string config_src  = make_config_json();
-    const std::string numbers_src = make_numbers_json(2000);
-    const std::string strings_src = make_strings_json(1000);
+    const std::string peers_src    = peers_to_json(peers);
+    const std::string config_src   = make_config_json();
+    const std::string numbers_src  = make_numbers_json(2000);
+    const std::string strings_src  = make_strings_json(1000);
+    const std::string integers_src = make_integers_json(10000);
+    const std::string longstr_src  = make_long_strings_json(500, 256);
+    const std::string bigobj_src   = make_large_object_json(1000);
+    const std::string deep_src     = make_deep_json(256);
+    // A valid-looking peers array truncated to malformed: the parser scans the
+    // whole payload before rejecting, so this measures reject throughput.
+    std::string peers_bad = peers_src;
+    peers_bad.back() = ',';
 
     std::printf("environment: ");
 #if defined(__clang__)
@@ -183,9 +249,11 @@ int main() {
 #ifdef HAVE_RAPIDJSON
     std::printf(" rapidjson");
 #endif
-    std::printf("\ndatasets: peers=%zuB  config=%zuB  numbers=%zuB  strings=%zuB\n",
+    std::printf("\ndatasets: peers=%zuB  config=%zuB  numbers=%zuB  strings=%zuB\n"
+                "          integers=%zuB  longstr=%zuB  bigobj=%zuB  deep=%zuB\n",
                 peers_src.size(), config_src.size(), numbers_src.size(),
-                strings_src.size());
+                strings_src.size(), integers_src.size(), longstr_src.size(),
+                bigobj_src.size(), deep_src.size());
 
     bench::Bench b("librats::Json vs reference DOM libraries");
     b.config().min_time = 0.5;
@@ -213,19 +281,31 @@ int main() {
         });
 #endif
     };
-    parse_group("Parse · config  (small nested object)", config_src);
-    parse_group("Parse · peers   (256 records)", peers_src);
-    parse_group("Parse · numbers (2000 float pairs)", numbers_src);
-    parse_group("Parse · strings (1000 escaped strings)", strings_src);
+    parse_group("Parse · config   (small nested object)", config_src);
+    parse_group("Parse · peers    (256 records)", peers_src);
+    parse_group("Parse · numbers  (2000 float pairs)", numbers_src);
+    parse_group("Parse · strings  (1000 escaped strings)", strings_src);
+    parse_group("Parse · integers (10000 int64)", integers_src);
+    parse_group("Parse · longstr  (500 × 256B, no escapes)", longstr_src);
+    parse_group("Parse · bigobj   (1000-key object)", bigobj_src);
+    parse_group("Parse · deep     (256-level nesting)", deep_src);
 
     // Pre-parsed DOMs reused by serialize / access benchmarks.
     librats::Json lr_peers = librats::Json::parse(peers_src);
+    librats::Json lr_ints  = librats::Json::parse(integers_src);
+    librats::Json lr_bigobj = librats::Json::parse(bigobj_src);
 #ifdef HAVE_NLOHMANN
     nlohmann::json nl_peers = nlohmann::json::parse(peers_src);
+    nlohmann::json nl_ints  = nlohmann::json::parse(integers_src);
+    nlohmann::json nl_bigobj = nlohmann::json::parse(bigobj_src);
 #endif
 #ifdef HAVE_RAPIDJSON
     rapidjson::Document rj_peers;
     rj_peers.Parse(peers_src.c_str(), peers_src.size());
+    rapidjson::Document rj_ints;
+    rj_ints.Parse(integers_src.c_str(), integers_src.size());
+    rapidjson::Document rj_bigobj;
+    rj_bigobj.Parse(bigobj_src.c_str(), bigobj_src.size());
 #endif
 
     // ── SERIALIZE (compact) ──────────────────────────────────────────────────
@@ -368,6 +448,138 @@ int main() {
         }
         do_not_optimize(acc);
         do_not_optimize(sc);
+    });
+#endif
+
+    // ── SERIALIZE compact · integers (to_chars path) ─────────────────────────
+    b.group("Serialize compact · integers");
+    b.bytes(static_cast<double>(integers_src.size()));
+    b.run("librats", [&] {
+        std::string s = lr_ints.dump();
+        do_not_optimize(s);
+    });
+#ifdef HAVE_NLOHMANN
+    b.run("nlohmann", [&] {
+        std::string s = nl_ints.dump();
+        do_not_optimize(s);
+    });
+#endif
+#ifdef HAVE_RAPIDJSON
+    b.run("rapidjson", [&] {
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> w(sb);
+        rj_ints.Accept(w);
+        do_not_optimize(sb);
+    });
+#endif
+
+    // ── SERIALIZE compact · longstr (escape-free run batching) ───────────────
+    librats::Json lr_long = librats::Json::parse(longstr_src);
+#ifdef HAVE_NLOHMANN
+    nlohmann::json nl_long = nlohmann::json::parse(longstr_src);
+#endif
+#ifdef HAVE_RAPIDJSON
+    rapidjson::Document rj_long;
+    rj_long.Parse(longstr_src.c_str(), longstr_src.size());
+#endif
+    b.group("Serialize compact · longstr");
+    b.bytes(static_cast<double>(longstr_src.size()));
+    b.run("librats", [&] {
+        std::string s = lr_long.dump();
+        do_not_optimize(s);
+    });
+#ifdef HAVE_NLOHMANN
+    b.run("nlohmann", [&] {
+        std::string s = nl_long.dump();
+        do_not_optimize(s);
+    });
+#endif
+#ifdef HAVE_RAPIDJSON
+    b.run("rapidjson", [&] {
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> w(sb);
+        rj_long.Accept(w);
+        do_not_optimize(sb);
+    });
+#endif
+
+    // Keys for the wide-object build / lookup benchmarks.
+    const int kBigKeys = 1000;
+    std::vector<std::string> keys;
+    keys.reserve(kBigKeys);
+    for (int i = 0; i < kBigKeys; ++i) keys.push_back("key_" + std::to_string(i));
+
+    // ── DOM build · 1000-key object (indexed insert path) ────────────────────
+    b.group("DOM build · 1000-key object");
+    b.bytes(static_cast<double>(bigobj_src.size()));
+    b.run("librats", [&] {
+        librats::Json o = librats::Json::object();
+        for (int i = 0; i < kBigKeys; ++i) o[keys[i]] = i;
+        do_not_optimize(o);
+    });
+#ifdef HAVE_NLOHMANN
+    b.run("nlohmann", [&] {
+        nlohmann::json o = nlohmann::json::object();
+        for (int i = 0; i < kBigKeys; ++i) o[keys[i]] = i;
+        do_not_optimize(o);
+    });
+#endif
+#ifdef HAVE_RAPIDJSON
+    b.run("rapidjson", [&] {
+        rapidjson::Document d;
+        d.SetObject();
+        auto& al = d.GetAllocator();
+        for (int i = 0; i < kBigKeys; ++i) {
+            rapidjson::Value k(keys[i].c_str(), al);
+            d.AddMember(k, rapidjson::Value(i), al);
+        }
+        do_not_optimize(d);
+    });
+#endif
+
+    // ── Keyed lookup · 1000 hits in the wide object (hash path) ──────────────
+    b.group("Keyed lookup · 1000-key object");
+    b.items(static_cast<double>(kBigKeys));
+    b.run("librats", [&] {
+        const librats::Json& o = lr_bigobj;
+        long long acc = 0;
+        for (const std::string& k : keys) acc += o[k].get<long long>();
+        do_not_optimize(acc);
+    });
+#ifdef HAVE_NLOHMANN
+    b.run("nlohmann", [&] {
+        const nlohmann::json& o = nl_bigobj;
+        long long acc = 0;
+        for (const std::string& k : keys) acc += o[k].get<long long>();
+        do_not_optimize(acc);
+    });
+#endif
+#ifdef HAVE_RAPIDJSON
+    b.run("rapidjson", [&] {
+        long long acc = 0;
+        for (const std::string& k : keys) acc += rj_bigobj[k.c_str()].GetInt64();
+        do_not_optimize(acc);
+    });
+#endif
+
+    // ── Reject · malformed input (non-throwing parse, robustness) ────────────
+    b.group("Reject · malformed peers  (non-throwing)");
+    b.bytes(static_cast<double>(peers_bad.size()));
+    b.run("librats", [&] {
+        auto j = librats::Json::parse(peers_bad, nullptr, false);
+        do_not_optimize(j);
+    });
+#ifdef HAVE_NLOHMANN
+    b.run("nlohmann", [&] {
+        auto j = nlohmann::json::parse(peers_bad, nullptr, false);
+        do_not_optimize(j);
+    });
+#endif
+#ifdef HAVE_RAPIDJSON
+    b.run("rapidjson", [&] {
+        rapidjson::Document d;
+        d.Parse(peers_bad.c_str(), peers_bad.size());
+        do_not_optimize(d);
     });
 #endif
 

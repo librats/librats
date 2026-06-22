@@ -439,6 +439,39 @@ TEST(JsonParse, BigIntegers) {
     EXPECT_EQ(big.get<uint64_t>(), UINT64_MAX);
 }
 
+TEST(JsonParse, Int64FullRangeArrayRoundTrip) {
+    // Full-range signed values, including INT64_MIN and large magnitudes, must
+    // survive a parse → dump → parse round-trip exactly (no float coercion).
+    const int64_t vals[] = {0, -1, 1, INT64_MIN, INT64_MAX, -9223372036854775807ll,
+                            1234567890123456789ll, -42};
+    Json arr = Json::array();
+    for (int64_t v : vals) arr.push_back(Json(v));
+    Json back = Json::parse(arr.dump());
+    ASSERT_EQ(back.size(), sizeof(vals) / sizeof(vals[0]));
+    for (std::size_t i = 0; i < back.size(); ++i) {
+        EXPECT_TRUE(back[i].is_number_integer());
+        EXPECT_EQ(back[i].get<int64_t>(), vals[i]);
+    }
+}
+
+TEST(JsonParse, InvalidUtf8BytesPassThrough) {
+    // The parser is lenient: raw bytes >= 0x20 (including invalid UTF-8) are
+    // preserved verbatim rather than rejected or sanitised, and dump emits them
+    // unchanged — so an arbitrary byte payload round-trips.
+    std::string raw = "\"a\xFF\xFE\x80 b\"";  // lone continuation / invalid bytes
+    Json j = Json::parse(raw);
+    ASSERT_TRUE(j.is_string());
+    EXPECT_EQ(j.get<std::string>(), "a\xFF\xFE\x80 b");
+    EXPECT_EQ(j.dump(), raw);  // emitted byte-for-byte
+}
+
+TEST(JsonParse, LoneSurrogateEscapeRejected) {
+    // A \u escape for an unpaired surrogate is malformed and must be rejected.
+    EXPECT_THROW(Json::parse("\"\\uD800\""), JsonError);          // high, no low
+    EXPECT_THROW(Json::parse("\"\\uD800\\u0041\""), JsonError);   // high + non-low
+    EXPECT_THROW(Json::parse("\"\\uDC00\""), JsonError);          // lone low
+}
+
 TEST(JsonParse, OversizedIntegerFallsBackToFloat) {
     // An integer literal beyond 64-bit range is kept (approximately) as a double
     // rather than rejected, mirroring how lenient JSON consumers behave.
