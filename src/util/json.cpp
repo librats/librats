@@ -118,17 +118,21 @@ void Json::destroy() noexcept {
 }
 
 void Json::copy_from(const Json& o) {
-    type_ = o.type_;
+    // Commit type_ only after the (possibly throwing) allocation succeeds: if
+    // `new` throws, this value keeps its prior type_/payload untouched, so a
+    // caller that started from a valid state (Null in the ctor / after the reset
+    // in operator=) stays valid and its destructor never frees a stale pointer.
     switch (o.type_) {
         case Type::Boolean:  bool_  = o.bool_;  break;
         case Type::Integer:  int_   = o.int_;   break;
         case Type::Unsigned: uint_  = o.uint_;  break;
         case Type::Float:    float_ = o.float_; break;
-        case Type::String:   str_ = new std::string(*o.str_); break;
-        case Type::Array:    arr_ = new Array(*o.arr_);       break;
-        case Type::Object:   obj_ = new Object(*o.obj_);      break;
+        case Type::String:   { auto* p = new std::string(*o.str_); str_ = p; } break;
+        case Type::Array:    { auto* p = new Array(*o.arr_);       arr_ = p; } break;
+        case Type::Object:   { auto* p = new Object(*o.obj_);      obj_ = p; } break;
         default: break;  // Null / Discarded carry no payload
     }
+    type_ = o.type_;
 }
 
 void Json::move_from(Json& o) noexcept {
@@ -149,6 +153,10 @@ void Json::move_from(Json& o) noexcept {
 Json& Json::operator=(const Json& o) {
     if (this == &o) return *this;
     destroy();
+    // Reset to a valid Null first: destroy() freed the old payload but left the
+    // old type_/pointer in place, so if copy_from below throws, the destructor
+    // would otherwise free a dangling pointer. As Null, a failed copy is safe.
+    type_ = Type::Null;
     copy_from(o);
     return *this;
 }
