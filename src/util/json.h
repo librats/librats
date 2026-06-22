@@ -84,12 +84,12 @@ public:
         Json& operator[](const std::string& key);          // inserts null if absent
         const Json* find(const std::string& key) const;     // nullptr if absent
         Json* find(const std::string& key);                 // nullptr if absent
-        bool contains(const std::string& key) const { return index_.count(key) != 0; }
+        bool contains(const std::string& key) const { return find(key) != nullptr; }
         bool erase(const std::string& key);
 
         std::size_t size() const { return items_.size(); }
         bool empty() const { return items_.empty(); }
-        void clear() { items_.clear(); index_.clear(); }
+        void clear() { items_.clear(); index_.clear(); indexed_ = false; }
 
         storage::iterator begin() { return items_.begin(); }
         storage::iterator end() { return items_.end(); }
@@ -99,8 +99,19 @@ public:
         bool operator==(const Object& other) const;  // order-independent
 
     private:
+        // Small objects (the common case — a peer record, a config node) keep
+        // only the insertion-ordered vector and look keys up with a linear scan,
+        // which beats hashing for a handful of entries and costs no allocation.
+        // The hash index is built lazily once the object grows past the
+        // threshold; invariant: indexed_ is true whenever size() > threshold.
+        static constexpr std::size_t kIndexThreshold = 16;
+
+        void build_index();  // populate index_ from items_, set indexed_
+        void reindex();      // rebuild (if large) or drop (if small) after erase
+
         storage items_;
         std::unordered_map<std::string, std::size_t> index_;
+        bool indexed_ = false;
     };
 
     // ── Construction ────────────────────────────────────────────────────────

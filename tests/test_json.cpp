@@ -353,6 +353,35 @@ TEST(JsonDump, NaNAndInfBecomeNull) {
     EXPECT_EQ(Json(std::numeric_limits<double>::infinity()).dump(), "null");
 }
 
+TEST(JsonDump, WholeValuedDoubleKeepsFloatForm) {
+    // A whole-valued double must never serialize as a bare integer — it has to
+    // reparse as a float. The exact spelling may be "2.0" or "1e+05" (the
+    // shortest round-tripping form); both are valid, what matters is the kind.
+    EXPECT_EQ(Json(2.0).dump(), "2.0");          // short form gets an explicit ".0"
+    EXPECT_EQ(Json(-0.0).dump(), "-0.0");        // sign of zero preserved
+    for (double v : {2.0, 100000.0, 1e20, -0.0}) {
+        Json back = Json::parse(Json(v).dump());
+        ASSERT_TRUE(back.is_number_float()) << "value dumped as " << Json(v).dump();
+        EXPECT_DOUBLE_EQ(back.get<double>(), v);
+    }
+}
+
+TEST(JsonDump, FloatsShortestRoundTrip) {
+    // The serializer must emit the shortest decimal that reparses to the exact
+    // same double — across small, large, denormal and high-precision values.
+    const double vals[] = {
+        0.1, 3.141592653589793, 2.5e-2, 1e20, 123456.789,
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::denorm_min(),
+    };
+    for (double v : vals) {
+        Json j = v;
+        Json back = Json::parse(j.dump());
+        ASSERT_TRUE(back.is_number_float()) << "dumped as " << j.dump();
+        EXPECT_DOUBLE_EQ(back.get<double>(), v) << "value dumped as " << j.dump();
+    }
+}
+
 TEST(JsonStream, OutputOperator) {
     Json j = {{"k", 1}};
     std::ostringstream os;
@@ -408,6 +437,18 @@ TEST(JsonParse, BigIntegers) {
     Json big = Json::parse("18446744073709551615");   // UINT64_MAX
     EXPECT_TRUE(big.is_number_unsigned());
     EXPECT_EQ(big.get<uint64_t>(), UINT64_MAX);
+}
+
+TEST(JsonParse, OversizedIntegerFallsBackToFloat) {
+    // An integer literal beyond 64-bit range is kept (approximately) as a double
+    // rather than rejected, mirroring how lenient JSON consumers behave.
+    Json big = Json::parse("99999999999999999999999999");
+    EXPECT_TRUE(big.is_number_float());
+    EXPECT_DOUBLE_EQ(big.get<double>(), 1e26);
+
+    Json neg = Json::parse("-99999999999999999999999999");
+    EXPECT_TRUE(neg.is_number_float());
+    EXPECT_DOUBLE_EQ(neg.get<double>(), -1e26);
 }
 
 TEST(JsonParse, UnicodeEscapes) {

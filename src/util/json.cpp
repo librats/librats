@@ -1,6 +1,7 @@
 #include "util/json.h"
 
 #include <cerrno>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -9,37 +10,84 @@
 #include <iterator>
 #include <ostream>
 
+// std::to_chars / std::from_chars for floating-point is a C++17 feature, but
+// some standard libraries shipped it later than the integer overloads. The
+// feature-test macro is defined (to 201611L) only once full support — including
+// the floating-point overloads — is present (libstdc++ ≥ 11, MSVC STL ≥ 19.24,
+// libc++ once complete). When it is absent we fall back to the classic
+// snprintf / strtod path, which is slower but produces identical results.
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+#  define LIBRATS_JSON_CHARCONV 1
+#else
+#  define LIBRATS_JSON_CHARCONV 0
+#endif
+
 namespace librats {
 
 // ── Object ──────────────────────────────────────────────────────────────────
 
+void Json::Object::build_index() {
+    index_.clear();
+    index_.reserve(items_.size());
+    for (std::size_t i = 0; i < items_.size(); ++i) index_.emplace(items_[i].first, i);
+    indexed_ = true;
+}
+
+void Json::Object::reindex() {
+    // Called after an erase shifts indices: rebuild while large, else drop the
+    // index and fall back to linear scans (keeping the size invariant).
+    if (items_.size() > kIndexThreshold) {
+        build_index();
+    } else {
+        index_.clear();
+        indexed_ = false;
+    }
+}
+
 Json& Json::Object::operator[](const std::string& key) {
-    auto it = index_.find(key);
-    if (it != index_.end()) return items_[it->second].second;
-    index_.emplace(key, items_.size());
+    if (indexed_) {
+        auto it = index_.find(key);
+        if (it != index_.end()) return items_[it->second].second;
+        index_.emplace(key, items_.size());
+        items_.emplace_back(key, Json());
+        return items_.back().second;
+    }
+    for (auto& kv : items_)
+        if (kv.first == key) return kv.second;
     items_.emplace_back(key, Json());
+    if (items_.size() > kIndexThreshold) build_index();
     return items_.back().second;
 }
 
 const Json* Json::Object::find(const std::string& key) const {
-    auto it = index_.find(key);
-    if (it == index_.end()) return nullptr;
-    return &items_[it->second].second;
+    if (indexed_) {
+        auto it = index_.find(key);
+        return it == index_.end() ? nullptr : &items_[it->second].second;
+    }
+    for (const auto& kv : items_)
+        if (kv.first == key) return &kv.second;
+    return nullptr;
 }
 
 Json* Json::Object::find(const std::string& key) {
-    auto it = index_.find(key);
-    if (it == index_.end()) return nullptr;
-    return &items_[it->second].second;
+    const Object* self = this;
+    return const_cast<Json*>(self->find(key));
 }
 
 bool Json::Object::erase(const std::string& key) {
-    auto it = index_.find(key);
-    if (it == index_.end()) return false;
-    items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(it->second));
-    // Indices after the removed slot shifted; rebuild the lookup table.
-    index_.clear();
-    for (std::size_t i = 0; i < items_.size(); ++i) index_[items_[i].first] = i;
+    std::size_t pos;
+    if (indexed_) {
+        auto it = index_.find(key);
+        if (it == index_.end()) return false;
+        pos = it->second;
+    } else {
+        pos = items_.size();
+        for (std::size_t i = 0; i < items_.size(); ++i)
+            if (items_[i].first == key) { pos = i; break; }
+        if (pos == items_.size()) return false;
+    }
+    items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(pos));
+    reindex();
     return true;
 }
 
@@ -364,46 +412,81 @@ bool Json::operator==(const Json& o) const {
 namespace {
 
 void dump_string(std::string& out, const std::string& s) {
+    // Escapes are rare in real payloads (ids, ips, agent strings carry none), so
+    // we copy maximal runs of pass-through bytes in one append() and only break
+    // the run for a character that needs escaping.
     out += '"';
-    for (char ch : s) {
-        unsigned char uc = static_cast<unsigned char>(ch);
-        switch (ch) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\b': out += "\\b";  break;
-            case '\f': out += "\\f";  break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (uc < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof buf, "\\u%04x", uc);
-                    out += buf;
-                } else {
-                    // Printable ASCII and raw UTF-8 bytes pass through unchanged.
-                    out += ch;
-                }
+    const char* const begin = s.data();
+    const char* const end   = begin + s.size();
+    const char* run = begin;  // start of the current pass-through run
+    for (const char* p = begin; p != end; ++p) {
+        const char* esc = nullptr;  // two-char escape for *p, if any
+        switch (*p) {
+            case '"':  esc = "\\\""; break;
+            case '\\': esc = "\\\\"; break;
+            case '\b': esc = "\\b";  break;
+            case '\f': esc = "\\f";  break;
+            case '\n': esc = "\\n";  break;
+            case '\r': esc = "\\r";  break;
+            case '\t': esc = "\\t";  break;
+            default: break;
         }
+        if (esc) {
+            out.append(run, static_cast<std::size_t>(p - run));
+            out += esc;
+            run = p + 1;
+        } else if (static_cast<unsigned char>(*p) < 0x20) {
+            // Other control characters use the \uXXXX form.
+            out.append(run, static_cast<std::size_t>(p - run));
+            char buf[7];
+            std::snprintf(buf, sizeof buf, "\\u%04x", static_cast<unsigned char>(*p));
+            out += buf;
+            run = p + 1;
+        }
+        // Printable ASCII and raw UTF-8 bytes stay in the run.
     }
+    out.append(run, static_cast<std::size_t>(end - run));
     out += '"';
+}
+
+// Append the shortest decimal form of an integer without a heap allocation
+// (std::to_string would allocate a temporary string per number).
+template <typename Int>
+void dump_int(std::string& out, Int v) {
+#if LIBRATS_JSON_CHARCONV
+    char buf[24];  // room for a 64-bit value with sign
+    auto res = std::to_chars(buf, buf + sizeof buf, v);
+    out.append(buf, res.ptr);
+#else
+    out += std::to_string(v);
+#endif
 }
 
 void dump_double(std::string& out, double d) {
     if (std::isnan(d) || std::isinf(d)) { out += "null"; return; }  // JSON has no NaN/Inf
+
     char buf[32];
-    // Shortest representation that still round-trips exactly.
+    char* last;
+#if LIBRATS_JSON_CHARCONV
+    // to_chars (no precision) yields the shortest string that round-trips exactly.
+    last = std::to_chars(buf, buf + sizeof buf, d).ptr;
+#else
+    // Fallback: grow precision until the value round-trips.
+    int n = 0;
     for (int prec = 15; prec <= 17; ++prec) {
-        std::snprintf(buf, sizeof buf, "%.*g", prec, d);
+        n = std::snprintf(buf, sizeof buf, "%.*g", prec, d);
         if (std::strtod(buf, nullptr) == d) break;
     }
-    std::string s(buf);
-    // Keep it recognisable as a float so it parses back to a float, not an int.
-    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
-        s.find('E') == std::string::npos) {
-        s += ".0";
+    last = buf + n;
+#endif
+    out.append(buf, last);
+
+    // Keep it recognisable as a float so it parses back to a float, not an int:
+    // a token with no '.', 'e' or 'E' (e.g. "2") gets a trailing ".0".
+    for (const char* q = buf; q != last; ++q) {
+        if (*q == '.' || *q == 'e' || *q == 'E') return;
     }
-    out += s;
+    out += ".0";
 }
 
 void newline_indent(std::string& out, int indent, int depth) {
@@ -419,8 +502,8 @@ void Json::dump_to(std::string& out, int indent, int depth) const {
         case Type::Null:      out += "null"; break;
         case Type::Discarded: out += "null"; break;  // dumping a discarded value falls back to null
         case Type::Boolean:   out += bool_ ? "true" : "false"; break;
-        case Type::Integer:   out += std::to_string(int_); break;
-        case Type::Unsigned:  out += std::to_string(uint_); break;
+        case Type::Integer:   dump_int(out, int_); break;
+        case Type::Unsigned:  dump_int(out, uint_); break;
         case Type::Float:     dump_double(out, float_); break;
         case Type::String:    dump_string(out, *str_); break;
         case Type::Array: {
@@ -602,11 +685,17 @@ private:
     std::string parse_string() {
         ++p_;  // consume opening '"'
         std::string out;
+        // Most string bytes need no translation, so copy maximal escape-free
+        // runs in a single append() and only stop for '"', '\\' or a control
+        // character. `run` marks the start of the run still to be flushed.
+        const char* run = p_;
         while (true) {
             if (p_ == end_) error("unterminated string");
-            unsigned char c = static_cast<unsigned char>(*p_++);
-            if (c == '"') break;
+            unsigned char c = static_cast<unsigned char>(*p_);
+            if (c == '"') { out.append(run, static_cast<std::size_t>(p_ - run)); ++p_; break; }
             if (c == '\\') {
+                out.append(run, static_cast<std::size_t>(p_ - run));
+                ++p_;  // consume backslash
                 if (p_ == end_) error("unterminated escape sequence");
                 char e = *p_++;
                 switch (e) {
@@ -636,10 +725,11 @@ private:
                     }
                     default: error("invalid escape sequence");
                 }
+                run = p_;  // next run resumes after the escape
             } else if (c < 0x20) {
                 error("unescaped control character in string");
             } else {
-                out += static_cast<char>(c);
+                ++p_;  // ordinary byte: defer the copy until the run is flushed
             }
         }
         return out;
@@ -675,11 +765,39 @@ private:
             while (p_ != end_ && is_digit(*p_)) ++p_;
         }
 
-        std::string num(start, p_);
+        // The grammar above is already validated, so the only conversion
+        // outcome we still handle is integer overflow → fall back to double.
+        return finish_number(start, is_float);
+    }
 
+    // Convert the already-scanned token [start, p_) into a Json number.
+    Json finish_number(const char* start, bool is_float) {
+#if LIBRATS_JSON_CHARCONV
         if (is_float) {
-            return Json(std::strtod(num.c_str(), nullptr));
+            double d = 0.0;
+            std::from_chars(start, p_, d);
+            return Json(d);
         }
+        if (*start == '-') {
+            int64_t v = 0;
+            if (std::from_chars(start, p_, v).ec == std::errc{}) return Json(v);
+        } else {
+            uint64_t v = 0;
+            if (std::from_chars(start, p_, v).ec == std::errc{}) {
+                // Prefer signed storage when it fits, so small positive ints
+                // compare equal to literal-constructed ones however they were built.
+                if (v <= static_cast<uint64_t>(INT64_MAX))
+                    return Json(static_cast<int64_t>(v));
+                return Json(v);
+            }
+        }
+        // Integer overflowed 64 bits: represent it (approximately) as a double.
+        double d = 0.0;
+        std::from_chars(start, p_, d);
+        return Json(d);
+#else
+        std::string num(start, p_);
+        if (is_float) return Json(std::strtod(num.c_str(), nullptr));
 
         errno = 0;
         if (num[0] == '-') {
@@ -689,11 +807,10 @@ private:
         }
         unsigned long long v = std::strtoull(num.c_str(), nullptr, 10);
         if (errno == ERANGE) return Json(std::strtod(num.c_str(), nullptr));
-        // Prefer signed storage when it fits, so small positive ints compare
-        // equal to literal-constructed ones regardless of how they were built.
         if (v <= static_cast<unsigned long long>(INT64_MAX))
             return Json(static_cast<int64_t>(v));
         return Json(static_cast<uint64_t>(v));
+#endif
     }
 };
 
