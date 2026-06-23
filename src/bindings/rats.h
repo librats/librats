@@ -135,7 +135,8 @@ RATS_API rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb 
 
 /* — optional subsystems (enable before start) — */
 
-/** DHT discovery. dht_port 0 = ephemeral; discovery_key namespaces the app (NULL → default). */
+/** DHT discovery. dht_port 0 = ephemeral; discovery_key namespaces the app
+ *  (NULL → the node's protocol, so only same-protocol peers discover each other). */
 RATS_API rats_error_t rats_enable_dht(rats_t node, uint16_t dht_port, const char* discovery_key);
 /** Local-network mDNS discovery. */
 RATS_API rats_error_t rats_enable_mdns(rats_t node);

@@ -45,7 +45,7 @@ public:
         std::string               data_dir = "";         ///< routing-table persistence dir (empty = cwd). Set to the node's data_dir to co-locate state.
         bool                      enable_ipv4 = true;    ///< run the IPv4 Kademlia network
         bool                      enable_ipv6 = true;    ///< run the IPv6 Kademlia network (BEP 32)
-        std::string               discovery_key = "librats";  ///< app namespace
+        std::string               discovery_key = "";  ///< DHT namespace. Empty → the node's `protocol` (resolved at attach), so peers of the same app/version discover each other and mismatched protocols (which can't handshake anyway) don't even meet. Set non-empty to override with a custom discovery network.
         std::vector<Address>         bootstrap_nodes;       ///< empty → default internet nodes
         std::chrono::milliseconds search_interval{5000};
         std::chrono::milliseconds announce_interval{30000};

@@ -40,12 +40,19 @@ InfoHash DhtDiscovery::hash_for_key(const std::string& key) {
 }
 
 DhtDiscovery::DhtDiscovery(Config config)
-    : config_(std::move(config)), hash_(hash_for_key(config_.discovery_key)) {}
+    : config_(std::move(config)) {}  // hash_ is resolved in attach() (may depend on the node protocol)
 
 DhtDiscovery::~DhtDiscovery() { stop(); }
 
 void DhtDiscovery::attach(NodeContext& ctx) {
     network_ = &ctx.network;
+    // Namespace discovery by the node's protocol unless an explicit key overrides
+    // it: peers of the same app/version announce/search the same hash, and ones with
+    // a different protocol (which couldn't complete a handshake anyway) never meet in
+    // the DHT. A non-empty discovery_key opts into a custom, protocol-independent net.
+    const std::string& key = config_.discovery_key.empty() ? network_->protocol()
+                                                           : config_.discovery_key;
+    hash_ = hash_for_key(key);
     // Publish the DHT as a borrowable capability so a sibling subsystem (e.g.
     // Bittorrent) can share this Kademlia node instead of running a second one.
     ctx.services.provide<DhtService>(this);

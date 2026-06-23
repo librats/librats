@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace librats {
@@ -36,6 +37,7 @@ public:
 
     virtual const PeerId&       local_id() const = 0;
     virtual uint16_t            listen_port() const = 0;     ///< our advertised TCP port
+    virtual const std::string&  protocol() const = 0;        ///< app protocol id (e.g. "librats/1.0"); namespaces discovery
     virtual void                connect(const Address& address) = 0;  ///< dial a discovered peer
     virtual void                send(const PeerId& to, MessageType type, ByteView payload) = 0;
     virtual void                broadcast(MessageType type, ByteView payload) = 0;
