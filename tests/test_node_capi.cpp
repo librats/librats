@@ -62,8 +62,11 @@ TEST(NodeCApiTest, ConnectSendAndEcho) {
     ASSERT_EQ(rats_start(client), RATS_OK);
 
     rats_connect(client, "127.0.0.1", rats_listen_port(server));
-    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
-    EXPECT_EQ(client_ctx.peers.load(), 1);
+    // Wait on the connected callback, not peer_count: the peer table is updated
+    // (so peer_count flips to 1) just before the on_peer_connected callbacks fire,
+    // so polling peer_count can win the race against the callback counter.
+    ASSERT_TRUE(wait_for([&] { return client_ctx.peers.load() == 1; }));
+    EXPECT_EQ(rats_peer_count(client), 1u);
 
     char* server_id = rats_local_id(server);
     ASSERT_NE(server_id, nullptr);
