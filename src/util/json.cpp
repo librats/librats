@@ -22,6 +22,17 @@
 #  define LIBRATS_JSON_CHARCONV 0
 #endif
 
+// Caveat: libc++ defines __cpp_lib_to_chars (it has the floating-point to_chars
+// overloads) yet still ships floating-point from_chars as = delete (true as of
+// Xcode 16.4 / current libc++). So the macro above does NOT imply from_chars
+// works for double — gate the float-parsing path on its own predicate and fall
+// back to strtod where the overload is missing.
+#if LIBRATS_JSON_CHARCONV && !defined(_LIBCPP_VERSION)
+#  define LIBRATS_JSON_FROM_CHARS_FLOAT 1
+#else
+#  define LIBRATS_JSON_FROM_CHARS_FLOAT 0
+#endif
+
 namespace librats {
 
 // ── Object ──────────────────────────────────────────────────────────────────
@@ -836,15 +847,22 @@ private:
         return finish_number(start, is_float);
     }
 
-    // Parse [start, p_) as a double. On magnitude overflow std::from_chars
+    // Parse [start, end) as a double. On magnitude overflow std::from_chars
     // reports result_out_of_range and — on libstdc++ — leaves the out-param
     // untouched, which would silently yield 0.0; map that to ±infinity instead,
     // matching the strtod fallback path and nlohmann (Json then dumps it as null).
     static double parse_double(const char* start, const char* end) {
         double d = 0.0;
+#if LIBRATS_JSON_FROM_CHARS_FLOAT
         auto res = std::from_chars(start, end, d);
         if (res.ec == std::errc::result_out_of_range)
             d = (*start == '-') ? -HUGE_VAL : HUGE_VAL;
+#else
+        // No floating-point from_chars (e.g. libc++): strtod over a NUL-terminated
+        // copy. strtod already returns ±HUGE_VAL on overflow, so no fixup needed.
+        std::string num(start, end);
+        d = std::strtod(num.c_str(), nullptr);
+#endif
         return d;
     }
 
