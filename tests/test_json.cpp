@@ -484,6 +484,29 @@ TEST(JsonParse, OversizedIntegerFallsBackToFloat) {
     EXPECT_DOUBLE_EQ(neg.get<double>(), -1e26);
 }
 
+TEST(JsonParse, OverflowingFloatBecomesInfinity) {
+    // A float literal whose magnitude overflows double must not silently collapse
+    // to 0.0 (std::from_chars leaves its out-param untouched on result_out_of_range).
+    // It is represented as ±infinity, which — having no JSON spelling — dumps as null.
+    Json pos = Json::parse("1E309");
+    ASSERT_TRUE(pos.is_number_float());
+    EXPECT_TRUE(std::isinf(pos.get<double>()));
+    EXPECT_GT(pos.get<double>(), 0.0);
+    EXPECT_EQ(pos.dump(), "null");
+
+    Json neg = Json::parse("-1E309");
+    ASSERT_TRUE(neg.is_number_float());
+    EXPECT_TRUE(std::isinf(neg.get<double>()));
+    EXPECT_LT(neg.get<double>(), 0.0);
+    EXPECT_EQ(neg.dump(), "null");
+
+    // An integer literal so long it overflows even double takes the same path.
+    Json huge_int = Json::parse(std::string(400, '9'));
+    ASSERT_TRUE(huge_int.is_number_float());
+    EXPECT_TRUE(std::isinf(huge_int.get<double>()));
+    EXPECT_GT(huge_int.get<double>(), 0.0);
+}
+
 TEST(JsonParse, UnicodeEscapes) {
     EXPECT_EQ(Json::parse("\"\\u0041\"").get<std::string>(), "A");
     // Euro sign U+20AC -> 3-byte UTF-8.

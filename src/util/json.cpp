@@ -836,14 +836,22 @@ private:
         return finish_number(start, is_float);
     }
 
+    // Parse [start, p_) as a double. On magnitude overflow std::from_chars
+    // reports result_out_of_range and — on libstdc++ — leaves the out-param
+    // untouched, which would silently yield 0.0; map that to ±infinity instead,
+    // matching the strtod fallback path and nlohmann (Json then dumps it as null).
+    static double parse_double(const char* start, const char* end) {
+        double d = 0.0;
+        auto res = std::from_chars(start, end, d);
+        if (res.ec == std::errc::result_out_of_range)
+            d = (*start == '-') ? -HUGE_VAL : HUGE_VAL;
+        return d;
+    }
+
     // Convert the already-scanned token [start, p_) into a Json number.
     Json finish_number(const char* start, bool is_float) {
 #if LIBRATS_JSON_CHARCONV
-        if (is_float) {
-            double d = 0.0;
-            std::from_chars(start, p_, d);
-            return Json(d);
-        }
+        if (is_float) return Json(parse_double(start, p_));
         if (*start == '-') {
             int64_t v = 0;
             if (std::from_chars(start, p_, v).ec == std::errc{}) return Json(v);
@@ -858,9 +866,7 @@ private:
             }
         }
         // Integer overflowed 64 bits: represent it (approximately) as a double.
-        double d = 0.0;
-        std::from_chars(start, p_, d);
-        return Json(d);
+        return Json(parse_double(start, p_));
 #else
         std::string num(start, p_);
         if (is_float) return Json(std::strtod(num.c_str(), nullptr));
