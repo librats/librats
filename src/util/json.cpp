@@ -792,18 +792,45 @@ private:
         }
     }
 
+    // Scan from the current position to the closing quote, counting '\X' as two
+    // bytes so an escaped quote isn't mistaken for the end. Returns a pointer to
+    // the closing '"' (or end_ if unterminated — the caller's decode loop then
+    // reports it). Used only to size the decode buffer; all escape validation
+    // still happens in parse_string, so this stays deliberately permissive.
+    const char* scan_to_close() const {
+        const char* s = p_;
+        while (s != end_) {
+            if (*s == '"') return s;
+            if (*s == '\\' && ++s == end_) break;
+            ++s;
+        }
+        return end_;
+    }
+
     std::string parse_string() {
         ++p_;  // consume opening '"'
         std::string out;
         // Most string bytes need no translation, so copy maximal escape-free
         // runs in a single append() and only stop for '"', '\\' or a control
         // character. `run` marks the start of the run still to be flushed.
+        // `str_begin` anchors the whole content for one-shot buffer sizing.
+        const char* const str_begin = p_;
         const char* run = p_;
+        bool sized = false;
         while (true) {
             if (p_ == end_) error("unterminated string");
             unsigned char c = static_cast<unsigned char>(*p_);
             if (c == '"') { out.append(run, static_cast<std::size_t>(p_ - run)); ++p_; break; }
             if (c == '\\') {
+                if (!sized) {
+                    // First escape: an escape-free string never reaches here and
+                    // stays on the single-append fast path. Once we must decode,
+                    // the result can be no longer than the raw bytes up to the
+                    // closing quote, so reserve that exactly once — every later
+                    // append() then stays in place instead of reallocating.
+                    out.reserve(static_cast<std::size_t>(scan_to_close() - str_begin));
+                    sized = true;
+                }
                 out.append(run, static_cast<std::size_t>(p_ - run));
                 ++p_;  // consume backslash
                 if (p_ == end_) error("unterminated escape sequence");
