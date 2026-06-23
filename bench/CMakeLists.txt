@@ -11,6 +11,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-O3 -DNDEBUG -fno-omit-frame-pointer)
 elseif(MSVC)
     add_compile_options(/O2 /DNDEBUG)
+    # With the Visual Studio (multi-config) generator CMAKE_BUILD_TYPE is ignored
+    # and the default Debug config injects /RTC1, which is incompatible with /O2
+    # (compiler error D8016). Strip the runtime-check flags from every config so
+    # the bench is always optimized, regardless of how it's built.
+    foreach(_cfg "" _DEBUG _RELWITHDEBINFO _MINSIZEREL _RELEASE)
+        string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_CXX_FLAGS${_cfg} "${CMAKE_CXX_FLAGS${_cfg}}")
+    endforeach()
 endif()
 
 set(LIBRATS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
