@@ -4,7 +4,7 @@
  * @file node.h
  * @brief The public entry point: a thin facade that wires the layers together.
  *
- * Node owns the reactor pool, the security provider, the peer directory and the
+ * Node owns the reactor pool, the security provider, the peer table and the
  * message router, and it IS the ConnectionDelegate the reactors report to. It is
  * deliberately thin — it composes the layers and exposes a small async API; the
  * logic lives in those layers, not here.
@@ -19,7 +19,7 @@
  *     with a self-certifying PeerId and the app protocol bound into the handshake;
  *   - manual dialing: connect(host, port) / connect(Address) — it never discovers
  *     peers by itself;
- *   - the peer directory + admission limit: peers(), peer(), peer_count(), max_peers;
+ *   - the peer table + admission limit: peers(), peer(), peer_count(), max_peers;
  *   - raw channel messaging: send(to, channel, bytes) / broadcast(channel, bytes)
  *     / on(channel, …);
  *   - peer connect/disconnect events and the node-scoped EventBus + ServiceRegistry;
@@ -125,9 +125,9 @@ public:
     void connect(const std::string& host, uint16_t port);
 
     /// Number of currently-established peers.
-    size_t                  peer_count() const noexcept { return directory_.size(); }
+    size_t                  peer_count() const noexcept { return peers_.size(); }
     /// Snapshot of all established peers (id, addresses, direction, timing).
-    std::vector<PeerInfo>   peers() const override { return directory_.snapshot(); }
+    std::vector<PeerInfo>   peers() const override { return peers_.snapshot(); }
     /// Handle to a connected peer by id, or std::nullopt if not connected.
     std::optional<Peer> peer(const PeerId& id);
 
@@ -141,7 +141,7 @@ public:
     void   set_max_peers(size_t n) noexcept { max_peers_.store(n, std::memory_order_relaxed); }
     bool   peer_limit_reached() const noexcept {
         const size_t cap = max_peers_.load(std::memory_order_relaxed);
-        return cap != 0 && directory_.size() >= cap;
+        return cap != 0 && peers_.size() >= cap;
     }
 
     // — application messaging (raw bytes on a named channel) —
@@ -211,7 +211,7 @@ private:
     NodeConfig                        config_;
     Identity                          identity_;
     std::unique_ptr<SecurityProvider> security_;
-    PeerTable                     directory_;
+    PeerTable                     peers_;
     MessageRouter                     router_;
     EventBus                          events_;      ///< host/cross-module notifications
     ServiceRegistry                   services_;    ///< capability lookup between modules

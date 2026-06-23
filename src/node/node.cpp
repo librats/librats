@@ -198,7 +198,7 @@ void Node::connect(const std::string& host, uint16_t port) {
 }
 
 std::optional<Peer> Node::peer(const PeerId& id) {
-    auto route = directory_.route(id);
+    auto route = peers_.route(id);
     if (!route) return std::nullopt;
     return make_peer(id, *route);
 }
@@ -206,7 +206,7 @@ std::optional<Peer> Node::peer(const PeerId& id) {
 // ── Application messaging ────────────────────────────────────────────────────
 
 void Node::send(const PeerId& to, std::string_view channel, ByteView payload) {
-    auto route = directory_.route(to);
+    auto route = peers_.route(to);
     if (!route) return;
     route_send(*route, FrameHeader{MessageType::App, 0, MessageRouter::channel_id(channel)},
                payload.to_bytes());
@@ -221,7 +221,7 @@ void Node::broadcast(std::string_view channel, ByteView payload) {
 // ── PeerNetwork (subsystems) ─────────────────────────────────────────────────
 
 void Node::send(const PeerId& to, MessageType type, ByteView payload) {
-    auto route = directory_.route(to);
+    auto route = peers_.route(to);
     if (!route) return;
     route_send(*route, FrameHeader{type, 0, 0}, payload.to_bytes());
 }
@@ -234,7 +234,7 @@ void Node::broadcast(MessageType type, ByteView payload) {
 
 std::vector<PeerId> Node::connected_peers() const {
     std::vector<PeerId> ids;
-    for (const auto& info : directory_.snapshot()) ids.push_back(info.id);
+    for (const auto& info : peers_.snapshot()) ids.push_back(info.id);
     return ids;
 }
 
@@ -260,7 +260,7 @@ bool Node::admit_inbound() {
     // handshake cost. The exact per-peer cap (which can tell a reconnect of a
     // known peer from a brand-new one) is enforced in on_established below.
     const size_t cap = max_peers_.load(std::memory_order_relaxed);
-    return cap == 0 || directory_.size() < cap;
+    return cap == 0 || peers_.size() < cap;
 }
 
 void Node::on_established(Connection& conn) {
@@ -274,11 +274,11 @@ void Node::on_established(Connection& conn) {
     // Peer-limit backstop. Inbound handshakes that raced past admit_inbound()
     // before the cap was hit are rejected here, now that we know the remote id.
     // A reconnect/duplicate of an already-known peer does not grow the count, so
-    // it is allowed through (the directory tie-break supersedes the old link).
+    // it is allowed through (the peer-table tie-break supersedes the old link).
     // Our own outbound dials are intentional and never rejected.
     const size_t cap = max_peers_.load(std::memory_order_relaxed);
     if (cap != 0 && conn.role() == ConnRole::Inbound &&
-        directory_.size() >= cap && !directory_.contains(conn.remote_id())) {
+        peers_.size() >= cap && !peers_.contains(conn.remote_id())) {
         LOG_DEBUG("node", "Rejecting inbound peer " << conn.remote_id().short_hex()
                   << "; peer limit (" << cap << ") reached");
         reactors_->by_index(conn.reactor_index()).close(conn.id(), CloseReason::PeerLimit);
@@ -295,10 +295,10 @@ void Node::on_established(Connection& conn) {
     // Symmetric tie-break for a simultaneous cross-connect: both peers keep the
     // link initiated by the smaller id, so they converge on the same connection.
     const bool prefer_outbound = identity_.id < conn.remote_id();
-    const auto outcome = directory_.add(info, route, prefer_outbound);
+    const auto outcome = peers_.add(info, route, prefer_outbound);
 
     // Tear down the loser of a duplicate/cross-connect race so it can't linger
-    // holding an fd. Its on_closed is a no-op: the directory no longer maps its
+    // holding an fd. Its on_closed is a no-op: the peer table no longer maps its
     // route, so it neither evicts the survivor nor fires a spurious disconnect.
     if (outcome.close)
         reactors_->by_index(outcome.close->reactor).close(outcome.close->conn, CloseReason::DuplicateConn);
@@ -354,7 +354,7 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     // A loser of a duplicate race (or a rejected self-connection) is not mapped
     // under its route, so removing it is a no-op and must NOT surface a disconnect
     // for a peer that is still connected over the surviving link.
-    if (!directory_.remove(id, route)) return;
+    if (!peers_.remove(id, route)) return;
     LOG_INFO("node", "Peer " << id.short_hex() << " disconnected (" << to_string(reason) << ")");
     for (auto& cb : peer_disconnected_) cb(id);
 }
@@ -399,7 +399,7 @@ void Node::handle_identify(Connection& conn, const Frame& frame) {
 
     if (!candidates.empty()) {
         const PeerRoute route{conn.reactor_index(), conn.id()};
-        const auto added = directory_.add_addresses(conn.remote_id(), route, candidates);
+        const auto added = peers_.add_addresses(conn.remote_id(), route, candidates);
         if (!added.empty())
             LOG_DEBUG("node", "Learned " << added.size() << " address(es) for peer "
                       << conn.remote_id().short_hex() << " (e.g. " << added.front().to_string() << ")");
@@ -458,7 +458,7 @@ void Peer::disconnect() const {
 }
 
 std::optional<PeerInfo> Peer::info() const {
-    return node_->directory_.info(id_);
+    return node_->peers_.info(id_);
 }
 
 } // namespace librats

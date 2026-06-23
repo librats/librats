@@ -413,7 +413,7 @@ TEST(AddressTest, RoundTripsIPv4AndIPv6) {
     EXPECT_EQ(v6full->port, 443);
 
     // to_string() is the exact inverse of parse() for a constructed IPv6 endpoint
-    // (this is the path PeerStore persistence relies on).
+    // (this is the path PeerTable persistence relies on).
     Address a{"fe80::1", 1234};
     EXPECT_EQ(a.to_string(), "[fe80::1]:1234");
     auto reparsed = Address::parse(a.to_string());

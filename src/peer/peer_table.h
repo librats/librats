@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * @file peer_directory.h
+ * @file peer_table.h
  * @brief Control-plane registry: PeerId → route + metadata.
  *
  * This is the only shared peer structure in the redesign, and it is deliberately

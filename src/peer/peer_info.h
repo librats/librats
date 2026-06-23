@@ -6,7 +6,7 @@
  *
  * PeerInfo is the "where / what" of a peer, kept separate from the live
  * transport (Connection) and from the raw identity (PeerId). It is a value type:
- * snapshotted into callbacks and into the PeerStore without touching live state.
+ * snapshotted into callbacks and into the PeerTable without touching live state.
  */
 
 #include "core/types.h"   // ConnRole
