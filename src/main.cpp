@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
     }
     if (use_reconnect) {
         ReconnectionService::Config rc;
-        if (!config.data_dir.empty()) rc.store_path = config.data_dir + "/peers.txt";
+        if (!config.data_dir.empty()) rc.store_path = config.data_dir + "/peers.json";
         rc.max_attempts = 10;  // give up on a persistently-dead target rather than retry forever
         auto reconnect = std::make_unique<ReconnectionService>(rc);
         sub.reconnect = reconnect.get();

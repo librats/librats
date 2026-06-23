@@ -1,8 +1,8 @@
 #include "peer/peer_book.h"
 #include "util/fs.h"
+#include "util/json.h"
 
 #include <algorithm>
-#include <sstream>
 #include <unordered_set>
 
 namespace librats {
@@ -29,42 +29,50 @@ void PeerBook::load() {
     const std::string text = read_file_text_cpp(path_);
     if (text.empty()) return;
 
+    // Non-throwing parse: a malformed/legacy file simply yields no records
+    // rather than crashing startup.
+    const Json root = Json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (!root.is_array()) return;
+
     std::lock_guard<std::mutex> lock(mutex_);
-    std::istringstream in(text);
-    std::string line;
-    while (std::getline(in, line)) {
-        std::istringstream ls(line);
-        std::string ip, idhex;
-        uint16_t    port = 0;
-        PeerRecord  r;
-        if (!(ls >> ip >> port) || port == 0 || ip.empty()) continue;  // need at least ip + port
+    for (const auto& j : root) {
+        if (!j.is_object()) continue;
+        const std::string ip   = j.value("ip", std::string());
+        const uint16_t    port = static_cast<uint16_t>(j.value("port", 0));
+        if (ip.empty() || port == 0) continue;  // need at least ip + port
+
+        PeerRecord r;
         r.address = Address{ip, port};
         // Remaining metadata fields are optional; absent ones keep their defaults.
-        if (ls >> idhex) {
-            if (idhex != "-") { if (auto id = PeerId::from_hex(idhex)) r.id = *id; }
-            ls >> r.first_seen >> r.last_seen >> r.last_connected >> r.connect_count >> r.fail_streak;
-        }
+        const std::string idhex = j.value("id", std::string());
+        if (!idhex.empty()) { if (auto id = PeerId::from_hex(idhex)) r.id = *id; }
+        r.first_seen     = j.value("first_seen",     uint64_t{0});
+        r.last_seen      = j.value("last_seen",      uint64_t{0});
+        r.last_connected = j.value("last_connected", uint64_t{0});
+        r.connect_count  = j.value("connect_count",  uint32_t{0});
+        r.fail_streak    = j.value("fail_streak",    uint32_t{0});
         records_[r.address.to_string()] = r;
     }
 }
 
 void PeerBook::save() const {
-    std::string text;
+    Json arr = Json::array();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        text.reserve(records_.size() * 64);
         for (const auto& [key, r] : records_) {
-            text += r.address.ip;                         text += ' ';
-            text += std::to_string(r.address.port);       text += ' ';
-            text += (r.id.is_zero() ? "-" : r.id.to_hex());text += ' ';
-            text += std::to_string(r.first_seen);         text += ' ';
-            text += std::to_string(r.last_seen);          text += ' ';
-            text += std::to_string(r.last_connected);     text += ' ';
-            text += std::to_string(r.connect_count);      text += ' ';
-            text += std::to_string(r.fail_streak);        text += '\n';
+            Json j = Json::object();
+            j["ip"]             = r.address.ip;
+            j["port"]           = r.address.port;
+            if (!r.id.is_zero()) j["id"] = r.id.to_hex();  // omitted when never connected
+            j["first_seen"]     = r.first_seen;
+            j["last_seen"]      = r.last_seen;
+            j["last_connected"] = r.last_connected;
+            j["connect_count"]  = r.connect_count;
+            j["fail_streak"]    = r.fail_streak;
+            arr.push_back(std::move(j));
         }
     }
-    create_file(path_.c_str(), text.c_str());
+    create_file(path_.c_str(), arr.dump(2).c_str());
 }
 
 void PeerBook::note_connected(const Address& address, const PeerId& id, uint64_t now) {

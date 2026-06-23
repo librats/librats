@@ -485,7 +485,7 @@ rats_error_t rats_enable_reconnect(rats_t node) {
     if (h->started) return RATS_ERR_ALREADY_STARTED;
     if (!h->reconnect) {
         ReconnectionService::Config rc;
-        if (!h->data_dir.empty()) rc.store_path = h->data_dir + "/peers.txt";
+        if (!h->data_dir.empty()) rc.store_path = h->data_dir + "/peers.json";
         h->reconnect = h->node->add_subsystem(std::make_unique<ReconnectionService>(rc));
     }
     return RATS_OK;

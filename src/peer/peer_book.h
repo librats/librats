@@ -15,8 +15,13 @@
  * Time is passed in (unix seconds) rather than read here, so the book stays a
  * pure, testable data structure; the wall clock lives at the call site.
  *
- * Thread-safe. Backed by a human-readable text file, one record per line:
- *   <ip> <port> <id-hex|-> <first_seen> <last_seen> <last_connected> <connects> <fails>
+ * Thread-safe. Backed by a human-readable JSON file: an array of objects, one
+ * per record, e.g.
+ *   [
+ *     {"ip":"127.0.0.1","port":4001,"id":"ab..","first_seen":1000,
+ *      "last_seen":2000,"last_connected":2000,"connect_count":2,"fail_streak":0}
+ *   ]
+ * The "id" field is omitted for peers we have only ever seen, never connected to.
  */
 
 #include "core/address.h"
