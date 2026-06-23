@@ -92,9 +92,8 @@ private:
 
 class PlaintextSecurity final : public SecurityProvider {
 public:
-    explicit PlaintextSecurity(Identity identity, std::string protocol_name = "librats",
-                               std::string protocol_version = "1.0")
-        : identity_(identity), proto_(protocol_id(protocol_name, protocol_version)) {}
+    explicit PlaintextSecurity(Identity identity, std::string protocol = "librats/1.0")
+        : identity_(identity), proto_(protocol_id(protocol)) {}
     std::unique_ptr<Handshaker> create(ConnRole role) override {
         return std::make_unique<PlaintextHandshaker>(identity_.id, role == ConnRole::Outbound, proto_);
     }

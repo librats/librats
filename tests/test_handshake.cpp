@@ -114,15 +114,15 @@ TEST(HandshakeTest, ProtocolPrologueGuardsCrossAppConnections) {
     Identity alice = Identity::generate(), bob = Identity::generate();
 
     {  // same protocol → success
-        NoiseSecurity a(alice, "app", "1.0"), b(bob, "app", "1.0");
+        NoiseSecurity a(alice, "app/1.0"), b(bob, "app/1.0");
         EXPECT_TRUE(handshake_completes(a, b));
     }
     {  // different name → failure
-        NoiseSecurity a(alice, "app", "1.0"), b(bob, "other", "1.0");
+        NoiseSecurity a(alice, "app/1.0"), b(bob, "other/1.0");
         EXPECT_FALSE(handshake_completes(a, b));
     }
     {  // same name, different version → failure
-        NoiseSecurity a(alice, "app", "1.0"), b(bob, "app", "2.0");
+        NoiseSecurity a(alice, "app/1.0"), b(bob, "app/2.0");
         EXPECT_FALSE(handshake_completes(a, b));
     }
     {  // library default on both sides → success (no surprise for existing nodes)
@@ -137,11 +137,11 @@ TEST(HandshakeTest, PlaintextAlsoGuardsProtocol) {
     Identity alice = Identity::generate(), bob = Identity::generate();
 
     {  // same protocol → ids exchanged, session established (just not encrypted)
-        PlaintextSecurity a(alice, "app", "1"), b(bob, "app", "1");
+        PlaintextSecurity a(alice, "app/1"), b(bob, "app/1");
         EXPECT_TRUE(handshake_completes(a, b));
     }
     {  // mismatched protocol → handshake refused
-        PlaintextSecurity a(alice, "app", "1"), b(bob, "app", "2");
+        PlaintextSecurity a(alice, "app/1"), b(bob, "app/2");
         EXPECT_FALSE(handshake_completes(a, b));
     }
 }

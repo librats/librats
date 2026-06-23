@@ -101,8 +101,7 @@ cfg.enableListen = true;            // false = dial-only node
 cfg.bindAddress = null;             // null = dual-stack "::"
 cfg.security = RatsClient.SECURITY_NOISE;   // or SECURITY_PLAINTEXT
 cfg.dataDir = "/data/.../rats";     // persistent identity + subsystem state
-cfg.protocolName = "myapp";
-cfg.protocolVersion = "1.0";
+cfg.protocol = "myapp/1.0";         // handshake app id; peers must match
 cfg.maxPeers = 50;                  // 0 = unlimited
 RatsClient client = new RatsClient(cfg);
 ```
@@ -168,7 +167,7 @@ client.removeReconnect("192.168.1.100", 8080);
 - `RatsClient(int listenPort)`, `RatsClient(Config)`
 - `int start()`, `void stop()`, `void destroy()`
 - `int getListenPort()`, `String getLocalId()`
-- `String getProtocolName()`, `String getProtocolVersion()`
+- `String getProtocol()` — handshake app id (e.g. `"librats/1.0"`)
 
 **Connections**
 - `int connect(String host, int port)`

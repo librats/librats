@@ -89,8 +89,7 @@ private:
     void Stop(const Napi::CallbackInfo& info);
     Napi::Value GetListenPort(const Napi::CallbackInfo& info);
     Napi::Value GetOurPeerId(const Napi::CallbackInfo& info);
-    Napi::Value GetProtocolName(const Napi::CallbackInfo& info);
-    Napi::Value GetProtocolVersion(const Napi::CallbackInfo& info);
+    Napi::Value GetProtocol(const Napi::CallbackInfo& info);
 
     // ---- connections ----
     Napi::Value Connect(const Napi::CallbackInfo& info);
@@ -166,7 +165,7 @@ RatsClient::RatsClient(const Napi::CallbackInfo& info)
 
         // Hold string storage alive until rats_create_config() returns (the
         // struct borrows the pointers only for the duration of the call).
-        std::string bind_addr, data_dir, proto_name, proto_ver;
+        std::string bind_addr, data_dir, protocol;
 
         if (cfg.Has("listenPort"))
             c.listen_port = static_cast<uint16_t>(cfg.Get("listenPort").As<Napi::Number>().Uint32Value());
@@ -182,13 +181,9 @@ RatsClient::RatsClient(const Napi::CallbackInfo& info)
             data_dir = cfg.Get("dataDir").As<Napi::String>().Utf8Value();
             c.data_dir = data_dir.c_str();
         }
-        if (cfg.Has("protocolName") && cfg.Get("protocolName").IsString()) {
-            proto_name = cfg.Get("protocolName").As<Napi::String>().Utf8Value();
-            c.protocol_name = proto_name.c_str();
-        }
-        if (cfg.Has("protocolVersion") && cfg.Get("protocolVersion").IsString()) {
-            proto_ver = cfg.Get("protocolVersion").As<Napi::String>().Utf8Value();
-            c.protocol_version = proto_ver.c_str();
+        if (cfg.Has("protocol") && cfg.Get("protocol").IsString()) {
+            protocol = cfg.Get("protocol").As<Napi::String>().Utf8Value();
+            c.protocol = protocol.c_str();
         }
         if (cfg.Has("maxPeers"))
             c.max_peers = static_cast<size_t>(cfg.Get("maxPeers").As<Napi::Number>().Int64Value());
@@ -257,18 +252,9 @@ Napi::Value RatsClient::GetOurPeerId(const Napi::CallbackInfo& info) {
     return result;
 }
 
-Napi::Value RatsClient::GetProtocolName(const Napi::CallbackInfo& info) {
+Napi::Value RatsClient::GetProtocol(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
-    char* s = rats_protocol_name(node_);
-    if (!s) return env.Null();
-    Napi::String result = Napi::String::New(env, s);
-    rats_string_free(s);
-    return result;
-}
-
-Napi::Value RatsClient::GetProtocolVersion(const Napi::CallbackInfo& info) {
-    Napi::Env env = info.Env();
-    char* s = rats_protocol_version(node_);
+    char* s = rats_protocol(node_);
     if (!s) return env.Null();
     Napi::String result = Napi::String::New(env, s);
     rats_string_free(s);
@@ -830,8 +816,7 @@ Napi::Object RatsClient::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("stop", &RatsClient::Stop),
         InstanceMethod("getListenPort", &RatsClient::GetListenPort),
         InstanceMethod("getOurPeerId", &RatsClient::GetOurPeerId),
-        InstanceMethod("getProtocolName", &RatsClient::GetProtocolName),
-        InstanceMethod("getProtocolVersion", &RatsClient::GetProtocolVersion),
+        InstanceMethod("getProtocol", &RatsClient::GetProtocol),
         // connections
         InstanceMethod("connect", &RatsClient::Connect),
         InstanceMethod("getPeerCount", &RatsClient::GetPeerCount),

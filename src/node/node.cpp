@@ -38,8 +38,8 @@ bool is_unspecified_ip(const std::string& ip) {
 
 std::unique_ptr<SecurityProvider> make_security(const NodeConfig& cfg, const Identity& id) {
     if (cfg.security == NodeConfig::Security::Noise)
-        return std::make_unique<NoiseSecurity>(id, cfg.protocol_name, cfg.protocol_version);
-    return std::make_unique<PlaintextSecurity>(id, cfg.protocol_name, cfg.protocol_version);
+        return std::make_unique<NoiseSecurity>(id, cfg.protocol);
+    return std::make_unique<PlaintextSecurity>(id, cfg.protocol);
 }
 
 // Load a persisted identity from <data_dir>/identity.key, or generate one and

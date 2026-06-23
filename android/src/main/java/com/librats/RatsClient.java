@@ -69,10 +69,9 @@ public class RatsClient {
         public int security = SECURITY_NOISE;
         /** Persistent state dir; null/"" gives an ephemeral identity per run. */
         public String dataDir = null;
-        /** Handshake app namespace; null selects "librats". */
-        public String protocolName = null;
-        /** Handshake app version; null selects "1.0". */
-        public String protocolVersion = null;
+        /** Handshake app id, e.g. "myapp/1.0"; null selects "librats/1.0".
+         *  Peers whose protocol differs cannot connect. */
+        public String protocol = null;
         /** Established-peer cap; 0 = unlimited. */
         public long maxPeers = 0;
     }
@@ -103,8 +102,7 @@ public class RatsClient {
                 config.bindAddress,
                 config.security,
                 config.dataDir,
-                config.protocolName,
-                config.protocolVersion,
+                config.protocol,
                 config.maxPeers);
         if (nativePtr == 0) {
             throw new RatsException("Failed to create native rats node");
@@ -154,14 +152,9 @@ public class RatsClient {
         return nativeLocalId(nativePtr);
     }
 
-    /** @return the application protocol name bound into the handshake. */
-    public String getProtocolName() {
-        return nativeProtocolName(nativePtr);
-    }
-
-    /** @return the application protocol version bound into the handshake. */
-    public String getProtocolVersion() {
-        return nativeProtocolVersion(nativePtr);
+    /** @return the application protocol id bound into the handshake (e.g. "librats/1.0"). */
+    public String getProtocol() {
+        return nativeProtocol(nativePtr);
     }
 
     // ===================== connections =====================
@@ -470,16 +463,15 @@ public class RatsClient {
 
     private native long nativeCreate(int listenPort);
     private native long nativeCreateConfig(int listenPort, boolean enableListen, String bindAddress,
-                                           int security, String dataDir, String protocolName,
-                                           String protocolVersion, long maxPeers);
+                                           int security, String dataDir, String protocol,
+                                           long maxPeers);
     private native void nativeDestroy(long ptr);
     private native int nativeStart(long ptr);
     private native void nativeStop(long ptr);
 
     private native int nativeListenPort(long ptr);
     private native String nativeLocalId(long ptr);
-    private native String nativeProtocolName(long ptr);
-    private native String nativeProtocolVersion(long ptr);
+    private native String nativeProtocol(long ptr);
 
     private native int nativeConnect(long ptr, String host, int port);
     private native long nativePeerCount(long ptr);

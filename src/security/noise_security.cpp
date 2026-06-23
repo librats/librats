@@ -112,8 +112,8 @@ private:
 
 } // namespace
 
-NoiseSecurity::NoiseSecurity(Identity identity, std::string protocol_name, std::string protocol_version)
-    : identity_(identity), prologue_(protocol_id(protocol_name, protocol_version)) {}
+NoiseSecurity::NoiseSecurity(Identity identity, std::string protocol)
+    : identity_(identity), prologue_(protocol_id(protocol)) {}
 
 std::unique_ptr<Handshaker> NoiseSecurity::create(ConnRole role) {
     return std::make_unique<NoiseHandshaker>(identity_, role == ConnRole::Outbound, ByteView(prologue_));

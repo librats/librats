@@ -356,11 +356,9 @@ int main() {
     librats::RatsClient client(8080);
     
     // Configure custom protocol for your application
-    client.set_protocol_name("my_app");
-    client.set_protocol_version("1.0");
-    
-    std::cout &lt;&lt; "Protocol: " &lt;&lt; client.get_protocol_name() 
-              &lt;&lt; " v" &lt;&lt; client.get_protocol_version() &lt;&lt; std::endl;
+    client.set_protocol("my_app/1.0");
+
+    std::cout &lt;&lt; "Protocol: " &lt;&lt; client.get_protocol() &lt;&lt; std::endl;
     std::cout &lt;&lt; "Discovery hash: " &lt;&lt; client.get_discovery_hash() &lt;&lt; std::endl;
     
     client.start();

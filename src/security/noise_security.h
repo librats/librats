@@ -20,12 +20,11 @@ namespace librats {
 
 class NoiseSecurity final : public SecurityProvider {
 public:
-    /// @param protocol_name/version Application protocol id, bound into the Noise
-    ///        handshake prologue. Peers whose (name, version) differ cannot
-    ///        complete a handshake — cross-application isolation, enforced
-    ///        cryptographically (a mismatch fails the handshake MAC).
-    explicit NoiseSecurity(Identity identity, std::string protocol_name = "librats",
-                           std::string protocol_version = "1.0");
+    /// @param protocol Application protocol id, bound into the Noise handshake
+    ///        prologue. Peers whose protocol differs cannot complete a handshake
+    ///        — cross-application isolation, enforced cryptographically (a
+    ///        mismatch fails the handshake MAC). By convention "<name>/<version>".
+    explicit NoiseSecurity(Identity identity, std::string protocol = "librats/1.0");
     std::unique_ptr<Handshaker> create(ConnRole role) override;
     const PeerId& local_id() const override { return identity_.id; }
 

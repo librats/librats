@@ -107,8 +107,7 @@ public:
     uint16_t      listen_port() const noexcept override { return listen_port_; }
 
     /// Application protocol identity bound into the handshake (see NodeConfig).
-    const std::string& protocol_name() const noexcept { return config_.protocol_name; }
-    const std::string& protocol_version() const noexcept { return config_.protocol_version; }
+    const std::string& protocol() const noexcept { return config_.protocol; }
 
     // — node-scoped coordination, shared by subsystems and the app (see NodeContext) —
     //   events()   : fire-and-forget notifications, one→many (host events, …)

@@ -138,7 +138,7 @@ client.broadcastJson('greeting', JSON.stringify({ hello: 'world' }));
   - `bindAddress?: string` (default `"::"`)
   - `security?: Security` (`Security.NOISE` | `Security.PLAINTEXT`)
   - `dataDir?: string` (persistent identity + subsystem state; empty = ephemeral)
-  - `protocolName?: string` / `protocolVersion?: string` (handshake identity)
+  - `protocol?: string` (handshake app id, e.g. `"myapp/1.0"`; default `"librats/1.0"`)
   - `maxPeers?: number` (0 = unlimited)
 
 ### Lifecycle / core
@@ -147,7 +147,7 @@ client.broadcastJson('greeting', JSON.stringify({ hello: 'world' }));
 - `stop(): void`
 - `getListenPort(): number`
 - `getOurPeerId(): string | null` — 64-char hex
-- `getProtocolName(): string | null` / `getProtocolVersion(): string | null`
+- `getProtocol(): string | null` — handshake app id (e.g. `"librats/1.0"`)
 
 ### Connections
 

@@ -45,10 +45,9 @@ export interface RatsConfig {
   security?: Security;
   /** Persistent state dir; empty/omitted = ephemeral identity each run. */
   dataDir?: string;
-  /** Handshake app namespace; default "librats". */
-  protocolName?: string;
-  /** Handshake app version; default "1.0". */
-  protocolVersion?: string;
+  /** Handshake app id, e.g. "myapp/1.0"; default "librats/1.0". Peers whose
+   *  protocol differs cannot connect. */
+  protocol?: string;
   /** Established-peer cap; 0 = unlimited. */
   maxPeers?: number;
 }
@@ -80,11 +79,8 @@ export class RatsClient {
   /** Our self-certifying peer id (64-char hex), or null if unavailable. */
   getOurPeerId(): string | null;
 
-  /** The application protocol name bound in the handshake. */
-  getProtocolName(): string | null;
-
-  /** The application protocol version. */
-  getProtocolVersion(): string | null;
+  /** The application protocol id bound in the handshake (e.g. "librats/1.0"). */
+  getProtocol(): string | null;
 
   // ---- connections ----
 

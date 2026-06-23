@@ -72,7 +72,7 @@ node.start();
 - **Noise Protocol encryption** (Noise_XX): Curve25519 key exchange + ChaCha20-Poly1305 AEAD on every connection by default
 - **Mutual authentication**: both peers prove possession of the private key behind their `PeerId`
 - **Perfect forward secrecy**: per-session ephemeral keys
-- **Protocol binding**: your app's `(protocol_name, protocol_version)` is bound into the handshake prologue, so nodes from different apps cryptographically cannot cross-connect
+- **Protocol binding**: your app's `protocol` id (e.g. `"myapp/1.0"`) is bound into the handshake prologue, so nodes from different apps cryptographically cannot cross-connect
 - **Plaintext option**: select `Security::Plaintext` for local debugging or trusted networks
 
 ### **NAT Traversal**
@@ -147,18 +147,18 @@ int main() {
 ```cpp
 NodeConfig config;
 config.listen_port = 8080;
-config.protocol_name = "my_app";      // bound into the handshake — only matching
-config.protocol_version = "1.0";      // (name, version) peers can connect
+config.protocol = "my_app/1.0";       // bound into the handshake — only peers with
+                                      // the same protocol id can connect
 config.data_dir = "./node-data";      // persist identity.key → stable PeerId across restarts
 
 Node node(config);
 node.start();
 
-std::cout << "protocol: " << node.protocol_name() << " v" << node.protocol_version() << "\n";
+std::cout << "protocol: " << node.protocol() << "\n";
 std::cout << "peer id:  " << node.local_id().to_hex() << "\n";
 ```
 
-Two nodes whose `(protocol_name, protocol_version)` differ cannot complete a handshake — a cheap, cryptographically-enforced way to keep separate apps (or app versions) from cross-connecting. See [Private Network Formation](#private-network-formation).
+Two nodes whose `protocol` id differs cannot complete a handshake — a cheap, cryptographically-enforced way to keep separate apps (or app versions) from cross-connecting. The id is an opaque string compared for exact equality; by convention `"<name>/<version>"`. See [Private Network Formation](#private-network-formation).
 
 ### 3. Typed JSON messaging
 
@@ -339,8 +339,7 @@ void stop();                   // stop subsystems (reverse order), close connect
 // Identity & protocol
 const PeerId&      local_id() const;          // our self-certifying id (== public key)
 uint16_t           listen_port() const;       // actual bound port (when config requested 0)
-const std::string& protocol_name() const;
-const std::string& protocol_version() const;
+const std::string& protocol() const;          // app protocol id bound into the handshake
 
 // Subsystems (attach BEFORE start(); the node owns them and returns a non-owning pointer)
 template <class T> T* add_subsystem(std::unique_ptr<T> subsystem);
@@ -385,8 +384,7 @@ struct NodeConfig {
     size_t      max_peers = 0;              // 0 = unlimited (guards inbound only)
     enum class Security { Noise, Plaintext };
     Security    security = Security::Noise; // Noise_XX by default
-    std::string protocol_name = "librats";  // bound into the handshake; must match to connect
-    std::string protocol_version = "1.0";
+    std::string protocol = "librats/1.0";   // app id bound into the handshake; must match to connect
     std::string data_dir = "";              // "" = ephemeral identity; else identity.key persists
     bool        enable_network_monitor = true;  // watch host network changes → NetworkChanged
 };
@@ -445,7 +443,7 @@ int main(void) {
 }
 ```
 
-Key entry points: `rats_create` / `rats_create_config` / `rats_config_default` / `rats_destroy`, `rats_start` / `rats_stop`, `rats_connect`, `rats_send` / `rats_broadcast`, `rats_on` / `rats_on_peer_connected` / `rats_on_peer_disconnected`, `rats_enable_{dht,mdns,pubsub,json,file_transfer,ping,reconnect,port_mapping}`, `rats_subscribe` / `rats_publish`, `rats_on_json` / `rats_send_json`, `rats_send_file` / `rats_accept_file`, `rats_peer_ids`, `rats_local_id`, `rats_protocol_name` / `rats_protocol_version`, `rats_version` / `rats_version_string` / `rats_git_describe` / `rats_abi`, `rats_set_log_level` / `rats_set_log_file`.
+Key entry points: `rats_create` / `rats_create_config` / `rats_config_default` / `rats_destroy`, `rats_start` / `rats_stop`, `rats_connect`, `rats_send` / `rats_broadcast`, `rats_on` / `rats_on_peer_connected` / `rats_on_peer_disconnected`, `rats_enable_{dht,mdns,pubsub,json,file_transfer,ping,reconnect,port_mapping}`, `rats_subscribe` / `rats_publish`, `rats_on_json` / `rats_send_json`, `rats_send_file` / `rats_accept_file`, `rats_peer_ids`, `rats_local_id`, `rats_protocol`, `rats_version` / `rats_version_string` / `rats_git_describe` / `rats_abi`, `rats_set_log_level` / `rats_set_log_file`.
 
 ## 🏢 Architecture
 
@@ -504,12 +502,11 @@ The source tree mirrors these layers: `src/core`, `src/util`, `src/wire`, `src/t
 
 To create a private overlay limited to your application's peers:
 
-1. **Set a unique protocol name and version before starting:**
+1. **Set a unique protocol id before starting:**
 
 ```cpp
 NodeConfig config;
-config.protocol_name = "my_private_app";
-config.protocol_version = "1.0";
+config.protocol = "my_private_app/1.0";
 Node node(config);
 node.add_subsystem(std::make_unique<DhtDiscovery>(dht_config));
 node.start();   // discovery uses a hash derived from your protocol identity
@@ -517,7 +514,7 @@ node.start();   // discovery uses a hash derived from your protocol identity
 
 2. **How it works:**
    - `DhtDiscovery` derives a discovery hash from your protocol identity and announces under it in the global DHT.
-   - Only peers with the **same** `(protocol_name, protocol_version)` discover each other — and even if a stranger dials you, the protocol identity is bound into the Noise handshake, so the connection cannot complete.
+   - Only peers with the **same** `protocol` id discover each other — and even if a stranger dials you, the protocol identity is bound into the Noise handshake, so the connection cannot complete.
    - Once discovered, peers connect over authenticated TCP and grow the mesh via Peer Exchange.
 
 3. **Discovery timing:**

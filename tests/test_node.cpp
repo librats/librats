@@ -204,8 +204,8 @@ TEST(NodeTest, MaxPeersRuntimeRaise) {
 // Nodes with a different protocol id cannot connect (the handshake prologue
 // diverges, failing the Noise handshake). Cross-application isolation.
 TEST(NodeTest, ProtocolMismatchPreventsConnection) {
-    NodeConfig sc = server_config(); sc.protocol_name = "app-a";
-    NodeConfig cc = client_config(); cc.protocol_name = "app-b";
+    NodeConfig sc = server_config(); sc.protocol = "app-a";
+    NodeConfig cc = client_config(); cc.protocol = "app-b";
     Node server(sc);
     Node client(cc);
 
@@ -221,10 +221,10 @@ TEST(NodeTest, ProtocolMismatchPreventsConnection) {
     server.stop();
 }
 
-// A matching custom protocol (name + version) connects normally.
+// A matching custom protocol connects normally.
 TEST(NodeTest, MatchingCustomProtocolConnects) {
-    NodeConfig sc = server_config(); sc.protocol_name = "myapp"; sc.protocol_version = "3.1";
-    NodeConfig cc = client_config(); cc.protocol_name = "myapp"; cc.protocol_version = "3.1";
+    NodeConfig sc = server_config(); sc.protocol = "myapp/3.1";
+    NodeConfig cc = client_config(); cc.protocol = "myapp/3.1";
     Node server(sc);
     Node client(cc);
 

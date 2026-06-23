@@ -49,10 +49,8 @@ class TestRatsClient(unittest.TestCase):
 
     def test_create_with_config(self):
         self.client = RatsClient(
-            0, security=Security.PLAINTEXT, protocol_name="myapp",
-            protocol_version="2.0", max_peers=10)
-        self.assertEqual(self.client.protocol_name, "myapp")
-        self.assertEqual(self.client.protocol_version, "2.0")
+            0, security=Security.PLAINTEXT, protocol="myapp/2.0", max_peers=10)
+        self.assertEqual(self.client.protocol, "myapp/2.0")
         self.assertEqual(self.client.get_max_peers(), 10)
 
     def test_context_manager(self):

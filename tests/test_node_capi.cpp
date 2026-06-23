@@ -202,8 +202,7 @@ TEST(NodeCApiTest, ConfigDataDirPersistsIdentity) {
     rats_config_t cfg = rats_config_default();
     const std::string dir_str = dir.string();
     cfg.data_dir         = dir_str.c_str();
-    cfg.protocol_name    = "capi-test";
-    cfg.protocol_version = "2.0";
+    cfg.protocol         = "capi-test/2.0";
 
     rats_t a = rats_create_config(&cfg);
     ASSERT_NE(a, nullptr);

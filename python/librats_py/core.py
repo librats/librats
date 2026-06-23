@@ -47,8 +47,7 @@ class RatsClient:
         bind_address: Optional[str] = None,
         security: Security = Security.NOISE,
         data_dir: Optional[str] = None,
-        protocol_name: Optional[str] = None,
-        protocol_version: Optional[str] = None,
+        protocol: Optional[str] = None,
         max_peers: int = 0,
     ):
         """Create a node.
@@ -59,8 +58,8 @@ class RatsClient:
             bind_address: Bind address; ``None`` → ``"::"`` dual-stack wildcard.
             security: :class:`~librats_py.enums.Security` mode (default Noise).
             data_dir: Persistent state dir; ``None``/"" → ephemeral identity.
-            protocol_name: Handshake app namespace; ``None`` → ``"librats"``.
-            protocol_version: Handshake app version; ``None`` → ``"1.0"``.
+            protocol: Handshake app id, e.g. ``"myapp/1.0"``; ``None`` →
+                ``"librats/1.0"``. Peers whose protocol differs cannot connect.
             max_peers: Established-peer cap (0 = unlimited).
         """
         self._lib = get_librats()
@@ -72,17 +71,14 @@ class RatsClient:
         cfg.max_peers = max_peers
         # Keep bytes alive for the duration of the create call.
         self._cfg_keepalive = [
-            _b(bind_address), _b(data_dir),
-            _b(protocol_name), _b(protocol_version),
+            _b(bind_address), _b(data_dir), _b(protocol),
         ]
         if bind_address is not None:
             cfg.bind_address = self._cfg_keepalive[0]
         if data_dir is not None:
             cfg.data_dir = self._cfg_keepalive[1]
-        if protocol_name is not None:
-            cfg.protocol_name = self._cfg_keepalive[2]
-        if protocol_version is not None:
-            cfg.protocol_version = self._cfg_keepalive[3]
+        if protocol is not None:
+            cfg.protocol = self._cfg_keepalive[2]
 
         self._handle = self._lib.lib.rats_create_config(byref(cfg))
         if not self._handle:
@@ -153,14 +149,9 @@ class RatsClient:
         return self.local_id
 
     @property
-    def protocol_name(self) -> str:
-        """Application protocol name bound into the handshake."""
-        return take_string(self._lib, self._lib.lib.rats_protocol_name(self._handle))
-
-    @property
-    def protocol_version(self) -> str:
-        """Application protocol version bound into the handshake."""
-        return take_string(self._lib, self._lib.lib.rats_protocol_version(self._handle))
+    def protocol(self) -> str:
+        """Application protocol id bound into the handshake (e.g. ``"librats/1.0"``)."""
+        return take_string(self._lib, self._lib.lib.rats_protocol(self._handle))
 
     # ------------------------------------------------------------------ #
     # Connections / peers

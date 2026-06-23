@@ -23,21 +23,14 @@
 
 namespace librats {
 
-/// Canonical bytes identifying an application protocol (name + version). Bound
-/// into the handshake — as the Noise prologue, or exchanged-and-checked in the
-/// plaintext handshake — so peers whose protocol differs cannot connect. Fields
-/// are length-prefixed so distinct (name, version) pairs can never alias (e.g.
-/// {"a","b/c"} vs {"a/b","c"}).
-inline std::string protocol_id(const std::string& name, const std::string& version) {
-    auto put = [](std::string& p, const std::string& s) {
-        p.push_back(static_cast<char>((s.size() >> 8) & 0xFF));
-        p.push_back(static_cast<char>(s.size() & 0xFF));
-        p += s;
-    };
-    std::string p = "librats-proto\x1f";  // fixed context tag
-    put(p, name);
-    put(p, version);
-    return p;
+/// Canonical bytes identifying an application protocol. Bound into the handshake
+/// — as the Noise prologue, or exchanged-and-checked in the plaintext handshake —
+/// so peers whose protocol differs cannot connect. The protocol string is an
+/// opaque identity compared for exact equality; by convention it is "<name>/
+/// <version>" (e.g. "librats/1.0"), but any difference at all is a distinct
+/// protocol. A fixed context tag namespaces it away from other prologue uses.
+inline std::string protocol_id(const std::string& protocol) {
+    return std::string("librats-proto\x1f", 14) + protocol;  // tag + opaque id
 }
 
 class Handshaker {

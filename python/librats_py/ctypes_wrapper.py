@@ -3,8 +3,8 @@ Low-level ctypes wrapper for the librats C ABI (``src/bindings/rats.h``).
 
 This module declares the shared-library handle and the argtypes/restypes for
 every C function the high-level API uses. Heap-allocated strings returned by the
-library (``rats_local_id``, ``rats_protocol_name``/``_version``,
-``rats_peer_ids`` entries) are declared ``c_void_p`` so the bytes can be copied
+library (``rats_local_id``, ``rats_protocol``, ``rats_peer_ids`` entries) are
+declared ``c_void_p`` so the bytes can be copied
 out and the original pointer released with ``rats_string_free``; use
 :func:`take_string` for that. Static strings (``rats_version_string``,
 ``rats_git_describe``, ``rats_error_str``) are declared ``c_char_p`` and must
@@ -42,8 +42,7 @@ class RatsConfig(Structure):
         ("bind_address", c_char_p),      # const char* (NULL → "::")
         ("security", c_int),             # rats_security_t
         ("data_dir", c_char_p),          # const char*
-        ("protocol_name", c_char_p),     # const char*
-        ("protocol_version", c_char_p),  # const char*
+        ("protocol", c_char_p),          # const char* (NULL → "librats/1.0")
         ("max_peers", c_size_t),         # size_t (0 = unlimited)
     ]
 
@@ -161,11 +160,8 @@ class LibratsCtypes:
         lib.rats_local_id.argtypes = [c_void_p]
         lib.rats_local_id.restype = c_void_p  # heap; free with rats_string_free
 
-        lib.rats_protocol_name.argtypes = [c_void_p]
-        lib.rats_protocol_name.restype = c_void_p  # heap
-
-        lib.rats_protocol_version.argtypes = [c_void_p]
-        lib.rats_protocol_version.restype = c_void_p  # heap
+        lib.rats_protocol.argtypes = [c_void_p]
+        lib.rats_protocol.restype = c_void_p  # heap
 
         # --- connections ---
         lib.rats_connect.argtypes = [c_void_p, c_char_p, c_uint16]

@@ -72,8 +72,7 @@ typedef struct {
     const char*     bind_address;     /* NULL → "::" dual-stack wildcard */
     rats_security_t security;         /* RATS_SECURITY_NOISE / _PLAINTEXT */
     const char*     data_dir;         /* persistent state dir; NULL/"" → ephemeral identity each run */
-    const char*     protocol_name;    /* handshake app namespace; NULL → "librats" */
-    const char*     protocol_version; /* handshake app version;   NULL → "1.0" */
+    const char*     protocol;         /* handshake app id (e.g. "myapp/1.0"); NULL → "librats/1.0" */
     size_t          max_peers;        /* established-peer cap; 0 = unlimited */
 } rats_config_t;
 
@@ -104,10 +103,9 @@ RATS_API uint16_t     rats_listen_port(rats_t node);
 RATS_API char*    rats_local_id(rats_t node);
 
 /** Application protocol identity bound into the handshake (see rats_config_t).
- *  Two nodes whose (name, version) differ cannot complete a handshake. Caller
- *  frees the returned string with rats_string_free(). */
-RATS_API char*    rats_protocol_name(rats_t node);
-RATS_API char*    rats_protocol_version(rats_t node);
+ *  Two nodes whose protocol differs cannot complete a handshake. Caller frees
+ *  the returned string with rats_string_free(). */
+RATS_API char*    rats_protocol(rats_t node);
 
 /* — connections — */
 

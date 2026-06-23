@@ -250,7 +250,7 @@ Java_com_librats_RatsClient_nativeCreate(JNIEnv*, jobject, jint listen_port) {
 JNIEXPORT jlong JNICALL
 Java_com_librats_RatsClient_nativeCreateConfig(JNIEnv* env, jobject, jint listen_port,
         jboolean enable_listen, jstring bind_address, jint security, jstring data_dir,
-        jstring protocol_name, jstring protocol_version, jlong max_peers) {
+        jstring protocol, jlong max_peers) {
     rats_config_t cfg = rats_config_default();
     cfg.listen_port = static_cast<uint16_t>(listen_port);
     cfg.enable_listen = enable_listen ? 1 : 0;
@@ -259,12 +259,10 @@ Java_com_librats_RatsClient_nativeCreateConfig(JNIEnv* env, jobject, jint listen
 
     std::string bind = toCString(env, bind_address);
     std::string ddir = toCString(env, data_dir);
-    std::string pname = toCString(env, protocol_name);
-    std::string pver = toCString(env, protocol_version);
+    std::string proto = toCString(env, protocol);
     cfg.bind_address = bind_address ? bind.c_str() : nullptr;
     cfg.data_dir = data_dir ? ddir.c_str() : nullptr;
-    cfg.protocol_name = protocol_name ? pname.c_str() : nullptr;
-    cfg.protocol_version = protocol_version ? pver.c_str() : nullptr;
+    cfg.protocol = protocol ? proto.c_str() : nullptr;
 
     return reinterpret_cast<jlong>(rats_create_config(&cfg));
 }
@@ -303,16 +301,8 @@ Java_com_librats_RatsClient_nativeLocalId(JNIEnv* env, jobject, jlong ptr) {
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_librats_RatsClient_nativeProtocolName(JNIEnv* env, jobject, jlong ptr) {
-    char* s = rats_protocol_name(node_of(ptr));
-    jstring result = toJString(env, s);
-    if (s) rats_string_free(s);
-    return result;
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_librats_RatsClient_nativeProtocolVersion(JNIEnv* env, jobject, jlong ptr) {
-    char* s = rats_protocol_version(node_of(ptr));
+Java_com_librats_RatsClient_nativeProtocol(JNIEnv* env, jobject, jlong ptr) {
+    char* s = rats_protocol(node_of(ptr));
     jstring result = toJString(env, s);
     if (s) rats_string_free(s);
     return result;

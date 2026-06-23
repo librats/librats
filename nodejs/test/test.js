@@ -86,8 +86,7 @@ describe('LibRats Node.js Bindings', { timeout: 10_000 }, function () {
 
     it('exposes protocol identity', function () {
       client1.start();
-      assert(typeof client1.getProtocolName() === 'string');
-      assert(typeof client1.getProtocolVersion() === 'string');
+      assert(typeof client1.getProtocol() === 'string');
     });
 
     it('reports peer count and ids', function () {

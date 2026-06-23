@@ -67,7 +67,7 @@ class RatsClient {
   /**
    * @param {number|object} [portOrConfig] - listen port (0 = ephemeral) or a
    *   config object: { listenPort, enableListen, bindAddress, security,
-   *   dataDir, protocolName, protocolVersion, maxPeers }.
+   *   dataDir, protocol, maxPeers }.
    */
   constructor(portOrConfig = 0) {
     this._native = new addon.RatsClient(portOrConfig);
@@ -87,11 +87,8 @@ class RatsClient {
   /** @returns {string|null} our self-certifying peer id (64-char hex). */
   getOurPeerId() { return this._native.getOurPeerId(); }
 
-  /** @returns {string|null} the application protocol name bound in the handshake. */
-  getProtocolName() { return this._native.getProtocolName(); }
-
-  /** @returns {string|null} the application protocol version. */
-  getProtocolVersion() { return this._native.getProtocolVersion(); }
+  /** @returns {string|null} the application protocol id bound in the handshake (e.g. "librats/1.0"). */
+  getProtocol() { return this._native.getProtocol(); }
 
   // ---- connections ----
 

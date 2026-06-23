@@ -89,8 +89,7 @@ rats_config_t rats_config_default(void) {
     c.bind_address     = nullptr;
     c.security         = RATS_SECURITY_NOISE;
     c.data_dir         = nullptr;
-    c.protocol_name    = nullptr;
-    c.protocol_version = nullptr;
+    c.protocol         = nullptr;
     c.max_peers        = 0;
     return c;
 }
@@ -104,8 +103,7 @@ rats_t rats_create_config(const rats_config_t* cfg) {
         config.security = (cfg->security == RATS_SECURITY_PLAINTEXT) ? NodeConfig::Security::Plaintext
                                                                      : NodeConfig::Security::Noise;
         if (cfg->data_dir)         config.data_dir         = cfg->data_dir;
-        if (cfg->protocol_name)    config.protocol_name    = cfg->protocol_name;
-        if (cfg->protocol_version) config.protocol_version = cfg->protocol_version;
+        if (cfg->protocol)         config.protocol         = cfg->protocol;
         config.max_peers = cfg->max_peers;
     }
     return make_handle(std::move(config));
@@ -525,12 +523,8 @@ void rats_set_log_file(const char* path) {
 
 /* — protocol identity (node-scoped) — */
 
-char* rats_protocol_name(rats_t node) {
-    return dup_string(node_of(node)->protocol_name());
-}
-
-char* rats_protocol_version(rats_t node) {
-    return dup_string(node_of(node)->protocol_version());
+char* rats_protocol(rats_t node) {
+    return dup_string(node_of(node)->protocol());
 }
 
 /* — library info (process-global) — */

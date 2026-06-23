@@ -40,8 +40,8 @@ Technical details of the Python bindings, which target the librats C ABI
 * **Error model.** Fallible calls return `rats_error_t` (`RATS_OK == 0`). The
   bindings route non-OK codes through `check_error`, which raises the matching
   exception. This inverts the old "non-zero == success" convention.
-* **Heap vs static strings.** `rats_local_id`, `rats_protocol_name`,
-  `rats_protocol_version` and each entry of `rats_peer_ids` are heap-allocated
+* **Heap vs static strings.** `rats_local_id`, `rats_protocol`
+  and each entry of `rats_peer_ids` are heap-allocated
   and must be freed with `rats_string_free`. They are declared `c_void_p` (NOT
   `c_char_p`, which auto-converts and would leak/lose the pointer) and read via
   `take_string`, which copies the bytes then frees the original.

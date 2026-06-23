@@ -69,8 +69,7 @@ client = RatsClient(
     listen_port=8080,
     security=Security.NOISE,        # or Security.PLAINTEXT
     data_dir="./state",             # persistent identity + subsystem state
-    protocol_name="myapp",
-    protocol_version="1.0",
+    protocol="myapp/1.0",           # handshake app id; peers must match
     max_peers=50,
 )
 ```
@@ -137,7 +136,7 @@ with RatsClient(8080) as client:
 ```python
 RatsClient(listen_port=0, *, enable_listen=True, bind_address=None,
            security=Security.NOISE, data_dir=None,
-           protocol_name=None, protocol_version=None, max_peers=0)
+           protocol=None, max_peers=0)
 ```
 
 ### Lifecycle / identity
@@ -149,7 +148,7 @@ RatsClient(listen_port=0, *, enable_listen=True, bind_address=None,
 | `destroy()` | Explicitly destroy (else on GC) |
 | `local_id -> str` | Our 64-hex peer id |
 | `listen_port -> int` | Actual listen port |
-| `protocol_name` / `protocol_version` | Handshake identity |
+| `protocol -> str` | Handshake app id (e.g. `"librats/1.0"`) |
 
 ### Connections / peers
 
