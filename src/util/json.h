@@ -39,7 +39,6 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -90,7 +89,7 @@ public:
 
         std::size_t size() const { return items_.size(); }
         bool empty() const { return items_.empty(); }
-        void clear() { items_.clear(); index_.clear(); indexed_ = false; }
+        void clear() { items_.clear(); index_ = {}; }
 
         storage::iterator begin() { return items_.begin(); }
         storage::iterator end() { return items_.end(); }
@@ -101,14 +100,19 @@ public:
 
     private:
         // Small objects (the common case — a peer record, a config node) keep
-        // only the insertion-ordered vector and look keys up with a linear scan,
+        // only the insertion-ordered vector and find keys with a linear scan,
         // which beats hashing for a handful of entries and costs no allocation.
-        // The hash index is built lazily once the object grows past the
-        // threshold; invariant: indexed_ is true whenever size() > threshold.
+        // Past the threshold we build an open-addressing index that stores *only*
+        // 1-based positions into items_ (a 0 slot means empty) — so it copies no
+        // keys and is one small vector instead of a node-per-key hash map. items_
+        // stays the single source of truth; every probe reads the key back from
+        // it. The index is non-empty exactly while the object is indexed.
         static constexpr std::size_t kIndexThreshold = 16;
 
-        void build_index();  // populate index_ from items_, set indexed_
-        void reindex();      // rebuild (if large) or drop (if small) after erase
+        static std::size_t hash_key(const std::string& key);
+        void rebuild_index();  // size the table for items_ and fill it from scratch
+        void reindex();        // after erase: rebuild while large, else drop the index
+        bool indexed() const { return !index_.empty(); }
 
         // Shared find-or-insert for both operator[] overloads. K is deduced as
         // `const std::string&` or `std::string&&`, so the key is copied or moved
@@ -117,8 +121,10 @@ public:
         Json& emplace_key(K&& key);
 
         storage items_;
-        std::unordered_map<std::string, std::size_t> index_;
-        bool indexed_ = false;
+        // Open-addressing slots: value 0 is an empty slot, otherwise it is
+        // (items_ index + 1). uint32_t positions cap an object at ~4 billion
+        // keys — far beyond any real JSON document.
+        std::vector<std::uint32_t> index_;
     };
 
     // ── Construction ────────────────────────────────────────────────────────

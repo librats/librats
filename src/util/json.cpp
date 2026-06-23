@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <istream>
 #include <iterator>
 #include <ostream>
@@ -36,40 +37,65 @@
 namespace librats {
 
 // ── Object ──────────────────────────────────────────────────────────────────
+//
+// The index is a power-of-two open-addressing table of 1-based positions into
+// items_ (a slot value of 0 means empty). It owns no keys: every comparison
+// reads the key back from items_, so a key exists exactly once — in items_.
+// An erase shifts positions, so it rebuilds the table; between rebuilds the
+// table only grows, which means linear probing needs no tombstones.
 
-void Json::Object::build_index() {
-    index_.clear();
-    index_.reserve(items_.size());
-    for (std::size_t i = 0; i < items_.size(); ++i) index_.emplace(items_[i].first, i);
-    indexed_ = true;
+std::size_t Json::Object::hash_key(const std::string& key) {
+    return std::hash<std::string>{}(key);
+}
+
+void Json::Object::rebuild_index() {
+    // Smallest power-of-two capacity that keeps the load factor below 0.5 once
+    // the key about to be inserted is in (hence the +1), so probe chains stay
+    // short. Slots are uint32_t, so even at this headroom the whole index is a
+    // few KB for thousands of keys — negligible beside the keys and values.
+    std::size_t cap = 32;
+    while (cap < (items_.size() + 1) * 2) cap <<= 1;
+    index_.assign(cap, 0);
+    const std::size_t mask = cap - 1;
+    for (std::size_t i = 0; i < items_.size(); ++i) {
+        std::size_t slot = hash_key(items_[i].first) & mask;
+        while (index_[slot]) slot = (slot + 1) & mask;
+        index_[slot] = static_cast<std::uint32_t>(i + 1);
+    }
 }
 
 void Json::Object::reindex() {
-    // Called after an erase shifts indices: rebuild while large, else drop the
-    // index and fall back to linear scans (keeping the size invariant).
-    if (items_.size() > kIndexThreshold) {
-        build_index();
-    } else {
-        index_.clear();
-        indexed_ = false;
-    }
+    // Called after an erase shifts positions: rebuild while large, else drop the
+    // index and fall back to linear scans.
+    if (items_.size() > kIndexThreshold) rebuild_index();
+    else index_ = {};
 }
 
 template <typename K>
 Json& Json::Object::emplace_key(K&& key) {
-    if (indexed_) {
-        auto it = index_.find(key);
-        if (it != index_.end()) return items_[it->second].second;
-        // The map needs its own copy of the key; the vector then takes the
-        // original by perfect-forward (a move when the caller passed an rvalue).
-        index_.emplace(key, items_.size());
+    if (indexed()) {
+        // Grow first if seating one more key would crowd the table; growing
+        // rehashes, so it must happen before we compute a slot below.
+        if ((items_.size() + 1) * 2 > index_.size()) rebuild_index();
+
+        // A single probe both finds an existing key and locates the empty slot
+        // a new one would take.
+        const std::size_t mask = index_.size() - 1;
+        std::size_t slot = hash_key(key) & mask;
+        while (std::uint32_t e = index_[slot]) {
+            if (items_[e - 1].first == key) return items_[e - 1].second;
+            slot = (slot + 1) & mask;
+        }
         items_.emplace_back(std::forward<K>(key), Json());
+        index_[slot] = static_cast<std::uint32_t>(items_.size());  // 1-based position
         return items_.back().second;
     }
+
+    // Small object: linear scan, no index, no allocation.
     for (auto& kv : items_)
         if (kv.first == key) return kv.second;
     items_.emplace_back(std::forward<K>(key), Json());
-    if (items_.size() > kIndexThreshold) build_index();
+    if (items_.size() > kIndexThreshold) rebuild_index();
     return items_.back().second;
 }
 
@@ -77,9 +103,14 @@ Json& Json::Object::operator[](const std::string& key) { return emplace_key(key)
 Json& Json::Object::operator[](std::string&& key) { return emplace_key(std::move(key)); }
 
 const Json* Json::Object::find(const std::string& key) const {
-    if (indexed_) {
-        auto it = index_.find(key);
-        return it == index_.end() ? nullptr : &items_[it->second].second;
+    if (indexed()) {
+        const std::size_t mask = index_.size() - 1;
+        std::size_t slot = hash_key(key) & mask;
+        while (std::uint32_t e = index_[slot]) {
+            if (items_[e - 1].first == key) return &items_[e - 1].second;
+            slot = (slot + 1) & mask;
+        }
+        return nullptr;
     }
     for (const auto& kv : items_)
         if (kv.first == key) return &kv.second;
@@ -92,17 +123,19 @@ Json* Json::Object::find(const std::string& key) {
 }
 
 bool Json::Object::erase(const std::string& key) {
-    std::size_t pos;
-    if (indexed_) {
-        auto it = index_.find(key);
-        if (it == index_.end()) return false;
-        pos = it->second;
+    std::size_t pos = items_.size();
+    if (indexed()) {
+        const std::size_t mask = index_.size() - 1;
+        std::size_t slot = hash_key(key) & mask;
+        while (std::uint32_t e = index_[slot]) {
+            if (items_[e - 1].first == key) { pos = e - 1; break; }
+            slot = (slot + 1) & mask;
+        }
     } else {
-        pos = items_.size();
         for (std::size_t i = 0; i < items_.size(); ++i)
             if (items_[i].first == key) { pos = i; break; }
-        if (pos == items_.size()) return false;
     }
+    if (pos == items_.size()) return false;
     items_.erase(items_.begin() + static_cast<std::ptrdiff_t>(pos));
     reindex();
     return true;
