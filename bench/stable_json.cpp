@@ -22,6 +22,17 @@
 #  define LIBRATS_JSON_CHARCONV 0
 #endif
 
+// Caveat: libc++ defines __cpp_lib_to_chars (it has the floating-point to_chars
+// overloads) yet still ships floating-point from_chars as = delete (true as of
+// Xcode 16.4 / current libc++). So the macro above does NOT imply from_chars
+// works for double — gate the float-parsing path on its own predicate and fall
+// back to strtod where the overload is missing.
+#if LIBRATS_JSON_CHARCONV && !defined(_LIBCPP_VERSION)
+#  define LIBRATS_JSON_FROM_CHARS_FLOAT 1
+#else
+#  define LIBRATS_JSON_FROM_CHARS_FLOAT 0
+#endif
+
 namespace librats_stable {
 
 // ── Object ──────────────────────────────────────────────────────────────────
@@ -44,20 +55,26 @@ void Json::Object::reindex() {
     }
 }
 
-Json& Json::Object::operator[](const std::string& key) {
+template <typename K>
+Json& Json::Object::emplace_key(K&& key) {
     if (indexed_) {
         auto it = index_.find(key);
         if (it != index_.end()) return items_[it->second].second;
+        // The map needs its own copy of the key; the vector then takes the
+        // original by perfect-forward (a move when the caller passed an rvalue).
         index_.emplace(key, items_.size());
-        items_.emplace_back(key, Json());
+        items_.emplace_back(std::forward<K>(key), Json());
         return items_.back().second;
     }
     for (auto& kv : items_)
         if (kv.first == key) return kv.second;
-    items_.emplace_back(key, Json());
+    items_.emplace_back(std::forward<K>(key), Json());
     if (items_.size() > kIndexThreshold) build_index();
     return items_.back().second;
 }
+
+Json& Json::Object::operator[](const std::string& key) { return emplace_key(key); }
+Json& Json::Object::operator[](std::string&& key) { return emplace_key(std::move(key)); }
 
 const Json* Json::Object::find(const std::string& key) const {
     if (indexed_) {
@@ -112,17 +129,21 @@ void Json::destroy() noexcept {
 }
 
 void Json::copy_from(const Json& o) {
-    type_ = o.type_;
+    // Commit type_ only after the (possibly throwing) allocation succeeds: if
+    // `new` throws, this value keeps its prior type_/payload untouched, so a
+    // caller that started from a valid state (Null in the ctor / after the reset
+    // in operator=) stays valid and its destructor never frees a stale pointer.
     switch (o.type_) {
         case Type::Boolean:  bool_  = o.bool_;  break;
         case Type::Integer:  int_   = o.int_;   break;
         case Type::Unsigned: uint_  = o.uint_;  break;
         case Type::Float:    float_ = o.float_; break;
-        case Type::String:   str_ = new std::string(*o.str_); break;
-        case Type::Array:    arr_ = new Array(*o.arr_);       break;
-        case Type::Object:   obj_ = new Object(*o.obj_);      break;
+        case Type::String:   { auto* p = new std::string(*o.str_); str_ = p; } break;
+        case Type::Array:    { auto* p = new Array(*o.arr_);       arr_ = p; } break;
+        case Type::Object:   { auto* p = new Object(*o.obj_);      obj_ = p; } break;
         default: break;  // Null / Discarded carry no payload
     }
+    type_ = o.type_;
 }
 
 void Json::move_from(Json& o) noexcept {
@@ -143,6 +164,10 @@ void Json::move_from(Json& o) noexcept {
 Json& Json::operator=(const Json& o) {
     if (this == &o) return *this;
     destroy();
+    // Reset to a valid Null first: destroy() freed the old payload but left the
+    // old type_/pointer in place, so if copy_from below throws, the destructor
+    // would otherwise free a dangling pointer. As Null, a failed copy is safe.
+    type_ = Type::Null;
     copy_from(o);
     return *this;
 }
@@ -449,17 +474,69 @@ void dump_string(std::string& out, const std::string& s) {
     out += '"';
 }
 
-// Append the shortest decimal form of an integer without a heap allocation
-// (std::to_string would allocate a temporary string per number).
+// ── Fast integer formatting ──────────────────────────────────────────────────
+//
+// Integers are emitted two decimal digits at a time by indexing a table of all
+// hundred digit pairs, which halves the number of (comparatively slow) integer
+// divisions a digit-at-a-time loop performs. This is the well-worn approach used
+// inside libstdc++, abseil and fmt; spelling it out keeps the fast path byte-for
+// -byte identical on every toolchain instead of silently degrading to an
+// allocating std::to_string wherever std::to_chars' integer overloads are
+// missing.
+
+// Every two-digit value "00", "01", … "99" laid out back to back, so the digits
+// of `n` live at kDigitPairs[2*n] and kDigitPairs[2*n + 1].
+constexpr char kDigitPairs[] =
+    "00010203040506070809"
+    "10111213141516171819"
+    "20212223242526272829"
+    "30313233343536373839"
+    "40414243444546474849"
+    "50515253545556575859"
+    "60616263646566676869"
+    "70717273747576777879"
+    "80818283848586878889"
+    "90919293949596979899";
+
+// Write the decimal digits of an unsigned magnitude backward, finishing at
+// `last`, and return a pointer to the most significant digit produced. The
+// caller owns the buffer; 20 digits span the full 64-bit range.
+inline char* write_decimal(char* last, uint64_t value) {
+    while (value >= 100) {
+        const unsigned pair = static_cast<unsigned>(value % 100) * 2;
+        value /= 100;
+        *--last = kDigitPairs[pair + 1];
+        *--last = kDigitPairs[pair];
+    }
+    if (value >= 10) {
+        const unsigned pair = static_cast<unsigned>(value) * 2;
+        *--last = kDigitPairs[pair + 1];
+        *--last = kDigitPairs[pair];
+    } else {
+        *--last = static_cast<char>('0' + value);
+    }
+    return last;
+}
+
+// Append the shortest decimal form of an integer with no heap allocation.
 template <typename Int>
 void dump_int(std::string& out, Int v) {
-#if LIBRATS_JSON_CHARCONV
-    char buf[24];  // room for a 64-bit value with sign
-    auto res = std::to_chars(buf, buf + sizeof buf, v);
-    out.append(buf, res.ptr);
-#else
-    out += std::to_string(v);
-#endif
+    char buf[21];                        // 20 digits + sign: the 64-bit worst case
+    char* const last = buf + sizeof buf;
+    char* first;
+    if constexpr (std::is_signed<Int>::value) {
+        uint64_t mag = static_cast<uint64_t>(v);
+        if (v < 0) {
+            mag = ~mag + 1;              // two's-complement magnitude (safe at INT64_MIN)
+            first = write_decimal(last, mag);
+            *--first = '-';
+        } else {
+            first = write_decimal(last, mag);
+        }
+    } else {
+        first = write_decimal(last, static_cast<uint64_t>(v));
+    }
+    out.append(first, last);
 }
 
 void dump_double(std::string& out, double d) {
@@ -612,7 +689,7 @@ private:
             skip_ws();
             if (peek() != ':') error("expected ':' after object key");
             ++p_;
-            o[key] = parse_value(depth + 1);
+            o[std::move(key)] = parse_value(depth + 1);
             skip_ws();
             char c = peek();
             if (c == ',') { ++p_; continue; }
@@ -770,14 +847,29 @@ private:
         return finish_number(start, is_float);
     }
 
+    // Parse [start, end) as a double. On magnitude overflow std::from_chars
+    // reports result_out_of_range and — on libstdc++ — leaves the out-param
+    // untouched, which would silently yield 0.0; map that to ±infinity instead,
+    // matching the strtod fallback path and nlohmann (Json then dumps it as null).
+    static double parse_double(const char* start, const char* end) {
+        double d = 0.0;
+#if LIBRATS_JSON_FROM_CHARS_FLOAT
+        auto res = std::from_chars(start, end, d);
+        if (res.ec == std::errc::result_out_of_range)
+            d = (*start == '-') ? -HUGE_VAL : HUGE_VAL;
+#else
+        // No floating-point from_chars (e.g. libc++): strtod over a NUL-terminated
+        // copy. strtod already returns ±HUGE_VAL on overflow, so no fixup needed.
+        std::string num(start, end);
+        d = std::strtod(num.c_str(), nullptr);
+#endif
+        return d;
+    }
+
     // Convert the already-scanned token [start, p_) into a Json number.
     Json finish_number(const char* start, bool is_float) {
 #if LIBRATS_JSON_CHARCONV
-        if (is_float) {
-            double d = 0.0;
-            std::from_chars(start, p_, d);
-            return Json(d);
-        }
+        if (is_float) return Json(parse_double(start, p_));
         if (*start == '-') {
             int64_t v = 0;
             if (std::from_chars(start, p_, v).ec == std::errc{}) return Json(v);
@@ -792,9 +884,7 @@ private:
             }
         }
         // Integer overflowed 64 bits: represent it (approximately) as a double.
-        double d = 0.0;
-        std::from_chars(start, p_, d);
-        return Json(d);
+        return Json(parse_double(start, p_));
 #else
         std::string num(start, p_);
         if (is_float) return Json(std::strtod(num.c_str(), nullptr));

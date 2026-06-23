@@ -82,6 +82,7 @@ public:
         Object& operator=(Object&&) noexcept = default;
 
         Json& operator[](const std::string& key);          // inserts null if absent
+        Json& operator[](std::string&& key);                // ditto, moves key on insert
         const Json* find(const std::string& key) const;     // nullptr if absent
         Json* find(const std::string& key);                 // nullptr if absent
         bool contains(const std::string& key) const { return find(key) != nullptr; }
@@ -108,6 +109,12 @@ public:
 
         void build_index();  // populate index_ from items_, set indexed_
         void reindex();      // rebuild (if large) or drop (if small) after erase
+
+        // Shared find-or-insert for both operator[] overloads. K is deduced as
+        // `const std::string&` or `std::string&&`, so the key is copied or moved
+        // into storage to match how the caller supplied it.
+        template <typename K>
+        Json& emplace_key(K&& key);
 
         storage items_;
         std::unordered_map<std::string, std::size_t> index_;
