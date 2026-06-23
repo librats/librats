@@ -4,11 +4,16 @@
  * @file reconnection.h
  * @brief Keeps connections to a set of peer addresses alive with backoff.
  *
- * A Subsystem that remembers peer addresses (optionally persisted via PeerStore)
+ * A Subsystem that remembers peer addresses (optionally persisted via PeerBook)
  * and re-dials them when they drop, using exponential backoff. Built only on
- * PeerNetwork: it dials via connect(), learns addresses from peer events, and
- * matches a disconnected peer back to its target by the address it was dialed at
- * (populated into PeerInfo for outbound connections).
+ * PeerNetwork: it dials via connect() and, each tick, reconciles its targets
+ * against the set of currently-connected peers (PeerNetwork::peers(), whose
+ * addresses include the dialable endpoints learned via identify). A target whose
+ * address is served by a live peer — over ANY route, inbound or outbound — is
+ * left alone; only the rest are dialed. Reconciling against this snapshot, rather
+ * than trusting a flag toggled on the connect event, is what stops us from
+ * endlessly re-dialing a peer already connected over a link we did not initiate
+ * (an inbound link, or a cross-connect the directory resolved to the other side).
  *
  * A target is dropped when the app calls remove(), or — if Config::max_attempts
  * is set — after that many consecutive failed dials without ever connecting (it
@@ -77,12 +82,10 @@ public:
 private:
     struct Target {
         Address                               address;
-        bool                                  connected = false;
         bool                                  dialing = false;  ///< a connect() is in flight; don't pile on a duplicate
-        PeerId                                peer_id;
-        int                                   attempts = 0;
-        std::chrono::steady_clock::time_point next_attempt;
-        std::chrono::steady_clock::time_point dial_deadline;  ///< backstop: give up waiting on the in-flight dial after this
+        int                                   attempts = 0;     ///< failed dials since the target was last seen connected
+        std::chrono::steady_clock::time_point next_attempt;     ///< earliest time to (re)dial
+        std::chrono::steady_clock::time_point dial_deadline;    ///< backstop: give up waiting on the in-flight dial after this
     };
 
     void on_connected(const Peer& peer);

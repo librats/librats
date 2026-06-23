@@ -147,6 +147,46 @@ TEST(ReconnectionServiceTest, ReestablishesAfterDrop) {
     server.stop();
 }
 
+// A peer can be connected over a link we did NOT initiate: here the other node
+// dials us, so from our side it is an inbound link and the on_peer_connected event
+// carries no dial address for it. The service must still recognise that peer as
+// connected — via the live-peer snapshot — and must NOT keep re-dialing it. With
+// the old flag-only logic this churned endless duplicate connections and, with
+// max_attempts set, eventually reaped the target while the peer was still up.
+TEST(ReconnectionServiceTest, DoesNotRedialPeerConnectedOverInboundLink) {
+    Node us(listening_config());
+    Node them(listening_config());
+
+    auto cfg = fast_reconnect();
+    cfg.max_attempts = 2;     // with the bug the churn would burn through these and
+    cfg.dial_timeout = 1s;    // give up within ~max_attempts * dial_timeout
+    auto reconnect = std::make_unique<ReconnectionService>(cfg);
+    ReconnectionService* svc = reconnect.get();
+    us.add_subsystem(std::move(reconnect));
+
+    ASSERT_TRUE(us.start());
+    ASSERT_TRUE(them.start());
+
+    // They dial us → inbound from our point of view, a route we never initiated.
+    const Address us_addr = *Address::parse("127.0.0.1:" + std::to_string(us.listen_port()));
+    them.connect(us_addr);
+    ASSERT_TRUE(wait_for([&] { return us.peer_count() == 1; })) << "inbound connect failed";
+
+    // Ask the service to keep that same peer connected, by its dialable address.
+    const Address them_addr = *Address::parse("127.0.0.1:" + std::to_string(them.listen_port()));
+    svc->add(them_addr);
+    ASSERT_EQ(svc->target_count(), 1u);
+
+    // Long enough that the buggy churn would have given up and dropped the target.
+    std::this_thread::sleep_for(3s);
+
+    EXPECT_EQ(svc->target_count(), 1u) << "target reaped despite the peer being connected";
+    EXPECT_EQ(us.peer_count(), 1u)     << "peer count disturbed by redundant dialing";
+
+    us.stop();
+    them.stop();
+}
+
 // remove() stops the service re-dialing an address after a drop.
 TEST(ReconnectionServiceTest, RemoveStopsReconnect) {
     Node server(listening_config());

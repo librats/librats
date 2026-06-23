@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <unordered_set>
 #include <vector>
 
 namespace librats {
@@ -103,6 +104,10 @@ void ReconnectionService::stop() {
     if (book_) book_->save();
 }
 
+// A successful connection. Connectivity itself is reconciled by the loop from the
+// live-peer snapshot; here we only learn/record the address. (For an inbound peer
+// info->addresses is still empty at this point — its dialable address arrives
+// later via identify — so inbound links are not auto-persisted; see the header.)
 void ReconnectionService::on_connected(const Peer& peer) {
     auto info = peer.info();
     if (!info) return;
@@ -120,27 +125,17 @@ void ReconnectionService::on_connected(const Peer& peer) {
                 it = targets_.emplace(key, Target{}).first;
                 it->second.address = addr;
             }
-            it->second.connected = true;
-            it->second.dialing = false;
-            it->second.peer_id = peer.id();
-            it->second.attempts = 0;
             if (book_) { book_->note_connected(addr, peer.id(), now); book_changed = true; }
         }
     }
     if (book_ && book_changed) book_->save();
 }
 
-void ReconnectionService::on_disconnected(const PeerId& id) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& [key, target] : targets_) {
-        if (target.connected && target.peer_id == id) {
-            target.connected = false;
-            target.dialing = false;
-            target.attempts = 0;
-            target.next_attempt = std::chrono::steady_clock::now();  // re-dial promptly
-            wake_.notify_all();
-        }
-    }
+// A peer dropped. The loop reconciles which targets are live from the directory
+// snapshot, so there is no per-target state to clear here — just wake it so the
+// re-dial happens at once rather than waiting out a tick.
+void ReconnectionService::on_disconnected(const PeerId& /*id*/) {
+    wake_.notify_all();
 }
 
 // An outbound dial we asked for closed before establishing. Clear the in-flight
@@ -162,22 +157,42 @@ std::chrono::milliseconds ReconnectionService::backoff_for(int attempts) const {
 }
 
 void ReconnectionService::loop() {
+    std::unordered_set<std::string> live;  // reused across ticks to avoid re-allocating
     while (running_.load()) {
         const auto now = std::chrono::steady_clock::now();
+
+        // Ground truth for "this target is already connected": the union of every
+        // live peer's dialable addresses, identify-learned ones included. Matching
+        // on this — instead of a flag set only on the on_peer_connected event — is
+        // what lets us recognise a peer reached over a route we did not dial (an
+        // inbound link, or a cross-connect the directory resolved to the other
+        // connection). Without it such a peer is never seen as connected and we
+        // re-dial it forever, each dial torn down by the node as a duplicate.
+        live.clear();
+        for (const PeerInfo& p : network_->peers())
+            for (const Address& a : p.addresses)
+                live.insert(a.to_string());
 
         std::vector<Address> to_dial, gave_up;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (auto it = targets_.begin(); it != targets_.end();) {
                 Target& target = it->second;
-                if (target.connected) { ++it; continue; }
+
+                // Connected right now (over any route): keep the retry state armed
+                // so a later drop re-dials promptly, and never dial a live peer.
+                if (live.count(it->first)) {
+                    target.dialing      = false;
+                    target.attempts     = 0;
+                    target.next_attempt = now;
+                    ++it;
+                    continue;
+                }
 
                 // A dial is already in flight: don't pile on a duplicate while the
-                // handshake completes (a duplicate connection to the same peer is
-                // deduped by the node, but the loser-route teardown races the app's
-                // peer handle). We clear `dialing` on connect / disconnect / dial
-                // failure; dial_deadline is only a backstop for the case where none
-                // of those ever arrive.
+                // handshake completes. We clear `dialing` on dial failure; the next
+                // tick clears it once the peer shows up live; dial_deadline is only a
+                // backstop for the case where neither signal ever arrives.
                 if (target.dialing && now < target.dial_deadline) { ++it; continue; }
                 if (target.next_attempt > now) { ++it; continue; }
 
