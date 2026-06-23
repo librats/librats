@@ -86,6 +86,17 @@ private:
         int                                   attempts = 0;     ///< failed dials since the target was last seen connected
         std::chrono::steady_clock::time_point next_attempt;     ///< earliest time to (re)dial
         std::chrono::steady_clock::time_point dial_deadline;    ///< backstop: give up waiting on the in-flight dial after this
+
+        /// Record that this target is connected as of `now`: no dial is in flight
+        /// any more and the failure streak resets, so a later drop re-dials at once
+        /// (an address that just worked earns no backoff penalty). Used by BOTH the
+        /// loop's live-snapshot reconciliation and the on_connected event, so the
+        /// two paths that clear an in-flight dial can never drift apart.
+        void mark_connected(std::chrono::steady_clock::time_point now) {
+            dialing      = false;
+            attempts     = 0;
+            next_attempt = now;
+        }
     };
 
     void on_connected(const Peer& peer);

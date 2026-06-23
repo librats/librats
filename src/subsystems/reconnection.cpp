@@ -104,15 +104,21 @@ void ReconnectionService::stop() {
     if (book_) book_->save();
 }
 
-// A successful connection. Connectivity itself is reconciled by the loop from the
-// live-peer snapshot; here we only learn/record the address. (For an inbound peer
-// info->addresses is still empty at this point — its dialable address arrives
-// later via identify — so inbound links are not auto-persisted; see the header.)
+// A successful connection. Two jobs: record the address in the book, and — the
+// success-side mirror of on_dial_failed — clear this target's in-flight dial state
+// right now. We must NOT wait for the loop to reconcile from the live-peer snapshot:
+// a peer that connects and then drops again BETWEEN ticks would otherwise leave its
+// dial flagged in-flight until dial_timeout, needlessly stalling the redial for
+// seconds even though the address is plainly reachable. (For an inbound peer
+// info->addresses is still empty at this point — its dialable address arrives later
+// via identify — so an inbound link matches no target here and is reconciled by the
+// loop's live snapshot instead; inbound links are thus not auto-persisted either.)
 void ReconnectionService::on_connected(const Peer& peer) {
     auto info = peer.info();
     if (!info) return;
 
-    const uint64_t now = now_secs();
+    const uint64_t now       = now_secs();
+    const auto     steady_now = std::chrono::steady_clock::now();
     bool book_changed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -125,6 +131,7 @@ void ReconnectionService::on_connected(const Peer& peer) {
                 it = targets_.emplace(key, Target{}).first;
                 it->second.address = addr;
             }
+            it->second.mark_connected(steady_now);  // resolve the in-flight dial now
             if (book_) { book_->note_connected(addr, peer.id(), now); book_changed = true; }
         }
     }
@@ -182,9 +189,7 @@ void ReconnectionService::loop() {
                 // Connected right now (over any route): keep the retry state armed
                 // so a later drop re-dials promptly, and never dial a live peer.
                 if (live.count(it->first)) {
-                    target.dialing      = false;
-                    target.attempts     = 0;
-                    target.next_attempt = now;
+                    target.mark_connected(now);
                     ++it;
                     continue;
                 }

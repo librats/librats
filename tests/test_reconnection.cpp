@@ -187,6 +187,45 @@ TEST(ReconnectionServiceTest, DoesNotRedialPeerConnectedOverInboundLink) {
     them.stop();
 }
 
+// A peer that connects and then drops again BEFORE the reconnection loop's periodic
+// tick can ever sample it as live must still be re-dialed promptly. The dial's
+// in-flight flag is cleared on the connect event (the success-side mirror of the
+// failed-dial signal); without that it stays armed until dial_timeout, stalling the
+// redial for seconds even though the address is plainly reachable.
+TEST(ReconnectionServiceTest, RedialsPromptlyAfterDropBetweenTicks) {
+    Node server(listening_config());
+    Node client(dialing_config());
+
+    ReconnectionService::Config cfg;
+    cfg.base_backoff = 50ms;
+    cfg.tick         = 2s;    // wide tick: the connect→drop never races a live-set sample,
+    cfg.dial_timeout = 10s;   //   and the buggy in-flight stall would last this long.
+    auto reconnect = std::make_unique<ReconnectionService>(cfg);
+    ReconnectionService* svc = reconnect.get();
+    client.add_subsystem(std::move(reconnect));
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    svc->add(*Address::parse("127.0.0.1:" + std::to_string(server.listen_port())));
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1; })) << "initial connect failed";
+
+    // Drop it at once — within the (wide) tick, so the loop never samples this peer
+    // as live. Only the on_connected event could have cleared the dial's in-flight
+    // flag; if it didn't, the redial is stuck until dial_timeout (10s) expires it.
+    auto peer = client.peer(server.local_id());
+    ASSERT_TRUE(peer.has_value());
+    peer->disconnect();
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 0; })) << "did not drop";
+
+    // Must come back well before dial_timeout would have expired the stale flag.
+    EXPECT_TRUE(wait_for([&] { return client.peer_count() == 1; }, 3s))
+        << "did not reconnect promptly after a drop between ticks";
+
+    client.stop();
+    server.stop();
+}
+
 // remove() stops the service re-dialing an address after a drop.
 TEST(ReconnectionServiceTest, RemoveStopsReconnect) {
     Node server(listening_config());
