@@ -37,6 +37,7 @@
 #include "core/address.h"
 #include "util/fs.h"
 #include "util/json.h"
+#include "util/logger.h"
 #ifdef RATS_SEARCH_FEATURES
 #include "subsystems/bittorrent.h"
 #endif
@@ -160,6 +161,12 @@ int main(int argc, char** argv) {
                      "\n";
         return 1;
     }
+
+    // In a Debug build (NDEBUG undefined) surface the full DEBUG-level log; a
+    // Release build keeps the default INFO threshold.
+#ifndef NDEBUG
+    Logger::getInstance().set_log_level(LogLevel::DEBUG);
+#endif
 
     NodeConfig config;
     config.listen_port = static_cast<uint16_t>(std::stoi(argv[1]));
