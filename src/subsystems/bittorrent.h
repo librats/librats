@@ -27,7 +27,12 @@
 #include "bittorrent/bt_client.h"       // BtClient, BtClientConfig, DhtClient, SpiderAnnounceCallback
 
 #include <cstddef>
+#include <cstdint>
+#include <condition_variable>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <string>
 
 namespace librats {
 
@@ -79,14 +84,51 @@ public:
     size_t spider_visited_count() const;
     void   clear_spider_state();
 
+    //=========================================================================
+    // Metadata-only fetch (BEP 9) — the convenience the old monolithic client
+    // exposed, restored here for rats-search's spider and on-demand lookups.
+    //
+    // Adds a temporary metadata-only magnet torrent, waits up to timeout_ms for
+    // its metadata to arrive, then removes the temporary torrent and invokes
+    // `callback` with the result (success=false on timeout). `callback` runs on
+    // an internal worker thread; it is invoked exactly once. No-op-fail if the
+    // subsystem is not running.
+    //=========================================================================
+    using MetadataCallback = std::function<void(const TorrentInfo& info, bool success,
+                                                const std::string& error)>;
+
+    /// Fetch metadata by searching the DHT for peers that have it.
+    void get_torrent_metadata(const std::string& info_hash_hex,
+                              MetadataCallback callback, int timeout_ms = 60000);
+
+    /// Fetch metadata directly from a known peer (skips the DHT search) — the
+    /// fast path used when a spider announce told us exactly who has it.
+    void get_torrent_metadata_from_peer(const std::string& info_hash_hex,
+                                        const std::string& ip, uint16_t port,
+                                        MetadataCallback callback, int timeout_ms = 60000);
+
 private:
     /// The DHT the client is actually using (external or its own), or nullptr.
     DhtClient* active_dht() const;
+
+    /// Shared body for both get_torrent_metadata* entry points.
+    void fetch_metadata_impl(const std::string& info_hash_hex, const std::string& ip,
+                             uint16_t port, bool direct, MetadataCallback callback,
+                             int timeout_ms);
 
     Config                    config_;
     ServiceRegistry*          services_ = nullptr;
     std::unique_ptr<BtClient> client_;
     bool                      shared_dht_ = false;
+
+    // In-flight metadata watchers. Each runs detached; stop() signals them to
+    // exit early and waits for the count to drain before tearing down client_,
+    // so a watcher's client_->remove_torrent() never races teardown.
+    std::mutex              meta_mutex_;
+    std::condition_variable meta_cv_;        ///< metadata arrived OR stopping
+    std::condition_variable meta_drain_cv_;  ///< a watcher finished
+    bool                    meta_stopping_ = false;
+    int                     meta_inflight_ = 0;
 };
 
 } // namespace librats
