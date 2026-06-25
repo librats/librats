@@ -230,6 +230,35 @@ set(LIBRARY_SOURCES
     src/dht/dht.cpp
     src/dht/krpc.h
     src/dht/krpc.cpp
+# dht/ modular layer (rewrite in progress) — leaf types
+    src/dht/id.h
+    src/dht/node_entry.h
+    src/dht/bep42.h
+    src/dht/bep42.cpp
+    src/dht/routing_table.h
+    src/dht/routing_table.cpp
+    src/dht/transport.h
+    src/dht/observer.h
+    src/dht/rpc_manager.h
+    src/dht/rpc_manager.cpp
+    src/dht/traversal.h
+    src/dht/traversal.cpp
+    src/dht/find_peers.h
+    src/dht/find_peers.cpp
+    src/dht/announce.h
+    src/dht/announce.cpp
+    src/dht/storage.h
+    src/dht/storage.cpp
+    src/dht/dos_blocker.h
+    src/dht/dos_blocker.cpp
+    src/dht/node.h
+    src/dht/node.cpp
+    src/dht/udp_transport.h
+    src/dht/udp_transport.cpp
+    src/dht/dht_runner.h
+    src/dht/dht_runner.cpp
+    src/dht/persistence.h
+    src/dht/persistence.cpp
     src/bittorrent/bencode.h
     src/bittorrent/bencode.cpp
 
@@ -499,6 +528,17 @@ if(RATS_BUILD_TESTS)
         tests/test_sha1.cpp
         tests/test_network_utils.cpp
         tests/test_dht.cpp
+        tests/test_dht_id.cpp
+        tests/test_dht_bootstrap.cpp
+        tests/test_dht_bep42.cpp
+        tests/test_dht_node_entry.cpp
+        tests/test_dht_routing_table.cpp
+        tests/test_dht_rpc_manager.cpp
+        tests/test_dht_traversal.cpp
+        tests/test_dht_storage.cpp
+        tests/test_dht_node.cpp
+        tests/test_dht_persistence_v2.cpp
+        tests/test_dht_udp.cpp
         tests/test_os.cpp
         tests/test_fs.cpp
         tests/test_json.cpp

@@ -1,0 +1,136 @@
+#pragma once
+
+/**
+ * @file routing_table.h
+ * @brief A Kademlia routing table with libtorrent-style dynamic buckets.
+ *
+ * Pure in-memory state — no sockets, no locks. It lives entirely on the DHT actor
+ * thread, so it never synchronises. It also never sends anything itself: liveness
+ * pings are issued by the owning Node, which reports the outcome back through
+ * node_seen() (it replied) / node_failed() (it timed out). That keeps the table a
+ * testable data structure and the I/O in one place.
+ *
+ * Buckets are an ordered list rooted at our own id: buckets_[0] is the *farthest*
+ * region of the keyspace and buckets_.back() the *closest* catch-all. When the last
+ * bucket overflows and a split would actually separate its contacts, a new bucket is
+ * appended and the contacts re-homed. Buckets near the top are larger (the extended
+ * routing table) because that is where the keyspace — and the first hop of almost any
+ * lookup — is densest, so more contacts there means fewer hops.
+ *
+ * Each bucket holds a *live* set — the contacts we route with, up to its size limit —
+ * plus a small *replacement cache* of standbys promoted the moment a live contact
+ * dies. Contact quality (RTT, failures, BEP 42 verification) lives on the NodeEntry
+ * and drives who gets kept, refreshed, or evicted, while a sub-prefix "spread" rule
+ * keeps a full bucket covering as many sub-branches as possible.
+ */
+
+#include "core/address.h"
+#include "dht/id.h"
+#include "dht/node_entry.h"
+
+#include <chrono>
+#include <cstddef>
+#include <optional>
+#include <vector>
+
+namespace librats {
+namespace dht {
+
+class RoutingTable {
+public:
+    // Consecutive failures tolerated before a contact with no standby is dropped.
+    static constexpr uint8_t kMaxFailCount = 5;
+
+    // `extended` enables the larger top buckets (the extended routing table). On by
+    // default for production; tests that want uniform k-sized buckets pass false.
+    explicit RoutingTable(const NodeId& self, bool extended = true);
+
+    // -- insertion --------------------------------------------------------------
+
+    // We learned this node exists from someone else's reply. Recorded as unpinged
+    // (a candidate to verify); it can fill a live slot but never splits or evicts a
+    // confirmed contact. `verified` is the caller's BEP 42 verdict on the (id, ip)
+    // pair, used only as a tie-breaker between unpinged candidates.
+    void heard_about(const NodeId& id, const Address& endpoint, bool verified = false);
+
+    // This node replied to us: recorded as confirmed with its RTT. A confirmed
+    // contact may split a full bucket or displace a weaker one, but a healthy contact
+    // alone in its sub-prefix slot is only removed via node_failed(). Returns true if
+    // it ended up live.
+    bool node_seen(const NodeId& id, const Address& endpoint,
+                   uint16_t rtt = NodeEntry::kRttUnknown, bool verified = false);
+
+    // A query to this node timed out. Since this only fires after a real liveness
+    // check failed, the contact is replaced immediately if a standby is waiting;
+    // otherwise it's kept until it exhausts kMaxFailCount, then dropped.
+    void node_failed(const NodeId& id, const Address& endpoint);
+
+    // -- queries ----------------------------------------------------------------
+
+    // Up to `count` contacts closest to `target` (XOR metric), closest first. By
+    // default only confirmed contacts are returned (for answering queries); pass
+    // include_unconfirmed=true to also seed our own lookups from unpinged contacts.
+    std::vector<NodeEntry> find_closest(const NodeId& target, std::size_t count = kBucketSize,
+                                        bool include_unconfirmed = false) const;
+
+    // The live contact most in need of a liveness check: the least-recently-touched
+    // (a never-contacted contact sorts first). The chosen contact is stamped as touched
+    // at `now`, so successive refreshes rotate through different contacts instead of
+    // re-probing this one while its probe is still outstanding. nullopt when there are
+    // no live contacts.
+    std::optional<NodeEntry> next_to_refresh(std::chrono::steady_clock::time_point now);
+
+    std::size_t size() const;                 // number of live contacts
+    bool empty() const { return size() == 0; }
+    int bucket_count() const noexcept { return static_cast<int>(buckets_.size()); }
+
+    // -- node id changes (BEP 42) ----------------------------------------------
+
+    const NodeId& self() const noexcept { return self_; }
+    void set_self(const NodeId& id);          // re-buckets every contact against the new id
+
+    // -- persistence ------------------------------------------------------------
+
+    std::vector<NodeEntry> good_contacts() const;                // confirmed live contacts, to save
+    void load_contacts(const std::vector<NodeEntry>& contacts);  // bulk restore, preserving quality
+
+private:
+    struct Bucket {
+        std::vector<NodeEntry> live;          // active contacts, up to bucket_limit(index)
+        std::vector<NodeEntry> replacements;  // standbys, up to kBucketSize
+    };
+
+    // The bucket `id` belongs to: its shared-prefix length with us, capped to the
+    // last (catch-all) bucket. buckets_ is never empty, so this is always valid.
+    int bucket_index(const NodeId& id) const noexcept;
+    // Live-set size limit for a bucket by position: larger near the top when the
+    // extended table is on, otherwise a flat kBucketSize.
+    int bucket_limit(int index) const noexcept;
+
+    // The one insertion path. `e` carries its own quality (pinged/confirmed via
+    // fail_count). Returns true if it ended up in a live set.
+    bool add_node(NodeEntry e);
+    // May the (full, last) bucket at `index` be split to fit a confirmed `e`?
+    bool can_split(int index, const NodeEntry& e) const;
+    // Append a bucket and re-home the old last bucket's contacts by shared prefix.
+    void split_bucket();
+    // Bucket `b` (index `index`, limit `limit`) is full and `e` is confirmed: free a
+    // slot by evicting the least valuable node while preserving sub-prefix spread.
+    bool replace_for_spread(Bucket& b, int index, int limit, const NodeEntry& e);
+    // Add/refresh a standby, evicting the worst one if the cache is full.
+    void stash_replacement(Bucket& b, const NodeEntry& entry);
+    // Spill live-set overflow into replacements and cap the cache (after a split).
+    void trim_to_limit(int index);
+    // Promote the best standbys into any free live slots a split opened up, so a
+    // parked contact isn't stuck (replacements are never pinged or refreshed).
+    void fill_from_replacements(int index);
+    // Drop trailing empty buckets, but always keep at least one.
+    void prune_empty_back();
+
+    NodeId self_;
+    bool extended_;
+    std::vector<Bucket> buckets_;  // [0] = farthest, back() = closest catch-all
+};
+
+} // namespace dht
+} // namespace librats

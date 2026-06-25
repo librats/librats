@@ -213,14 +213,14 @@ TEST(DhtDiscoveryTest, BringsUpBothAddressFamilies) {
 // The routing table is persisted under the configured data_dir, not the cwd.
 TEST(DhtDiscoveryTest, PersistsRoutingTableUnderDataDir) {
     const std::string dir  = "rats_test_dht_data";
-    const std::string path = dir + "/dht_routing_46991.json";
+    const std::string path = dir + "/dht_routing.json";  // port-independent name
     delete_file(path.c_str());
 
     Node node(listening_config());
     auto cfg = disc_config({});  // offline, no bootstrap
     cfg.data_dir = dir;
-    cfg.dht_port = 46991;        // fixed port → predictable file name
-    cfg.enable_ipv6 = false;     // a single, predictably-named routing file
+    cfg.dht_port = 46991;        // fixed port (binds predictably; not part of the file name)
+    cfg.enable_ipv6 = false;     // a single routing file (no _v6 variant)
     auto disc = std::make_unique<DhtDiscovery>(cfg);
     DhtDiscovery* d = disc.get();
     node.add_subsystem(std::move(disc));
