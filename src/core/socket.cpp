@@ -11,6 +11,12 @@
     #include <errno.h>    // for errno
 #endif
 
+// On Windows, SIO_UDP_CONNRESET lives in <mstcpip.h>, which mingw doesn't always pull
+// in via <winsock2.h>. Define it from its well-known control code as a fallback.
+#if defined(_WIN32) && !defined(SIO_UDP_CONNRESET)
+    #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+
 // Socket module logging macros
 #define LOG_SOCKET_DEBUG(message) LOG_DEBUG("socket", message)
 #define LOG_SOCKET_INFO(message)  LOG_INFO("socket", message)
@@ -757,6 +763,20 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
         return INVALID_SOCKET_VALUE;
     }
 
+#ifdef _WIN32
+    // Disable the Windows-only "UDP connection reset" behaviour. By default, when a
+    // datagram we sent provokes an ICMP "port unreachable", Windows fails the *next*
+    // recvfrom() on this socket with WSAECONNRESET — nonsensical for a connectionless
+    // protocol. A DHT constantly sends to dead/unreachable nodes, so without this every
+    // such ICMP would cost us a receive cycle. FALSE turns it off.
+    {
+        BOOL connreset = FALSE;
+        DWORD bytes_returned = 0;
+        WSAIoctl(udp_socket, SIO_UDP_CONNRESET, &connreset, sizeof(connreset),
+                 nullptr, 0, &bytes_returned, nullptr, nullptr);
+    }
+#endif
+
     // Set socket option to reuse address
     int opt = 1;
     if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR,
@@ -953,19 +973,19 @@ std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Addre
 
         int result = select(static_cast<int>(maxfd) + 1, &read_fds, nullptr, nullptr, ptimeout);
         if (result == 0) {
-            LOG_SOCKET_DEBUG("UDP receive timeout (" << timeout_ms << "ms)");
+            // Timeout with no data — normal control flow for a polling/idle loop, so it's
+            // deliberately not logged (it would spam every idle cycle, e.g. the DHT runner).
             return {};
         } else if (result < 0) {
             LOG_SOCKET_ERROR("Select error while waiting for UDP data");
             return {};
         }
-        // Woken by the interrupt socket (e.g. stop requested): leave the data socket
-        // untouched and report no data so the caller can re-check its stop flag.
-        if (have_interrupt && FD_ISSET(interrupt_fd, &read_fds)) {
-            return {};
-        }
-        // Guard against calling recvfrom on a data socket that isn't actually ready.
+        // Prefer real data: if a datagram arrived alongside a wakeup, read it now rather
+        // than deferring it a loop iteration. The wakeup byte stays buffered and is drained
+        // by the caller right after, so no wakeup is lost by checking data first.
         if (!FD_ISSET(socket, &read_fds)) {
+            // No data — must have been the interrupt socket (e.g. stop/posted work).
+            // Report no data so the caller can re-check its stop flag / run posted tasks.
             return {};
         }
     }

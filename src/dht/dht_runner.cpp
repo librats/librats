@@ -27,12 +27,18 @@ void DhtRunner::start() {
 
 void DhtRunner::stop() {
     if (!running_.exchange(false)) return;
+    wakeup_.signal();  // wake the loop now instead of waiting out the recv timeout
     if (thread_.joinable()) thread_.join();
 }
 
 void DhtRunner::post(std::function<void()> task) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    tasks_.push_back(std::move(task));
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.push_back(std::move(task));
+    }
+    // The task is queued before we signal, so whenever a wakeup byte exists the task is
+    // already visible to drain_tasks() — the loop can never block past a pending task.
+    wakeup_.signal();
 }
 
 void DhtRunner::set_periodic(std::chrono::milliseconds interval, std::function<void()> fn) {
@@ -46,8 +52,15 @@ void DhtRunner::loop() {
     auto last_periodic = start;  // first periodic fires one full interval in, not at t=0
     while (running_.load()) {
         Address from;
-        auto data = transport_.recv(kRecvTimeoutMs, from);
+        // recv() returns early (as nullopt) the moment post()/stop() signals the wakeup
+        // pipe, so a posted task runs without waiting out kRecvTimeoutMs.
+        auto data = transport_.recv(kRecvTimeoutMs, from, wakeup_.fd());
         const auto now = std::chrono::steady_clock::now();
+
+        // Consume the wakeup byte(s) before processing, so the next recv() blocks again.
+        // Draining here (not after drain_tasks) means any task posted during processing
+        // leaves an un-drained byte that wakes the following recv() — no lost wakeups.
+        wakeup_.drain();
 
         if (data) node_.on_datagram(*data, from, now);
 

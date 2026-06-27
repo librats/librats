@@ -33,8 +33,11 @@ public:
     void send(const Address& to, const std::vector<uint8_t>& datagram) override;
 
     // Wait up to timeout_ms for a datagram. Returns the payload and fills `from` on
-    // success, or nullopt on timeout / error.
-    std::optional<std::vector<uint8_t>> recv(int timeout_ms, Address& from);
+    // success, or nullopt on timeout / error. If `interrupt_fd` is a valid socket it is
+    // watched alongside the data socket: when it becomes readable the wait returns early
+    // (as nullopt), letting the caller react to posted work without waiting out the timeout.
+    std::optional<std::vector<uint8_t>> recv(int timeout_ms, Address& from,
+                                             socket_t interrupt_fd = INVALID_SOCKET_VALUE);
 
     void close();
 

@@ -11,6 +11,8 @@
  * through post() rather than touching it directly.
  */
 
+#include "core/wakeup_pipe.h"
+
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -54,6 +56,7 @@ private:
     std::atomic<bool> running_{false};
     std::mutex    mutex_;
     std::vector<std::function<void()>> tasks_;
+    WakeupPipe    wakeup_;  // lets post()/stop() interrupt the recv() wait immediately
 
     std::chrono::milliseconds          periodic_interval_{0};  // 0 = disabled
     std::function<void()>              periodic_fn_;

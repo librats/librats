@@ -142,3 +142,34 @@ TEST(DhtUdp, RunnerFiresPeriodicHookOnLoopThread) {
     EXPECT_TRUE(fired) << "periodic hook fired " << ticks.load() << " times, expected >= 3";
     EXPECT_NE(cb_thread, main_thread) << "periodic hook must run on the loop thread";
 }
+
+// A posted task must run almost immediately, not after the recv() timeout. The runner
+// wires its WakeupPipe into recv() so post() interrupts the wait at once; without that
+// wiring this delay would be ~kRecvTimeoutMs (100ms). We first let the loop settle into
+// a fresh recv(), then measure how long a posted task takes to execute.
+TEST(DhtUdp, PostedTaskWakesLoopPromptly) {
+    librats::init_socket_library();
+
+    UdpTransport t(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(t.is_open());
+
+    Node node(t, nid(0x44), /*ipv6=*/false);
+    DhtRunner runner(node, t);
+    runner.start();
+
+    // Let the loop park in a fresh recv() so a broken wakeup would cost the full timeout.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+    std::promise<std::chrono::steady_clock::time_point> ran;
+    auto fut = ran.get_future();
+    const auto posted_at = std::chrono::steady_clock::now();
+    runner.post([&] { ran.set_value(std::chrono::steady_clock::now()); });
+
+    ASSERT_EQ(fut.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    const auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(fut.get() - posted_at);
+    runner.stop();
+
+    // Instant wakeup is sub-millisecond; allow generous slack for scheduling jitter but
+    // stay well under the 100ms recv timeout a missing wakeup would incur.
+    EXPECT_LT(delay.count(), 50) << "posted task waited " << delay.count() << "ms (wakeup not firing?)";
+}

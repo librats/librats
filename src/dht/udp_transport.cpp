@@ -28,9 +28,12 @@ void UdpTransport::send(const Address& to, const std::vector<uint8_t>& datagram)
     send_udp_data(socket_, datagram, to.ip, to.port, family_);
 }
 
-std::optional<std::vector<uint8_t>> UdpTransport::recv(int timeout_ms, Address& from) {
+std::optional<std::vector<uint8_t>> UdpTransport::recv(int timeout_ms, Address& from,
+                                                       socket_t interrupt_fd) {
     if (!is_open()) return std::nullopt;
-    auto data = receive_udp_data(socket_, 2048, from, timeout_ms);
+    // 4 KiB comfortably covers any KRPC datagram; an oversized one would be dropped
+    // (truncated to WSAEMSGSIZE on Windows), so leave headroom above the ~1500 MTU.
+    auto data = receive_udp_data(socket_, 4096, from, timeout_ms, interrupt_fd);
     if (data.empty()) return std::nullopt;
     return data;
 }
