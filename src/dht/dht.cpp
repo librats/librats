@@ -4,6 +4,7 @@
 #include "dht/dht_runner.h"
 #include "dht/persistence.h"
 #include "dht/bep42.h"
+#include "dht/log.h"
 #include "util/network_utils.h"
 #include "util/fs.h"
 
@@ -72,6 +73,9 @@ DhtClient::DhtClient(int port, const std::string& bind_address,
     std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<int> b(0, 255);
     for (auto& x : impl_->self) x = static_cast<uint8_t>(b(gen));
+
+    LOG_DEBUG("dht", "client created (" << (impl_->ipv6 ? "IPv6" : "IPv4")
+                     << ", port " << impl_->port << ", data_dir '" << impl_->data_directory << "')");
 }
 
 DhtClient::~DhtClient() { stop(); }
@@ -79,12 +83,17 @@ DhtClient::~DhtClient() { stop(); }
 bool DhtClient::start() {
     if (impl_->running.load()) return true;
 
+    const int requested_port = impl_->port;
     impl_->transport = std::make_unique<dht::UdpTransport>(impl_->port, impl_->bind_address, impl_->family);
     if (!impl_->transport->is_open()) {
+        LOG_ERROR("dht", "failed to open " << (impl_->ipv6 ? "IPv6" : "IPv4")
+                         << " UDP socket on port " << requested_port);
         impl_->transport.reset();
         return false;
     }
     impl_->port = impl_->transport->port();  // record the actual bound port
+    if (requested_port > 0 && impl_->port != requested_port)
+        LOG_WARN("dht", "port " << requested_port << " unavailable, bound ephemeral port " << impl_->port);
 
     // Restore our identity + a warm contact set if we've run here before. Only when a
     // data dir is configured: without one nothing is persisted (stop() saves under the
@@ -93,8 +102,11 @@ bool DhtClient::start() {
     std::vector<dht::NodeEntry> contacts;
     if (!impl_->data_directory.empty()) {
         NodeId loaded = impl_->self;
-        if (dht::load_routing_table(routing_table_file_path(), loaded, contacts))
+        if (dht::load_routing_table(routing_table_file_path(), loaded, contacts)) {
             impl_->self = loaded;
+            LOG_INFO("dht", "restored identity " << dht::short_hex(impl_->self)
+                            << " and " << contacts.size() << " contact(s) from disk");
+        }
     }
 
     impl_->node = std::make_unique<dht::Node>(*impl_->transport, impl_->self, impl_->ipv6);
@@ -109,27 +121,37 @@ bool DhtClient::start() {
     if (!impl_->data_directory.empty() && impl_->data_directory != ".") {
         impl_->runner->set_periodic(kAutosaveInterval, [this] {
             if (!impl_->node) return;
+            const auto contacts = impl_->node->routing_table().good_contacts();
             write_routing_table(routing_table_file_path(), impl_->data_directory,
-                                impl_->node->self(), impl_->node->routing_table().good_contacts());
+                                impl_->node->self(), contacts);
+            LOG_DEBUG("dht", "autosaved " << contacts.size() << " contact(s)");
         });
     }
 
     impl_->runner->start();
     impl_->running.store(true);
+    LOG_INFO("dht", "started, node " << dht::short_hex(impl_->self) << ", "
+                    << (impl_->ipv6 ? "IPv6" : "IPv4") << " on port " << impl_->port);
     return true;
 }
 
 void DhtClient::stop() {
     if (!impl_->running.exchange(false)) return;
+    LOG_INFO("dht", "stopping");
     if (impl_->runner) impl_->runner->stop();  // join the loop thread first
 
     // Single-threaded again: persist (only when a data dir is configured, to avoid
     // littering) directly from the idle node.
-    if (impl_->node && !impl_->data_directory.empty()) save_routing_table();
+    if (impl_->node && !impl_->data_directory.empty()) {
+        const std::size_t n = impl_->node->routing_table().good_contacts().size();
+        save_routing_table();
+        LOG_INFO("dht", "saved " << n << " contact(s) to disk");
+    }
 
     impl_->runner.reset();
     impl_->node.reset();
     impl_->transport.reset();
+    LOG_INFO("dht", "stopped");
 }
 
 void DhtClient::shutdown_immediate() { stop(); }
@@ -141,13 +163,21 @@ uint16_t DhtClient::get_port() const {
 }
 
 bool DhtClient::bootstrap(const std::vector<Address>& bootstrap_nodes) {
-    if (!impl_->running.load()) return false;
+    if (!impl_->running.load()) {
+        LOG_WARN("dht", "bootstrap ignored — client not running");
+        return false;
+    }
     // Resolve hostnames (and filter by family) before the seeds reach the engine: it
     // matches a reply's source address verbatim against the address it queried, so a
     // seed left as a hostname would have every reply dropped as a spoof. Resolution can
     // block, so do it here on the caller's thread, not on the DHT loop.
     auto resolved = resolve_bootstrap_nodes(bootstrap_nodes, impl_->ipv6);
-    if (resolved.empty()) return false;  // nothing usable for our family
+    if (resolved.empty()) {
+        LOG_WARN("dht", "bootstrap failed — no usable " << (impl_->ipv6 ? "IPv6" : "IPv4")
+                        << " node(s) among " << bootstrap_nodes.size() << " seed(s)");
+        return false;  // nothing usable for our family
+    }
+    LOG_INFO("dht", "bootstrapping via " << resolved.size() << " seed(s)");
     impl_->runner->post([this, resolved] {
         impl_->node->set_bootstrap_nodes(resolved);  // reused by spider reseed
         impl_->node->bootstrap(resolved, Impl::now());
@@ -212,7 +242,11 @@ void DhtClient::set_external_ip(const std::string& ip) {
     if (dht::verify_node_id_for_ip(impl_->self, ip)) return;
     std::mt19937 gen(std::random_device{}());
     NodeId regenerated;
-    if (dht::generate_node_id_from_ip(ip, regenerated, gen)) impl_->self = regenerated;
+    if (dht::generate_node_id_from_ip(ip, regenerated, gen)) {
+        impl_->self = regenerated;
+        LOG_INFO("dht", "external IP " << ip << " set before start, node id → "
+                        << dht::short_hex(impl_->self));
+    }
 }
 
 std::string DhtClient::get_external_address() const {
@@ -296,6 +330,7 @@ bool DhtClient::load_routing_table() {
     impl_->self = loaded;
     if (impl_->running.load() && impl_->node)
         impl_->on_loop([this, &contacts] { impl_->node->routing_table().load_contacts(contacts); return 0; });
+    LOG_DEBUG("dht", "loaded " << contacts.size() << " contact(s) from disk");
     return true;
 }
 

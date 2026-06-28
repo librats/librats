@@ -134,6 +134,8 @@ public:
      */
     static std::string node_id_to_string(const NodeId& id);
     static NodeId string_to_node_id(const std::string& str);
+    // The KRPC method name ("ping" / "find_node" / "get_peers" / "announce_peer"); used for logging.
+    static std::string query_type_to_string(KrpcQueryType type);
     // Compact encodings auto-select IPv4 (6/26 bytes) or IPv6 (18/38 bytes) based on the address.
     static std::string compact_peer_info(const Address& peer);
     static std::string compact_node_info(const KrpcNode& node);
@@ -152,8 +154,7 @@ private:
     static std::unique_ptr<KrpcMessage> decode_error(const BencodeValue& data);
     
     static KrpcQueryType string_to_query_type(const std::string& str);
-    static std::string query_type_to_string(KrpcQueryType type);
-    
+
     static std::atomic<uint32_t> transaction_counter_;
 };
 

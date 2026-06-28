@@ -1,4 +1,5 @@
 #include "dht/dos_blocker.h"
+#include "dht/log.h"
 
 namespace librats {
 namespace dht {
@@ -15,6 +16,10 @@ bool DosBlocker::allow(const std::string& ip, TimePoint now) {
 
     if (++e.count > kMaxPerWindow) {
         e.banned_until = now + kBanDuration;
+        // Logged once at the ban transition only — the top-of-function early return keeps
+        // every subsequent packet from this IP from re-logging. DEBUG (not WARN) on purpose:
+        // a spoofed-source flood could otherwise turn one ban per IP into log amplification.
+        LOG_DEBUG("dht", "rate-limit ban: " << ip << " (" << e.count << " queries in window)");
         return false;
     }
 

@@ -2,10 +2,13 @@
 #include "dht/announce.h"
 #include "dht/bep42.h"
 #include "dht/krpc.h"
+#include "dht/log.h"
 #include "util/network_utils.h"
 
 #include <algorithm>
+#include <chrono>
 #include <random>
+#include <sstream>
 #include <utility>
 
 namespace librats {
@@ -19,6 +22,20 @@ std::vector<KrpcNode> to_krpc(const std::vector<NodeEntry>& nodes) {
     out.reserve(nodes.size());
     for (const auto& n : nodes) out.emplace_back(n.id, n.endpoint.ip, n.endpoint.port);
     return out;
+}
+
+// A capped, comma-joined rendering of peer endpoints for a log line: show the first few
+// and summarise the rest, so even a large result set stays one readable line. Only ever
+// called inside a LOG_* argument, so it costs nothing when the level is filtered out.
+std::string format_peers(const std::vector<Address>& peers, std::size_t max = 6) {
+    std::ostringstream s;
+    const std::size_t shown = std::min(peers.size(), max);
+    for (std::size_t i = 0; i < shown; ++i) {
+        if (i) s << ", ";
+        s << peers[i].to_string();
+    }
+    if (peers.size() > shown) s << " (+" << (peers.size() - shown) << " more)";
+    return s.str();
 }
 
 // A bare liveness ping. Owned solely by the RpcManager while in flight; on the
@@ -48,6 +65,7 @@ Node::Node(Transport& transport, const NodeId& self, bool ipv6)
     : transport_(transport), self_(self), ipv6_(ipv6), table_(self), rpc_(transport) {}
 
 void Node::on_datagram(const std::vector<uint8_t>& data, const Address& from, TimePoint now) {
+    now_ = now;
     if (!dos_.allow(from.ip, now)) return;  // flooding source — ignore
 
     auto msg = KrpcProtocol::decode_message(data);
@@ -71,6 +89,9 @@ void Node::handle_query(const KrpcMessage& msg, const Address& from, TimePoint n
 #else
     const bool use_neighbor = false;
 #endif
+
+    LOG_DEBUG("dht.rpc", "<- " << KrpcProtocol::query_type_to_string(msg.query_type)
+                         << " from " << from.to_string() << " (" << short_hex(msg.sender_id) << ")");
 
     // Organic senders join the routing table; crawled IPs are kept out of it.
     auto learn = [&](const NodeId& sender) {
@@ -122,6 +143,7 @@ void Node::handle_query(const KrpcMessage& msg, const Address& from, TimePoint n
             const bool skip_token = false;
 #endif
             if (!skip_token && !tokens_.verify(from, msg.info_hash, msg.token, now)) {
+                LOG_DEBUG("dht.rpc", "announce_peer from " << from.to_string() << " rejected: invalid token");
                 send_message(KrpcProtocol::create_error(msg.transaction_id,
                                  KrpcErrorCode::ProtocolError, "Invalid token"), from);
                 return;
@@ -165,6 +187,7 @@ void Node::ping(const NodeId& id, const Address& ep, TimePoint now) {
 }
 
 FindPeers& Node::start_lookup(std::unique_ptr<FindPeers> lookup, TimePoint now) {
+    now_ = now;  // so a synchronous completion inside start() measures a sane duration
     lookup->set_want(want());
     FindPeers& ref = *lookup;
     lookups_.push_back(std::move(lookup));
@@ -173,9 +196,16 @@ FindPeers& Node::start_lookup(std::unique_ptr<FindPeers> lookup, TimePoint now) 
 }
 
 void Node::bootstrap(const std::vector<Address>& nodes, TimePoint now) {
-    // A self-targeted get_peers lookup populates the table with our neighbourhood.
+    now_ = now;  // bootstrap seeds and starts its lookup without going through start_lookup
+    LOG_DEBUG("dht.find", "bootstrap lookup: " << nodes.size() << " seed(s), table=" << table_.size());
+    // A self-targeted get_peers lookup populates the table with our neighbourhood; on
+    // completion we report how warm the table got.
     auto boot = std::make_unique<FindPeers>(table_, rpc_, self_, self_,
-                                            FindPeers::PeersCallback{}, FindPeers::DoneCallback{});
+        FindPeers::PeersCallback{},
+        [this](const std::vector<Address>&) {
+            LOG_INFO("dht.find", "bootstrap complete — routing table: " << table_.size()
+                                 << " node(s), " << table_.bucket_count() << " bucket(s)");
+        });
     boot->set_want(want());
     for (const auto& ep : nodes) boot->add_seed(ep);
     FindPeers& ref = *boot;
@@ -185,14 +215,37 @@ void Node::bootstrap(const std::vector<Address>& nodes, TimePoint now) {
 
 void Node::find_peers(const InfoHash& info_hash, FindPeers::PeersCallback on_peers,
                       FindPeers::DoneCallback on_done, TimePoint now) {
+    LOG_DEBUG("dht.find", "find_peers " << short_hex(info_hash) << " started (table=" << table_.size() << ")");
+    // Peers as they arrive — the actual endpoints, so progress is visible mid-lookup.
+    auto peers = [this, info_hash, cb = std::move(on_peers)](const std::vector<Address>& fresh) {
+        LOG_DEBUG("dht.find", "find_peers " << short_hex(info_hash) << ": +" << fresh.size()
+                              << " peer(s): " << format_peers(fresh));
+        if (cb) cb(fresh);
+    };
+    // The result line: total peers, how long it took, and (capped) which ones.
+    auto done = [this, info_hash, start = now, cb = std::move(on_done)](const std::vector<Address>& all) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_ - start).count();
+        LOG_INFO("dht.find", "find_peers " << short_hex(info_hash) << " → " << all.size()
+                             << " peer(s) in " << (ms < 0 ? 0 : ms) << "ms"
+                             << (all.empty() ? "" : ": " + format_peers(all)));
+        if (cb) cb(all);
+    };
     start_lookup(std::make_unique<FindPeers>(table_, rpc_, self_, info_hash,
-                                             std::move(on_peers), std::move(on_done)), now);
+                                             std::move(peers), std::move(done)), now);
 }
 
 void Node::announce_peer(const InfoHash& info_hash, uint16_t port, bool implied_port,
                          FindPeers::DoneCallback on_done, TimePoint now) {
+    LOG_DEBUG("dht.find", "announce " << short_hex(info_hash) << " on port " << port
+                          << (implied_port ? " (implied)" : "") << " started (table=" << table_.size() << ")");
+    auto done = [this, info_hash, start = now, cb = std::move(on_done)](const std::vector<Address>& all) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_ - start).count();
+        LOG_INFO("dht.find", "announce " << short_hex(info_hash) << " complete in "
+                             << (ms < 0 ? 0 : ms) << "ms (" << all.size() << " peer(s) seen)");
+        if (cb) cb(all);
+    };
     start_lookup(std::make_unique<Announce>(table_, rpc_, self_, info_hash, port, implied_port,
-                                            FindPeers::PeersCallback{}, std::move(on_done)), now);
+                                            FindPeers::PeersCallback{}, std::move(done)), now);
 }
 
 void Node::cancel_lookup(const InfoHash& info_hash) {
@@ -216,6 +269,7 @@ std::size_t Node::lookup_count(bool announce) const {
 }
 
 void Node::tick(TimePoint now) {
+    now_ = now;
     rpc_.tick(now);          // fire query timeouts (drives lookups + ping-before-replace)
     reap_finished();
     peers_.expire(now);      // drop announced peers older than the TTL
@@ -232,6 +286,17 @@ void Node::tick(TimePoint now) {
                          FindPeers::PeersCallback{}, FindPeers::DoneCallback{}), now);
         last_self_refresh_ = now;
     }
+
+    // DEBUG heartbeat: periodic activity counters plus a pretty routing-table dump, so
+    // the live state is visible over time without tracing every event. describe() is only
+    // built when DEBUG is actually enabled (the macro guards on the level).
+    if (now - last_state_log_ >= kStateLogInterval) {
+        LOG_DEBUG("dht", "activity: " << lookups_.size() << " lookup(s), "
+                         << rpc_.outstanding() << " rpc in-flight, "
+                         << peers_.hash_count() << " stored hash(es)");
+        LOG_DEBUG("dht.route", table_.describe());
+        last_state_log_ = now;
+    }
 }
 
 void Node::reap_finished() {
@@ -246,7 +311,10 @@ void Node::maybe_update_external_ip(const std::string& reported_ip, const Addres
     if (reported_ip == external_address_) return;
 
     if (!ip_voters_.insert(from.ip).second) return;  // one vote per distinct responder
-    if (++ip_votes_[reported_ip] >= kExternalIpVoteThreshold) {
+    const int votes = ++ip_votes_[reported_ip];
+    LOG_DEBUG("dht", "external IP vote: " << reported_ip << " (" << votes << "/"
+                     << kExternalIpVoteThreshold << ", from " << from.ip << ")");
+    if (votes >= kExternalIpVoteThreshold) {
         ip_votes_.clear();
         ip_voters_.clear();
         set_external_ip(reported_ip);
@@ -256,15 +324,21 @@ void Node::maybe_update_external_ip(const std::string& reported_ip, const Addres
 void Node::set_external_ip(const std::string& ip) {
     if (!is_public_address(ip)) return;
     if (network_utils::is_valid_ipv6(ip) != ipv6_) return;  // separate networks per family
+    const bool changed = (ip != external_address_);
     external_address_ = ip;
 
-    if (verify_node_id_for_ip(self_, ip)) return;  // our id already matches this address
+    if (verify_node_id_for_ip(self_, ip)) {  // our id already matches this address
+        if (changed) LOG_INFO("dht", "external address is " << ip << " (node id already BEP 42-compliant)");
+        return;
+    }
 
     std::mt19937 gen(std::random_device{}());
     NodeId new_id;
     if (!generate_node_id_from_ip(ip, new_id, gen)) return;
     self_ = new_id;
     table_.set_self(new_id);  // re-bucket everything against the new id
+    LOG_INFO("dht", "external address is " << ip << ", regenerated node id "
+                    << short_hex(self_) << " (BEP 42)");
 }
 
 std::vector<Address> Node::default_bootstrap_nodes() {

@@ -10,8 +10,8 @@
  *   "dht"        — client facade + runner lifecycle (start/stop/bootstrap/external-ip)
  *   "dht.find"   — lookups (find_peers / announce) and their progress
  *   "dht.route"  — routing table (bucket splits, evictions, table summary)
- *   "dht.rpc"    — outgoing/incoming queries, timeouts (mostly DEBUG)
- *   "dht.spider" — the crawl (only under RATS_SEARCH_FEATURES)
+ *   "dht.rpc"    — outgoing/incoming queries, timeouts, anti-spoof drops
+ *   "dht.krpc"   — the KRPC wire codec (encode/decode); defined in krpc.cpp
  *
  * Endpoints render via Address::to_string(); ids render via short_hex() below.
  */

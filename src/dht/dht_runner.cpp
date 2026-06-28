@@ -1,6 +1,7 @@
 #include "dht/dht_runner.h"
 #include "dht/node.h"
 #include "dht/udp_transport.h"
+#include "dht/log.h"
 
 #include <chrono>
 #include <utility>

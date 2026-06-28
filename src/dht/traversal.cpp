@@ -1,6 +1,7 @@
 #include "dht/traversal.h"
 #include "dht/bep42.h"
 #include "dht/krpc.h"
+#include "dht/log.h"
 
 #include <algorithm>
 
@@ -150,6 +151,20 @@ void Traversal::traverse(const NodeId& id, const Address& ep) {
 void Traversal::finish() {
     if (done_) return;
     done_ = true;
+
+    // Convergence mechanics, common to every lookup type — *how* it converged, which
+    // explains a slow or empty result (e.g. many queried but few alive = a sparse or
+    // unresponsive neighbourhood). The peer set and the elapsed time belong to the
+    // dht.find layer in node.cpp, so they are deliberately not repeated here.
+    int alive = 0, queried = 0;
+    for (const auto& o : results_) {
+        if (o->has(Observer::kAlive)) ++alive;
+        if (o->has(Observer::kQueried)) ++queried;
+    }
+    LOG_DEBUG("dht.find", name() << ' ' << short_hex(target_) << " converged: " << alive
+                          << " alive / " << queried << " queried, " << results_.size()
+                          << " candidate(s)");
+
     on_complete();
 }
 
