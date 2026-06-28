@@ -194,6 +194,16 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
         try { cb(p, h); } catch (...) {}
     };
     impl_->runner->post([this, info_hash, callback, safe] {
+        // Dedup: callers (dht_discovery / bt_client) re-issue find_peers on a refresh
+        // timer that fires far faster than a lookup completes (~25s in the wild), so
+        // without this they pile up into many concurrent identical traversals hammering
+        // the same nodes. If a search for this hash is already running, drop the
+        // duplicate — the in-flight lookup keeps delivering peers to its subscriber.
+        if (impl_->node->lookup_active(info_hash, /*announce=*/false)) {
+            LOG_DEBUG("dht", "find_peers " << dht::short_hex(info_hash)
+                             << " skipped — search already active");
+            return;
+        }
         impl_->node->find_peers(
             info_hash,
             [callback, info_hash, safe](const std::vector<Address>& p) { safe(callback, p, info_hash); },
@@ -209,6 +219,13 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port, PeerDisc
     const uint16_t announce_port = port == 0 ? dht_port : port;
     const bool implied = (announce_port == dht_port);
     impl_->runner->post([this, info_hash, announce_port, implied, callback] {
+        // Dedup, same rationale as find_peers: don't stack a second announce traversal
+        // for a hash that's still announcing (one announce ran ~28s in the wild).
+        if (impl_->node->lookup_active(info_hash, /*announce=*/true)) {
+            LOG_DEBUG("dht", "announce " << dht::short_hex(info_hash)
+                             << " skipped — announce already active");
+            return;
+        }
         impl_->node->announce_peer(
             info_hash, announce_port, implied,
             [callback, info_hash](const std::vector<Address>& all) {
