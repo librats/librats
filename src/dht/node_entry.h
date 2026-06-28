@@ -33,7 +33,7 @@ struct NodeEntry {
     // Last time we "touched" this contact: a reply received OR a probe issued to it.
     // Defaults to the clock minimum so a never-contacted contact sorts as most stale
     // (refreshed first). Read only by RoutingTable::next_to_refresh for its ordering.
-    std::chrono::steady_clock::time_point last_seen{std::chrono::steady_clock::time_point::min()};
+    std::chrono::steady_clock::time_point last_seen{(std::chrono::steady_clock::time_point::min)()};
     uint16_t rtt        = kRttUnknown;
     uint8_t  fail_count = kNeverPinged;
     bool     verified   = false;

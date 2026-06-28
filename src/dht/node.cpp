@@ -29,7 +29,7 @@ std::vector<KrpcNode> to_krpc(const std::vector<NodeEntry>& nodes) {
 // called inside a LOG_* argument, so it costs nothing when the level is filtered out.
 std::string format_peers(const std::vector<Address>& peers, std::size_t max = 6) {
     std::ostringstream s;
-    const std::size_t shown = std::min(peers.size(), max);
+    const std::size_t shown = (std::min)(peers.size(), max);
     for (std::size_t i = 0; i < shown; ++i) {
         if (i) s << ", ";
         s << peers[i].to_string();

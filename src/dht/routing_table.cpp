@@ -333,7 +333,7 @@ std::vector<NodeEntry> RoutingTable::find_closest(const NodeId& target, std::siz
         for (int i = start + 1; i < static_cast<int>(buckets_.size()); ++i) take(buckets_[i]);
     for (int i = start - 1; i >= 0 && result.size() < count; --i) take(buckets_[i]);
 
-    const std::size_t k = std::min(count, result.size());
+    const std::size_t k = (std::min)(count, result.size());
     std::partial_sort(result.begin(), result.begin() + k, result.end(),
         [&](const NodeEntry& a, const NodeEntry& c) { return closer_to(a.id, c.id, target); });
     if (result.size() > count) result.resize(count);
