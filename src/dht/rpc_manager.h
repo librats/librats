@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <random>
 #include <unordered_map>
 
 namespace librats {
@@ -35,7 +36,8 @@ public:
     static constexpr std::chrono::milliseconds kShortTimeout{2000};
     static constexpr std::chrono::milliseconds kFullTimeout{15000};
 
-    explicit RpcManager(Transport& transport) : transport_(transport) {}
+    explicit RpcManager(Transport& transport)
+        : transport_(transport), rng_(std::random_device{}()) {}
 
     // Stamp a transaction id on `msg`, send it to `to`, and register `obs` to receive
     // the outcome. Returns false if the message could not be encoded.
@@ -68,7 +70,7 @@ private:
 
     Transport& transport_;
     std::unordered_map<uint16_t, Pending> pending_;
-    uint16_t counter_ = 0;
+    std::mt19937 rng_;  // seeds unpredictable transaction ids (anti-spoofing)
 };
 
 } // namespace dht

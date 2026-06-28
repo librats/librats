@@ -26,12 +26,17 @@ bool string_to_txn(const std::string& s, uint16_t& out) {
 } // namespace
 
 uint16_t RpcManager::next_txn() {
-    // 65536 ids is far more than we ever have outstanding; skip any still in use.
+    // Random, unpredictable transaction ids. A counter is trivially predictable, so an off-path
+    // attacker could forge replies to our queries; with a random id it must guess a
+    // 16-bit value *and* spoof the exact endpoint we queried (handle_response checks
+    // both). pending_ is keyed by txn, so re-draw on the rare collision with an id
+    // still in flight — 65536 ids vastly exceed what we ever have outstanding.
+    std::uniform_int_distribution<uint32_t> draw(0, 0xffff);
     for (int i = 0; i < 65536; ++i) {
-        const uint16_t t = counter_++;
+        const uint16_t t = static_cast<uint16_t>(draw(rng_));
         if (pending_.find(t) == pending_.end()) return t;
     }
-    return counter_++;  // unreachable in practice
+    return static_cast<uint16_t>(draw(rng_));  // table full — unreachable in practice
 }
 
 bool RpcManager::invoke(KrpcMessage& msg, const Address& to, const ObserverPtr& obs, TimePoint now) {

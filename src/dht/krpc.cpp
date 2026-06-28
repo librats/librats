@@ -1,8 +1,6 @@
 #include "dht/krpc.h"
 #include "util/network_utils.h"
 #include "util/logger.h"
-#include <random>
-#include <chrono>
 #include <sstream>
 #include <iomanip>
 #include <cstring>
@@ -24,8 +22,6 @@
 #define LOG_KRPC_ERROR(message) LOG_ERROR("dht.krpc", message)
 
 namespace librats {
-
-std::atomic<uint32_t> KrpcProtocol::transaction_counter_ = 0;
 
 KrpcProtocol::KrpcProtocol() {}
 
@@ -451,22 +447,6 @@ std::unique_ptr<KrpcMessage> KrpcProtocol::decode_error(const BencodeValue& data
 }
 
 // Utility functions
-std::string KrpcProtocol::generate_transaction_id() {
-    // A predictable transaction ID lets an off-path attacker forge responses to our queries and
-    // poison lookups. We make the ID unpredictable (2 random bytes) while keeping it collision-free
-    // (2 monotonic counter bytes guarantee uniqueness among any 65536 consecutive/outstanding
-    // transactions). The result is a 4-byte opaque binary string echoed back verbatim in KRPC.
-    static thread_local std::mt19937 rng(std::random_device{}());
-    uint32_t counter = transaction_counter_.fetch_add(1, std::memory_order_relaxed);
-    uint16_t rnd = static_cast<uint16_t>(rng() & 0xFFFF);
-    char tid[4];
-    tid[0] = static_cast<char>((rnd >> 8) & 0xFF);
-    tid[1] = static_cast<char>(rnd & 0xFF);
-    tid[2] = static_cast<char>((counter >> 8) & 0xFF);
-    tid[3] = static_cast<char>(counter & 0xFF);
-    return std::string(tid, sizeof(tid));
-}
-
 std::string KrpcProtocol::node_id_to_string(const NodeId& id) {
     return std::string(id.begin(), id.end());
 }

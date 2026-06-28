@@ -6,7 +6,6 @@
 #include <vector>
 #include <array>
 #include <memory>
-#include <atomic>
 
 namespace librats {
 
@@ -123,12 +122,7 @@ public:
      */
     static std::vector<uint8_t> encode_message(const KrpcMessage& message);
     static std::unique_ptr<KrpcMessage> decode_message(const std::vector<uint8_t>& data);
-    
-    /**
-     * Generate transaction ID
-     */
-    static std::string generate_transaction_id();
-    
+
     /**
      * Utility functions
      */
@@ -154,8 +148,6 @@ private:
     static std::unique_ptr<KrpcMessage> decode_error(const BencodeValue& data);
     
     static KrpcQueryType string_to_query_type(const std::string& str);
-
-    static std::atomic<uint32_t> transaction_counter_;
 };
 
 } // namespace librats 
