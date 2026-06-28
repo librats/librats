@@ -182,6 +182,33 @@ void Traversal::traverse(const NodeId& id, const Address& ep) {
     add_entry(id, ep);
 }
 
+void Traversal::resort_result(Observer& o) {
+    if (done_) return;
+
+    // Locate the observer by identity. It may have been dropped by a truncation while a
+    // reply was in flight, in which case there is nothing to re-place.
+    auto it = std::find_if(results_.begin(), results_.end(),
+        [&](const ObserverPtr& p) { return p.get() == &o; });
+    if (it == results_.end()) return;
+
+    // If it already sat inside the sorted prefix, account for pulling it out of there.
+    // (For a seed it lives in the unsorted tail, so this branch won't fire — but a
+    // duplicate id resolved into the prefix could, exactly as in libtorrent.)
+    if (it - results_.begin() < sorted_) --sorted_;
+
+    ObserverPtr ptr = std::move(*it);
+    results_.erase(it);
+
+    // Re-insert by XOR distance now that the id is known — same lower_bound the sorted
+    // prefix is built with in add_entry, so the invariant is preserved.
+    const NodeId id = ptr->id();
+    const auto sorted_end = results_.begin() + sorted_;
+    auto pos = std::lower_bound(results_.begin(), sorted_end, id,
+        [&](const ObserverPtr& a, const NodeId& nid) { return closer_to(a->id(), nid, target_); });
+    results_.insert(pos, std::move(ptr));
+    ++sorted_;
+}
+
 void Traversal::finish() {
     if (done_) return;
     done_ = true;
@@ -206,7 +233,13 @@ void TraversalObserver::on_response(const KrpcMessage& msg, uint16_t rtt_ms, Tim
     if (has(kDone) || has(kAlive)) return;  // late/duplicate
     set(kAlive);                            // protect against truncation during traverse()
 
-    if (has(kInitial)) id_ = msg.response_id;  // learn a seed node's real id from its reply
+    if (has(kInitial) && msg.response_id != NodeId{}) {
+        // A seed/router we only knew by address just revealed its real id. Adopt it and
+        // re-place this observer among the distance-sorted candidates (a zero id is the
+        // "unknown" sentinel, so guard against a malformed reply re-sorting us to the top).
+        id_ = msg.response_id;
+        algorithm_.resort_result(*this);
+    }
 
     parse_reply(msg);
 

@@ -134,6 +134,41 @@ TEST(DhtTraversal, TimeoutDoesNotStall) {
     EXPECT_EQ(final_peers[0], p1);
 }
 
+// A bootstrap seed is added by address with an unknown id. When it replies, its real id
+// becomes known and it must be resorted into the candidate list by distance — so a seed
+// that turns out to be close to the target counts as a responder and receives the announce.
+TEST(DhtTraversal, SeedIsResortedOnceItsIdIsKnown) {
+    RecordingTransport tp;
+    RpcManager rpc(tp);
+    const NodeId self = nid(0x00);
+    const NodeId info_hash = nid(0x55);
+    RoutingTable table(self);  // empty: the lookup must rely on the seed alone
+
+    const Address router("10.0.0.1", 1);
+
+    bool done = false;
+    Announce ann(table, rpc, self, info_hash, /*port=*/6881, /*implied_port=*/false, {},
+                 [&](const std::vector<Address>&) { done = true; });
+    ann.add_seed(router);     // address only — id unknown
+    ann.start(at(0));
+
+    // The seed is queried even though we don't know its id yet.
+    ASSERT_TRUE(has_query_to(tp, router));
+    const std::size_t before = tp.sent.size();
+
+    // It replies revealing an id close to the info-hash, with a token and no further nodes.
+    KrpcMessage r0 = KrpcProtocol::create_get_peers_response(txn_to(tp, router), nid(0x55), {}, "tokR");
+    ASSERT_TRUE(rpc.handle_response(r0, router, at(0)));
+    EXPECT_TRUE(done);
+
+    // Having been resorted in as an alive token holder, it must receive an announce_peer.
+    ASSERT_GT(tp.sent.size(), before);
+    auto announce = query_to(tp, router);
+    ASSERT_NE(announce, nullptr);
+    EXPECT_EQ(announce->query_type, KrpcQueryType::AnnouncePeer);
+    EXPECT_EQ(announce->token, "tokR");
+}
+
 // On completion, announce_peer goes to the closest responders that gave a token.
 TEST(DhtTraversal, AnnounceSendsToTokenHolders) {
     RecordingTransport tp;

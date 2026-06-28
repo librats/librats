@@ -49,6 +49,12 @@ public:
     void on_failed(Observer& o, bool short_timeout, TimePoint now);
     void traverse(const NodeId& id, const Address& ep);  // a node a peer told us about
 
+    // A seed/router whose id we didn't know just told us its real id in a reply. Move it
+    // out of the unsorted tail and into its XOR-distance place among the sorted candidates
+    // (libtorrent's set_id → resort_result), so a seed close to the target can count
+    // toward the k closest and, for an announce, receive an announce_peer.
+    void resort_result(Observer& o);
+
 protected:
     // Build and send this node's query (returns false if it couldn't be sent).
     virtual bool invoke(const ObserverPtr& o, TimePoint now) = 0;
