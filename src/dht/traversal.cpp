@@ -6,6 +6,12 @@
 #include <algorithm>
 #include <atomic>
 
+// Per-wave "dht.traversal" round logging is verbose; gate it behind a compile-time flag
+// so it can be dropped entirely from a build. Default on (true).
+#ifndef DHT_TRAVERSAL_DEBUG
+#define DHT_TRAVERSAL_DEBUG true
+#endif
+
 namespace librats {
 namespace dht {
 
@@ -119,11 +125,13 @@ bool Traversal::add_requests(TimePoint now) {
     // on dead/sybil nodes. Built only when DEBUG is on (the macro guards the level).
     if (sent > 0) {
         ++round_;
+#if DHT_TRAVERSAL_DEBUG
         const int closest = sorted_ > 0 ? shared_prefix_bits(results_.front()->id(), target_) : 0;
-        LOG_DEBUG("dht.find", name() << " L" << id_ << ' ' << short_hex(target_) << " round "
+        LOG_DEBUG("dht.traversal", name() << " L" << id_ << ' ' << short_hex(target_) << " round "
                               << round_ << ": +" << sent << " sent, " << invoke_count_
                               << " in-flight, " << alive << '/' << kBucketSize << " alive, branch="
                               << branch_factor_ << ", closest +" << closest << "b");
+#endif
     }
 
     // Done when the k closest have all answered with nothing left in flight, or when
