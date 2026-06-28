@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <cstdint>
 #include <fstream>
+#include <atomic>
 #include "util/fs.h"
 
 #ifdef _WIN32
@@ -44,7 +45,19 @@ public:
     // Set the minimum log level
     void set_log_level(LogLevel level) {
         std::lock_guard<std::mutex> lock(mutex_);
-        min_level_ = level;
+        min_level_.store(level, std::memory_order_relaxed);
+    }
+
+    // Current minimum level (lock-free).
+    LogLevel get_log_level() const {
+        return min_level_.load(std::memory_order_relaxed);
+    }
+
+    // True if a message at `level` would be emitted. Cheap and lock-free, so the LOG_*
+    // macros can gate message construction on it and skip formatting work — string
+    // building, id-to-hex conversions — that would otherwise be built and thrown away.
+    bool is_enabled(LogLevel level) const {
+        return level >= min_level_.load(std::memory_order_relaxed);
     }
     
     // Enable/disable colors
@@ -125,8 +138,8 @@ public:
     // Main logging function
     void log(LogLevel level, const std::string& module, const std::string& message) {
         std::lock_guard<std::mutex> lock(mutex_);
-        
-        if (level < min_level_) {
+
+        if (level < min_level_.load(std::memory_order_relaxed)) {
             return;
         }
         
@@ -406,7 +419,7 @@ private:
     }
     
     mutable std::mutex mutex_;
-    LogLevel min_level_;
+    std::atomic<LogLevel> min_level_;
     bool colors_enabled_;
     bool timestamps_enabled_;
     bool is_terminal_;
@@ -429,33 +442,25 @@ private:
 
 } // namespace librats
 
-// Convenience macros for easy logging
-#define LOG_DEBUG(module, message) \
+// Convenience macros for easy logging.
+//
+// Each macro first checks is_enabled() — a lock-free level read — and only builds the
+// message string when it would actually be emitted. This keeps a filtered-out log
+// (e.g. a DEBUG line while running at INFO) down to a single atomic load, so hot-path
+// logging costs nothing until the level is turned up. `message` is only evaluated when
+// the level is enabled; keep it side-effect free.
+#define RATS_LOG_AT(level_enum, module, message) \
     do { \
-        std::ostringstream oss; \
-        oss << message; \
-        librats::Logger::getInstance().log(librats::LogLevel::DEBUG, module, oss.str()); \
+        if (librats::Logger::getInstance().is_enabled(level_enum)) { \
+            std::ostringstream oss; \
+            oss << message; \
+            librats::Logger::getInstance().log(level_enum, module, oss.str()); \
+        } \
     } while(0)
 
-#define LOG_INFO(module, message) \
-    do { \
-        std::ostringstream oss; \
-        oss << message; \
-        librats::Logger::getInstance().log(librats::LogLevel::INFO, module, oss.str()); \
-    } while(0)
-
-#define LOG_WARN(module, message) \
-    do { \
-        std::ostringstream oss; \
-        oss << message; \
-        librats::Logger::getInstance().log(librats::LogLevel::WARN, module, oss.str()); \
-    } while(0)
-
-#define LOG_ERROR(module, message) \
-    do { \
-        std::ostringstream oss; \
-        oss << message; \
-        librats::Logger::getInstance().log(librats::LogLevel::ERROR, module, oss.str()); \
-    } while(0)
+#define LOG_DEBUG(module, message) RATS_LOG_AT(librats::LogLevel::DEBUG, module, message)
+#define LOG_INFO(module, message)  RATS_LOG_AT(librats::LogLevel::INFO,  module, message)
+#define LOG_WARN(module, message)  RATS_LOG_AT(librats::LogLevel::WARN,  module, message)
+#define LOG_ERROR(module, message) RATS_LOG_AT(librats::LogLevel::ERROR, module, message)
 
  

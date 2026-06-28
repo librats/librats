@@ -232,6 +232,7 @@ set(LIBRARY_SOURCES
     src/dht/krpc.cpp
 # dht/ modular layer (rewrite in progress) — leaf types
     src/dht/id.h
+    src/dht/log.h
     src/dht/node_entry.h
     src/dht/bep42.h
     src/dht/bep42.cpp
