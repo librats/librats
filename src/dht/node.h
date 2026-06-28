@@ -128,8 +128,15 @@ private:
     // maintenance cadence
     static constexpr std::chrono::seconds kRefreshInterval{6};
     static constexpr std::chrono::minutes kSelfRefreshInterval{6};
+    static constexpr std::chrono::seconds kStateLogInterval{30};  // DEBUG heartbeat cadence
     TimePoint last_refresh_{};
     TimePoint last_self_refresh_{};
+    TimePoint last_state_log_{};
+
+    // The most recent model time, stamped at every entry point (on_datagram / tick /
+    // start_lookup / bootstrap). Lets a lookup's done-callback measure its own duration
+    // without the engine threading `now` through every callback signature.
+    TimePoint now_{};
 
 #ifdef RATS_SEARCH_FEATURES
     // An id that looks close to `target` (first 10 bytes from target, last 10 from us),

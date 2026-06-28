@@ -16,11 +16,12 @@
     #include <netinet/in.h>
 #endif
 
-// KRPC module logging macros
-#define LOG_KRPC_DEBUG(message) LOG_DEBUG("krpc", message)
-#define LOG_KRPC_INFO(message)  LOG_INFO("krpc", message)
-#define LOG_KRPC_WARN(message)  LOG_WARN("krpc", message)
-#define LOG_KRPC_ERROR(message) LOG_ERROR("krpc", message)
+// KRPC module logging macros. Tagged "dht.krpc" to sit under the DHT dot-namespace
+// alongside dht.find / dht.route / dht.rpc — the codec is used only by the DHT.
+#define LOG_KRPC_DEBUG(message) LOG_DEBUG("dht.krpc", message)
+#define LOG_KRPC_INFO(message)  LOG_INFO("dht.krpc", message)
+#define LOG_KRPC_WARN(message)  LOG_WARN("dht.krpc", message)
+#define LOG_KRPC_ERROR(message) LOG_ERROR("dht.krpc", message)
 
 namespace librats {
 

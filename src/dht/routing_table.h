@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cstddef>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace librats {
@@ -83,6 +84,11 @@ public:
     std::size_t size() const;                 // number of live contacts
     bool empty() const { return size() == 0; }
     int bucket_count() const noexcept { return static_cast<int>(buckets_.size()); }
+
+    // A pretty, multi-line snapshot for periodic DEBUG logging: a header plus one row
+    // per bucket with its live/limit fill bar and best & worst contact. Pure formatting,
+    // no I/O — built only when actually logged (callers guard on the log level).
+    std::string describe() const;
 
     // -- node id changes (BEP 42) ----------------------------------------------
 

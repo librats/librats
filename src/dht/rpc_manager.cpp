@@ -1,5 +1,6 @@
 #include "dht/rpc_manager.h"
 #include "dht/krpc.h"
+#include "dht/log.h"
 
 #include <vector>
 
@@ -43,13 +44,19 @@ bool RpcManager::invoke(KrpcMessage& msg, const Address& to, const ObserverPtr& 
     transport_.send(to, data);
     obs->txn_ = t;
     pending_[t] = Pending{obs, to, now};
+    LOG_DEBUG("dht.rpc", "→ " << KrpcProtocol::query_type_to_string(msg.query_type)
+                         << " to " << to.to_string() << " [txn " << t << "]");
     return true;
 }
 
 void RpcManager::send_oneshot(KrpcMessage& msg, const Address& to) {
     msg.transaction_id = txn_to_string(next_txn());  // the peer may echo it; we don't track the reply
     const std::vector<uint8_t> data = KrpcProtocol::encode_message(msg);
-    if (!data.empty()) transport_.send(to, data);
+    if (!data.empty()) {
+        transport_.send(to, data);
+        LOG_DEBUG("dht.rpc", "→ " << KrpcProtocol::query_type_to_string(msg.query_type)
+                             << " to " << to.to_string() << " (oneshot)");
+    }
 }
 
 bool RpcManager::handle_response(const KrpcMessage& msg, const Address& from, TimePoint now) {
@@ -58,15 +65,29 @@ bool RpcManager::handle_response(const KrpcMessage& msg, const Address& from, Ti
 
     auto it = pending_.find(t);
     if (it == pending_.end()) return false;          // unknown / already resolved
-    if (it->second.endpoint != from) return false;   // anti-spoof: not from whom we queried
+    if (it->second.endpoint != from) {               // anti-spoof: not from whom we queried
+        LOG_DEBUG("dht.rpc", "dropped reply [txn " << t << "]: from " << from.to_string()
+                             << " != queried " << it->second.endpoint.to_string());
+        return false;
+    }
 
     const ObserverPtr obs = it->second.obs;          // keep alive across the callback
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.sent).count();
     const uint16_t rtt = elapsed < 0 ? 0 : (elapsed > 0xfffe ? uint16_t(0xfffe) : uint16_t(elapsed));
     pending_.erase(it);
 
-    if (msg.type == KrpcMessageType::Error) obs->on_timeout(now);  // an error is a failed query
-    else obs->on_response(msg, rtt, now);
+    if (msg.type == KrpcMessageType::Error) {
+        // A peer that explicitly rejected us is alive but refused — a different signal from
+        // silence, so log it distinctly even though it drives the same failed-query path.
+        LOG_DEBUG("dht.rpc", "<- error from " << from.to_string() << " [txn " << t << "]: "
+                             << static_cast<int>(msg.error_code) << ' ' << msg.error_message);
+        obs->on_timeout(now);  // an error is a failed query
+    } else {
+        // The success half of the → query pair, carrying the round-trip we just measured.
+        LOG_DEBUG("dht.rpc", "<- response from " << from.to_string() << " (" << short_hex(msg.response_id)
+                             << ") [txn " << t << "] " << rtt << "ms");
+        obs->on_response(msg, rtt, now);
+    }
     return true;
 }
 
@@ -82,7 +103,13 @@ void RpcManager::tick(TimePoint now) {
     }
 
     for (auto& o : shorts) o->on_short_timeout(now);          // keeps the pending entry
-    for (auto& o : fulls) { cancel(o.get()); o->on_timeout(now); }
+    for (auto& o : fulls) {
+        // Only the *full* timeout is logged (a query truly gave up) — short timeouts just
+        // widen the branch factor and fire constantly, so they stay silent.
+        LOG_DEBUG("dht.rpc", "timeout " << short_hex(o->id()) << ' ' << o->endpoint().to_string());
+        cancel(o.get());
+        o->on_timeout(now);
+    }
 }
 
 void RpcManager::cancel(Observer* obs) {

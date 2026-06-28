@@ -1,7 +1,11 @@
 #include "dht/routing_table.h"
+#include "dht/log.h"
 
 #include <algorithm>
 #include <array>
+#include <iomanip>
+#include <sstream>
+#include <string>
 
 namespace librats {
 namespace dht {
@@ -170,6 +174,13 @@ void RoutingTable::split_bucket() {
     // The deeper bucket has a smaller limit, so it may now overflow — spill the rest.
     trim_to_limit(last);
     trim_to_limit(last + 1);
+
+    // Structural milestone, not per-packet churn: a bucket deepens only a bounded number
+    // of times as the table grows, so this stays quiet (unlike add/seen/fail, which must
+    // never log). The live composition over time is the heartbeat's describe() job.
+    LOG_DEBUG("dht.route", "bucket split → " << buckets_.size() << " bucket(s): #" << last
+                           << " keeps " << buckets_[last].live.size() << ", #" << (last + 1)
+                           << " gets " << buckets_[last + 1].live.size() << " live");
 }
 
 bool RoutingTable::replace_for_spread(Bucket& b, int index, int limit, const NodeEntry& e) {
@@ -379,6 +390,58 @@ std::vector<NodeEntry> RoutingTable::good_contacts() const {
 
 void RoutingTable::load_contacts(const std::vector<NodeEntry>& contacts) {
     for (const auto& n : contacts) add_node(n);
+}
+
+std::string RoutingTable::describe() const {
+    // One compact line per contact: "<id8> <ip:port> <rtt> <flags>", where flags are
+    //   ?  = only heard about (never replied)   !N = N consecutive failures   v = BEP 42-verified
+    const auto fmt_contact = [](const NodeEntry& n) {
+        std::ostringstream s;
+        s << short_hex(n.id) << ' ' << n.endpoint.to_string() << ' ';
+        if (n.rtt == NodeEntry::kRttUnknown) s << "-ms";
+        else                                 s << n.rtt << "ms";
+        if (!n.pinged())           s << " ?";
+        else if (n.fail_count > 0) s << " !" << static_cast<int>(n.fail_count);
+        if (n.verified)            s << " v";
+        return s.str();
+    };
+    // A 10-cell bar showing how full the live set is relative to this bucket's limit.
+    const auto fill_bar = [](std::size_t live, int limit) {
+        constexpr int width = 10;
+        int filled = limit > 0 ? static_cast<int>((live * width + limit / 2) / limit) : 0;
+        if (filled > width) filled = width;
+        return std::string(static_cast<std::size_t>(filled), '#') +
+               std::string(static_cast<std::size_t>(width - filled), '.');
+    };
+
+    std::ostringstream os;
+    os << "routing table: " << size() << " node(s) / " << buckets_.size()
+       << " bucket(s)  self " << short_hex(self_);
+    for (int i = 0; i < static_cast<int>(buckets_.size()); ++i) {
+        const Bucket& b = buckets_[i];
+        const int limit = bucket_limit(i);
+
+        std::ostringstream cnt;
+        cnt << b.live.size() << '/' << limit;
+
+        os << "\n  #" << std::right << std::setw(2) << i << "  "
+           << std::left << std::setw(7) << cnt.str()
+           << "repl " << std::right << std::setw(2) << b.replacements.size() << "  "
+           << '[' << fill_bar(b.live.size(), limit) << "]  ";
+
+        if (b.live.empty()) { os << "(empty)"; continue; }
+
+        // best = the contact no other is better than; worst = the first to be evicted.
+        const NodeEntry* best  = &b.live.front();
+        const NodeEntry* worst = &b.live.front();
+        for (const auto& n : b.live) {
+            if (best->is_worse_than(n)) best = &n;
+            if (n.is_worse_than(*worst)) worst = &n;
+        }
+        os << "best " << fmt_contact(*best);
+        if (b.live.size() > 1) os << "  worst " << fmt_contact(*worst);
+    }
+    return os.str();
 }
 
 void RoutingTable::prune_empty_back() {
