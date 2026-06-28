@@ -37,6 +37,7 @@ public:
 
     const NodeId& target() const noexcept { return target_; }
     bool finished() const noexcept { return done_; }
+    unsigned id() const noexcept { return id_; }  // short per-lookup id for log correlation
     virtual bool is_announce() const noexcept { return false; }  // overridden by Announce
 
     // Add a bootstrap/router contact whose node id we don't know yet (learned from
@@ -68,6 +69,8 @@ private:
     void finish();
 
     NodeId target_;
+    unsigned id_;        // unique lookup id (assigned in ctor), printed as "L<id>" in logs
+    int  round_ = 0;     // how many waves of queries we've fired (the search "round")
     int  sorted_ = 0;
     int  branch_factor_ = static_cast<int>(kAlpha);
     int  invoke_count_ = 0;

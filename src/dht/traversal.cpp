@@ -4,12 +4,21 @@
 #include "dht/log.h"
 
 #include <algorithm>
+#include <atomic>
 
 namespace librats {
 namespace dht {
 
+namespace {
+// Monotonic lookup-id source. Atomic because v4 and v6 nodes run on separate threads,
+// so ids stay unique across both instances — a single "L<id>" disambiguates everything.
+// Unsigned so wrap-around past 2^32 is defined (benign) rather than signed-overflow UB.
+std::atomic<unsigned> g_lookup_seq{0};
+}  // namespace
+
 Traversal::Traversal(RoutingTable& table, RpcManager& rpc, const NodeId& self, const NodeId& target)
-    : table_(table), rpc_(rpc), self_(self), target_(target) {}
+    : table_(table), rpc_(rpc), self_(self), target_(target),
+      id_(g_lookup_seq.fetch_add(1, std::memory_order_relaxed)) {}
 
 Traversal::~Traversal() {
     // Detach any still-in-flight queries so the RpcManager won't call into a
@@ -80,12 +89,14 @@ bool Traversal::add_requests(TimePoint now) {
 
     int results_target = static_cast<int>(kBucketSize);  // want k alive nodes at the top
     int outstanding = 0;                                  // queries in flight among the top
+    int alive = 0;                                        // confirmed-alive among the top
+    int sent  = 0;                                        // queries fired in this wave
 
     for (auto& obs_ptr : results_) {
         if (results_target <= 0) break;
         Observer* o = obs_ptr.get();
 
-        if (o->has(Observer::kAlive)) { --results_target; continue; }
+        if (o->has(Observer::kAlive)) { --results_target; ++alive; continue; }
         if (o->has(Observer::kFailed) || o->has(Observer::kDone)) continue;
         if (o->has(Observer::kQueried)) { ++outstanding; continue; }  // in flight, awaiting reply
 
@@ -95,9 +106,24 @@ bool Traversal::add_requests(TimePoint now) {
         if (invoke(obs_ptr, now)) {
             ++invoke_count_;
             ++outstanding;
+            ++sent;
         } else {
             o->set(Observer::kFailed);
         }
+    }
+
+    // One line per wave that actually fired queries — this is the search "round". A stall
+    // (slots full, nothing sent) prints nothing, so the cadence of these lines reveals
+    // timeout-bound progress; `closest` (shared-prefix bits with the target) climbing shows
+    // real convergence, while a flat `closest` with a rising `branch` means we're spinning
+    // on dead/sybil nodes. Built only when DEBUG is on (the macro guards the level).
+    if (sent > 0) {
+        ++round_;
+        const int closest = sorted_ > 0 ? shared_prefix_bits(results_.front()->id(), target_) : 0;
+        LOG_DEBUG("dht.find", name() << " L" << id_ << ' ' << short_hex(target_) << " round "
+                              << round_ << ": +" << sent << " sent, " << invoke_count_
+                              << " in-flight, " << alive << '/' << kBucketSize << " alive, branch="
+                              << branch_factor_ << ", closest +" << closest << "b");
     }
 
     // Done when the k closest have all answered with nothing left in flight, or when
@@ -161,9 +187,9 @@ void Traversal::finish() {
         if (o->has(Observer::kAlive)) ++alive;
         if (o->has(Observer::kQueried)) ++queried;
     }
-    LOG_DEBUG("dht.find", name() << ' ' << short_hex(target_) << " converged: " << alive
-                          << " alive / " << queried << " queried, " << results_.size()
-                          << " candidate(s)");
+    LOG_DEBUG("dht.find", name() << " L" << id_ << ' ' << short_hex(target_) << " converged in "
+                          << round_ << " round(s): " << alive << " alive / " << queried
+                          << " queried, " << results_.size() << " candidate(s)");
 
     on_complete();
 }

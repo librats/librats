@@ -197,7 +197,6 @@ FindPeers& Node::start_lookup(std::unique_ptr<FindPeers> lookup, TimePoint now) 
 
 void Node::bootstrap(const std::vector<Address>& nodes, TimePoint now) {
     now_ = now;  // bootstrap seeds and starts its lookup without going through start_lookup
-    LOG_DEBUG("dht.find", "bootstrap lookup: " << nodes.size() << " seed(s), table=" << table_.size());
     // A self-targeted get_peers lookup populates the table with our neighbourhood; on
     // completion we report how warm the table got.
     auto boot = std::make_unique<FindPeers>(table_, rpc_, self_, self_,
@@ -206,6 +205,8 @@ void Node::bootstrap(const std::vector<Address>& nodes, TimePoint now) {
             LOG_INFO("dht.find", "bootstrap complete — routing table: " << table_.size()
                                  << " node(s), " << table_.bucket_count() << " bucket(s)");
         });
+    LOG_DEBUG("dht.find", "bootstrap lookup L" << boot->id() << ": " << nodes.size()
+                          << " seed(s), table=" << table_.size());
     boot->set_want(want());
     for (const auto& ep : nodes) boot->add_seed(ep);
     FindPeers& ref = *boot;
@@ -215,7 +216,6 @@ void Node::bootstrap(const std::vector<Address>& nodes, TimePoint now) {
 
 void Node::find_peers(const InfoHash& info_hash, FindPeers::PeersCallback on_peers,
                       FindPeers::DoneCallback on_done, TimePoint now) {
-    LOG_DEBUG("dht.find", "find_peers " << short_hex(info_hash) << " started (table=" << table_.size() << ")");
     // Peers as they arrive — the actual endpoints, so progress is visible mid-lookup.
     auto peers = [this, info_hash, cb = std::move(on_peers)](const std::vector<Address>& fresh) {
         LOG_DEBUG("dht.find", "find_peers " << short_hex(info_hash) << ": +" << fresh.size()
@@ -230,22 +230,26 @@ void Node::find_peers(const InfoHash& info_hash, FindPeers::PeersCallback on_pee
                              << (all.empty() ? "" : ": " + format_peers(all)));
         if (cb) cb(all);
     };
-    start_lookup(std::make_unique<FindPeers>(table_, rpc_, self_, info_hash,
-                                             std::move(peers), std::move(done)), now);
+    auto lookup = std::make_unique<FindPeers>(table_, rpc_, self_, info_hash,
+                                              std::move(peers), std::move(done));
+    LOG_DEBUG("dht.find", "find_peers " << short_hex(info_hash) << " L" << lookup->id()
+                          << " started (table=" << table_.size() << ")");
+    start_lookup(std::move(lookup), now);
 }
 
 void Node::announce_peer(const InfoHash& info_hash, uint16_t port, bool implied_port,
                          FindPeers::DoneCallback on_done, TimePoint now) {
-    LOG_DEBUG("dht.find", "announce " << short_hex(info_hash) << " on port " << port
-                          << (implied_port ? " (implied)" : "") << " started (table=" << table_.size() << ")");
     auto done = [this, info_hash, start = now, cb = std::move(on_done)](const std::vector<Address>& all) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_ - start).count();
         LOG_INFO("dht.find", "announce " << short_hex(info_hash) << " complete in "
                              << (ms < 0 ? 0 : ms) << "ms (" << all.size() << " peer(s) seen)");
         if (cb) cb(all);
     };
-    start_lookup(std::make_unique<Announce>(table_, rpc_, self_, info_hash, port, implied_port,
-                                            FindPeers::PeersCallback{}, std::move(done)), now);
+    auto lookup = std::make_unique<Announce>(table_, rpc_, self_, info_hash, port, implied_port,
+                                             FindPeers::PeersCallback{}, std::move(done));
+    LOG_DEBUG("dht.find", "announce " << short_hex(info_hash) << " L" << lookup->id() << " on port " << port
+                          << (implied_port ? " (implied)" : "") << " started (table=" << table_.size() << ")");
+    start_lookup(std::move(lookup), now);
 }
 
 void Node::cancel_lookup(const InfoHash& info_hash) {
