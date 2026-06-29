@@ -226,11 +226,24 @@ void Traversal::finish() {
                           << round_ << " round(s): " << alive << " alive / " << queried
                           << " queried, " << results_.size() << " candidate(s)");
 
+    // We complete as soon as the top-k have answered, but queries to farther nodes may
+    // still be in flight (counted in invoke_count_, not in the top-k `outstanding`).
+    for (const auto& obs : results_) {
+        Observer* o = obs.get();
+        const bool in_flight = o->has(Observer::kQueried) && !o->has(Observer::kAlive) &&
+                               !o->has(Observer::kFailed) && !o->has(Observer::kDone);
+        if (in_flight) {
+            o->set(Observer::kDone);
+            rpc_.cancel(o);
+        }
+    }
+
     on_complete();
 }
 
 void TraversalObserver::on_response(const KrpcMessage& msg, uint16_t rtt_ms, TimePoint now) {
     if (has(kDone) || has(kAlive)) return;  // late/duplicate
+    if (algorithm_.finished()) return;      // lookup already converged; don't re-enter parse_reply
     set(kAlive);                            // protect against truncation during traverse()
 
     if (has(kInitial) && msg.response_id != NodeId{}) {
