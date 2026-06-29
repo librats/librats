@@ -74,6 +74,7 @@ TEST(DhtUdp, TwoNodesAnnounceAndFind) {
     bool announced = false;
     ra.post([&] {
         a.announce_peer(info_hash, ta.port(), /*implied_port=*/false,
+                        /*on_peers=*/{},
                         [&](const std::vector<Address>&) {
                             std::lock_guard<std::mutex> lk(m);
                             announced = true;

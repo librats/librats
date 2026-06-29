@@ -63,7 +63,7 @@ public:
     void find_peers(const InfoHash& info_hash, FindPeers::PeersCallback on_peers,
                     FindPeers::DoneCallback on_done, TimePoint now);
     void announce_peer(const InfoHash& info_hash, uint16_t port, bool implied_port,
-                       FindPeers::DoneCallback on_done, TimePoint now);
+                       FindPeers::PeersCallback on_peers, FindPeers::DoneCallback on_done, TimePoint now);
     void cancel_lookup(const InfoHash& info_hash);                       // drop active lookups for it
     bool lookup_active(const InfoHash& info_hash, bool announce) const;  // is one running?
     std::size_t lookup_count(bool announce) const;                       // how many running

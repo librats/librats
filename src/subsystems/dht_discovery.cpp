@@ -168,13 +168,18 @@ void DhtDiscovery::loop() {
         }
 
         const auto now = std::chrono::steady_clock::now();
+        auto deliver = [this](const std::vector<Address>& peers, const InfoHash& h) { on_peers(peers, h); };
         if (now - last_announce >= config_.announce_interval) {
-            for_each_client([&](DhtClient& c) { c.announce_peer(hash_, network_->listen_port()); });
+            // announce_peer runs a get_peers traversal and announces on completion, so it
+            // discovers peers itself — feed them to on_peers and skip the separate
+            // find_peers this cycle, otherwise we'd run two identical traversals per hash
+            // (every node queried twice). find_peers covers the faster search cadence in
+            // between announces.
+            for_each_client([&](DhtClient& c) { c.announce_peer(hash_, network_->listen_port(), deliver); });
             last_announce = now;
+        } else {
+            for_each_client([&](DhtClient& c) { c.find_peers(hash_, deliver); });
         }
-        for_each_client([this](DhtClient& c) {
-            c.find_peers(hash_, [this](const std::vector<Address>& peers, const InfoHash& h) { on_peers(peers, h); });
-        });
 
         std::unique_lock<std::mutex> lock(wait_mutex_);
         wake_.wait_for(lock, config_.search_interval,

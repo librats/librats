@@ -218,7 +218,13 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port, PeerDisc
     const uint16_t dht_port = impl_->transport->port();
     const uint16_t announce_port = port == 0 ? dht_port : port;
     const bool implied = (announce_port == dht_port);
-    impl_->runner->post([this, info_hash, announce_port, implied, callback] {
+    // A user callback runs on the loop thread, so a throw would take the whole DHT down —
+    // isolate it (same guard as find_peers).
+    auto safe = [](PeerDiscoveryCallback cb, const std::vector<Address>& p, const InfoHash& h) {
+        if (!cb) return;
+        try { cb(p, h); } catch (...) {}
+    };
+    impl_->runner->post([this, info_hash, announce_port, implied, callback, safe] {
         // Dedup, same rationale as find_peers: don't stack a second announce traversal
         // for a hash that's still announcing (one announce ran ~28s in the wild).
         if (impl_->node->lookup_active(info_hash, /*announce=*/true)) {
@@ -228,9 +234,11 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port, PeerDisc
         }
         impl_->node->announce_peer(
             info_hash, announce_port, implied,
-            [callback, info_hash](const std::vector<Address>& all) {
-                if (callback) try { callback(all, info_hash); } catch (...) {}
-            },
+            // Peers stream in as the announce traversal discovers them, then once more in
+            // full on completion — so a caller that announces also gets peer discovery for
+            // free, with no separate find_peers needed.
+            [callback, info_hash, safe](const std::vector<Address>& p) { safe(callback, p, info_hash); },
+            [callback, info_hash, safe](const std::vector<Address>& all) { safe(callback, all, info_hash); },
             Impl::now());
     });
     return true;

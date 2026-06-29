@@ -189,6 +189,13 @@ void Node::ping(const NodeId& id, const Address& ep, TimePoint now) {
 FindPeers& Node::start_lookup(std::unique_ptr<FindPeers> lookup, TimePoint now) {
     now_ = now;  // so a synchronous completion inside start() measures a sane duration
     lookup->set_want(want());
+    // Self-heal: when the routing table is too thin to seed a lookup (cold start, or every
+    // contact has died), fall back to the bootstrap routers — mirrors libtorrent's
+    // traversal_algorithm::add_router_entries(). Without this, a node whose table empties
+    // can never recover: every lookup would converge instantly on an empty candidate set,
+    // and the self-refresh in tick() never fires while the table is empty.
+    if (table_.size() < kAlpha)
+        for (const auto& ep : bootstrap_nodes_) lookup->add_seed(ep);
     FindPeers& ref = *lookup;
     lookups_.push_back(std::move(lookup));
     ref.start(now);  // may complete synchronously (e.g. empty table) — reaped next tick
@@ -238,7 +245,15 @@ void Node::find_peers(const InfoHash& info_hash, FindPeers::PeersCallback on_pee
 }
 
 void Node::announce_peer(const InfoHash& info_hash, uint16_t port, bool implied_port,
-                         FindPeers::DoneCallback on_done, TimePoint now) {
+                         FindPeers::PeersCallback on_peers, FindPeers::DoneCallback on_done, TimePoint now) {
+    // An announce is a get_peers traversal that announces on completion, so it discovers
+    // peers along the way too. Stream them as they arrive (like find_peers), so a caller
+    // that both announces and wants peers needs only this one lookup, not a second one.
+    auto peers = [this, info_hash, cb = std::move(on_peers)](const std::vector<Address>& fresh) {
+        LOG_DEBUG("dht.find", "announce " << short_hex(info_hash) << ": +" << fresh.size()
+                              << " peer(s): " << format_peers(fresh));
+        if (cb) cb(fresh);
+    };
     auto done = [this, info_hash, start = now, cb = std::move(on_done)](const std::vector<Address>& all) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_ - start).count();
         LOG_INFO("dht.find", "announce " << short_hex(info_hash) << " complete in "
@@ -246,7 +261,7 @@ void Node::announce_peer(const InfoHash& info_hash, uint16_t port, bool implied_
         if (cb) cb(all);
     };
     auto lookup = std::make_unique<Announce>(table_, rpc_, self_, info_hash, port, implied_port,
-                                             FindPeers::PeersCallback{}, std::move(done));
+                                             std::move(peers), std::move(done));
     LOG_DEBUG("dht.find", "announce " << short_hex(info_hash) << " L" << lookup->id() << " on port " << port
                           << (implied_port ? " (implied)" : "") << " started (table=" << table_.size() << ")");
     start_lookup(std::move(lookup), now);
