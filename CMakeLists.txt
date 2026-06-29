@@ -309,43 +309,7 @@ set(LIBRARY_SOURCES
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
 if(RATS_SEARCH_FEATURES)
     list(APPEND LIBRARY_SOURCES
-        src/bittorrent/bittorrent.cpp
-        src/bittorrent/bittorrent.h
-        src/bittorrent/bt_types.h
-        src/bittorrent/bt_bitfield.h
-        src/bittorrent/bt_bitfield.cpp
-        src/bittorrent/bt_file_storage.h
-        src/bittorrent/bt_file_storage.cpp
-        src/bittorrent/bt_torrent_info.h
-        src/bittorrent/bt_torrent_info.cpp
-        src/bittorrent/bt_piece_picker.h
-        src/bittorrent/bt_piece_picker.cpp
-        src/bittorrent/bt_messages.h
-        src/bittorrent/bt_messages.cpp
-        src/bittorrent/bt_handshake.h
-        src/bittorrent/bt_handshake.cpp
-        src/bittorrent/bt_peer_connection.h
-        src/bittorrent/bt_peer_connection.cpp
-        src/bittorrent/bt_extension.h
-        src/bittorrent/bt_extension.cpp
-        src/bittorrent/bt_choker.h
-        src/bittorrent/bt_choker.cpp
-        src/bittorrent/bt_torrent.h
-        src/bittorrent/bt_torrent.cpp
-        src/bittorrent/bt_client.h
-        src/bittorrent/bt_client.cpp
-        src/bittorrent/bt_network.h
-        src/bittorrent/bt_network.cpp
-        src/bittorrent/disk_io.cpp
-        src/bittorrent/disk_io.h
-        src/bittorrent/tracker.cpp
-        src/bittorrent/tracker.h
-        src/bittorrent/bt_create_torrent.h
-        src/bittorrent/bt_create_torrent.cpp
-        src/bittorrent/bt_resume_data.h
-        src/bittorrent/bt_resume_data.cpp
-        src/subsystems/bittorrent.h
-        src/subsystems/bittorrent.cpp
+
     )
 endif()
 
@@ -582,22 +546,7 @@ if(RATS_BUILD_TESTS)
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled
     if(RATS_SEARCH_FEATURES)
         list(APPEND TEST_SOURCES 
-            tests/test_bittorrent.cpp
-            tests/test_tracker.cpp
-            tests/test_disk_io.cpp
-            tests/test_bt_bitfield.cpp
-            tests/test_bt_file_storage.cpp
-            tests/test_bt_torrent_info.cpp
-            tests/test_bt_piece_picker.cpp
-            tests/test_bt_messages.cpp
-            tests/test_bt_handshake.cpp
-            tests/test_bt_peer_connection.cpp
-            tests/test_bt_extension.cpp
-            tests/test_bt_network.cpp
-            tests/test_bt_integration.cpp
-            tests/test_bt_create_torrent.cpp
-            tests/test_bt_resume_data.cpp
-            tests/test_node_bittorrent.cpp
+
         )
     endif()
 
