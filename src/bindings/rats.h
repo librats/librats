@@ -235,6 +235,21 @@ RATS_API rats_error_t rats_add_reconnect(rats_t node, const char* host, uint16_t
 /** Stop reconnecting to an address and drop it from the store. */
 RATS_API rats_error_t rats_remove_reconnect(rats_t node, const char* host, uint16_t port);
 
+/* — BitTorrent —
+ * Only functional when the library is built with RATS_SEARCH_FEATURES; the calls
+ * otherwise return RATS_ERR_NOT_ENABLED. The client keeps its own transport and,
+ * when DHT is enabled on the node first, shares it. Enable before start(). */
+
+/** Enable BitTorrent. listen_port 0 picks an ephemeral port; download_path is the
+ *  default save directory (NULL = "."). Enable DHT first to share the node's DHT. */
+RATS_API rats_error_t rats_enable_bittorrent(rats_t node, uint16_t listen_port, const char* download_path);
+/** Start downloading a magnet link (metadata is fetched from peers). */
+RATS_API rats_error_t rats_bt_add_magnet(rats_t node, const char* magnet_uri, const char* save_path);
+/** Start a torrent from a .torrent file on disk. */
+RATS_API rats_error_t rats_bt_add_torrent_file(rats_t node, const char* torrent_path, const char* save_path);
+/** Remove a torrent by its 40-char hex info-hash (downloaded files are kept). */
+RATS_API rats_error_t rats_bt_remove_torrent(rats_t node, const char* info_hash_hex);
+
 /* — logging (process-global; no node required) — */
 
 typedef enum {

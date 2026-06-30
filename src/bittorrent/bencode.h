@@ -1,145 +1,176 @@
 #pragma once
 
-#include <vector>
-#include <string>
-#include <unordered_map>
-#include <memory>
-#include <variant>
-#include <cstdint>
+/**
+ * @file bencode.h
+ * @brief Bencode value tree, decoder and encoder (BEP 3).
+ *
+ * Bencode is the serialization format used by every part of BitTorrent and by
+ * the DHT's KRPC protocol. This module is shared between both, so it is built
+ * unconditionally (not behind RATS_SEARCH_FEATURES).
+ *
+ * Design:
+ *  - `BencodeValue` is an owning value tree: an integer, a (binary-safe) string,
+ *    a list, or a dictionary. The ergonomic accessors make reading parsed data
+ *    read like the structure itself: `root["info"]["piece length"].as_integer()`.
+ *  - A dictionary is stored as a *sorted, duplicate-free* vector of key/value
+ *    pairs. That keeps lookups O(log n) without a per-dict hash allocation, and
+ *    makes encoding canonical by construction (bencode requires sorted keys).
+ *  - Decoding is hardened against hostile input: bounded recursion depth,
+ *    overflow-safe length/integer parsing, strict canonical integers, and a
+ *    full-buffer-consumption check. Malformed input never crashes — the
+ *    non-throwing `try_decode` returns `std::nullopt`, the throwing `decode`
+ *    throws `std::runtime_error`.
+ */
 
-// Use shared_ptr variant for GCC 11 and lower compatibility
-#ifndef LIBRATS_USE_SHARED_PTR_VARIANT
-#if defined(__GNUC__) && (__GNUC__ <= 11)
-#define LIBRATS_USE_SHARED_PTR_VARIANT 1
-#else
-#define LIBRATS_USE_SHARED_PTR_VARIANT 0
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+
+// Some older standard libraries can't place a container of an incomplete type
+// directly inside std::variant (the recursion `BencodeValue` -> container of
+// `BencodeValue`). On those toolchains we box the containers in a shared_ptr.
+// This is fully isolated behind the list_ref()/dict_ref() helpers below, so the
+// rest of the code never sees it. (Deep-copy is implemented explicitly either
+// way, so value semantics are identical on both paths.)
+#ifndef LIBRATS_BENCODE_BOXED_CONTAINERS
+#  if defined(__GNUC__) && (__GNUC__ <= 11)
+#    define LIBRATS_BENCODE_BOXED_CONTAINERS 1
+#  else
+#    define LIBRATS_BENCODE_BOXED_CONTAINERS 0
+#  endif
 #endif
+
+#if LIBRATS_BENCODE_BOXED_CONTAINERS
+#include <memory>
 #endif
 
 namespace librats {
 
-// Forward declarations
 class BencodeValue;
-using BencodeDict = std::unordered_map<std::string, BencodeValue>;
+
+/// A bencode list is a plain vector of values.
 using BencodeList = std::vector<BencodeValue>;
 
+/// A bencode dictionary, stored sorted by key with no duplicates. Keys are
+/// byte strings (binary-safe). The sorted invariant is maintained by both the
+/// decoder and the mutable `operator[]`, so iteration and encoding are canonical.
+using BencodeDict = std::vector<std::pair<std::string, BencodeValue>>;
+
 /**
- * Represents a bencoded value which can be:
- * - Integer (signed 64-bit)
- * - String (byte string)
- * - List (array of bencoded values)
- * - Dictionary (map of string keys to bencoded values)
+ * @brief One bencode value: integer, string, list or dictionary.
+ *
+ * Copying is a deep copy (true value semantics). Construct leaves directly
+ * (`BencodeValue(42)`, `BencodeValue("x")`) or containers via `create_list()` /
+ * `create_dict()` and the mutable accessors.
  */
 class BencodeValue {
 public:
-    enum class Type {
-        Integer,
-        String,
-        List,
-        Dictionary
-    };
+    enum class Type { Integer, String, List, Dictionary };
 
-    // Constructors
-    BencodeValue();
-    BencodeValue(int64_t value);
-    BencodeValue(const std::string& value);
+    BencodeValue();                       ///< empty string (binary-safe, zero length)
+    BencodeValue(std::int64_t value);
+    BencodeValue(std::string value);
     BencodeValue(const char* value);
-    BencodeValue(const BencodeList& value);
-    BencodeValue(const BencodeDict& value);
-    
-    // Copy and move constructors
+    BencodeValue(BencodeList value);
+    BencodeValue(BencodeDict value);
+
     BencodeValue(const BencodeValue& other);
     BencodeValue(BencodeValue&& other) noexcept;
     BencodeValue& operator=(const BencodeValue& other);
     BencodeValue& operator=(BencodeValue&& other) noexcept;
-    
     ~BencodeValue();
 
-    // Type checking
-    Type get_type() const { return type_; }
-    bool is_integer() const { return type_ == Type::Integer; }
-    bool is_string() const { return type_ == Type::String; }
-    bool is_list() const { return type_ == Type::List; }
-    bool is_dict() const { return type_ == Type::Dictionary; }
+    // ---- type ----
+    Type type()     const noexcept { return type_; }
+    Type get_type() const noexcept { return type_; }  ///< alias
+    bool is_integer() const noexcept { return type_ == Type::Integer; }
+    bool is_string()  const noexcept { return type_ == Type::String; }
+    bool is_list()    const noexcept { return type_ == Type::List; }
+    bool is_dict()    const noexcept { return type_ == Type::Dictionary; }
 
-    // Value access
-    int64_t as_integer() const;
-    const std::string& as_string() const;
-    const BencodeList& as_list() const;
-    const BencodeDict& as_dict() const;
+    // ---- typed access (throw std::runtime_error on a type mismatch) ----
+    std::int64_t        as_integer() const;
+    const std::string&  as_string()  const;
+    const BencodeList&  as_list()    const;
+    const BencodeDict&  as_dict()    const;
+    BencodeList&        as_list();   ///< mutable list (lists carry no invariant)
 
-    // Mutable access
-    BencodeList& as_list();
-    BencodeDict& as_dict();
+    // ---- safe, non-throwing helpers ----
+    /// Dictionary lookup. Returns nullptr if this is not a dict or the key is
+    /// absent. Never throws — the preferred way to read untrusted input.
+    const BencodeValue* find(std::string_view key) const noexcept;
+    bool has_key(std::string_view key) const noexcept { return find(key) != nullptr; }
 
-    // Dictionary operations
-    bool has_key(const std::string& key) const;
-    const BencodeValue& operator[](const std::string& key) const;
-    BencodeValue& operator[](const std::string& key);
+    // ---- dictionary building / reading ----
+    /// Const dictionary read; throws std::runtime_error if the key is missing.
+    const BencodeValue& operator[](std::string_view key) const;
+    /// Mutable dictionary access; inserts a default-constructed value (keeping
+    /// the sorted invariant) if the key is absent. Throws if this is not a dict.
+    BencodeValue& operator[](std::string_view key);
 
-    // List operations
-    const BencodeValue& operator[](size_t index) const;
-    BencodeValue& operator[](size_t index);
-    void push_back(const BencodeValue& value);
-    size_t size() const;
+    // ---- list building / reading ----
+    const BencodeValue& operator[](std::size_t index) const;  ///< throws if out of range
+    BencodeValue&       operator[](std::size_t index);        ///< throws if out of range
+    void push_back(BencodeValue value);                        ///< append to a list
+    std::size_t size() const;  ///< element/byte count for string/list/dict; throws otherwise
 
-    // Encoding
-    std::vector<uint8_t> encode() const;
-    std::string encode_string() const;
+    // ---- encoding ----
+    std::vector<std::uint8_t> encode() const;
+    std::string               encode_string() const;
+    void                      encode_to(std::vector<std::uint8_t>& out) const;
 
-    // Static creation methods
-    static BencodeValue create_integer(int64_t value);
-    static BencodeValue create_string(const std::string& value);
-    static BencodeValue create_list();
-    static BencodeValue create_dict();
+    // ---- factories (kept for readability at call sites) ----
+    static BencodeValue create_integer(std::int64_t v) { return BencodeValue(v); }
+    static BencodeValue create_string(std::string v)   { return BencodeValue(std::move(v)); }
+    static BencodeValue create_list()                  { return BencodeValue(BencodeList{}); }
+    static BencodeValue create_dict()                  { return BencodeValue(BencodeDict{}); }
 
 private:
     Type type_;
-#if LIBRATS_USE_SHARED_PTR_VARIANT
-    std::variant<int64_t, std::string, std::shared_ptr<BencodeList>, std::shared_ptr<BencodeDict>> value_;
+#if LIBRATS_BENCODE_BOXED_CONTAINERS
+    std::variant<std::int64_t, std::string,
+                 std::shared_ptr<BencodeList>, std::shared_ptr<BencodeDict>> value_;
 #else
-    std::variant<int64_t, std::string, BencodeList, BencodeDict> value_;
+    std::variant<std::int64_t, std::string, BencodeList, BencodeDict> value_;
 #endif
-    
-    void encode_to_buffer(std::vector<uint8_t>& buffer) const;
+
+    // The only place that knows about container boxing.
+    void set_list(BencodeList l);
+    void set_dict(BencodeDict d);
+    BencodeList&       list_ref();
+    const BencodeList& list_ref() const;
+    BencodeDict&       dict_ref();
+    const BencodeDict& dict_ref() const;
 };
 
 /**
- * Bencode decoder
+ * @brief Bencode decoder entry points (throwing — kept for existing callers).
+ *
+ * Each decodes exactly one value and requires it to span the whole buffer.
+ * Throws std::runtime_error on any malformed input.
  */
 class BencodeDecoder {
 public:
-    static BencodeValue decode(const std::vector<uint8_t>& data);
+    static BencodeValue decode(const std::vector<std::uint8_t>& data);
     static BencodeValue decode(const std::string& data);
-    static BencodeValue decode(const uint8_t* data, size_t size);
-
-private:
-    const uint8_t* data_;
-    size_t size_;
-    size_t pos_;
-
-    BencodeDecoder(const uint8_t* data, size_t size);
-    
-    BencodeValue decode_value();
-    BencodeValue decode_integer();
-    BencodeValue decode_string();
-    BencodeValue decode_list();
-    BencodeValue decode_dict();
-    
-    bool has_more() const { return pos_ < size_; }
-    uint8_t current_byte() const;
-    uint8_t consume_byte();
-    std::string consume_string(size_t length);
+    static BencodeValue decode(const std::uint8_t* data, std::size_t size);
 };
 
-/**
- * Utility functions
- */
 namespace bencode {
-    BencodeValue decode(const std::vector<uint8_t>& data);
+    /// Throwing decode (one value, whole buffer). Throws std::runtime_error.
+    BencodeValue decode(const std::vector<std::uint8_t>& data);
     BencodeValue decode(const std::string& data);
-    std::vector<uint8_t> encode(const BencodeValue& value);
-    std::string encode_string(const BencodeValue& value);
+
+    /// Non-throwing decode (one value, whole buffer). nullopt on malformed input.
+    std::optional<BencodeValue> try_decode(const std::uint8_t* data, std::size_t size) noexcept;
+    std::optional<BencodeValue> try_decode(std::string_view data) noexcept;
+
+    std::vector<std::uint8_t> encode(const BencodeValue& value);
+    std::string               encode_string(const BencodeValue& value);
 }
 
-} // namespace librats 
+} // namespace librats

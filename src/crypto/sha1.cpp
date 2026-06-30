@@ -148,6 +148,38 @@ std::string SHA1::finalize() {
     return result.str();
 }
 
+std::array<uint8_t, 20> SHA1::finalize_bytes() {
+    if (!finalized) {
+        // Same padding as finalize(): append 0x80, zero-fill to 56 mod 64, then
+        // the 64-bit big-endian bit length.
+        uint64_t bit_length = total_length * 8;
+        update(0x80);
+        while (buffer_length != 56) {
+            update(0x00);
+        }
+        for (int i = 7; i >= 0; i--) {
+            update(static_cast<uint8_t>(bit_length >> (i * 8)));
+        }
+        finalized = true;
+    }
+
+    std::array<uint8_t, 20> out{};
+    const uint32_t h[5] = {h0, h1, h2, h3, h4};
+    for (int i = 0; i < 5; i++) {
+        out[i * 4]     = static_cast<uint8_t>(h[i] >> 24);
+        out[i * 4 + 1] = static_cast<uint8_t>(h[i] >> 16);
+        out[i * 4 + 2] = static_cast<uint8_t>(h[i] >> 8);
+        out[i * 4 + 3] = static_cast<uint8_t>(h[i]);
+    }
+    return out;
+}
+
+std::array<uint8_t, 20> SHA1::hash_raw(const uint8_t* data, size_t length) {
+    SHA1 hasher;
+    hasher.update(data, length);
+    return hasher.finalize_bytes();
+}
+
 std::string SHA1::hash(const std::string& input) {
     SHA1 hasher;
     hasher.update(input);
