@@ -10,6 +10,9 @@
 #include "subsystems/file_transfer.h"
 #include "subsystems/ping_service.h"
 #include "subsystems/reconnection.h"
+#ifdef RATS_SEARCH_FEATURES
+#include "subsystems/bittorrent.h"
+#endif
 #include "core/address.h"
 #include "util/logger.h"
 #include "util/json.h"
@@ -36,6 +39,9 @@ struct RatsHandle {
     FileTransfer*        files     = nullptr;
     PingService*         ping      = nullptr;
     ReconnectionService* reconnect = nullptr;
+#ifdef RATS_SEARCH_FEATURES
+    Bittorrent*          bittorrent = nullptr;
+#endif
     std::string data_dir;  ///< copied from NodeConfig so subsystems can co-locate state
     bool dht_enabled     = false;
     bool mdns_enabled    = false;
@@ -487,6 +493,75 @@ rats_error_t rats_enable_reconnect(rats_t node) {
         h->reconnect = h->node->add_subsystem(std::make_unique<ReconnectionService>(rc));
     }
     return RATS_OK;
+}
+
+/* — BitTorrent (only functional when built with RATS_SEARCH_FEATURES) — */
+
+rats_error_t rats_enable_bittorrent(rats_t node, uint16_t listen_port, const char* download_path) {
+#ifdef RATS_SEARCH_FEATURES
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (!h->bittorrent) {
+        Bittorrent::Config cfg;
+        cfg.client.listen_port   = listen_port;
+        cfg.client.download_path = download_path ? download_path : ".";
+        h->bittorrent = h->node->add_subsystem(std::make_unique<Bittorrent>(cfg));
+    }
+    return RATS_OK;
+#else
+    (void)node; (void)listen_port; (void)download_path;
+    return RATS_ERR_NOT_ENABLED;
+#endif
+}
+
+rats_error_t rats_bt_add_magnet(rats_t node, const char* magnet_uri, const char* save_path) {
+#ifdef RATS_SEARCH_FEATURES
+    if (!magnet_uri) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->bittorrent || !h->bittorrent->is_running()) return RATS_ERR_NOT_ENABLED;
+    auto* c = h->bittorrent->client();
+    // Mutating the client must happen on its reactor thread.
+    c->reactor().post([c, uri = std::string(magnet_uri),
+                       sp = std::string(save_path ? save_path : "")] { c->add_magnet(uri, sp); });
+    return RATS_OK;
+#else
+    (void)node; (void)magnet_uri; (void)save_path;
+    return RATS_ERR_NOT_ENABLED;
+#endif
+}
+
+rats_error_t rats_bt_add_torrent_file(rats_t node, const char* torrent_path, const char* save_path) {
+#ifdef RATS_SEARCH_FEATURES
+    if (!torrent_path) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->bittorrent || !h->bittorrent->is_running()) return RATS_ERR_NOT_ENABLED;
+    auto info = bittorrent::TorrentInfo::from_file(torrent_path);
+    if (!info) return RATS_ERR_INVALID_ARG;
+    auto* c = h->bittorrent->client();
+    c->reactor().post([c, info = *info, sp = std::string(save_path ? save_path : "")] {
+        c->add_torrent(info, sp);
+    });
+    return RATS_OK;
+#else
+    (void)node; (void)torrent_path; (void)save_path;
+    return RATS_ERR_NOT_ENABLED;
+#endif
+}
+
+rats_error_t rats_bt_remove_torrent(rats_t node, const char* info_hash_hex) {
+#ifdef RATS_SEARCH_FEATURES
+    if (!info_hash_hex) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->bittorrent || !h->bittorrent->is_running()) return RATS_ERR_NOT_ENABLED;
+    auto ih = bittorrent::info_hash_from_hex(info_hash_hex);
+    if (!ih) return RATS_ERR_INVALID_ARG;
+    auto* c = h->bittorrent->client();
+    c->reactor().post([c, ih = *ih] { c->remove_torrent(ih); });
+    return RATS_OK;
+#else
+    (void)node; (void)info_hash_hex;
+    return RATS_ERR_NOT_ENABLED;
+#endif
 }
 
 rats_error_t rats_add_reconnect(rats_t node, const char* host, uint16_t port) {

@@ -309,7 +309,45 @@ set(LIBRARY_SOURCES
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
 if(RATS_SEARCH_FEATURES)
     list(APPEND LIBRARY_SOURCES
-
+        src/bittorrent/types.h
+        src/bittorrent/types.cpp
+        src/bittorrent/byte_io.h
+        src/bittorrent/bitfield.h
+        src/bittorrent/bitfield.cpp
+        src/bittorrent/file_storage.h
+        src/bittorrent/file_storage.cpp
+        src/bittorrent/magnet_uri.h
+        src/bittorrent/magnet_uri.cpp
+        src/bittorrent/torrent_info.h
+        src/bittorrent/torrent_info.cpp
+        src/bittorrent/store_buffer.h
+        src/bittorrent/store_buffer.cpp
+        src/bittorrent/disk_io.h
+        src/bittorrent/disk_io.cpp
+        src/bittorrent/piece_picker.h
+        src/bittorrent/piece_picker.cpp
+        src/bittorrent/reactor.h
+        src/bittorrent/reactor.cpp
+        src/bittorrent/peer_connection.h
+        src/bittorrent/peer_connection.cpp
+        src/bittorrent/choker.h
+        src/bittorrent/choker.cpp
+        src/bittorrent/torrent.h
+        src/bittorrent/torrent.cpp
+        src/bittorrent/client.h
+        src/bittorrent/client.cpp
+        src/bittorrent/extensions.h
+        src/bittorrent/extensions.cpp
+        src/bittorrent/peer_list.h
+        src/bittorrent/peer_list.cpp
+        src/bittorrent/tracker.h
+        src/bittorrent/tracker.cpp
+        src/bittorrent/resume_data.h
+        src/bittorrent/resume_data.cpp
+        src/bittorrent/torrent_creator.h
+        src/bittorrent/torrent_creator.cpp
+        src/subsystems/bittorrent.h
+        src/subsystems/bittorrent.cpp
     )
 endif()
 
@@ -545,8 +583,37 @@ if(RATS_BUILD_TESTS)
 
     # Add BitTorrent tests if RATS_SEARCH_FEATURES is enabled
     if(RATS_SEARCH_FEATURES)
-        list(APPEND TEST_SOURCES 
-
+        list(APPEND TEST_SOURCES
+            # Phase 0 — primitives
+            tests/test_bt_types.cpp
+            tests/test_bt_byte_io.cpp
+            tests/test_bt_bitfield.cpp
+            # Phase 1 — metadata
+            tests/test_bt_file_storage.cpp
+            tests/test_bt_magnet.cpp
+            tests/test_bt_torrent_info.cpp
+            # Phase 2 — disk I/O
+            tests/test_bt_store_buffer.cpp
+            tests/test_bt_disk_io.cpp
+            # Phase 3 — piece picker
+            tests/test_bt_piece_picker.cpp
+            # Phase 4 — reactor + peer wire protocol
+            tests/test_bt_reactor.cpp
+            tests/test_bt_peer_connection.cpp
+            # Phase 5 — torrent + client + choker
+            tests/test_bt_choker.cpp
+            tests/test_bt_download.cpp
+            # Phase 6 — extension protocol + metadata exchange + discovery
+            tests/test_bt_extensions.cpp
+            tests/test_bt_magnet_fetch.cpp
+            tests/test_bt_peer_list.cpp
+            tests/test_bt_pex.cpp
+            tests/test_bt_tracker.cpp
+            # Phase 7 — fast resume + torrent creation
+            tests/test_bt_resume_data.cpp
+            tests/test_bt_torrent_creator.cpp
+            # Phase 8 — node subsystem integration
+            tests/test_bt_subsystem.cpp
         )
     endif()
 

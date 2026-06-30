@@ -1,0 +1,361 @@
+#include "bittorrent/peer_connection.h"
+#include "bittorrent/byte_io.h"
+
+#include <cerrno>
+#include <cstring>
+
+namespace librats::bittorrent {
+
+namespace {
+
+#ifdef _WIN32
+inline bool would_block() { return WSAGetLastError() == WSAEWOULDBLOCK; }
+#else
+inline bool would_block() { return errno == EAGAIN || errno == EWOULDBLOCK; }
+#endif
+
+/// Largest message we will accept. A bitfield for ~16M pieces fits; a piece
+/// message is ~16 KiB. Anything larger is treated as a protocol violation.
+constexpr std::uint32_t kMaxMessageLen = 2 * 1024 * 1024;
+
+constexpr std::size_t kRecvChunk = 64 * 1024;
+
+} // namespace
+
+PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
+                               const InfoHash& info_hash, const PeerId& our_peer_id,
+                               std::uint32_t num_pieces, Observer* observer,
+                               std::string remote_ip, std::uint16_t remote_port)
+    : reactor_(reactor)
+    , sock_(sock)
+    , outgoing_(outgoing)
+    , info_hash_(info_hash)
+    , our_peer_id_(our_peer_id)
+    , num_pieces_(num_pieces)
+    , obs_(observer)
+    , bound_(true)
+    , remote_ip_(std::move(remote_ip))
+    , remote_port_(remote_port)
+    , peer_have_(num_pieces, false) {}
+
+PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, const PeerId& our_peer_id,
+                               Resolver resolver, std::string remote_ip, std::uint16_t remote_port)
+    : reactor_(reactor)
+    , sock_(sock)
+    , outgoing_(false)
+    , info_hash_{}
+    , our_peer_id_(our_peer_id)
+    , num_pieces_(0)
+    , obs_(nullptr)
+    , resolver_(std::move(resolver))
+    , bound_(false)
+    , remote_ip_(std::move(remote_ip))
+    , remote_port_(remote_port) {}
+
+PeerConnection::~PeerConnection() {
+    if (!closed_ && is_valid_socket(sock_)) {
+        reactor_.remove(sock_);
+        close_socket(sock_);
+        sock_ = INVALID_SOCKET_VALUE;
+    }
+}
+
+void PeerConnection::start() {
+    if (started_) return;
+    started_ = true;
+    set_socket_nonblocking(sock_);
+    reactor_.add(sock_, PollIn, [this](std::uint32_t ev) { on_io(ev); });
+
+    // An outgoing peer sends its handshake immediately; an incoming one waits to
+    // learn the info-hash, then replies (see parse_handshake()).
+    if (outgoing_) send_handshake();
+}
+
+void PeerConnection::send_handshake() {
+    std::uint8_t hs[kHandshakeSize];
+    hs[0] = std::uint8_t(kProtocolStringLen);
+    std::memcpy(hs + 1, kProtocolString, kProtocolStringLen);
+    ReservedBytes reserved{};
+    reserved::enable_dht(reserved);
+    reserved::enable_fast(reserved);
+    reserved::enable_extensions(reserved);
+    std::memcpy(hs + 20, reserved.data(), 8);
+    std::memcpy(hs + 28, info_hash_.data(), 20);
+    std::memcpy(hs + 48, our_peer_id_.data(), 20);
+    handshake_sent_ = true;
+    queue(hs, kHandshakeSize);
+}
+
+void PeerConnection::close(const std::string& reason) {
+    if (closed_) return;
+    closed_ = true;
+    if (is_valid_socket(sock_)) {
+        reactor_.remove(sock_);
+        close_socket(sock_);
+        sock_ = INVALID_SOCKET_VALUE;
+    }
+    if (obs_) obs_->on_closed(*this, reason);
+}
+
+// ---- I/O ----
+
+void PeerConnection::on_io(std::uint32_t events) {
+    if (closed_) return;
+    if (events & PollOut) flush();
+    if (closed_) return;
+    if (events & PollIn) do_read();
+    if (closed_) return;
+    if (events & (PollErr | PollHup)) close("socket error");
+}
+
+void PeerConnection::do_read() {
+    for (;;) {
+        rx_.ensure_space(kRecvChunk);
+        const int n = ::recv(sock_, reinterpret_cast<char*>(rx_.write_ptr()),
+                             static_cast<int>(rx_.write_space()), 0);
+        if (n > 0) {
+            rx_.received(std::size_t(n));
+            continue;
+        }
+        if (n == 0) { close("peer closed connection"); return; }
+        if (would_block()) break;
+        close("recv error");
+        return;
+    }
+
+    parse();
+    if (closed_) return;
+    if (rx_.empty()) rx_.clear();
+    else if (rx_.front_waste() > (1u << 20)) rx_.normalize();
+}
+
+void PeerConnection::parse() {
+    if (!handshake_received_) {
+        if (rx_.size() < kHandshakeSize) return;
+        if (!parse_handshake()) return;  // consumed 68 bytes (or closed)
+    }
+
+    while (!closed_ && rx_.size() >= 4) {
+        const std::uint32_t len = read_u32_be(rx_.data());
+        if (len > kMaxMessageLen) { close("oversize message"); return; }
+        if (rx_.size() < std::size_t(4) + len) break;  // wait for the rest
+        if (len == 0) { rx_.consume(4); continue; }     // keep-alive
+
+        const std::uint8_t  id      = rx_.data()[4];
+        const std::uint8_t* payload = rx_.data() + 5;
+        const std::uint32_t plen    = len - 1;
+        dispatch(MessageId(id), payload, plen);
+        if (closed_) return;
+        rx_.consume(std::size_t(4) + len);
+    }
+}
+
+bool PeerConnection::parse_handshake() {
+    const std::uint8_t* d = rx_.data();
+    if (d[0] != kProtocolStringLen || std::memcmp(d + 1, kProtocolString, kProtocolStringLen) != 0) {
+        close("bad protocol header");
+        return false;
+    }
+    std::memcpy(peer_reserved_.data(), d + 20, 8);
+
+    InfoHash their_info{};
+    std::memcpy(their_info.data(), d + 28, 20);
+
+    if (bound_) {
+        // Outgoing: the info-hash must be the one we dialed for.
+        if (their_info != info_hash_) { close("info-hash mismatch"); return false; }
+    } else {
+        // Incoming: resolve which torrent this is for and late-bind to it.
+        Binding b;
+        if (!resolver_ || !resolver_(their_info, b) || !b.observer) {
+            close("unknown torrent");
+            return false;
+        }
+        info_hash_  = their_info;
+        obs_        = b.observer;
+        num_pieces_ = b.num_pieces;
+        peer_have_  = Bitfield(num_pieces_, false);
+        bound_      = true;
+    }
+
+    std::memcpy(peer_id_.data(), d + 48, 20);
+    rx_.consume(kHandshakeSize);
+    handshake_received_ = true;
+
+    // An incoming connection now knows which torrent it is for and replies.
+    if (!outgoing_ && !handshake_sent_) send_handshake();
+
+    if (obs_) obs_->on_handshake(*this, info_hash_, peer_id_);
+    return true;
+}
+
+void PeerConnection::dispatch(MessageId id, const std::uint8_t* payload, std::uint32_t len) {
+    auto bad = [&] { close("malformed message"); };
+
+    switch (id) {
+        case MessageId::Choke:
+            if (len != 0) return bad();
+            peer_choking_ = true;
+            if (obs_) obs_->on_choke(*this, true);
+            break;
+        case MessageId::Unchoke:
+            if (len != 0) return bad();
+            peer_choking_ = false;
+            if (obs_) obs_->on_choke(*this, false);
+            break;
+        case MessageId::Interested:
+            if (len != 0) return bad();
+            peer_interested_ = true;
+            if (obs_) obs_->on_interest(*this, true);
+            break;
+        case MessageId::NotInterested:
+            if (len != 0) return bad();
+            peer_interested_ = false;
+            if (obs_) obs_->on_interest(*this, false);
+            break;
+        case MessageId::Have: {
+            if (len != 4) return bad();
+            const std::uint32_t piece = read_u32_be(payload);
+            if (piece < peer_have_.size()) peer_have_.set(piece);
+            if (obs_) obs_->on_have(*this, piece);
+            break;
+        }
+        case MessageId::Bitfield: {
+            const std::uint32_t bits = num_pieces_ ? num_pieces_ : len * 8;
+            peer_have_.assign(payload, len, bits);
+            if (obs_) obs_->on_bitfield(*this, peer_have_);
+            break;
+        }
+        case MessageId::Request: {
+            if (len != 12) return bad();
+            if (obs_) obs_->on_request(*this, read_u32_be(payload), read_u32_be(payload + 4),
+                                       read_u32_be(payload + 8));
+            break;
+        }
+        case MessageId::Piece: {
+            if (len < 8) return bad();
+            if (obs_) obs_->on_piece(*this, read_u32_be(payload), read_u32_be(payload + 4),
+                                     ByteView(payload + 8, len - 8));
+            break;
+        }
+        case MessageId::Cancel: {
+            if (len != 12) return bad();
+            if (obs_) obs_->on_cancel(*this, read_u32_be(payload), read_u32_be(payload + 4),
+                                      read_u32_be(payload + 8));
+            break;
+        }
+        case MessageId::Port:
+            if (len != 2) return bad();
+            if (obs_) obs_->on_port(*this, read_u16_be(payload));
+            break;
+        case MessageId::Extended:
+            if (len < 1) return bad();
+            if (obs_) obs_->on_extended(*this, payload[0], ByteView(payload + 1, len - 1));
+            break;
+        default:
+            break;  // unknown id — ignore for forward compatibility
+    }
+}
+
+// ---- send ----
+
+void PeerConnection::send_message(MessageId id, const std::uint8_t* payload, std::uint32_t len) {
+    std::uint8_t header[5];
+    write_u32_be(header, len + 1);
+    header[4] = std::uint8_t(id);
+    queue(header, 5);
+    if (len) queue(payload, len);
+}
+
+void PeerConnection::send_keepalive() {
+    std::uint8_t z[4] = {0, 0, 0, 0};
+    queue(z, 4);
+}
+void PeerConnection::send_choke()         { am_choking_ = true;    send_message(MessageId::Choke, nullptr, 0); }
+void PeerConnection::send_unchoke()       { am_choking_ = false;   send_message(MessageId::Unchoke, nullptr, 0); }
+void PeerConnection::send_interested()    { am_interested_ = true; send_message(MessageId::Interested, nullptr, 0); }
+void PeerConnection::send_not_interested(){ am_interested_ = false;send_message(MessageId::NotInterested, nullptr, 0); }
+
+void PeerConnection::send_have(std::uint32_t piece) {
+    std::uint8_t p[4];
+    write_u32_be(p, piece);
+    send_message(MessageId::Have, p, 4);
+}
+
+void PeerConnection::send_bitfield(const Bitfield& bitfield) {
+    send_message(MessageId::Bitfield, bitfield.data(), std::uint32_t(bitfield.data_size()));
+}
+
+void PeerConnection::send_request(std::uint32_t piece, std::uint32_t offset, std::uint32_t length) {
+    std::uint8_t p[12];
+    write_u32_be(p, piece);
+    write_u32_be(p + 4, offset);
+    write_u32_be(p + 8, length);
+    send_message(MessageId::Request, p, 12);
+}
+
+void PeerConnection::send_piece(std::uint32_t piece, std::uint32_t offset, ByteView data) {
+    std::uint8_t head[8];
+    write_u32_be(head, piece);
+    write_u32_be(head + 4, offset);
+    std::uint8_t header[5];
+    write_u32_be(header, std::uint32_t(9 + data.size()));
+    header[4] = std::uint8_t(MessageId::Piece);
+    queue(header, 5);
+    queue(head, 8);
+    if (!data.empty()) queue(data.data(), data.size());
+}
+
+void PeerConnection::send_cancel(std::uint32_t piece, std::uint32_t offset, std::uint32_t length) {
+    std::uint8_t p[12];
+    write_u32_be(p, piece);
+    write_u32_be(p + 4, offset);
+    write_u32_be(p + 8, length);
+    send_message(MessageId::Cancel, p, 12);
+}
+
+void PeerConnection::send_port(std::uint16_t port) {
+    std::uint8_t p[2];
+    write_u16_be(p, port);
+    send_message(MessageId::Port, p, 2);
+}
+
+void PeerConnection::send_extended(std::uint8_t ext_id, ByteView payload) {
+    std::uint8_t header[5];
+    write_u32_be(header, std::uint32_t(2 + payload.size()));
+    header[4] = std::uint8_t(MessageId::Extended);
+    queue(header, 5);
+    queue(&ext_id, 1);
+    if (!payload.empty()) queue(payload.data(), payload.size());
+}
+
+void PeerConnection::queue(const std::uint8_t* data, std::size_t len) {
+    if (closed_ || len == 0) return;
+    out_.insert(out_.end(), data, data + len);
+    flush();
+}
+
+void PeerConnection::flush() {
+    while (out_sent_ < out_.size()) {
+        const int n = ::send(sock_, reinterpret_cast<const char*>(out_.data() + out_sent_),
+                            static_cast<int>(out_.size() - out_sent_), 0);
+        if (n > 0) {
+            out_sent_ += std::size_t(n);
+            continue;
+        }
+        if (would_block()) { want_write(true); return; }
+        close("send error");
+        return;
+    }
+    out_.clear();
+    out_sent_ = 0;
+    want_write(false);
+}
+
+void PeerConnection::want_write(bool on) {
+    if (on == want_write_ || closed_) return;
+    want_write_ = on;
+    reactor_.modify(sock_, PollIn | (on ? PollOut : PollNone));
+}
+
+} // namespace librats::bittorrent
