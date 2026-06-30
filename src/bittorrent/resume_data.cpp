@@ -10,10 +10,7 @@ namespace {
 constexpr char kFormatTag[] = "librats resume";
 
 const librats::BencodeValue* find(const librats::BencodeValue& d, const char* key) {
-    if (!d.is_dict()) return nullptr;
-    const auto& m = d.as_dict();
-    auto it = m.find(key);
-    return it == m.end() ? nullptr : &it->second;
+    return d.find(key);
 }
 } // namespace
 

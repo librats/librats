@@ -618,14 +618,117 @@ TEST_F(BencodeTest, AdditionalDecodingErrorsTest) {
     EXPECT_THROW(bencode::decode(""), std::runtime_error);
 }
 
-// Test integers with leading zeros (allowed by this implementation)
-TEST_F(BencodeTest, LeadingZerosTest) {
-    // Test integer with leading zeros (should be allowed)
-    BencodeValue decoded = bencode::decode("i01e");
-    EXPECT_TRUE(decoded.is_integer());
-    EXPECT_EQ(decoded.as_integer(), 1);
-    
-    BencodeValue decoded_zero = bencode::decode("i00e");
-    EXPECT_TRUE(decoded_zero.is_integer());
-    EXPECT_EQ(decoded_zero.as_integer(), 0);
-} 
+// Per BEP 3 a bencoded integer is canonical: no leading zeros, no "-0".
+// Non-canonical integers must be rejected (they used to be silently accepted).
+TEST_F(BencodeTest, NonCanonicalIntegersRejectedTest) {
+    EXPECT_THROW(bencode::decode("i01e"), std::runtime_error);   // leading zero
+    EXPECT_THROW(bencode::decode("i00e"), std::runtime_error);   // leading zeros
+    EXPECT_THROW(bencode::decode("i-0e"), std::runtime_error);   // negative zero
+    EXPECT_THROW(bencode::decode("i007e"), std::runtime_error);  // leading zeros
+    EXPECT_THROW(bencode::decode("i1 e"), std::runtime_error);   // embedded space
+    EXPECT_THROW(bencode::decode("i+1e"), std::runtime_error);   // explicit plus
+    EXPECT_THROW(bencode::decode("i1a2e"), std::runtime_error);  // non-digit
+
+    // The canonical forms still decode fine.
+    EXPECT_EQ(bencode::decode("i0e").as_integer(), 0);
+    EXPECT_EQ(bencode::decode("i-1e").as_integer(), -1);
+    EXPECT_EQ(bencode::decode("i10e").as_integer(), 10);
+}
+
+// ---- Hardening: hostile / malformed input must be rejected, never crash ----
+
+// A deeply nested value used to overflow the call stack; now it is rejected by
+// the recursion-depth limit.
+TEST_F(BencodeTest, DeepNestingIsRejectedTest) {
+    std::string bomb(100000, 'l');           // 100k unterminated nested lists
+    EXPECT_THROW(bencode::decode(bomb), std::runtime_error);
+
+    // A legal structure right at a sane depth still decodes.
+    std::string ok = std::string(50, 'l') + std::string(50, 'e');
+    EXPECT_NO_THROW(bencode::decode(ok));
+}
+
+// A huge declared string length must not overflow the bounds check nor allocate.
+TEST_F(BencodeTest, HugeStringLengthIsRejectedTest) {
+    EXPECT_THROW(bencode::decode("99999999999999999999:x"), std::runtime_error);
+    EXPECT_THROW(bencode::decode("18446744073709551616:x"), std::runtime_error); // 2^64
+    EXPECT_THROW(bencode::decode("100:short"), std::runtime_error);
+}
+
+// Integers outside the int64 range are rejected (no UB).
+TEST_F(BencodeTest, IntegerOutOfRangeTest) {
+    EXPECT_THROW(bencode::decode("i9223372036854775808e"), std::runtime_error);   // INT64_MAX+1
+    EXPECT_THROW(bencode::decode("i-9223372036854775809e"), std::runtime_error);  // INT64_MIN-1
+    EXPECT_THROW(bencode::decode("i99999999999999999999999e"), std::runtime_error);
+
+    // The exact limits round-trip.
+    EXPECT_EQ(bencode::decode("i9223372036854775807e").as_integer(),
+              std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(bencode::decode("i-9223372036854775808e").as_integer(),
+              std::numeric_limits<int64_t>::min());
+}
+
+// One value must span the whole buffer — trailing bytes are an error.
+TEST_F(BencodeTest, TrailingGarbageIsRejectedTest) {
+    EXPECT_THROW(bencode::decode("i42eX"), std::runtime_error);
+    EXPECT_THROW(bencode::decode("5:helloXYZ"), std::runtime_error);
+    EXPECT_THROW(bencode::decode("lee"), std::runtime_error);       // extra 'e'
+    EXPECT_THROW(bencode::decode("dededee"), std::runtime_error);
+}
+
+// Duplicate dictionary keys are ambiguous and rejected.
+TEST_F(BencodeTest, DuplicateKeysRejectedTest) {
+    EXPECT_THROW(bencode::decode("d1:ai1e1:ai2ee"), std::runtime_error);
+}
+
+// Keys arriving out of order are tolerated and stored sorted (canonical on re-encode).
+TEST_F(BencodeTest, UnsortedKeysAreSortedTest) {
+    BencodeValue v = bencode::decode("d1:bi2e1:ai1ee");
+    ASSERT_TRUE(v.is_dict());
+    ASSERT_TRUE(v.has_key("a"));
+    ASSERT_TRUE(v.has_key("b"));
+    EXPECT_EQ(v["a"].as_integer(), 1);
+    EXPECT_EQ(v["b"].as_integer(), 2);
+    // Re-encoding yields canonical (sorted) order regardless of input order.
+    EXPECT_EQ(v.encode_string(), "d1:ai1e1:bi2ee");
+}
+
+// find() is a non-throwing dictionary lookup.
+TEST_F(BencodeTest, FindIsNonThrowingTest) {
+    BencodeValue v = bencode::decode("d3:fooi7ee");
+    ASSERT_NE(v.find("foo"), nullptr);
+    EXPECT_EQ(v.find("foo")->as_integer(), 7);
+    EXPECT_EQ(v.find("missing"), nullptr);
+
+    // find() on a non-dictionary is safe and returns nullptr (no throw).
+    BencodeValue i(int64_t{1});
+    EXPECT_EQ(i.find("anything"), nullptr);
+}
+
+// try_decode never throws: it reports malformed input as nullopt.
+TEST_F(BencodeTest, TryDecodeNeverThrowsTest) {
+    auto good = bencode::try_decode("i42e");
+    ASSERT_TRUE(good.has_value());
+    EXPECT_EQ(good->as_integer(), 42);
+
+    EXPECT_FALSE(bencode::try_decode("i42").has_value());          // truncated
+    EXPECT_FALSE(bencode::try_decode("i01e").has_value());         // non-canonical
+    EXPECT_FALSE(bencode::try_decode(std::string(100000, 'l')).has_value()); // bomb
+    EXPECT_FALSE(bencode::try_decode("").has_value());             // empty
+}
+
+// Deep copies are independent (regression: boxed-container path used to share state).
+TEST_F(BencodeTest, DeepCopyIndependenceTest) {
+    BencodeValue original = BencodeValue::create_dict();
+    original["k"] = BencodeValue(1);
+
+    BencodeValue copy = original;          // copy ctor
+    copy["k"] = BencodeValue(2);
+    EXPECT_EQ(original["k"].as_integer(), 1);   // original unchanged
+    EXPECT_EQ(copy["k"].as_integer(), 2);
+
+    BencodeValue assigned;
+    assigned = original;                    // copy assignment
+    assigned["k"] = BencodeValue(3);
+    EXPECT_EQ(original["k"].as_integer(), 1);
+}

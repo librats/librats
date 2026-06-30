@@ -89,10 +89,7 @@ std::optional<std::pair<std::size_t, std::size_t>> find_info_span(const Bytes& b
 // ---- safe bencode accessors (the BencodeValue accessors throw on mismatch) ----
 
 const librats::BencodeValue* find(const librats::BencodeValue& dict, const char* key) {
-    if (!dict.is_dict()) return nullptr;
-    const auto& map = dict.as_dict();
-    auto it = map.find(key);
-    return it == map.end() ? nullptr : &it->second;
+    return dict.find(key);
 }
 
 const std::string* find_string(const librats::BencodeValue& dict, const char* key) {

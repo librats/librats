@@ -81,10 +81,7 @@ std::size_t bencode_value_length(const std::uint8_t* d, std::size_t n, std::size
 }
 
 const librats::BencodeValue* find(const librats::BencodeValue& dict, const char* key) {
-    if (!dict.is_dict()) return nullptr;
-    const auto& m = dict.as_dict();
-    auto it = m.find(key);
-    return it == m.end() ? nullptr : &it->second;
+    return dict.find(key);
 }
 
 std::optional<std::int64_t> find_int(const librats::BencodeValue& dict, const char* key) {
