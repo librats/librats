@@ -4,6 +4,7 @@
 #include "bittorrent/types.h"
 
 #include <algorithm>
+#include <set>
 
 using namespace librats::bittorrent;
 
@@ -249,6 +250,58 @@ TEST(BtPiecePicker, MarkWritingNoDuplicatesReturnsEmpty) {
     pp.mark_requested(b0, PEER_A);          // the common case: a single requester
     auto others = pp.mark_writing(b0, PEER_A);
     EXPECT_TRUE(others.empty());            // nothing to cancel
+}
+
+// The rarest-first index is maintained incrementally (a single HAVE is an O(log n)
+// bucket move, not a full re-sort). These tests pin that the index still reflects
+// the true rarest piece after availability churn — i.e. the incremental moves stay
+// consistent with a from-scratch sort.
+
+TEST(BtPiecePicker, IncrementalRarestUpdateAfterChanges) {
+    PiecePicker pp(3, kPiece, std::int64_t(kPiece) * 3);
+    pp.peer_has_piece(1); pp.peer_has_piece(1);  // piece 1 -> availability 2
+    pp.peer_has_piece(2); pp.peer_has_piece(2);  // piece 2 -> availability 2
+    pp.peer_has_piece(0);                         // piece 0 -> availability 1 (rarest)
+    {
+        auto picked = pp.pick_blocks(seeder(3), 1, PEER_A);
+        ASSERT_FALSE(picked.empty());
+        EXPECT_EQ(picked[0].piece, 0u);
+    }
+    // Now flip it: piece 0 becomes common, piece 2 becomes the rarest. No explicit
+    // rebuild happens — the bucket moves alone must produce the new ordering.
+    pp.peer_has_piece(0); pp.peer_has_piece(0); pp.peer_has_piece(0);  // piece 0 -> 4
+    pp.peer_lost_piece(2);                                              // piece 2 -> 1 (rarest)
+    {
+        auto picked = pp.pick_blocks(seeder(3), 1, PEER_B);
+        ASSERT_FALSE(picked.empty());
+        EXPECT_EQ(picked[0].piece, 2u);
+    }
+}
+
+TEST(BtPiecePicker, IndexSurvivesHaveAndAvailabilityChurn) {
+    PiecePicker pp(4, kPiece, std::int64_t(kPiece) * 4);
+    pp.peer_has_piece(0); pp.peer_has_piece(1); pp.peer_has_piece(2); pp.peer_has_piece(3);
+    pp.we_have(0);  // pieces 0 and 2 leave the index (no longer wanted)
+    pp.we_have(2);
+    // Churn availability around the removed pieces — swap-removal bookkeeping must
+    // not corrupt the surviving buckets.
+    pp.peer_lost_piece(1);                       // piece 1 -> availability 0
+    pp.peer_has_piece(3); pp.peer_has_piece(3);  // piece 3 -> availability 3
+    auto picked = pp.pick_blocks(seeder(4), 1, PEER_A);
+    ASSERT_FALSE(picked.empty());
+    EXPECT_EQ(picked[0].piece, 1u);  // only 1 and 3 remain wanted; 1 is rarer
+}
+
+TEST(BtPiecePicker, RarestFillsAcrossEqualAvailabilityBucket) {
+    // All five pieces share one bucket (availability 0). Filling 6 blocks must draw
+    // from three distinct pieces (2 blocks each) with no duplicates, despite the
+    // random in-bucket rotation.
+    PiecePicker pp(5, kPiece, std::int64_t(kPiece) * 5);
+    auto picked = pp.pick_blocks(seeder(5), 6, PEER_A);
+    ASSERT_EQ(picked.size(), 6u);
+    std::set<std::pair<std::uint32_t, std::uint32_t>> uniq;
+    for (const auto& b : picked) uniq.insert({b.piece, b.block});
+    EXPECT_EQ(uniq.size(), 6u);  // all distinct (piece, block)
 }
 
 TEST(BtPiecePicker, PriorityChangeUpdatesPiecesLeft) {

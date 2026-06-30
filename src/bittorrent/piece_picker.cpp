@@ -13,7 +13,13 @@ PiecePicker::PiecePicker(std::uint32_t num_pieces, std::uint32_t piece_length, s
     , priority_(num_pieces, PiecePriority::Normal)
     , have_(num_pieces, false)
     , pieces_left_(num_pieces)
-    , rng_(std::random_device{}()) {}
+    , order_pos_(num_pieces, 0)
+    , in_order_(num_pieces, 0)
+    , rng_(std::random_device{}()) {
+    // Every piece starts wanted (Normal priority, not-have, availability 0), so it
+    // all begins life in the single bucket {Normal, 0}.
+    for (std::uint32_t p = 0; p < num_pieces_; ++p) order_insert(p);
+}
 
 // ---- geometry ----
 
@@ -38,11 +44,11 @@ std::uint32_t PiecePicker::block_size(std::uint32_t piece, std::uint32_t block) 
 
 void PiecePicker::we_have(std::uint32_t piece) {
     if (have_.get(piece)) return;
+    order_remove(piece);  // no longer wanted — pull it out of the rarest index
     have_.set(piece);
     ++num_have_;
     if (priority_[piece] != PiecePriority::DontDownload && pieces_left_ > 0) --pieces_left_;
     downloading_.erase(piece);
-    rarest_dirty_ = true;
 }
 
 void PiecePicker::we_have_all() {
@@ -59,6 +65,7 @@ void PiecePicker::set_have_bitfield(const Bitfield& have) {
 void PiecePicker::set_piece_priority(std::uint32_t piece, PiecePriority priority) {
     const PiecePriority old = priority_[piece];
     if (old == priority) return;
+    order_remove(piece);  // remove under the OLD key before the priority changes
     if (!have_.get(piece)) {
         const bool was_wanted = old != PiecePriority::DontDownload;
         const bool now_wanted = priority != PiecePriority::DontDownload;
@@ -66,32 +73,26 @@ void PiecePicker::set_piece_priority(std::uint32_t piece, PiecePriority priority
         else if (!was_wanted && now_wanted) ++pieces_left_;
     }
     priority_[piece] = priority;
-    rarest_dirty_ = true;
+    order_insert(piece);  // re-file under the new key (no-op if it is now unwanted)
 }
 
 // ---- availability ----
 
-void PiecePicker::peer_has_piece(std::uint32_t piece) { ++availability_[piece]; rarest_dirty_ = true; }
-void PiecePicker::peer_lost_piece(std::uint32_t piece) {
-    if (availability_[piece] > 0) --availability_[piece];
-    rarest_dirty_ = true;
-}
+void PiecePicker::peer_has_piece(std::uint32_t piece)  { avail_add(piece, +1); }
+void PiecePicker::peer_lost_piece(std::uint32_t piece) { avail_add(piece, -1); }
 void PiecePicker::inc_availability(const Bitfield& peer_have) {
-    for (std::uint32_t p = 0; p < num_pieces_; ++p) if (peer_have.size() > p && peer_have.get(p)) ++availability_[p];
-    rarest_dirty_ = true;
+    for (std::uint32_t p = 0; p < num_pieces_; ++p)
+        if (peer_have.size() > p && peer_have.get(p)) avail_add(p, +1);
 }
 void PiecePicker::dec_availability(const Bitfield& peer_have) {
     for (std::uint32_t p = 0; p < num_pieces_; ++p)
-        if (peer_have.size() > p && peer_have.get(p) && availability_[p] > 0) --availability_[p];
-    rarest_dirty_ = true;
+        if (peer_have.size() > p && peer_have.get(p)) avail_add(p, -1);
 }
 void PiecePicker::inc_availability_all() {
-    for (auto& a : availability_) ++a;
-    rarest_dirty_ = true;
+    for (std::uint32_t p = 0; p < num_pieces_; ++p) avail_add(p, +1);
 }
 void PiecePicker::dec_availability_all() {
-    for (auto& a : availability_) if (a > 0) --a;
-    rarest_dirty_ = true;
+    for (std::uint32_t p = 0; p < num_pieces_; ++p) avail_add(p, -1);
 }
 
 // ---- block state machine ----
@@ -196,30 +197,39 @@ void PiecePicker::append_free_blocks(std::uint32_t piece, int count, const void*
     }
 }
 
-void PiecePicker::rebuild_rarest_order() {
-    rarest_order_.clear();
-    for (std::uint32_t p = 0; p < num_pieces_; ++p) if (wanted(p)) rarest_order_.push_back(p);
+void PiecePicker::order_insert(std::uint32_t piece) {
+    if (in_order_[piece] || !wanted(piece)) return;
+    std::vector<std::uint32_t>& bucket = order_[order_key(piece)];
+    order_pos_[piece] = std::uint32_t(bucket.size());
+    bucket.push_back(piece);
+    in_order_[piece] = 1;
+}
 
-    // Primary: higher priority first. Secondary: lower availability first (rarest).
-    std::sort(rarest_order_.begin(), rarest_order_.end(), [this](std::uint32_t a, std::uint32_t b) {
-        if (priority_[a] != priority_[b]) return priority_[a] > priority_[b];
-        return availability_[a] < availability_[b];
-    });
+void PiecePicker::order_remove(std::uint32_t piece) {
+    if (!in_order_[piece]) return;
+    auto it = order_.find(order_key(piece));  // key must match the one used at insert
+    std::vector<std::uint32_t>& bucket = it->second;
+    const std::uint32_t pos  = order_pos_[piece];
+    const std::uint32_t last = bucket.back();
+    bucket[pos] = last;            // swap the tail piece into the vacated slot...
+    order_pos_[last] = pos;        // ...and fix up its recorded position
+    bucket.pop_back();
+    if (bucket.empty()) order_.erase(it);  // keep the map free of empty buckets
+    in_order_[piece] = 0;
+}
 
-    // Shuffle within equal (priority, availability) runs so peers don't all pick the
-    // same piece — without disturbing the rarest-first ordering between runs.
-    std::size_t i = 0;
-    while (i < rarest_order_.size()) {
-        std::size_t j = i + 1;
-        while (j < rarest_order_.size()
-               && priority_[rarest_order_[j]] == priority_[rarest_order_[i]]
-               && availability_[rarest_order_[j]] == availability_[rarest_order_[i]]) {
-            ++j;
-        }
-        std::shuffle(rarest_order_.begin() + std::ptrdiff_t(i), rarest_order_.begin() + std::ptrdiff_t(j), rng_);
-        i = j;
+void PiecePicker::avail_add(std::uint32_t piece, int delta) {
+    // Remove under the current key, change availability, then re-file under the new
+    // key — an O(log n) bucket move. (For a have/unwanted piece the index ops are
+    // no-ops; we still track its availability count.)
+    order_remove(piece);
+    if (delta >= 0) {
+        availability_[piece] += std::uint32_t(delta);
+    } else {
+        const std::uint32_t d = std::uint32_t(-delta);
+        availability_[piece] = availability_[piece] > d ? availability_[piece] - d : 0;
     }
-    rarest_dirty_ = false;
+    order_insert(piece);
 }
 
 std::vector<PieceBlock> PiecePicker::pick_blocks(const Bitfield& peer_have, int count, const void* peer) {
@@ -254,8 +264,18 @@ std::vector<PieceBlock> PiecePicker::pick_blocks(const Bitfield& peer_have, int 
             break;
         }
         case PickMode::RarestFirst:
-            if (rarest_dirty_) rebuild_rarest_order();
-            for (std::uint32_t p : rarest_order_) { if (int(result.size()) >= count) break; try_new_piece(p); }
+            // Buckets are visited best-first (highest priority, then rarest). Within
+            // a bucket every piece is equally good, so start at a random offset and
+            // wrap around: this spreads concurrent peers across the rarest pieces
+            // instead of all converging on the same one — without any sorting here.
+            for (auto& [key, bucket] : order_) {
+                if (int(result.size()) >= count) break;
+                if (bucket.empty()) continue;
+                const std::size_t n     = bucket.size();
+                const std::size_t start = std::uniform_int_distribution<std::size_t>(0, n - 1)(rng_);
+                for (std::size_t k = 0; k < n && int(result.size()) < count; ++k)
+                    try_new_piece(bucket[(start + k) % n]);
+            }
             break;
     }
     if (int(result.size()) >= count) return result;

@@ -24,8 +24,10 @@
 #include "bittorrent/bitfield.h"
 
 #include <cstdint>
+#include <map>
 #include <random>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace librats::bittorrent {
@@ -137,9 +139,23 @@ private:
         return priority_[piece] != PiecePriority::DontDownload && !have_.get(piece);
     }
     DownloadingPiece& downloading_for(std::uint32_t piece);
-    void rebuild_rarest_order();
     void append_free_blocks(std::uint32_t piece, int count, const void* peer,
                             std::vector<PieceBlock>& out) const;
+
+    // ---- incremental rarest-first index ----
+    // Every wanted & not-yet-have piece sits in a bucket keyed by
+    // (priority desc, availability asc). A single availability or priority change
+    // is an O(log n) bucket move (order_remove + order_insert) instead of a full
+    // re-sort; pick_blocks() walks the buckets in map order, which is exactly
+    // best-first (highest priority, then rarest).
+    std::pair<int, std::uint32_t> order_key(std::uint32_t piece) const noexcept {
+        // Negate priority so the higher enum value (High) compares *less* and is
+        // visited first by the ascending std::map.
+        return { -int(priority_[piece]), availability_[piece] };
+    }
+    void order_insert(std::uint32_t piece);   ///< add piece to its bucket (if wanted & absent)
+    void order_remove(std::uint32_t piece);   ///< pull piece out of its current bucket (if present)
+    void avail_add(std::uint32_t piece, int delta);  ///< change availability, keeping the index sorted
 
     std::uint32_t num_pieces_;
     std::uint32_t piece_length_;
@@ -155,9 +171,12 @@ private:
 
     std::unordered_map<std::uint32_t, DownloadingPiece> downloading_;
 
-    // Lazily-rebuilt rarest-first order (wanted & not-have pieces).
-    std::vector<std::uint32_t> rarest_order_;
-    bool                       rarest_dirty_ = true;
+    // Incremental rarest-first index: (priority desc, availability asc) -> pieces.
+    // order_pos_[p] is p's slot within its bucket (for O(1) swap-removal);
+    // in_order_[p] records whether p is currently bucketed at all.
+    std::map<std::pair<int, std::uint32_t>, std::vector<std::uint32_t>> order_;
+    std::vector<std::uint32_t> order_pos_;
+    std::vector<std::uint8_t>  in_order_;
     mutable std::mt19937       rng_;
 };
 
