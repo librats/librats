@@ -77,7 +77,13 @@ void PeerConnection::send_handshake() {
     std::memcpy(hs + 1, kProtocolString, kProtocolStringLen);
     ReservedBytes reserved{};
     reserved::enable_dht(reserved);
-    reserved::enable_fast(reserved);
+    // NOTE: we deliberately do NOT advertise the Fast Extension (BEP 6). We do not
+    // implement its messages (Have All / Have None / Suggest / Reject / Allowed
+    // Fast), and a peer that sees the Fast bit and also supports it would replace
+    // its initial `bitfield` with a `Have All` / `Have None` we'd silently ignore —
+    // making fast-capable seeds (i.e. most of the modern swarm) look like they hold
+    // nothing, so we'd never download from them. Re-enable only once BEP 6 is
+    // actually implemented in dispatch().
     reserved::enable_extensions(reserved);
     std::memcpy(hs + 20, reserved.data(), 8);
     std::memcpy(hs + 28, info_hash_.data(), 20);
