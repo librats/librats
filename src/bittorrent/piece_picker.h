@@ -100,7 +100,11 @@ public:
     std::vector<PieceBlock> pick_blocks(const Bitfield& peer_have, int count, const void* peer);
 
     void mark_requested(const PieceBlock& b, const void* peer);
-    void mark_writing(const PieceBlock& b);
+    /// Mark a received block as being written to disk. Returns the *other* peers
+    /// that also had this block requested (end-game duplicates) so the caller can
+    /// send them CANCEL; the block's requester set is then cleared. Empty in the
+    /// common, non-end-game case where only the delivering peer had it.
+    std::vector<const void*> mark_writing(const PieceBlock& b, const void* peer);
     /// Mark a block on disk. Returns true if this completed the piece (all blocks
     /// finished → ready to hash).
     bool mark_finished(const PieceBlock& b);

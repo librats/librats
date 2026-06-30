@@ -150,7 +150,7 @@ TEST(BtPiecePicker, BlockStateMachine) {
     EXPECT_EQ(pp.block_state(0, 0), BlockState::None);
     pp.mark_requested(b0, PEER_A);
     EXPECT_EQ(pp.block_state(0, 0), BlockState::Requested);
-    pp.mark_writing(b0);
+    pp.mark_writing(b0, PEER_A);
     EXPECT_EQ(pp.block_state(0, 0), BlockState::Writing);
     EXPECT_FALSE(pp.mark_finished(b0));  // piece not complete yet (block 1 outstanding)
     EXPECT_EQ(pp.block_state(0, 0), BlockState::Finished);
@@ -221,6 +221,34 @@ TEST(BtPiecePicker, EndGameReRequestsOutstanding) {
     auto b = pp.pick_blocks(seeder(1), 2, PEER_B);
     EXPECT_EQ(b.size(), 2u);
     EXPECT_TRUE(pp.in_endgame());
+}
+
+TEST(BtPiecePicker, EndGameMarkWritingCancelsOtherPeers) {
+    PiecePicker pp(1, kPiece, kPiece);  // 2 blocks, single piece
+    const PieceBlock b0{0, 0};
+    // End-game: both peers have the same block outstanding.
+    pp.mark_requested(b0, PEER_A);
+    pp.mark_requested(b0, PEER_B);
+
+    // The block arrives from A: B is handed back so the caller can CANCEL its now
+    // redundant request, and the requester set is cleared (block is being written).
+    auto others = pp.mark_writing(b0, PEER_A);
+    ASSERT_EQ(others.size(), 1u);
+    EXPECT_EQ(others[0], PEER_B);
+    EXPECT_EQ(pp.block_state(0, 0), BlockState::Writing);
+
+    // A duplicate arrival from B (its PIECE crossing our CANCEL) is a no-op: the
+    // block is already Writing, so there is nothing left to cancel.
+    auto none = pp.mark_writing(b0, PEER_B);
+    EXPECT_TRUE(none.empty());
+}
+
+TEST(BtPiecePicker, MarkWritingNoDuplicatesReturnsEmpty) {
+    PiecePicker pp(1, kPiece, kPiece);
+    const PieceBlock b0{0, 0};
+    pp.mark_requested(b0, PEER_A);          // the common case: a single requester
+    auto others = pp.mark_writing(b0, PEER_A);
+    EXPECT_TRUE(others.empty());            // nothing to cancel
 }
 
 TEST(BtPiecePicker, PriorityChangeUpdatesPiecesLeft) {

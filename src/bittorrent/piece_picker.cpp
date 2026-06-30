@@ -115,11 +115,23 @@ void PiecePicker::mark_requested(const PieceBlock& b, const void* peer) {
         blk.peers.push_back(peer);
 }
 
-void PiecePicker::mark_writing(const PieceBlock& b) {
+std::vector<const void*> PiecePicker::mark_writing(const PieceBlock& b, const void* peer) {
+    std::vector<const void*> others;
     auto it = downloading_.find(b.piece);
-    if (it == downloading_.end()) return;
+    if (it == downloading_.end()) return others;
     Block& blk = it->second.blocks[b.block];
-    if (blk.state == BlockState::Requested) { --it->second.num_requested; blk.state = BlockState::Writing; ++it->second.num_writing; }
+    if (blk.state == BlockState::Requested) {
+        --it->second.num_requested;
+        blk.state = BlockState::Writing;
+        ++it->second.num_writing;
+        // Hand back the *other* requesters (end-game) so the caller can CANCEL the
+        // now-redundant duplicate requests, then drop the requester set — the block
+        // is in flight to disk and must not be picked or re-requested again.
+        for (const void* p : blk.peers)
+            if (p != peer) others.push_back(p);
+        blk.peers.clear();
+    }
+    return others;
 }
 
 bool PiecePicker::mark_finished(const PieceBlock& b) {

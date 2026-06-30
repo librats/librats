@@ -187,7 +187,18 @@ void Torrent::on_piece(PeerConnection& pc, std::uint32_t piece, std::uint32_t of
     bytes_downloaded_ += data.size();
     recent_down_[&pc] += data.size();
 
-    picker_->mark_writing(block);
+    // End-game: this block may have been requested from several peers at once. Now
+    // that it has arrived, CANCEL the duplicate requests still outstanding on the
+    // *other* peers so we don't download the same block again from each of them.
+    const std::vector<const void*> others = picker_->mark_writing(block, &pc);
+    for (const void* o : others) {
+        auto* opc = static_cast<PeerConnection*>(const_cast<void*>(o));
+        if (!alive(opc)) continue;
+        auto it = outstanding_.find(opc);
+        if (it != outstanding_.end() && it->second > 0) --it->second;  // freed a slot
+        opc->send_cancel(piece, block.block * kBlockSize, picker_->block_size(piece, block.block));
+    }
+
     disk_->async_write(piece, offset, data.to_bytes(),
                        [this, block](bool ok) { on_block_written(block, ok); });
 
