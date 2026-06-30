@@ -181,9 +181,16 @@ void Torrent::refill(PeerConnection& pc) {
 
 void Torrent::on_piece(PeerConnection& pc, std::uint32_t piece, std::uint32_t offset, ByteView data) {
     if (!picker_ || piece >= info_.num_pieces()) return;
-    const PieceBlock block{piece, offset / kBlockSize};
 
     if (outstanding_[&pc] > 0) --outstanding_[&pc];
+
+    // We already completed this piece — an end-game duplicate that crossed our
+    // CANCEL, or a block arriving after the piece verified. Discard it: writing it
+    // again would be wasted I/O and would resurrect a stale picker entry. The
+    // request slot is already freed, so just keep this peer's pipeline full.
+    if (picker_->have_piece(piece)) { refill(pc); return; }
+
+    const PieceBlock block{piece, offset / kBlockSize};
     bytes_downloaded_ += data.size();
     recent_down_[&pc] += data.size();
 
