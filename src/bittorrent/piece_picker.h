@@ -23,8 +23,8 @@
 
 #include "bittorrent/bitfield.h"
 
+#include <array>
 #include <cstdint>
-#include <map>
 #include <random>
 #include <unordered_map>
 #include <utility>
@@ -152,15 +152,15 @@ private:
                             std::vector<PieceBlock>& out) const;
 
     // ---- incremental rarest-first index ----
-    // Every wanted & not-yet-have piece sits in a bucket keyed by
-    // (priority desc, availability asc). A single availability or priority change
-    // is an O(log n) bucket move (order_remove + order_insert) instead of a full
-    // re-sort; pick_blocks() walks the buckets in map order, which is exactly
-    // best-first (highest priority, then rarest).
-    std::pair<int, std::uint32_t> order_key(std::uint32_t piece) const noexcept {
-        // Negate priority so the higher enum value (High) compares *less* and is
-        // visited first by the ascending std::map.
-        return { -int(priority_[piece]), availability_[piece] };
+    // Every wanted & not-yet-have piece sits in a bucket addressed directly by
+    // (priority level, availability). A single availability or priority change is
+    // an O(1) bucket move (order_remove + order_insert) — no tree, no node
+    // allocation. pick_blocks() walks the buckets best-first (High priority first,
+    // then ascending availability = rarest). availability is bounded by the peer
+    // count (seeds live in seeds_, not here), so the inner dimension stays small.
+    static constexpr int kNumPrio = 2;  ///< High (idx 0, picked first) and Normal (idx 1)
+    static int prio_idx(PiecePriority p) noexcept {
+        return p == PiecePriority::High ? 0 : 1;  // DontDownload is never bucketed
     }
     void order_insert(std::uint32_t piece);   ///< add piece to its bucket (if wanted & absent)
     void order_remove(std::uint32_t piece);   ///< pull piece out of its current bucket (if present)
@@ -188,10 +188,11 @@ private:
 
     std::unordered_map<std::uint32_t, DownloadingPiece> downloading_;
 
-    // Incremental rarest-first index: (priority desc, availability asc) -> pieces.
-    // order_pos_[p] is p's slot within its bucket (for O(1) swap-removal);
-    // in_order_[p] records whether p is currently bucketed at all.
-    std::map<std::pair<int, std::uint32_t>, std::vector<std::uint32_t>> order_;
+    // Incremental rarest-first index: buckets_[prio_idx][availability] -> pieces.
+    // The inner vector grows on demand as higher availabilities appear (bounded by
+    // the peer count). order_pos_[p] is p's slot within its bucket (for O(1)
+    // swap-removal); in_order_[p] records whether p is currently bucketed at all.
+    std::array<std::vector<std::vector<std::uint32_t>>, kNumPrio> buckets_;
     std::vector<std::uint32_t> order_pos_;
     std::vector<std::uint8_t>  in_order_;
     mutable std::mt19937       rng_;

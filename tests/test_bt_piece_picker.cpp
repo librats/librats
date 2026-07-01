@@ -82,6 +82,32 @@ TEST(BtPiecePicker, Availability) {
     EXPECT_EQ(pp.availability(1), 2u);
 }
 
+TEST(BtPiecePicker, FlatBucketsGrowAndOrderAcrossPriorityAndAvailability) {
+    // Exercises the flat (priority, availability) bucket index: availability grows
+    // past the default inner size, priority overrides rarity, and swap-removal at a
+    // higher availability slot keeps the index consistent.
+    PiecePicker pp(4, kPiece, std::int64_t(kPiece) * 4);
+    for (int i = 0; i < 8; ++i) pp.peer_has_piece(0);  // avail(0)=8 (grows inner vector)
+    for (int i = 0; i < 6; ++i) pp.peer_has_piece(1);  // avail(1)=6
+    pp.peer_has_piece(2);                              // avail(2)=1 (rarest)
+    for (int i = 0; i < 3; ++i) pp.peer_has_piece(3);  // avail(3)=3
+
+    // Rarest first → piece 2.
+    EXPECT_EQ(pp.pick_blocks(seeder(4), 1, PEER_A)[0].piece, 2u);
+
+    // High priority on the *most common* piece (0) must beat the rarest.
+    pp.set_piece_priority(0, PiecePriority::High);
+    EXPECT_EQ(pp.pick_blocks(seeder(4), 1, PEER_A)[0].piece, 0u);
+
+    // Drop piece 0 back to Normal; now among Normal pieces the rarest (2) wins again.
+    pp.set_piece_priority(0, PiecePriority::Normal);
+    EXPECT_EQ(pp.pick_blocks(seeder(4), 1, PEER_A)[0].piece, 2u);
+
+    // Churn availability at a high slot: make piece 1 the rarest by dropping it to 0.
+    for (int i = 0; i < 6; ++i) pp.peer_lost_piece(1);  // avail(1)=0
+    EXPECT_EQ(pp.pick_blocks(seeder(4), 1, PEER_A)[0].piece, 1u);
+}
+
 TEST(BtPiecePicker, SeedCounterFoldsIntoAvailabilityAndPreservesRarestOrder) {
     // A seed shifts every piece's availability equally, so the rarest-first order
     // must be unchanged and availability() must reflect the seed count. Seed

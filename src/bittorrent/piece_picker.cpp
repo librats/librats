@@ -203,7 +203,10 @@ void PiecePicker::append_free_blocks(std::uint32_t piece, int count, const void*
 
 void PiecePicker::order_insert(std::uint32_t piece) {
     if (in_order_[piece] || !wanted(piece)) return;
-    std::vector<std::uint32_t>& bucket = order_[order_key(piece)];
+    std::vector<std::vector<std::uint32_t>>& col = buckets_[prio_idx(priority_[piece])];
+    const std::uint32_t av = availability_[piece];
+    if (col.size() <= av) col.resize(av + 1);   // grow the availability dimension on demand
+    std::vector<std::uint32_t>& bucket = col[av];
     order_pos_[piece] = std::uint32_t(bucket.size());
     bucket.push_back(piece);
     in_order_[piece] = 1;
@@ -211,14 +214,14 @@ void PiecePicker::order_insert(std::uint32_t piece) {
 
 void PiecePicker::order_remove(std::uint32_t piece) {
     if (!in_order_[piece]) return;
-    auto it = order_.find(order_key(piece));  // key must match the one used at insert
-    std::vector<std::uint32_t>& bucket = it->second;
+    // Bucket coords must match the ones used at insert — callers remove *before*
+    // mutating priority_/availability_ (see avail_add / set_piece_priority).
+    std::vector<std::uint32_t>& bucket = buckets_[prio_idx(priority_[piece])][availability_[piece]];
     const std::uint32_t pos  = order_pos_[piece];
     const std::uint32_t last = bucket.back();
     bucket[pos] = last;            // swap the tail piece into the vacated slot...
     order_pos_[last] = pos;        // ...and fix up its recorded position
-    bucket.pop_back();
-    if (bucket.empty()) order_.erase(it);  // keep the map free of empty buckets
+    bucket.pop_back();             // empty buckets simply stay empty — no alloc churn
     in_order_[piece] = 0;
 }
 
@@ -286,8 +289,9 @@ std::vector<PieceBlock> PiecePicker::pick_blocks(const Bitfield& peer_have, int 
             // a random spread without scanning or allocating across all pieces (the
             // bucket set is small: one per distinct (priority, availability)).
             std::vector<std::vector<std::uint32_t>*> bkts;
-            bkts.reserve(order_.size());
-            for (auto& kv : order_) if (!kv.second.empty()) bkts.push_back(&kv.second);
+            for (auto& col : buckets_)
+                for (auto& bucket : col)
+                    if (!bucket.empty()) bkts.push_back(&bucket);
             std::shuffle(bkts.begin(), bkts.end(), rng_);
             for (auto* bucket : bkts) {
                 if (int(result.size()) >= count) break;
@@ -299,17 +303,21 @@ std::vector<PieceBlock> PiecePicker::pick_blocks(const Bitfield& peer_have, int 
             break;
         }
         case PickMode::RarestFirst:
-            // Buckets are visited best-first (highest priority, then rarest). Within
-            // a bucket every piece is equally good, so start at a random offset and
-            // wrap around: this spreads concurrent peers across the rarest pieces
-            // instead of all converging on the same one — without any sorting here.
-            for (auto& [key, bucket] : order_) {
-                if (int(result.size()) >= count) break;
-                if (bucket.empty()) continue;
-                const std::size_t n     = bucket.size();
-                const std::size_t start = std::uniform_int_distribution<std::size_t>(0, n - 1)(rng_);
-                for (std::size_t k = 0; k < n && int(result.size()) < count; ++k)
-                    try_new_piece(bucket[(start + k) % n]);
+            // Visit buckets best-first: High priority before Normal, and within a
+            // priority ascending availability (rarest first). Within a bucket every
+            // piece is equally good, so start at a random offset and wrap around:
+            // this spreads concurrent peers across the rarest pieces instead of all
+            // converging on the same one — without any sorting here.
+            for (int pi = 0; pi < kNumPrio && int(result.size()) < count; ++pi) {
+                std::vector<std::vector<std::uint32_t>>& col = buckets_[pi];
+                for (std::uint32_t av = 0; av < col.size() && int(result.size()) < count; ++av) {
+                    std::vector<std::uint32_t>& bucket = col[av];
+                    if (bucket.empty()) continue;
+                    const std::size_t n     = bucket.size();
+                    const std::size_t start = std::uniform_int_distribution<std::size_t>(0, n - 1)(rng_);
+                    for (std::size_t k = 0; k < n && int(result.size()) < count; ++k)
+                        try_new_piece(bucket[(start + k) % n]);
+                }
             }
             break;
     }
