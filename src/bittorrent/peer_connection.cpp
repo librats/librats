@@ -27,6 +27,18 @@ constexpr std::size_t kRecvChunk = 64 * 1024;
 /// realistic torrent well under a MiB).
 constexpr std::size_t kSendHighWater = 8 * 1024 * 1024;
 
+// ---- connection timeouts (enforced by tick()) ----
+/// Drop an incoming peer that hasn't completed the handshake in this long — stops
+/// idle half-open sockets from accumulating (a cheap DoS).
+constexpr auto kHandshakeTimeout = std::chrono::seconds(30);
+/// Drop a connected peer that has sent us nothing for this long.
+constexpr auto kIdleTimeout      = std::chrono::seconds(120);
+/// Send a keep-alive if we haven't sent anything for this long (kept below a
+/// typical peer's ~120 s idle timeout so we don't get dropped).
+constexpr auto kKeepAliveInterval = std::chrono::seconds(100);
+/// How often tick() runs. Coarse: it only checks the deadlines above.
+constexpr auto kTickInterval     = std::chrono::seconds(10);
+
 } // namespace
 
 PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
@@ -60,6 +72,9 @@ PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, const PeerId& ou
     , remote_port_(remote_port) {}
 
 PeerConnection::~PeerConnection() {
+    // Cancel the tick before we die so its captured `this` can never fire on freed
+    // memory. Same reactor thread owns both the timer and this destructor.
+    if (tick_timer_ != kInvalidTimerId) { reactor_.cancel(tick_timer_); tick_timer_ = kInvalidTimerId; }
     if (!closed_ && is_valid_socket(sock_)) {
         reactor_.remove(sock_);
         close_socket(sock_);
@@ -72,6 +87,10 @@ void PeerConnection::start() {
     started_ = true;
     set_socket_nonblocking(sock_);
     reactor_.add(sock_, PollIn, [this](std::uint32_t ev) { on_io(ev); });
+
+    const auto now = std::chrono::steady_clock::now();
+    created_ = last_recv_ = last_sent_ = now;
+    tick_timer_ = reactor_.schedule(kTickInterval, [this] { tick(); });
 
     // An outgoing peer sends its handshake immediately; an incoming one waits to
     // learn the info-hash, then replies (see parse_handshake()).
@@ -102,6 +121,7 @@ void PeerConnection::send_handshake() {
 void PeerConnection::close(const std::string& reason) {
     if (closed_) return;
     closed_ = true;
+    if (tick_timer_ != kInvalidTimerId) { reactor_.cancel(tick_timer_); tick_timer_ = kInvalidTimerId; }
     if (is_valid_socket(sock_)) {
         reactor_.remove(sock_);
         close_socket(sock_);
@@ -127,6 +147,7 @@ void PeerConnection::do_read() {
         const int n = ::recv(sock_, reinterpret_cast<char*>(rx_.write_ptr()),
                              static_cast<int>(rx_.write_space()), 0);
         if (n > 0) {
+            last_recv_ = std::chrono::steady_clock::now();
             rx_.received(std::size_t(n));
             continue;
         }
@@ -357,6 +378,7 @@ void PeerConnection::flush() {
         const int n = ::send(sock_, reinterpret_cast<const char*>(out_.data() + out_sent_),
                             static_cast<int>(out_.size() - out_sent_), 0);
         if (n > 0) {
+            last_sent_ = std::chrono::steady_clock::now();
             out_sent_ += std::size_t(n);
             continue;
         }
@@ -383,6 +405,24 @@ void PeerConnection::want_write(bool on) {
     if (on == want_write_ || closed_) return;
     want_write_ = on;
     reactor_.modify(sock_, PollIn | (on ? PollOut : PollNone));
+}
+
+void PeerConnection::tick() {
+    if (closed_) return;
+    const auto now = std::chrono::steady_clock::now();
+
+    if (!handshake_done()) {
+        // A peer that connects but never completes the handshake is dropped so it
+        // can't occupy a socket indefinitely.
+        if (now - created_ > kHandshakeTimeout) { close("handshake timeout"); return; }
+    } else {
+        if (now - last_recv_ > kIdleTimeout) { close("idle timeout"); return; }
+        // Keep the link alive if we've been quiet, so the peer doesn't drop us.
+        if (now - last_sent_ > kKeepAliveInterval) send_keepalive();  // updates last_sent_ via flush
+    }
+
+    if (closed_) return;  // send_keepalive() may have hit a send error and closed us
+    tick_timer_ = reactor_.schedule(kTickInterval, [this] { tick(); });
 }
 
 } // namespace librats::bittorrent

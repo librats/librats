@@ -22,6 +22,7 @@
 #include "core/bytes.h"
 #include "core/receive_buffer.h"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -131,6 +132,9 @@ private:
     void queue(const std::uint8_t* data, std::size_t len);
     void flush();
     void want_write(bool on);
+    /// Periodic self-rescheduling tick: enforces the handshake/idle deadlines and
+    /// emits keep-alives. Stops rescheduling once the connection is closed.
+    void tick();
 
     Reactor&      reactor_;
     socket_t      sock_;
@@ -149,6 +153,12 @@ private:
     std::vector<std::uint8_t> out_;
     std::size_t          out_sent_ = 0;
     bool                 want_write_ = false;
+
+    // Timeout bookkeeping, all evaluated by the periodic tick().
+    TimerId                               tick_timer_ = kInvalidTimerId;
+    std::chrono::steady_clock::time_point created_{};    ///< start() time — handshake deadline
+    std::chrono::steady_clock::time_point last_recv_{};  ///< last byte received — idle deadline
+    std::chrono::steady_clock::time_point last_sent_{};  ///< last byte sent — keep-alive timer
 
     bool          started_           = false;
     bool          handshake_sent_    = false;
