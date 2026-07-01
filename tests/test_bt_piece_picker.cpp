@@ -144,6 +144,23 @@ TEST(BtPiecePicker, IsInteresting) {
     EXPECT_FALSE(pp.is_interesting(has0));  // we already have the only piece it offers
 }
 
+TEST(BtPiecePicker, PieceInteresting) {
+    // The O(1) single-piece interest query used on each incoming HAVE. It must
+    // agree with is_interesting() for a peer holding exactly that one piece.
+    PiecePicker pp(3, kPiece, std::int64_t(kPiece) * 3);
+    EXPECT_TRUE(pp.piece_interesting(0));   // fresh, wanted piece
+    EXPECT_TRUE(pp.piece_interesting(2));
+
+    pp.we_have(1);
+    EXPECT_FALSE(pp.piece_interesting(1));   // already have it — not interesting
+
+    pp.set_piece_priority(2, PiecePriority::DontDownload);
+    EXPECT_FALSE(pp.piece_interesting(2));   // excluded from download
+
+    EXPECT_FALSE(pp.piece_interesting(3));   // out of range → false, no OOB access
+    EXPECT_TRUE(pp.piece_interesting(0));    // piece 0 still wanted
+}
+
 TEST(BtPiecePicker, BlockStateMachine) {
     PiecePicker pp(1, kPiece, kPiece);  // 1 piece, 2 blocks
     PieceBlock b0{0, 0}, b1{0, 1};

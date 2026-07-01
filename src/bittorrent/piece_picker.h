@@ -120,6 +120,13 @@ public:
 
     BlockState block_state(std::uint32_t piece, std::uint32_t block) const;
     bool       is_interesting(const Bitfield& peer_have) const;
+    /// True if @p piece is one we still want (not have, not DontDownload). O(1).
+    /// A peer that has this piece is therefore interesting to us — this lets the
+    /// interest update on a single HAVE stay O(1) instead of rescanning the whole
+    /// bitfield through is_interesting().
+    bool       piece_interesting(std::uint32_t piece) const noexcept {
+        return piece < num_pieces_ && wanted(piece);
+    }
     bool       in_endgame() const noexcept { return endgame_; }
     std::size_t num_downloading() const noexcept { return downloading_.size(); }
 

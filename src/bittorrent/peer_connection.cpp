@@ -250,8 +250,16 @@ void PeerConnection::dispatch(MessageId id, const std::uint8_t* payload, std::ui
         case MessageId::Have: {
             if (len != 4) return bad();
             const std::uint32_t piece = read_u32_be(payload);
-            if (piece < peer_have_.size()) peer_have_.set(piece);
-            if (obs_) obs_->on_have(*this, piece);
+            // Only act on a HAVE that actually flips a bit. A redundant HAVE (a piece
+            // the peer already advertised, via bitfield or an earlier HAVE) is legal on
+            // the wire, but re-notifying the observer would inc availability a second
+            // time in the picker while disconnect only decrements once per set bit —
+            // leaving the count permanently skewed and corrupting rarest-first. An
+            // out-of-range index simply flips nothing and is ignored.
+            if (piece < peer_have_.size() && !peer_have_.get(piece)) {
+                peer_have_.set(piece);
+                if (obs_) obs_->on_have(*this, piece);
+            }
             break;
         }
         case MessageId::Bitfield: {

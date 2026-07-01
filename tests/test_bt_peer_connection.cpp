@@ -36,6 +36,7 @@ struct Recorder : PeerConnection::Observer {
     bool          got_interest = false, interested = false;
     bool          got_choke = false, choked = true;
     bool          got_have = false;
+    int           have_count = 0;
     std::uint32_t have_piece = 0;
     bool          got_request = false;
     std::uint32_t rq_piece = 0, rq_off = 0, rq_len = 0;
@@ -55,7 +56,7 @@ struct Recorder : PeerConnection::Observer {
     void on_bitfield(PeerConnection&, const Bitfield& bf) override { got_bitfield = true; bitfield = bf; }
     void on_interest(PeerConnection&, bool i) override { got_interest = true; interested = i; }
     void on_choke(PeerConnection&, bool c) override { got_choke = true; choked = c; }
-    void on_have(PeerConnection&, std::uint32_t p) override { got_have = true; have_piece = p; }
+    void on_have(PeerConnection&, std::uint32_t p) override { got_have = true; ++have_count; have_piece = p; }
     void on_request(PeerConnection&, std::uint32_t p, std::uint32_t o, std::uint32_t l) override {
         got_request = true; rq_piece = p; rq_off = o; rq_len = l;
     }
@@ -142,6 +143,26 @@ TEST_F(BtPeerConnection, HaveUpdatesPeerBitfield) {
     a_->send_have(3);
     pump([&] { return obs_b_.got_have; });
     EXPECT_EQ(obs_b_.have_piece, 3u);
+    EXPECT_TRUE(b_->peer_bitfield().get(3));
+}
+
+// A redundant HAVE (a piece the peer already advertised) must not re-fire on_have,
+// or the picker would count the peer's availability for that piece twice.
+TEST_F(BtPeerConnection, RedundantHaveDoesNotRefire) {
+    pump([&] { return a_->handshake_done() && b_->handshake_done(); });
+
+    a_->send_have(2);
+    pump([&] { return obs_b_.have_count == 1; });
+    ASSERT_EQ(obs_b_.have_count, 1);
+    EXPECT_TRUE(b_->peer_bitfield().get(2));
+
+    // Send the same piece again (redundant → must be ignored) followed by a new
+    // piece (must fire). The wire is ordered, so once piece 3 arrives we know the
+    // redundant piece-2 HAVE has already been processed — and dropped.
+    a_->send_have(2);   // redundant
+    a_->send_have(3);   // new
+    pump([&] { return obs_b_.have_piece == 3; });
+    EXPECT_EQ(obs_b_.have_count, 2);   // the two distinct HAVEs, not three
     EXPECT_TRUE(b_->peer_bitfield().get(3));
 }
 

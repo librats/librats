@@ -142,7 +142,11 @@ void Torrent::on_bitfield(PeerConnection& pc, const Bitfield& bf) {
 void Torrent::on_have(PeerConnection& pc, std::uint32_t piece) {
     if (!picker_ || piece >= info_.num_pieces()) return;
     picker_->peer_has_piece(piece);
-    update_interest(pc);
+    // A single new piece can only *gain* us interest, never lose it, and the piece
+    // the peer just announced is enough to decide — so this stays O(1) instead of
+    // rescanning the peer's whole bitfield via is_interesting() on every HAVE.
+    if (!pc.am_interested() && picker_->piece_interesting(piece)) pc.send_interested();
+    if (pc.am_interested() && !pc.peer_choking()) refill(pc);
 }
 
 void Torrent::on_choke(PeerConnection& pc, bool peer_choking) {
