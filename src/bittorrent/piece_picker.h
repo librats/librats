@@ -175,6 +175,11 @@ private:
     std::uint32_t               pieces_left_ = 0;   ///< wanted & not-yet-have
     PickMode                    mode_        = PickMode::RarestFirst;
     bool                        endgame_     = false;
+    // Sequential cursor: every piece with index < seq_cursor_ is already `have`,
+    // so a sequential pick can start here instead of rescanning the completed
+    // prefix from 0 on every refill. Maintained only in we_have() (advances
+    // monotonically, O(n) total over the whole download).
+    std::uint32_t               seq_cursor_  = 0;
 
     std::unordered_map<std::uint32_t, DownloadingPiece> downloading_;
 

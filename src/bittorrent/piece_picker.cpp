@@ -49,6 +49,8 @@ void PiecePicker::we_have(std::uint32_t piece) {
     ++num_have_;
     if (priority_[piece] != PiecePriority::DontDownload && pieces_left_ > 0) --pieces_left_;
     downloading_.erase(piece);
+    // Advance the sequential cursor over any now-contiguous prefix of have pieces.
+    while (seq_cursor_ < num_pieces_ && have_.get(seq_cursor_)) ++seq_cursor_;
 }
 
 void PiecePicker::we_have_all() {
@@ -238,11 +240,28 @@ std::vector<PieceBlock> PiecePicker::pick_blocks(const Bitfield& peer_have, int 
 
     auto peer_has = [&](std::uint32_t p) { return peer_have.size() > p && peer_have.get(p); };
 
-    // 1) Finish pieces already in progress that this peer can serve.
-    for (const auto& [piece, dp] : downloading_) {
-        if (int(result.size()) >= count) break;
-        if (!wanted(piece) || !peer_has(piece)) continue;
+    // 1) Finish pieces already in progress that this peer can serve. In sequential
+    // mode finish the earliest partial first (streaming order); otherwise the map
+    // order is fine. (downloading_ is small — bounded by peers × pieces-in-flight.)
+    auto take_partial = [&](std::uint32_t piece) {
+        if (int(result.size()) >= count) return;
+        if (!wanted(piece) || !peer_has(piece)) return;
         append_free_blocks(piece, count, peer, result);
+    };
+    if (mode_ == PickMode::Sequential) {
+        std::vector<std::uint32_t> partials;
+        partials.reserve(downloading_.size());
+        for (const auto& kv : downloading_) partials.push_back(kv.first);
+        std::sort(partials.begin(), partials.end());
+        for (std::uint32_t piece : partials) {
+            if (int(result.size()) >= count) break;
+            take_partial(piece);
+        }
+    } else {
+        for (const auto& [piece, dp] : downloading_) {
+            if (int(result.size()) >= count) break;
+            take_partial(piece);
+        }
     }
     if (int(result.size()) >= count) return result;
 
@@ -253,14 +272,28 @@ std::vector<PieceBlock> PiecePicker::pick_blocks(const Bitfield& peer_have, int 
     };
     switch (mode_) {
         case PickMode::Sequential:
-            for (std::uint32_t p = 0; p < num_pieces_ && int(result.size()) < count; ++p) try_new_piece(p);
+            // Start at the cursor: every piece below it is already have, so there
+            // is nothing to pick there. This keeps the hot refill path off the
+            // completed prefix instead of rescanning it from 0 every time.
+            for (std::uint32_t p = seq_cursor_; p < num_pieces_ && int(result.size()) < count; ++p)
+                try_new_piece(p);
             break;
         case PickMode::Random: {
-            std::vector<std::uint32_t> cand;
-            for (std::uint32_t p = 0; p < num_pieces_; ++p)
-                if (wanted(p) && peer_has(p) && !downloading_.count(p)) cand.push_back(p);
-            std::shuffle(cand.begin(), cand.end(), rng_);
-            for (std::uint32_t p : cand) { if (int(result.size()) >= count) break; try_new_piece(p); }
+            // Walk the rarest-first buckets — which already hold exactly the wanted
+            // pieces — in a shuffled order, each entered at a random offset. That is
+            // a random spread without scanning or allocating across all pieces (the
+            // bucket set is small: one per distinct (priority, availability)).
+            std::vector<std::vector<std::uint32_t>*> bkts;
+            bkts.reserve(order_.size());
+            for (auto& kv : order_) if (!kv.second.empty()) bkts.push_back(&kv.second);
+            std::shuffle(bkts.begin(), bkts.end(), rng_);
+            for (auto* bucket : bkts) {
+                if (int(result.size()) >= count) break;
+                const std::size_t n     = bucket->size();
+                const std::size_t start = std::uniform_int_distribution<std::size_t>(0, n - 1)(rng_);
+                for (std::size_t k = 0; k < n && int(result.size()) < count; ++k)
+                    try_new_piece((*bucket)[(start + k) % n]);
+            }
             break;
         }
         case PickMode::RarestFirst:

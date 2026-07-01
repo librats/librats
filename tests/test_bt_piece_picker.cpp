@@ -115,6 +115,66 @@ TEST(BtPiecePicker, SequentialPicksLowestIndex) {
     EXPECT_EQ(picked[0].block, 0u);
 }
 
+TEST(BtPiecePicker, SequentialCursorSkipsCompletedPrefix) {
+    // After completing a contiguous prefix, a sequential pick must resume at the
+    // first not-have piece — not re-offer (or rescan) the finished ones.
+    PiecePicker pp(5, kPiece, std::int64_t(kPiece) * 5);
+    pp.set_mode(PickMode::Sequential);
+    pp.we_have(0);
+    pp.we_have(1);
+    auto picked = pp.pick_blocks(seeder(5), 1, PEER_A);
+    ASSERT_FALSE(picked.empty());
+    EXPECT_EQ(picked[0].piece, 2u);  // 0 and 1 are have → start at 2
+}
+
+TEST(BtPiecePicker, SequentialCursorHandlesOutOfOrderCompletion) {
+    // The cursor only advances over a *contiguous* have-prefix: completing a later
+    // piece first must not move it past the still-missing earlier piece.
+    PiecePicker pp(5, kPiece, std::int64_t(kPiece) * 5);
+    pp.set_mode(PickMode::Sequential);
+    pp.we_have(2);                    // gap: 0,1 still missing
+    auto picked = pp.pick_blocks(seeder(5), 1, PEER_A);
+    ASSERT_FALSE(picked.empty());
+    EXPECT_EQ(picked[0].piece, 0u);  // still starts at 0
+    pp.we_have(0);
+    pp.we_have(1);                    // now 0,1,2 all have → cursor jumps to 3
+    auto picked2 = pp.pick_blocks(seeder(5), 1, PEER_A);
+    ASSERT_FALSE(picked2.empty());
+    EXPECT_EQ(picked2[0].piece, 3u);
+}
+
+TEST(BtPiecePicker, SequentialFinishesEarliestPartialFirst) {
+    // Two partial pieces in progress; a sequential pick must finish the lower-index
+    // one first (streaming order), regardless of internal map order.
+    PiecePicker pp(5, kPiece, std::int64_t(kPiece) * 5);
+    pp.set_mode(PickMode::Sequential);
+    pp.mark_requested(PieceBlock{3, 0}, PEER_A);  // start piece 3 (block 1 free)
+    pp.mark_requested(PieceBlock{1, 0}, PEER_A);  // start piece 1 (block 1 free)
+
+    auto picked = pp.pick_blocks(seeder(5), 1, PEER_B);
+    ASSERT_EQ(picked.size(), 1u);
+    EXPECT_EQ(picked[0].piece, 1u);  // finish the earlier partial (1) before 3
+    EXPECT_EQ(picked[0].block, 1u);
+}
+
+TEST(BtPiecePicker, RandomPicksDistinctWantedBlocksPeerHas) {
+    // Random mode must still honour: only wanted pieces the peer has, no dups.
+    PiecePicker pp(6, kPiece, std::int64_t(kPiece) * 6);
+    pp.set_mode(PickMode::Random);
+    pp.we_have(0);                       // not wanted anymore
+    Bitfield bf(6, true);
+    bf.reset(5);                         // peer lacks piece 5
+    auto picked = pp.pick_blocks(bf, 6, PEER_A);
+    ASSERT_FALSE(picked.empty());
+    std::set<std::pair<std::uint32_t, std::uint32_t>> uniq;
+    for (const auto& b : picked) {
+        EXPECT_NE(b.piece, 0u);          // have → excluded
+        EXPECT_NE(b.piece, 5u);          // peer lacks it → excluded
+        uniq.insert({b.piece, b.block});
+    }
+    EXPECT_EQ(uniq.size(), picked.size());  // all distinct
+}
+
 TEST(BtPiecePicker, DontDownloadIsSkipped) {
     PiecePicker pp(3, kPiece, std::int64_t(kPiece) * 3);
     pp.set_mode(PickMode::Sequential);
