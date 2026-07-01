@@ -140,13 +140,13 @@ bool TorrentInfo::parse_info_dict(const librats::BencodeValue& info, TorrentPars
                 rel += '/';
                 rel += comp.as_string();
             }
-            files.add_file(std::move(rel), *length);
+            if (!files.add_file(std::move(rel), *length)) return fail("file size overflow");
         }
     } else {
         // Single-file: the info dict itself carries the length.
         const auto length = find_int(info, "length");
         if (!length || *length < 0) return fail("single-file torrent missing length");
-        files.add_file(*name, *length);
+        if (!files.add_file(*name, *length)) return fail("file size overflow");
     }
 
     // The piece-hash count must match the file layout exactly.

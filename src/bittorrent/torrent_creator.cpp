@@ -62,7 +62,7 @@ std::optional<TorrentInfo> TorrentCreator::create_from_path(const std::string& p
         std::string rel = root_name;
         if (!single_file)
             for (const auto& c : s.components) { rel += '/'; rel += c; }
-        layout.add_file(rel, s.size);
+        if (!layout.add_file(rel, s.size)) return fail("file size overflow");
         disk_paths.push_back(s.disk_path);
     }
 

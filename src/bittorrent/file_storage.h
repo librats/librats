@@ -39,8 +39,11 @@ class FileStorage {
 public:
     void set_piece_length(std::uint32_t length) noexcept { piece_length_ = length; }
     void set_name(std::string name) { name_ = std::move(name); }
-    /// Append a file (its offset is computed from the running total).
-    void add_file(std::string path, std::int64_t size);
+    /// Append a file (its offset is computed from the running total). Returns
+    /// false and leaves the layout unchanged if @p size is negative or would
+    /// overflow the int64 running total — a hostile .torrent must be rejected
+    /// rather than driving signed-overflow UB and a garbage num_pieces().
+    bool add_file(std::string path, std::int64_t size);
     void clear();
 
     const std::string&            name()         const noexcept { return name_; }

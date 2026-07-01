@@ -2,12 +2,20 @@
 #include "bittorrent/types.h"  // kBlockSize
 
 #include <algorithm>
+#include <limits>
 
 namespace librats::bittorrent {
 
-void FileStorage::add_file(std::string path, std::int64_t size) {
+bool FileStorage::add_file(std::string path, std::int64_t size) {
+    // Reject a negative size or a running total that would overflow int64: a
+    // hostile .torrent could otherwise trigger signed-overflow UB here and a
+    // garbage num_pieces() downstream. Leave the layout untouched so the caller
+    // can bail cleanly.
+    if (size < 0 || size > std::numeric_limits<std::int64_t>::max() - total_size_)
+        return false;
     files_.push_back(FileEntry{std::move(path), size, total_size_});
     total_size_ += size;
+    return true;
 }
 
 void FileStorage::clear() {

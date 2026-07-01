@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <limits>
+
 #include "bittorrent/file_storage.h"
 
 using namespace librats::bittorrent;
@@ -92,6 +95,38 @@ TEST(BtFileStorage, MapBlockClampsToTotalSize) {
     auto slices = fs.map_block(1, 0, 1024);
     ASSERT_EQ(slices.size(), 1u);
     EXPECT_EQ(slices[0].size, 476);
+}
+
+TEST(BtFileStorage, AddFileSucceedsForNormalSize) {
+    FileStorage fs;
+    EXPECT_TRUE(fs.add_file("a", 100));
+    EXPECT_TRUE(fs.add_file("b", 0));   // zero-length is valid
+    EXPECT_EQ(fs.total_size(), 100);
+    EXPECT_EQ(fs.num_files(), 2u);
+}
+
+TEST(BtFileStorage, AddFileRejectsNegativeSize) {
+    FileStorage fs;
+    EXPECT_FALSE(fs.add_file("a", -1));
+    // Rejected file must leave the layout completely unchanged.
+    EXPECT_EQ(fs.num_files(), 0u);
+    EXPECT_EQ(fs.total_size(), 0);
+}
+
+TEST(BtFileStorage, AddFileRejectsInt64Overflow) {
+    constexpr std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
+    FileStorage fs;
+    ASSERT_TRUE(fs.add_file("a", kMax - 10));   // near the ceiling
+
+    // A second file whose size would push the running total past INT64_MAX must
+    // be rejected instead of wrapping around into UB / a garbage total.
+    EXPECT_FALSE(fs.add_file("b", 100));
+    EXPECT_EQ(fs.num_files(), 1u);              // 'b' not added
+    EXPECT_EQ(fs.total_size(), kMax - 10);      // total untouched
+
+    // A file that exactly fits the remaining headroom still succeeds.
+    EXPECT_TRUE(fs.add_file("c", 10));
+    EXPECT_EQ(fs.total_size(), kMax);
 }
 
 TEST(BtFileStorage, MapBlockSkipsZeroLengthFiles) {
