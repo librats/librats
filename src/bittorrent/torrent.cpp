@@ -182,6 +182,14 @@ void Torrent::refill(PeerConnection& pc) {
 void Torrent::on_piece(PeerConnection& pc, std::uint32_t piece, std::uint32_t offset, ByteView data) {
     if (!picker_ || piece >= info_.num_pieces()) return;
 
+    // Reject a malformed or unsolicited block before it can index the picker's
+    // block vector out of bounds: the offset must be block-aligned and inside the
+    // piece, and the payload must be exactly that block's size. A hostile peer
+    // could otherwise drive an out-of-bounds access via mark_writing()/mark_finished().
+    const std::uint32_t piece_bytes = info_.piece_size(piece);
+    if (offset % kBlockSize != 0 || offset >= piece_bytes) return;
+    if (data.size() != picker_->block_size(piece, offset / kBlockSize)) return;
+
     if (outstanding_[&pc] > 0) --outstanding_[&pc];
 
     // We already completed this piece — an end-game duplicate that crossed our
@@ -248,6 +256,10 @@ void Torrent::on_request(PeerConnection& pc, std::uint32_t piece, std::uint32_t 
     if (!picker_ || pc.am_choking()) return;             // we are not serving this peer
     if (piece >= info_.num_pieces() || !picker_->have_piece(piece)) return;
     if (length == 0 || length > kMaxBlockSize) return;
+    // The requested range must lie wholly within the piece, else the disk read
+    // would spill into an adjacent piece's file region and serve unrelated bytes.
+    const std::uint32_t piece_bytes = info_.piece_size(piece);
+    if (offset >= piece_bytes || length > piece_bytes - offset) return;
 
     PeerConnection* peer = &pc;
     disk_->async_read(piece, offset, length, [this, peer, piece, offset](bool ok, Bytes data) {
