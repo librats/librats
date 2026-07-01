@@ -20,6 +20,13 @@ constexpr std::uint32_t kMaxMessageLen = 2 * 1024 * 1024;
 
 constexpr std::size_t kRecvChunk = 64 * 1024;
 
+/// Send-buffer high-water mark. If a peer stops draining its socket and our
+/// unsent backlog blows past this, the peer is a slow consumer — drop it rather
+/// than buffer without bound. Matches librats' own kDefaultSendHighWater (8 MiB);
+/// far above any single legitimate message (a piece is <=32 KiB, a bitfield for a
+/// realistic torrent well under a MiB).
+constexpr std::size_t kSendHighWater = 8 * 1024 * 1024;
+
 } // namespace
 
 PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
@@ -339,6 +346,10 @@ void PeerConnection::queue(const std::uint8_t* data, std::size_t len) {
     if (closed_ || len == 0) return;
     out_.insert(out_.end(), data, data + len);
     flush();
+    // Backpressure: flush() leaves out_ holding only the still-unsent backlog (it
+    // compacts the sent prefix). If that backlog has run past the high-water mark
+    // the peer isn't keeping up — drop it instead of buffering without bound.
+    if (!closed_ && out_.size() > kSendHighWater) close("slow consumer: send buffer overflow");
 }
 
 void PeerConnection::flush() {
@@ -349,7 +360,17 @@ void PeerConnection::flush() {
             out_sent_ += std::size_t(n);
             continue;
         }
-        if (would_block()) { want_write(true); return; }
+        if (would_block()) {
+            // Socket is congested; wait for PollOut. Reclaim the already-sent prefix
+            // first so out_ holds only the backlog (bounds memory under partial
+            // writes and makes out_.size() a true measure of what's queued).
+            if (out_sent_ > 0) {
+                out_.erase(out_.begin(), out_.begin() + std::ptrdiff_t(out_sent_));
+                out_sent_ = 0;
+            }
+            want_write(true);
+            return;
+        }
         close("send error");
         return;
     }

@@ -188,10 +188,23 @@ std::vector<Torrent*> Client::torrents() {
     return out;
 }
 
+Torrent* Client::add_torrent_file(const std::string& path, const std::string& save_path) {
+    auto info = TorrentInfo::from_file(path);
+    if (!info) return nullptr;
+    return add_torrent(*info, save_path);
+}
+
+std::size_t Client::total_peers() const {
+    std::size_t n = 0;
+    for (const auto& [hash, t] : torrents_) n += t->num_peers();
+    return n;
+}
+
 void Client::schedule_reap() {
     if (!opened_) return;
     reap_timer_ = reactor_.schedule(std::chrono::seconds(1), [this] {
         reap_closed();
+        sample_rates();
         schedule_reap();
     });
 }
@@ -201,6 +214,29 @@ void Client::reap_closed() {
         std::remove_if(connections_.begin(), connections_.end(),
                        [](const std::unique_ptr<PeerConnection>& pc) { return pc->closed(); }),
         connections_.end());
+}
+
+void Client::sample_rates() {
+    std::uint64_t down = 0, up = 0;
+    for (auto& [hash, t] : torrents_) {
+        down += t->bytes_downloaded();
+        up   += t->bytes_uploaded();
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (last_sample_.time_since_epoch().count() != 0) {
+        const double dt = std::chrono::duration<double>(now - last_sample_).count();
+        if (dt > 0) {
+            // Counters are monotonic, but guard against a torrent being removed
+            // between samples (which would make the aggregate drop).
+            const std::uint64_t d_down = down >= last_down_bytes_ ? down - last_down_bytes_ : 0;
+            const std::uint64_t d_up   = up   >= last_up_bytes_   ? up   - last_up_bytes_   : 0;
+            down_rate_.store(std::uint64_t(double(d_down) / dt), std::memory_order_relaxed);
+            up_rate_.store(std::uint64_t(double(d_up) / dt), std::memory_order_relaxed);
+        }
+    }
+    last_down_bytes_ = down;
+    last_up_bytes_   = up;
+    last_sample_     = now;
 }
 
 } // namespace librats::bittorrent
