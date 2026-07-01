@@ -90,12 +90,14 @@ void PiecePicker::dec_availability(const Bitfield& peer_have) {
     for (std::uint32_t p = 0; p < num_pieces_; ++p)
         if (peer_have.size() > p && peer_have.get(p)) avail_add(p, -1);
 }
-void PiecePicker::inc_availability_all() {
-    for (std::uint32_t p = 0; p < num_pieces_; ++p) avail_add(p, +1);
-}
-void PiecePicker::dec_availability_all() {
-    for (std::uint32_t p = 0; p < num_pieces_; ++p) avail_add(p, -1);
-}
+// A seed has every piece. Bumping every piece's availability (O(n) plus a bucket
+// move each) is wasted work: since a seed shifts *all* pieces equally, the
+// rarest-first ordering is unchanged, so the bucket index (keyed on the per-peer
+// count) needs no update at all. Track seeds as one counter instead — the
+// effective availability of a piece is availability_[p] + seeds_ — making a seed
+// joining or leaving O(1). (Mirrors libtorrent's m_seeds.)
+void PiecePicker::inc_availability_all() { ++seeds_; }
+void PiecePicker::dec_availability_all() { if (seeds_ > 0) --seeds_; }
 
 // ---- block state machine ----
 

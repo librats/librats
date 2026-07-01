@@ -59,6 +59,7 @@ void Torrent::stop() {
     peers_.clear();
     outstanding_.clear();
     recent_down_.clear();
+    seed_peers_.clear();
     if (disk_) disk_->stop();
     disk_.reset();
     picker_.reset();
@@ -135,7 +136,16 @@ void Torrent::on_handshake(PeerConnection& pc, const InfoHash&, const PeerId&) {
 
 void Torrent::on_bitfield(PeerConnection& pc, const Bitfield& bf) {
     if (!picker_) return;
-    picker_->inc_availability(bf);
+    // A full bitfield is a seed: count it as one O(1) seed instead of bumping every
+    // piece's availability. Remember which peers we counted this way so remove_peer
+    // undoes it symmetrically. The insert() guard also makes a (spurious) repeat
+    // full bitfield idempotent for the seed count.
+    const std::uint32_t n = info_.num_pieces();
+    if (n > 0 && bf.size() == n && bf.count() == n) {
+        if (seed_peers_.insert(&pc).second) picker_->inc_availability_all();
+    } else {
+        picker_->inc_availability(bf);
+    }
     update_interest(pc);
 }
 
@@ -308,7 +318,10 @@ void Torrent::remove_peer(PeerConnection* pc) {
     auto it = std::find(peers_.begin(), peers_.end(), pc);
     if (it == peers_.end()) return;
     if (picker_) {
-        picker_->dec_availability(pc->peer_bitfield());
+        // Undo the availability accounting the same way it was applied: a seed via
+        // the seed counter, anyone else per-piece from their bitfield.
+        if (seed_peers_.erase(pc)) picker_->dec_availability_all();
+        else                       picker_->dec_availability(pc->peer_bitfield());
         picker_->cancel_peer(pc);
     }
     peers_.erase(it);

@@ -94,7 +94,9 @@ public:
     void          dec_availability(const Bitfield& peer_have);
     void          inc_availability_all();   ///< a seed joined
     void          dec_availability_all();
-    std::uint32_t availability(std::uint32_t piece) const noexcept { return availability_[piece]; }
+    /// Effective availability: per-peer count plus the number of connected seeds
+    /// (seeds are tracked as one counter — see inc_availability_all).
+    std::uint32_t availability(std::uint32_t piece) const noexcept { return availability_[piece] + seeds_; }
 
     // ---- block state machine ----
     /// Up to @p count blocks that @p peer (holding @p peer_have) can serve and we
@@ -180,6 +182,9 @@ private:
     // prefix from 0 on every refill. Maintained only in we_have() (advances
     // monotonically, O(n) total over the whole download).
     std::uint32_t               seq_cursor_  = 0;
+    // Number of connected seeds (peers that have everything). Tracked as one
+    // counter instead of +1 on every piece; folded into availability().
+    std::uint32_t               seeds_       = 0;
 
     std::unordered_map<std::uint32_t, DownloadingPiece> downloading_;
 

@@ -168,6 +168,7 @@ private:
     std::vector<PeerConnection*>                            peers_;
     std::unordered_map<PeerConnection*, int>                outstanding_;
     std::unordered_map<PeerConnection*, std::uint64_t>      recent_down_;  // tit-for-tat score
+    std::unordered_set<PeerConnection*>                     seed_peers_;   // counted via the picker's O(1) seed counter
     std::unordered_map<PeerConnection*, ext::PeerExtensions>           peer_ext_;
     std::unordered_map<PeerConnection*, std::unordered_set<std::string>> pex_sent_;
     PeerList                                                          peer_list_;

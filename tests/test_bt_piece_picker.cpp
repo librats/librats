@@ -82,6 +82,34 @@ TEST(BtPiecePicker, Availability) {
     EXPECT_EQ(pp.availability(1), 2u);
 }
 
+TEST(BtPiecePicker, SeedCounterFoldsIntoAvailabilityAndPreservesRarestOrder) {
+    // A seed shifts every piece's availability equally, so the rarest-first order
+    // must be unchanged and availability() must reflect the seed count. Seed
+    // join/leave is O(1) (no per-piece bucket moves).
+    PiecePicker pp(3, kPiece, std::int64_t(kPiece) * 3);
+    pp.peer_has_piece(0);                                             // raw avail(0)=1 (rarest)
+    pp.peer_has_piece(1); pp.peer_has_piece(1); pp.peer_has_piece(1); // raw avail(1)=3
+    pp.peer_has_piece(2); pp.peer_has_piece(2);                       // raw avail(2)=2
+
+    pp.inc_availability_all();  // one seed joins
+    pp.inc_availability_all();  // a second seed joins
+    EXPECT_EQ(pp.availability(0), 3u);  // 1 + 2 seeds
+    EXPECT_EQ(pp.availability(1), 5u);  // 3 + 2
+    EXPECT_EQ(pp.availability(2), 4u);  // 2 + 2
+
+    // Rarest-first order is unchanged: piece 0 still rarest despite the seeds.
+    auto picked = pp.pick_blocks(seeder(3), 1, PEER_A);
+    ASSERT_FALSE(picked.empty());
+    EXPECT_EQ(picked[0].piece, 0u);
+
+    pp.dec_availability_all();
+    EXPECT_EQ(pp.availability(0), 2u);  // 1 + 1
+    pp.dec_availability_all();
+    EXPECT_EQ(pp.availability(0), 1u);  // 1 + 0
+    pp.dec_availability_all();          // no seeds left — must not underflow
+    EXPECT_EQ(pp.availability(0), 1u);
+}
+
 TEST(BtPiecePicker, RarestFirstPicksRarest) {
     PiecePicker pp(4, kPiece, std::int64_t(kPiece) * 4);
     // Distinct availabilities so order is unambiguous: piece 1 is rarest.
