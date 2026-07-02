@@ -183,3 +183,33 @@ TEST_F(BtDownload, SingleFileDownloadCompletes) {
     seeder.stop();
     leecher.stop();
 }
+
+// Regression: resuming a complete torrent must not double-count downloaded bytes.
+// load_resume_data restores the cumulative counter (total_downloaded) AND the
+// have-bitfield; the on-disk check must not fold the on-disk pieces back into that
+// counter (which previously doubled it and drove `left` to 0 — a false seed claim).
+TEST_F(BtDownload, ResumeDoesNotDoubleCountDownloaded) {
+    Bytes data = make_data(40000);  // ~3 pieces at 16 KiB
+    // Write the complete file into the download dir so every piece is present.
+    TorrentInfo info = build_and_seed_single("solo.bin", data, 16384, dl_dir());
+
+    Client c(Client::Config{0, dl_dir(), "-LR0001-"});
+    c.open();
+
+    ResumeData rd;
+    rd.info_hash        = info.info_hash();
+    rd.have             = Bitfield(info.num_pieces(), true);  // all pieces on disk
+    rd.total_downloaded = data.size();                        // cumulative from a prior session
+    rd.total_uploaded   = 0;
+
+    Torrent* t = c.add_torrent_with_resume(info, rd, dl_dir());
+    ASSERT_NE(t, nullptr);
+
+    for (int i = 0; i < 4000 && t->state() != Torrent::State::Seeding; ++i) c.reactor().run_one(2);
+    ASSERT_EQ(t->state(), Torrent::State::Seeding);
+
+    // Must equal the restored counter, not twice it.
+    EXPECT_EQ(t->bytes_downloaded(), data.size());
+
+    c.stop();
+}

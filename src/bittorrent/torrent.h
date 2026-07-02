@@ -181,8 +181,9 @@ private:
     std::uint32_t     metadata_received_ = 0;
     std::vector<bool> metadata_have_;
 
-    std::uint64_t bytes_downloaded_ = 0;
+    std::uint64_t bytes_downloaded_ = 0;  ///< cumulative payload downloaded (tracker stat / resume)
     std::uint64_t bytes_uploaded_   = 0;
+    std::uint64_t verified_bytes_   = 0;  ///< payload currently present & verified on disk (drives `left`)
 
     TimerId                                  tick_timer_ = kInvalidTimerId;
     std::function<void()>                    on_complete_;

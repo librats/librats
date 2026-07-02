@@ -169,6 +169,11 @@ private:
     bool          am_interested_   = false;
     bool          peer_choking_    = true;
     bool          peer_interested_ = false;
+    /// A bitfield is only valid as the peer's first piece-state message (BEP 3).
+    /// Set once the peer has sent a bitfield or any HAVE; a later bitfield is then
+    /// rejected so we can't double-count its availability against a single per-bit
+    /// decrement at disconnect.
+    bool          piece_state_begun_ = false;
     Bitfield      peer_have_;
     ReservedBytes peer_reserved_{};
 };

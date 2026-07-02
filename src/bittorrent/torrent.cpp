@@ -69,8 +69,12 @@ void Torrent::stop() {
 void Torrent::on_check_complete(Bitfield have) {
     if (!running_) return;
     picker_->set_have_bitfield(have);
+    // Account the bytes already on disk toward `left` via verified_bytes_ — NOT
+    // bytes_downloaded_, which is the cumulative download counter restored verbatim
+    // from resume. Folding on-disk pieces into it too would double-count a resumed
+    // torrent (and drive `left` to 0, falsely announcing us as a seed).
     for (std::uint32_t p = 0; p < info_.num_pieces(); ++p)
-        if (picker_->have_piece(p)) bytes_downloaded_ += info_.piece_size(p);
+        if (picker_->have_piece(p)) verified_bytes_ += info_.piece_size(p);
 
     if (picker_->is_finished()) { state_ = State::Seeding; completed_announced_ = true; }
     else                        { state_ = State::Downloading; }
@@ -254,6 +258,7 @@ void Torrent::on_piece_hashed(std::uint32_t piece, bool ok, std::array<std::uint
     }
 
     picker_->we_have(piece);
+    verified_bytes_ += info_.piece_size(piece);  // one more piece is now on disk → shrinks `left`
     for (PeerConnection* pc : peers_) {
         pc->send_have(piece);
         update_interest(*pc);  // we may no longer need some peers
@@ -497,8 +502,11 @@ TrackerRequest Torrent::make_tracker_request(TrackerEvent event) const {
     r.port       = host_.listen_port();
     r.uploaded   = bytes_uploaded_;
     r.downloaded = bytes_downloaded_;
-    r.left = (has_metadata_ && info_.total_size() > std::int64_t(bytes_downloaded_))
-                 ? std::uint64_t(info_.total_size()) - bytes_downloaded_
+    // `left` is what remains to fetch = total size minus what is verified on disk.
+    // Must use verified_bytes_, not the cumulative bytes_downloaded_ (which can
+    // exceed on-disk bytes after re-downloads and would understate `left`).
+    r.left = (has_metadata_ && info_.total_size() > std::int64_t(verified_bytes_))
+                 ? std::uint64_t(info_.total_size()) - verified_bytes_
                  : 0;
     r.event   = event;
     r.numwant = 50;

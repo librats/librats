@@ -249,6 +249,7 @@ void PeerConnection::dispatch(MessageId id, const std::uint8_t* payload, std::ui
             break;
         case MessageId::Have: {
             if (len != 4) return bad();
+            piece_state_begun_ = true;  // a HAVE begins the piece-state flow; a later bitfield is invalid
             const std::uint32_t piece = read_u32_be(payload);
             // Only act on a HAVE that actually flips a bit. A redundant HAVE (a piece
             // the peer already advertised, via bitfield or an earlier HAVE) is legal on
@@ -263,6 +264,14 @@ void PeerConnection::dispatch(MessageId id, const std::uint8_t* payload, std::ui
             break;
         }
         case MessageId::Bitfield: {
+            // BEP 3: a bitfield is valid only as the peer's first piece-state
+            // message. A second bitfield (or one after any HAVE) would re-add the
+            // peer's whole availability in the picker with no matching decrement —
+            // a permanent skew. And when we know the piece count, the payload must
+            // be exactly ceil(num_pieces/8) bytes. Reject either as a violation.
+            if (piece_state_begun_) return bad();
+            if (num_pieces_ != 0 && len != (num_pieces_ + 7) / 8) return bad();
+            piece_state_begun_ = true;
             const std::uint32_t bits = num_pieces_ ? num_pieces_ : len * 8;
             peer_have_.assign(payload, len, bits);
             if (obs_) obs_->on_bitfield(*this, peer_have_);

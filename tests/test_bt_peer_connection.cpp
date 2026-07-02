@@ -200,6 +200,52 @@ TEST_F(BtPeerConnection, ExtendedAndPort) {
     EXPECT_EQ(obs_b_.port, 6881);
 }
 
+// A second bitfield is a protocol violation (BEP 3: at most one, sent first): it
+// would re-add the peer's availability in the picker with no matching decrement.
+// The receiver must reject it by closing.
+TEST_F(BtPeerConnection, DuplicateBitfieldClosesConnection) {
+    pump([&] { return a_->handshake_done() && b_->handshake_done(); });
+
+    Bitfield bf(num_pieces_, false);
+    bf.set(1);
+    a_->send_bitfield(bf);
+    a_->send_bitfield(bf);  // illegal second bitfield
+
+    pump([&] { return b_->closed(); });
+    EXPECT_TRUE(obs_b_.got_bitfield);  // the first one was delivered
+    EXPECT_TRUE(b_->closed());         // the duplicate closed the link
+}
+
+// A bitfield whose byte length doesn't match ceil(num_pieces/8) is malformed and
+// must be rejected rather than silently padded/truncated.
+TEST_F(BtPeerConnection, WrongSizeBitfieldClosesConnection) {
+    pump([&] { return a_->handshake_done() && b_->handshake_done(); });
+
+    // b_ knows num_pieces_ == 4 (1 byte expected); send a 12-bit (2-byte) bitfield.
+    Bitfield oversized(num_pieces_ + 8, false);
+    a_->send_bitfield(oversized);
+
+    pump([&] { return b_->closed(); });
+    EXPECT_TRUE(b_->closed());
+    EXPECT_FALSE(obs_b_.got_bitfield);  // never accepted
+}
+
+// A bitfield arriving after a HAVE (i.e. not the first piece-state message) is
+// likewise rejected — otherwise its availability would double-count over the HAVE.
+TEST_F(BtPeerConnection, BitfieldAfterHaveRejected) {
+    pump([&] { return a_->handshake_done() && b_->handshake_done(); });
+
+    a_->send_have(0);
+    Bitfield bf(num_pieces_, false);
+    bf.set(2);
+    a_->send_bitfield(bf);
+
+    pump([&] { return b_->closed(); });
+    EXPECT_TRUE(obs_b_.got_have);
+    EXPECT_FALSE(obs_b_.got_bitfield);
+    EXPECT_TRUE(b_->closed());
+}
+
 // Standalone (own sockets): a peer whose info-hash differs rejects the handshake.
 TEST(BtPeerConnectionStandalone, MismatchedInfoHashCloses) {
     socket_t sa, sb;
