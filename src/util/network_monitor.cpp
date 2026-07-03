@@ -110,6 +110,14 @@ void NetworkMonitor::stop() {
     if (!running_.exchange(false)) {
         return;
     }
+    // Signal under mutex_ so this synchronizes with the worker's wait: without
+    // holding the lock, a notify_all() that lands between the worker's predicate
+    // check and its enrollment in the CV wait queue is lost, and the worker then
+    // sleeps the full poll_interval (30 s with an event backend) before join()
+    // returns. Taking the lock (as check_now() does) closes that window.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+    }
     cv_.notify_all();   // wake the worker out of its wait
     backend_stop();     // stop OS notifications / join the reader thread
     if (worker_.joinable()) {
