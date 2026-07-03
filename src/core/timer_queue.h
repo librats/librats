@@ -50,7 +50,11 @@ public:
         const auto now = Clock::now();
         const auto due = heap_.front().when;
         if (due <= now) return 0;
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(due - now).count();
+        // Round UP: truncating a sub-millisecond remainder to 0 would make the
+        // reactor poll with a 0 ms timeout and busy-spin until the deadline
+        // instead of sleeping through it. ceil guarantees the wait covers the
+        // timer, so it fires on wake rather than after a CPU-burning spin.
+        const auto ms = std::chrono::ceil<std::chrono::milliseconds>(due - now).count();
         return static_cast<int>(std::min<long long>(ms, max_ms));
     }
 
