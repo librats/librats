@@ -62,7 +62,9 @@ TrackerResponse announce_to_tracker(const std::string& url, const TrackerRequest
 class TrackerAnnouncer {
 public:
     using Poster       = std::function<void(std::function<void()>)>;
-    using PeerCallback = std::function<void(const std::vector<Address>& peers)>;
+    /// Delivers a tracker's response: discovered peers and the interval (seconds)
+    /// the tracker wants before the next announce (already max'd with min-interval).
+    using PeerCallback = std::function<void(const std::vector<Address>& peers, std::uint32_t interval)>;
 
     TrackerAnnouncer(std::vector<std::string> trackers, Poster poster, int timeout_ms = 10000);
     ~TrackerAnnouncer();

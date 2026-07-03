@@ -323,22 +323,26 @@ std::vector<PieceBlock> PiecePicker::pick_blocks(const Bitfield& peer_have, int 
     }
     if (int(result.size()) >= count) return result;
 
-    // 3) End-game: every needed block this peer can offer is already requested
-    // elsewhere — re-request outstanding blocks (but not ones already on this peer).
-    bool used_endgame = false;
+    // 3) End-game. Only enter it once *every* wanted piece is already in progress
+    // (downloading_ covers all remaining wanted pieces) — i.e. near completion —
+    // so we don't start duplicating requests early in the download (PP-1). Before
+    // that, a peer whose blocks are all taken simply gets nothing this round.
+    if (downloading_.size() < pieces_left_) return result;  // fresh pieces still remain
+
+    // Duplicate at most ONE already-requested block per call (not this peer's whole
+    // budget) so an in-progress block isn't fetched from many peers at once.
     for (const auto& [piece, dp] : downloading_) {
-        if (int(result.size()) >= count) break;
         if (!wanted(piece) || !peer_has(piece)) continue;
         const std::uint32_t nblocks = blocks_in_piece(piece);
-        for (std::uint32_t b = 0; b < nblocks && int(result.size()) < count; ++b) {
+        for (std::uint32_t b = 0; b < nblocks; ++b) {
             const Block& blk = dp.blocks[b];
             if (blk.state != BlockState::Requested) continue;
             if (std::find(blk.peers.begin(), blk.peers.end(), peer) != blk.peers.end()) continue;
             result.push_back(PieceBlock{piece, b});
-            used_endgame = true;
+            endgame_ = true;
+            return result;  // one busy block per pick
         }
     }
-    if (used_endgame) endgame_ = true;
     return result;
 }
 

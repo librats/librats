@@ -349,10 +349,34 @@ TEST(BtPiecePicker, EndGameReRequestsOutstanding) {
     for (const auto& b : a) pp.mark_requested(b, PEER_A);
     EXPECT_FALSE(pp.in_endgame());
 
-    // Peer B has nothing free left; end-game lets it re-request A's blocks.
+    // Every piece is now in progress (near completion), so peer B may re-request an
+    // outstanding block — but at most ONE per pick, not the whole piece (PP-1).
     auto b = pp.pick_blocks(seeder(1), 2, PEER_B);
-    EXPECT_EQ(b.size(), 2u);
+    ASSERT_EQ(b.size(), 1u);
     EXPECT_TRUE(pp.in_endgame());
+    pp.mark_requested(b[0], PEER_B);
+
+    // A second pick hands B the other outstanding block.
+    auto b2 = pp.pick_blocks(seeder(1), 2, PEER_B);
+    ASSERT_EQ(b2.size(), 1u);
+    EXPECT_NE(b2[0].block, b[0].block);
+}
+
+// PP-1: end-game must NOT start early. While fresh pieces remain unstarted, a peer
+// whose blocks are all taken gets nothing rather than duplicating requests.
+TEST(BtPiecePicker, NoEndGameWhileFreshPiecesRemain) {
+    PiecePicker pp(2, kPiece, std::int64_t(kPiece) * 2);  // 2 pieces
+    // Peer A takes every block of piece 0 only.
+    Bitfield only0(2, false); only0.set(0);
+    auto a = pp.pick_blocks(only0, 2, PEER_A);
+    ASSERT_EQ(a.size(), 2u);
+    for (const auto& b : a) pp.mark_requested(b, PEER_A);
+
+    // Peer B also has only piece 0. Piece 1 is still fresh (unstarted), so we are
+    // not near completion — B must get nothing, not an end-game duplicate.
+    auto b = pp.pick_blocks(only0, 2, PEER_B);
+    EXPECT_TRUE(b.empty());
+    EXPECT_FALSE(pp.in_endgame());
 }
 
 TEST(BtPiecePicker, EndGameMarkWritingCancelsOtherPeers) {

@@ -41,6 +41,8 @@ public:
         if (is_valid_socket(sock_)) { close_socket(sock_); sock_ = INVALID_SOCKET_VALUE; }
     }
     std::uint16_t port() const { return port_; }
+    // BEP 15 event codes: 0=none, 1=completed, 2=started, 3=stopped.
+    bool saw_event(std::uint32_t ev) const { return (events_.load() & (1u << ev)) != 0; }
 
 private:
     void run() {
@@ -57,6 +59,7 @@ private:
                 write_u64_be(resp.data() + 8, 0x1122334455667788ull);
                 send_udp_data(sock_, resp, sender.ip, sender.port, AddressFamily::IPv4);
             } else if (action == 1) {  // announce
+                if (req.size() >= 84) events_.fetch_or(1u << read_u32_be(req.data() + 80));
                 Bytes resp(26);
                 write_u32_be(resp.data(), 1);
                 write_u32_be(resp.data() + 4, tid);
@@ -77,7 +80,8 @@ private:
     std::uint16_t     peer_port_;
     socket_t          sock_ = INVALID_SOCKET_VALUE;
     std::uint16_t     port_ = 0;
-    std::atomic<bool> running_{true};
+    std::atomic<bool>         running_{true};
+    std::atomic<std::uint32_t> events_{0};   ///< bitmask of BEP15 event codes seen
     std::thread       thread_;
 };
 
@@ -232,8 +236,14 @@ TEST(BtTracker, DiscoversSeederViaTrackerAndDownloads) {
     Bytes got((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     EXPECT_EQ(got, data);
 
+    // The leecher must announce its lifecycle to the tracker (H12): started on
+    // start, completed on finishing (async — pump for it), stopped on stop.
+    EXPECT_TRUE(fake.saw_event(2));                            // started
+    EXPECT_TRUE(pump([&] { return fake.saw_event(1); }));     // completed
+
     seeder.stop();
-    leecher.stop();
+    leecher.stop();                                            // sends + drains "stopped"
+    EXPECT_TRUE(fake.saw_event(3));                            // stopped
     fake.stop();
     stdfs::remove_all(base, ec);
 }

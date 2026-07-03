@@ -102,6 +102,7 @@ public:
     const PeerId& peer_id() const override { return peer_id_; }
     void          find_peers_via_dht(const InfoHash& info_hash,
                                      std::function<void(const std::string& ip, std::uint16_t port)> on_peer) override;
+    void          announce_to_dht(const InfoHash& info_hash, std::uint16_t port) override;
 
     /// Largest number of peer connections (in + out) the session will hold at once.
     /// Beyond this, inbound sockets are accepted and immediately closed so a flood

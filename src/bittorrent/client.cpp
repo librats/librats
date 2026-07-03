@@ -130,6 +130,12 @@ void Client::find_peers_via_dht(const InfoHash& info_hash,
     });
 }
 
+void Client::announce_to_dht(const InfoHash& info_hash, std::uint16_t port) {
+    // Publish ourselves to the info-hash's DHT nodes so other clients' get_peers
+    // find us (BEP 5). DhtClient is the node's shared, thread-safe instance.
+    if (dht_ && dht_->is_running()) dht_->announce_peer(info_hash, port);
+}
+
 Torrent* Client::add_torrent(const TorrentInfo& info, const std::string& save_path) {
     return run_on_reactor([&] { return add_torrent_impl(info, save_path); });
 }

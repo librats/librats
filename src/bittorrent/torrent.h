@@ -58,6 +58,9 @@ public:
     /// found peer is delivered to @p on_peer on the reactor thread. Default no-op.
     virtual void find_peers_via_dht(const InfoHash& /*info_hash*/,
                                     std::function<void(const std::string& ip, std::uint16_t port)> /*on_peer*/) {}
+    /// Announce ourselves to the DHT for @p info_hash on @p port so other clients
+    /// doing get_peers can find us (BEP 5). Default no-op (no DHT attached).
+    virtual void announce_to_dht(const InfoHash& /*info_hash*/, std::uint16_t /*port*/) {}
 };
 
 class Torrent final : public PeerConnection::Observer {
@@ -142,6 +145,9 @@ private:
     void update_interest(PeerConnection& pc);
     void refill(PeerConnection& pc);
     void recompute_choker();
+    /// Rotate the optimistic-unchoke slot to give a currently-choked interested
+    /// peer a chance to prove itself (so newcomers can bootstrap). ~30 s cadence.
+    void rotate_optimistic();
     void handle_pex(PeerConnection& pc, ByteView payload);
     void send_pex();
     std::optional<ext::PexPeer> dialable(PeerConnection& pc) const;
@@ -193,12 +199,16 @@ private:
     /// Time of the last progress with each peer (a block received, or the moment
     /// we started waiting on a fresh batch). Drives the request-timeout snub.
     std::unordered_map<PeerConnection*, std::chrono::steady_clock::time_point> request_time_;
-    std::unordered_map<PeerConnection*, std::uint64_t>      recent_down_;  // tit-for-tat score
+    std::unordered_map<PeerConnection*, std::uint64_t>      recent_down_;  // bytes recv this choke window (leech score)
+    std::unordered_map<PeerConnection*, std::uint64_t>      recent_up_;    // bytes served this choke window (seed score)
+    PeerConnection*                                         optimistic_ = nullptr;  // current optimistic-unchoke peer
     std::unordered_set<PeerConnection*>                     seed_peers_;   // counted via the picker's O(1) seed counter
     std::unordered_map<PeerConnection*, ext::PeerExtensions>           peer_ext_;
     std::unordered_map<PeerConnection*, std::unordered_set<std::string>> pex_sent_;
+    std::unordered_map<PeerConnection*, int>                             pex_last_tick_;  ///< tick of last PEX to peer (BEP11 ≥60 s gap)
     PeerList                                                          peer_list_;
     int                                                               tick_count_ = 0;
+    int                                                               next_announce_tick_ = 300;  ///< tick to re-announce (driven by tracker interval)
 
     // ut_metadata (BEP 9) assembly state, used while we lack metadata.
     Bytes             metadata_buf_;

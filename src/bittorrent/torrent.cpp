@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <unordered_map>
 
 namespace librats::bittorrent {
 
@@ -54,7 +56,11 @@ void Torrent::stop() {
     if (!running_) return;
     running_ = false;
     if (tick_timer_ != kInvalidTimerId) { reactor_.cancel(tick_timer_); tick_timer_ = kInvalidTimerId; }
-    if (trackers_) { trackers_->stop(); trackers_.reset(); }
+    if (trackers_) {
+        announce_trackers(TrackerEvent::Stopped);  // tell trackers we're leaving (H12)
+        trackers_->stop();                          // drains the in-flight Stopped announce
+        trackers_.reset();
+    }
     for (PeerConnection* pc : peers_) pc->close("torrent stopped");
     peers_.clear();
     outstanding_.clear();
@@ -116,14 +122,29 @@ void Torrent::tick() {
             if (peer_list_.add(ip, port, PeerSource::Dht)) try_connect();
         });
     }
-    // Re-announce to trackers on a coarse cadence (the precise interval handling
-    // can refine this later; ~5 min keeps the swarm fresh without being chatty).
-    if (tick_count_ % 300 == 1) announce_trackers(TrackerEvent::None);
+    // Announce ourselves to the DHT so others can find us — promptly on startup,
+    // then every ~15 min per BEP 5 (H15). Was previously never done → undiscoverable.
+    if (tick_count_ % 900 == 5) host_.announce_to_dht(info_hash(), host_.listen_port());
+    // Re-announce when the tracker's requested interval has elapsed (H13).
+    if (tick_count_ >= next_announce_tick_) {
+        next_announce_tick_ = tick_count_ + 300;  // fallback until the response updates it
+        announce_trackers(TrackerEvent::None);
+    }
 
     try_connect();
     send_pex();
-    recompute_choker();
-    for (auto& [pc, score] : recent_down_) score = 0;  // reset the tit-for-tat window
+
+    // Choking runs on a coarse cadence, not every tick: recompute the unchoke set
+    // every ~10 s and rotate the optimistic slot every ~30 s. Recomputing every
+    // second (with a 1 s scoring window) made peers near the slot boundary flip
+    // choke/unchoke constantly (H4). The tit-for-tat window therefore accumulates
+    // over the whole 10 s and is only reset when we recompute.
+    if (tick_count_ % 30 == 0) rotate_optimistic();
+    if (tick_count_ % 10 == 0) {
+        recompute_choker();
+        for (auto& [pc, score] : recent_down_) score = 0;
+        for (auto& [pc, score] : recent_up_)   score = 0;
+    }
     schedule_tick();
 }
 
@@ -331,6 +352,7 @@ void Torrent::on_piece_hashed(std::uint32_t piece, bool ok, std::array<std::uint
     if (picker_->is_finished() && !completed_announced_) {
         completed_announced_ = true;
         state_ = State::Seeding;
+        announce_trackers(TrackerEvent::Completed);  // tell trackers we're now a seed (H12)
         if (on_complete_) on_complete_();
     }
 }
@@ -348,7 +370,8 @@ void Torrent::on_request(PeerConnection& pc, std::uint32_t piece, std::uint32_t 
     disk_->async_read(piece, offset, length, [this, peer, piece, offset](bool ok, Bytes data) {
         if (ok && alive(peer)) {
             peer->send_piece(piece, offset, ByteView(data));
-            bytes_uploaded_ += data.size();
+            bytes_uploaded_    += data.size();
+            recent_up_[peer]   += data.size();  // seed-choking score for this window
         }
     });
 }
@@ -363,18 +386,39 @@ void Torrent::on_closed(PeerConnection& pc, const std::string&) {
 
 void Torrent::recompute_choker() {
     if (!running_) return;
+    // Score peers by what they've done for us this window: while downloading that
+    // is bytes received (tit-for-tat); while seeding we receive nothing, so score
+    // by bytes we served them instead — otherwise every peer scores 0 and a seed
+    // would serve only whichever peers happened to connect first, forever (H2).
+    const bool seeding = picker_ && picker_->is_finished();
     std::vector<Choker::Candidate> candidates;
     for (PeerConnection* pc : peers_)
         if (pc->peer_interested())
-            candidates.push_back(Choker::Candidate{pc, recent_down_[pc]});
+            candidates.push_back(Choker::Candidate{pc, seeding ? recent_up_[pc] : recent_down_[pc]});
 
-    auto unchoke = choker_.select(std::move(candidates));
+    auto unchoke = choker_.select(std::move(candidates), optimistic_);
     for (PeerConnection* pc : peers_) {
         const bool should_unchoke =
             std::find(unchoke.begin(), unchoke.end(), pc) != unchoke.end();
         if (should_unchoke && pc->am_choking())       pc->send_unchoke();
         else if (!should_unchoke && !pc->am_choking()) pc->send_choke();
     }
+}
+
+void Torrent::rotate_optimistic() {
+    // Round-robin the optimistic slot through the interested-but-choked peers so a
+    // newcomer that hasn't earned a tit-for-tat slot still gets a chance to prove
+    // itself (H1). Advance from just after the current optimistic in peer order.
+    std::vector<PeerConnection*> candidates;
+    for (PeerConnection* pc : peers_)
+        if (pc->peer_interested()) candidates.push_back(pc);
+    if (candidates.empty()) { optimistic_ = nullptr; return; }
+
+    auto it = std::find(candidates.begin(), candidates.end(), optimistic_);
+    const std::size_t next = (it == candidates.end()) ? 0
+                           : (std::size_t(it - candidates.begin()) + 1) % candidates.size();
+    optimistic_ = candidates[next];
+    recompute_choker();  // apply the new optimistic slot immediately
 }
 
 // ---- helpers ----
@@ -393,11 +437,14 @@ void Torrent::remove_peer(PeerConnection* pc) {
         else                       picker_->dec_availability(pc->peer_bitfield());
         picker_->cancel_peer(pc);
     }
+    if (optimistic_ == pc) optimistic_ = nullptr;
     peers_.erase(it);
     outstanding_.erase(pc);
     request_time_.erase(pc);
     recent_down_.erase(pc);
+    recent_up_.erase(pc);
     peer_ext_.erase(pc);
+    pex_last_tick_.erase(pc);
 }
 
 std::size_t Torrent::num_outstanding_requests() const noexcept {
@@ -552,19 +599,41 @@ void Torrent::send_pex() {
         auto ext_it = peer_ext_.find(pc);
         if (ext_it == peer_ext_.end() || ext_it->second.ut_pex_id == 0) continue;
 
-        // Advertise the dialable address of every *other* peer we haven't already
-        // told this one about (a simple running diff — never re-send a peer).
-        auto& sent = pex_sent_[pc];
-        std::vector<ext::PexPeer> added;
+        // BEP 11: the first PEX message to a peer may go out promptly, but
+        // subsequent ones must be at least 60 s apart or the peer treats it as
+        // abuse and disconnects (too_frequent_pex) (H14). Gate per peer.
+        auto tick_it = pex_last_tick_.find(pc);
+        const bool first = (tick_it == pex_last_tick_.end());
+        if (!first && tick_count_ - tick_it->second < 60) continue;
+
+        // Diff the set of dialable peers we've told this one about against the
+        // current set: newly-seen peers go in `added`, departed ones in `dropped`.
+        std::unordered_map<std::string, ext::PexPeer> current;
         for (PeerConnection* other : peers_) {
             if (other == pc) continue;
-            auto ep = dialable(*other);
-            if (!ep) continue;
-            const std::string key = ep->ip + ":" + std::to_string(ep->port);
-            if (sent.insert(key).second) added.push_back(*ep);
+            if (auto ep = dialable(*other))
+                current.emplace(ep->ip + ":" + std::to_string(ep->port), *ep);
         }
-        if (!added.empty())
-            pc->send_extended(ext_it->second.ut_pex_id, ByteView(ext::encode_pex(added, {})));
+
+        auto& sent = pex_sent_[pc];
+        std::vector<ext::PexPeer> added, dropped;
+        for (const auto& [key, ep] : current)
+            if (!sent.count(key)) added.push_back(ep);
+        for (const std::string& key : sent) {
+            if (current.count(key)) continue;
+            const std::size_t c = key.rfind(':');  // reconstruct the departed peer's endpoint
+            if (c != std::string::npos)
+                dropped.push_back(ext::PexPeer{key.substr(0, c),
+                                               std::uint16_t(std::atoi(key.c_str() + c + 1))});
+        }
+
+        if (!added.empty() || !dropped.empty()) {
+            pc->send_extended(ext_it->second.ut_pex_id, ByteView(ext::encode_pex(added, dropped)));
+            pex_last_tick_[pc] = tick_count_;
+        }
+
+        sent.clear();
+        for (const auto& [key, ep] : current) sent.insert(key);
     }
 }
 
@@ -590,7 +659,11 @@ TrackerRequest Torrent::make_tracker_request(TrackerEvent event) const {
 
 void Torrent::announce_trackers(TrackerEvent event) {
     if (!trackers_) return;
-    trackers_->announce(make_tracker_request(event), [this](const std::vector<Address>& peers) {
+    trackers_->announce(make_tracker_request(event),
+                        [this](const std::vector<Address>& peers, std::uint32_t interval) {
+        // Schedule the next periodic announce off the tracker's requested interval
+        // rather than a fixed cadence (H13). tick_count_ advances ~1/s.
+        next_announce_tick_ = tick_count_ + int(interval);
         bool any = false;
         for (const Address& a : peers)
             if (peer_list_.add(a.ip, a.port, PeerSource::Tracker)) any = true;

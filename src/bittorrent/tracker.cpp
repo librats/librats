@@ -4,6 +4,7 @@
 #include "bittorrent/byte_io.h"
 #include "core/socket.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <iomanip>
@@ -266,7 +267,14 @@ TrackerResponse parse_http_response(const Bytes& body) {
 
 TrackerResponse announce_to_tracker(const std::string& url, const TrackerRequest& req, int timeout_ms) {
     if (url.rfind("udp://", 0) == 0)  return announce_udp(url, req, timeout_ms);
-    if (url.rfind("http", 0) == 0)    return announce_http(url, req, timeout_ms);
+    // We have no TLS for trackers yet. Skip https:// rather than speaking cleartext
+    // HTTP to port 443 — that never works and would leak info_hash/peer_id in the
+    // clear (H11). Re-enable once a real TLS stream is wired in.
+    if (url.rfind("https://", 0) == 0) {
+        TrackerResponse out; out.failure_reason = "https trackers not supported (no TLS)";
+        return out;
+    }
+    if (url.rfind("http://", 0) == 0) return announce_http(url, req, timeout_ms);
     TrackerResponse out;
     out.failure_reason = "unsupported tracker scheme";
     return out;
@@ -290,8 +298,13 @@ void TrackerAnnouncer::announce(const TrackerRequest& req, PeerCallback on_peers
             TrackerResponse resp = announce_to_tracker(url, req, timeout_ms_);
             {
                 std::lock_guard<std::mutex> lk(mutex_);
-                if (!stopping_ && resp.success && !resp.peers.empty() && poster_) {
-                    poster_([on_peers, peers = resp.peers] { on_peers(peers); });
+                if (!stopping_ && resp.success && poster_) {
+                    // Honour the tracker's requested re-announce cadence (clamped to a
+                    // sane 1 min..1 h) so we don't get rate-limited/banned (H13).
+                    std::uint32_t interval = std::max(resp.interval, resp.min_interval);
+                    if (interval == 0) interval = 1800;
+                    interval = std::min<std::uint32_t>(std::max<std::uint32_t>(interval, 60), 3600);
+                    poster_([on_peers, peers = resp.peers, interval] { on_peers(peers, interval); });
                 }
                 --inflight_;
             }
