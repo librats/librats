@@ -237,3 +237,17 @@ TEST(BtTracker, DiscoversSeederViaTrackerAndDownloads) {
     fake.stop();
     stdfs::remove_all(base, ec);
 }
+
+// A tracker URL comes from an untrusted .torrent / magnet `tr=`. A non-numeric
+// port must fail the announce gracefully, not throw std::stoi out of the detached
+// worker thread (which would std::terminate the whole process). (C2-stoi)
+TEST(BtTracker, MalformedPortFailsGracefully) {
+    TrackerRequest req;  // defaults are fine; we never reach the network
+
+    EXPECT_NO_THROW({
+        EXPECT_FALSE(announce_to_tracker("udp://127.0.0.1:notaport/announce", req, 200).success);
+        EXPECT_FALSE(announce_to_tracker("udp://127.0.0.1:/announce", req, 200).success);
+        EXPECT_FALSE(announce_to_tracker("http://127.0.0.1:99999/announce", req, 200).success);
+        EXPECT_FALSE(announce_to_tracker("http://127.0.0.1:0x50/announce", req, 200).success);
+    });
+}

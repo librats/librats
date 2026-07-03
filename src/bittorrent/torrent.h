@@ -33,6 +33,7 @@
 #include "bittorrent/types.h"
 #include "core/types.h"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -83,6 +84,11 @@ public:
     bool               is_complete() const { return picker_ && picker_->is_finished(); }
     double             progress()    const;
     std::size_t        num_peers()   const noexcept { return peers_.size(); }
+    /// Total block requests currently in flight across all peers.
+    std::size_t        num_outstanding_requests() const noexcept;
+    /// Override how long a peer may hold requests without delivering before it is
+    /// snubbed and its blocks freed. Defaults to kRequestTimeout (30 s).
+    void               set_request_timeout(std::chrono::milliseconds t) noexcept { request_timeout_ = t; }
     std::uint64_t      bytes_downloaded() const noexcept { return bytes_downloaded_; }
     std::uint64_t      bytes_uploaded()   const noexcept { return bytes_uploaded_; }
 
@@ -142,6 +148,10 @@ private:
     void           announce_trackers(TrackerEvent event);
     TrackerRequest make_tracker_request(TrackerEvent event) const;
     std::string    default_resume_path() const;
+    /// Free blocks stuck on peers that have made no progress within
+    /// kRequestTimeout so other peers can re-request them (prevents a silent /
+    /// keep-alive-only peer from stalling pieces forever). Runs on the 1 s tick.
+    void check_request_timeouts();
     void on_block_written(PieceBlock block, bool ok);
     void verify_piece(std::uint32_t piece);
     void on_piece_hashed(std::uint32_t piece, bool ok, std::array<std::uint8_t, 20> hash);
@@ -150,6 +160,11 @@ private:
 
     static constexpr int         kPipelineDepth = 16;
     static constexpr std::size_t kMaxPeers      = 50;
+    /// A peer that holds outstanding requests but delivers no block for this long
+    /// is snubbed: its blocks are freed for other peers. Kept well under the 120 s
+    /// idle timeout so a keep-alive-only peer can't stall pieces indefinitely.
+    static constexpr std::chrono::seconds kRequestTimeout{30};
+    std::chrono::milliseconds request_timeout_{kRequestTimeout};
 
     Reactor&                     reactor_;
     TorrentHost&                 host_;
@@ -167,6 +182,9 @@ private:
 
     std::vector<PeerConnection*>                            peers_;
     std::unordered_map<PeerConnection*, int>                outstanding_;
+    /// Time of the last progress with each peer (a block received, or the moment
+    /// we started waiting on a fresh batch). Drives the request-timeout snub.
+    std::unordered_map<PeerConnection*, std::chrono::steady_clock::time_point> request_time_;
     std::unordered_map<PeerConnection*, std::uint64_t>      recent_down_;  // tit-for-tat score
     std::unordered_set<PeerConnection*>                     seed_peers_;   // counted via the picker's O(1) seed counter
     std::unordered_map<PeerConnection*, ext::PeerExtensions>           peer_ext_;

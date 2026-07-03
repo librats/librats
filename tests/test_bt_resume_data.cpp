@@ -134,3 +134,26 @@ TEST(BtResumeData, ResumesCompletedTorrentWithoutPeers) {
     resumed.stop();
     stdfs::remove_all(base, ec);
 }
+
+// A hostile/corrupt .resume can claim billions of pieces while carrying a tiny
+// (or no) bitfield. num-pieces drives Bitfield::assign's allocation, so decode
+// must reject a record whose num-pieces doesn't match the pieces string length
+// rather than allocating gigabytes. (C4)
+TEST(BtResumeData, RejectsInflatedNumPieces) {
+    BencodeValue d = BencodeValue::create_dict();
+    d["format"]     = BencodeValue(std::string("librats resume"));
+    d["info-hash"]  = BencodeValue(std::string(20, '\x11'));
+    d["num-pieces"] = BencodeValue(std::int64_t(40000000000LL));  // absurd
+    d["pieces"]     = BencodeValue(std::string(4, '\0'));          // 4 bytes = 32 bits, not 4e10
+    EXPECT_FALSE(ResumeData::decode(d.encode()).has_value());
+
+    // A consistent record (num-pieces == 8*len rounded up) still decodes.
+    BencodeValue ok = BencodeValue::create_dict();
+    ok["format"]     = BencodeValue(std::string("librats resume"));
+    ok["info-hash"]  = BencodeValue(std::string(20, '\x11'));
+    ok["num-pieces"] = BencodeValue(std::int64_t(20));             // ceil(20/8) = 3 bytes
+    ok["pieces"]     = BencodeValue(std::string(3, '\xff'));
+    auto back = ResumeData::decode(ok.encode());
+    ASSERT_TRUE(back.has_value());
+    EXPECT_EQ(back->have.size(), 20u);
+}

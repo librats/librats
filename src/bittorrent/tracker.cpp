@@ -26,6 +26,21 @@ std::uint32_t random_u32() {
     return std::uniform_int_distribution<std::uint32_t>{}(gen);
 }
 
+// Parse a TCP/UDP port out of an untrusted tracker URL. Returns 0 on anything
+// that is not a plain 1..65535 decimal number. std::stoi must NOT be used here:
+// a hostile ".torrent"/magnet `tr=udp://host:notaport` would throw
+// std::invalid_argument out of the detached announce worker → std::terminate.
+std::uint16_t parse_port(const std::string& s) {
+    if (s.empty()) return 0;
+    std::uint32_t v = 0;
+    for (const char c : s) {
+        if (c < '0' || c > '9') return 0;
+        v = v * 10 + std::uint32_t(c - '0');
+        if (v > 65535) return 0;
+    }
+    return std::uint16_t(v);
+}
+
 const char* http_event(TrackerEvent e) {
     switch (e) {
         case TrackerEvent::Started:   return "started";
@@ -92,7 +107,9 @@ Bytes http_get(const std::string& url, int timeout_ms) {
 
     std::uint16_t port = (proto == "https") ? 443 : 80;
     if (const std::size_t colon = host_port.find(':'); colon != std::string::npos) {
-        port = std::uint16_t(std::stoi(host_port.substr(colon + 1)));
+        const std::uint16_t parsed = parse_port(host_port.substr(colon + 1));
+        if (parsed == 0) return {};  // malformed port — fail the announce, never crash
+        port = parsed;
         host_port = host_port.substr(0, colon);
     }
 
@@ -137,7 +154,8 @@ TrackerResponse announce_udp(const std::string& url, const TrackerRequest& req, 
     const std::size_t colon = rest.find(':');
     if (colon == std::string::npos) { out.failure_reason = "bad udp url"; return out; }
     const std::string host = rest.substr(0, colon);
-    const int port = std::stoi(rest.substr(colon + 1));
+    const std::uint16_t port = parse_port(rest.substr(colon + 1));
+    if (port == 0) { out.failure_reason = "bad udp port"; return out; }
 
     socket_t sock = create_udp_socket(0, "", AddressFamily::IPv4);
     if (!is_valid_socket(sock)) { out.failure_reason = "socket"; return out; }

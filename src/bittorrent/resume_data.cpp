@@ -45,12 +45,20 @@ std::optional<ResumeData> ResumeData::decode(const Bytes& data) {
         if (const auto* up = find(d, "uploaded"); up && up->is_integer()) rd.total_uploaded = std::uint64_t(up->as_integer());
         if (const auto* dn = find(d, "downloaded"); dn && dn->is_integer()) rd.total_downloaded = std::uint64_t(dn->as_integer());
 
-        std::size_t num_pieces = 0;
+        std::int64_t num_pieces = 0;
         if (const auto* np = find(d, "num-pieces"); np && np->is_integer() && np->as_integer() >= 0)
-            num_pieces = std::size_t(np->as_integer());
-        if (const auto* p = find(d, "pieces"); p && p->is_string())
-            rd.have.assign(reinterpret_cast<const std::uint8_t*>(p->as_string().data()),
-                           p->as_string().size(), num_pieces);
+            num_pieces = np->as_integer();
+        if (const auto* p = find(d, "pieces"); p && p->is_string()) {
+            const std::string& bytes = p->as_string();
+            // `num-pieces` is attacker-controlled and drives Bitfield::assign's
+            // allocation independently of the `pieces` string length. A tiny file
+            // claiming billions of pieces would allocate gigabytes (C4). A valid
+            // record always has exactly ceil(num_pieces/8) bytes of bitfield, so
+            // reject anything that doesn't match rather than trusting the count.
+            if (std::uint64_t((num_pieces + 7) / 8) != bytes.size()) return std::nullopt;
+            rd.have.assign(reinterpret_cast<const std::uint8_t*>(bytes.data()),
+                           bytes.size(), std::size_t(num_pieces));
+        }
 
         if (const auto* info = find(d, "info"); info && info->is_string())
             rd.info_dict.assign(info->as_string().begin(), info->as_string().end());

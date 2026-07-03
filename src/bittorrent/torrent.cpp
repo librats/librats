@@ -108,6 +108,8 @@ void Torrent::tick() {
     if (!running_) return;
     ++tick_count_;
 
+    check_request_timeouts();  // free blocks stuck on stalled peers before anything else
+
     // Ask the DHT for fresh peers periodically (every ~30 s).
     if (tick_count_ % 30 == 1) {
         host_.find_peers_via_dht(info_hash(), [this](const std::string& ip, std::uint16_t port) {
@@ -168,6 +170,7 @@ void Torrent::on_choke(PeerConnection& pc, bool peer_choking) {
     if (peer_choking) {
         picker_->cancel_peer(&pc);  // they dropped our outstanding requests
         outstanding_[&pc] = 0;
+        request_time_.erase(&pc);
     } else {
         refill(pc);
     }
@@ -189,12 +192,18 @@ void Torrent::refill(PeerConnection& pc) {
     int budget = kPipelineDepth - outstanding_[&pc];
     if (budget <= 0) return;
 
+    const int before = outstanding_[&pc];
     auto blocks = picker_->pick_blocks(pc.peer_bitfield(), budget, &pc);
     for (const PieceBlock& b : blocks) {
         picker_->mark_requested(b, &pc);
         pc.send_request(b.piece, b.block * kBlockSize, picker_->block_size(b.piece, b.block));
         ++outstanding_[&pc];
     }
+    // Start the stall clock when a previously-idle peer gets a fresh batch. If it
+    // already had requests in flight, keep the older timestamp so a peer that
+    // stops delivering can't hide behind newly-added requests.
+    if (before == 0 && outstanding_[&pc] > 0)
+        request_time_[&pc] = std::chrono::steady_clock::now();
 }
 
 void Torrent::on_piece(PeerConnection& pc, std::uint32_t piece, std::uint32_t offset, ByteView data) {
@@ -209,6 +218,9 @@ void Torrent::on_piece(PeerConnection& pc, std::uint32_t piece, std::uint32_t of
     if (data.size() != picker_->block_size(piece, offset / kBlockSize)) return;
 
     if (outstanding_[&pc] > 0) --outstanding_[&pc];
+    // Progress: this peer just delivered, so reset its stall clock — any remaining
+    // outstanding blocks get a fresh timeout window.
+    request_time_[&pc] = std::chrono::steady_clock::now();
 
     // We already completed this piece — an end-game duplicate that crossed our
     // CANCEL, or a block arriving after the piece verified. Discard it: writing it
@@ -236,6 +248,38 @@ void Torrent::on_piece(PeerConnection& pc, std::uint32_t piece, std::uint32_t of
                        [this, block](bool ok) { on_block_written(block, ok); });
 
     refill(pc);  // keep the pipeline full while the write is in flight
+}
+
+void Torrent::check_request_timeouts() {
+    if (!picker_) return;
+    const auto now = std::chrono::steady_clock::now();
+
+    // Find peers that hold outstanding requests but have made no progress within
+    // the timeout. A peer sending only keep-alives (which refresh the 120 s idle
+    // deadline) would otherwise sit on its blocks forever, stalling those pieces.
+    std::vector<PeerConnection*> stalled;
+    for (const auto& [pc, n] : outstanding_) {
+        if (n <= 0) continue;
+        auto it = request_time_.find(pc);
+        if (it != request_time_.end() && now - it->second > request_timeout_)
+            stalled.push_back(pc);
+    }
+    if (stalled.empty()) return;
+
+    // Release each stalled peer's blocks back to the picker so another peer can
+    // pick them, and leave the peer idle (no re-request this round) so we don't
+    // immediately hand the same blocks back to the peer that just stalled.
+    for (PeerConnection* pc : stalled) {
+        picker_->cancel_peer(pc);
+        outstanding_[pc] = 0;
+        request_time_.erase(pc);
+    }
+
+    // Re-request the freed blocks from peers that are actually delivering.
+    for (PeerConnection* pc : peers_) {
+        if (std::find(stalled.begin(), stalled.end(), pc) != stalled.end()) continue;
+        if (pc->am_interested() && !pc->peer_choking()) refill(*pc);
+    }
 }
 
 void Torrent::on_block_written(PieceBlock block, bool ok) {
@@ -331,8 +375,15 @@ void Torrent::remove_peer(PeerConnection* pc) {
     }
     peers_.erase(it);
     outstanding_.erase(pc);
+    request_time_.erase(pc);
     recent_down_.erase(pc);
     peer_ext_.erase(pc);
+}
+
+std::size_t Torrent::num_outstanding_requests() const noexcept {
+    std::size_t n = 0;
+    for (const auto& [pc, count] : outstanding_) if (count > 0) n += std::size_t(count);
+    return n;
 }
 
 double Torrent::progress() const {
@@ -366,6 +417,10 @@ void Torrent::handle_ext_handshake(PeerConnection& pc, ByteView payload) {
 
 void Torrent::ensure_metadata_buffer(std::uint32_t total_size) {
     if (metadata_size_ != 0 || total_size == 0) return;  // already sized, or unknown
+    // The size is self-reported by a peer (extended handshake or ut_metadata data
+    // message), so reject an implausible value before allocating — otherwise a
+    // hostile peer advertising ~4 GiB drives an out-of-memory allocation (C3).
+    if (total_size > kMaxMetadataSize) return;
     metadata_size_     = total_size;
     metadata_pieces_   = (total_size + kMetadataPieceSize - 1) / kMetadataPieceSize;
     metadata_buf_.assign(total_size, 0);

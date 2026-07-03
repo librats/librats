@@ -40,6 +40,11 @@ constexpr std::uint32_t kBlockSize           = 16 * 1024;   ///< standard reques
 constexpr std::uint32_t kMaxBlockSize        = 32 * 1024;   ///< largest block we will serve
 constexpr std::uint32_t kDefaultPieceLength  = 256 * 1024;  ///< default for created torrents
 constexpr std::uint32_t kMetadataPieceSize   = 16 * 1024;   ///< BEP 9 metadata block size
+/// Largest ut_metadata (BEP 9) info dict we will accept from a peer. The size is
+/// self-reported in the peer's extended handshake, so it must be capped before we
+/// allocate a buffer for it — otherwise a hostile peer advertising ~4 GiB triggers
+/// an out-of-memory allocation. libtorrent uses the same 4 MiB ceiling.
+constexpr std::uint32_t kMaxMetadataSize     = 4 * 1024 * 1024;
 
 // ---- Reserved-bit negotiation (handshake) ----
 // Each capability is a single bit in a specific reserved byte, per the relevant BEP.
