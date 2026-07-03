@@ -1,6 +1,7 @@
 #include "bittorrent/torrent.h"
 
 #include "bittorrent/byte_io.h"
+#include "bittorrent/log.h"
 #include "util/fs.h"
 
 #include <algorithm>
@@ -32,12 +33,15 @@ void Torrent::start() {
             info_, save_path_,
             [this](std::function<void()> fn) { reactor_.post(std::move(fn)); });
         state_ = State::Checking;
+        LOG_INFO("bt.torrent", short_hash(info_hash()) << " \"" << info_.name() << "\" → Checking ("
+                               << info_.num_pieces() << " pieces, " << info_.total_size() << " bytes)");
         // Pieces in resume_have_ are trusted (skip the hash); the rest are verified.
         disk_->async_check_files(resume_have_, nullptr,
                                  [this](Bitfield have) { on_check_complete(std::move(have)); });
     } else {
         // Magnet: no metadata yet — fetch the info dict from peers (BEP 9) first.
         state_ = State::Metadata;
+        LOG_INFO("bt.torrent", short_hash(info_hash()) << " → Metadata (magnet, awaiting info dict)");
     }
 
     // Trackers come from the .torrent or the magnet link; announce to find peers
@@ -55,6 +59,7 @@ void Torrent::start() {
 void Torrent::stop() {
     if (!running_) return;
     running_ = false;
+    LOG_INFO("bt.torrent", short_hash(info_hash()) << " stopped (" << peers_.size() << " peers)");
     if (tick_timer_ != kInvalidTimerId) { reactor_.cancel(tick_timer_); tick_timer_ = kInvalidTimerId; }
     if (trackers_) {
         announce_trackers(TrackerEvent::Stopped);  // tell trackers we're leaving (H12)
@@ -84,6 +89,14 @@ void Torrent::on_check_complete(Bitfield have) {
 
     if (picker_->is_finished()) { state_ = State::Seeding; completed_announced_ = true; }
     else                        { state_ = State::Downloading; }
+
+    if (state_ == State::Seeding)
+        LOG_INFO("bt.torrent", short_hash(info_hash()) << " check complete: all "
+                               << info_.num_pieces() << " pieces present → Seeding");
+    else
+        LOG_INFO("bt.torrent", short_hash(info_hash()) << " check complete: " << picker_->num_have()
+                               << '/' << info_.num_pieces() << " pieces (" << int(progress() * 100)
+                               << "%) → Downloading");
 
     try_connect();
 }
@@ -118,13 +131,18 @@ void Torrent::tick() {
 
     // Ask the DHT for fresh peers periodically (every ~30 s).
     if (tick_count_ % 30 == 1) {
+        LOG_DEBUG("bt.torrent", short_hash(info_hash()) << " → DHT get_peers");
         host_.find_peers_via_dht(info_hash(), [this](const std::string& ip, std::uint16_t port) {
             if (peer_list_.add(ip, port, PeerSource::Dht)) try_connect();
         });
     }
     // Announce ourselves to the DHT so others can find us — promptly on startup,
     // then every ~15 min per BEP 5 (H15). Was previously never done → undiscoverable.
-    if (tick_count_ % 900 == 5) host_.announce_to_dht(info_hash(), host_.listen_port());
+    if (tick_count_ % 900 == 5) {
+        LOG_DEBUG("bt.torrent", short_hash(info_hash()) << " → DHT announce_peer port "
+                                << host_.listen_port());
+        host_.announce_to_dht(info_hash(), host_.listen_port());
+    }
     // Re-announce when the tracker's requested interval has elapsed (H13).
     if (tick_count_ >= next_announce_tick_) {
         next_announce_tick_ = tick_count_ + 300;  // fallback until the response updates it
@@ -159,6 +177,11 @@ void Torrent::on_handshake(PeerConnection& pc, const InfoHash&, const PeerId&) {
     outstanding_[&pc] = 0;
     recent_down_[&pc] = 0;
     peer_list_.set_connected(pc.remote_ip(), pc.remote_port(), true);
+    // Milestone: the first peer on a torrent is worth an INFO line; the rest are
+    // routine (each peer's handshake is already logged at DEBUG in bt.peer).
+    if (peers_.size() == 1)
+        LOG_INFO("bt.torrent", short_hash(info_hash()) << " first peer connected "
+                               << pc.remote_ip() << ':' << pc.remote_port());
 
     if (pc.peer_supports_extensions()) send_extended_handshake(pc);
     // Only announce a bitfield once we know the piece count (i.e. have metadata).
@@ -228,6 +251,10 @@ void Torrent::refill(PeerConnection& pc) {
         pc.send_request(b.piece, b.block * kBlockSize, picker_->block_size(b.piece, b.block));
         ++outstanding_[&pc];
     }
+    if (!blocks.empty())
+        LOG_DEBUG("bt.torrent", short_hash(info_hash()) << " → request " << blocks.size()
+                                << " block(s) from " << pc.remote_ip() << ':' << pc.remote_port()
+                                << " (" << outstanding_[&pc] << " in flight)");
     // Start the stall clock when a previously-idle peer gets a fresh batch. If it
     // already had requests in flight, keep the older timestamp so a peer that
     // stops delivering can't hide behind newly-added requests.
@@ -243,8 +270,18 @@ void Torrent::on_piece(PeerConnection& pc, std::uint32_t piece, std::uint32_t of
     // piece, and the payload must be exactly that block's size. A hostile peer
     // could otherwise drive an out-of-bounds access via mark_writing()/mark_finished().
     const std::uint32_t piece_bytes = info_.piece_size(piece);
-    if (offset % kBlockSize != 0 || offset >= piece_bytes) return;
-    if (data.size() != picker_->block_size(piece, offset / kBlockSize)) return;
+    if (offset % kBlockSize != 0 || offset >= piece_bytes) {
+        LOG_WARN("bt.torrent", short_hash(info_hash()) << " ✗ bad block from " << pc.remote_ip()
+                               << ':' << pc.remote_port() << " piece " << piece << " off " << offset
+                               << " (misaligned/out of range), dropped");
+        return;
+    }
+    if (data.size() != picker_->block_size(piece, offset / kBlockSize)) {
+        LOG_WARN("bt.torrent", short_hash(info_hash()) << " ✗ bad block from " << pc.remote_ip()
+                               << ':' << pc.remote_port() << " piece " << piece
+                               << " wrong size " << data.size() << ", dropped");
+        return;
+    }
 
     if (outstanding_[&pc] > 0) --outstanding_[&pc];
     // Progress: this peer just delivered, so reset its stall clock — any remaining
@@ -303,6 +340,8 @@ void Torrent::check_request_timeouts() {
         outstanding_[pc] = 0;
         request_time_.erase(pc);
     }
+    LOG_WARN("bt.torrent", short_hash(info_hash()) << " snubbed " << stalled.size()
+                           << " stalled peer(s), freed their blocks for re-request");
 
     // Re-request the freed blocks from peers that are actually delivering.
     for (PeerConnection* pc : peers_) {
@@ -313,7 +352,12 @@ void Torrent::check_request_timeouts() {
 
 void Torrent::on_block_written(PieceBlock block, bool ok) {
     if (!running_ || !picker_) return;
-    if (!ok) { picker_->restore_piece(block.piece); return; }
+    if (!ok) {
+        LOG_ERROR("bt.torrent", short_hash(info_hash()) << " ✗ disk write failed for piece "
+                                << block.piece << ", will refetch");
+        picker_->restore_piece(block.piece);
+        return;
+    }
     if (picker_->mark_finished(block)) verify_piece(block.piece);
 
     // A write just drained: if backpressure had paused requesting and the queue is
@@ -338,6 +382,8 @@ void Torrent::verify_piece(std::uint32_t piece) {
 void Torrent::on_piece_hashed(std::uint32_t piece, bool ok, std::array<std::uint8_t, 20> hash) {
     if (!running_ || !picker_) return;
     if (!ok || hash != info_.piece_hash(piece)) {
+        LOG_WARN("bt.torrent", short_hash(info_hash()) << " ✗ piece " << piece
+                               << " hash mismatch, refetch");
         picker_->restore_piece(piece);  // corrupt — fetch it again
         return;
     }
@@ -349,9 +395,20 @@ void Torrent::on_piece_hashed(std::uint32_t piece, bool ok, std::array<std::uint
         update_interest(*pc);  // we may no longer need some peers
     }
 
+    LOG_DEBUG("bt.torrent", short_hash(info_hash()) << " ✓ piece " << piece << " verified ("
+                            << picker_->num_have() << '/' << info_.num_pieces() << ')');
+    // Progress milestone: log once per 10% crossed, not once per piece (H: keep INFO
+    // readable as a clean per-torrent story instead of thousands of lines).
+    const int pct = int(progress() * 100);
+    if (pct / 10 > progress_logged_ && pct < 100) {
+        progress_logged_ = pct / 10;
+        LOG_INFO("bt.torrent", short_hash(info_hash()) << " progress " << (progress_logged_ * 10) << '%');
+    }
+
     if (picker_->is_finished() && !completed_announced_) {
         completed_announced_ = true;
         state_ = State::Seeding;
+        LOG_INFO("bt.torrent", short_hash(info_hash()) << " ✓ download complete → Seeding");
         announce_trackers(TrackerEvent::Completed);  // tell trackers we're now a seed (H12)
         if (on_complete_) on_complete_();
     }
@@ -487,7 +544,11 @@ void Torrent::ensure_metadata_buffer(std::uint32_t total_size) {
     // The size is self-reported by a peer (extended handshake or ut_metadata data
     // message), so reject an implausible value before allocating — otherwise a
     // hostile peer advertising ~4 GiB drives an out-of-memory allocation (C3).
-    if (total_size > kMaxMetadataSize) return;
+    if (total_size > kMaxMetadataSize) {
+        LOG_WARN("bt.meta", short_hash(info_hash()) << " ✗ rejected oversize metadata "
+                            << total_size << " bytes (> " << kMaxMetadataSize << ')');
+        return;
+    }
     metadata_size_     = total_size;
     metadata_pieces_   = (total_size + kMetadataPieceSize - 1) / kMetadataPieceSize;
     metadata_buf_.assign(total_size, 0);
@@ -548,10 +609,13 @@ void Torrent::on_metadata_piece(std::uint32_t piece, std::uint32_t total_size, B
 void Torrent::try_complete_metadata() {
     if (info_.set_metadata(metadata_buf_)) {       // verifies SHA-1 == info-hash
         has_metadata_ = true;
+        LOG_INFO("bt.meta", short_hash(info_hash()) << " ✓ metadata resolved: \"" << info_.name()
+                            << "\" " << info_.num_pieces() << " pieces, " << info_.total_size() << " bytes");
         if (on_metadata_) on_metadata_(info_);
         promote_to_downloading();
     } else {
         // Verification failed — discard and re-request from every peer.
+        LOG_WARN("bt.meta", short_hash(info_hash()) << " ✗ metadata verification failed, re-requesting");
         std::fill(metadata_have_.begin(), metadata_have_.end(), false);
         metadata_received_ = 0;
         for (PeerConnection* pc : peers_) request_metadata(*pc);
@@ -664,10 +728,12 @@ void Torrent::announce_trackers(TrackerEvent event) {
         // Schedule the next periodic announce off the tracker's requested interval
         // rather than a fixed cadence (H13). tick_count_ advances ~1/s.
         next_announce_tick_ = tick_count_ + int(interval);
-        bool any = false;
+        int added = 0;
         for (const Address& a : peers)
-            if (peer_list_.add(a.ip, a.port, PeerSource::Tracker)) any = true;
-        if (any) try_connect();
+            if (peer_list_.add(a.ip, a.port, PeerSource::Tracker)) ++added;
+        LOG_INFO("bt.tracker", short_hash(info_hash()) << " ← " << peers.size() << " peers (+"
+                               << added << " new), next announce in " << interval << "s");
+        if (added) try_connect();
     });
 }
 

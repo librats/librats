@@ -1,4 +1,5 @@
 #include "bittorrent/piece_picker.h"
+#include "bittorrent/log.h"
 #include "bittorrent/types.h"  // kBlockSize
 
 #include <algorithm>
@@ -339,6 +340,8 @@ std::vector<PieceBlock> PiecePicker::pick_blocks(const Bitfield& peer_have, int 
             if (blk.state != BlockState::Requested) continue;
             if (std::find(blk.peers.begin(), blk.peers.end(), peer) != blk.peers.end()) continue;
             result.push_back(PieceBlock{piece, b});
+            if (!endgame_) LOG_DEBUG("bt.picker", "entering end-game (" << pieces_left_
+                                                  << " piece(s) left, all in progress)");
             endgame_ = true;
             return result;  // one busy block per pick
         }

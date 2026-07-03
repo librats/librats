@@ -2,6 +2,7 @@
 
 #include "bittorrent/bencode.h"
 #include "bittorrent/byte_io.h"
+#include "bittorrent/log.h"
 #include "core/socket.h"
 
 #include <algorithm>
@@ -296,6 +297,11 @@ void TrackerAnnouncer::announce(const TrackerRequest& req, PeerCallback on_peers
         }
         std::thread([this, url, req, on_peers] {
             TrackerResponse resp = announce_to_tracker(url, req, timeout_ms_);
+            if (resp.success)
+                LOG_DEBUG("bt.tracker", "← " << url << ": " << resp.peers.size() << " peers, interval "
+                                        << resp.interval << "s");
+            else
+                LOG_DEBUG("bt.tracker", "✗ " << url << ": " << resp.failure_reason);
             {
                 std::lock_guard<std::mutex> lk(mutex_);
                 if (!stopping_ && resp.success && poster_) {

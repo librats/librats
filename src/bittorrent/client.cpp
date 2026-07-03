@@ -1,4 +1,5 @@
 #include "bittorrent/client.h"
+#include "bittorrent/log.h"
 
 #include <algorithm>
 #include <chrono>
@@ -45,10 +46,15 @@ void Client::stop() {
 
 void Client::open_listener() {
     listener_ = create_tcp_server(config_.listen_port, 16, "", AddressFamily::IPv4);
-    if (!is_valid_socket(listener_)) return;
+    if (!is_valid_socket(listener_)) {
+        LOG_ERROR("bt.client", "failed to bind listen port " << config_.listen_port
+                               << " — inbound peers disabled");
+        return;
+    }
     set_socket_nonblocking(listener_);
     actual_port_ = std::uint16_t(get_bound_port(listener_));
     reactor_.add(listener_, PollIn, [this](std::uint32_t) { on_accept(); });
+    LOG_INFO("bt.client", "listening on port " << actual_port_);
 }
 
 void Client::on_accept() {
@@ -59,7 +65,11 @@ void Client::on_accept() {
         if (!is_valid_socket(s)) break;  // drained (non-blocking listener)
         // Cap total connections so an inbound flood can't exhaust memory / fds (H3).
         // Keep draining the accept queue, but immediately drop anything over the cap.
-        if (connections_.size() >= kMaxConnections) { close_socket(s); continue; }
+        if (connections_.size() >= kMaxConnections) {
+            LOG_DEBUG("bt.client", "connection cap " << kMaxConnections << " reached, dropping inbound");
+            close_socket(s);
+            continue;
+        }
         set_socket_nonblocking(s);
 
         // Remote source endpoint (for logging / PEX). The peer's *listen* port is
@@ -83,6 +93,7 @@ void Client::on_accept() {
         };
         auto pc = std::make_unique<PeerConnection>(reactor_, s, peer_id_, std::move(resolver),
                                                    std::move(ip), port);
+        LOG_DEBUG("bt.client", "inbound connection from " << ip << ':' << port);
         PeerConnection* raw = pc.get();
         connections_.push_back(std::move(pc));
         raw->start();
@@ -141,7 +152,10 @@ Torrent* Client::add_torrent(const TorrentInfo& info, const std::string& save_pa
 }
 
 Torrent* Client::add_torrent_impl(const TorrentInfo& info, const std::string& save_path) {
-    if (!info.is_valid() || !info.has_metadata()) return nullptr;
+    if (!info.is_valid() || !info.has_metadata()) {
+        LOG_WARN("bt.client", "rejected invalid/incomplete torrent");
+        return nullptr;
+    }
     const InfoHash ih = info.info_hash();
     if (torrents_.count(ih)) return torrents_[ih].get();
 
@@ -149,6 +163,7 @@ Torrent* Client::add_torrent_impl(const TorrentInfo& info, const std::string& sa
     auto t = std::make_unique<Torrent>(reactor_, *this, info, path);
     Torrent* raw = t.get();
     torrents_.emplace(ih, std::move(t));
+    LOG_INFO("bt.client", "added torrent " << short_hash(ih) << " \"" << info.name() << "\" → " << path);
     raw->start();
     return raw;
 }
@@ -159,7 +174,10 @@ Torrent* Client::add_magnet(const std::string& magnet_uri, const std::string& sa
 
 Torrent* Client::add_magnet_impl(const std::string& magnet_uri, const std::string& save_path) {
     auto info = TorrentInfo::from_magnet(magnet_uri);
-    if (!info || !info->is_valid()) return nullptr;
+    if (!info || !info->is_valid()) {
+        LOG_WARN("bt.client", "rejected invalid magnet uri");
+        return nullptr;
+    }
     const InfoHash ih = info->info_hash();
     if (torrents_.count(ih)) return torrents_[ih].get();
 
@@ -167,6 +185,7 @@ Torrent* Client::add_magnet_impl(const std::string& magnet_uri, const std::strin
     auto t = std::make_unique<Torrent>(reactor_, *this, *info, path);
     Torrent* raw = t.get();
     torrents_.emplace(ih, std::move(t));
+    LOG_INFO("bt.client", "added magnet " << short_hash(ih) << " → " << path);
     raw->start();
     return raw;
 }
@@ -217,6 +236,7 @@ void Client::remove_torrent(const InfoHash& info_hash, bool /*delete_files*/) {
 void Client::remove_torrent_impl(const InfoHash& info_hash) {
     auto it = torrents_.find(info_hash);
     if (it == torrents_.end()) return;
+    LOG_INFO("bt.client", "removed torrent " << short_hash(info_hash));
     it->second->stop();
     torrents_.erase(it);
     // File deletion is not yet implemented; the torrent's data is left on disk.

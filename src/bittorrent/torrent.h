@@ -209,6 +209,7 @@ private:
     PeerList                                                          peer_list_;
     int                                                               tick_count_ = 0;
     int                                                               next_announce_tick_ = 300;  ///< tick to re-announce (driven by tracker interval)
+    int                                                               progress_logged_ = -1;      ///< last download %-decile logged at INFO (avoids per-piece spam)
 
     // ut_metadata (BEP 9) assembly state, used while we lack metadata.
     Bytes             metadata_buf_;

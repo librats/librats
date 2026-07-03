@@ -1,5 +1,6 @@
 #include "bittorrent/peer_connection.h"
 #include "bittorrent/byte_io.h"
+#include "bittorrent/log.h"
 
 #include <cerrno>
 #include <cstring>
@@ -94,7 +95,11 @@ void PeerConnection::start() {
 
     // An outgoing peer sends its handshake immediately; an incoming one waits to
     // learn the info-hash, then replies (see parse_handshake()).
-    if (outgoing_) send_handshake();
+    if (outgoing_) {
+        LOG_DEBUG("bt.peer", remote_ip_ << ':' << remote_port_ << " → handshake sent ("
+                             << short_hash(info_hash_) << ')');
+        send_handshake();
+    }
 }
 
 void PeerConnection::send_handshake() {
@@ -121,6 +126,9 @@ void PeerConnection::send_handshake() {
 void PeerConnection::close(const std::string& reason) {
     if (closed_) return;
     closed_ = true;
+    // Single choke point for every teardown path (protocol error, timeout, slow
+    // consumer, remote close, torrent stop): one greppable line per disconnect.
+    LOG_DEBUG("bt.peer", remote_ip_ << ':' << remote_port_ << " disconnect: " << reason);
     if (tick_timer_ != kInvalidTimerId) { reactor_.cancel(tick_timer_); tick_timer_ = kInvalidTimerId; }
     if (is_valid_socket(sock_)) {
         reactor_.remove(sock_);
@@ -219,6 +227,8 @@ bool PeerConnection::parse_handshake() {
     // An incoming connection now knows which torrent it is for and replies.
     if (!outgoing_ && !handshake_sent_) send_handshake();
 
+    LOG_DEBUG("bt.peer", remote_ip_ << ':' << remote_port_ << " ← handshake "
+                         << identify_client(peer_id_) << " (" << short_hash(info_hash_) << ')');
     if (obs_) obs_->on_handshake(*this, info_hash_, peer_id_);
     return true;
 }

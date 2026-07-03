@@ -1,5 +1,6 @@
 #include "bittorrent/disk_io.h"
 
+#include "bittorrent/log.h"
 #include "crypto/sha1.h"
 #include "util/fs.h"
 
@@ -78,16 +79,23 @@ bool ThreadedDiskIo::ensure_file(std::size_t file_index) {
 
     const std::string parent = get_parent_directory(path.c_str());
     if (!parent.empty() && !directory_exists(parent.c_str())) {
-        if (!create_directories(parent.c_str())) return false;
+        if (!create_directories(parent.c_str())) {
+            LOG_ERROR("bt.disk", "✗ failed to create directory " << parent);
+            return false;
+        }
     }
 
     if (file_exists(path.c_str())) {
         // Extend a short (e.g. partially-downloaded) file without truncating it.
         if (size > 0 && get_file_size(path.c_str()) < size) {
             const std::uint8_t zero = 0;
-            if (!write_file_chunk(path, std::uint64_t(size - 1), &zero, 1)) return false;
+            if (!write_file_chunk(path, std::uint64_t(size - 1), &zero, 1)) {
+                LOG_ERROR("bt.disk", "✗ failed to extend file " << path << " to " << size << " bytes");
+                return false;
+            }
         }
     } else if (!create_file_with_size(path, std::uint64_t(size))) {
+        LOG_ERROR("bt.disk", "✗ failed to create file " << path << " (" << size << " bytes)");
         return false;
     }
 

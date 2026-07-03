@@ -12,6 +12,12 @@
 #include "util/fs.h"
 
 #ifdef _WIN32
+    // Include winsock2.h before windows.h: winsock2 defines _WINSOCKAPI_, which
+    // stops windows.h from pulling in the legacy winsock.h. Without this a TU that
+    // includes this header before a socket header (e.g. core/socket.h) gets
+    // winsock.h first and then a wall of winsock.h/winsock2.h redefinition errors
+    // under MSVC.
+    #include <winsock2.h>
     #include <windows.h>
     #include <io.h>
     #define isatty _isatty

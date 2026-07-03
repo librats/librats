@@ -40,8 +40,8 @@ void Bittorrent::start() {
             }
         }
     }
-    LOG_INFO("bittorrent", (shared_dht_ ? "Sharing the node's DHT swarm"
-                                        : "Running BitTorrent without a DHT"));
+    LOG_INFO("bt.node", (shared_dht_ ? "sharing the node's DHT swarm"
+                                     : "running BitTorrent without a DHT"));
 
     client_->start();
 }
@@ -76,7 +76,7 @@ DhtClient* Bittorrent::active_dht() const {
 
 void Bittorrent::set_spider_mode(bool enable) {
     if (auto* d = active_dht()) d->set_spider_mode(enable);
-    else LOG_WARN("bittorrent", "set_spider_mode ignored: no shared DHT");
+    else LOG_WARN("bt.node", "set_spider_mode ignored: no shared DHT");
 }
 
 bool Bittorrent::is_spider_mode() const {
@@ -86,7 +86,7 @@ bool Bittorrent::is_spider_mode() const {
 
 void Bittorrent::set_spider_announce_callback(SpiderAnnounceCallback callback) {
     if (auto* d = active_dht()) d->set_spider_announce_callback(std::move(callback));
-    else LOG_WARN("bittorrent", "set_spider_announce_callback ignored: no shared DHT");
+    else LOG_WARN("bt.node", "set_spider_announce_callback ignored: no shared DHT");
 }
 
 void Bittorrent::set_spider_ignore(bool ignore) {
