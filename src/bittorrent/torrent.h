@@ -152,6 +152,9 @@ private:
     /// kRequestTimeout so other peers can re-request them (prevents a silent /
     /// keep-alive-only peer from stalling pieces forever). Runs on the 1 s tick.
     void check_request_timeouts();
+    /// Refill every peer whose pipeline has room (used to resume requesting once
+    /// disk write backpressure clears).
+    void refill_all();
     void on_block_written(PieceBlock block, bool ok);
     void verify_piece(std::uint32_t piece);
     void on_piece_hashed(std::uint32_t piece, bool ok, std::array<std::uint8_t, 20> hash);
@@ -165,6 +168,10 @@ private:
     /// idle timeout so a keep-alive-only peer can't stall pieces indefinitely.
     static constexpr std::chrono::seconds kRequestTimeout{30};
     std::chrono::milliseconds request_timeout_{kRequestTimeout};
+    /// Stop requesting new blocks while the disk has more than this many bytes of
+    /// writes still pending, so a fast swarm can't grow the write queue without
+    /// bound when the disk is slow (D-2). Requesting resumes as the queue drains.
+    static constexpr std::size_t kDiskWriteHighWater = 32 * 1024 * 1024;
 
     Reactor&                     reactor_;
     TorrentHost&                 host_;
@@ -178,6 +185,7 @@ private:
     bool                         running_ = false;
     bool                         has_metadata_ = false;
     bool                         completed_announced_ = false;
+    bool                         write_stalled_ = false;  ///< requesting paused for disk backpressure
     Bitfield                     resume_have_;   ///< trusted have-set from resume data
 
     std::vector<PeerConnection*>                            peers_;

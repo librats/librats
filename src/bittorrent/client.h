@@ -28,9 +28,12 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <unordered_set>
 #include <vector>
 
 namespace librats::bittorrent {
@@ -100,12 +103,42 @@ public:
     void          find_peers_via_dht(const InfoHash& info_hash,
                                      std::function<void(const std::string& ip, std::uint16_t port)> on_peer) override;
 
+    /// Largest number of peer connections (in + out) the session will hold at once.
+    /// Beyond this, inbound sockets are accepted and immediately closed so a flood
+    /// of incoming connections can't exhaust memory / file descriptors.
+    static constexpr std::size_t kMaxConnections = 200;
+
 private:
     void open_listener();
     void on_accept();
     void schedule_reap();
     void reap_closed();
     void sample_rates();  ///< recompute down_rate_/up_rate_ from per-torrent byte counters
+
+    // Run @p f on the reactor thread and return its result. Executed inline when
+    // already on the reactor thread or when the reactor isn't running its own
+    // thread yet (tests pump run_one); otherwise posted and waited on. This makes
+    // the public mutators below safe to call from any thread (C2).
+    template <class F>
+    std::invoke_result_t<F> run_on_reactor(F f) {
+        using R = std::invoke_result_t<F>;
+        if (reactor_.on_reactor_thread() || !reactor_.running()) return f();
+        std::promise<R> prom;
+        auto fut = prom.get_future();
+        reactor_.post([&] {
+            if constexpr (std::is_void_v<R>) { f(); prom.set_value(); }
+            else                             { prom.set_value(f()); }
+        });
+        return fut.get();
+    }
+
+    // Unsynchronised implementations — only ever run on the reactor thread (either
+    // directly in the single-threaded/test path or via run_on_reactor()).
+    Torrent* add_torrent_impl(const TorrentInfo& info, const std::string& save_path);
+    Torrent* add_magnet_impl(const std::string& magnet_uri, const std::string& save_path);
+    Torrent* add_torrent_with_resume_impl(const TorrentInfo& info, const ResumeData& resume,
+                                          const std::string& save_path);
+    void     remove_torrent_impl(const InfoHash& info_hash);
 
     Reactor       reactor_;
     Config        config_;
@@ -119,6 +152,10 @@ private:
 
     std::map<InfoHash, std::unique_ptr<Torrent>>      torrents_;
     std::vector<std::unique_ptr<PeerConnection>>      connections_;
+    /// Outbound sockets still waiting for connect() to complete. Tracked so a
+    /// mid-connect stop() can close them, and so the completion looks the torrent
+    /// up by info-hash rather than holding a raw Torrent* that may have been removed.
+    std::unordered_set<socket_t>                      pending_connects_;
 
     // Rate sampling (updated on the reactor thread once per second).
     std::atomic<std::uint64_t>            down_rate_{0};

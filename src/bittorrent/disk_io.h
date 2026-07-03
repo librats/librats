@@ -26,6 +26,7 @@
 #include "core/bytes.h"
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -68,6 +69,12 @@ public:
     virtual void async_check_files(Bitfield trusted_have, DiskCheckProgress progress,
                                    DiskCheckHandler handler) = 0;
 
+    /// Bytes of block data accepted for writing but not yet flushed to disk. The
+    /// Torrent uses this to apply backpressure — it stops requesting new blocks
+    /// while this is high — so a fast network can't grow the write queue without
+    /// bound when the disk is slow. Default 0 for fakes with no real queue.
+    virtual std::size_t queued_write_bytes() const noexcept { return 0; }
+
     /// Stop workers and quiesce. Safe to call more than once.
     virtual void stop() = 0;
 };
@@ -101,6 +108,7 @@ public:
     void async_hash(std::uint32_t piece, DiskHashHandler handler) override;
     void async_check_files(Bitfield trusted_have, DiskCheckProgress progress,
                            DiskCheckHandler handler) override;
+    std::size_t queued_write_bytes() const noexcept override { return queued_bytes_.load(std::memory_order_relaxed); }
     void stop() override;
 
 private:
@@ -127,6 +135,9 @@ private:
     // File preallocation bookkeeping.
     std::mutex        ensure_mutex_;
     std::vector<char> ensured_;       ///< per-file "already sized on disk" flag
+
+    // Bytes of block data queued for writing but not yet flushed (backpressure).
+    std::atomic<std::size_t> queued_bytes_{0};
 
     // Worker pool + job queue.
     std::vector<std::thread>          workers_;

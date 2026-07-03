@@ -140,11 +140,15 @@ void ThreadedDiskIo::async_read(std::uint32_t piece, std::uint32_t offset, std::
 
 void ThreadedDiskIo::async_write(std::uint32_t piece, std::uint32_t offset, Bytes data,
                                  DiskWriteHandler handler) {
-    // Park the block so reads/hashes see it before the write reaches disk.
+    // Park the block so reads/hashes see it before the write reaches disk, and
+    // count it toward the pending-write total that drives backpressure (D-2).
+    const std::size_t sz = data.size();
     store_.insert(piece, offset, data);
-    enqueue([this, piece, offset, data = std::move(data), handler = std::move(handler)]() mutable {
+    queued_bytes_.fetch_add(sz, std::memory_order_relaxed);
+    enqueue([this, piece, offset, sz, data = std::move(data), handler = std::move(handler)]() mutable {
         const bool ok = write_range(piece, offset, data);
         store_.erase(piece, offset);
+        queued_bytes_.fetch_sub(sz, std::memory_order_relaxed);
         complete([handler = std::move(handler), ok]() mutable {
             if (handler) handler(ok);
         });

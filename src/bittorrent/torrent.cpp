@@ -130,6 +130,10 @@ void Torrent::tick() {
 // ---- peer event handling ----
 
 void Torrent::on_handshake(PeerConnection& pc, const InfoHash&, const PeerId&) {
+    // Cap peers per torrent. Outbound dials are already gated by try_connect(), but
+    // inbound peers reach us straight through the handshake, so enforce it here too
+    // (H3) — otherwise a flood of incoming handshakes grows peers_ without bound.
+    if (peers_.size() >= kMaxPeers) { pc.close("too many peers"); return; }
     peers_.push_back(&pc);
     outstanding_[&pc] = 0;
     recent_down_[&pc] = 0;
@@ -189,6 +193,10 @@ void Torrent::update_interest(PeerConnection& pc) {
 
 void Torrent::refill(PeerConnection& pc) {
     if (!running_ || !picker_ || pc.peer_choking() || !pc.am_interested()) return;
+    // Disk backpressure: while too many writes are still pending, stop requesting
+    // new blocks so the write queue can drain (D-2). on_block_written() resumes
+    // requesting once it falls back under the watermark.
+    if (disk_ && disk_->queued_write_bytes() > kDiskWriteHighWater) { write_stalled_ = true; return; }
     int budget = kPipelineDepth - outstanding_[&pc];
     if (budget <= 0) return;
 
@@ -286,6 +294,18 @@ void Torrent::on_block_written(PieceBlock block, bool ok) {
     if (!running_ || !picker_) return;
     if (!ok) { picker_->restore_piece(block.piece); return; }
     if (picker_->mark_finished(block)) verify_piece(block.piece);
+
+    // A write just drained: if backpressure had paused requesting and the queue is
+    // back under the watermark, resume filling peers' pipelines (D-2).
+    if (write_stalled_ && (!disk_ || disk_->queued_write_bytes() <= kDiskWriteHighWater)) {
+        write_stalled_ = false;
+        refill_all();
+    }
+}
+
+void Torrent::refill_all() {
+    for (PeerConnection* pc : peers_)
+        if (pc->am_interested() && !pc->peer_choking()) refill(*pc);
 }
 
 void Torrent::verify_piece(std::uint32_t piece) {

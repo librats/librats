@@ -36,6 +36,10 @@ void Client::stop() {
     for (auto& [hash, t] : torrents_) t->stop();
     torrents_.clear();
     connections_.clear();
+    // Reclaim any outbound sockets still mid-connect (their completion lambda will
+    // never run now that the reactor is stopped).
+    for (socket_t s : pending_connects_) { reactor_.remove(s); close_socket(s); }
+    pending_connects_.clear();
     if (is_valid_socket(listener_)) { reactor_.remove(listener_); close_socket(listener_); listener_ = INVALID_SOCKET_VALUE; }
 }
 
@@ -53,6 +57,9 @@ void Client::on_accept() {
         // logs it as an error). nullptr addr: we read the peer address elsewhere.
         socket_t s = ::accept(listener_, nullptr, nullptr);
         if (!is_valid_socket(s)) break;  // drained (non-blocking listener)
+        // Cap total connections so an inbound flood can't exhaust memory / fds (H3).
+        // Keep draining the accept queue, but immediately drop anything over the cap.
+        if (connections_.size() >= kMaxConnections) { close_socket(s); continue; }
         set_socket_nonblocking(s);
 
         // Remote source endpoint (for logging / PEX). The peer's *listen* port is
@@ -83,15 +90,24 @@ void Client::on_accept() {
 }
 
 void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port) {
+    if (connections_.size() >= kMaxConnections) { torrent.on_connect_failed(ip, port); return; }
     socket_t s = tcp_connect_start(ip, int(port));
     if (!is_valid_socket(s)) { torrent.on_connect_failed(ip, port); return; }
 
-    Torrent* t = &torrent;
-    reactor_.add(s, PollOut, [this, t, s, ip, port](std::uint32_t) {
+    // Capture the info-hash, not a raw Torrent*: the torrent may be removed before
+    // the connect completes, so we re-resolve it (and bail if it's gone) rather
+    // than dereference a dangling pointer (H10). The socket is tracked so a
+    // mid-connect stop() can reclaim it.
+    const InfoHash ih = torrent.info_hash();
+    pending_connects_.insert(s);
+    reactor_.add(s, PollOut, [this, ih, s, ip, port](std::uint32_t) {
         reactor_.remove(s);  // done watching for connect completion
-        if (tcp_connect_result(s) != 0) {
+        pending_connects_.erase(s);
+        auto it = torrents_.find(ih);
+        Torrent* t = (it != torrents_.end()) ? it->second.get() : nullptr;
+        if (tcp_connect_result(s) != 0 || !t) {
             close_socket(s);
-            t->on_connect_failed(ip, port);
+            if (t) t->on_connect_failed(ip, port);
             return;
         }
         auto pc = std::make_unique<PeerConnection>(reactor_, s, /*outgoing=*/true,
@@ -115,6 +131,10 @@ void Client::find_peers_via_dht(const InfoHash& info_hash,
 }
 
 Torrent* Client::add_torrent(const TorrentInfo& info, const std::string& save_path) {
+    return run_on_reactor([&] { return add_torrent_impl(info, save_path); });
+}
+
+Torrent* Client::add_torrent_impl(const TorrentInfo& info, const std::string& save_path) {
     if (!info.is_valid() || !info.has_metadata()) return nullptr;
     const InfoHash ih = info.info_hash();
     if (torrents_.count(ih)) return torrents_[ih].get();
@@ -128,6 +148,10 @@ Torrent* Client::add_torrent(const TorrentInfo& info, const std::string& save_pa
 }
 
 Torrent* Client::add_magnet(const std::string& magnet_uri, const std::string& save_path) {
+    return run_on_reactor([&] { return add_magnet_impl(magnet_uri, save_path); });
+}
+
+Torrent* Client::add_magnet_impl(const std::string& magnet_uri, const std::string& save_path) {
     auto info = TorrentInfo::from_magnet(magnet_uri);
     if (!info || !info->is_valid()) return nullptr;
     const InfoHash ih = info->info_hash();
@@ -143,6 +167,11 @@ Torrent* Client::add_magnet(const std::string& magnet_uri, const std::string& sa
 
 Torrent* Client::add_torrent_with_resume(const TorrentInfo& info, const ResumeData& resume,
                                          const std::string& save_path) {
+    return run_on_reactor([&] { return add_torrent_with_resume_impl(info, resume, save_path); });
+}
+
+Torrent* Client::add_torrent_with_resume_impl(const TorrentInfo& info, const ResumeData& resume,
+                                              const std::string& save_path) {
     if (!info.is_valid()) return nullptr;
     const InfoHash ih = info.info_hash();
     if (torrents_.count(ih)) return torrents_[ih].get();
@@ -157,15 +186,17 @@ Torrent* Client::add_torrent_with_resume(const TorrentInfo& info, const ResumeDa
 }
 
 Torrent* Client::add_torrent_for_seeding(const TorrentInfo& info, const std::string& save_path) {
-    if (!info.is_valid() || !info.has_metadata()) return nullptr;
-    ResumeData rd;
-    rd.info_hash = info.info_hash();
-    rd.have      = Bitfield(info.num_pieces(), true);  // assume every piece is present
-    return add_torrent_with_resume(info, rd, save_path);
+    return run_on_reactor([&]() -> Torrent* {
+        if (!info.is_valid() || !info.has_metadata()) return nullptr;
+        ResumeData rd;
+        rd.info_hash = info.info_hash();
+        rd.have      = Bitfield(info.num_pieces(), true);  // assume every piece is present
+        return add_torrent_with_resume_impl(info, rd, save_path);
+    });
 }
 
 void Client::save_all_resume_data() {
-    for (auto& [hash, t] : torrents_) t->save_resume_data();
+    run_on_reactor([&] { for (auto& [hash, t] : torrents_) t->save_resume_data(); });
 }
 
 Torrent* Client::get_torrent(const InfoHash& info_hash) {
@@ -174,6 +205,10 @@ Torrent* Client::get_torrent(const InfoHash& info_hash) {
 }
 
 void Client::remove_torrent(const InfoHash& info_hash, bool /*delete_files*/) {
+    run_on_reactor([&] { remove_torrent_impl(info_hash); });
+}
+
+void Client::remove_torrent_impl(const InfoHash& info_hash) {
     auto it = torrents_.find(info_hash);
     if (it == torrents_.end()) return;
     it->second->stop();
@@ -189,9 +224,9 @@ std::vector<Torrent*> Client::torrents() {
 }
 
 Torrent* Client::add_torrent_file(const std::string& path, const std::string& save_path) {
-    auto info = TorrentInfo::from_file(path);
+    auto info = TorrentInfo::from_file(path);  // pure parse — safe off the reactor thread
     if (!info) return nullptr;
-    return add_torrent(*info, save_path);
+    return run_on_reactor([&] { return add_torrent_impl(*info, save_path); });
 }
 
 std::size_t Client::total_peers() const {
