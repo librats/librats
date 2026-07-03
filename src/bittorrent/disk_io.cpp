@@ -16,7 +16,7 @@ ThreadedDiskIo::ThreadedDiskIo(const TorrentInfo& info, std::string save_path,
     , save_path_(std::move(save_path))
     , poster_(std::move(poster))
     , ensured_(info.num_files(), 0) {
-    const int n = std::max(1, config.num_threads);
+    const int n = (std::max)(1, config.num_threads);
     workers_.reserve(std::size_t(n));
     for (int i = 0; i < n; ++i) workers_.emplace_back([this] { worker_loop(); });
 }

@@ -518,7 +518,7 @@ void Torrent::handle_ut_metadata(PeerConnection& pc, ByteView payload) {
             const std::uint32_t pieces = (total + kMetadataPieceSize - 1) / kMetadataPieceSize;
             if (msg->piece < pieces) {
                 const std::uint32_t off = msg->piece * kMetadataPieceSize;
-                const std::uint32_t len = std::min(kMetadataPieceSize, total - off);
+                const std::uint32_t len = (std::min)(kMetadataPieceSize, total - off);
                 pc.send_extended(id, ByteView(ext::encode_metadata_data(
                                             msg->piece, total, ByteView(info.data() + off, len))));
                 return;
@@ -537,7 +537,7 @@ void Torrent::on_metadata_piece(std::uint32_t piece, std::uint32_t total_size, B
     if (metadata_size_ == 0 || piece >= metadata_pieces_ || metadata_have_[piece]) return;
 
     const std::uint32_t off    = piece * kMetadataPieceSize;
-    const std::uint32_t expect = std::min(kMetadataPieceSize, metadata_size_ - off);
+    const std::uint32_t expect = (std::min)(kMetadataPieceSize, metadata_size_ - off);
     if (block.size() != expect) return;  // malformed slice — ignore
 
     std::copy(block.begin(), block.end(), metadata_buf_.begin() + std::ptrdiff_t(off));

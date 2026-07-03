@@ -301,7 +301,7 @@ void TrackerAnnouncer::announce(const TrackerRequest& req, PeerCallback on_peers
                 if (!stopping_ && resp.success && poster_) {
                     // Honour the tracker's requested re-announce cadence (clamped to a
                     // sane 1 min..1 h) so we don't get rate-limited/banned (H13).
-                    std::uint32_t interval = std::max(resp.interval, resp.min_interval);
+                    std::uint32_t interval = (std::max)(resp.interval, resp.min_interval);
                     if (interval == 0) interval = 1800;
                     interval = std::min<std::uint32_t>(std::max<std::uint32_t>(interval, 60), 3600);
                     poster_([on_peers, peers = resp.peers, interval] { on_peers(peers, interval); });

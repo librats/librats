@@ -48,7 +48,7 @@ bool is_all_zero(const std::array<std::uint8_t, 20>& id) noexcept {
 
 PeerId generate_peer_id(const std::string& client_prefix) {
     PeerId id{};
-    const std::size_t prefix_len = std::min(client_prefix.size(), kPeerIdSize);
+    const std::size_t prefix_len = (std::min)(client_prefix.size(), kPeerIdSize);
     for (std::size_t i = 0; i < prefix_len; ++i) id[i] = std::uint8_t(client_prefix[i]);
 
     std::random_device rd;

@@ -11,7 +11,7 @@ std::vector<const void*> Choker::select(std::vector<Candidate> candidates,
                      [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
 
     std::vector<const void*> chosen;
-    const std::size_t take = std::min(slots_, candidates.size());
+    const std::size_t take = (std::min)(slots_, candidates.size());
     chosen.reserve(take + 1);
     for (std::size_t i = 0; i < take; ++i) chosen.push_back(candidates[i].peer);
 

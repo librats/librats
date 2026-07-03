@@ -51,7 +51,7 @@ std::vector<FileSlice> FileStorage::map_block(std::uint32_t piece, std::uint32_t
 
     std::int64_t abs = std::int64_t(piece) * piece_length_ + offset;
     if (abs >= total_size_) return slices;
-    std::int64_t remaining = std::min(size, total_size_ - abs);  // clamp to payload
+    std::int64_t remaining = (std::min)(size, total_size_ - abs);  // clamp to payload
 
     // Binary search: the file containing `abs` is the last one whose offset <= abs.
     // (Zero-length files share an offset with the following file; picking the last
@@ -65,7 +65,7 @@ std::vector<FileSlice> FileStorage::map_block(std::uint32_t piece, std::uint32_t
     while (remaining > 0 && f < files_.size()) {
         const std::int64_t file_off = abs - files_[f].offset;
         if (file_off >= files_[f].size) { ++f; continue; }  // empty / already past this file
-        const std::int64_t take = std::min(remaining, files_[f].size - file_off);
+        const std::int64_t take = (std::min)(remaining, files_[f].size - file_off);
         slices.push_back(FileSlice{f, file_off, take});
         remaining -= take;
         abs       += take;

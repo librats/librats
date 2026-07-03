@@ -37,7 +37,7 @@ std::uint32_t PiecePicker::blocks_in_piece(std::uint32_t piece) const noexcept {
 std::uint32_t PiecePicker::block_size(std::uint32_t piece, std::uint32_t block) const noexcept {
     const std::uint32_t ps = piece_size(piece);
     const std::uint32_t off = block * kBlockSize;
-    return std::min(kBlockSize, ps - off);
+    return (std::min)(kBlockSize, ps - off);
 }
 
 // ---- our progress ----

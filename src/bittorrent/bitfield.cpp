@@ -36,7 +36,7 @@ void Bitfield::resize(std::size_t bits, bool value) {
     // last byte were trailing zeros and weren't touched by resize() — set them.
     if (value && bits > old_bits) {
         const std::size_t old_byte_end = (old_bits + 7) / 8 * 8;  // bit just past old last byte
-        for (std::size_t i = old_bits; i < std::min(bits, old_byte_end); ++i) set(i);
+        for (std::size_t i = old_bits; i < (std::min)(bits, old_byte_end); ++i) set(i);
     }
     clear_trailing_bits();
 }

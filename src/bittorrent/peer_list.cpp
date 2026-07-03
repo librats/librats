@@ -26,7 +26,7 @@ std::vector<PeerList::Endpoint> PeerList::connect_candidates(std::size_t max) {
     });
 
     std::vector<Endpoint> out;
-    const std::size_t take = std::min(max, eligible_peers.size());
+    const std::size_t take = (std::min)(max, eligible_peers.size());
     out.reserve(take);
     for (std::size_t i = 0; i < take; ++i) {
         eligible_peers[i]->connecting = true;

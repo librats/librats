@@ -26,8 +26,8 @@ void StoreBuffer::overlay(std::uint32_t piece, std::uint32_t offset, Bytes& out)
     for (; it != end; ++it) {
         const std::uint64_t blk_begin = it->first.second;
         const std::uint64_t blk_end   = blk_begin + it->second.size();
-        const std::uint64_t from = std::max(read_begin, blk_begin);
-        const std::uint64_t to   = std::min(read_end, blk_end);
+        const std::uint64_t from = (std::max)(read_begin, blk_begin);
+        const std::uint64_t to   = (std::min)(read_end, blk_end);
         if (from >= to) continue;  // no intersection
         std::copy(it->second.begin() + std::ptrdiff_t(from - blk_begin),
                   it->second.begin() + std::ptrdiff_t(to - blk_begin),
