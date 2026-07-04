@@ -47,8 +47,12 @@ public:
         bool                      enable_ipv6 = true;    ///< run the IPv6 Kademlia network (BEP 32)
         std::string               discovery_key = "";  ///< DHT namespace. Empty → the node's `protocol` (resolved at attach), so peers of the same app/version discover each other and mismatched protocols (which can't handshake anyway) don't even meet. Set non-empty to override with a custom discovery network.
         std::vector<Address>         bootstrap_nodes;       ///< empty → default internet nodes
-        std::chrono::milliseconds search_interval{5000};
-        std::chrono::milliseconds announce_interval{30000};
+        std::chrono::milliseconds search_interval{30000}; /// every 30 seconds
+        /// Re-announce cadence. Kept at ~⅓ of the peer TTL (librats stores announced peers
+        /// for 30 min, libtorrent ~45 min) so we stay findable with a comfortable margin
+        /// even if an announce or two is lost — libtorrent's own default is 15 min. A fresh
+        /// node still announces immediately at startup regardless of this value (see loop()).
+        std::chrono::milliseconds announce_interval{600000};  // 10 min
 
         /// Probe a STUN server once at startup to learn our public IP and seed the
         /// DHT node id per BEP 42. Without it we still converge via the slower
