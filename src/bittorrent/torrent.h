@@ -33,6 +33,7 @@
 #include "bittorrent/types.h"
 #include "core/types.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -128,6 +129,14 @@ public:
     void on_closed(PeerConnection&, const std::string& reason) override;
 
 private:
+    /// Post @p fn to the reactor, guarded by alive_ so it is dropped if this
+    /// torrent has since been destroyed. Disk and tracker completions run on their
+    /// own worker threads and marshal back through here; a completion that a worker
+    /// posts while stop() is joining it can land in the reactor queue *after* the
+    /// torrent is erased, so the raw `this` those callbacks capture would dangle
+    /// (use-after-free). The guard is the only thing keeping that pointer live-safe.
+    void post(std::function<void()> fn);
+
     void on_check_complete(Bitfield have);
 
     // Extension protocol / metadata (BEP 10 / BEP 9).
@@ -178,6 +187,12 @@ private:
     /// writes still pending, so a fast swarm can't grow the write queue without
     /// bound when the disk is slow (D-2). Requesting resumes as the queue drains.
     static constexpr std::size_t kDiskWriteHighWater = 32 * 1024 * 1024;
+
+    /// Liveness token shared with every reactor task this torrent posts (directly
+    /// or via a disk/tracker completion poster). Cleared in the destructor; the
+    /// shared_ptr keeps the flag readable after the torrent is gone, so a task
+    /// still queued on the reactor drops itself instead of touching freed memory.
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 
     Reactor&                     reactor_;
     TorrentHost&                 host_;

@@ -19,7 +19,17 @@ Torrent::Torrent(Reactor& reactor, TorrentHost& host, TorrentInfo info, std::str
     , choker_(4) {}
 
 Torrent::~Torrent() {
+    // Invalidate the liveness token before tearing down: stop() joins the disk /
+    // tracker workers, and a completion a worker posts during that join lands in
+    // the reactor queue after `this` is gone — the guard in post() drops it.
+    alive_->store(false, std::memory_order_release);
     stop();
+}
+
+void Torrent::post(std::function<void()> fn) {
+    reactor_.post([alive = alive_, fn = std::move(fn)]() mutable {
+        if (alive->load(std::memory_order_acquire)) fn();
+    });
 }
 
 void Torrent::start() {
@@ -31,7 +41,7 @@ void Torrent::start() {
         picker_ = std::make_unique<PiecePicker>(info_.num_pieces(), info_.piece_length(), info_.total_size());
         disk_   = std::make_unique<ThreadedDiskIo>(
             info_, save_path_,
-            [this](std::function<void()> fn) { reactor_.post(std::move(fn)); });
+            [this](std::function<void()> fn) { post(std::move(fn)); });
         state_ = State::Checking;
         LOG_INFO("bt.torrent", short_hash(info_hash()) << " \"" << info_.name() << "\" → Checking ("
                                << info_.num_pieces() << " pieces, " << info_.total_size() << " bytes)");
@@ -48,7 +58,7 @@ void Torrent::start() {
     // (which also seeds the metadata fetch for magnets).
     if (!info_.all_trackers().empty()) {
         trackers_ = std::make_unique<TrackerAnnouncer>(
-            info_.all_trackers(), [this](std::function<void()> fn) { reactor_.post(std::move(fn)); });
+            info_.all_trackers(), [this](std::function<void()> fn) { post(std::move(fn)); });
         announce_trackers(TrackerEvent::Started);
     }
 
@@ -103,7 +113,7 @@ void Torrent::on_check_complete(Bitfield have) {
 
 void Torrent::add_peer(const std::string& ip, std::uint16_t port) {
     if (peer_list_.add(ip, port, PeerSource::Tracker) && running_)
-        reactor_.post([this] { try_connect(); });
+        post([this] { try_connect(); });
 }
 
 void Torrent::try_connect() {
@@ -625,7 +635,7 @@ void Torrent::try_complete_metadata() {
 void Torrent::promote_to_downloading() {
     picker_ = std::make_unique<PiecePicker>(info_.num_pieces(), info_.piece_length(), info_.total_size());
     disk_   = std::make_unique<ThreadedDiskIo>(
-        info_, save_path_, [this](std::function<void()> fn) { reactor_.post(std::move(fn)); });
+        info_, save_path_, [this](std::function<void()> fn) { post(std::move(fn)); });
     state_ = State::Downloading;
 
     // Adopt the bitfields we received while metadata-less and (re)evaluate interest.
