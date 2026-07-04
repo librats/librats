@@ -93,25 +93,42 @@ void Traversal::add_entry(const NodeId& id, const Address& ep, uint8_t flags) {
 bool Traversal::add_requests(TimePoint now) {
     if (done_) return true;
 
-    int results_target = static_cast<int>(kBucketSize);  // want k alive nodes at the top
-    int outstanding = 0;                                  // queries in flight among the top
-    int alive = 0;                                        // confirmed-alive among the top
-    int sent  = 0;                                        // queries fired in this wave
+    // How many of the k closest still need a live answer before the search has converged.
+    // Starts at k and counts down as we meet alive nodes walking the list closest-first;
+    // reaching 0 means the k nodes nearest the target have all replied.
+    int alive_needed = static_cast<int>(kBucketSize);
+    // Queries among the k closest that we still genuinely wait on: sent, not yet answered,
+    // and not yet past their short timeout. A query that has already passed its short
+    // timeout is deliberately NOT counted here — a stale straggler must not block completion
+    // (see the return below). A just-sent query counts too.
+    int in_flight = 0;
+    int alive = 0;   // alive nodes seen among the closest (for the round log line)
+    int sent  = 0;   // queries fired in this pass (a stall sends nothing)
 
     for (auto& obs_ptr : results_) {
-        if (results_target <= 0) break;
+        if (alive_needed <= 0) break;  // the k closest have all replied — stop scanning
         Observer* o = obs_ptr.get();
 
-        if (o->has(Observer::kAlive)) { --results_target; ++alive; continue; }
+        if (o->has(Observer::kAlive)) { --alive_needed; ++alive; continue; }
         if (o->has(Observer::kFailed) || o->has(Observer::kDone)) continue;
-        if (o->has(Observer::kQueried)) { ++outstanding; continue; }  // in flight, awaiting reply
+        if (o->has(Observer::kQueried)) {
+            // Only a *fresh* query — one that hasn't yet passed its short timeout — blocks
+            // completion. Once a query is past its short timeout it has almost certainly
+            // gone dead; holding the whole lookup for it until the 15 s full timeout is
+            // pure dead time. Such a node gave us no peers, and (being silent) no write
+            // token, so it was never a candidate to announce to either — waiting for it
+            // cannot improve the result. We keep the observer registered so a late reply
+            // is still welcome, but a stale query no longer gates convergence.
+            if (!o->has(Observer::kShortTimeout)) ++in_flight;
+            continue;
+        }
 
         if (invoke_count_ >= branch_factor_) continue;  // no free slot; keep scanning to count
 
         o->set(Observer::kQueried);
         if (invoke(obs_ptr, now)) {
             ++invoke_count_;
-            ++outstanding;
+            ++in_flight;
             ++sent;
         } else {
             o->set(Observer::kFailed);
@@ -134,9 +151,21 @@ bool Traversal::add_requests(TimePoint now) {
 #endif
     }
 
-    // Done when the k closest have all answered with nothing left in flight, or when
-    // there is simply nothing more we can do.
-    return (results_target == 0 && outstanding == 0) || invoke_count_ == 0;
+    // Done exactly when nothing we still wait on is in flight. This one check already covers
+    // both ways a lookup can end:
+    //   - success:   the k closest have all replied, so none of them is still in flight;
+    //   - exhausted: a sparse/dead neighbourhood we can't fill to k live nodes — but if any
+    //                reachable candidate were left, the loop above would have just queried it
+    //                (which bumps in_flight), so in_flight == 0 also means "nothing left to
+    //                try". (A stale query frees its slot, so it never hides a sendable one.)
+    // A fresh query always keeps in_flight > 0, so we never stop while a node might still
+    // answer inside its short timeout. Conversely a *stale* query — one past its short
+    // timeout, so almost certainly dead — is excluded from in_flight on purpose: that is what
+    // decouples termination from the 15 s full timeout. The full timeout now only ages out
+    // routing-table liveness (node_failed), never lookup completion, so one silent-but-close
+    // node can no longer stall the search (nor delay an announce_peer) by sitting out its
+    // full timeout.
+    return in_flight == 0;
 }
 
 void Traversal::on_responded(Observer& o, uint16_t rtt, TimePoint now) {
@@ -227,7 +256,7 @@ void Traversal::finish() {
                           << " queried, " << results_.size() << " candidate(s)");
 
     // We complete as soon as the top-k have answered, but queries to farther nodes may
-    // still be in flight (counted in invoke_count_, not in the top-k `outstanding`).
+    // still be in flight (counted in invoke_count_, not in the top-k in_flight).
     for (const auto& obs : results_) {
         Observer* o = obs.get();
         const bool in_flight = o->has(Observer::kQueried) && !o->has(Observer::kAlive) &&

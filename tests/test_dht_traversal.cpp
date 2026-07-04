@@ -134,6 +134,45 @@ TEST(DhtTraversal, TimeoutDoesNotStall) {
     EXPECT_EQ(final_peers[0], p1);
 }
 
+// A silent-but-close node must not pin the lookup open until the 15 s *full* timeout:
+// once its *short* timeout (2 s) fires and there is no fresh query left and nothing new
+// to send, the search converges immediately. Regression guard for the dead-tail fix that
+// decouples lookup termination from the full RPC timeout.
+TEST(DhtTraversal, StaleQueryCompletesAtShortTimeout) {
+    RecordingTransport tp;
+    RpcManager rpc(tp);
+    const NodeId self = nid(0x00);
+    const NodeId info_hash = nid(0x55);
+    RoutingTable table(self);
+
+    const Address s0("10.0.0.1", 1), s1("10.0.0.2", 2);
+    table.node_seen(nid(0xF0), s0, 20);
+    table.node_seen(nid(0xF1), s1, 20);
+
+    std::vector<Address> final_peers;
+    bool done = false;
+    FindPeers fp(table, rpc, self, info_hash, {},
+                 [&](const std::vector<Address>& all) { done = true; final_peers = all; });
+    fp.start(at(0));
+
+    ASSERT_TRUE(has_query_to(tp, s0));
+    ASSERT_TRUE(has_query_to(tp, s1));
+
+    // s0 answers with a peer; s1 stays silent.
+    const Address p1("5.5.5.1", 100);
+    KrpcMessage r0 = KrpcProtocol::create_get_peers_response(txn_to(tp, s0), nid(0xF0), {p1}, "tok");
+    ASSERT_TRUE(rpc.handle_response(r0, s0, at(0)));
+    EXPECT_FALSE(done);           // s1 is still a fresh in-flight query — must keep waiting
+
+    // Only the short timeout elapses (2 s <= t < 15 s): s1 becomes a stale straggler.
+    // With no fresh query pending and nothing left to send, the lookup completes now
+    // rather than waiting out the full timeout.
+    rpc.tick(at(3));
+    EXPECT_TRUE(done);
+    ASSERT_EQ(final_peers.size(), 1u);
+    EXPECT_EQ(final_peers[0], p1);
+}
+
 // A bootstrap seed is added by address with an unknown id. When it replies, its real id
 // becomes known and it must be resorted into the candidate list by distance — so a seed
 // that turns out to be close to the target counts as a responder and receives the announce.
