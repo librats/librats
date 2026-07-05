@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bittorrent/bencode.h"
+#include "core/ip_address.h"
 #include "core/socket.h"
 #include <string>
 #include <vector>
@@ -45,12 +46,12 @@ enum class KrpcErrorCode {
  * KRPC Node information
  */
 struct KrpcNode {
-    NodeId id;
-    std::string ip;
-    uint16_t port;
-    
+    NodeId    id;
+    IpAddress ip;
+    uint16_t  port;
+
     KrpcNode() : id(), port(0) {}
-    KrpcNode(const NodeId& node_id, const std::string& ip_addr, uint16_t port_num)
+    KrpcNode(const NodeId& node_id, const IpAddress& ip_addr, uint16_t port_num)
         : id(node_id), ip(ip_addr), port(port_num) {}
 };
 
@@ -83,8 +84,10 @@ struct KrpcMessage {
     // On responses we SEND: the requester's external address, so they can learn how the
     // network sees them and derive a compliant node ID.
     // On responses we RECEIVE: our own external address as observed by the responder.
-    std::string external_ip;
-    uint16_t external_port = 0;
+    // Kept as a numeric IpAddress (not text): it comes off the wire as raw bytes and is
+    // consumed as raw bytes, so no round-trip through a string is needed.
+    IpAddress external_ip;
+    uint16_t  external_port = 0;
 
     // For errors
     KrpcErrorCode error_code;

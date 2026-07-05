@@ -30,10 +30,11 @@ std::string TokenManager::compute(const Address& querier, const InfoHash& info_h
                                   const std::array<uint8_t, 16>& secret) const {
     // Port is deliberately excluded — a NAT may show a different source port on the
     // follow-up announce, but the address stays the same.
+    const ByteView ip = querier.ip.bytes();
     std::vector<uint8_t> data;
-    data.reserve(secret.size() + querier.ip.size() + info_hash.size());
+    data.reserve(secret.size() + ip.size() + info_hash.size());
     data.insert(data.end(), secret.begin(), secret.end());
-    data.insert(data.end(), querier.ip.begin(), querier.ip.end());
+    data.insert(data.end(), ip.begin(), ip.end());
     data.insert(data.end(), info_hash.begin(), info_hash.end());
     return SHA1::hash_bytes(data);
 }

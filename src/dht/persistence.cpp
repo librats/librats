@@ -19,7 +19,7 @@ bool save_routing_table(const std::string& path, const NodeId& self,
         if (!n.confirmed()) continue;  // only persist good contacts
         Json e;
         e["id"] = to_hex(n.id);
-        e["ip"] = n.endpoint.ip;
+        e["ip"] = n.endpoint.ip.to_string();
         e["port"] = static_cast<int>(n.endpoint.port);
         if (n.rtt != NodeEntry::kRttUnknown) e["rtt"] = static_cast<int>(n.rtt);
         nodes.push_back(e);
@@ -61,9 +61,10 @@ bool load_routing_table(const std::string& path, NodeId& self,
         std::size_t skipped = 0;
         for (const auto& e : root["nodes"]) {
             if (!e.contains("id") || !e.contains("ip") || !e.contains("port")) { ++skipped; continue; }
+            const auto ip = IpAddress::parse(e["ip"].get<std::string>());
+            if (!ip) { ++skipped; continue; }
             NodeEntry n(from_hex(e["id"].get<std::string>()),
-                        Address(e["ip"].get<std::string>(),
-                                static_cast<uint16_t>(e["port"].get<int>())));
+                        Address(*ip, static_cast<uint16_t>(e["port"].get<int>())));
             const uint16_t rtt = e.contains("rtt")
                                      ? static_cast<uint16_t>(e["rtt"].get<int>())
                                      : NodeEntry::kRttUnknown;

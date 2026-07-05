@@ -119,7 +119,7 @@ private:
     std::condition_variable wake_;
 
     mutable std::mutex                       mutex_;
-    std::unordered_map<std::string, Target>  targets_;  ///< keyed by address string
+    std::unordered_map<Address, Target>      targets_;  ///< keyed by the peer Address
 };
 
 } // namespace librats

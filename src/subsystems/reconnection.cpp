@@ -35,15 +35,15 @@ ReconnectionService::ReconnectionService(Config config) : config_(std::move(conf
 ReconnectionService::~ReconnectionService() { stop(); }
 
 void ReconnectionService::add(const Address& address) {
-    const std::string key = address.to_string();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (targets_.find(key) != targets_.end()) return;
+        if (targets_.count(address)) return;
         if (targets_.size() >= config_.max_targets) {
-            LOG_WARN("reconnect", "Active-target cap (" << config_.max_targets << ") reached; dropping " << key);
+            LOG_WARN("reconnect", "Active-target cap (" << config_.max_targets
+                                  << ") reached; dropping " << address.to_string());
             return;
         }
-        Target& t = targets_[key];
+        Target& t = targets_[address];
         t.address = address;
         t.next_attempt = std::chrono::steady_clock::now();
     }
@@ -55,7 +55,7 @@ void ReconnectionService::remove(const Address& address) {
     bool erased;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        erased = targets_.erase(address.to_string()) > 0;
+        erased = targets_.erase(address) > 0;
     }
     if (book_ && book_->remove(address)) book_->save();
     if (erased) LOG_DEBUG("reconnect", "Stopped reconnecting to " << address.to_string());
@@ -90,7 +90,7 @@ void ReconnectionService::start() {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const Address& addr : recent) {
             if (targets_.size() >= config_.max_targets) break;
-            auto [it, inserted] = targets_.try_emplace(addr.to_string());
+            auto [it, inserted] = targets_.try_emplace(addr);
             if (inserted) { it->second.address = addr; it->second.next_attempt = std::chrono::steady_clock::now(); }
         }
     }
@@ -123,12 +123,11 @@ void ReconnectionService::on_connected(const Peer& peer) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const Address& addr : info->addresses) {
-            const std::string key = addr.to_string();
-            auto it = targets_.find(key);
+            auto it = targets_.find(addr);
             if (it == targets_.end()) {
                 if (!config_.persist_discovered) continue;
                 if (targets_.size() >= config_.max_targets) continue;  // bound active growth
-                it = targets_.emplace(key, Target{}).first;
+                it = targets_.emplace(addr, Target{}).first;
                 it->second.address = addr;
             }
             it->second.mark_connected(steady_now);  // resolve the in-flight dial now
@@ -152,7 +151,7 @@ void ReconnectionService::on_disconnected(const PeerId& /*id*/) {
 // stretching every retry to that timeout.
 void ReconnectionService::on_dial_failed(const Address& address) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = targets_.find(address.to_string());
+    auto it = targets_.find(address);
     if (it != targets_.end()) it->second.dialing = false;
 }
 
@@ -164,7 +163,7 @@ std::chrono::milliseconds ReconnectionService::backoff_for(int attempts) const {
 }
 
 void ReconnectionService::loop() {
-    std::unordered_set<std::string> live;  // reused across ticks to avoid re-allocating
+    std::unordered_set<Address> live;  // reused across ticks to avoid re-allocating
     while (running_.load()) {
         const auto now = std::chrono::steady_clock::now();
 
@@ -178,7 +177,7 @@ void ReconnectionService::loop() {
         live.clear();
         for (const PeerInfo& p : network_->peers())
             for (const Address& a : p.addresses)
-                live.insert(a.to_string());
+                live.insert(a);
 
         std::vector<Address> to_dial, gave_up;
         {

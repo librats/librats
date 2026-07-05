@@ -49,13 +49,18 @@ void MdnsDiscovery::on_service(const MdnsService& service, bool /*is_new*/) {
     // Skip our own announcement (its name carries our instance label).
     if (service.service_name.find(instance_) != std::string::npos) return;
 
-    const std::string key = service.ip_address + ":" + std::to_string(service.port);
+    // service.ip_address comes off the wire (untrusted); only dial a valid numeric IP.
+    const auto ip = IpAddress::parse(service.ip_address);
+    if (!ip) return;
+
+    const Address addr{*ip, service.port};
     {
         std::lock_guard<std::mutex> lock(dialed_mutex_);
-        if (!dialed_.insert(key).second) return;  // already dialed this address
+        if (!dialed_.insert(addr).second) return;  // already dialed this address
     }
-    LOG_DEBUG("mdns-discovery", "Dialing discovered service " << service.service_name << " at " << key);
-    network_->connect(Address{service.ip_address, service.port});
+    LOG_DEBUG("mdns-discovery", "Dialing discovered service " << service.service_name
+                                 << " at " << addr.to_string());
+    network_->connect(addr);
 }
 
 } // namespace librats

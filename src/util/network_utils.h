@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/ip_address.h"
+
 #include <string>
 #include <vector>
 
@@ -53,6 +55,10 @@ bool is_hostname(const std::string& str);
  * private and therefore not a usable public endpoint.
  */
 bool is_public_ip(const std::string& ip);
+
+/// Byte-based overload: classifies directly from the address bytes, with no textual
+/// re-parse. The string overload above is a thin wrapper that parses then delegates.
+bool is_public_ip(const IpAddress& ip);
 
 /**
  * Get all local network interface addresses (IPv4 and IPv6)

@@ -67,7 +67,7 @@ private:
             resp.add_xor_mapped_address(StunMappedAddress(StunAddressFamily::IPv4, public_ip_, 41234));
             resp.add_software("FixedStunServer/1.0");
             auto out = resp.serialize();
-            send_udp_data(socket_, out, sender.ip, sender.port);
+            send_udp_data(socket_, out, sender.ip.to_string(), sender.port);
         }
     }
 
@@ -82,7 +82,7 @@ NodeConfig listening_config() {
     NodeConfig c; c.bind_address = "127.0.0.1"; c.security = NodeConfig::Security::Noise; return c;
 }
 
-DhtDiscovery::Config disc_config(const std::vector<Address>& bootstrap) {
+DhtDiscovery::Config disc_config(const std::vector<HostEndpoint>& bootstrap) {
     DhtDiscovery::Config c;
     c.discovery_key = "librats-test-net";
     c.bind_address = "127.0.0.1";
@@ -134,7 +134,7 @@ TEST(DhtDiscoveryTest, SeedsNodeIdFromStun) {
     Node node(listening_config());
     auto cfg = disc_config({});  // offline, no bootstrap
     cfg.discover_external_ip = true;
-    cfg.stun_servers = { Address("127.0.0.1", stun.port()) };
+    cfg.stun_servers = { HostEndpoint("127.0.0.1", stun.port()) };
     cfg.stun_timeout = 2000ms;
     auto disc = std::make_unique<DhtDiscovery>(cfg);
     DhtDiscovery* d = disc.get();
@@ -154,7 +154,7 @@ TEST(DhtDiscoveryTest, StartsCleanlyWhenStunUnreachable) {
     Node node(listening_config());
     auto cfg = disc_config({});
     cfg.discover_external_ip = true;
-    cfg.stun_servers = { Address("127.0.0.1", 1) };  // nothing is listening there
+    cfg.stun_servers = { HostEndpoint("127.0.0.1", 1) };  // nothing is listening there
     cfg.stun_timeout = 300ms;
     auto disc = std::make_unique<DhtDiscovery>(cfg);
     DhtDiscovery* d = disc.get();
@@ -180,7 +180,7 @@ TEST(DhtDiscoveryTest, TwoNodesDiscoverViaDht) {
 
     // b bootstraps from a's DHT node.
     Node b(listening_config());
-    std::vector<Address> bootstrap{ Address("127.0.0.1", da->dht_port()) };
+    std::vector<HostEndpoint> bootstrap{ HostEndpoint("127.0.0.1", da->dht_port()) };
     b.add_subsystem(std::make_unique<DhtDiscovery>(disc_config(bootstrap)));
     ASSERT_TRUE(b.start());
 
@@ -260,7 +260,7 @@ TEST(DhtDiscoveryTest, TwoNodesDiscoverViaIPv6Dht) {
         c.security = NodeConfig::Security::Noise;
         return c;
     };
-    auto v6_disc_config = [](const std::vector<Address>& bootstrap) {
+    auto v6_disc_config = [](const std::vector<HostEndpoint>& bootstrap) {
         auto c = disc_config(bootstrap);
         c.bind_address = "";    // wildcard
         c.enable_ipv4 = false;  // IPv6-only DHT
@@ -275,7 +275,7 @@ TEST(DhtDiscoveryTest, TwoNodesDiscoverViaIPv6Dht) {
     ASSERT_TRUE(wait_for([&] { return da->dht_port_v6() != 0; }, 5s));
 
     Node b(v6_node_config());
-    std::vector<Address> bootstrap{ Address("::1", da->dht_port_v6()) };
+    std::vector<HostEndpoint> bootstrap{ HostEndpoint("::1", da->dht_port_v6()) };
     b.add_subsystem(std::make_unique<DhtDiscovery>(v6_disc_config(bootstrap)));
     ASSERT_TRUE(b.start());
 

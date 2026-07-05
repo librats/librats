@@ -15,6 +15,7 @@
  */
 
 #include "core/address.h"
+#include "core/host_endpoint.h"
 #include "dht/dos_blocker.h"
 #include "dht/find_peers.h"
 #include "dht/id.h"
@@ -87,13 +88,13 @@ public:
     // -- accessors / config -----------------------------------------------------
     const NodeId& self() const noexcept { return self_; }
     bool is_ipv6() const noexcept { return ipv6_; }
-    void set_external_ip(const std::string& ip);          // BEP 42: re-derive our id
-    const std::string& external_address() const noexcept { return external_address_; }
+    void set_external_ip(const IpAddress& ip);            // BEP 42: re-derive our id
+    const IpAddress& external_address() const noexcept { return external_address_; }
     RoutingTable& routing_table() noexcept { return table_; }
     const RoutingTable& routing_table() const noexcept { return table_; }
     std::size_t active_lookups() const noexcept { return lookups_.size(); }
 
-    static std::vector<Address> default_bootstrap_nodes();
+    static std::vector<HostEndpoint> default_bootstrap_nodes();
 
 private:
     // incoming query handlers (server side)
@@ -102,7 +103,7 @@ private:
 
     void send_message(const KrpcMessage& msg, const Address& to);  // a response (echoes txn, stamps ip)
     void ping(const NodeId& id, const Address& ep, TimePoint now);  // liveness probe
-    void maybe_update_external_ip(const std::string& reported_ip, const Address& from);
+    void maybe_update_external_ip(const IpAddress& reported_ip, const Address& from);
     FindPeers& start_lookup(std::unique_ptr<FindPeers> lookup, TimePoint now);
     void reap_finished();
     std::vector<std::string> want() const { return {ipv6_ ? "n6" : "n4"}; }
@@ -121,9 +122,9 @@ private:
     // BEP 42: learn our external address from the "ip" nodes echo back, but require a
     // consensus of distinct responders before trusting it (one node can't poison us).
     static constexpr int kExternalIpVoteThreshold = 5;
-    std::string             external_address_;
-    std::map<std::string, int> ip_votes_;
-    std::set<std::string>      ip_voters_;
+    IpAddress               external_address_;
+    std::map<IpAddress, int> ip_votes_;
+    std::set<IpAddress>      ip_voters_;
 
     // maintenance cadence
     static constexpr std::chrono::seconds kRefreshInterval{6};
@@ -144,14 +145,14 @@ private:
     NodeId neighbor_id(const NodeId& target) const;
     void   add_spider_node(const NodeEntry& node);
     void   spider_absorb(const KrpcMessage& msg, const Address& from);  // reply → spider pool
-    bool   spider_contacted(const std::string& ip) const;
+    bool   spider_contacted(const IpAddress& ip) const;
 
     std::atomic<bool>      spider_mode_{false};
     std::atomic<bool>      spider_ignore_{false};
     SpiderAnnounceCallback spider_announce_;
     std::vector<NodeEntry>        spider_pool_;   // crawl frontier (kept apart from the routing table)
     std::unordered_set<NodeId, NodeIdHash> spider_visited_;
-    std::unordered_set<std::string>        spider_contacted_ips_;
+    std::unordered_set<IpAddress>          spider_contacted_ips_;
     TimePoint              last_spider_bootstrap_{};
     static constexpr std::size_t kMaxSpiderNodes = 2000;
     static constexpr std::size_t kMaxSpiderVisited = 10000;

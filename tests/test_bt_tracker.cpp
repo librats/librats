@@ -57,7 +57,7 @@ private:
                 write_u32_be(resp.data(), 0);
                 write_u32_be(resp.data() + 4, tid);
                 write_u64_be(resp.data() + 8, 0x1122334455667788ull);
-                send_udp_data(sock_, resp, sender.ip, sender.port, AddressFamily::IPv4);
+                send_udp_data(sock_, resp, sender.ip.to_string(), sender.port, AddressFamily::IPv4);
             } else if (action == 1) {  // announce
                 if (req.size() >= 84) events_.fetch_or(1u << read_u32_be(req.data() + 80));
                 Bytes resp(26);
@@ -71,7 +71,7 @@ private:
                 resp[20] = std::uint8_t(a); resp[21] = std::uint8_t(b);
                 resp[22] = std::uint8_t(c); resp[23] = std::uint8_t(d);
                 write_u16_be(resp.data() + 24, peer_port_);
-                send_udp_data(sock_, resp, sender.ip, sender.port, AddressFamily::IPv4);
+                send_udp_data(sock_, resp, sender.ip.to_string(), sender.port, AddressFamily::IPv4);
             }
         }
     }
@@ -161,7 +161,7 @@ TEST(BtTracker, ParseHttpResponse) {
     EXPECT_EQ(resp.complete, 5u);
     EXPECT_EQ(resp.incomplete, 3u);
     ASSERT_EQ(resp.peers.size(), 1u);
-    EXPECT_EQ(resp.peers[0].ip, "1.2.3.4");
+    EXPECT_EQ(resp.peers[0].ip.to_string(), "1.2.3.4");
     EXPECT_EQ(resp.peers[0].port, 81u);
 }
 
@@ -188,7 +188,7 @@ TEST(BtTracker, UdpAnnounceLoopback) {
     ASSERT_TRUE(resp.success) << resp.failure_reason;
     EXPECT_EQ(resp.complete, 1u);
     ASSERT_EQ(resp.peers.size(), 1u);
-    EXPECT_EQ(resp.peers[0].ip, "1.2.3.4");
+    EXPECT_EQ(resp.peers[0].ip.to_string(), "1.2.3.4");
     EXPECT_EQ(resp.peers[0].port, 6881u);
 }
 

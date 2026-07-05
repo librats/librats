@@ -191,7 +191,7 @@ void Node::maintenance_loop() {
 
 // ── Connections ─────────────────────────────────────────────────────────────
 
-void Node::connect(const Address& address) { connect(address.ip, address.port); }
+void Node::connect(const Address& address) { connect(address.ip.to_string(), address.port); }
 
 void Node::connect(const std::string& host, uint16_t port) {
     reactors_->pick().connect(host, port);
@@ -288,8 +288,12 @@ void Node::on_established(Connection& conn) {
     PeerInfo info;
     info.id        = conn.remote_id();
     info.direction = conn.role();
-    if (conn.has_dial_address())  // outbound: remember the address we dialed
-        info.addresses.push_back(Address{conn.dial_host(), conn.dial_port()});
+    // Outbound: remember the address we dialed — but only if it was a numeric IP.
+    // A dial-by-hostname target isn't a dialable Address (peers can't use our name),
+    // and the resolved IP is re-learned via identify anyway.
+    if (conn.has_dial_address())
+        if (auto ip = IpAddress::parse(conn.dial_host()))
+            info.addresses.push_back(Address{*ip, conn.dial_port()});
 
     const PeerRoute route{conn.reactor_index(), conn.id()};
     // Symmetric tie-break for a simultaneous cross-connect: both peers keep the
@@ -371,8 +375,8 @@ void Node::send_identify(Connection& conn) {
     IdentifyMessage msg;
     msg.listen_port = listen_port_;
     msg.addresses   = advertised_addresses();
-    const std::string seen_ip = conn.remote_ip();
-    if (!is_unspecified_ip(seen_ip))
+    const IpAddress seen_ip = conn.remote_ip();
+    if (!seen_ip.is_any())
         msg.observed = Address{seen_ip, 0};  // port is the peer's ephemeral; IP is what matters
 
     const Bytes payload = msg.encode();
@@ -390,11 +394,11 @@ void Node::handle_identify(Connection& conn, const Frame& frame) {
     // advertised listen port (the linchpin for inbound peers), plus any extra
     // addresses it self-advertised. PeerTable de-duplicates and caps the set.
     std::vector<Address> candidates;
-    const std::string seen_ip = conn.remote_ip();
-    if (msg->listen_port != 0 && !is_unspecified_ip(seen_ip))
+    const IpAddress seen_ip = conn.remote_ip();
+    if (msg->listen_port != 0 && !seen_ip.is_any())
         candidates.push_back(Address{seen_ip, msg->listen_port});
     for (const Address& a : msg->addresses)
-        if (a.port != 0 && !is_unspecified_ip(a.ip))
+        if (a.port != 0 && !a.ip.is_any())
             candidates.push_back(a);
 
     if (!candidates.empty()) {
@@ -407,7 +411,7 @@ void Node::handle_identify(Connection& conn, const Frame& frame) {
 
     // Learn our own public address: pair the IP the peer saw us at with OUR listen
     // port (its observed port is our ephemeral source port, not dialable).
-    if (msg->observed && listen_port_ != 0 && !is_unspecified_ip(msg->observed->ip))
+    if (msg->observed && listen_port_ != 0 && !msg->observed->ip.is_any())
         record_observed_address(Address{msg->observed->ip, listen_port_});
 }
 

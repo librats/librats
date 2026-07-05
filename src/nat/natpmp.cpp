@@ -174,6 +174,7 @@ bool NatPmpClient::ensure_gateway() {
         socket_t sock = create_udp_socket(0, "", AddressFamily::IPv4);
         if (!is_valid_socket(sock)) continue;
 
+        const auto gw_ip = IpAddress::parse(gw);  // gateway is a numeric literal; parse once, compare by bytes
         std::vector<uint8_t> req = { NATPMP_VERSION, OP_EXTERNAL_IP };
         bool answered = false;
         for (int timeout : kRetryTimeouts) {
@@ -181,7 +182,7 @@ bool NatPmpClient::ensure_gateway() {
             if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) < 0) break;
             Address from;
             auto resp = receive_udp_data(sock, 64, from, timeout, wakeup_.fd());
-            if (resp.size() >= 12 && from.ip == gw && resp[0] == NATPMP_VERSION &&
+            if (resp.size() >= 12 && gw_ip && from.ip == *gw_ip && resp[0] == NATPMP_VERSION &&
                 resp[1] == (OP_EXTERNAL_IP | OP_RESPONSE_BIT)) {
                 uint16_t result = get_u16(&resp[2]);
                 if (result == 0) {
@@ -224,6 +225,7 @@ bool NatPmpClient::request_external_ip(socket_t sock) {
         gw = gateway_;
     }
     if (gw.empty()) return false;
+    const auto gw_ip = IpAddress::parse(gw);  // numeric literal; parse once, compare by bytes
 
     std::vector<uint8_t> req = { NATPMP_VERSION, OP_EXTERNAL_IP };
     for (int timeout : kRetryTimeouts) {
@@ -231,7 +233,7 @@ bool NatPmpClient::request_external_ip(socket_t sock) {
         if (send_udp_data(sock, req, gw, NATPMP_PORT, AddressFamily::IPv4) < 0) return false;
         Address from;
         auto resp = receive_udp_data(sock, 64, from, timeout, wakeup_.fd());
-        if (resp.size() >= 12 && from.ip == gw && resp[0] == NATPMP_VERSION &&
+        if (resp.size() >= 12 && gw_ip && from.ip == *gw_ip && resp[0] == NATPMP_VERSION &&
             resp[1] == (OP_EXTERNAL_IP | OP_RESPONSE_BIT) && get_u16(&resp[2]) == 0) {
             char ip[INET_ADDRSTRLEN];
             struct in_addr addr;
@@ -253,6 +255,7 @@ bool NatPmpClient::send_map_request(socket_t sock, Mapping& m, bool remove) {
         gw = gateway_;
     }
     if (gw.empty()) return false;
+    const auto gw_ip = IpAddress::parse(gw);  // numeric literal; parse once, compare by bytes
 
     const uint32_t lifetime = remove ? 0 : lease_duration_;
     const uint16_t requested_external = remove ? 0 : m.external_port;
@@ -293,7 +296,7 @@ bool NatPmpClient::send_map_request(socket_t sock, Mapping& m, bool remove) {
 
         Address from;
         auto resp = receive_udp_data(sock, 64, from, timeout, wakeup_.fd());
-        if (resp.size() < 16 || from.ip != gw) continue;
+        if (resp.size() < 16 || !gw_ip || from.ip != *gw_ip) continue;
         if (resp[0] != NATPMP_VERSION || resp[1] != expected_opcode) continue;
 
         uint16_t result = get_u16(&resp[2]);

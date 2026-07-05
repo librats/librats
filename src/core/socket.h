@@ -4,6 +4,7 @@
 
 #include <string>
 #include <functional>
+#include <optional>
 #include <vector>
 #include <cstdint>
 
@@ -108,6 +109,14 @@ socket_t accept_client(socket_t server_socket);
 std::string get_peer_address(socket_t socket);
 
 /**
+ * Get the peer endpoint as a numeric Address, straight from getpeername() with no
+ * textual round-trip (IpAddress::from_sockaddr). Returns nullopt on error or an
+ * unsupported address family. Note the port is the peer's ephemeral SOURCE port,
+ * not its listen port.
+ */
+std::optional<Address> get_peer_endpoint(socket_t socket);
+
+/**
  * Send data through a TCP socket
  * @param socket The socket handle
  * @param data The binary data to send
@@ -167,6 +176,17 @@ socket_t create_udp_socket(int port = 0, const std::string& bind_address = "",
  * @return Number of bytes sent, or -1 on error
  */
 int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const std::string& host, int port,
+                  AddressFamily af = AddressFamily::DualStack);
+
+/**
+ * Send UDP data to a numeric Address. Unlike the host-string overload this does no
+ * hostname resolution and no inet_pton — the destination sockaddr is filled straight
+ * from the address bytes (an IPv4 address is mapped to ::ffff:x.x.x.x on a
+ * DualStack/IPv6 socket). This is the hot path for engines like the DHT that already
+ * hold resolved addresses.
+ * @return Number of bytes sent, or -1 on error
+ */
+int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Address& dest,
                   AddressFamily af = AddressFamily::DualStack);
 
 /**

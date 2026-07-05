@@ -102,14 +102,14 @@ TEST_F(DhtTest, DhtClientPortBindingTest) {
 
 // Test bootstrap nodes
 TEST_F(DhtTest, BootstrapNodesTest) {
-    std::vector<Address> bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
+    std::vector<HostEndpoint> bootstrap_nodes = DhtClient::get_default_bootstrap_nodes();
 
     // Should have at least a few bootstrap nodes
     EXPECT_GT(bootstrap_nodes.size(), 0);
 
     // Check that bootstrap nodes have valid format
     for (const auto& node : bootstrap_nodes) {
-        EXPECT_FALSE(node.ip.empty());
+        EXPECT_FALSE(node.host.empty());
         EXPECT_GT(node.port, 0);
         EXPECT_LT(node.port, 65536);
     }
@@ -449,27 +449,27 @@ TEST_F(DhtTest, DataDirectoryConfigurationTest) {
 
 // IPv4 compact node info round-trips through 26-byte records
 TEST_F(DhtTest, CompactNodeInfoIPv4RoundTrip) {
-    KrpcNode node(create_test_node_id(0x11), "192.168.1.42", 6881);
+    KrpcNode node(create_test_node_id(0x11), *IpAddress::parse("192.168.1.42"), 6881);
     std::string compact = KrpcProtocol::compact_node_info(node);
     EXPECT_EQ(compact.size(), 26u);  // 20 id + 4 ip + 2 port
 
     auto parsed = KrpcProtocol::parse_compact_node_info(compact, /*ipv6=*/false);
     ASSERT_EQ(parsed.size(), 1u);
     EXPECT_EQ(parsed[0].id, node.id);
-    EXPECT_EQ(parsed[0].ip, "192.168.1.42");
+    EXPECT_EQ(parsed[0].ip.to_string(), "192.168.1.42");
     EXPECT_EQ(parsed[0].port, 6881);
 }
 
 // IPv6 compact node info round-trips through 38-byte records (BEP 32)
 TEST_F(DhtTest, CompactNodeInfoIPv6RoundTrip) {
-    KrpcNode node(create_test_node_id(0x22), "2001:db8::1", 51413);
+    KrpcNode node(create_test_node_id(0x22), *IpAddress::parse("2001:db8::1"), 51413);
     std::string compact = KrpcProtocol::compact_node_info(node);
     EXPECT_EQ(compact.size(), 38u);  // 20 id + 16 ip + 2 port
 
     auto parsed = KrpcProtocol::parse_compact_node_info(compact, /*ipv6=*/true);
     ASSERT_EQ(parsed.size(), 1u);
     EXPECT_EQ(parsed[0].id, node.id);
-    EXPECT_EQ(parsed[0].ip, "2001:db8::1");
+    EXPECT_EQ(parsed[0].ip.to_string(), "2001:db8::1");
     EXPECT_EQ(parsed[0].port, 51413);
 }
 
@@ -480,7 +480,7 @@ TEST_F(DhtTest, CompactPeerInfoFamilies) {
     EXPECT_EQ(c4.size(), 6u);
     auto p4 = KrpcProtocol::parse_compact_peer_info(c4);
     ASSERT_EQ(p4.size(), 1u);
-    EXPECT_EQ(p4[0].ip, "10.0.0.5");
+    EXPECT_EQ(p4[0].ip.to_string(), "10.0.0.5");
     EXPECT_EQ(p4[0].port, 1234);
 
     Address v6("2001:db8::dead:beef", 4321);
@@ -488,15 +488,15 @@ TEST_F(DhtTest, CompactPeerInfoFamilies) {
     EXPECT_EQ(c6.size(), 18u);
     auto p6 = KrpcProtocol::parse_compact_peer_info(c6);
     ASSERT_EQ(p6.size(), 1u);
-    EXPECT_EQ(p6[0].ip, "2001:db8::dead:beef");
+    EXPECT_EQ(p6[0].ip.to_string(), "2001:db8::dead:beef");
     EXPECT_EQ(p6[0].port, 4321);
 }
 
 // A find_node response carrying IPv6 nodes encodes them under "nodes6" and decodes back
 TEST_F(DhtTest, FindNodeResponseIPv6NodesRoundTrip) {
     std::vector<KrpcNode> nodes = {
-        KrpcNode(create_test_node_id(0x01), "2001:db8::1", 100),
-        KrpcNode(create_test_node_id(0x02), "fe80::abcd", 200),
+        KrpcNode(create_test_node_id(0x01), *IpAddress::parse("2001:db8::1"), 100),
+        KrpcNode(create_test_node_id(0x02), *IpAddress::parse("fe80::abcd"), 200),
     };
     auto msg = KrpcProtocol::create_find_node_response("aa", create_test_node_id(0xFF), nodes);
     auto encoded = KrpcProtocol::encode_message(msg);
@@ -505,17 +505,17 @@ TEST_F(DhtTest, FindNodeResponseIPv6NodesRoundTrip) {
     auto decoded = KrpcProtocol::decode_message(encoded);
     ASSERT_NE(decoded, nullptr);
     ASSERT_EQ(decoded->nodes.size(), 2u);
-    EXPECT_EQ(decoded->nodes[0].ip, "2001:db8::1");
+    EXPECT_EQ(decoded->nodes[0].ip.to_string(), "2001:db8::1");
     EXPECT_EQ(decoded->nodes[0].port, 100);
-    EXPECT_EQ(decoded->nodes[1].ip, "fe80::abcd");
+    EXPECT_EQ(decoded->nodes[1].ip.to_string(), "fe80::abcd");
     EXPECT_EQ(decoded->nodes[1].port, 200);
 }
 
 // A response mixing IPv4 and IPv6 nodes splits them into nodes/nodes6 and recombines on decode
 TEST_F(DhtTest, FindNodeResponseMixedFamilies) {
     std::vector<KrpcNode> nodes = {
-        KrpcNode(create_test_node_id(0x01), "192.168.0.1", 100),
-        KrpcNode(create_test_node_id(0x02), "2001:db8::2", 200),
+        KrpcNode(create_test_node_id(0x01), *IpAddress::parse("192.168.0.1"), 100),
+        KrpcNode(create_test_node_id(0x02), *IpAddress::parse("2001:db8::2"), 200),
     };
     auto msg = KrpcProtocol::create_find_node_response("bb", create_test_node_id(0xFF), nodes);
     auto decoded = KrpcProtocol::decode_message(KrpcProtocol::encode_message(msg));
@@ -524,8 +524,8 @@ TEST_F(DhtTest, FindNodeResponseMixedFamilies) {
 
     bool has_v4 = false, has_v6 = false;
     for (const auto& n : decoded->nodes) {
-        if (n.ip == "192.168.0.1" && n.port == 100) has_v4 = true;
-        if (n.ip == "2001:db8::2" && n.port == 200) has_v6 = true;
+        if (n.ip.to_string() == "192.168.0.1" && n.port == 100) has_v4 = true;
+        if (n.ip.to_string() == "2001:db8::2" && n.port == 200) has_v6 = true;
     }
     EXPECT_TRUE(has_v4);
     EXPECT_TRUE(has_v6);

@@ -162,7 +162,7 @@ uint16_t DhtClient::get_port() const {
     return impl_->transport ? impl_->transport->port() : 0;
 }
 
-bool DhtClient::bootstrap(const std::vector<Address>& bootstrap_nodes) {
+bool DhtClient::bootstrap(const std::vector<HostEndpoint>& bootstrap_nodes) {
     if (!impl_->running.load()) {
         LOG_WARN("dht", "bootstrap ignored — client not running");
         return false;
@@ -254,40 +254,42 @@ NodeId DhtClient::get_node_id() const {
     return impl_->self;
 }
 
-void DhtClient::set_external_ip(const std::string& ip) {
+void DhtClient::set_external_ip(const std::string& ip_str) {
+    // STUN and the public API hand us a textual IP — parse once here, then the engine
+    // works purely in numeric IpAddress terms (no repeated re-parsing per BEP 42 step).
+    const auto ip = IpAddress::parse(ip_str);
+    if (!ip) return;
+
     if (impl_->running.load()) {
-        impl_->runner->post([this, ip] { impl_->node->set_external_ip(ip); });
+        impl_->runner->post([this, addr = *ip] { impl_->node->set_external_ip(addr); });
         return;
     }
     // Before start: apply BEP 42 to the cached identity so get_node_id() reflects it
     // and the node adopts it at start.
-    if (!dht::is_public_address(ip)) return;
-    if (network_utils::is_valid_ipv6(ip) != impl_->ipv6) return;
-    impl_->external_address = ip;
-    if (dht::verify_node_id_for_ip(impl_->self, ip)) return;
+    if (!dht::is_public_address(*ip)) return;
+    if (ip->is_v6() != impl_->ipv6) return;
+    impl_->external_address = ip_str;
+    if (dht::verify_node_id_for_ip(impl_->self, *ip)) return;
     std::mt19937 gen(std::random_device{}());
     NodeId regenerated;
-    if (dht::generate_node_id_from_ip(ip, regenerated, gen)) {
+    if (dht::generate_node_id_from_ip(*ip, regenerated, gen)) {
         impl_->self = regenerated;
-        LOG_INFO("dht", "external IP " << ip << " set before start, node id → "
+        LOG_INFO("dht", "external IP " << ip_str << " set before start, node id → "
                         << dht::short_hex(impl_->self));
     }
 }
 
 std::string DhtClient::get_external_address() const {
-    if (impl_->running.load()) return impl_->on_loop([this] { return impl_->node->external_address(); });
+    if (impl_->running.load())
+        return impl_->on_loop([this] { return impl_->node->external_address().to_string(); });
     return impl_->external_address;
-}
-
-bool DhtClient::generate_node_id_from_ip(const std::string& ip, NodeId& out, std::mt19937& gen) {
-    return dht::generate_node_id_from_ip(ip, out, gen);
 }
 
 bool DhtClient::verify_node_id_for_ip(const NodeId& id, const std::string& ip) {
     return dht::verify_node_id_for_ip(id, ip);
 }
 
-std::vector<Address> DhtClient::get_default_bootstrap_nodes() {
+std::vector<HostEndpoint> DhtClient::get_default_bootstrap_nodes() {
     return dht::Node::default_bootstrap_nodes();
 }
 
@@ -394,27 +396,23 @@ void DhtClient::clear_spider_state() {
 }
 #endif // RATS_SEARCH_FEATURES
 
-std::vector<Address> resolve_bootstrap_nodes(const std::vector<Address>& nodes, bool ipv6) {
+std::vector<Address> resolve_bootstrap_nodes(const std::vector<HostEndpoint>& nodes, bool ipv6) {
     std::vector<Address> out;
     out.reserve(nodes.size());
     for (const auto& n : nodes) {
-        if (n.ip.empty() || n.port == 0) continue;
+        if (n.host.empty() || n.port == 0) continue;
 
         // Numeric literal: keep it only if it belongs to this node's family.
-        if (network_utils::is_valid_ipv6(n.ip)) {
-            if (ipv6) out.push_back(n);
-            continue;
-        }
-        if (network_utils::is_valid_ipv4(n.ip)) {
-            if (!ipv6) out.push_back(n);
+        if (auto ip = IpAddress::parse(n.host)) {
+            if (ip->is_v6() == ipv6) out.push_back(Address{*ip, n.port});
             continue;
         }
 
         // Hostname: resolve to our family (A for IPv4, AAAA for IPv6). Drop it if it
         // has no record there, rather than feed the engine an unmatchable hostname.
-        const std::string ip = ipv6 ? network_utils::resolve_hostname_v6(n.ip)
-                                    : network_utils::resolve_hostname(n.ip);
-        if (!ip.empty()) out.emplace_back(ip, n.port);
+        const std::string ip = ipv6 ? network_utils::resolve_hostname_v6(n.host)
+                                    : network_utils::resolve_hostname(n.host);
+        if (auto a = IpAddress::parse(ip)) out.push_back(Address{*a, n.port});
     }
     return out;
 }

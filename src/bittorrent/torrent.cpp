@@ -740,7 +740,7 @@ void Torrent::announce_trackers(TrackerEvent event) {
         next_announce_tick_ = tick_count_ + int(interval);
         int added = 0;
         for (const Address& a : peers)
-            if (peer_list_.add(a.ip, a.port, PeerSource::Tracker)) ++added;
+            if (peer_list_.add(a.ip.to_string(), a.port, PeerSource::Tracker)) ++added;
         LOG_INFO("bt.tracker", short_hash(info_hash()) << " ← " << peers.size() << " peers (+"
                                << added << " new), next announce in " << interval << "s");
         if (added) try_connect();

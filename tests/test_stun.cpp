@@ -451,12 +451,12 @@ private:
             response.transaction_id = request->transaction_id;
             
             // Add XOR-MAPPED-ADDRESS with sender's address
-            StunMappedAddress mapped_addr(StunAddressFamily::IPv4, sender.ip, sender.port);
+            StunMappedAddress mapped_addr(StunAddressFamily::IPv4, sender.ip.to_string(), sender.port);
             response.add_xor_mapped_address(mapped_addr);
             response.add_software("MockStunServer/1.0");
             
             auto response_data = response.serialize();
-            send_udp_data(socket_, response_data, sender.ip, sender.port);
+            send_udp_data(socket_, response_data, sender.ip.to_string(), sender.port);
         }
     }
     

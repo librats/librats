@@ -122,7 +122,7 @@ public:
     /// source port. Combined with the peer's advertised listen port by the node's
     /// identify exchange to form a dialable address — the only way to learn the
     /// dialable address of an *inbound* peer. Empty string on error.
-    std::string        remote_ip() const;
+    IpAddress          remote_ip() const;
 
 private:
     void begin_handshake();             ///< transport up → Handshaking

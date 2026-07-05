@@ -79,7 +79,7 @@ private:
     std::atomic<bool> running_{false};
 
     std::mutex mutex_;
-    std::unordered_map<std::string, std::chrono::steady_clock::time_point> recent_dials_;
+    std::unordered_map<Address, std::chrono::steady_clock::time_point> recent_dials_;
 };
 
 } // namespace librats

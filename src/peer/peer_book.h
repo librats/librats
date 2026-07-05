@@ -81,7 +81,7 @@ public:
 private:
     std::string                                 path_;
     mutable std::mutex                          mutex_;
-    std::unordered_map<std::string, PeerRecord> records_;  ///< keyed by address.to_string()
+    std::unordered_map<Address, PeerRecord> records_;  ///< keyed by the peer Address
 };
 
 } // namespace librats

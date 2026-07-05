@@ -48,7 +48,7 @@ private:
     std::atomic<bool>          running_{false};
 
     std::mutex                      dialed_mutex_;
-    std::unordered_set<std::string> dialed_;  ///< ip:port we've already dialed
+    std::unordered_set<Address> dialed_;  ///< peers we've already dialed
 };
 
 } // namespace librats

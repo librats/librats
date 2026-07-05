@@ -334,8 +334,8 @@ bool UpnpClient::discover_device(Device& out) {
             if (std::find(tried.begin(), tried.end(), location) != tried.end()) continue;
             tried.push_back(location);
 
-            std::string local_ip = local_ip_for_destination(from.ip, from.port);
-            LOG_UPNP_DEBUG("SSDP reply from " << from.ip << " location=" << location);
+            std::string local_ip = local_ip_for_destination(from.ip.to_string(), from.port);
+            LOG_UPNP_DEBUG("SSDP reply from " << from.ip.to_string() << " location=" << location);
             if (fetch_description(location, local_ip, out)) {
                 found = true;
                 break;

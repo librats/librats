@@ -11,6 +11,7 @@
  * private/loopback/reserved addresses can't be verified and are exempt.
  */
 
+#include "core/ip_address.h"
 #include "dht/id.h"
 
 #include <random>
@@ -21,14 +22,17 @@ namespace dht {
 
 // Is `ip` publicly routable? Only public IPs can be (and must be) verified. Thin
 // wrapper over network_utils::is_public_ip so every subsystem shares one definition.
-bool is_public_address(const std::string& ip);
+bool is_public_address(const IpAddress& ip);
 
 // Build a fresh BEP 42-compliant id for `ip`. Returns false and leaves `out`
-// untouched only if `ip` can't be parsed. `rng` supplies the seed and random tail.
-bool generate_node_id_from_ip(const std::string& ip, NodeId& out, std::mt19937& rng);
+// untouched only if `ip` is unspecified. `rng` supplies the seed and random tail.
+bool generate_node_id_from_ip(const IpAddress& ip, NodeId& out, std::mt19937& rng);
 
 // Does `id` satisfy BEP 42 for a peer observed at `ip`? Always true for non-public
-// or unparseable IPs (they can't be verified), so it never rejects on uncertainty.
+// or unspecified IPs (they can't be verified), so it never rejects on uncertainty.
+// The IpAddress overload is the hot path (routing-table admission); the string one
+// parses then delegates, and backs the public DhtClient::verify_node_id_for_ip API.
+bool verify_node_id_for_ip(const NodeId& id, const IpAddress& ip);
 bool verify_node_id_for_ip(const NodeId& id, const std::string& ip);
 
 } // namespace dht

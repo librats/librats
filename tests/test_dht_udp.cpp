@@ -112,7 +112,7 @@ TEST(DhtUdp, TwoNodesAnnounceAndFind) {
 
     bool has_announced_peer = false;
     for (const auto& p : found)
-        if (p.ip == "127.0.0.1" && p.port == ta.port()) has_announced_peer = true;
+        if (p.ip.to_string() == "127.0.0.1" && p.port == ta.port()) has_announced_peer = true;
     EXPECT_TRUE(has_announced_peer) << "lookup did not return the announced peer";
 }
 

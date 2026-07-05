@@ -56,9 +56,9 @@ TEST(IdentifyCodec, EncodeSkipsInvalidAddresses) {
     IdentifyMessage msg;
     msg.listen_port = 80;
     msg.addresses = {
-        Address{"1.2.3.4", 0},   // zero port → skipped
-        Address{"", 5000},       // empty ip  → skipped
-        Address{"5.6.7.8", 90},  // valid     → kept
+        Address{"1.2.3.4", 0},        // zero port        → skipped
+        Address{IpAddress{}, 5000},   // unspecified ip    → skipped
+        Address{"5.6.7.8", 90},       // valid             → kept
     };
     const auto decoded = IdentifyMessage::decode(ByteView(msg.encode()));
     ASSERT_TRUE(decoded.has_value());
@@ -77,13 +77,13 @@ TEST(IdentifyCodec, EncodeCapsAddressCount) {
 
 TEST(IdentifyCodec, RejectsUnknownVersion) {
     Bytes buf = IdentifyMessage{}.encode();
-    buf[0] = 2;  // bump version
+    buf[0] = 99;  // an unknown version (current is kVersion == 1)
     EXPECT_FALSE(IdentifyMessage::decode(ByteView(buf)).has_value());
 }
 
 TEST(IdentifyCodec, RejectsOverlargeCount) {
-    // version=1, listen_port=0, count=9 (> kMaxAddresses) — no address bytes follow.
-    Bytes buf = {1, 0, 0, static_cast<uint8_t>(IdentifyMessage::kMaxAddresses + 1)};
+    // version=kVersion, listen_port=0, count>kMaxAddresses — no address bytes follow.
+    Bytes buf = {IdentifyMessage::kVersion, 0, 0, static_cast<uint8_t>(IdentifyMessage::kMaxAddresses + 1)};
     EXPECT_FALSE(IdentifyMessage::decode(ByteView(buf)).has_value());
 }
 

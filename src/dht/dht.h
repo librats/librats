@@ -15,6 +15,7 @@
  */
 
 #include "core/address.h"
+#include "core/host_endpoint.h"
 #include "core/socket.h"   // AddressFamily
 #include "dht/krpc.h"      // KrpcProtocol/KrpcMessage (wire format, used by tests)
 
@@ -61,7 +62,7 @@ public:
     bool is_running() const;
     uint16_t get_port() const;
 
-    bool bootstrap(const std::vector<Address>& bootstrap_nodes);
+    bool bootstrap(const std::vector<HostEndpoint>& bootstrap_nodes);
     bool find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback);
     bool announce_peer(const InfoHash& info_hash, uint16_t port = 0, PeerDiscoveryCallback callback = nullptr);
     void cancel_search(const InfoHash& info_hash);
@@ -69,9 +70,8 @@ public:
     NodeId get_node_id() const;
     void set_external_ip(const std::string& ip);
     std::string get_external_address() const;
-    static bool generate_node_id_from_ip(const std::string& ip, NodeId& out, std::mt19937& gen);
     static bool verify_node_id_for_ip(const NodeId& id, const std::string& ip);
-    static std::vector<Address> get_default_bootstrap_nodes();
+    static std::vector<HostEndpoint> get_default_bootstrap_nodes();
 
     size_t get_routing_table_size() const;
     bool is_search_active(const InfoHash& info_hash) const;
@@ -110,7 +110,7 @@ private:
 // would have every reply dropped — seeds must enter the engine as numeric IPs of the
 // right family. Resolution can block, so callers run this off the DHT loop thread.
 // Exposed for testing.
-std::vector<Address> resolve_bootstrap_nodes(const std::vector<Address>& nodes, bool ipv6);
+std::vector<Address> resolve_bootstrap_nodes(const std::vector<HostEndpoint>& nodes, bool ipv6);
 
 // Node id -> lowercase hex, for logging.
 std::string node_id_to_hex(const NodeId& id);

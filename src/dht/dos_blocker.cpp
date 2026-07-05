@@ -4,7 +4,7 @@
 namespace librats {
 namespace dht {
 
-bool DosBlocker::allow(const std::string& ip, TimePoint now) {
+bool DosBlocker::allow(const IpAddress& ip, TimePoint now) {
     Entry& e = table_[ip];
 
     if (e.banned_until > now) return false;  // still serving a ban
@@ -19,7 +19,7 @@ bool DosBlocker::allow(const std::string& ip, TimePoint now) {
         // Logged once at the ban transition only — the top-of-function early return keeps
         // every subsequent packet from this IP from re-logging. DEBUG (not WARN) on purpose:
         // a spoofed-source flood could otherwise turn one ban per IP into log amplification.
-        LOG_DEBUG("dht", "rate-limit ban: " << ip << " (" << e.count << " queries in window)");
+        LOG_DEBUG("dht", "rate-limit ban: " << ip.to_string() << " (" << e.count << " queries in window)");
         return false;
     }
 

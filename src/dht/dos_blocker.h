@@ -9,11 +9,11 @@
  * with the tracking table capped. Consulted before any incoming packet is processed.
  */
 
+#include "core/ip_address.h"
 #include "dht/observer.h"  // for TimePoint
 
 #include <chrono>
 #include <cstddef>
-#include <string>
 #include <unordered_map>
 
 namespace librats {
@@ -27,7 +27,7 @@ public:
     static constexpr std::size_t kMaxTracked = 2000;         // cap the per-IP table
 
     // True if a packet from `ip` should be processed; false if it's being rate-limited.
-    bool allow(const std::string& ip, TimePoint now);
+    bool allow(const IpAddress& ip, TimePoint now);
 
     std::size_t tracked() const noexcept { return table_.size(); }
 
@@ -40,7 +40,7 @@ private:
 
     void prune(TimePoint now);
 
-    std::unordered_map<std::string, Entry> table_;
+    std::unordered_map<IpAddress, Entry> table_;
 };
 
 } // namespace dht

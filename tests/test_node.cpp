@@ -397,19 +397,19 @@ TEST(NodeTest, RobustAgainstBadInputs) {
 TEST(AddressTest, RoundTripsIPv4AndIPv6) {
     auto v4 = Address::parse("127.0.0.1:8080");
     ASSERT_TRUE(v4);
-    EXPECT_EQ(v4->ip, "127.0.0.1");
+    EXPECT_EQ(v4->ip.to_string(), "127.0.0.1");
     EXPECT_EQ(v4->port, 8080);
     EXPECT_EQ(v4->to_string(), "127.0.0.1:8080");
 
     auto v6 = Address::parse("[::1]:9000");
     ASSERT_TRUE(v6);
-    EXPECT_EQ(v6->ip, "::1");                 // stored bare, no brackets
+    EXPECT_EQ(v6->ip.to_string(), "::1");     // stored bare, no brackets
     EXPECT_EQ(v6->port, 9000);
     EXPECT_EQ(v6->to_string(), "[::1]:9000"); // rendered bracketed
 
     auto v6full = Address::parse("[2001:db8::ff00:42:8329]:443");
     ASSERT_TRUE(v6full);
-    EXPECT_EQ(v6full->ip, "2001:db8::ff00:42:8329");
+    EXPECT_EQ(v6full->ip.to_string(), "2001:db8::ff00:42:8329");
     EXPECT_EQ(v6full->port, 443);
 
     // to_string() is the exact inverse of parse() for a constructed IPv6 endpoint

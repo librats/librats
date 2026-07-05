@@ -25,7 +25,7 @@ UdpTransport::~UdpTransport() {
 
 void UdpTransport::send(const Address& to, const std::vector<uint8_t>& datagram) {
     if (!is_open()) return;
-    send_udp_data(socket_, datagram, to.ip, to.port, family_);
+    send_udp_data(socket_, datagram, to, family_);
 }
 
 std::optional<std::vector<uint8_t>> UdpTransport::recv(int timeout_ms, Address& from,

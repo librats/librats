@@ -34,9 +34,9 @@
 namespace librats {
 
 struct IdentifyMessage {
-    static constexpr uint8_t kVersion      = 1;
+    static constexpr uint8_t kVersion      = 1;   ///< IPs on the wire are raw bytes (4/16), not text
     static constexpr size_t  kMaxAddresses = 32;  ///< cap advertised addresses
-    static constexpr size_t  kMaxIpLength  = 64;  ///< cap a single IP literal
+    static constexpr size_t  kMaxIpLength  = 16;  ///< a single IP is 4 (v4) or 16 (v6) bytes
 
     uint16_t               listen_port = 0;
     std::vector<Address>   addresses;   ///< sender's self-advertised dialable addrs

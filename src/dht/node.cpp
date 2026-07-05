@@ -3,7 +3,6 @@
 #include "dht/bep42.h"
 #include "dht/krpc.h"
 #include "dht/log.h"
-#include "util/network_utils.h"
 
 #include <algorithm>
 #include <chrono>
@@ -162,7 +161,7 @@ void Node::handle_query(const KrpcMessage& msg, const Address& from, TimePoint n
 }
 
 void Node::handle_response(const KrpcMessage& msg, const Address& from, TimePoint now) {
-    if (!msg.external_ip.empty()) maybe_update_external_ip(msg.external_ip, from);
+    if (!msg.external_ip.is_unspecified()) maybe_update_external_ip(msg.external_ip, from);
     // The matching observer (a lookup or a ping) feeds the routing table and drives
     // its lookup; anti-spoofing and timeouts live in the RpcManager.
     rpc_.handle_response(msg, from, now);
@@ -172,8 +171,8 @@ void Node::send_message(const KrpcMessage& msg, const Address& to) {
     KrpcMessage out = msg;
     // BEP 42: tell the requester the address we see them at, so they can derive a
     // compliant node id (and so we learn our own address from their replies).
-    if (out.type == KrpcMessageType::Response && out.external_ip.empty()) {
-        out.external_ip = to.ip;
+    if (out.type == KrpcMessageType::Response && out.external_ip.is_unspecified()) {
+        out.external_ip = to.ip;  // already numeric bytes — no string round-trip
         out.external_port = to.port;
     }
     const auto data = KrpcProtocol::encode_message(out);
@@ -324,15 +323,15 @@ void Node::reap_finished() {
                    lookups_.end());
 }
 
-void Node::maybe_update_external_ip(const std::string& reported_ip, const Address& from) {
-    if (!is_public_address(reported_ip)) return;
-    if (network_utils::is_valid_ipv6(reported_ip) != ipv6_) return;  // wrong family
+void Node::maybe_update_external_ip(const IpAddress& reported_ip, const Address& from) {
+    if (!is_public_address(reported_ip)) return;         // IpAddress overload — no re-parse
+    if (reported_ip.is_v6() != ipv6_) return;            // wrong family
     if (reported_ip == external_address_) return;
 
     if (!ip_voters_.insert(from.ip).second) return;  // one vote per distinct responder
     const int votes = ++ip_votes_[reported_ip];
-    LOG_DEBUG("dht", "external IP vote: " << reported_ip << " (" << votes << "/"
-                     << kExternalIpVoteThreshold << ", from " << from.ip << ")");
+    LOG_DEBUG("dht", "external IP vote: " << reported_ip.to_string() << " (" << votes << "/"
+                     << kExternalIpVoteThreshold << ", from " << from.ip.to_string() << ")");
     if (votes >= kExternalIpVoteThreshold) {
         ip_votes_.clear();
         ip_voters_.clear();
@@ -340,14 +339,14 @@ void Node::maybe_update_external_ip(const std::string& reported_ip, const Addres
     }
 }
 
-void Node::set_external_ip(const std::string& ip) {
+void Node::set_external_ip(const IpAddress& ip) {
     if (!is_public_address(ip)) return;
-    if (network_utils::is_valid_ipv6(ip) != ipv6_) return;  // separate networks per family
+    if (ip.is_v6() != ipv6_) return;  // separate networks per family
     const bool changed = (ip != external_address_);
     external_address_ = ip;
 
     if (verify_node_id_for_ip(self_, ip)) {  // our id already matches this address
-        if (changed) LOG_INFO("dht", "external address is " << ip << " (node id already BEP 42-compliant)");
+        if (changed) LOG_INFO("dht", "external address is " << ip.to_string() << " (node id already BEP 42-compliant)");
         return;
     }
 
@@ -356,11 +355,11 @@ void Node::set_external_ip(const std::string& ip) {
     if (!generate_node_id_from_ip(ip, new_id, gen)) return;
     self_ = new_id;
     table_.set_self(new_id);  // re-bucket everything against the new id
-    LOG_INFO("dht", "external address is " << ip << ", regenerated node id "
+    LOG_INFO("dht", "external address is " << ip.to_string() << ", regenerated node id "
                     << short_hex(self_) << " (BEP 42)");
 }
 
-std::vector<Address> Node::default_bootstrap_nodes() {
+std::vector<HostEndpoint> Node::default_bootstrap_nodes() {
     // Hostnames resolve per-family at send time; dht.libtorrent.org also has an AAAA
     // record, giving IPv6 a reliable entry point.
     return {
@@ -411,7 +410,7 @@ void Node::add_spider_node(const NodeEntry& node) {
     spider_pool_[std::uniform_int_distribution<std::size_t>(0, spider_pool_.size() - 1)(gen)] = node;
 }
 
-bool Node::spider_contacted(const std::string& ip) const {
+bool Node::spider_contacted(const IpAddress& ip) const {
     return spider_contacted_ips_.count(ip) > 0;
 }
 
@@ -440,9 +439,10 @@ void Node::spider_walk(TimePoint now) {
         if (spider_pool_.empty()) {
             if (now - last_spider_bootstrap_ >= std::chrono::seconds(30)) {
                 last_spider_bootstrap_ = now;
-                // Reuse the resolved seed set the facade gave us; only fall back to the
-                // (hostname) defaults if we were never seeded.
-                bootstrap(bootstrap_nodes_.empty() ? default_bootstrap_nodes() : bootstrap_nodes_, now);
+                // Reseed from the resolved seed set the facade gave us. The engine has no
+                // resolver, so it can only reuse already-resolved Addresses — the hostname
+                // defaults live at the facade layer (DhtClient) and are resolved there.
+                if (!bootstrap_nodes_.empty()) bootstrap(bootstrap_nodes_, now);
             }
             return;
         }

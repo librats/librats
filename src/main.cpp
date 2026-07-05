@@ -186,7 +186,10 @@ int main(int argc, char** argv) {
         if      (arg == "--bind" && i + 1 < argc)   config.bind_address = argv[++i];
         else if (arg == "--data" && i + 1 < argc)   config.data_dir = argv[++i];
         else if (arg == "--connect" && i + 2 < argc) {
-            dial_at_start.push_back(Address{argv[i + 1], static_cast<uint16_t>(std::stoi(argv[i + 2]))});
+            if (auto ip = IpAddress::parse(argv[i + 1]))
+                dial_at_start.push_back(Address{*ip, static_cast<uint16_t>(std::stoi(argv[i + 2]))});
+            else
+                std::cerr << "--connect: '" << argv[i + 1] << "' is not a numeric IP address\n";
             i += 2;
         }
         else if (arg == "--no-dht")       use_dht = false;
@@ -364,11 +367,15 @@ int main(int argc, char** argv) {
         }
         else if (cmd == "/reconnect" && args.size() >= 3) {
             if (!sub.reconnect) { std::cout << "reconnect not enabled (--no-reconnect)\n"; continue; }
-            sub.reconnect->add(Address{args[1], static_cast<uint16_t>(std::stoi(args[2]))});
+            auto ip = IpAddress::parse(args[1]);
+            if (!ip) { std::cout << "'" << args[1] << "' is not a numeric IP address\n"; continue; }
+            sub.reconnect->add(Address{*ip, static_cast<uint16_t>(std::stoi(args[2]))});
         }
         else if (cmd == "/rmreconnect" && args.size() >= 3) {
             if (!sub.reconnect) { std::cout << "reconnect not enabled (--no-reconnect)\n"; continue; }
-            sub.reconnect->remove(Address{args[1], static_cast<uint16_t>(std::stoi(args[2]))});
+            auto ip = IpAddress::parse(args[1]);
+            if (!ip) { std::cout << "'" << args[1] << "' is not a numeric IP address\n"; continue; }
+            sub.reconnect->remove(Address{*ip, static_cast<uint16_t>(std::stoi(args[2]))});
         }
         else if (cmd == "/dhtfind" && args.size() >= 2) {
             if (!sub.dht) { std::cout << "dht not enabled (--no-dht)\n"; continue; }

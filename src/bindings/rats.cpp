@@ -14,6 +14,7 @@
 #include "subsystems/bittorrent.h"
 #endif
 #include "core/address.h"
+#include "util/network_utils.h"
 #include "util/logger.h"
 #include "util/json.h"
 #include "util/version.h"
@@ -60,6 +61,18 @@ RatsHandle* make_handle(NodeConfig config) {
 }
 
 RatsHandle* as_handle(rats_t handle) { return static_cast<RatsHandle*>(handle); }
+
+// Turn a caller-supplied (host, port) into a numeric Address. A numeric literal is
+// used verbatim; a hostname is resolved here at the API boundary (IPv4 first, then
+// IPv6) so the reconnection subsystem only ever holds resolved endpoints. Returns
+// nullopt if the host is neither a valid literal nor resolvable.
+std::optional<Address> resolve_target(const char* host, uint16_t port) {
+    if (auto ip = IpAddress::parse(host)) return Address{*ip, port};
+    std::string resolved = network_utils::resolve_hostname(host);
+    if (resolved.empty()) resolved = network_utils::resolve_hostname_v6(host);
+    if (auto ip = IpAddress::parse(resolved)) return Address{*ip, port};
+    return std::nullopt;
+}
 Node*       node_of(rats_t handle)   { return as_handle(handle)->node.get(); }
 
 char* dup_string(const std::string& s) {
@@ -568,7 +581,9 @@ rats_error_t rats_add_reconnect(rats_t node, const char* host, uint16_t port) {
     if (!host) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->reconnect) return RATS_ERR_NOT_ENABLED;
-    h->reconnect->add(Address{host, port});
+    const auto target = resolve_target(host, port);
+    if (!target) return RATS_ERR_INVALID_ARG;  // not a valid literal, and did not resolve
+    h->reconnect->add(*target);
     return RATS_OK;
 }
 
@@ -576,7 +591,9 @@ rats_error_t rats_remove_reconnect(rats_t node, const char* host, uint16_t port)
     if (!host) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->reconnect) return RATS_ERR_NOT_ENABLED;
-    h->reconnect->remove(Address{host, port});
+    const auto target = resolve_target(host, port);
+    if (!target) return RATS_ERR_INVALID_ARG;
+    h->reconnect->remove(*target);
     return RATS_OK;
 }
 

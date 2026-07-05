@@ -46,7 +46,7 @@ public:
         bool                      enable_ipv4 = true;    ///< run the IPv4 Kademlia network
         bool                      enable_ipv6 = true;    ///< run the IPv6 Kademlia network (BEP 32)
         std::string               discovery_key = "";  ///< DHT namespace. Empty → the node's `protocol` (resolved at attach), so peers of the same app/version discover each other and mismatched protocols (which can't handshake anyway) don't even meet. Set non-empty to override with a custom discovery network.
-        std::vector<Address>         bootstrap_nodes;       ///< empty → default internet nodes
+        std::vector<HostEndpoint>    bootstrap_nodes;       ///< empty → default internet nodes
         std::chrono::milliseconds search_interval{30000}; /// every 30 seconds
         /// Re-announce cadence. Kept at ~⅓ of the peer TTL (librats stores announced peers
         /// for 30 min, libtorrent ~45 min) so we stay findable with a comfortable margin
@@ -58,7 +58,7 @@ public:
         /// DHT node id per BEP 42. Without it we still converge via the slower
         /// in-DHT "ip" voting, but bootstrap under the wrong node id until then.
         bool                      discover_external_ip = true;
-        std::vector<Address>      stun_servers;          ///< empty → built-in public defaults
+        std::vector<HostEndpoint> stun_servers;          ///< empty → built-in public defaults
         std::chrono::milliseconds stun_timeout{3000};
     };
 
@@ -116,7 +116,7 @@ private:
     std::condition_variable wake_;
 
     std::mutex                      dialed_mutex_;
-    std::unordered_set<std::string> dialed_;  ///< ip:port we've already dialed
+    std::unordered_set<Address> dialed_;  ///< peers we've already dialed
 };
 
 } // namespace librats

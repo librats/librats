@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
+#include "core/ip_address.h"
 #include "dht/bep42.h"
 #include "dht/id.h"
 
 #include <random>
 
 using namespace librats::dht;
+using librats::IpAddress;
 
 // Official BEP 42 test vectors: each IP paired with a node id that must verify for
 // it. These pin our CRC32C derivation to the spec's published values.
@@ -29,17 +31,17 @@ TEST(DhtBep42, GenerateVerifyRoundTrip) {
     std::mt19937 rng(0xC0FFEE);
     for (const char* ip : {"1.2.3.4", "198.51.100.7", "2606:4700:4700::1111"}) {
         NodeId id;
-        ASSERT_TRUE(generate_node_id_from_ip(ip, id, rng)) << ip;
+        ASSERT_TRUE(generate_node_id_from_ip(*IpAddress::parse(ip), id, rng)) << ip;
         EXPECT_TRUE(verify_node_id_for_ip(id, ip)) << ip;
     }
 }
 
-TEST(DhtBep42, GenerateRejectsUnparseableIp) {
+TEST(DhtBep42, GenerateRejectsUnspecifiedIp) {
     std::mt19937 rng(1);
     NodeId id;
     id.fill(0xAB);
     const NodeId before = id;
-    EXPECT_FALSE(generate_node_id_from_ip("not-an-ip", id, rng));
+    EXPECT_FALSE(generate_node_id_from_ip(IpAddress{}, id, rng));
     EXPECT_EQ(id, before);  // left untouched on failure
 }
 
@@ -52,8 +54,8 @@ TEST(DhtBep42, PrivateAddressesAlwaysVerify) {
 }
 
 TEST(DhtBep42, IsPublicAddress) {
-    EXPECT_TRUE(is_public_address("8.8.8.8"));
-    EXPECT_FALSE(is_public_address("192.168.0.1"));
-    EXPECT_FALSE(is_public_address("127.0.0.1"));
-    EXPECT_FALSE(is_public_address("10.0.0.1"));
+    EXPECT_TRUE(is_public_address(*IpAddress::parse("8.8.8.8")));
+    EXPECT_FALSE(is_public_address(*IpAddress::parse("192.168.0.1")));
+    EXPECT_FALSE(is_public_address(*IpAddress::parse("127.0.0.1")));
+    EXPECT_FALSE(is_public_address(*IpAddress::parse("10.0.0.1")));
 }

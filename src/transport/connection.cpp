@@ -29,12 +29,11 @@ Connection::Connection(ConnId id, socket_t sock, ConnRole role,
 
 Connection::~Connection() = default;
 
-std::string Connection::remote_ip() const {
-    // get_peer_address returns "ip:port" with the peer's ephemeral source port;
-    // strip the port (rfind handles the inner colons of an IPv6 literal).
-    const std::string endpoint = get_peer_address(socket_);
-    const auto colon = endpoint.rfind(':');
-    return colon == std::string::npos ? endpoint : endpoint.substr(0, colon);
+IpAddress Connection::remote_ip() const {
+    // The peer's source IP, straight from getpeername() with no textual round-trip.
+    // (The source port is ephemeral and not useful here, so it's discarded.)
+    const auto ep = get_peer_endpoint(socket_);
+    return ep ? ep->ip : IpAddress{};
 }
 
 uint8_t Connection::reactor_index() const noexcept { return reactor_.index(); }

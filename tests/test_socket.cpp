@@ -26,7 +26,7 @@ TEST_F(SocketTest, InitializationTest) {
 // Test Peer structure
 TEST_F(SocketTest, PeerTest) {
     Address peer1("127.0.0.1", 8080);
-    EXPECT_EQ(peer1.ip, "127.0.0.1");
+    EXPECT_EQ(peer1.ip.to_string(), "127.0.0.1");
     EXPECT_EQ(peer1.port, 8080);
     
     Address peer2("127.0.0.1", 8080);

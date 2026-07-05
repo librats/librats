@@ -39,10 +39,11 @@ void PeerBook::load() {
         if (!j.is_object()) continue;
         const std::string ip   = j.value("ip", std::string());
         const uint16_t    port = static_cast<uint16_t>(j.value("port", 0));
-        if (ip.empty() || port == 0) continue;  // need at least ip + port
+        const auto ipaddr = IpAddress::parse(ip);
+        if (!ipaddr || port == 0) continue;  // need a valid numeric ip + port
 
         PeerRecord r;
-        r.address = Address{ip, port};
+        r.address = Address{*ipaddr, port};
         // Remaining metadata fields are optional; absent ones keep their defaults.
         const std::string idhex = j.value("id", std::string());
         if (!idhex.empty()) { if (auto id = PeerId::from_hex(idhex)) r.id = *id; }
@@ -51,7 +52,7 @@ void PeerBook::load() {
         r.last_connected = j.value("last_connected", uint64_t{0});
         r.connect_count  = j.value("connect_count",  uint32_t{0});
         r.fail_streak    = j.value("fail_streak",    uint32_t{0});
-        records_[r.address.to_string()] = r;
+        records_[r.address] = r;
     }
 }
 
@@ -61,7 +62,7 @@ void PeerBook::save() const {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& [key, r] : records_) {
             Json j = Json::object();
-            j["ip"]             = r.address.ip;
+            j["ip"]             = r.address.ip.to_string();
             j["port"]           = r.address.port;
             if (!r.id.is_zero()) j["id"] = r.id.to_hex();  // omitted when never connected
             j["first_seen"]     = r.first_seen;
@@ -77,7 +78,7 @@ void PeerBook::save() const {
 
 void PeerBook::note_connected(const Address& address, const PeerId& id, uint64_t now) {
     std::lock_guard<std::mutex> lock(mutex_);
-    PeerRecord& r = records_[address.to_string()];
+    PeerRecord& r = records_[address];
     if (r.first_seen == 0) r.first_seen = now;
     r.address        = address;
     if (!id.is_zero()) r.id = id;
@@ -89,7 +90,7 @@ void PeerBook::note_connected(const Address& address, const PeerId& id, uint64_t
 
 void PeerBook::note_failure(const Address& address, uint64_t /*now*/) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = records_.find(address.to_string());
+    auto it = records_.find(address);
     if (it == records_.end()) return;  // only track failures for peers we already know
     // Deliberately does NOT refresh last_seen: a peer that only ever fails must
     // still age out (otherwise repeated give-ups would keep it forever "fresh").
@@ -98,7 +99,7 @@ void PeerBook::note_failure(const Address& address, uint64_t /*now*/) {
 
 void PeerBook::note_seen(const Address& address, uint64_t now) {
     std::lock_guard<std::mutex> lock(mutex_);
-    PeerRecord& r = records_[address.to_string()];
+    PeerRecord& r = records_[address];
     if (r.first_seen == 0) r.first_seen = now;
     r.address   = address;
     r.last_seen = now;
@@ -106,7 +107,7 @@ void PeerBook::note_seen(const Address& address, uint64_t now) {
 
 bool PeerBook::remove(const Address& address) {
     std::lock_guard<std::mutex> lock(mutex_);
-    return records_.erase(address.to_string()) > 0;
+    return records_.erase(address) > 0;
 }
 
 std::vector<Address> PeerBook::best(size_t n, uint64_t now, uint64_t max_age_secs) const {
@@ -144,9 +145,9 @@ size_t PeerBook::prune(uint64_t now, uint64_t max_age_secs, size_t max_size) {
         for (const auto& [key, r] : records_) recs.push_back(&r);
         std::sort(recs.begin(), recs.end(),
                   [](const PeerRecord* a, const PeerRecord* b) { return better(*a, *b); });
-        std::unordered_set<std::string> keep;
+        std::unordered_set<Address> keep;
         keep.reserve(max_size);
-        for (size_t i = 0; i < max_size; ++i) keep.insert(recs[i]->address.to_string());
+        for (size_t i = 0; i < max_size; ++i) keep.insert(recs[i]->address);
         for (auto it = records_.begin(); it != records_.end();) {
             if (keep.count(it->first)) ++it;
             else it = records_.erase(it);

@@ -10,15 +10,11 @@ namespace librats {
 
 namespace {
 
-constexpr uint8_t kVersion  = 1;
+constexpr uint8_t kVersion  = 1;  // peer IPs are raw address bytes (4/16), not text
 constexpr uint8_t kRequest  = 0;
 constexpr uint8_t kResponse = 1;
 
 constexpr size_t kRequestSize = 4;  // ver + op + u16 max
-
-bool is_unspecified_ip(const std::string& ip) {
-    return ip.empty() || ip == "0.0.0.0" || ip == "::";
-}
 
 void put_u16(Bytes& out, uint16_t v) {
     out.push_back(static_cast<uint8_t>(v >> 8));
@@ -90,8 +86,9 @@ void PeerExchange::handle_request(const Peer& requester, uint16_t max) {
         const Address* addr = pick_shareable(p.addresses);
         if (!addr) continue;
 
-        out.push_back(static_cast<uint8_t>(addr->ip.size()));
-        out.insert(out.end(), addr->ip.begin(), addr->ip.end());
+        const ByteView ip = addr->ip.bytes();  // 4 (v4) or 16 (v6) raw bytes
+        out.push_back(static_cast<uint8_t>(ip.size()));
+        out.insert(out.end(), ip.begin(), ip.end());
         put_u16(out, addr->port);
         const auto& id_bytes = p.id.bytes();
         out.insert(out.end(), id_bytes.begin(), id_bytes.end());
@@ -130,10 +127,10 @@ void PeerExchange::handle_response(ByteView body) {
         const uint8_t* len_p = take(1);
         if (!len_p) return;
         const uint8_t ip_len = *len_p;
-        if (ip_len == 0) return;  // malformed
+        if (ip_len != 4 && ip_len != 16) return;  // malformed
         const uint8_t* ip_p = take(ip_len);
         if (!ip_p) return;
-        std::string ip(reinterpret_cast<const char*>(ip_p), ip_len);
+        const auto ip = IpAddress::from_bytes(ByteView(ip_p, ip_len));
         const uint8_t* port_p = take(2);
         if (!port_p) return;
         const uint16_t port = get_u16(port_p);
@@ -142,8 +139,8 @@ void PeerExchange::handle_response(ByteView body) {
         const auto id = PeerId::from_bytes(ByteView(id_p, PeerId::kSize));
 
         if (!id || *id == self || connected.count(*id)) continue;     // us / already linked
-        if (port == 0 || is_unspecified_ip(ip)) continue;             // not dialable
-        Address addr{std::move(ip), port};
+        if (!ip || port == 0 || ip->is_any()) continue;               // not dialable
+        Address addr{*ip, port};
         if (!should_dial(addr)) continue;                             // cooldown / dedup
 
         LOG_DEBUG("pex", "Discovered peer " << id->short_hex() << " at " << addr.to_string() << "; dialing");
@@ -156,8 +153,7 @@ void PeerExchange::handle_response(ByteView body) {
 
 const Address* PeerExchange::pick_shareable(const std::vector<Address>& addrs) const {
     for (const Address& a : addrs) {
-        if (a.port == 0 || a.ip.empty() || a.ip.size() > 0xFF) continue;
-        if (is_unspecified_ip(a.ip)) continue;
+        if (a.port == 0 || a.ip.is_any()) continue;
         if (config_.public_only && !network_utils::is_public_ip(a.ip)) continue;
         return &a;
     }
@@ -175,7 +171,7 @@ bool PeerExchange::should_dial(const Address& addr) {
     }
     if (recent_dials_.size() >= config_.max_recent_dials) return false;  // overloaded → back off
 
-    auto [it, inserted] = recent_dials_.emplace(addr.to_string(), now);
+    auto [it, inserted] = recent_dials_.emplace(addr, now);
     return inserted;  // false ⇒ dialed within the cooldown window
 }
 

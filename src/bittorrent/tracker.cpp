@@ -4,6 +4,7 @@
 #include "bittorrent/byte_io.h"
 #include "bittorrent/log.h"
 #include "core/socket.h"
+#include "util/network_utils.h"
 
 #include <algorithm>
 #include <cctype>
@@ -90,7 +91,20 @@ std::vector<Address> parse_dict_peers(const librats::BencodeValue& list) {
     for (std::size_t i = 0; i < list.size(); ++i) {
         const auto& d = list[i];
         if (!d.is_dict() || !d.has_key("ip") || !d.has_key("port")) continue;
-        peers.emplace_back(d["ip"].as_string(), std::uint16_t(d["port"].as_integer()));
+        const std::uint16_t port = std::uint16_t(d["port"].as_integer());
+        if (port == 0) continue;
+        // BEP 3 dictionary model: "ip" may be a dotted-quad, an IPv6 literal, OR a
+        // DNS name. Address is strictly numeric, so a name must be resolved here
+        // (we already run on a blocking announce worker) — feeding it to the numeric
+        // Address ctor would assert in debug and silently drop the peer in release.
+        const std::string& host = d["ip"].as_string();
+        auto ip = IpAddress::parse(host);
+        if (!ip) {
+            std::string resolved = network_utils::resolve_hostname(host);
+            if (resolved.empty()) resolved = network_utils::resolve_hostname_v6(host);
+            ip = IpAddress::parse(resolved);
+        }
+        if (ip) peers.emplace_back(*ip, port);
     }
     return peers;
 }

@@ -138,6 +138,13 @@ set(LIBRARY_SOURCES
     src/core/io_poller.h
     src/core/io_poller.cpp
     src/core/bytes.h
+    src/core/address.h
+    src/core/address.cpp
+    src/core/ip_address.h
+    src/core/ip_address.cpp
+    src/core/host_endpoint.h
+    src/core/endpoint_parse.h
+    src/core/endpoint_parse.cpp
     src/core/types.h
     src/core/types.cpp
     src/core/mpsc_queue.h
@@ -527,6 +534,7 @@ if(RATS_BUILD_TESTS)
     # Create test source list
     set(TEST_SOURCES
         tests/test_socket.cpp
+        tests/test_ip_address.cpp
         tests/test_bencode.cpp
         tests/test_sha1.cpp
         tests/test_network_utils.cpp

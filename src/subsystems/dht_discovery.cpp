@@ -18,8 +18,8 @@ int hex_val(char c) {
 
 // A couple of well-known public STUN servers, tried in order. Kept short so a
 // total-outage startup costs at most a few timeouts before we fall back to voting.
-std::vector<Address> default_stun_servers() {
-    return { Address("stun.l.google.com", 19302), Address("stun1.l.google.com", 19302) };
+std::vector<HostEndpoint> default_stun_servers() {
+    return { HostEndpoint("stun.l.google.com", 19302), HostEndpoint("stun1.l.google.com", 19302) };
 }
 
 // The configured bind literal only applies to its own family; the other family
@@ -77,7 +77,7 @@ std::unique_ptr<DhtClient> DhtDiscovery::make_client(AddressFamily family) {
         return nullptr;
     }
 
-    const std::vector<Address> nodes =
+    const std::vector<HostEndpoint> nodes =
         config_.bootstrap_nodes.empty() ? DhtClient::get_default_bootstrap_nodes() : config_.bootstrap_nodes;
     if (!nodes.empty()) client->bootstrap(nodes);
 
@@ -136,16 +136,16 @@ std::string DhtDiscovery::external_address() const {
 // Runs on the loop thread; stop() joins that thread before resetting dht_, so the
 // dht_ access here can never touch a freed client.
 void DhtDiscovery::probe_external_ip() {
-    std::vector<Address> servers = config_.stun_servers.empty() ? default_stun_servers()
-                                                                : config_.stun_servers;
+    std::vector<HostEndpoint> servers = config_.stun_servers.empty() ? default_stun_servers()
+                                                                      : config_.stun_servers;
     StunClient stun;
     const int timeout = static_cast<int>(config_.stun_timeout.count());
-    for (const Address& s : servers) {
+    for (const HostEndpoint& s : servers) {
         if (!running_.load()) return;  // stopping; don't keep probing
-        StunResult r = stun.binding_request(s.ip, s.port, timeout);
+        StunResult r = stun.binding_request(s.host, s.port, timeout);
         if (r.success && r.mapped_address) {
             const std::string& ip = r.mapped_address->address;
-            LOG_INFO("dht-discovery", "STUN reflexive address " << ip << " (via " << s.ip << ":" << s.port << ")");
+            LOG_INFO("dht-discovery", "STUN reflexive address " << ip << " (via " << s.host << ":" << s.port << ")");
             // Feed it to whichever clients are up; each ignores it if it's not a
             // public address of its own family (e.g. a v4 reflexive on the v6 client).
             if (running_.load()) for_each_client([&](DhtClient& c) { c.set_external_ip(ip); });
@@ -189,14 +189,13 @@ void DhtDiscovery::loop() {
 
 void DhtDiscovery::on_peers(const std::vector<Address>& peers, const InfoHash& /*info_hash*/) {
     for (const Address& peer : peers) {
-        if (peer.ip.empty() || peer.port == 0) continue;
-        const std::string key = peer.ip + ":" + std::to_string(peer.port);
+        if (peer.ip.is_any() || peer.port == 0) continue;
         {
             std::lock_guard<std::mutex> lock(dialed_mutex_);
-            if (!dialed_.insert(key).second) continue;  // already dialed this address
+            if (!dialed_.insert(peer).second) continue;  // already dialed this address
         }
-        LOG_DEBUG("dht-discovery", "Dialing discovered peer " << key);
-        network_->connect(Address{peer.ip, peer.port});
+        LOG_DEBUG("dht-discovery", "Dialing discovered peer " << peer.to_string());
+        network_->connect(peer);
     }
 }
 

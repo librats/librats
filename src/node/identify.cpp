@@ -12,13 +12,16 @@ void put_u16(Bytes& out, uint16_t v) {
 }
 
 void put_addr(Bytes& out, const Address& a) {
-    out.push_back(static_cast<uint8_t>(a.ip.size()));
-    out.insert(out.end(), a.ip.begin(), a.ip.end());
+    // [len:u8][ip bytes: 4 or 16][port:u16] — the IP goes out as raw address bytes,
+    // not text, so an endpoint costs 7 (v4) or 19 (v6) bytes on the wire.
+    const ByteView ip = a.ip.bytes();
+    out.push_back(static_cast<uint8_t>(ip.size()));
+    out.insert(out.end(), ip.begin(), ip.end());
     put_u16(out, a.port);
 }
 
 bool emittable(const Address& a) {
-    return !a.ip.empty() && a.ip.size() <= IdentifyMessage::kMaxIpLength;
+    return !a.ip.is_unspecified();  // size() is then 4 or 16, always within kMaxIpLength
 }
 
 /// Bounds-checked forward reader: every read is validated against the remaining
@@ -91,21 +94,25 @@ std::optional<IdentifyMessage> IdentifyMessage::decode(ByteView in) {
     msg.addresses.reserve(count);
     for (uint8_t i = 0; i < count; ++i) {
         const uint8_t ip_len = r.u8();
-        if (!r.ok || ip_len == 0 || ip_len > kMaxIpLength) return std::nullopt;
+        if (!r.ok || (ip_len != 4 && ip_len != 16)) return std::nullopt;
         std::string ip = r.str(ip_len);
         const uint16_t port = r.u16();
         if (!r.ok) return std::nullopt;
-        msg.addresses.push_back(Address{std::move(ip), port});
+        auto addr = IpAddress::from_bytes(ByteView(ip));
+        if (!addr) return std::nullopt;
+        msg.addresses.push_back(Address{*addr, port});
     }
 
     const uint8_t obs_len = r.u8();
     if (!r.ok) return std::nullopt;
     if (obs_len != 0) {
-        if (obs_len > kMaxIpLength) return std::nullopt;
+        if (obs_len != 4 && obs_len != 16) return std::nullopt;
         std::string ip = r.str(obs_len);
         const uint16_t port = r.u16();
         if (!r.ok) return std::nullopt;
-        msg.observed = Address{std::move(ip), port};
+        auto addr = IpAddress::from_bytes(ByteView(ip));
+        if (!addr) return std::nullopt;
+        msg.observed = Address{*addr, port};
     }
 
     // Trailing bytes (e.g. a future minor extension) are tolerated and ignored.

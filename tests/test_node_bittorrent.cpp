@@ -33,7 +33,7 @@ DhtDiscovery::Config offline_dht_config() {
     c.dht_port = 0;                   // ephemeral
     c.enable_ipv6 = false;
     c.discover_external_ip = false;   // skip STUN
-    c.bootstrap_nodes = { Address("127.0.0.1", 6881) };  // dummy → avoid internet defaults
+    c.bootstrap_nodes = { HostEndpoint("127.0.0.1", 6881) };  // dummy → avoid internet defaults
     return c;
 }
 

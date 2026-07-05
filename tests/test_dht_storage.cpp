@@ -6,6 +6,7 @@
 
 using namespace librats::dht;
 using librats::Address;
+using librats::IpAddress;
 
 namespace {
 InfoHash hash_of(uint8_t v) { InfoHash h; h.fill(v); return h; }
@@ -65,14 +66,14 @@ TEST(DhtPeerStore, StoreGetDedupAndExpire) {
 
 TEST(DhtDosBlocker, BlocksFloodThenRecovers) {
     DosBlocker dos;
-    const std::string ip = "7.7.7.7";
+    const IpAddress ip = *IpAddress::parse("7.7.7.7");
 
     int allowed = 0;
     for (int i = 0; i < 60; ++i)
         if (dos.allow(ip, at_sec(0))) ++allowed;
     EXPECT_EQ(allowed, DosBlocker::kMaxPerWindow);   // burst capped, rest banned
 
-    EXPECT_FALSE(dos.allow(ip, at_sec(60)));          // still within the 5-minute ban
-    EXPECT_TRUE(dos.allow(ip, at_min(6)));            // ban elapsed → allowed again
-    EXPECT_TRUE(dos.allow("8.8.8.8", at_sec(0)));     // a different IP is independent
+    EXPECT_FALSE(dos.allow(ip, at_sec(60)));                         // still within the 5-minute ban
+    EXPECT_TRUE(dos.allow(ip, at_min(6)));                           // ban elapsed → allowed again
+    EXPECT_TRUE(dos.allow(*IpAddress::parse("8.8.8.8"), at_sec(0))); // a different IP is independent
 }

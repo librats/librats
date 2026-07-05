@@ -136,7 +136,7 @@ void Client::find_peers_via_dht(const InfoHash& info_hash,
     // DhtClient delivers results on its own thread; marshal them onto the reactor.
     dht_->find_peers(info_hash, [this, on_peer](const std::vector<Address>& peers, const InfoHash&) {
         reactor_.post([peers, on_peer] {
-            for (const Address& a : peers) on_peer(a.ip, a.port);
+            for (const Address& a : peers) on_peer(a.ip.to_string(), a.port);
         });
     });
 }

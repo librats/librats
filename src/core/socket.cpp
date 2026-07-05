@@ -51,33 +51,18 @@ static std::string socket_error_string(int error) {
 #endif
 }
 
-// Extract sender peer info from sockaddr_storage (shared by UDP receive)
+// Extract sender peer info from sockaddr_storage (shared by UDP receive).
+// IpAddress::from_sockaddr copies the raw address bytes (and unwraps IPv4-mapped
+// IPv6) with no textual round-trip; an unknown family yields an unspecified peer.
 static void extract_sender_peer(const sockaddr_storage& sender_addr, Address& peer) {
-    if (sender_addr.ss_family == AF_INET) {
-        char ip_str[INET_ADDRSTRLEN];
-        const auto* addr_in = reinterpret_cast<const sockaddr_in*>(&sender_addr);
-        inet_ntop(AF_INET, &addr_in->sin_addr, ip_str, INET_ADDRSTRLEN);
-        peer.ip = ip_str;
-        peer.port = ntohs(addr_in->sin_port);
-    } else if (sender_addr.ss_family == AF_INET6) {
-        const auto* addr_in6 = reinterpret_cast<const sockaddr_in6*>(&sender_addr);
-
-        // Check if this is an IPv4-mapped IPv6 address (::ffff:x.x.x.x)
-        if (IN6_IS_ADDR_V4MAPPED(&addr_in6->sin6_addr)) {
-            char ip_str[INET_ADDRSTRLEN];
-            struct in_addr ipv4_addr;
-            memcpy(&ipv4_addr, &addr_in6->sin6_addr.s6_addr[12], 4);
-            inet_ntop(AF_INET, &ipv4_addr, ip_str, INET_ADDRSTRLEN);
-            peer.ip = ip_str;
-        } else {
-            char ip_str[INET6_ADDRSTRLEN];
-            inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_str, INET6_ADDRSTRLEN);
-            peer.ip = ip_str;
-        }
-        peer.port = ntohs(addr_in6->sin6_port);
+    const auto* sa = reinterpret_cast<const sockaddr*>(&sender_addr);
+    if (auto ip = IpAddress::from_sockaddr(sa)) {
+        peer.ip = *ip;
+        peer.port = (sender_addr.ss_family == AF_INET)
+                        ? ntohs(reinterpret_cast<const sockaddr_in*>(&sender_addr)->sin_port)
+                        : ntohs(reinterpret_cast<const sockaddr_in6*>(&sender_addr)->sin6_port);
     } else {
-        peer.ip = "unknown";
-        peer.port = 0;
+        peer = Address{};
     }
 }
 
@@ -562,6 +547,19 @@ std::string get_peer_address(socket_t socket) {
     return peer_ip + ":" + std::to_string(peer_port);
 }
 
+std::optional<Address> get_peer_endpoint(socket_t socket) {
+    sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (getpeername(socket, reinterpret_cast<sockaddr*>(&ss), &len) == SOCKET_ERROR_VALUE)
+        return std::nullopt;
+    auto ip = IpAddress::from_sockaddr(reinterpret_cast<sockaddr*>(&ss));
+    if (!ip) return std::nullopt;
+    const uint16_t port = (ss.ss_family == AF_INET)
+                              ? ntohs(reinterpret_cast<sockaddr_in*>(&ss)->sin_port)
+                              : ntohs(reinterpret_cast<sockaddr_in6*>(&ss)->sin6_port);
+    return Address{*ip, port};
+}
+
 int send_tcp_data(socket_t socket, const std::vector<uint8_t>& data) {
     LOG_SOCKET_DEBUG("Sending " << data.size() << " bytes to TCP socket " << socket);
 
@@ -948,6 +946,57 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data,
     return bytes_sent;
 }
 
+// Build a UDP destination sockaddr straight from a numeric Address — no hostname
+// resolution and no inet_pton, just a memcpy of the raw address bytes. On a
+// DualStack/IPv6 socket an IPv4 address is written as an IPv4-mapped IPv6 address.
+static bool build_udp_dest_addr(const IpAddress& ip, int port, AddressFamily af,
+                                sockaddr_storage& addr, socklen_t& addr_len) {
+    memset(&addr, 0, sizeof(addr));
+    if (ip.is_v6()) {
+        auto* a6 = reinterpret_cast<sockaddr_in6*>(&addr);
+        a6->sin6_family = AF_INET6;
+        a6->sin6_port   = htons(static_cast<uint16_t>(port));
+        memcpy(&a6->sin6_addr, ip.bytes().data(), 16);
+        addr_len = sizeof(sockaddr_in6);
+        return true;
+    }
+    if (ip.is_v4()) {
+        if (af == AddressFamily::IPv4) {
+            auto* a4 = reinterpret_cast<sockaddr_in*>(&addr);
+            a4->sin_family = AF_INET;
+            a4->sin_port   = htons(static_cast<uint16_t>(port));
+            memcpy(&a4->sin_addr, ip.bytes().data(), 4);
+            addr_len = sizeof(sockaddr_in);
+        } else {
+            auto* a6 = reinterpret_cast<sockaddr_in6*>(&addr);
+            a6->sin6_family = AF_INET6;
+            a6->sin6_port   = htons(static_cast<uint16_t>(port));
+            a6->sin6_addr.s6_addr[10] = 0xff;
+            a6->sin6_addr.s6_addr[11] = 0xff;
+            memcpy(&a6->sin6_addr.s6_addr[12], ip.bytes().data(), 4);
+            addr_len = sizeof(sockaddr_in6);
+        }
+        return true;
+    }
+    return false;  // unspecified — nothing to send to
+}
+
+int send_udp_data(socket_t socket, const std::vector<uint8_t>& data,
+                  const Address& dest, AddressFamily af) {
+    sockaddr_storage dest_addr;
+    socklen_t addr_len;
+    if (!build_udp_dest_addr(dest.ip, dest.port, af, dest_addr, addr_len)) return -1;
+
+    int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0,
+                            reinterpret_cast<sockaddr*>(&dest_addr), addr_len);
+    if (bytes_sent == SOCKET_ERROR_VALUE) {
+        LOG_SOCKET_ERROR("Failed to send UDP data to " << dest.to_string()
+                         << " (error: " << socket_error_string(get_last_socket_error()) << ")");
+        return -1;
+    }
+    return bytes_sent;
+}
+
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Address& sender_peer,
                                       int timeout_ms, socket_t interrupt_fd) {
     // Handle timeout (and optional interrupt socket) using select. When no interrupt
@@ -1015,7 +1064,7 @@ std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Addre
 
     extract_sender_peer(sender_addr, sender_peer);
 
-    LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from " << sender_peer.ip << ":" << sender_peer.port);
+    LOG_SOCKET_DEBUG("Received " << bytes_received << " bytes from " << sender_peer.to_string());
 
     buffer.resize(bytes_received);
     return buffer;
