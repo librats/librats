@@ -127,13 +127,20 @@ void Torrent::pause() {
     seed_peers_.clear();
     peer_ext_.clear();
     optimistic_ = nullptr;
-    // The 1 s tick keeps running (cheap), but try_connect() is gated on paused_.
+    // Leave the swarm: tell trackers we're gone so they stop handing our address to
+    // others (mirrors stop(), minus tearing down picker_/disk_). tick() is gated on
+    // paused_ below, so DHT/tracker re-announces halt too — no more inbound dials.
+    announce_trackers(TrackerEvent::Stopped);
+    // The 1 s tick keeps running (cheap) but returns early while paused.
 }
 
 void Torrent::resume() {
     if (!running_ || !paused_) return;
     paused_ = false;
     LOG_INFO("bt.torrent", short_hash(info_hash()) << " resumed");
+    // Rejoin the swarm: a fresh Started announce repopulates the peer list (the DHT
+    // get_peers / periodic announces resume with the tick).
+    announce_trackers(TrackerEvent::Started);
     try_connect();
 }
 
@@ -162,6 +169,11 @@ void Torrent::schedule_tick() {
 void Torrent::tick() {
     if (!running_) return;
     ++tick_count_;
+
+    // Paused: no swarm activity — skip DHT/tracker announces, dialing, choking and
+    // PEX. Keep the tick alive so resume() picks straight back up. (peers_ is empty
+    // while paused, so there is nothing to time out or choke anyway.)
+    if (paused_) { schedule_tick(); return; }
 
     check_request_timeouts();  // free blocks stuck on stalled peers before anything else
 

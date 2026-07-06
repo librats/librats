@@ -621,6 +621,7 @@ if(RATS_BUILD_TESTS)
             tests/test_bt_tracker.cpp
             # Phase 7 — fast resume + torrent creation
             tests/test_bt_resume_data.cpp
+            tests/test_bt_pause_resume.cpp
             tests/test_bt_torrent_creator.cpp
             # Phase 8 — node subsystem integration
             tests/test_bt_subsystem.cpp

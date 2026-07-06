@@ -173,7 +173,7 @@ private:
     // Unsynchronised implementations — only ever run on the reactor thread (either
     // directly in the single-threaded/test path or via run_on_reactor()).
     Torrent* add_torrent_impl(const TorrentInfo& info, const std::string& save_path);
-    Torrent* add_magnet_impl(const std::string& magnet_uri, const std::string& save_path);
+    Torrent* add_magnet_impl(const std::string& magnet_uri, const std::string& save_path, bool resume);
     Torrent* add_torrent_with_resume_impl(const TorrentInfo& info, const ResumeData& resume,
                                           const std::string& save_path);
     void     remove_torrent_impl(const InfoHash& info_hash);

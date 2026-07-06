@@ -169,10 +169,14 @@ Torrent* Client::add_torrent_impl(const TorrentInfo& info, const std::string& sa
 }
 
 Torrent* Client::add_magnet(const std::string& magnet_uri, const std::string& save_path) {
-    return run_on_reactor([&] { return add_magnet_impl(magnet_uri, save_path); });
+    return run_on_reactor([&] { return add_magnet_impl(magnet_uri, save_path, /*resume=*/false); });
 }
 
-Torrent* Client::add_magnet_impl(const std::string& magnet_uri, const std::string& save_path) {
+Torrent* Client::add_magnet_resumed(const std::string& magnet_uri, const std::string& save_path) {
+    return run_on_reactor([&] { return add_magnet_impl(magnet_uri, save_path, /*resume=*/true); });
+}
+
+Torrent* Client::add_magnet_impl(const std::string& magnet_uri, const std::string& save_path, bool resume) {
     auto info = TorrentInfo::from_magnet(magnet_uri);
     if (!info || !info->is_valid()) {
         LOG_WARN("bt.client", "rejected invalid magnet uri");
@@ -185,33 +189,13 @@ Torrent* Client::add_magnet_impl(const std::string& magnet_uri, const std::strin
     auto t = std::make_unique<Torrent>(reactor_, *this, *info, path);
     Torrent* raw = t.get();
     torrents_.emplace(ih, std::move(t));
-    LOG_INFO("bt.client", "added magnet " << short_hash(ih) << " → " << path);
+    // Resume must be applied before start(); it completes the metadata + trusted have
+    // set if a resume file exists next to the download.
+    if (resume && raw->try_load_resume_data())
+        LOG_INFO("bt.client", "restored resume data for " << short_hash(ih));
+    LOG_INFO("bt.client", "added magnet" << (resume ? " (resumed) " : " ") << short_hash(ih) << " → " << path);
     raw->start();
     return raw;
-}
-
-Torrent* Client::add_magnet_resumed(const std::string& magnet_uri, const std::string& save_path) {
-    return run_on_reactor([&]() -> Torrent* {
-        auto info = TorrentInfo::from_magnet(magnet_uri);
-        if (!info || !info->is_valid()) {
-            LOG_WARN("bt.client", "rejected invalid magnet uri");
-            return nullptr;
-        }
-        const InfoHash ih = info->info_hash();
-        if (torrents_.count(ih)) return torrents_[ih].get();
-
-        const std::string path = save_path.empty() ? config_.download_path : save_path;
-        auto t = std::make_unique<Torrent>(reactor_, *this, *info, path);
-        Torrent* raw = t.get();
-        torrents_.emplace(ih, std::move(t));
-        // Resume must be applied before start(); completes metadata + trusted have
-        // set if a resume file exists next to the download.
-        if (raw->try_load_resume_data())
-            LOG_INFO("bt.client", "restored resume data for " << short_hash(ih));
-        LOG_INFO("bt.client", "added magnet (resumed) " << short_hash(ih) << " → " << path);
-        raw->start();
-        return raw;
-    });
 }
 
 Torrent* Client::add_torrent_with_resume(const TorrentInfo& info, const ResumeData& resume,
