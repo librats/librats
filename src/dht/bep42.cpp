@@ -1,6 +1,7 @@
 #include "dht/bep42.h"
 #include "util/network_utils.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 
@@ -92,6 +93,16 @@ bool verify_node_id_for_ip(const NodeId& id, const std::string& ip) {
     const auto a = IpAddress::parse(ip);
     if (!a) return true;  // unparseable -> don't reject on uncertainty
     return verify_node_id_for_ip(id, *a);
+}
+
+bool ip_too_close(const IpAddress& a, const IpAddress& b) noexcept {
+    if (a.family() != b.family()) return false;  // different networks, never "close"
+    // /24 for IPv4, /64 for IPv6: compare the leading network bytes. The address bytes
+    // are in network order, so a plain prefix compare is the CIDR test.
+    const std::size_t network_bytes = a.is_v6() ? 8 : (a.is_v4() ? 3 : 0);
+    if (network_bytes == 0) return false;        // unspecified
+    return std::equal(a.bytes().begin(), a.bytes().begin() + network_bytes,
+                      b.bytes().begin());
 }
 
 } // namespace dht

@@ -22,6 +22,15 @@
  * dies. Contact quality (RTT, failures, BEP 42 verification) lives on the NodeEntry
  * and drives who gets kept, refreshed, or evicted, while a sub-prefix "spread" rule
  * keeps a full bucket covering as many sub-branches as possible.
+ *
+ * Sybil/eclipse resistance (BEP 42). Admission is IP-diversity limited so no single
+ * operator can pack the table with contacts it controls and hijack lookups:
+ *   1. at most one contact per IP across the whole table, and
+ *   2. at most one contact per /24 (IPv4) or /64 (IPv6) within any single bucket.
+ * Only *public* addresses are constrained — private/loopback/CGNAT IPs can't be the
+ * source of a real Sybil attack and would wrongly collide on a LAN (this mirrors the
+ * BEP 42 exemption already applied by verify_node_id_for_ip). A per-IP count index
+ * (ip_count_) makes rule 1 an O(1) check; rule 2 is a small per-bucket scan.
  */
 
 #include "core/address.h"
@@ -32,6 +41,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace librats {
@@ -100,6 +110,13 @@ public:
     std::vector<NodeEntry> good_contacts() const;                // confirmed live contacts, to save
     void load_contacts(const std::vector<NodeEntry>& contacts);  // bulk restore, preserving quality
 
+    // -- diagnostics ------------------------------------------------------------
+
+    // True iff the per-IP index (ip_count_) matches a fresh count over the buckets.
+    // Cheap invariant used by tests to prove the IP accounting stays balanced across
+    // arbitrary add/evict/fail churn; not needed at runtime.
+    bool ip_index_consistent() const;
+
 private:
     struct Bucket {
         std::vector<NodeEntry> live;          // active contacts, up to bucket_limit(index)
@@ -116,6 +133,28 @@ private:
     // The one insertion path. `e` carries its own quality (pinged/confirmed via
     // fail_count). Returns true if it ended up in a live set.
     bool add_node(NodeEntry e);
+
+    // -- IP-diversity admission (Sybil/eclipse resistance) ----------------------
+
+    // May a genuinely new (not-already-known-by-id) contact `e` enter bucket `idx`?
+    // Enforces the two rules above for public IPs only; a same-endpoint contact that
+    // has quietly changed its id is evicted here as a poisoning signal. Non-public
+    // addresses are always admissible. Rare collision handling lives in this one place.
+    bool passes_ip_diversity(Bucket& b, int idx, const NodeEntry& e);
+
+    // Locate the contact currently at endpoint `ep` (ip+port) anywhere in the table.
+    // Only walked on a public-IP collision, so the O(table) cost is off the hot path.
+    struct Located { int bucket; bool live; std::size_t index; };
+    std::optional<Located> find_by_endpoint(const Address& ep);
+
+    // Keep ip_count_ in lock-step with the buckets. The invariant is simple and local:
+    // every push into a live/replacement set calls ip_track, every removal ip_untrack,
+    // and an in-place overwrite goes through assign() (untrack old + track new). Moves
+    // between the two sets are therefore self-balancing. Only public IPs are indexed.
+    void ip_track(const IpAddress& ip);
+    void ip_untrack(const IpAddress& ip);
+    void assign(NodeEntry& slot, const NodeEntry& e);  // overwrite a slot, keeping the index synced
+
     // May the (full, last) bucket at `index` be split to fit a confirmed `e`?
     bool can_split(int index, const NodeEntry& e) const;
     // Append a bucket and re-home the old last bucket's contacts by shared prefix.
@@ -136,6 +175,10 @@ private:
     NodeId self_;
     bool extended_;
     std::vector<Bucket> buckets_;  // [0] = farthest, back() = closest catch-all
+
+    // Count of live+replacement contacts per *public* IP across the whole table. Backs
+    // rule 1 (one contact per IP) as an O(1) lookup; kept balanced by ip_track/untrack.
+    std::unordered_map<IpAddress, int> ip_count_;
 };
 
 } // namespace dht

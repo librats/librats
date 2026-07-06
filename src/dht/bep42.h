@@ -35,5 +35,14 @@ bool generate_node_id_from_ip(const IpAddress& ip, NodeId& out, std::mt19937& rn
 bool verify_node_id_for_ip(const NodeId& id, const IpAddress& ip);
 bool verify_node_id_for_ip(const NodeId& id, const std::string& ip);
 
+// Are `a` and `b` close enough to be treated as one identity for Sybil/eclipse
+// resistance? Two addresses count as "too close" when they fall in the same /24
+// (IPv4) or /64 (IPv6) block — the granularity at which a single operator typically
+// controls every address. Different families (or an unspecified address) are never
+// too close. The routing table uses this to keep one subnet from filling a bucket,
+// and a lookup to keep it from flooding the candidate set (libtorrent's
+// dht_restrict_routing_ips / dht_restrict_search_ips).
+bool ip_too_close(const IpAddress& a, const IpAddress& b) noexcept;
+
 } // namespace dht
 } // namespace librats

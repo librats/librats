@@ -544,6 +544,7 @@ if(RATS_BUILD_TESTS)
         tests/test_dht_bep42.cpp
         tests/test_dht_node_entry.cpp
         tests/test_dht_routing_table.cpp
+        tests/test_dht_ip_diversity.cpp
         tests/test_dht_rpc_manager.cpp
         tests/test_dht_traversal.cpp
         tests/test_dht_storage.cpp

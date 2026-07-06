@@ -1,4 +1,5 @@
 #include "dht/routing_table.h"
+#include "dht/bep42.h"
 #include "dht/log.h"
 
 #include <algorithm>
@@ -101,28 +102,43 @@ bool RoutingTable::add_node(NodeEntry e) {
     Bucket& b = buckets_[idx];
 
     // Already live → refresh in place. A confirmed sighting also records success;
-    // mere hearsay must not reset a live contact's quality.
+    // mere hearsay must not reset a live contact's quality. A confirmed contact that
+    // moved to a new endpoint re-points the IP index too.
     if (auto it = find_by_id(b.live, e.id); it != b.live.end()) {
         it->verified = it->verified || e.verified;
-        if (e.pinged()) { it->endpoint = e.endpoint; it->record_success(e.rtt); }
+        if (e.pinged()) {
+            if (it->endpoint.ip != e.endpoint.ip) { ip_untrack(it->endpoint.ip); ip_track(e.endpoint.ip); }
+            it->endpoint = e.endpoint;
+            it->record_success(e.rtt);
+        }
         return true;
     }
 
     // Sitting in the replacement cache: a confirmed sighting pulls it out to promote,
-    // carrying its accumulated quality; mere hearsay leaves it parked.
+    // carrying its accumulated quality; mere hearsay leaves it parked. The erase
+    // untracks its IP; the shared insert below re-tracks it (at its current endpoint),
+    // so a promotion is IP-neutral even if the endpoint changed.
+    bool promoted = false;
     if (auto it = find_by_id(b.replacements, e.id); it != b.replacements.end()) {
         if (!e.pinged()) return false;
-        NodeEntry promoted = *it;
-        promoted.endpoint = e.endpoint;
-        promoted.verified = promoted.verified || e.verified;
-        promoted.record_success(e.rtt);
+        NodeEntry carried = *it;
+        carried.endpoint = e.endpoint;
+        carried.verified = carried.verified || e.verified;
+        carried.record_success(e.rtt);
+        ip_untrack(it->endpoint.ip);
         b.replacements.erase(it);
-        e = promoted;
+        e = carried;
+        promoted = true;
     }
+
+    // A genuinely new IP must pass the IP-diversity gate (rule 1 + rule 2, public IPs
+    // only). A promoted contact is already one we know, so it skips the gate.
+    if (!promoted && !passes_ip_diversity(b, idx, e)) return false;
 
     const int limit = bucket_limit(idx);
     if (static_cast<int>(b.live.size()) < limit) {
         b.live.push_back(e);
+        ip_track(e.endpoint.ip);
         return true;
     }
 
@@ -192,7 +208,7 @@ bool RoutingTable::replace_for_spread(Bucket& b, int index, int limit, const Nod
     for (auto& n : live)
         if (n.pinged() && n.fail_count > 0 && (!stale || n.fail_count > stale->fail_count))
             stale = &n;
-    if (stale) { *stale = e; return true; }
+    if (stale) { assign(*stale, e); return true; }
 
     // 2) Otherwise keep a spread of sub-prefixes. Group the live nodes by their slot.
     // classify_prefix yields prefix_bits_for(limit) bits, so the slot index is in
@@ -213,7 +229,7 @@ bool RoutingTable::replace_for_spread(Bucket& b, int index, int limit, const Nod
     if (!slot[want].empty()) {
         // Our slot is taken: displace its worst node only if we're strictly better.
         NodeEntry* worst = worst_in(slot[want]);
-        if (worst->is_worse_than(e)) { *worst = e; return true; }
+        if (worst->is_worse_than(e)) { assign(*worst, e); return true; }
         return false;
     }
 
@@ -224,34 +240,40 @@ bool RoutingTable::replace_for_spread(Bucket& b, int index, int limit, const Nod
         if (s.size() > 1)
             for (auto* n : s)
                 if (!victim || n->is_worse_than(*victim)) victim = n;
-    if (victim) { *victim = e; return true; }
+    if (victim) { assign(*victim, e); return true; }
     return false;
 }
 
 void RoutingTable::stash_replacement(Bucket& b, const NodeEntry& entry) {
     auto& r = b.replacements;
     if (auto it = find_by_id(r, entry.id); it != r.end()) {
-        *it = entry;
+        assign(*it, entry);
         return;
     }
     if (r.size() < kBucketSize) {
         r.push_back(entry);
+        ip_track(entry.endpoint.ip);
         return;
     }
     auto worst = worst_of(r);
-    if (worst != r.end() && worst->is_worse_than(entry)) *worst = entry;
+    if (worst != r.end() && worst->is_worse_than(entry)) assign(*worst, entry);
 }
 
 void RoutingTable::trim_to_limit(int index) {
     Bucket& b = buckets_[index];
     const int limit = bucket_limit(index);
+    // Spilling a live contact into replacements keeps it in the table, so the IP index
+    // is untouched. Only the final overflow — a contact dropped from the table — untracks.
     while (static_cast<int>(b.live.size()) > limit) {
         auto worst = worst_of(b.live);
         b.replacements.push_back(std::move(*worst));
         b.live.erase(worst);
     }
-    while (b.replacements.size() > kBucketSize)
-        b.replacements.erase(worst_of(b.replacements));
+    while (b.replacements.size() > kBucketSize) {
+        auto worst = worst_of(b.replacements);
+        ip_untrack(worst->endpoint.ip);
+        b.replacements.erase(worst);
+    }
 }
 
 void RoutingTable::fill_from_replacements(int index) {
@@ -280,7 +302,10 @@ void RoutingTable::node_failed(const NodeId& id, const Address& endpoint) {
         if (auto r = find_by_id(b.replacements, id);
             r != b.replacements.end() && r->endpoint == endpoint) {
             r->record_failure();
-            if (!r->pinged() || r->fail_count >= kMaxFailCount) b.replacements.erase(r);
+            if (!r->pinged() || r->fail_count >= kMaxFailCount) {
+                ip_untrack(r->endpoint.ip);
+                b.replacements.erase(r);
+            }
         }
         return;
     }
@@ -295,6 +320,7 @@ void RoutingTable::node_failed(const NodeId& id, const Address& endpoint) {
     // A liveness check already failed here, so if a standby is ready, evict the
     // failed contact and let the best standbys take the freed slot(s).
     if (!b.replacements.empty()) {
+        ip_untrack(it->endpoint.ip);
         b.live.erase(it);
         fill_from_replacements(idx);
         prune_empty_back();
@@ -302,7 +328,10 @@ void RoutingTable::node_failed(const NodeId& id, const Address& endpoint) {
     }
 
     // No standby: keep giving it chances until it's clearly dead.
-    if (!it->pinged() || it->fail_count >= kMaxFailCount) b.live.erase(it);
+    if (!it->pinged() || it->fail_count >= kMaxFailCount) {
+        ip_untrack(it->endpoint.ip);
+        b.live.erase(it);
+    }
     prune_empty_back();
 }
 
@@ -377,6 +406,7 @@ void RoutingTable::set_self(const NodeId& id) {
     self_ = id;
     buckets_.clear();
     buckets_.emplace_back();
+    ip_count_.clear();  // rebuilt as add_node re-tracks each contact
     for (const auto& n : all) add_node(n);
 }
 
@@ -449,6 +479,80 @@ void RoutingTable::prune_empty_back() {
            && buckets_.back().live.empty()
            && buckets_.back().replacements.empty())
         buckets_.pop_back();
+}
+
+// -- IP-diversity admission ---------------------------------------------------
+
+void RoutingTable::ip_track(const IpAddress& ip) {
+    if (is_public_address(ip)) ++ip_count_[ip];
+}
+
+void RoutingTable::ip_untrack(const IpAddress& ip) {
+    if (!is_public_address(ip)) return;
+    auto it = ip_count_.find(ip);
+    if (it == ip_count_.end()) return;         // defensive: never underflow past zero
+    if (--it->second <= 0) ip_count_.erase(it);
+}
+
+void RoutingTable::assign(NodeEntry& slot, const NodeEntry& e) {
+    ip_untrack(slot.endpoint.ip);              // the displaced contact leaves the table
+    slot = e;
+    ip_track(e.endpoint.ip);                   // ... and the new one takes its place
+}
+
+std::optional<RoutingTable::Located> RoutingTable::find_by_endpoint(const Address& ep) {
+    for (int i = 0; i < static_cast<int>(buckets_.size()); ++i) {
+        Bucket& b = buckets_[i];
+        for (std::size_t j = 0; j < b.live.size(); ++j)
+            if (b.live[j].endpoint == ep) return Located{i, true, j};
+        for (std::size_t j = 0; j < b.replacements.size(); ++j)
+            if (b.replacements[j].endpoint == ep) return Located{i, false, j};
+    }
+    return std::nullopt;
+}
+
+bool RoutingTable::passes_ip_diversity(Bucket& b, int idx, const NodeEntry& e) {
+    const IpAddress& ip = e.endpoint.ip;
+    if (!is_public_address(ip)) return true;   // private/loopback/CGNAT: unconstrained
+
+    // Rule 1 — one contact per IP across the whole table. The same-id sighting was
+    // already handled in add_node, so a hit here means this IP is held under a
+    // *different* id: a routing-table poisoning signal.
+    if (ip_count_.find(ip) != ip_count_.end()) {
+        auto found = find_by_endpoint(e.endpoint);
+        if (!found)       return false;        // same IP, different port -> ignore newcomer
+        if (!e.pinged())  return false;        // unconfirmed id swap  -> ignore (poison)
+
+        // A *confirmed* contact is answering from an endpoint we already hold under
+        // another id. The old entry is now suspect, so drop it and don't trust the new
+        // one either — libtorrent's conservative "evict on changed id". The freed live
+        // slot refills from that bucket's standbys.
+        Bucket& eb = buckets_[found->bucket];
+        auto& set  = found->live ? eb.live : eb.replacements;
+        ip_untrack(set[found->index].endpoint.ip);
+        set.erase(set.begin() + static_cast<std::ptrdiff_t>(found->index));
+        if (found->live) fill_from_replacements(found->bucket);
+        prune_empty_back();
+        return false;
+    }
+
+    // Rule 2 — at most one contact per /24 (v4) or /64 (v6) within this one bucket.
+    for (const auto& n : b.live)
+        if (ip_too_close(n.endpoint.ip, ip)) return false;
+    for (const auto& n : b.replacements)
+        if (ip_too_close(n.endpoint.ip, ip)) return false;
+    return true;
+}
+
+bool RoutingTable::ip_index_consistent() const {
+    std::unordered_map<IpAddress, int> expected;
+    for (const auto& b : buckets_) {
+        for (const auto& n : b.live)
+            if (is_public_address(n.endpoint.ip)) ++expected[n.endpoint.ip];
+        for (const auto& n : b.replacements)
+            if (is_public_address(n.endpoint.ip)) ++expected[n.endpoint.ip];
+    }
+    return expected == ip_count_;
 }
 
 } // namespace dht

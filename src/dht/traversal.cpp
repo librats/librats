@@ -67,6 +67,17 @@ void Traversal::add_entry(const NodeId& id, const Address& ep, uint8_t flags) {
         [&](const ObserverPtr& o, const NodeId& nid) { return closer_to(o->id(), nid, target_); });
     if (pos != sorted_end && (*pos)->id() == id) return;  // already a candidate
 
+    // Anti-Sybil (libtorrent's dht_restrict_search_ips): a genuinely new candidate — the
+    // dedup above already let same-id repeats out — sharing a /24 (v4) or /64 (v6) with one
+    // we've already admitted is ignored, so no single operator can pack the candidate set
+    // and steer the search. The first node in a block wins. This mirrors libtorrent, which
+    // runs the check *after* the id dedup and skips it for kInitial seeds (handled above).
+    // The packed prefixes live in a per-lookup set, so it is an O(1) test rather than an
+    // O(n) scan of results_, and a prefix persists for the lookup's lifetime (a candidate
+    // dropped by truncation can't re-open its block). Only public IPs are restricted, so a
+    // LAN/loopback/CGNAT test topology is unaffected.
+    if (register_subnet(ep)) return;
+
     results_.insert(pos, make_observer(id, ep));
     ++sorted_;
 
@@ -88,6 +99,25 @@ void Traversal::add_entry(const NodeId& id, const Address& ep, uint8_t flags) {
         results_.resize(kMaxResults);
         if (sorted_ > static_cast<int>(kMaxResults)) sorted_ = static_cast<int>(kMaxResults);
     }
+}
+
+bool Traversal::register_subnet(const Address& ep) {
+    // Only public addresses are constrained; a LAN/loopback/CGNAT topology is exempt (the
+    // same rule the routing table applies) and never collides. is_public_address implies a
+    // specified v4/v6 address, so bytes() below has the octets we index.
+    if (!is_public_address(ep.ip)) return false;
+
+    const uint8_t* b = ep.ip.bytes().data();  // network-order octets
+    if (ep.ip.is_v6()) {
+        // /64: the leading 8 bytes packed big-endian (matches ip_too_close's compare and
+        // libtorrent's read_uint64 over the first 8 v6 octets).
+        uint64_t prefix = 0;
+        for (int i = 0; i < 8; ++i) prefix = (prefix << 8) | b[i];
+        return !subnet6_.insert(prefix).second;  // insert() fails ⇒ block already admitted
+    }
+    // /24: the leading 3 bytes, low octet dropped — libtorrent's to_uint() & 0xffffff00.
+    const uint32_t prefix = (uint32_t(b[0]) << 24) | (uint32_t(b[1]) << 16) | (uint32_t(b[2]) << 8);
+    return !subnet4_.insert(prefix).second;
 }
 
 bool Traversal::add_requests(TimePoint now) {

@@ -20,6 +20,8 @@
 #include "dht/rpc_manager.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 namespace librats {
@@ -74,6 +76,12 @@ private:
     bool add_requests(TimePoint now);  // returns true when the search is complete
     void finish();
 
+    // Anti-Sybil admission for a candidate's endpoint (libtorrent's dht_restrict_search_ips):
+    // record `ep`'s /24 (v4) or /64 (v6) in this lookup's prefix set and return true if that
+    // block was already claimed by an earlier candidate (⇒ ignore `ep`). Public IPs only;
+    // private/loopback/CGNAT never collide. O(1) amortised, replacing an O(n) scan.
+    bool register_subnet(const Address& ep);
+
     NodeId target_;
     unsigned id_;        // unique lookup id (assigned in ctor), printed as "L<id>" in logs
     int  round_ = 0;     // how many waves of queries we've fired (the search "round")
@@ -81,6 +89,11 @@ private:
     int  branch_factor_ = static_cast<int>(kAlpha);
     int  invoke_count_ = 0;
     bool done_ = false;
+
+    // Packed /24 (v4) and /64 (v6) prefixes of candidates already admitted to this lookup,
+    // backing register_subnet()'s O(1) Sybil check. Bounded by kMaxResults, so tiny.
+    std::unordered_set<uint32_t> subnet4_;
+    std::unordered_set<uint64_t> subnet6_;
 
     static constexpr std::size_t kMaxResults = 100;
 };
