@@ -86,6 +86,43 @@ TEST(BtTorrentCreator, MultiFileDirectory) {
     EXPECT_TRUE(has_b);
 }
 
+TEST(BtTorrentCreator, ReportsHashingProgress) {
+    const std::string dir = temp_dir("progress");
+    // 70000 bytes over a 16384-byte piece length => ceil(70000/16384) = 5 pieces.
+    write_file((stdfs::path(dir) / "data.bin").string(), make_data(70000, 7));
+
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> updates;
+    TorrentCreator c;
+    c.set_piece_length(16384);
+    auto info = c.create_from_path(
+        (stdfs::path(dir) / "data.bin").string(), nullptr,
+        [&](std::uint32_t done, std::uint32_t total) { updates.emplace_back(done, total); });
+
+    ASSERT_TRUE(info.has_value());
+    ASSERT_EQ(info->num_pieces(), 5u);
+
+    // One callback per piece, total held constant, current strictly increasing 1..N,
+    // and the final call reports completion (N, N).
+    ASSERT_EQ(updates.size(), 5u);
+    for (std::size_t i = 0; i < updates.size(); ++i) {
+        EXPECT_EQ(updates[i].first, std::uint32_t(i + 1));
+        EXPECT_EQ(updates[i].second, 5u);
+    }
+    EXPECT_EQ(updates.back(), std::make_pair(5u, 5u));
+}
+
+// Passing no progress callback (the default) must not crash and must still build.
+TEST(BtTorrentCreator, NoProgressCallbackIsFine) {
+    const std::string dir = temp_dir("noprogress");
+    write_file((stdfs::path(dir) / "data.bin").string(), make_data(40000, 3));
+
+    TorrentCreator c;
+    c.set_piece_length(16384);
+    auto info = c.create_from_path((stdfs::path(dir) / "data.bin").string());
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->num_pieces(), 3u);
+}
+
 // The strongest check: a created torrent's piece hashes match the real files, so
 // a seeder over the same directory verifies every piece and reaches Seeding.
 TEST(BtTorrentCreator, CreatedTorrentSeedsCleanly) {

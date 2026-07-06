@@ -35,7 +35,8 @@ void scan_directory(const std::string& dir, std::vector<std::string> prefix,
 
 } // namespace
 
-std::optional<TorrentInfo> TorrentCreator::create_from_path(const std::string& path, std::string* error) {
+std::optional<TorrentInfo> TorrentCreator::create_from_path(const std::string& path, std::string* error,
+                                                            const PieceHashProgress& on_progress) {
     auto fail = [&](const char* m) -> std::optional<TorrentInfo> { if (error) *error = m; return std::nullopt; };
 
     const std::string root_name = name_.empty() ? get_filename_from_path(path) : name_;
@@ -67,9 +68,10 @@ std::optional<TorrentInfo> TorrentCreator::create_from_path(const std::string& p
     }
 
     // Hash every piece by reading the bytes it spans across the source files.
+    const std::uint32_t total_pieces = layout.num_pieces();
     std::string pieces;
-    pieces.reserve(std::size_t(layout.num_pieces()) * 20);
-    for (std::uint32_t p = 0; p < layout.num_pieces(); ++p) {
+    pieces.reserve(std::size_t(total_pieces) * 20);
+    for (std::uint32_t p = 0; p < total_pieces; ++p) {
         Bytes buf;
         buf.reserve(layout.piece_size(p));
         for (const auto& slice : layout.map_block(p, 0, layout.piece_size(p))) {
@@ -81,6 +83,7 @@ std::optional<TorrentInfo> TorrentCreator::create_from_path(const std::string& p
         }
         auto h = SHA1::hash_raw(buf.data(), buf.size());
         pieces.append(reinterpret_cast<const char*>(h.data()), 20);
+        if (on_progress) on_progress(p + 1, total_pieces);
     }
 
     // Build the info dictionary.

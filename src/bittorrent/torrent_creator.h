@@ -15,11 +15,17 @@
 #include "core/bytes.h"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace librats::bittorrent {
+
+/// Reports piece-hashing progress during create_from_path: (pieces_hashed,
+/// total_pieces). Called once per piece as it is hashed; total_pieces is fixed
+/// for the whole run and the final call always has pieces_hashed == total_pieces.
+using PieceHashProgress = std::function<void(std::uint32_t pieces_hashed, std::uint32_t total_pieces)>;
 
 class TorrentCreator {
 public:
@@ -32,8 +38,10 @@ public:
 
     /// Hash @p path (a file or directory) and build the torrent. On success the
     /// bencoded form is available via torrent_file(). Returns nullopt (and sets
-    /// @p error, if given) on I/O or layout problems.
-    std::optional<TorrentInfo> create_from_path(const std::string& path, std::string* error = nullptr);
+    /// @p error, if given) on I/O or layout problems. If @p on_progress is set it
+    /// is invoked once per hashed piece so callers can drive a progress bar.
+    std::optional<TorrentInfo> create_from_path(const std::string& path, std::string* error = nullptr,
+                                                const PieceHashProgress& on_progress = {});
 
     const Bytes& torrent_file() const noexcept { return torrent_bytes_; }
 
