@@ -77,6 +77,15 @@ public:
     void start();
     void stop();
 
+    /// Pause a running torrent: drop its peers and stop dialing/serving, but keep
+    /// the piece picker and disk state so resume() does not re-hash. No-op if not
+    /// running or already paused.
+    void pause();
+    /// Resume a paused torrent: start reconnecting to peers again. No-op if not
+    /// running or not paused.
+    void resume();
+    bool is_paused() const noexcept { return paused_; }
+
     /// Queue a peer to connect to (deduplicated). Connects promptly if running.
     void add_peer(const std::string& ip, std::uint16_t port);
 
@@ -109,6 +118,10 @@ public:
     /// is trusted (those pieces skip the hash check), and an embedded info dict
     /// completes a magnet torrent. Ignored if the info-hash doesn't match.
     void       load_resume_data(const ResumeData& rd);
+    /// Load resume state from the default on-disk path (see default_resume_path).
+    /// Like load_resume_data(), call before start(). Returns false if no resume
+    /// file exists or it fails to decode.
+    bool       try_load_resume_data();
     ResumeData generate_resume_data() const;
     /// Write resume data to @p path (default: {save_path}/.resume/{info_hash}.resume).
     bool save_resume_data() const;
@@ -204,6 +217,7 @@ private:
     Choker                           choker_;
     State                        state_   = State::Stopped;
     bool                         running_ = false;
+    bool                         paused_  = false;
     bool                         has_metadata_ = false;
     bool                         completed_announced_ = false;
     bool                         write_stalled_ = false;  ///< requesting paused for disk backpressure

@@ -69,6 +69,7 @@ void Torrent::start() {
 void Torrent::stop() {
     if (!running_) return;
     running_ = false;
+    paused_  = false;
     LOG_INFO("bt.torrent", short_hash(info_hash()) << " stopped (" << peers_.size() << " peers)");
     if (tick_timer_ != kInvalidTimerId) { reactor_.cancel(tick_timer_); tick_timer_ = kInvalidTimerId; }
     if (trackers_) {
@@ -111,13 +112,38 @@ void Torrent::on_check_complete(Bitfield have) {
     try_connect();
 }
 
+void Torrent::pause() {
+    if (!running_ || paused_) return;
+    paused_ = true;
+    LOG_INFO("bt.torrent", short_hash(info_hash()) << " paused (" << peers_.size() << " peers dropped)");
+    // Drop all peers and their per-peer request state, but keep picker_/disk_ so a
+    // later resume() does not have to re-hash what is already on disk.
+    for (PeerConnection* pc : peers_) pc->close("torrent paused");
+    peers_.clear();
+    outstanding_.clear();
+    request_time_.clear();
+    recent_down_.clear();
+    recent_up_.clear();
+    seed_peers_.clear();
+    peer_ext_.clear();
+    optimistic_ = nullptr;
+    // The 1 s tick keeps running (cheap), but try_connect() is gated on paused_.
+}
+
+void Torrent::resume() {
+    if (!running_ || !paused_) return;
+    paused_ = false;
+    LOG_INFO("bt.torrent", short_hash(info_hash()) << " resumed");
+    try_connect();
+}
+
 void Torrent::add_peer(const std::string& ip, std::uint16_t port) {
-    if (peer_list_.add(ip, port, PeerSource::Tracker) && running_)
+    if (peer_list_.add(ip, port, PeerSource::Tracker) && running_ && !paused_)
         post([this] { try_connect(); });
 }
 
 void Torrent::try_connect() {
-    if (!running_ || peers_.size() >= kMaxPeers) return;
+    if (!running_ || paused_ || peers_.size() >= kMaxPeers) return;
     auto candidates = peer_list_.connect_candidates(kMaxPeers - peers_.size());
     for (const auto& c : candidates) host_.connect_peer(*this, c.ip, c.port);
 }
@@ -179,6 +205,8 @@ void Torrent::tick() {
 // ---- peer event handling ----
 
 void Torrent::on_handshake(PeerConnection& pc, const InfoHash&, const PeerId&) {
+    // Reject inbound peers while paused — pause() means "no swarm activity".
+    if (paused_) { pc.close("torrent paused"); return; }
     // Cap peers per torrent. Outbound dials are already gated by try_connect(), but
     // inbound peers reach us straight through the handshake, so enforce it here too
     // (H3) — otherwise a flood of incoming handshakes grows peers_ without bound.
@@ -757,6 +785,19 @@ void Torrent::load_resume_data(const ResumeData& rd) {
     resume_have_     = rd.have;
     bytes_uploaded_  = rd.total_uploaded;
     bytes_downloaded_ = rd.total_downloaded;
+}
+
+bool Torrent::try_load_resume_data() {
+    if (running_) return false;  // must be applied before start()
+    std::size_t size = 0;
+    void* raw = read_file_binary(default_resume_path().c_str(), &size);
+    if (!raw) return false;
+    Bytes data(static_cast<std::uint8_t*>(raw), static_cast<std::uint8_t*>(raw) + size);
+    std::free(raw);
+    auto rd = ResumeData::decode(data);
+    if (!rd) return false;
+    load_resume_data(*rd);
+    return true;
 }
 
 ResumeData Torrent::generate_resume_data() const {

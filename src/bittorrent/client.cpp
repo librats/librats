@@ -190,6 +190,30 @@ Torrent* Client::add_magnet_impl(const std::string& magnet_uri, const std::strin
     return raw;
 }
 
+Torrent* Client::add_magnet_resumed(const std::string& magnet_uri, const std::string& save_path) {
+    return run_on_reactor([&]() -> Torrent* {
+        auto info = TorrentInfo::from_magnet(magnet_uri);
+        if (!info || !info->is_valid()) {
+            LOG_WARN("bt.client", "rejected invalid magnet uri");
+            return nullptr;
+        }
+        const InfoHash ih = info->info_hash();
+        if (torrents_.count(ih)) return torrents_[ih].get();
+
+        const std::string path = save_path.empty() ? config_.download_path : save_path;
+        auto t = std::make_unique<Torrent>(reactor_, *this, *info, path);
+        Torrent* raw = t.get();
+        torrents_.emplace(ih, std::move(t));
+        // Resume must be applied before start(); completes metadata + trusted have
+        // set if a resume file exists next to the download.
+        if (raw->try_load_resume_data())
+            LOG_INFO("bt.client", "restored resume data for " << short_hash(ih));
+        LOG_INFO("bt.client", "added magnet (resumed) " << short_hash(ih) << " → " << path);
+        raw->start();
+        return raw;
+    });
+}
+
 Torrent* Client::add_torrent_with_resume(const TorrentInfo& info, const ResumeData& resume,
                                          const std::string& save_path) {
     return run_on_reactor([&] { return add_torrent_with_resume_impl(info, resume, save_path); });
@@ -240,6 +264,52 @@ void Client::remove_torrent_impl(const InfoHash& info_hash) {
     it->second->stop();
     torrents_.erase(it);
     // File deletion is not yet implemented; the torrent's data is left on disk.
+}
+
+TorrentStatus Client::torrent_status(const InfoHash& info_hash) {
+    return run_on_reactor([&]() -> TorrentStatus {
+        TorrentStatus s;
+        auto it = torrents_.find(info_hash);
+        if (it == torrents_.end() || !it->second) return s;
+        const Torrent*     t    = it->second.get();
+        const TorrentInfo& info = t->torrent_info();
+        s.exists       = true;
+        s.name         = info.name();
+        s.has_metadata = t->has_metadata();
+        s.is_complete  = t->is_complete();
+        s.paused       = t->is_paused();
+        s.progress     = t->progress();
+        s.downloaded   = t->bytes_downloaded();
+        s.uploaded     = t->bytes_uploaded();
+        s.num_peers    = t->num_peers();
+        if (info.has_metadata()) {
+            s.total_size = std::uint64_t(info.total_size());
+            for (const FileEntry& f : info.files().files())
+                s.files.push_back({f.path, f.size});
+        }
+        return s;
+    });
+}
+
+void Client::pause_torrent(const InfoHash& info_hash) {
+    run_on_reactor([&] {
+        auto it = torrents_.find(info_hash);
+        if (it != torrents_.end() && it->second) it->second->pause();
+    });
+}
+
+void Client::resume_torrent(const InfoHash& info_hash) {
+    run_on_reactor([&] {
+        auto it = torrents_.find(info_hash);
+        if (it != torrents_.end() && it->second) it->second->resume();
+    });
+}
+
+bool Client::save_resume_data(const InfoHash& info_hash) {
+    return run_on_reactor([&]() -> bool {
+        auto it = torrents_.find(info_hash);
+        return it != torrents_.end() && it->second && it->second->save_resume_data();
+    });
 }
 
 std::vector<Torrent*> Client::torrents() {

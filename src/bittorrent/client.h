@@ -38,6 +38,25 @@
 
 namespace librats::bittorrent {
 
+/// A thread-safe snapshot of one torrent's state. Produced by Client::torrent_status
+/// on the reactor thread so callers on any thread get a consistent view without
+/// touching the (lock-free, reactor-owned) Torrent directly.
+struct TorrentStatus {
+    struct File { std::string path; std::int64_t size = 0; };
+
+    bool          exists       = false;  ///< false if no such torrent (rest is default)
+    std::string   name;
+    bool          has_metadata = false;
+    bool          is_complete  = false;
+    bool          paused       = false;
+    double        progress     = 0.0;    ///< 0..1
+    std::uint64_t total_size   = 0;
+    std::uint64_t downloaded   = 0;
+    std::uint64_t uploaded     = 0;
+    std::size_t   num_peers    = 0;
+    std::vector<File> files;             ///< populated once metadata is known
+};
+
 class Client final : public TorrentHost {
 public:
     struct Config {
@@ -69,6 +88,11 @@ public:
     /// Add a magnet link — the torrent starts metadata-less and fetches its info
     /// dict from peers (BEP 9) before downloading.
     Torrent* add_magnet(const std::string& magnet_uri, const std::string& save_path = "");
+    /// Like add_magnet, but first loads any resume file saved next to @p save_path
+    /// (see Torrent::try_load_resume_data) so a previously-downloaded torrent
+    /// resumes its pieces — and, if the resume file embeds the info dict, skips the
+    /// metadata re-fetch entirely. Used to restore torrents across restarts.
+    Torrent* add_magnet_resumed(const std::string& magnet_uri, const std::string& save_path = "");
     /// Add a torrent and apply saved resume state (trusts the recorded pieces).
     Torrent* add_torrent_with_resume(const TorrentInfo& info, const ResumeData& resume,
                                      const std::string& save_path = "");
@@ -83,6 +107,19 @@ public:
     std::vector<Torrent*> torrents();
     /// Persist resume data for every torrent to its default path.
     void     save_all_resume_data();
+
+    // ---- thread-safe control / inspection (marshalled onto the reactor) ----
+    // Prefer these over reaching into a Torrent* from another thread: Torrent state
+    // is lock-free and reactor-owned, so it must only be touched on the reactor.
+
+    /// Consistent snapshot of one torrent (exists=false if not found).
+    TorrentStatus torrent_status(const InfoHash& info_hash);
+    /// Pause / resume a torrent without re-hashing (see Torrent::pause).
+    void          pause_torrent(const InfoHash& info_hash);
+    void          resume_torrent(const InfoHash& info_hash);
+    /// Persist one torrent's resume data to its default path. Returns false if the
+    /// torrent is unknown or the write failed.
+    bool          save_resume_data(const InfoHash& info_hash);
 
     // ---- aggregate stats (for status lines / UI) ----
     std::size_t   num_torrents() const noexcept { return torrents_.size(); }
