@@ -134,8 +134,15 @@ void Client::find_peers_via_dht(const InfoHash& info_hash,
                                 std::function<void(const std::string&, std::uint16_t)> on_peer) {
     if (!dht_ || !dht_->is_running()) return;
     // DhtClient delivers results on its own thread; marshal them onto the reactor.
-    dht_->find_peers(info_hash, [this, on_peer](const std::vector<Address>& peers, const InfoHash&) {
-        reactor_.post([peers, on_peer] {
+    // Re-resolve the torrent by info-hash before invoking on_peer: the torrent may
+    // have been removed between the get_peers request and its (seconds-later) reply,
+    // and on_peer captures the Torrent by pointer — dereferencing it after removal is
+    // a use-after-free of peer_list_ (same H10 hazard fixed in connect_peer). Removal
+    // happens only on the reactor thread, so a torrent present here stays alive for
+    // the whole callback.
+    dht_->find_peers(info_hash, [this, info_hash, on_peer](const std::vector<Address>& peers, const InfoHash&) {
+        reactor_.post([this, info_hash, peers, on_peer] {
+            if (torrents_.find(info_hash) == torrents_.end()) return;  // torrent gone
             for (const Address& a : peers) on_peer(a.ip.to_string(), a.port);
         });
     });
