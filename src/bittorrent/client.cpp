@@ -252,7 +252,17 @@ void Client::remove_torrent_impl(const InfoHash& info_hash) {
     auto it = torrents_.find(info_hash);
     if (it == torrents_.end()) return;
     LOG_INFO("bt.client", "removed torrent " << short_hash(info_hash));
-    it->second->stop();
+    it->second->stop();  // closes the peers the torrent has registered in its peer list
+    // stop() only closes connections the torrent knows about (its peers_ list). An
+    // *outgoing* connection that has completed connect() but not yet the wire
+    // handshake holds obs_ = this torrent, yet is not in peers_ until on_handshake —
+    // so stop() misses it. Erasing the torrent now would leave that live connection
+    // with a dangling observer, and its next message (handshake reply + payload in
+    // one segment) dereferences the freed Torrent → use-after-free crashing in
+    // dispatch(). Close every remaining live connection bound to this info-hash
+    // while the torrent is still alive (close() fires on_closed() on it).
+    for (auto& pc : connections_)
+        if (!pc->closed() && pc->info_hash() == info_hash) pc->close("torrent removed");
     torrents_.erase(it);
     // File deletion is not yet implemented; the torrent's data is left on disk.
 }
