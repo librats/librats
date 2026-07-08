@@ -818,3 +818,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **nlohmann/json**: for the excellent JSON library integration
 - **Contributors**: everyone who has helped make librats better
+
