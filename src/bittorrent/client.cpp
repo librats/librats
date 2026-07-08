@@ -292,6 +292,18 @@ TorrentStatus Client::torrent_status(const InfoHash& info_hash) {
     });
 }
 
+std::optional<TorrentInfo> Client::torrent_metadata(const InfoHash& info_hash) {
+    return run_on_reactor([&]() -> std::optional<TorrentInfo> {
+        auto it = torrents_.find(info_hash);
+        if (it == torrents_.end() || !it->second) return std::nullopt;
+        const Torrent* t = it->second.get();
+        if (!t->has_metadata()) return std::nullopt;
+        // Copy the info out under reactor ownership; TorrentInfo is a value type,
+        // so the caller gets a standalone snapshot safe to use off-thread.
+        return t->torrent_info();
+    });
+}
+
 void Client::pause_torrent(const InfoHash& info_hash) {
     run_on_reactor([&] {
         auto it = torrents_.find(info_hash);

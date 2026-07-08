@@ -114,6 +114,11 @@ public:
 
     /// Consistent snapshot of one torrent (exists=false if not found).
     TorrentStatus torrent_status(const InfoHash& info_hash);
+    /// Thread-safe copy of a loaded torrent's full metadata, or nullopt when the
+    /// torrent is unknown or its metadata hasn't arrived yet. Marshalled onto the
+    /// reactor, so it is safe to call from any thread — unlike get_torrent(), which
+    /// hands back a reactor-owned Torrent* that must not be touched off-thread.
+    std::optional<TorrentInfo> torrent_metadata(const InfoHash& info_hash);
     /// Pause / resume a torrent without re-hashing (see Torrent::pause).
     void          pause_torrent(const InfoHash& info_hash);
     void          resume_torrent(const InfoHash& info_hash);
