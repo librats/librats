@@ -226,7 +226,7 @@ RATS_API int64_t rats_peer_rtt_ms(rats_t node, const char* peer_id_hex);
 
 /** Enable the reconnection subsystem: re-dials dropped peers with exponential
  *  backoff. Dialed peers are remembered automatically; when the node has a
- *  data_dir, targets persist to "<data_dir>/peers.txt" across restarts. Call
+ *  data_dir, targets persist to "<data_dir>/peers.json" across restarts. Call
  *  before start(). A bare node never reconnects on its own. */
 RATS_API rats_error_t rats_enable_reconnect(rats_t node);
 /** Add an address to keep connected (re-dialed on drop). Persisted if a store is
