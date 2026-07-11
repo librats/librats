@@ -52,10 +52,18 @@ struct TrackerResponse {
     std::vector<Address> peers;
 };
 
+/// Polled by the blocking announce so a caller can abort it early (e.g. on
+/// shutdown): when it returns true the announce bails within ~one poll slice
+/// instead of blocking for the full timeout. An empty predicate never cancels.
+using TrackerCancelPredicate = std::function<bool()>;
+
 /// Perform one blocking announce to @p url (http/https/udp). Self-contained: it
 /// opens, uses and closes its own socket and shares no state with anything.
+/// @p cancelled, if set, is polled during the wait so the call can be aborted
+/// promptly (the blocking receive is done in short slices between polls).
 TrackerResponse announce_to_tracker(const std::string& url, const TrackerRequest& req,
-                                    int timeout_ms = 10000);
+                                    int timeout_ms = 10000,
+                                    const TrackerCancelPredicate& cancelled = {});
 
 /// Drives announces to a torrent's trackers from background threads, delivering
 /// peers via a poster (the reactor). Owned by one Torrent.

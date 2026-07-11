@@ -154,15 +154,41 @@ Bytes http_get(const std::string& url, int timeout_ms) {
     return {};
 }
 
-TrackerResponse announce_http(const std::string& url, const TrackerRequest& req, int timeout_ms) {
+// Wait for a UDP datagram for up to @p total_timeout_ms, but in short slices so a
+// pending cancellation (e.g. shutdown) aborts the wait within one slice instead
+// of blocking for the whole timeout against an unresponsive tracker. Returns the
+// datagram, or empty on timeout / cancellation.
+Bytes receive_udp_sliced(socket_t sock, std::size_t maxlen, Address& sender, int total_timeout_ms,
+                         const TrackerCancelPredicate& cancelled) {
+    if (!cancelled) {
+        // No cancellation wanted — one plain blocking wait (fast path).
+        return receive_udp_data(sock, maxlen, sender, total_timeout_ms);
+    }
+    constexpr int kSliceMs = 200;
+    int elapsed = 0;
+    while (elapsed < total_timeout_ms) {
+        if (cancelled()) return {};
+        const int slice = (std::min)(kSliceMs, total_timeout_ms - elapsed);
+        Bytes data = receive_udp_data(sock, maxlen, sender, slice);
+        if (!data.empty()) return data;
+        elapsed += slice;
+    }
+    return {};
+}
+
+TrackerResponse announce_http(const std::string& url, const TrackerRequest& req, int timeout_ms,
+                              const TrackerCancelPredicate& cancelled) {
     TrackerResponse out;
+    if (cancelled && cancelled()) { out.failure_reason = "cancelled"; return out; }
     const Bytes body = http_get(tracker_detail::build_http_announce_url(url, req), timeout_ms);
     if (body.empty()) { out.failure_reason = "no response"; return out; }
     return tracker_detail::parse_http_response(body);
 }
 
-TrackerResponse announce_udp(const std::string& url, const TrackerRequest& req, int timeout_ms) {
+TrackerResponse announce_udp(const std::string& url, const TrackerRequest& req, int timeout_ms,
+                             const TrackerCancelPredicate& cancelled) {
     TrackerResponse out;
+    if (cancelled && cancelled()) { out.failure_reason = "cancelled"; return out; }
 
     // Parse udp://host:port[/...]
     std::string rest = url.substr(6);
@@ -186,10 +212,10 @@ TrackerResponse announce_udp(const std::string& url, const TrackerRequest& req, 
     if (send_udp_data(sock, creq, host, port, AddressFamily::IPv4) <= 0) { out.failure_reason = "send"; return out; }
 
     Address sender;
-    Bytes cresp = receive_udp_data(sock, 2048, sender, timeout_ms);
+    Bytes cresp = receive_udp_sliced(sock, 2048, sender, timeout_ms, cancelled);
     if (cresp.size() < 16 || read_u32_be(cresp.data()) != kActionConnect ||
         read_u32_be(cresp.data() + 4) != tid1) {
-        out.failure_reason = "connect failed";
+        out.failure_reason = (cancelled && cancelled()) ? "cancelled" : "connect failed";
         return out;
     }
     const std::uint64_t conn_id = read_u64_be(cresp.data() + 8);
@@ -212,8 +238,11 @@ TrackerResponse announce_udp(const std::string& url, const TrackerRequest& req, 
     write_u16_be(areq.data() + 96, req.port);
     if (send_udp_data(sock, areq, host, port, AddressFamily::IPv4) <= 0) { out.failure_reason = "send"; return out; }
 
-    Bytes resp = receive_udp_data(sock, 2048, sender, timeout_ms);
-    if (resp.size() < 8) { out.failure_reason = "no response"; return out; }
+    Bytes resp = receive_udp_sliced(sock, 2048, sender, timeout_ms, cancelled);
+    if (resp.size() < 8) {
+        out.failure_reason = (cancelled && cancelled()) ? "cancelled" : "no response";
+        return out;
+    }
     const std::uint32_t action = read_u32_be(resp.data());
     if (action == kActionError) {
         out.failure_reason.assign(resp.begin() + 8, resp.end());
@@ -280,8 +309,9 @@ TrackerResponse parse_http_response(const Bytes& body) {
 
 } // namespace tracker_detail
 
-TrackerResponse announce_to_tracker(const std::string& url, const TrackerRequest& req, int timeout_ms) {
-    if (url.rfind("udp://", 0) == 0)  return announce_udp(url, req, timeout_ms);
+TrackerResponse announce_to_tracker(const std::string& url, const TrackerRequest& req, int timeout_ms,
+                                    const TrackerCancelPredicate& cancelled) {
+    if (url.rfind("udp://", 0) == 0)  return announce_udp(url, req, timeout_ms, cancelled);
     // We have no TLS for trackers yet. Skip https:// rather than speaking cleartext
     // HTTP to port 443 — that never works and would leak info_hash/peer_id in the
     // clear (H11). Re-enable once a real TLS stream is wired in.
@@ -289,7 +319,7 @@ TrackerResponse announce_to_tracker(const std::string& url, const TrackerRequest
         TrackerResponse out; out.failure_reason = "https trackers not supported (no TLS)";
         return out;
     }
-    if (url.rfind("http://", 0) == 0) return announce_http(url, req, timeout_ms);
+    if (url.rfind("http://", 0) == 0) return announce_http(url, req, timeout_ms, cancelled);
     TrackerResponse out;
     out.failure_reason = "unsupported tracker scheme";
     return out;
