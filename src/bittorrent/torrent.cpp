@@ -476,9 +476,10 @@ void Torrent::on_request(PeerConnection& pc, std::uint32_t piece, std::uint32_t 
     PeerConnection* peer = &pc;
     disk_->async_read(piece, offset, length, [this, peer, piece, offset](bool ok, Bytes data) {
         if (ok && alive(peer)) {
-            peer->send_piece(piece, offset, ByteView(data));
-            bytes_uploaded_    += data.size();
-            recent_up_[peer]   += data.size();  // seed-choking score for this window
+            const std::size_t sent = data.size();  // data is about to be moved away
+            peer->send_piece(piece, offset, std::move(data));
+            bytes_uploaded_    += sent;
+            recent_up_[peer]   += sent;  // seed-choking score for this window
         }
     });
 }

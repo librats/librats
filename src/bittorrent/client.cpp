@@ -63,6 +63,7 @@ void Client::on_accept() {
         // logs it as an error). nullptr addr: we read the peer address elsewhere.
         socket_t s = ::accept(listener_, nullptr, nullptr);
         if (!is_valid_socket(s)) break;  // drained (non-blocking listener)
+        suppress_sigpipe(s);  // not inherited from the listener; raw accept()
         // Cap total connections so an inbound flood can't exhaust memory / fds (H3).
         // Keep draining the accept queue, but immediately drop anything over the cap.
         if (connections_.size() >= kMaxConnections) {

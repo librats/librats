@@ -61,8 +61,8 @@ public:
 
 class Connection {
 public:
-    /// High-water mark for the send buffer; exceeding it closes the connection
-    /// with CloseReason::SlowConsumer.
+    /// High-water mark for the memory held by the send queue; exceeding it closes the
+    /// connection with CloseReason::SlowConsumer.
     static constexpr size_t kDefaultSendHighWater = 8 * 1024 * 1024;
 
     Connection(ConnId id, socket_t sock, ConnRole role,
@@ -108,6 +108,12 @@ public:
     /// the reaper can never outlive the connection and fire against a reused fd.
     void cancel_establish_timer();
 
+    /// Periodic housekeeping, driven by the Reactor's maintenance timer. Hands back
+    /// the receive buffer of a peer that has gone quiet — a peer that sent one big
+    /// frame and then fell silent would otherwise sit on that allocation for the life
+    /// of the connection. Reactor thread; never closes the connection.
+    void on_maintenance_tick() { rx_.decay(); }
+
     /// Record the address this outbound connection was dialed at (so the peer's
     /// reconnect address is known). Set by the Reactor after adopt(); reactor thread.
     void set_dial_address(std::string host, uint16_t port) {
@@ -126,10 +132,12 @@ public:
 
 private:
     void begin_handshake();             ///< transport up → Handshaking
+    size_t read_size() const;           ///< bytes to offer the next recv() (see rx_need_)
+    bool process_blocks();              ///< decode every complete block in rx_; false ⇒ teardown
     bool drive_handshake(ByteView body);///< feed one handshake block; false ⇒ teardown
     bool deliver_frame(ByteView body);  ///< decrypt+parse+dispatch; false ⇒ teardown
     void complete_established();         ///< handshake done → Established
-    void queue_block(ByteView body);    ///< length-prefix `body` into the send buffer
+    void queue_block(Bytes body);       ///< length-prefix `body` into the send buffer
     bool flush();                       ///< drain tx_ to the socket; false ⇒ teardown
     void arm_write();
     void disarm_write();
@@ -147,7 +155,11 @@ private:
     std::unique_ptr<Session>    session_;      ///< non-null once Established
     PeerId                      remote_id_;
 
-    ReceiveBuffer     rx_{512};   ///< grows lazily; small idle footprint
+    ReceiveBuffer     rx_;  ///< allocates on first read, shrinks back when idle
+    /// Wire size of the block rx_ is mid-way through, once its length prefix has been
+    /// read; 0 when no block is in flight. Lets the next recv() size rx_ for the whole
+    /// block in one go instead of growing into it. Peer-declared, hence capped.
+    size_t            rx_need_ = 0;
     ChainedSendBuffer tx_;
     bool              want_write_ = false;
     size_t            send_high_water_ = kDefaultSendHighWater;

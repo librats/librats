@@ -70,10 +70,22 @@ constexpr uint32_t kMaxBlockSize     = 64u * 1024 * 1024;  ///< body cap
 /// Append `[u32 len][body]` to `out`.
 void encode_block(Bytes& out, ByteView body);
 
+/// Write just the `[u32 len]` prefix into `out` (exactly kLengthPrefixSize bytes).
+/// The send path uses this to queue the prefix as its own gather slice, so the body
+/// — an encrypted frame, possibly megabytes — never has to be copied to be framed.
+void encode_block_header(uint8_t* out, size_t body_size);
+
 struct Block {
     enum Status { Ok, Incomplete, Error } status = Incomplete;
     size_t   consumed = 0;  ///< bytes to consume from the buffer (when Ok)
     ByteView body{};        ///< the block body (when Ok); views the input
+
+    /// Total size of this block on the wire (prefix + body), known as soon as the
+    /// prefix has been read; 0 while the prefix itself is still incomplete. On an
+    /// Incomplete block this is what the receive path needs before it can parse,
+    /// so it can size the buffer for the whole block in one allocation instead of
+    /// climbing to it 1.5x at a time.
+    size_t   needed = 0;
 };
 
 /// Try to take one block from the front of `[data, data+size)` without copying.

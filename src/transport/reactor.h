@@ -100,6 +100,7 @@ private:
     void drain_wakeup();
     void handle_event(const PollResult& ev);
     void do_accept();
+    void schedule_maintenance();
     Connection* adopt(socket_t sock, ConnRole role);
     void mark_for_close(socket_t sock, CloseReason reason);
     void process_pending_close();
@@ -115,6 +116,11 @@ private:
     static constexpr int kMaxPollMs = 50;
     /// Deadline from adopt() to reaching Established (covers connect + handshake).
     static constexpr std::chrono::milliseconds kEstablishTimeout{15000};
+    /// Cadence of the housekeeping sweep over this reactor's connections (currently
+    /// only Connection::on_maintenance_tick, which ages idle receive buffers). One
+    /// timer per reactor rather than one per connection: the work is a few pointer
+    /// comparisons per peer, so a sweep is cheaper than N timer entries.
+    static constexpr std::chrono::milliseconds kMaintenanceInterval{10000};
 
     uint8_t                   index_;
     ConnectionDelegate&       delegate_;

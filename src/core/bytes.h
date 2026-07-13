@@ -9,6 +9,9 @@
  * NOT own its storage — the referenced bytes must outlive the view. On the
  * receive path views point straight into the connection's ReceiveBuffer and are
  * only valid until the buffer is consumed.
+ *
+ * `ByteSpan` is the mutable counterpart (std::span<uint8_t>), handed out by
+ * ReceiveBuffer::prepare() as the destination of a recv().
  */
 
 #include <cstdint>
@@ -41,6 +44,26 @@ public:
 private:
     const uint8_t* data_ = nullptr;
     size_t         size_ = 0;
+};
+
+/// Non-owning view over a contiguous run of *writable* bytes.
+class ByteSpan {
+public:
+    constexpr ByteSpan() = default;
+    constexpr ByteSpan(uint8_t* data, size_t size) : data_(data), size_(size) {}
+
+    uint8_t* data()  const noexcept { return data_; }
+    size_t   size()  const noexcept { return size_; }
+    bool     empty() const noexcept { return size_ == 0; }
+
+    uint8_t* begin() const noexcept { return data_; }
+    uint8_t* end()   const noexcept { return data_ + size_; }
+
+    operator ByteView() const noexcept { return ByteView(data_, size_); }
+
+private:
+    uint8_t* data_ = nullptr;
+    size_t   size_ = 0;
 };
 
 } // namespace librats

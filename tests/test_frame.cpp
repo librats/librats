@@ -48,6 +48,34 @@ TEST(FrameTest, BlockRejectsOversize) {
     EXPECT_EQ(framer::try_take_block(wire.data(), wire.size()).status, framer::Block::Error);
 }
 
+// An incomplete block reports the size it is waiting for as soon as the length prefix
+// is in — that is what lets the receive path allocate for the whole block at once
+// instead of growing into it 1.5x at a time.
+TEST(FrameTest, IncompleteBlockReportsTheSizeItNeeds) {
+    Bytes wire;
+    framer::encode_block(wire, ByteView(std::string(5000, 'x')));
+    const size_t total = wire.size();  // 4 + 5000
+
+    // Prefix not fully in yet: nothing to report.
+    for (size_t have = 0; have < framer::kLengthPrefixSize; ++have) {
+        const auto block = framer::try_take_block(wire.data(), have);
+        EXPECT_EQ(block.status, framer::Block::Incomplete);
+        EXPECT_EQ(block.needed, 0u) << "at " << have << " byte(s)";
+    }
+
+    // Prefix in, body still arriving: the full wire size is known throughout.
+    for (size_t have = framer::kLengthPrefixSize; have < total; ++have) {
+        const auto block = framer::try_take_block(wire.data(), have);
+        EXPECT_EQ(block.status, framer::Block::Incomplete);
+        EXPECT_EQ(block.needed, total) << "at " << have << " byte(s)";
+    }
+
+    const auto done = framer::try_take_block(wire.data(), total);
+    EXPECT_EQ(done.status, framer::Block::Ok);
+    EXPECT_EQ(done.needed, total);
+    EXPECT_EQ(done.consumed, total);
+}
+
 TEST(FrameTest, BackToBackBlocks) {
     Bytes wire;
     framer::encode_block(wire, ByteView(std::string("one")));

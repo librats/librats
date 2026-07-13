@@ -8,15 +8,18 @@ namespace framer {
 
 // ── Outer block ─────────────────────────────────────────────────────────────
 
+void encode_block_header(uint8_t* out, size_t body_size) {
+    const uint32_t net_len = htonl(static_cast<uint32_t>(body_size));
+    std::memcpy(out, &net_len, kLengthPrefixSize);
+}
+
 void encode_block(Bytes& out, ByteView body) {
-    const uint32_t len = static_cast<uint32_t>(body.size());
-    const size_t   at  = out.size();
+    const size_t at = out.size();
     out.resize(at + kLengthPrefixSize + body.size());
 
     uint8_t* p = out.data() + at;
-    const uint32_t net_len = htonl(len);
-    std::memcpy(p, &net_len, 4);
-    if (!body.empty()) std::memcpy(p + 4, body.data(), body.size());
+    encode_block_header(p, body.size());
+    if (!body.empty()) std::memcpy(p + kLengthPrefixSize, body.data(), body.size());
 }
 
 Block try_take_block(const uint8_t* data, size_t size) {
@@ -30,6 +33,7 @@ Block try_take_block(const uint8_t* data, size_t size) {
     if (len > kMaxBlockSize) { out.status = Block::Error; return out; }
 
     const size_t total = kLengthPrefixSize + len;
+    out.needed = total;  // the prefix is in: we now know the whole block's size
     if (size < total) { out.status = Block::Incomplete; return out; }
 
     out.status   = Block::Ok;

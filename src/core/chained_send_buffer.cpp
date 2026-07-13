@@ -1,75 +1,125 @@
 #include "core/chained_send_buffer.h"
-#include <cstring>
+
 #include <algorithm>
+#include <cassert>
 
 namespace librats {
 
-void ChainedSendBuffer::append(std::vector<uint8_t> data) {
-    if (data.empty()) return;
-    
-    total_bytes_ += data.size();
-    chunks_.emplace_back(std::move(data));
+ChainedSendBuffer& ChainedSendBuffer::operator=(ChainedSendBuffer&& other) noexcept {
+    if (this == &other) return *this;
+
+    // clear() the source rather than relying on the containers' moved-from state: a
+    // moved-from deque/vector is only guaranteed *valid*, not empty, and the counters
+    // must be zeroed to match whatever it ends up holding.
+    chunks_    = std::move(other.chunks_);
+    recycled_  = std::move(other.recycled_);
+    pending_   = std::exchange(other.pending_, 0);
+    allocated_ = std::exchange(other.allocated_, 0);
+    other.clear();
+    return *this;
 }
 
-void ChainedSendBuffer::append(const uint8_t* data, size_t length) {
-    if (length == 0) return;
-    
-    std::vector<uint8_t> chunk(data, data + length);
+// ── Queueing ────────────────────────────────────────────────────────────────
+
+void ChainedSendBuffer::append(Bytes data) {
+    if (data.empty()) return;
+
+    pending_   += data.size();
+    allocated_ += data.capacity();
+    chunks_.push_back(Chunk{std::move(data), 0});
+}
+
+void ChainedSendBuffer::append(ByteView bytes) {
+    if (bytes.empty()) return;
+
+    // Pack into the tail chunk when it has the room. The capacity check guarantees
+    // the insert cannot reallocate, so slices handed out by gather() — including one
+    // pointing into this very chunk — stay valid.
+    if (Bytes* tail = coalescable_tail(bytes.size())) {
+        tail->insert(tail->end(), bytes.begin(), bytes.end());
+        pending_ += bytes.size();
+        return;
+    }
+
+    Bytes chunk = take_chunk(bytes.size());
+    chunk.assign(bytes.begin(), bytes.end());
     append(std::move(chunk));
 }
 
-const uint8_t* ChainedSendBuffer::front_data() const {
-    if (chunks_.empty()) {
-        return nullptr;
-    }
-    return chunks_.front().current();
+Bytes* ChainedSendBuffer::coalescable_tail(size_t bytes) noexcept {
+    if (chunks_.empty()) return nullptr;
+    Bytes& tail = chunks_.back().data;
+    return tail.capacity() - tail.size() >= bytes ? &tail : nullptr;
 }
 
-size_t ChainedSendBuffer::front_size() const {
-    if (chunks_.empty()) {
-        return 0;
+Bytes ChainedSendBuffer::take_chunk(size_t bytes) {
+    if (recycled_.capacity() >= bytes) {
+        Bytes chunk = std::move(recycled_);
+        recycled_ = Bytes{};  // a moved-from vector is only guaranteed *valid*, not empty
+        return chunk;
     }
-    return chunks_.front().remaining();
+
+    // A small message opens a chunk with spare room, so the messages behind it can
+    // be packed in for free (see coalescable_tail). A large one is sized exactly —
+    // padding a payload buffer would only waste memory.
+    Bytes chunk;
+    chunk.reserve((std::max)(bytes, kScratchCapacity));
+    return chunk;
+}
+
+void ChainedSendBuffer::recycle(Bytes&& chunk) noexcept {
+    // Keep at most one drained chunk, and only a small one: holding on to a piece-
+    // sized payload buffer would trade a malloc for permanently resident memory.
+    if (chunk.capacity() > kMaxRecycledCapacity) return;
+    if (chunk.capacity() <= recycled_.capacity()) return;
+
+    recycled_ = std::move(chunk);
+    recycled_.clear();  // keeps the capacity
+}
+
+// ── Draining ────────────────────────────────────────────────────────────────
+
+size_t ChainedSendBuffer::gather(ByteView* out, size_t max_slices) const {
+    size_t n = 0;
+    for (const Chunk& chunk : chunks_) {
+        if (n == max_slices) break;
+        out[n++] = ByteView(chunk.head(), chunk.remaining());
+    }
+    return n;
+}
+
+ByteView ChainedSendBuffer::front() const noexcept {
+    if (chunks_.empty()) return {};
+    const Chunk& head = chunks_.front();
+    return ByteView(head.head(), head.remaining());
 }
 
 void ChainedSendBuffer::pop_front(size_t bytes) {
+    assert(bytes <= pending_ && "pop_front() past the queued bytes");
+
     while (bytes > 0 && !chunks_.empty()) {
-        SendChunk& front = chunks_.front();
-        size_t remaining = front.remaining();
-        
-        if (bytes >= remaining) {
-            // Consume entire chunk
-            bytes -= remaining;
-            total_bytes_ -= remaining;
-            chunks_.pop_front();
-        } else {
-            // Partial consume
-            front.offset += bytes;
-            total_bytes_ -= bytes;
-            bytes = 0;
+        Chunk& head = chunks_.front();
+        const size_t left = head.remaining();
+
+        if (bytes < left) {  // chunk partially sent: just advance its cursor
+            head.sent += bytes;
+            pending_  -= bytes;
+            return;
         }
+
+        bytes      -= left;
+        pending_   -= left;
+        allocated_ -= head.data.capacity();
+        recycle(std::move(head.data));
+        chunks_.pop_front();
     }
 }
 
-void ChainedSendBuffer::clear() {
+void ChainedSendBuffer::clear() noexcept {
     chunks_.clear();
-    total_bytes_ = 0;
-}
-
-size_t ChainedSendBuffer::copy_to(uint8_t* buffer, size_t max_bytes) const {
-    size_t copied = 0;
-    
-    for (const auto& chunk : chunks_) {
-        if (copied >= max_bytes) break;
-        
-        size_t remaining = chunk.remaining();
-        size_t to_copy = (std::min)(remaining, max_bytes - copied);
-        
-        std::memcpy(buffer + copied, chunk.current(), to_copy);
-        copied += to_copy;
-    }
-    
-    return copied;
+    recycled_  = Bytes{};
+    pending_   = 0;
+    allocated_ = 0;
 }
 
 } // namespace librats

@@ -122,6 +122,8 @@ void Reactor::run() {
     PollResult        events[kMaxEvents];
     std::vector<Task> task_batch;
 
+    schedule_maintenance();
+
     while (running_.load(std::memory_order_relaxed)) {
         const int timeout = timers_.next_timeout_ms(kMaxPollMs);
         const int n = poller_->wait(events, kMaxEvents, timeout);
@@ -172,6 +174,15 @@ void Reactor::handle_event(const PollResult& ev) {
     if (!keep) mark_for_close(fd, conn->close_reason());
 }
 
+void Reactor::schedule_maintenance() {
+    timers_.schedule(kMaintenanceInterval, [this] {
+        // Connections being torn down this tick are still in conns_; the sweep is
+        // read-only with respect to the map, and on_maintenance_tick() never closes.
+        for (auto& [sock, conn] : conns_) conn->on_maintenance_tick();
+        schedule_maintenance();
+    });
+}
+
 void Reactor::do_accept() {
     // Level-triggered: drain all pending connections this tick. Use a raw,
     // non-logging accept — accept_client() logs an error on every EWOULDBLOCK,
@@ -179,6 +190,7 @@ void Reactor::do_accept() {
     while (true) {
         socket_t client = ::accept(server_socket_, nullptr, nullptr);
         if (!is_valid_socket(client)) break;  // EWOULDBLOCK / error → done this tick
+        suppress_sigpipe(client);  // not inherited from the listener; raw accept()
 
         // Admission control: refuse new inbound peers when at capacity, before
         // paying any handshake cost. Keep draining the backlog so the listener

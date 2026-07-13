@@ -20,6 +20,7 @@
 #include "bittorrent/reactor.h"
 #include "bittorrent/types.h"
 #include "core/bytes.h"
+#include "core/chained_send_buffer.h"
 #include "core/receive_buffer.h"
 
 #include <chrono>
@@ -115,7 +116,9 @@ public:
     void send_have(std::uint32_t piece);
     void send_bitfield(const Bitfield& bitfield);
     void send_request(std::uint32_t piece, std::uint32_t offset, std::uint32_t length);
-    void send_piece(std::uint32_t piece, std::uint32_t offset, ByteView data);
+    /// Takes ownership of `data` — the block goes into the send queue as its own
+    /// chunk, so a disk read is handed straight to the socket without a copy.
+    void send_piece(std::uint32_t piece, std::uint32_t offset, Bytes data);
     void send_cancel(std::uint32_t piece, std::uint32_t offset, std::uint32_t length);
     void send_port(std::uint16_t port);
     void send_extended(std::uint8_t ext_id, ByteView payload);
@@ -123,13 +126,20 @@ public:
 private:
     void on_io(std::uint32_t events);
     void do_read();
+    std::size_t read_size() const;  ///< bytes to offer the next recv() (see rx_need_)
     void parse();
     bool parse_handshake();
     void send_handshake();
     void dispatch(MessageId id, const std::uint8_t* payload, std::uint32_t len);
 
     void send_message(MessageId id, const std::uint8_t* payload, std::uint32_t len);
-    void queue(const std::uint8_t* data, std::size_t len);
+    /// Append to the send queue. No syscall: the caller flushes once the whole
+    /// message is queued, so a message never costs more than one send().
+    void queue(ByteView bytes) { if (!closed_) tx_.append(bytes); }
+    /// Queue a buffer the caller already owns — moved in, never copied.
+    void queue(Bytes bytes) { if (!closed_) tx_.append(std::move(bytes)); }
+    /// Push the queue to the socket with one gather-send, (dis)arm write interest,
+    /// and enforce the send high-water mark. May close the connection.
     void flush();
     void want_write(bool on);
     /// Periodic self-rescheduling tick: enforces the handshake/idle deadlines and
@@ -149,10 +159,13 @@ private:
     std::string   remote_ip_;       ///< peer's address (source for incoming, dialed for outgoing)
     std::uint16_t remote_port_ = 0;
 
-    ReceiveBuffer        rx_;
-    std::vector<std::uint8_t> out_;
-    std::size_t          out_sent_ = 0;
-    bool                 want_write_ = false;
+    ReceiveBuffer     rx_;
+    /// Wire size of the message rx_ is mid-way through (4-byte prefix included), once
+    /// that prefix has been read; 0 when no message is in flight. Lets the next recv()
+    /// size rx_ for the whole message in one go. Peer-declared, hence capped.
+    std::size_t       rx_need_ = 0;
+    ChainedSendBuffer tx_;
+    bool              want_write_ = false;
 
     // Timeout bookkeeping, all evaluated by the periodic tick().
     TimerId                               tick_timer_ = kInvalidTimerId;

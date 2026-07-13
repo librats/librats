@@ -2,6 +2,7 @@
 #include "bittorrent/byte_io.h"
 #include "bittorrent/log.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
@@ -20,6 +21,15 @@ inline bool would_block() { return errno == EAGAIN || errno == EWOULDBLOCK; }
 constexpr std::uint32_t kMaxMessageLen = 2 * 1024 * 1024;
 
 constexpr std::size_t kRecvChunk = 64 * 1024;
+
+/// Ceiling on how far rx_ may be grown on the strength of a *declared* message length
+/// alone. Sizing the buffer for the whole message up front (as libtorrent does, growing
+/// straight to packet_size) turns a large message into one allocation instead of a
+/// 1.5x-at-a-time climb. But the length is the peer's word, so past this we fall back
+/// to geometric growth and the allocation only ever tracks bytes that really arrived.
+/// Comfortably above anything real (a piece is 16 KiB + 9; the largest honest message
+/// is a bitfield, ~1 byte per 8 pieces).
+constexpr std::size_t kMaxEagerReserve = 1024 * 1024;
 
 /// Send-buffer high-water mark. If a peer stops draining its socket and our
 /// unsent backlog blows past this, the peer is a slow consumer — drop it rather
@@ -120,7 +130,8 @@ void PeerConnection::send_handshake() {
     std::memcpy(hs + 28, info_hash_.data(), 20);
     std::memcpy(hs + 48, our_peer_id_.data(), 20);
     handshake_sent_ = true;
-    queue(hs, kHandshakeSize);
+    queue(ByteView(hs, kHandshakeSize));
+    flush();
 }
 
 void PeerConnection::close(const std::string& reason) {
@@ -135,6 +146,9 @@ void PeerConnection::close(const std::string& reason) {
         close_socket(sock_);
         sock_ = INVALID_SOCKET_VALUE;
     }
+    // Drop the send backlog; rx_ is deliberately left alone — close() can be called
+    // from inside a message handler that still holds a ByteView into it.
+    tx_.clear();
     if (obs_) obs_->on_closed(*this, reason);
 }
 
@@ -150,37 +164,68 @@ void PeerConnection::on_io(std::uint32_t events) {
 }
 
 void PeerConnection::do_read() {
+    // Drain the kernel buffer, parsing after every read. Parsing inside the loop
+    // (rather than once the socket is empty) is what bounds rx_ to a single in-flight
+    // message — otherwise a seed pushing pieces at line rate would grow it to
+    // however much it managed to deliver before we caught up.
+    //
+    // The loop must run to would-block or to a short read (kernel buffer now empty):
+    // the kqueue backend is edge-triggered, so leaving unread data behind would stall
+    // the connection until the peer happens to send more.
     for (;;) {
-        rx_.ensure_space(kRecvChunk);
-        const int n = ::recv(sock_, reinterpret_cast<char*>(rx_.write_ptr()),
-                             static_cast<int>(rx_.write_space()), 0);
-        if (n > 0) {
-            last_recv_ = std::chrono::steady_clock::now();
-            rx_.received(std::size_t(n));
-            continue;
-        }
-        if (n == 0) { close("peer closed connection"); return; }
-        if (would_block()) break;
-        close("recv error");
-        return;
-    }
+        const ByteSpan into = rx_.prepare(read_size());
 
-    parse();
-    if (closed_) return;
-    if (rx_.empty()) rx_.clear();
-    else if (rx_.front_waste() > (1u << 20)) rx_.normalize();
+        const int n = ::recv(sock_, reinterpret_cast<char*>(into.data()),
+                             static_cast<int>(into.size()), 0);
+        if (n == 0) { close("peer closed connection"); return; }
+        if (n < 0) {
+            if (would_block()) return;
+            close("recv error");
+            return;
+        }
+
+        last_recv_ = std::chrono::steady_clock::now();
+        rx_.commit(std::size_t(n));
+
+        parse();
+        if (closed_) return;
+
+        if (std::size_t(n) < into.size()) return;  // kernel buffer drained
+    }
+}
+
+std::size_t PeerConnection::read_size() const {
+    // Ask for the rest of the message we are mid-way through, so a big one (a bitfield,
+    // a metadata piece) lands in a single allocation rather than a series of 1.5x growth
+    // steps that memmove everything received so far at each one. Bounded by
+    // kMaxEagerReserve — rx_need_ is a length the *peer* declared.
+    //
+    // Note this asks for the remainder even when it is *smaller* than kRecvChunk. It is
+    // tempting to floor it at kRecvChunk ("read as much as we can anyway"), but
+    // prepare(n) is a demand for n bytes of free tail, and a buffer sized exactly for
+    // the message has no kRecvChunk of tail left near the end of it — so the floor would
+    // force one last 1.5x grow (memcpy'ing the whole message that already arrived) for
+    // room the message does not need. Nothing is lost by asking for less: prepare()
+    // hands back the *entire* free tail regardless, so the recv() is just as big.
+    if (rx_need_ > rx_.size()) return (std::min)(rx_need_ - rx_.size(), kMaxEagerReserve);
+    return kRecvChunk;
 }
 
 void PeerConnection::parse() {
+    rx_need_ = 0;  // recomputed below: 0 == no message is mid-flight
+
     if (!handshake_received_) {
-        if (rx_.size() < kHandshakeSize) return;
+        if (rx_.size() < kHandshakeSize) { rx_need_ = kHandshakeSize; return; }
         if (!parse_handshake()) return;  // consumed 68 bytes (or closed)
     }
 
     while (!closed_ && rx_.size() >= 4) {
         const std::uint32_t len = read_u32_be(rx_.data());
         if (len > kMaxMessageLen) { close("oversize message"); return; }
-        if (rx_.size() < std::size_t(4) + len) break;  // wait for the rest
+        if (rx_.size() < std::size_t(4) + len) {
+            rx_need_ = std::size_t(4) + len;  // size rx_ for the whole message
+            break;
+        }
         if (len == 0) { rx_.consume(4); continue; }     // keep-alive
 
         const std::uint8_t  id      = rx_.data()[4];
@@ -324,13 +369,15 @@ void PeerConnection::send_message(MessageId id, const std::uint8_t* payload, std
     std::uint8_t header[5];
     write_u32_be(header, len + 1);
     header[4] = std::uint8_t(id);
-    queue(header, 5);
-    if (len) queue(payload, len);
+    queue(ByteView(header, 5));
+    if (len) queue(ByteView(payload, len));
+    flush();
 }
 
 void PeerConnection::send_keepalive() {
-    std::uint8_t z[4] = {0, 0, 0, 0};
-    queue(z, 4);
+    const std::uint8_t z[4] = {0, 0, 0, 0};
+    queue(ByteView(z, 4));
+    flush();
 }
 void PeerConnection::send_choke()         { am_choking_ = true;    send_message(MessageId::Choke, nullptr, 0); }
 void PeerConnection::send_unchoke()       { am_choking_ = false;   send_message(MessageId::Unchoke, nullptr, 0); }
@@ -355,16 +402,18 @@ void PeerConnection::send_request(std::uint32_t piece, std::uint32_t offset, std
     send_message(MessageId::Request, p, 12);
 }
 
-void PeerConnection::send_piece(std::uint32_t piece, std::uint32_t offset, ByteView data) {
-    std::uint8_t head[8];
-    write_u32_be(head, piece);
-    write_u32_be(head + 4, offset);
-    std::uint8_t header[5];
+void PeerConnection::send_piece(std::uint32_t piece, std::uint32_t offset, Bytes data) {
+    // The 13-byte header packs into the send queue's scratch chunk; the block is moved
+    // in as its own chunk, so the buffer the disk read filled is never copied. Gather
+    // I/O reunites the two, so this is still one send().
+    std::uint8_t header[13];
     write_u32_be(header, std::uint32_t(9 + data.size()));
     header[4] = std::uint8_t(MessageId::Piece);
-    queue(header, 5);
-    queue(head, 8);
-    if (!data.empty()) queue(data.data(), data.size());
+    write_u32_be(header + 5, piece);
+    write_u32_be(header + 9, offset);
+    queue(ByteView(header, sizeof(header)));
+    if (!data.empty()) queue(std::move(data));
+    flush();
 }
 
 void PeerConnection::send_cancel(std::uint32_t piece, std::uint32_t offset, std::uint32_t length) {
@@ -382,50 +431,41 @@ void PeerConnection::send_port(std::uint16_t port) {
 }
 
 void PeerConnection::send_extended(std::uint8_t ext_id, ByteView payload) {
-    std::uint8_t header[5];
+    std::uint8_t header[6];
     write_u32_be(header, std::uint32_t(2 + payload.size()));
     header[4] = std::uint8_t(MessageId::Extended);
-    queue(header, 5);
-    queue(&ext_id, 1);
-    if (!payload.empty()) queue(payload.data(), payload.size());
-}
-
-void PeerConnection::queue(const std::uint8_t* data, std::size_t len) {
-    if (closed_ || len == 0) return;
-    out_.insert(out_.end(), data, data + len);
+    header[5] = ext_id;
+    queue(ByteView(header, sizeof(header)));
+    if (!payload.empty()) queue(payload);
     flush();
-    // Backpressure: flush() leaves out_ holding only the still-unsent backlog (it
-    // compacts the sent prefix). If that backlog has run past the high-water mark
-    // the peer isn't keeping up — drop it instead of buffering without bound.
-    if (!closed_ && out_.size() > kSendHighWater) close("slow consumer: send buffer overflow");
 }
 
 void PeerConnection::flush() {
-    while (out_sent_ < out_.size()) {
-        const int n = ::send(sock_, reinterpret_cast<const char*>(out_.data() + out_sent_),
-                            static_cast<int>(out_.size() - out_sent_), 0);
+    if (closed_) return;
+
+    while (!tx_.empty()) {
+        // One syscall for the whole backlog, however many chunks it spans.
+        ByteView slices[kMaxSendSlices];
+        const std::size_t count = tx_.gather(slices, kMaxSendSlices);
+
+        const std::ptrdiff_t n = send_vectored(sock_, slices, count);
         if (n > 0) {
             last_sent_ = std::chrono::steady_clock::now();
-            out_sent_ += std::size_t(n);
+            tx_.pop_front(std::size_t(n));
             continue;
         }
-        if (would_block()) {
-            // Socket is congested; wait for PollOut. Reclaim the already-sent prefix
-            // first so out_ holds only the backlog (bounds memory under partial
-            // writes and makes out_.size() a true measure of what's queued).
-            if (out_sent_ > 0) {
-                out_.erase(out_.begin(), out_.begin() + std::ptrdiff_t(out_sent_));
-                out_sent_ = 0;
-            }
-            want_write(true);
-            return;
-        }
+        if (n == 0) break;                 // nothing accepted; retry on PollOut
+        if (would_block()) break;          // congested; the backlog waits for PollOut
         close("send error");
         return;
     }
-    out_.clear();
-    out_sent_ = 0;
-    want_write(false);
+
+    want_write(!tx_.empty());
+
+    // Backpressure: allocated() is the memory the queue actually holds (a partially
+    // sent chunk keeps its whole allocation). Past the high-water mark the peer isn't
+    // draining us — drop it rather than buffer without bound.
+    if (tx_.allocated() > kSendHighWater) close("slow consumer: send buffer overflow");
 }
 
 void PeerConnection::want_write(bool on) {
@@ -449,6 +489,13 @@ void PeerConnection::tick() {
     }
 
     if (closed_) return;  // send_keepalive() may have hit a send error and closed us
+
+    // Hand back the receive buffer of a peer that has gone quiet. Without this a peer
+    // that sent one big message (a bitfield, a metadata piece) and then went idle would
+    // sit on that allocation for as long as the connection lives — the traffic-driven
+    // shrink in ReceiveBuffer only ever samples when a message actually arrives.
+    rx_.decay();
+
     tick_timer_ = reactor_.schedule(kTickInterval, [this] { tick(); });
 }
 

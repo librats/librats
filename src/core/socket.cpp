@@ -9,6 +9,14 @@
 #ifndef _WIN32
     #include <fcntl.h>    // for O_NONBLOCK
     #include <errno.h>    // for errno
+    #include <sys/uio.h>  // for iovec (send_vectored)
+    #include <limits.h>   // for IOV_MAX (send_vectored)
+    // macOS/BSD have no MSG_NOSIGNAL; they suppress SIGPIPE with the SO_NOSIGPIPE
+    // socket option instead, which suppress_sigpipe() sets on every TCP socket we
+    // send on — so sending with no flag is the right fallback there.
+    #ifndef MSG_NOSIGNAL
+        #define MSG_NOSIGNAL 0
+    #endif
 #endif
 
 // On Windows, SIO_UDP_CONNRESET lives in <mstcpip.h>, which mingw doesn't always pull
@@ -51,6 +59,19 @@ static std::string socket_error_string(int error) {
 #endif
 }
 
+void suppress_sigpipe(socket_t socket) {
+#ifdef SO_NOSIGPIPE
+    int on = 1;
+    if (setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE,
+                   reinterpret_cast<const char*>(&on), sizeof(on)) != 0) {
+        LOG_SOCKET_WARN("Failed to set SO_NOSIGPIPE on socket " << socket << ": "
+                        << socket_error_string(get_last_socket_error()));
+    }
+#else
+    (void)socket;
+#endif
+}
+
 // Extract sender peer info from sockaddr_storage (shared by UDP receive).
 // IpAddress::from_sockaddr copies the raw address bytes (and unwraps IPv4-mapped
 // IPv6) with no textual round-trip; an unknown family yields an unspecified peer.
@@ -76,6 +97,7 @@ static socket_t create_tcp_client_v4(const std::string& host, int port, int time
         LOG_SOCKET_ERROR("Failed to create IPv4 client socket");
         return INVALID_SOCKET_VALUE;
     }
+    suppress_sigpipe(client_socket);
 
     sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
@@ -123,6 +145,7 @@ static socket_t create_tcp_client_v6(const std::string& host, int port, int time
         LOG_SOCKET_ERROR("Failed to create IPv6 client socket");
         return INVALID_SOCKET_VALUE;
     }
+    suppress_sigpipe(client_socket);
 
     sockaddr_in6 server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
@@ -289,6 +312,7 @@ bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr
 static socket_t tcp_connect_start_family(int family, const std::string& resolved_ip, int port) {
     socket_t s = socket(family, SOCK_STREAM, 0);
     if (s == INVALID_SOCKET_VALUE) return INVALID_SOCKET_VALUE;
+    suppress_sigpipe(s);
 
     if (!set_socket_nonblocking(s)) {
         close_socket(s);
@@ -497,6 +521,7 @@ socket_t accept_client(socket_t server_socket) {
         LOG_SOCKET_ERROR("Failed to accept client connection");
         return INVALID_SOCKET_VALUE;
     }
+    suppress_sigpipe(client_socket);
 
     if (client_addr.ss_family == AF_INET) {
         char client_ip[INET_ADDRSTRLEN];
@@ -558,6 +583,45 @@ std::optional<Address> get_peer_endpoint(socket_t socket) {
                               ? ntohs(reinterpret_cast<sockaddr_in*>(&ss)->sin_port)
                               : ntohs(reinterpret_cast<sockaddr_in6*>(&ss)->sin6_port);
     return Address{*ip, port};
+}
+
+std::ptrdiff_t send_vectored(socket_t socket, const ByteView* slices, size_t count) {
+    if (count == 0) return 0;
+    if (count > kMaxSendSlices) count = kMaxSendSlices;
+#if !defined(_WIN32) && defined(IOV_MAX)
+    // sendmsg() rejects an iovec longer than IOV_MAX with EINVAL — which the callers
+    // read as "the peer is gone" and would close a perfectly healthy connection over.
+    // POSIX only guarantees 16 (Linux and macOS allow 1024), so clamp rather than
+    // trust kMaxSendSlices to be under every platform's limit. The slices that don't
+    // fit are not lost: they go out on the next round of the caller's flush loop.
+    if (count > static_cast<size_t>(IOV_MAX)) count = static_cast<size_t>(IOV_MAX);
+#endif
+
+#ifdef _WIN32
+    WSABUF bufs[kMaxSendSlices];
+    for (size_t i = 0; i < count; ++i) {
+        bufs[i].buf = reinterpret_cast<CHAR*>(const_cast<uint8_t*>(slices[i].data()));
+        bufs[i].len = static_cast<ULONG>(slices[i].size());
+    }
+    DWORD sent = 0;
+    if (WSASend(socket, bufs, static_cast<DWORD>(count), &sent, 0, nullptr, nullptr) == SOCKET_ERROR) {
+        return -1;
+    }
+    return static_cast<std::ptrdiff_t>(sent);
+#else
+    struct iovec iov[kMaxSendSlices];
+    for (size_t i = 0; i < count; ++i) {
+        iov[i].iov_base = const_cast<uint8_t*>(slices[i].data());
+        iov[i].iov_len  = slices[i].size();
+    }
+    struct msghdr msg = {};
+    msg.msg_iov    = iov;
+    msg.msg_iovlen = static_cast<decltype(msg.msg_iovlen)>(count);
+    // MSG_NOSIGNAL keeps a peer that hung up from killing the process with SIGPIPE.
+    // It doesn't exist on macOS/BSD (they use SO_NOSIGPIPE on the socket instead),
+    // where the fallback below makes this a plain sendmsg().
+    return ::sendmsg(socket, &msg, MSG_NOSIGNAL);
+#endif
 }
 
 int send_tcp_data(socket_t socket, const std::vector<uint8_t>& data) {

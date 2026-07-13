@@ -1,11 +1,13 @@
 #pragma once
 
 #include "address.h"
+#include "bytes.h"
 
 #include <string>
 #include <functional>
 #include <optional>
 #include <vector>
+#include <cstddef>
 #include <cstdint>
 
 #ifdef _WIN32
@@ -102,6 +104,21 @@ socket_t create_tcp_server(int port, int backlog = 5, const std::string& bind_ad
 socket_t accept_client(socket_t server_socket);
 
 /**
+ * Keep a peer that hung up from killing the process with SIGPIPE.
+ *
+ * Writing to a socket whose peer has closed raises SIGPIPE, whose default
+ * disposition terminates the process. Linux suppresses it per-send with
+ * MSG_NOSIGNAL; macOS/BSD have no such flag and suppress it per-socket instead, so
+ * every TCP socket we may send on has to carry SO_NOSIGPIPE. Windows has no SIGPIPE
+ * at all, and there this is a no-op.
+ *
+ * The socket helpers here (create_tcp_client / tcp_connect_start / accept_client)
+ * already do this. Call it yourself only when you take a socket straight from
+ * ::accept() — the option is *not* inherited from the listening socket.
+ */
+void suppress_sigpipe(socket_t socket);
+
+/**
  * Get the peer address (IP:port) from a connected socket
  * @param socket The connected socket handle
  * @return Peer address string in format "IP:port", or empty string on error
@@ -123,6 +140,35 @@ std::optional<Address> get_peer_endpoint(socket_t socket);
  * @return Number of bytes sent, or -1 on error
  */
 int send_tcp_data(socket_t socket, const std::vector<uint8_t>& data);
+
+/// Most slices send_vectored() will pass to the kernel in one call. Callers size
+/// their slice arrays with this; anything beyond it simply goes out next round.
+///
+/// Sized so the syscall runs out of *bytes* before it runs out of slices. A queued
+/// message costs two slices (its length prefix + its body), so 64 slices would cap a
+/// single send at 32 messages — with small frames that is ~45 KiB, well under what a
+/// socket will take, and a backlog would need more syscalls than a plain contiguous
+/// buffer. 256 slices (4 KiB of ByteView on the stack) keeps the kernel, not this
+/// array, the limiting factor. send_vectored() additionally clamps to IOV_MAX.
+constexpr size_t kMaxSendSlices = 256;
+
+/**
+ * Scatter/gather send: hand several non-contiguous slices to the kernel in a
+ * single syscall (sendmsg on POSIX, WSASend on Windows). A backlog of framed
+ * messages then costs one syscall instead of one per message — the reason
+ * ChainedSendBuffer::gather() exists.
+ *
+ * Non-blocking sockets may accept only part of the data, exactly as send() does.
+ *
+ * @param socket The socket handle
+ * @param slices Contiguous runs to send, in order (slices beyond kMaxSendSlices
+ *               are ignored — the caller sends them on the next round)
+ * @param count  Number of slices
+ * @return Bytes accepted (possibly a partial write), or -1 on error, in which case
+ *         errno / WSAGetLastError() holds the reason (EWOULDBLOCK when the socket's
+ *         send buffer is full).
+ */
+std::ptrdiff_t send_vectored(socket_t socket, const ByteView* slices, size_t count);
 
 /**
  * Receive data from a TCP socket

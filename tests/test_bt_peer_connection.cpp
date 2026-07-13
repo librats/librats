@@ -179,7 +179,7 @@ TEST_F(BtPeerConnection, RequestThenPiece) {
     // A serves the block.
     Bytes block(16384);
     for (std::size_t i = 0; i < block.size(); ++i) block[i] = std::uint8_t(i * 7 + 1);
-    a_->send_piece(1, 0, ByteView(block));
+    a_->send_piece(1, 0, block);  // copies; `block` is compared against below
 
     pump([&] { return obs_b_.got_piece; });
     EXPECT_EQ(obs_b_.pc_piece, 1u);
