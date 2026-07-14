@@ -290,8 +290,10 @@ TEST(ReceiveBufferTest, IdleDecayLeavesABusyBufferAlone) {
 }
 
 TEST(ReceiveBufferTest, IdleDecayKeepsAPartialMessageIntact) {
-    // A tick may land while a message is still in flight. That data is live — it must
-    // keep both its bytes and its storage.
+    // A tick may land while a message is still in flight. Ageing may reclaim the unused
+    // tail (see IdleDecayReclaimsAStalledPartialMessage), but the live bytes themselves
+    // are never dropped or moved out from under the parser: they keep their content and
+    // enough storage to hold them.
     ReceiveBuffer buf;
     const auto payload = iota_bytes(200);
     feed(buf, payload);
@@ -301,6 +303,55 @@ TEST(ReceiveBufferTest, IdleDecayKeepsAPartialMessageIntact) {
     EXPECT_EQ(buf.size(), payload.size());
     EXPECT_EQ(live(buf), payload);
     EXPECT_GE(buf.capacity(), payload.size());
+}
+
+TEST(ReceiveBufferTest, IdleDecayReclaimsAStalledPartialMessage) {
+    // The pinning case an empty-only shrink misses: the read path grows rx_ eagerly for
+    // a large declared block, only the first slice arrives, then the peer stalls. The
+    // buffer stays non-empty forever, so a decay() that bailed on !empty() could never
+    // hand the allocation back. It must now shrink toward the live bytes — while keeping
+    // them intact — since decay() is the only thing that visits an idle connection.
+    ReceiveBuffer buf;
+
+    buf.prepare(1 << 20);                 // eager reserve for a ~1 MiB block…
+    const auto arrived = iota_bytes(16 * 1024);
+    const ByteSpan into = buf.prepare(arrived.size());
+    std::copy(arrived.begin(), arrived.end(), into.data());
+    buf.commit(arrived.size());           // …of which only 16 KiB ever shows up
+
+    const size_t pinned = buf.capacity();
+    ASSERT_GE(pinned, size_t{1} << 20);
+
+    // No traffic — only idle ticks. The buffer never drains (the block is incomplete),
+    // yet the allocation must still come down to what actually arrived.
+    for (int tick = 0; tick < 40; ++tick) buf.decay();
+
+    EXPECT_LT(buf.capacity(), pinned / 8) << "stalled partial message pinned the buffer";
+    EXPECT_GE(buf.capacity(), arrived.size());  // but never below the live bytes,
+    EXPECT_EQ(buf.size(), arrived.size());      // which are all still there…
+    EXPECT_EQ(live(buf), arrived);              // …and unchanged
+}
+
+TEST(ReceiveBufferTest, IdleDecayDoesNotThrashAMostlyFullBuffer) {
+    // The flip side of shrinking a partial message: once the live bytes fill most of the
+    // allocation there is little tail left to hand back, and giving it back costs a
+    // memcpy of everything we must keep — which the very next byte undoes by growing the
+    // buffer straight back. A stalled peer trickling one byte every few ticks would
+    // otherwise have us memcpy its half-arrived block up and down for free.
+    ReceiveBuffer buf;
+    feed(buf, 64 * 1024);   // a big block, none of it parseable yet
+    feed(buf, 1);           // the single grow this test allows (the buffer was exactly full)
+
+    const size_t settled = buf.capacity();
+    ASSERT_GT(settled, 64 * 1024u);
+
+    for (int cycle = 0; cycle < 20; ++cycle) {
+        for (int tick = 0; tick < 3; ++tick) buf.decay();
+        ASSERT_EQ(buf.capacity(), settled) << "idle ticks shrank a mostly-full buffer";
+        feed(buf, 1);       // …and the stalled peer dribbles another byte
+        ASSERT_EQ(buf.capacity(), settled) << "…which grew it back: cycle " << cycle;
+    }
+    EXPECT_EQ(buf.size(), 64 * 1024u + 1 + 20);
 }
 
 TEST(ReceiveBufferTest, IdleDecayOnAnUnallocatedBufferIsANoOp) {

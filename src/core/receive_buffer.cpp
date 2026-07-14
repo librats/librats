@@ -138,19 +138,39 @@ void ReceiveBuffer::compact() {
 }
 
 void ReceiveBuffer::decay() {
-    // Nothing worth reclaiming, or a partial message still needs the storage it is
-    // sitting in. (maybe_shrink() may only run on a drained buffer.)
-    if (cap_ <= kMinCapacity || !empty()) return;
+    // Nothing to reclaim below the floor.
+    if (cap_ <= kMinCapacity) return;
 
-    // Traffic since the last tick: consume() already sampled it, and this connection
-    // is sized for a reason. Aging it as well would shrink it below its read size only
-    // for the next prepare() to grow it straight back.
+    // Traffic since the last tick: consume() already sampled it (or a partial message
+    // is still streaming in), and this connection is sized for a reason. Aging it as
+    // well would shrink it below its read size only for the next prepare() to grow it
+    // straight back.
     if (std::exchange(received_since_decay_, false)) return;
 
     // Silent for a whole tick. Halving (rather than folding in one more zero sample)
     // is what makes this converge in seconds rather than minutes: maybe_shrink() wants
     // the allocation to be more than twice the watermark, so halving the watermark
     // halves the allocation every couple of ticks until it is back at the floor.
+    //
+    // This runs even when a partial message is still live (empty() is false). A peer
+    // that sends a length prefix — or the first slice of a large frame — and then
+    // stalls would otherwise pin the whole eager allocation for the life of the
+    // connection, and decay() is the only thing that ever visits an idle one.
+    // maybe_shrink() never drops below the live bytes, so the stalled data is kept;
+    // only the unused tail is handed back.
+    //
+    // Unless the live bytes already fill more than half the allocation: the tail worth
+    // reclaiming is then smaller than the memcpy of the data we have to keep, and the
+    // next byte the peer sends grows us straight back — copying it a second time. A
+    // stalled peer could otherwise trickle one byte per few ticks and have us memcpy its
+    // half-arrived block up and down forever. Pinning only ever comes from the *eager*
+    // reserve (a declared length that never arrived), where the live bytes are a tiny
+    // fraction of cap_, so bailing here costs no reclaim that mattered — it merely caps
+    // the unreclaimed slack at the size of the data itself, the same 2x any geometric
+    // buffer accepts. (Drained buffers reach maybe_shrink() via consume(), where
+    // size() == 0, so this never holds them up.)
+    if (size() * 2 > cap_) return;
+
     watermark_ /= 2;
     maybe_shrink();
 }
@@ -174,8 +194,6 @@ void ReceiveBuffer::sample_usage() noexcept {
 }
 
 void ReceiveBuffer::maybe_shrink() {
-    assert(empty() && "shrinking is only decided on a drained buffer");
-
     // Only when the allocation is worth reclaiming *and* recent demand has clearly
     // moved on — otherwise a buffer merely sitting between two messages would free
     // and re-allocate itself on every single message.
@@ -186,9 +204,15 @@ void ReceiveBuffer::maybe_shrink() {
     // that ballooned for one huge message is back to normal in a handful of steps
     // (at most log2(cap) reallocations), not by creeping down a few percent at a
     // time. Growth is geometric and cheap if demand returns.
+    //
+    // Never below the bytes still live: a partial message caught mid-stream keeps its
+    // storage — reallocate() moves those bytes to the front — so a stalled peer's data
+    // is preserved while its unused tail is reclaimed. On a drained buffer size() is 0,
+    // so this is exactly the plain watermark target.
     // The watermark is deliberately NOT reset here (unlike after a grow): it is the
     // decaying memory of demand that has to keep falling to shrink us further.
-    const size_t target = round_up((std::max)(kMinCapacity, watermark_), kAllocGranularity);
+    const size_t floor  = (std::max)(kMinCapacity, size());
+    const size_t target = round_up((std::max)(floor, watermark_), kAllocGranularity);
     if (target < cap_) reallocate(target);
 }
 

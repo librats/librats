@@ -108,7 +108,8 @@ public:
 
     /// Idle tick: age the remembered demand and shrink if the allocation has outgrown
     /// it. Call this periodically (once per keep-alive tick is plenty) from whatever
-    /// already visits the connection on a timer.
+    /// already visits the connection on a timer. May reallocate, so — like prepare() —
+    /// it invalidates data() and any view into the buffer.
     ///
     /// The traffic-driven shrink in consume() only ever samples when a message
     /// *arrives*, so it cannot reclaim anything from a peer that has gone quiet — and
@@ -120,8 +121,15 @@ public:
     /// A tick in which anything at all was received does not age the buffer — the
     /// traffic-driven path already sampled it, and decaying on top of that would shrink
     /// a live connection below its read size just for the next prepare() to grow it
-    /// straight back. Likewise a no-op while a partial message is still live: that data
-    /// needs its storage.
+    /// straight back.
+    ///
+    /// A partial message still being live does *not* stop the tick: a peer that sends
+    /// the first slice of a large frame and then stalls never drains the buffer, so
+    /// bailing out here would pin its eager allocation for the life of the connection.
+    /// The shrink never goes below the live bytes (they are moved to the front), so the
+    /// stalled data is kept and only the unused tail is handed back — and it stops once
+    /// those bytes fill half the allocation, since below that the tail is worth less
+    /// than the memcpy of keeping the data (and the next byte would grow it back).
     void decay();
 
     /// Drop all data, keep the allocation (e.g. re-using the buffer for a new peer).
