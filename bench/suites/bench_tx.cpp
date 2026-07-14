@@ -241,73 +241,93 @@ struct BtTxNew {
 // ── Workloads ────────────────────────────────────────────────────────────────
 //
 // Each returns after every byte has been handed to the kernel: the reactor keeps
-// getting writable events (k.refill()) until the backlog is gone. `peak` is the
-// most heap the send queue ever held.
+// getting writable events (k.refill()) until the backlog is gone.
 
+/// What a workload reports back about the memory the send queue held.
+struct Held {
+    std::size_t peak   = 0;  ///< high-water of the queue's own allocated()
+    std::size_t hidden = 0;  ///< high-water of (real live heap − allocated()) while draining
+};
+
+/// Hand the backlog to the kernel, one writable event at a time — and watch, at every
+/// step, whether the queue's allocated() still matches the heap it is really sitting on.
+///
+/// That gap is the whole point of this instrument. allocated() is what the send
+/// high-water mark reads, so a queue that frees a drained chunk's buffer *later* than it
+/// subtracts that chunk from its counter is one that can hold well past the mark while
+/// reporting that it is under it — and no assertion on the public API can catch that,
+/// because the counter lies consistently. Only the heap can tell.
+///
+/// Sampled during the drain, not over the whole run, so a growth transient (a vector
+/// doubling to hold what it already holds) does not read as retention.
 template <typename D>
-void drain(D& d, mock::TxKernel& k) {
+void drain(D& d, mock::TxKernel& k, Held& held) {
     while (d.pending() > 0) {
         k.refill();  // the next PollOut
         d.flush();
+
+        const auto live      = std::size_t((std::max)(track::g_stats.live, std::int64_t{0}));
+        const auto allocated = d.allocated();
+        if (live > allocated) held.hidden = (std::max)(held.hidden, live - allocated);
     }
 }
 
 /// N mesh frames of `size` bytes each (the payload arrives already encrypted, so
 /// each one is a fresh heap buffer — both implementations pay for that).
 template <typename D>
-std::size_t mesh_frames(D& d, mock::TxKernel& k, const Bytes& payload, int n) {
-    std::size_t peak = 0;
+Held mesh_frames(D& d, mock::TxKernel& k, const Bytes& payload, int n) {
+    Held h;
     for (int i = 0; i < n; ++i) {
         d.send(Bytes(payload));
-        peak = (std::max)(peak, d.allocated());
+        h.peak = (std::max)(h.peak, d.allocated());
     }
-    drain(d, k);
-    return peak;
+    drain(d, k, h);
+    return h;
 }
 
 /// The same frames, but corked into batches of `batch` — one flush per batch, as
 /// a handler generating several messages in response to one event would.
 template <typename D>
-std::size_t mesh_batched(D& d, mock::TxKernel& k, const Bytes& payload, int n, int batch) {
-    std::size_t peak = 0;
+Held mesh_batched(D& d, mock::TxKernel& k, const Bytes& payload, int n, int batch) {
+    Held h;
     for (int i = 0; i < n; ++i) {
         d.send(Bytes(payload));
         if ((i + 1) % batch == 0) d.flush();  // the cork pops
-        peak = (std::max)(peak, d.allocated());
+        h.peak = (std::max)(h.peak, d.allocated());
     }
     d.flush();
-    drain(d, k);
-    return peak;
+    drain(d, k, h);
+    return h;
 }
 
 /// A seeder answering `n` piece requests: each block is a fresh buffer, as it
 /// would be coming back from the disk thread.
 template <typename D, bool Move>
-std::size_t bt_seed(D& d, mock::TxKernel& k, const Bytes& block, int n) {
-    std::size_t peak = 0;
+Held bt_seed(D& d, mock::TxKernel& k, const Bytes& block, int n) {
+    Held h;
     for (int i = 0; i < n; ++i) {
         Bytes disk(block);  // the disk read
         if constexpr (Move) d.send_piece(std::uint32_t(i), 0, std::move(disk));
         else                d.send_piece(std::uint32_t(i), 0, ByteView(disk));
-        peak = (std::max)(peak, d.allocated());
+        h.peak = (std::max)(h.peak, d.allocated());
     }
-    drain(d, k);
-    return peak;
+    drain(d, k, h);
+    return h;
 }
 
 /// The request pipeline: `rounds` batches of kPipelineDepth=16 requests each,
 /// exactly what Torrent::request_more_blocks (torrent.cpp:299) emits.
 template <typename D>
-std::size_t bt_requests(D& d, mock::TxKernel& k, int rounds, bool cork_batch = false) {
-    std::size_t peak = 0;
+Held bt_requests(D& d, mock::TxKernel& k, int rounds, bool cork_batch = false) {
+    Held h;
     for (int r = 0; r < rounds; ++r) {
         for (int i = 0; i < 16; ++i)
             d.send_request(std::uint32_t(r), std::uint32_t(i * 16384), 16384);
         if (cork_batch) d.flush();  // the cork pops at the end of the batch
-        peak = (std::max)(peak, d.allocated());
+        h.peak = (std::max)(h.peak, d.allocated());
     }
-    drain(d, k);
-    return peak;
+    drain(d, k, h);
+    return h;
 }
 
 // ── Reporting ────────────────────────────────────────────────────────────────
@@ -325,7 +345,8 @@ struct Metrics {
     std::uint64_t bytes    = 0;
     std::uint64_t allocs   = 0;
     std::uint64_t alloc_kb = 0;
-    std::size_t   peak     = 0;
+    std::size_t   peak     = 0;  ///< high-water of the queue's own allocated()
+    std::size_t   hidden   = 0;  ///< heap held at the peak *beyond* what allocated() admits
     double        user_us  = 0;  ///< measured userland time, syscalls ~free
     double        model_us = 0;  ///< user_us + calls x kSyscallNs
 };
@@ -340,14 +361,14 @@ static std::string kib(std::size_t b) {
 
 static void head(const char* what) {
     std::printf("\n  \033[1m%s\033[0m\n", what);
-    std::printf("  \033[2m%-10s %8s %9s %7s %9s %9s %10s %11s\033[0m\n", "impl", "send()",
-                "iov", "allocs", "churn", "peak q", "userland", "modelled");
+    std::printf("  \033[2m%-10s %8s %9s %7s %9s %9s %8s %10s %11s\033[0m\n", "impl", "send()",
+                "iov", "allocs", "churn", "peak q", "hidden", "userland", "modelled");
 }
 static void row(const char* tag, const Metrics& m, const char* col) {
-    std::printf("  %s%-10s %8llu %9llu %7llu %8lluK %9s %8.1f us %8.1f us\033[0m\n", col, tag,
+    std::printf("  %s%-10s %8llu %9llu %7llu %8lluK %9s %8s %8.1f us %8.1f us\033[0m\n", col, tag,
                 (unsigned long long)m.calls, (unsigned long long)m.slices,
                 (unsigned long long)m.allocs, (unsigned long long)m.alloc_kb,
-                kib(m.peak).c_str(), m.user_us, m.model_us);
+                kib(m.peak).c_str(), kib(m.hidden).c_str(), m.user_us, m.model_us);
 }
 
 template <typename Fn>
@@ -357,15 +378,18 @@ static Metrics measure(mock::TxKernel& k, Fn&& fn) {
     // One instrumented run for the counters.
     k.reset();
     track::Stats mem;
+    Held         held;
     {
         track::Scope scope(mem);
-        m.peak = fn();
+        held = fn();
     }
     m.calls    = k.c.calls;
     m.slices   = k.c.slices;
     m.bytes    = k.c.bytes;
     m.allocs   = mem.allocs;
     m.alloc_kb = mem.bytes / 1024;
+    m.peak     = held.peak;
+    m.hidden   = held.hidden;
 
     // Then a few timed runs; the median is the userland cost.
     std::vector<double> t;
@@ -453,6 +477,16 @@ int main() {
     std::printf(
         "\n  \033[2m'iov'      buffers handed to the kernel in total. The old queue could only\n"
         "             ever show it the front chunk, so iov == send().\n"
+        "  'peak q'   the queue's own allocated() at its high-water. This is what the\n"
+        "             send high-water mark reads, and so what decides when a slow\n"
+        "             consumer is dropped.\n"
+        "  'hidden'   heap the queue was really sitting on, over and above what its\n"
+        "             allocated() admitted to — sampled at every writable event while\n"
+        "             the backlog drains. It must stay near zero: whatever shows up here\n"
+        "             is memory a peer that stops reading can make us carry *past* the\n"
+        "             high-water mark, invisibly, because the counter guarding the mark\n"
+        "             is the very thing under-reporting. No assertion on the public API\n"
+        "             can catch that — the counter lies consistently — so it is measured.\n"
         "  'userland' measured with the syscall mocked down to a memcpy — the naked cost\n"
         "             of the buffer machinery, with the kernel taken out of the picture.\n"
         "  'modelled' userland + send() x 1 us, a realistic syscall. This is the column\n"
