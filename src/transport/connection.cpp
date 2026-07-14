@@ -190,6 +190,14 @@ bool Connection::on_readable() {
 }
 
 size_t Connection::read_size() const {
+    // Not established yet: the peer is still anonymous, so its declared length buys it
+    // nothing. A handshake block is a Noise message plus the protocol id — hundreds of
+    // bytes — so there is no large allocation to save here, while honouring the length
+    // would let four bytes from an unauthenticated socket reserve kMaxEagerReserve. rx_
+    // still grows geometrically to hold whatever actually arrives, so an unusually large
+    // handshake block is served just as correctly, only without the eager reserve.
+    if (state_ != ConnState::Established) return kRecvChunk;
+
     // Ask for the rest of the block we are mid-way through, so a large frame lands in
     // one allocation rather than a series of 1.5x growth steps. Bounded by
     // kMaxEagerReserve, since rx_need_ is a length the *peer* declared.
