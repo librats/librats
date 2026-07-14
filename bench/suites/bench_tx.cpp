@@ -249,8 +249,7 @@ struct Held {
     std::size_t hidden = 0;  ///< high-water of (real live heap − allocated()) while draining
 };
 
-/// Hand the backlog to the kernel, one writable event at a time — and watch, at every
-/// step, whether the queue's allocated() still matches the heap it is really sitting on.
+/// Compare the queue's allocated() against the heap it is really sitting on.
 ///
 /// That gap is the whole point of this instrument. allocated() is what the send
 /// high-water mark reads, so a queue that frees a drained chunk's buffer *later* than it
@@ -258,17 +257,23 @@ struct Held {
 /// reporting that it is under it — and no assertion on the public API can catch that,
 /// because the counter lies consistently. Only the heap can tell.
 ///
-/// Sampled during the drain, not over the whole run, so a growth transient (a vector
-/// doubling to hold what it already holds) does not read as retention.
+/// Sampled while the socket is draining the queue, not over the whole run, so a growth
+/// transient (a vector doubling to hold what it already holds) does not read as
+/// retention.
+template <typename D>
+void sample_hidden(const D& d, Held& held) {
+    const auto live      = std::size_t((std::max)(track::g_stats.live, std::int64_t{0}));
+    const auto allocated = d.allocated();
+    if (live > allocated) held.hidden = (std::max)(held.hidden, live - allocated);
+}
+
+/// Hand the backlog to the kernel, one writable event at a time.
 template <typename D>
 void drain(D& d, mock::TxKernel& k, Held& held) {
     while (d.pending() > 0) {
         k.refill();  // the next PollOut
         d.flush();
-
-        const auto live      = std::size_t((std::max)(track::g_stats.live, std::int64_t{0}));
-        const auto allocated = d.allocated();
-        if (live > allocated) held.hidden = (std::max)(held.hidden, live - allocated);
+        sample_hidden(d, held);
     }
 }
 
@@ -310,6 +315,66 @@ Held bt_seed(D& d, mock::TxKernel& k, const Bytes& block, int n) {
         if constexpr (Move) d.send_piece(std::uint32_t(i), 0, std::move(disk));
         else                d.send_piece(std::uint32_t(i), 0, ByteView(disk));
         h.peak = (std::max)(h.peak, d.allocated());
+    }
+    drain(d, k, h);
+    return h;
+}
+
+/// A live peer rather than a pure seeder: every block goes out sandwiched between the
+/// control chatter that rides alongside it — a HAVE for the piece we just completed and
+/// a REQUEST for the next one, as a peer that is simultaneously downloading emits.
+///
+/// The point is the *interleaving*. Every other workload here is homogeneous, and a
+/// homogeneous stream of small messages is the one case coalescable_tail() is perfect
+/// at: they all pack into the spare capacity of one scratch chunk. Alternate them with
+/// a 16 KiB block and the tail is a payload buffer with no room in it, so each small
+/// message has to open a chunk of its own — which is exactly the allocation the
+/// recycled chunk exists to absorb, and exactly the pressure the chain's slot
+/// bookkeeping has to survive.
+template <typename D, bool Move>
+Held bt_mixed(D& d, mock::TxKernel& k, const Bytes& block, int n) {
+    Held h;
+    for (int i = 0; i < n; ++i) {
+        Bytes disk(block);  // the disk read
+        if constexpr (Move) d.send_piece(std::uint32_t(i), 0, std::move(disk));
+        else                d.send_piece(std::uint32_t(i), 0, ByteView(disk));
+
+        uint8_t have[4];
+        write_u32_be(have, std::uint32_t(i));
+        d.send_message(4, have, 4);                          // HAVE — we finished a piece
+        d.send_request(std::uint32_t(i), 0, 16 * 1024);      // …and we want the next one
+
+        h.peak = (std::max)(h.peak, d.allocated());
+    }
+    drain(d, k, h);
+    return h;
+}
+
+/// A seeder in its steady state: the disk keeps the queue topped up to `depth` bytes
+/// while the socket drains it, so the backlog never empties and never runs away.
+///
+/// This is the only workload where append() and pop_front() genuinely interleave. Every
+/// other one fills the queue to its peak and only *then* drains it, so the head only
+/// ever chases a shrinking chain. Here new chunks land behind the head while drained
+/// ones pile up in front of it — the case a queue that retires its dead slots lazily
+/// (as the chain does, in bulk) has to be measured on, because it is the one where the
+/// slots could creep.
+template <typename D, bool Move>
+Held bt_steady(D& d, mock::TxKernel& k, const Bytes& block, int n, std::size_t depth) {
+    Held h;
+    int queued = 0;
+    while (queued < n) {
+        while (queued < n && d.pending() < depth) {  // the disk tops the queue back up
+            Bytes disk(block);
+            if constexpr (Move) d.send_piece(std::uint32_t(queued), 0, std::move(disk));
+            else                d.send_piece(std::uint32_t(queued), 0, ByteView(disk));
+            ++queued;
+        }
+        h.peak = (std::max)(h.peak, d.allocated());
+
+        k.refill();  // the next PollOut takes a window's worth away again
+        d.flush();
+        sample_hidden(d, h);
     }
     drain(d, k, h);
     return h;
@@ -421,6 +486,10 @@ int main() {
     constexpr std::size_t kSndBuf = 256 * 1024;  // what one send() will take
     constexpr std::size_t kTight  = 16 * 1024;   // a congested peer's window per event
 
+    /// How much a steadily-seeding peer keeps in flight: the queue is topped back up to
+    /// this on every writable event, so it is never empty and never unbounded.
+    constexpr std::size_t kSteadyDepth = 512 * 1024;
+
     std::printf("\n\033[1;36mSend path — syscalls & memory\033[0m\n");
 
     // 1) mesh, 2000 small frames, uncongested.
@@ -472,6 +541,31 @@ int main() {
         row("old", measure(k, [&] { BtTxOld d; d.k = &k; return bt_requests(d, k, 200); }), OLD);
         row("new", measure(k, [&] { BtTxNew d; d.k = &k; return bt_requests(d, k, 200); }), NEW);
         row("new+cork", measure(k, [&] { BtTxNew d; d.k = &k; d.cork = true; return bt_requests(d, k, 200, true); }), CORK);
+    }
+
+    // 7) A real peer: blocks interleaved with the chatter that rides alongside them.
+    {
+        head("bt: 512 x (16 KiB block + HAVE + REQUEST), congested peer (16K/event)");
+        mock::TxKernel k(kSndBuf, kTight);
+        row("old", measure(k, [&] { BtTxOld d; d.k = &k; return bt_mixed<BtTxOld, false>(d, k, block, 512); }), OLD);
+        row("new", measure(k, [&] { BtTxNew d; d.k = &k; return bt_mixed<BtTxNew, true>(d, k, block, 512); }), NEW);
+    }
+
+    // 8) The steady state: the disk refills the queue while the socket drains it, so
+    //    appends and pops interleave and the backlog never empties.
+    {
+        head("bt: seed 1024 x 16 KiB, queue held at 512 KiB (append while draining)");
+        mock::TxKernel k(kSndBuf, kTight);
+        row("old", measure(k, [&] { BtTxOld d; d.k = &k; return bt_steady<BtTxOld, false>(d, k, block, 1024, kSteadyDepth); }), OLD);
+        row("new", measure(k, [&] { BtTxNew d; d.k = &k; return bt_steady<BtTxNew, true>(d, k, block, 1024, kSteadyDepth); }), NEW);
+    }
+
+    // 9) The high-water case: 8 MiB of backlog made of *small* chunks, not big ones.
+    {
+        head("mesh: 40k x 200 B frames, peer stopped reading (8 MiB backlog)");
+        mock::TxKernel k(kSndBuf, kTight);
+        row("old", measure(k, [&] { MeshTxOld d; d.k = &k; return mesh_frames(d, k, small, 40000); }), OLD);
+        row("new", measure(k, [&] { MeshTxNew d; d.k = &k; return mesh_frames(d, k, small, 40000); }), NEW);
     }
 
     std::printf(
@@ -546,6 +640,27 @@ int main() {
         b.run("old", [&] { BtTxOld d; d.k = &k; bt_requests(d, k, 200); });
         b.run("new", [&] { BtTxNew d; d.k = &k; bt_requests(d, k, 200); });
         b.run("new+cork", [&] { BtTxNew d; d.k = &k; d.cork = true; bt_requests(d, k, 200, true); });
+    }
+    {
+        b.group("bt: 512 x (block + HAVE + REQUEST), congested");
+        b.bytes(512.0 * (16 * 1024 + 13 + 9 + 17));
+        mock::TxKernel k(kSndBuf, kTight);
+        b.run("old", [&] { BtTxOld d; d.k = &k; bt_mixed<BtTxOld, false>(d, k, block, 512); });
+        b.run("new", [&] { BtTxNew d; d.k = &k; bt_mixed<BtTxNew, true>(d, k, block, 512); });
+    }
+    {
+        b.group("bt: seed 1024 x 16 KiB, append while draining");
+        b.bytes(1024.0 * (16 * 1024 + 13));
+        mock::TxKernel k(kSndBuf, kTight);
+        b.run("old", [&] { BtTxOld d; d.k = &k; bt_steady<BtTxOld, false>(d, k, block, 1024, kSteadyDepth); });
+        b.run("new", [&] { BtTxNew d; d.k = &k; bt_steady<BtTxNew, true>(d, k, block, 1024, kSteadyDepth); });
+    }
+    {
+        b.group("mesh: 40k x 200 B, 8 MiB backlog");
+        b.bytes(40000 * 204.0);
+        mock::TxKernel k(kSndBuf, kTight);
+        b.run("old", [&] { MeshTxOld d; d.k = &k; mesh_frames(d, k, small, 40000); });
+        b.run("new", [&] { MeshTxNew d; d.k = &k; mesh_frames(d, k, small, 40000); });
     }
     b.report();
     return 0;
