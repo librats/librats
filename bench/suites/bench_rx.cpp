@@ -405,6 +405,55 @@ static void print_decay() {
                 " connection.\n  Multiply by peer count.\033[0m\n");
 }
 
+// ── Buffer decay: the half a drained buffer never shows ──────────────────────
+//
+// Every scenario above replays whole messages, so the buffer is empty by the time
+// the idle ticks run — and an empty buffer is the easy case. The expensive peer is
+// the one that declares a block, sends a sliver of it and stops: rx_ has already
+// been grown for the length on the wire, and it never drains, so it is never in the
+// state the traffic-driven shrink samples. decay() is the only thing that visits
+// it, and it must reclaim while the partial message is still live.
+
+static void print_stalled_decay() {
+    std::printf("\n\033[1;36mBuffer decay — a peer declares a 4 MiB block, sends 16 KiB,"
+                " then stalls\033[0m\n");
+    std::printf("\n  \033[2m%-28s %10s %10s %10s %10s\033[0m\n", "step", "old cap", "new cap",
+                "new live", "new watermark");
+
+    MeshRxOld      o;
+    MeshRxNew      n;
+    mock::RxKernel ko, kn;
+
+    auto row = [&](const char* what) {
+        const std::size_t oc = o.capacity(), nc = n.capacity();
+        const char* col = nc < oc ? "\033[32m" : "";
+        std::printf("  %s%-28s %10s %10s %10s %10s\033[0m\n", col, what, kib(oc).c_str(),
+                    kib(nc).c_str(), kib(n.rx_.size()).c_str(), kib(n.rx_.watermark()).c_str());
+    };
+
+    // The block's length prefix arrives in full; the body is cut off after 16 KiB.
+    const auto           block = wire::mesh({4 * 1024 * 1024});
+    std::vector<uint8_t> sliver(block.begin(), block.begin() + 16 * 1024);
+
+    row("start");
+    replay(o, ko, sliver, 16 * 1024);
+    replay(n, kn, sliver, 16 * 1024);
+    row("16 KiB of it arrives");
+
+    for (int i = 1; i <= 8; ++i) {
+        char label[64];
+        std::snprintf(label, sizeof label, "idle tick %d (decay)", i);
+        n.rx_.decay();
+        row(label);
+    }
+    std::printf("\n  \033[2mNothing here is parseable, so the buffer never empties and the"
+                " shrink in consume()\n  never fires — a decay() that skipped a live partial"
+                " message would leave the eager\n  reserve pinned exactly as the old buffer"
+                " does. It comes down to the bytes that\n  actually arrived, and stops there:"
+                " below that the tail is worth less than the\n  memcpy of keeping the data."
+                "\033[0m\n");
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -440,6 +489,7 @@ int main() {
 
     print_metrics(scen);
     print_decay();
+    print_stalled_decay();
 
     // ── Timing ───────────────────────────────────────────────────────────────
     bench::Bench b("Receive path — throughput");
