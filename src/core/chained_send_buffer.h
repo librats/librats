@@ -94,12 +94,22 @@ public:
 
     // ── Draining ────────────────────────────────────────────────────────────
 
+    /// Bytes gather() will describe in one go unless told otherwise. A socket accepts
+    /// what fits in its send buffer — a few hundred KiB at most — and every slice past
+    /// that is an iovec entry the kernel copies in and then ignores. Under a backlog
+    /// (the case gather() exists for) the flush loop re-gathers after every partial
+    /// write, so that waste is paid on every syscall, not once. libtorrent bounds its
+    /// build_iovec() by a byte quota for the same reason.
+    static constexpr size_t kMaxGatherBytes = 1024 * 1024;
+
     /// Fill `out` with up to `max_slices` contiguous runs covering the front of the
-    /// queue, in order. Returns the number of slices written. The views stay valid
-    /// until the next pop_front()/clear() — append() never invalidates them, because
-    /// a slice points at a chunk's *heap buffer*, which a vector growth moves the
-    /// owning Chunk around but never reallocates.
-    size_t gather(ByteView* out, size_t max_slices) const;
+    /// queue, in order, stopping once they cover `max_bytes` (the slice that crosses
+    /// the limit is still included whole, so a single chunk larger than the limit is
+    /// described rather than dropped). Returns the number of slices written. The views
+    /// stay valid until the next pop_front()/clear() — append() never invalidates them,
+    /// because a slice points at a chunk's *heap buffer*, which a vector growth moves
+    /// the owning Chunk around but never reallocates.
+    size_t gather(ByteView* out, size_t max_slices, size_t max_bytes = kMaxGatherBytes) const;
 
     /// The first contiguous run — the single-slice form of gather(), for a plain
     /// send(). Empty when the queue is empty.

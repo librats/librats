@@ -14,10 +14,13 @@ namespace {
 /// Roomy enough that the helpers below always see the whole queue.
 constexpr size_t kSlices = 1024;
 
+/// No byte budget: these helpers want the whole queue, not the flush loop's one round.
+constexpr size_t kNoByteLimit = SIZE_MAX;
+
 /// Everything still queued, flattened — what the peer would receive if we sent it all.
 std::vector<uint8_t> pending(const ChainedSendBuffer& buf) {
     ByteView slices[kSlices];
-    const size_t count = buf.gather(slices, kSlices);
+    const size_t count = buf.gather(slices, kSlices, kNoByteLimit);
 
     std::vector<uint8_t> out;
     for (size_t i = 0; i < count; ++i) out.insert(out.end(), slices[i].begin(), slices[i].end());
@@ -27,7 +30,7 @@ std::vector<uint8_t> pending(const ChainedSendBuffer& buf) {
 /// Simulate a send() that accepts `accepted` bytes, and return what went out.
 std::vector<uint8_t> send_some(ChainedSendBuffer& buf, size_t accepted) {
     ByteView slices[kSlices];
-    const size_t count = buf.gather(slices, kSlices);
+    const size_t count = buf.gather(slices, kSlices, kNoByteLimit);
 
     std::vector<uint8_t> sent;
     for (size_t i = 0; i < count && sent.size() < accepted; ++i) {
@@ -155,6 +158,32 @@ TEST(ChainedSendBufferTest, GatherRespectsTheSliceLimit) {
 
     ByteView slices[4];
     EXPECT_EQ(buf.gather(slices, 4), 4u);  // the rest goes out on the next round
+}
+
+TEST(ChainedSendBufferTest, GatherStopsOnceItCoversTheByteBudget) {
+    ChainedSendBuffer buf;
+    for (int i = 0; i < 10; ++i) buf.append(iota_bytes(8, uint8_t(i)));
+
+    // 20 bytes of budget is covered by three 8-byte chunks; the fourth would be an
+    // iovec entry the kernel copies in and ignores, so it waits for the next round.
+    ByteView slices[kSlices];
+    EXPECT_EQ(buf.gather(slices, kSlices, 20), 3u);
+    EXPECT_EQ(buf.gather(slices, kSlices, 16), 2u);   // exactly covered: no extra slice
+    EXPECT_EQ(buf.gather(slices, kSlices, 1), 1u);
+
+    // Nothing is lost — the queue still holds it all, and an unbudgeted gather sees it.
+    EXPECT_EQ(buf.size(), 80u);
+    EXPECT_EQ(buf.gather(slices, kSlices, kNoByteLimit), 10u);
+}
+
+TEST(ChainedSendBufferTest, GatherAlwaysDescribesAtLeastOneSlice) {
+    ChainedSendBuffer buf;
+    buf.append(iota_bytes(64));
+
+    // A chunk bigger than the budget must still be sendable, or the queue would stall.
+    ByteView slices[kSlices];
+    ASSERT_EQ(buf.gather(slices, kSlices, 8), 1u);
+    EXPECT_EQ(slices[0].size(), 64u);
 }
 
 TEST(ChainedSendBufferTest, GatherSkipsTheAlreadySentPrefix) {

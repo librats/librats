@@ -88,11 +88,19 @@ void ChainedSendBuffer::recycle(Bytes&& chunk) noexcept {
 
 // ── Draining ────────────────────────────────────────────────────────────────
 
-size_t ChainedSendBuffer::gather(ByteView* out, size_t max_slices) const {
-    size_t n = 0;
+size_t ChainedSendBuffer::gather(ByteView* out, size_t max_slices, size_t max_bytes) const {
+    size_t n     = 0;
+    size_t bytes = 0;
     for (size_t i = head_; i < chunks_.size() && n < max_slices; ++i) {
         const Chunk& chunk = chunks_[i];
         out[n++] = ByteView(chunk.head(), chunk.remaining());
+
+        // Checked *after* taking the slice, so the first one is always described even
+        // if it alone exceeds the budget — a chunk larger than max_bytes must still be
+        // sendable, and a short iovec never loses data: whatever the kernel does not
+        // take this round goes out on the next.
+        bytes += chunk.remaining();
+        if (bytes >= max_bytes) break;
     }
     return n;
 }
