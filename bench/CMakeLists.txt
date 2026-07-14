@@ -1,6 +1,23 @@
 cmake_minimum_required(VERSION 3.14)
 project(librats_bench CXX)
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Layout
+#
+#    framework/   the harness. Project-agnostic, no librats in it: the timing
+#                 loop (bench.h) and the operator new/delete counters
+#                 (alloc_track). Reusable anywhere.
+#    support/     scaffolding a suite needs to exercise librats: mocked sockets,
+#                 dataset generators. librats-specific, but not under test.
+#    baseline/    frozen copies of the implementation each suite is measured
+#                 *against*, in their own namespaces so old and new link into
+#                 one binary. Never "fixed" — they must behave like what shipped.
+#    suites/      the benchmarks themselves. One file, one executable.
+#
+#  Everything includes from the bench/ root, so a path says which layer it is:
+#  #include "framework/bench.h", "support/net_mock.h", "baseline/stable_json.h".
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Benchmarks must be optimized regardless of how the parent tree is configured.
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,30 +39,63 @@ endif()
 
 set(LIBRATS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
-# ── Reference libraries (optional; fetched if the network allows) ────────────
+# ── add_bench(<name> SOURCES ... [DEFS ...] [INCLUDES ...] [WIN_LIBS ...]
+#                                 [STATIC_RUNTIME]) ─────────────────────────────
+#
+# STATIC_RUNTIME is for suites that override the global operator new/delete: the
+# override must be the only one in the program, so the C++ runtime is linked in
+# rather than shared (a shared libstdc++ has its own, and blocks allocated here
+# would be freed across a DLL boundary).
+function(add_bench name)
+    cmake_parse_arguments(A "STATIC_RUNTIME" "" "SOURCES;DEFS;INCLUDES;WIN_LIBS" ${ARGN})
+
+    add_executable(${name} ${A_SOURCES})
+    target_include_directories(${name} PRIVATE
+        ${LIBRATS_ROOT}/src            # the code under test
+        ${CMAKE_CURRENT_SOURCE_DIR}    # framework/ support/ baseline/
+        ${A_INCLUDES}
+    )
+    target_compile_definitions(${name} PRIVATE ${A_DEFS})
+    if(WIN32 AND A_WIN_LIBS)
+        target_link_libraries(${name} PRIVATE ${A_WIN_LIBS})
+    endif()
+    if(A_STATIC_RUNTIME AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_link_options(${name} PRIVATE -static)
+    endif()
+    set_target_properties(${name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin
+    )
+endfunction()
+
+# ── Reference libraries — bench_json / bench_mem only ────────────────────────
+#
+# FetchContent_Populate hard-errors when the download fails, which would
+# otherwise leave an offline machine unable to configure *any* target here,
+# including the I/O suites that have no third-party dependencies at all.
+option(BENCH_FETCH_REFS "Fetch nlohmann/json + RapidJSON for the JSON suites" ON)
+
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
 
-# nlohmann/json — single header.
-FetchContent_Declare(nlohmann_json
+FetchContent_Declare(nlohmann_json                       # single header
     URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
     URL_HASH SHA256=9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6
     DOWNLOAD_NO_EXTRACT TRUE
 )
-# RapidJSON — header-only tree; populate without building its tests.
-FetchContent_Declare(rapidjson
+FetchContent_Declare(rapidjson                           # header-only tree
     GIT_REPOSITORY https://github.com/Tencent/rapidjson.git
-    GIT_TAG 24b5e7a8b27f42fa16b96fc70aade9106cf7102f  # master @ 2023, stable headers
+    GIT_TAG 24b5e7a8b27f42fa16b96fc70aade9106cf7102f     # master @ 2023, stable headers
     GIT_SHALLOW TRUE
 )
 
 set(BENCH_DEFS "")
 set(BENCH_INCLUDES "")
 
-# nlohmann
-FetchContent_GetProperties(nlohmann_json)
-if(NOT nlohmann_json_POPULATED)
-    FetchContent_Populate(nlohmann_json)
+if(BENCH_FETCH_REFS)
+    FetchContent_GetProperties(nlohmann_json)
+    if(NOT nlohmann_json_POPULATED)
+        FetchContent_Populate(nlohmann_json)
+    endif()
 endif()
 if(EXISTS "${nlohmann_json_SOURCE_DIR}/json.hpp")
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/include/nlohmann")
@@ -58,10 +108,11 @@ else()
     message(WARNING "bench: nlohmann/json NOT available — skipping that column")
 endif()
 
-# rapidjson
-FetchContent_GetProperties(rapidjson)
-if(NOT rapidjson_POPULATED)
-    FetchContent_Populate(rapidjson)
+if(BENCH_FETCH_REFS)
+    FetchContent_GetProperties(rapidjson)
+    if(NOT rapidjson_POPULATED)
+        FetchContent_Populate(rapidjson)
+    endif()
 endif()
 if(EXISTS "${rapidjson_SOURCE_DIR}/include/rapidjson/document.h")
     list(APPEND BENCH_INCLUDES "${rapidjson_SOURCE_DIR}/include")
@@ -71,43 +122,64 @@ else()
     message(WARNING "bench: RapidJSON NOT available — skipping that column")
 endif()
 
-# ── The benchmark target ─────────────────────────────────────────────────────
-# We compile librats' json.cpp directly (rather than linking the Debug library)
-# so the code under test is optimized identically to the reference libraries.
-add_executable(bench_json
-    bench_json.cpp
-    ${LIBRATS_ROOT}/src/util/json.cpp
-    stable_json.cpp                       # previous-commit baseline (namespace librats_stable)
-)
-target_include_directories(bench_json PRIVATE
-    ${LIBRATS_ROOT}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}           # so stable_json.cpp finds "stable_json.h"
-    ${BENCH_INCLUDES}
-)
-target_compile_definitions(bench_json PRIVATE ${BENCH_DEFS})
+# ── The code under test ──────────────────────────────────────────────────────
+#
+# librats sources are compiled straight into each benchmark rather than linked
+# from the main tree, so what is measured is optimized identically to whatever it
+# is being compared against — independent of how the parent tree was configured.
 
-# Memory-footprint benchmark — a separate binary so its allocation instrumentation
-# never perturbs bench_json's timing numbers.
-add_executable(bench_mem
-    bench_mem.cpp
-    ${LIBRATS_ROOT}/src/util/json.cpp
-    stable_json.cpp                       # previous-commit baseline (namespace librats_stable)
+set(JSON_UNDER_TEST ${LIBRATS_ROOT}/src/util/json.cpp)
+set(IO_UNDER_TEST
+    ${LIBRATS_ROOT}/src/core/receive_buffer.cpp
+    ${LIBRATS_ROOT}/src/core/chained_send_buffer.cpp
+    ${LIBRATS_ROOT}/src/wire/frame.cpp                   # needs htonl -> ws2_32
 )
-target_include_directories(bench_mem PRIVATE
-    ${LIBRATS_ROOT}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}           # so stable_json.cpp finds "stable_json.h"
-    ${BENCH_INCLUDES}
+
+# ── The suites ───────────────────────────────────────────────────────────────
+
+# JSON: librats::Json vs nlohmann vs RapidJSON vs the previous librats::Json.
+add_bench(bench_json
+    SOURCES  suites/bench_json.cpp ${JSON_UNDER_TEST} baseline/stable_json.cpp
+    DEFS     ${BENCH_DEFS}
+    INCLUDES ${BENCH_INCLUDES}
 )
-target_compile_definitions(bench_mem PRIVATE ${BENCH_DEFS})
 
-# The global operator new/delete override must be the only one in the program,
-# so statically link the C++ runtime — otherwise a shared libstdc++ has its own
-# operator new and blocks allocated here would be freed across a DLL boundary
-# with the wrong size header.
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_link_options(bench_mem PRIVATE -static)
-endif()
+# JSON: one deliberately nasty document, end to end.
+add_bench(bench_complex
+    SOURCES  suites/bench_complex.cpp ${JSON_UNDER_TEST}
+    DEFS     ${BENCH_DEFS}
+    INCLUDES ${BENCH_INCLUDES}
+)
 
-set_target_properties(bench_json bench_mem PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin
+# JSON: resident heap of a parsed DOM. A separate binary on purpose — its
+# allocation instrumentation would otherwise skew bench_json's timings and
+# unfairly penalise allocation-heavy DOMs. (It carries its own operator new
+# override, predating framework/alloc_track.h; it needs to tag RapidJSON's
+# custom allocator too.)
+add_bench(bench_mem
+    SOURCES  suites/bench_mem.cpp ${JSON_UNDER_TEST} baseline/stable_json.cpp
+    DEFS     ${BENCH_DEFS}
+    INCLUDES ${BENCH_INCLUDES}
+    STATIC_RUNTIME
+)
+
+# I/O: the receive and the send path, current vs pre-5d64343. Both count syscalls
+# (support/net_mock.h) and allocations (framework/alloc_track.h).
+add_bench(bench_rx
+    SOURCES  suites/bench_rx.cpp ${IO_UNDER_TEST}
+             baseline/legacy_buffers.cpp framework/alloc_track.cpp
+    WIN_LIBS ws2_32
+    STATIC_RUNTIME
+)
+add_bench(bench_tx
+    SOURCES  suites/bench_tx.cpp ${IO_UNDER_TEST}
+             baseline/legacy_buffers.cpp framework/alloc_track.cpp
+    WIN_LIBS ws2_32
+    STATIC_RUNTIME
+)
+
+# DHT: librats' keyspace primitives vs a standalone re-port of libtorrent's.
+# Header-only (src/dht/id.h); brings its own timing loop.
+add_bench(bench_dht
+    SOURCES suites/bench_dht.cpp
 )

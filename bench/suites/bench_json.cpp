@@ -12,13 +12,13 @@
 //  array.
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include "bench.h"
+#include "framework/bench.h"
 #include "util/json.h"
 // "stable" baseline: the json.{h,cpp} from the previous commit (HEAD~1, fc81b94),
 // dropped in under namespace librats_stable so it links side-by-side with the
 // current librats::Json. Lets us see whether the latest commit actually moved
 // the needle on each hot path.
-#include "stable_json.h"
+#include "baseline/stable_json.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -38,7 +38,7 @@
 #  define HAVE_RAPIDJSON 1
 #endif
 
-#include "bench_data.h"
+#include "support/json_data.h"
 
 using bench::do_not_optimize;
 using namespace benchdata;
