@@ -84,7 +84,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # Options
-option(RATS_BUILD_EXAMPLES "Build examples" ON)
+option(RATS_BUILD_EXAMPLES "Build examples (incl. the rats-client reference app)" OFF)
 option(RATS_BUILD_TESTS "Build unit tests" ON)
 option(RATS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(RATS_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
