@@ -409,6 +409,23 @@ target_include_directories(rats
 find_package(Threads REQUIRED)
 target_link_libraries(rats Threads::Threads)
 
+# 64-bit atomics: on 32-bit targets (e.g. ppc, armv7, x86, mips) an 8-byte
+# std::atomic is not lock-free in hardware, so the compiler lowers it to
+# __atomic_*_8 libcalls that live in libatomic. Detect that case and link it,
+# otherwise the link fails with "undefined ___atomic_fetch_add_8" etc.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_FLAGS "${CMAKE_CXX_FLAGS}")
+check_cxx_source_compiles("
+#include <atomic>
+#include <cstdint>
+std::atomic<uint64_t> x;
+int main() { x.fetch_add(1); x.store(2); return (int)x.load(); }
+" HAVE_BUILTIN_ATOMIC64)
+unset(CMAKE_REQUIRED_FLAGS)
+if(NOT HAVE_BUILTIN_ATOMIC64)
+    target_link_libraries(rats atomic)
+endif()
+
 # Link networking libraries
 if(WIN32)
     target_link_libraries(rats ws2_32 iphlpapi bcrypt)
