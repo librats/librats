@@ -22,8 +22,9 @@ if(NOT TARGET rats)
     if(NOT DEFINED LIBRATS_SOURCE_DIR)
         set(LIBRATS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
     endif()
-    # Don't rebuild the library's own tests/examples/bindings just to get libs.
+    # Don't rebuild the library's own tests/client/examples just to get libs.
     set(RATS_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(RATS_BUILD_CLIENT   OFF CACHE BOOL "" FORCE)
     set(RATS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     add_subdirectory(${LIBRATS_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/librats_build)
 endif()

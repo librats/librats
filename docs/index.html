@@ -231,6 +231,7 @@
             <div class="section-header">
                 <h2 class="section-title">Quick Start</h2>
                 <p class="section-subtitle">Get up and running in minutes</p>
+                <p class="section-subtitle">Prefer runnable code? The <a href="https://github.com/DEgITx/librats/tree/master/examples">examples/</a> directory has focused, self-contained programs — chat, pub/sub, typed messaging, file transfer, DHT discovery, and a batteries-included <code>full_chat</code> that finds its peers automatically over DHT + mDNS + PEX. Build them with <code>-DRATS_BUILD_EXAMPLES=ON</code>.</p>
             </div>
             <div class="code-tabs">
                 <div class="tab-buttons">
@@ -967,7 +968,11 @@ int main() {
 cd librats
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)</code></pre>
+make -j$(nproc)
+
+# Optional: build the runnable examples (off by default)
+# cmake .. -DRATS_BUILD_EXAMPLES=ON && make -j$(nproc)
+# ./bin/examples/full_chat 9000 lobby   # auto-discovers peers</code></pre>
                                 <button class="copy-source-btn" onclick="copySourceCode()">
                                     <i class="fas fa-copy"></i>
                                 </button>

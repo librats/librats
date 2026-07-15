@@ -595,7 +595,8 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 | Option | Default | Description |
 |--------|---------|-------------|
 | `RATS_BUILD_TESTS` | `ON` | Build unit tests with GoogleTest |
-| `RATS_BUILD_EXAMPLES` | `ON` | Build the `rats-client` demo application |
+| `RATS_BUILD_CLIENT` | `ON` | Build the `rats-client` reference/demo application |
+| `RATS_BUILD_EXAMPLES` | `OFF` | Build the `examples/` programs |
 | `RATS_ENABLE_ASAN` | `OFF` | Enable AddressSanitizer for memory debugging |
 | `RATS_ENABLE_TSAN` | `OFF` | Enable ThreadSanitizer for data-race debugging |
 | `RATS_BINDINGS` | `ON` | Build the C API bindings for FFI support |
@@ -608,9 +609,9 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 **Examples:**
 
 ```bash
-# Build as shared library without tests or examples
+# Build as shared library without tests, client or examples
 cmake .. -DRATS_SHARED_LIBRARY=ON -DRATS_STATIC_LIBRARY=OFF \
-         -DRATS_BUILD_TESTS=OFF -DRATS_BUILD_EXAMPLES=OFF
+         -DRATS_BUILD_TESTS=OFF -DRATS_BUILD_CLIENT=OFF -DRATS_BUILD_EXAMPLES=OFF
 
 # Build with BitTorrent support and debug symbols
 cmake .. -DRATS_SEARCH_FEATURES=ON -DCMAKE_BUILD_TYPE=Debug
@@ -643,6 +644,7 @@ FetchContent_Declare(
     GIT_TAG master  # or a specific version/tag
 )
 set(RATS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(RATS_BUILD_CLIENT OFF CACHE BOOL "" FORCE)
 set(RATS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(librats)
 
@@ -659,6 +661,7 @@ git submodule add https://github.com/DEgITx/librats.git external/librats
 
 ```cmake
 set(RATS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(RATS_BUILD_CLIENT OFF CACHE BOOL "" FORCE)
 set(RATS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(external/librats)
 
@@ -692,7 +695,8 @@ ctest -j$(nproc) --output-on-failure
 
 After building, you'll find:
 - **Library**: `build/lib/librats.a` (static library)
-- **Executable**: `build/bin/rats-client` (reference/demo application)
+- **Executable**: `build/bin/rats-client` (reference/demo application, built by default; disable with `RATS_BUILD_CLIENT=OFF`)
+- **Examples**: `build/bin/examples/*` (the [`examples/`](examples/) programs, if `RATS_BUILD_EXAMPLES=ON`)
 - **Tests**: `build/bin/librats_tests` (if `RATS_BUILD_TESTS=ON`)
 
 ## 🎯 Usage Examples
@@ -710,6 +714,30 @@ After building, you'll find:
 ```
 
 Options: `--bind <addr>`, `--data <dir>` (stable identity + reconnect store), `--connect <host> <port>` (repeatable), `--dht`, `--mdns`, `--upnp`, `--reconnect`, `--no-ping`. Pub/sub, typed JSON messaging and file transfer are always on. Type `/help` once running for the interactive command list (`/peers`, `/connect`, `/sub`, `/pub`, `/msg`, `/file`, …).
+
+### Runnable examples
+
+The [`examples/`](examples/) directory holds small, focused programs — one capability each, built on the public `Node` API. They are **off by default**; enable them with `-DRATS_BUILD_EXAMPLES=ON` (add `-DRATS_SEARCH_FEATURES=ON` for the BitTorrent one). Binaries land in `build/bin/examples/`.
+
+| Program | Shows |
+|---------|-------|
+| `chat` | A bare `Node`: encrypted transport + raw channel messaging, manual dialing |
+| `pubsub` | The `PubSub` (GossipSub) subsystem — a topic mesh that relays across hops |
+| `typed_messaging` | `MessageJson` typed JSON messages, keyed by the authenticated sender |
+| `file_transfer` | `FileTransfer` — streaming a file with CRC32 / SHA-256 integrity + progress |
+| `dht_discovery` | `DhtDiscovery` — automatic peer discovery over the Kademlia DHT |
+| `full_chat` | "Batteries-included" chat: DHT + mDNS + PEX discovery, reconnection, ping and pub/sub — peers find each other with no addresses typed in |
+| `bittorrent_download` | Downloading a magnet link (requires `RATS_SEARCH_FEATURES`) |
+
+```bash
+cmake -B build -DRATS_BUILD_EXAMPLES=ON && cmake --build build -j
+
+# find each other automatically in the "lobby" room (LAN via mDNS, WAN via DHT):
+./build/bin/examples/full_chat 9000 lobby
+./build/bin/examples/full_chat 9001 lobby
+```
+
+See [`examples/README.md`](examples/README.md) for the full list and per-example usage.
 
 ### Minimal chat
 

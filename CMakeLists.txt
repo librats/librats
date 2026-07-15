@@ -84,7 +84,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # Options
-option(RATS_BUILD_EXAMPLES "Build examples (incl. the rats-client reference app)" OFF)
+option(RATS_BUILD_CLIENT "Build the rats-client reference application" ON)
+option(RATS_BUILD_EXAMPLES "Build the examples/ programs" OFF)
 option(RATS_BUILD_TESTS "Build unit tests" ON)
 option(RATS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(RATS_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
@@ -461,8 +462,8 @@ if(RATS_STORAGE)
     target_compile_definitions(rats PUBLIC RATS_STORAGE)
 endif(RATS_STORAGE)
 
-# Create the main executable
-if(RATS_BUILD_EXAMPLES)
+# Create the main executable (the rats-client reference application)
+if(RATS_BUILD_CLIENT)
     add_executable(rats-client src/main.cpp)
     target_link_libraries(rats-client rats)
 
@@ -692,7 +693,7 @@ if(RATS_BUILD_TESTS)
     )
 endif()
 
-# Examples (basic examples always built; BT examples require RATS_SEARCH_FEATURES)
+# Examples (opt-in; the BitTorrent example additionally requires RATS_SEARCH_FEATURES)
 if(RATS_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
