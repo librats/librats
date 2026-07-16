@@ -251,42 +251,46 @@
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="basic-code">#include "librats.h"
+                            <pre><code id="basic-code">#include "node/node.h"
 #include &lt;iostream&gt;
 #include &lt;thread&gt;
 #include &lt;chrono&gt;
 
+using namespace librats;
+
 int main() {
-    // Create a simple P2P client
-    librats::RatsClient client(8080);
-    
-    // Set up connection callback
-    client.set_connection_callback([](socket_t socket, const std::string& peer_id) {
-        std::cout &lt;&lt; "✅ New peer connected: " &lt;&lt; peer_id &lt;&lt; std::endl;
+    // A bare Node: encrypted transport (Noise_XX) + raw channel messaging.
+    Node node(NodeConfig{/*listen_port=*/8080});
+
+    // Callbacks run on a reactor thread; register them BEFORE start().
+    node.on_peer_connected([](const Peer& peer) {
+        std::cout &lt;&lt; "✅ New peer connected: " &lt;&lt; peer.id().short_hex() &lt;&lt; std::endl;
     });
-    
-    // Set up message callback
-    client.set_string_data_callback([](socket_t socket, const std::string& peer_id, const std::string& message) {
-        std::cout &lt;&lt; "💬 Message from " &lt;&lt; peer_id &lt;&lt; ": " &lt;&lt; message &lt;&lt; std::endl;
+
+    node.on("chat", [](const Peer& peer, ByteView data) {
+        std::cout &lt;&lt; "💬 Message from " &lt;&lt; peer.id().short_hex() &lt;&lt; ": "
+                  &lt;&lt; std::string(reinterpret_cast&lt;const char*&gt;(data.data()), data.size()) &lt;&lt; std::endl;
     });
-    
-    // Start the client
-    if (!client.start()) {
-        std::cerr &lt;&lt; "Failed to start client" &lt;&lt; std::endl;
+
+    // Start the node
+    if (!node.start()) {
+        std::cerr &lt;&lt; "Failed to start node" &lt;&lt; std::endl;
         return 1;
     }
-    
-    std::cout &lt;&lt; "🐀 librats client running on port 8080" &lt;&lt; std::endl;
-    
-    // Connect to another peer (optional)
-    // client.connect_to_peer("127.0.0.1", 8081);
-    
-    // Send a message to all connected peers
-    client.broadcast_string_to_peers("Hello from librats!");
-    
+
+    std::cout &lt;&lt; "🐀 librats node running on port " &lt;&lt; node.listen_port() &lt;&lt; std::endl;
+
+    // Dial another peer (optional) — a bare Node never discovers peers on its own.
+    // node.connect("127.0.0.1", 8081);
+
+    // Send raw bytes to all connected peers on the "chat" channel.
+    std::string msg = "Hello from librats!";
+    node.broadcast("chat", ByteView(msg));
+
     // Keep running
     std::this_thread::sleep_for(std::chrono::minutes(1));
-    
+
+    node.stop();
     return 0;
 }</code></pre>
                         </div>
@@ -300,42 +304,31 @@ int main() {
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="python-code">import librats_py
+                            <pre><code id="python-code">from librats_py import RatsClient
 import time
 
 def main():
-    # Create a simple P2P client
-    client = librats_py.RatsClient(8080)
-    
-    # Set up connection callback
-    def on_connection(peer_id):
-        print(f"✅ New peer connected: {peer_id}")
-    
-    client.set_connection_callback(on_connection)
-    
-    # Set up message callback
-    def on_message(peer_id, message):
-        print(f"💬 Message from {peer_id}: {message}")
-    
-    client.set_string_data_callback(on_message)
-    
-    # Start the client
-    if not client.start():
-        print("Failed to start client")
-        return 1
-    
-    print("🐀 librats client running on port 8080")
-    
-    # Connect to another peer (optional)
-    # client.connect_to_peer("127.0.0.1", 8081)
-    
-    # Send a message to all connected peers
-    client.broadcast_string_to_peers("Hello from librats Python!")
-    
-    # Keep running
-    time.sleep(60)
-    
-    return 0
+    CHANNEL = "chat"
+
+    # Context manager starts/stops the node. Register callbacks before start().
+    with RatsClient(8080) as client:
+        client.on_peer_connected(lambda pid: print(f"✅ New peer connected: {pid}"))
+
+        def on_message(peer_id, data):
+            print(f"💬 Message from {peer_id}: {data.decode('utf-8', 'replace')}")
+
+        client.on(CHANNEL, on_message)
+
+        client.start()
+        print(f"🐀 librats node running on port {client.listen_port}")
+
+        # Dial another peer (optional)
+        # client.connect("127.0.0.1", 8081)
+
+        # Broadcast raw bytes to all connected peers on the "chat" channel.
+        client.broadcast(CHANNEL, b"Hello from librats Python!")
+
+        time.sleep(60)  # keep running
 
 if __name__ == "__main__":
     main()</code></pre>
@@ -350,32 +343,39 @@ if __name__ == "__main__":
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="protocol-code">#include "librats.h"
+                            <pre><code id="protocol-code">#include "node/node.h"
+#include "subsystems/dht_discovery.h"
 #include &lt;iostream&gt;
+#include &lt;thread&gt;
+#include &lt;chrono&gt;
+
+using namespace librats;
 
 int main() {
-    librats::RatsClient client(8080);
-    
-    // Configure custom protocol for your application
-    client.set_protocol("my_app/1.0");
+    NodeConfig config;
+    config.listen_port = 8080;
+    // The protocol is bound into the handshake: only peers with the exact same
+    // (name/version) can complete a connection.
+    config.protocol = "my_app/1.0";
 
-    std::cout &lt;&lt; "Protocol: " &lt;&lt; client.get_protocol() &lt;&lt; std::endl;
-    std::cout &lt;&lt; "Discovery hash: " &lt;&lt; client.get_discovery_hash() &lt;&lt; std::endl;
-    
-    client.start();
-    
-    // Start DHT discovery with custom protocol
-    if (client.start_dht_discovery()) {
-        // Announce our presence
-        client.announce_for_hash(client.get_discovery_hash());
-        
-        // Search for other peers using same protocol
-        client.find_peers_by_hash(client.get_discovery_hash(), 
-            [](const std::vector&lt;std::string&gt;& peers) {
-                std::cout &lt;&lt; "Found " &lt;&lt; peers.size() &lt;&lt; " peers" &lt;&lt; std::endl;
-            });
-    }
-    
+    Node node(config);
+
+    // DHT discovery announces + searches under a discovery key and dials any
+    // peers it finds. An empty key defaults to config.protocol, so peers of the
+    // same app/version discover each other automatically.
+    node.add_subsystem(std::make_unique&lt;DhtDiscovery&gt;(DhtDiscovery::Config{}));
+
+    node.on_peer_connected([](const Peer& peer) {
+        std::cout &lt;&lt; "Discovered peer: " &lt;&lt; peer.id().short_hex() &lt;&lt; std::endl;
+    });
+
+    std::cout &lt;&lt; "Protocol: " &lt;&lt; node.protocol() &lt;&lt; std::endl;
+
+    // start() brings up the DHT; announcing + searching runs on its own thread.
+    node.start();
+
+    std::this_thread::sleep_for(std::chrono::minutes(5));  // let discovery run
+    node.stop();
     return 0;
 }</code></pre>
                         </div>
@@ -388,42 +388,40 @@ int main() {
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="chat-code">#include "librats.h"
+                            <pre><code id="chat-code">#include "node/node.h"
+#include "subsystems/message_json.h"
 #include &lt;iostream&gt;
 #include &lt;string&gt;
 
+using namespace librats;
+
 int main() {
-    librats::RatsClient client(8080);
-    
-    // Set up message handlers using the modern API
-    client.on("chat", [](const std::string& peer_id, const nlohmann::json& data) {
-        std::cout &lt;&lt; "[CHAT] " &lt;&lt; peer_id &lt;&lt; ": " 
-                  &lt;&lt; data["message"].get&lt;std::string&gt;() &lt;&lt; std::endl;
+    Node node(NodeConfig{/*listen_port=*/8080});
+    node.add_subsystem(std::make_unique&lt;MessageJson&gt;());  // reached via node.json()
+
+    // Typed JSON handlers. The sender is the AUTHENTICATED PeerId from the
+    // handshake — it cannot be spoofed by a field in the payload.
+    node.json()-&gt;on("chat", [](const PeerId& from, const librats::Json& data) {
+        std::cout &lt;&lt; "[CHAT] " &lt;&lt; from.short_hex() &lt;&lt; ": "
+                  &lt;&lt; data.value("message", "") &lt;&lt; std::endl;
     });
-    
-    client.on("user_join", [](const std::string& peer_id, const nlohmann::json& data) {
-        std::cout &lt;&lt; "[JOIN] " &lt;&lt; data["username"].get&lt;std::string&gt;() 
-                  &lt;&lt; " joined" &lt;&lt; std::endl;
+
+    node.json()-&gt;on("user_join", [](const PeerId& from, const librats::Json& data) {
+        std::cout &lt;&lt; "[JOIN] " &lt;&lt; data.value("username", "") &lt;&lt; " joined" &lt;&lt; std::endl;
     });
-    
-    // Connection callback
-    client.set_connection_callback([&](socket_t socket, const std::string& peer_id) {
-        std::cout &lt;&lt; "✅ Peer connected: " &lt;&lt; peer_id &lt;&lt; std::endl;
-        
-        // Send welcome message
-        nlohmann::json welcome;
-        welcome["username"] = "User_" + client.get_our_peer_id().substr(0, 8);
-        client.send("user_join", welcome);
+
+    // Announce ourselves whenever a peer connects.
+    node.on_peer_connected([&](const Peer& peer) {
+        std::cout &lt;&lt; "✅ Peer connected: " &lt;&lt; peer.id().short_hex() &lt;&lt; std::endl;
+        node.json()-&gt;send("user_join",
+            librats::Json{{"username", "User_" + node.local_id().short_hex()}});
     });
-    
-    client.start();
-    
-    // Send a chat message
-    nlohmann::json chat_msg;
-    chat_msg["message"] = "Hello, P2P chat!";
-    chat_msg["timestamp"] = std::time(nullptr);
-    client.send("chat", chat_msg);
-    
+
+    node.start();
+
+    // Broadcast a chat message to all connected peers.
+    node.json()-&gt;send("chat", librats::Json{{"message", "Hello, P2P chat!"}});
+
     return 0;
 }</code></pre>
                         </div>
@@ -437,44 +435,36 @@ int main() {
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="gossipsub-code">int main() {
-    librats::RatsClient client(8080);
-    
-    // Set up topic message handlers
-    client.on_topic_message("chat", [](const std::string& peer_id, 
-        const std::string& topic, const std::string& message) {
-        std::cout << "Chat from " << peer_id << ": " << message << std::endl;
+                            <pre><code id="gossipsub-code">#include "node/node.h"
+#include "subsystems/pubsub.h"
+#include "subsystems/dht_discovery.h"
+#include &lt;iostream&gt;
+
+using namespace librats;
+
+int main() {
+    Node node(NodeConfig{/*listen_port=*/8080});
+    auto* pubsub = node.add_subsystem(std::make_unique&lt;PubSub&gt;());
+    node.add_subsystem(std::make_unique&lt;DhtDiscovery&gt;(DhtDiscovery::Config{}));  // find peers to gossip with
+
+    // Optional: validate inbound messages before they are delivered or forwarded.
+    pubsub-&gt;set_validator("chat", [](const PeerId& from, const std::string& topic, ByteView data) {
+        // Only accept messages shorter than 1000 bytes.
+        return data.size() &lt;= 1000 ? ValidationResult::Accept : ValidationResult::Reject;
     });
-    
-    client.on_topic_json_message("events", [](const std::string& peer_id, 
-        const std::string& topic, const nlohmann::json& data) {
-        std::cout << "Event: " << data["type"] << " from " << peer_id << std::endl;
+
+    // Subscribe: installs the delivery handler and joins the topic mesh.
+    pubsub-&gt;subscribe("chat", [](const PeerId& from, const std::string& topic, ByteView data) {
+        std::cout &lt;&lt; "Chat from " &lt;&lt; from.short_hex() &lt;&lt; ": "
+                  &lt;&lt; std::string(reinterpret_cast&lt;const char*&gt;(data.data()), data.size()) &lt;&lt; std::endl;
     });
-    
-    // Set message validator
-    client.set_topic_message_validator("chat", [](const std::string& topic, 
-        const std::string& message, const std::string& peer_id) {
-        // Only accept messages shorter than 1000 characters
-        return message.length() <= 1000 ? 
-            librats::ValidationResult::ACCEPT : 
-            librats::ValidationResult::REJECT;
-    });
-    
-    client.start();
-    client.start_dht_discovery();
-    
-    // Subscribe to topics
-    client.subscribe_to_topic("chat");
-    client.subscribe_to_topic("events");
-    
-    // Publish messages
-    client.publish_to_topic("chat", "Hello, GossipSub world!");
-    
-    nlohmann::json event_data;
-    event_data["type"] = "user_login";
-    event_data["timestamp"] = std::time(nullptr);
-    client.publish_json_to_topic("events", event_data);
-    
+
+    node.start();
+
+    // Publish along the mesh — relayed to every subscriber, even several hops away.
+    std::string msg = "Hello, GossipSub world!";
+    pubsub-&gt;publish("chat", ByteView(msg));
+
     return 0;
 }</code></pre>
                         </div>
@@ -487,50 +477,48 @@ int main() {
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="files-code">#include "librats.h"
+                            <pre><code id="files-code">#include "node/node.h"
+#include "subsystems/file_transfer.h"
 #include &lt;iostream&gt;
 
+using namespace librats;
+
 int main() {
-    librats::RatsClient client(8080);
-    
-    // Set up file transfer callbacks
-    client.on_file_transfer_progress([](const librats::FileTransferProgress& progress) {
-        std::cout &lt;&lt; "\ud83d\udcc1 Transfer " &lt;&lt; progress.transfer_id.substr(0, 8) 
-                  &lt;&lt; ": " &lt;&lt; progress.get_completion_percentage() &lt;&lt; "% complete"
-                  &lt;&lt; " (" &lt;&lt; (progress.transfer_rate_bps / 1024) &lt;&lt; " KB/s)" &lt;&lt; std::endl;
+    Node node(NodeConfig{/*listen_port=*/8080});
+
+    // Stage in-progress downloads in ./downloads; chunk size, window and
+    // integrity verification are set through FileTransfer::Config if needed.
+    auto* files = node.add_subsystem(std::make_unique&lt;FileTransfer&gt;("./downloads"));
+
+    files-&gt;on_progress([](const FileTransfer::Progress& p) {
+        std::cout &lt;&lt; "\ud83d\udcc1 Transfer " &lt;&lt; p.id
+                  &lt;&lt; ": " &lt;&lt; (int)p.percent() &lt;&lt; "% complete"
+                  &lt;&lt; " (" &lt;&lt; (p.transfer_rate_bps / 1024) &lt;&lt; " KB/s)" &lt;&lt; std::endl;
     });
-    
-    client.on_file_transfer_completed([](const std::string& transfer_id, bool success, const std::string& error) {
+
+    files-&gt;on_complete([](uint64_t id, bool success, const std::string& path) {
         if (success) {
-            std::cout &lt;&lt; "\u2705 Transfer completed: " &lt;&lt; transfer_id.substr(0, 8) &lt;&lt; std::endl;
+            std::cout &lt;&lt; "\u2705 Transfer completed: " &lt;&lt; path &lt;&lt; std::endl;
         } else {
-            std::cout &lt;&lt; "\u274c Transfer failed: " &lt;&lt; error &lt;&lt; std::endl;
+            std::cout &lt;&lt; "\u274c Transfer failed: " &lt;&lt; path &lt;&lt; std::endl;
         }
     });
-    
-    // Auto-accept incoming file transfers
-    client.on_file_transfer_request([](const std::string& peer_id, 
-                                      const librats::FileMetadata& metadata, 
-                                      const std::string& transfer_id) {
-        std::cout &lt;&lt; "\ud83d\udce5 Incoming: " &lt;&lt; metadata.filename &lt;&lt; " from " &lt;&lt; peer_id.substr(0, 8) &lt;&lt; std::endl;
-        return true; // Auto-accept
+
+    // Auto-accept incoming offers into ./downloads. Per-chunk CRC32 and a
+    // whole-file SHA-256 are verified before each file is moved into place.
+    files-&gt;on_offer([&](const FileTransfer::Offer& offer) {
+        std::cout &lt;&lt; "\ud83d\udce5 Incoming: " &lt;&lt; offer.name
+                  &lt;&lt; " from " &lt;&lt; offer.from.short_hex() &lt;&lt; std::endl;
+        files-&gt;accept(offer.from, offer.id, "./downloads/" + offer.name);
     });
-    
-    client.start();
-    
-    // Configure transfer settings
-    librats::FileTransferConfig config;
-    config.chunk_size = 64 * 1024;       // 64KB chunks
-    config.max_concurrent_chunks = 4;    // 4 parallel chunks
-    config.verify_checksums = true;      // Verify integrity
-    client.set_file_transfer_config(config);
-    
+
+    node.start();
+
     std::cout &lt;&lt; "File transfer ready. Connect peers and exchange files!" &lt;&lt; std::endl;
-    
-    // Example transfers (replace "peer_id" with actual peer ID)
-    //std::string file_transfer = client.send_file("peer_id", "my_file.txt");
-    //std::string dir_transfer = client.send_directory("peer_id", "./my_folder");
-    //std::string file_request = client.request_file("peer_id", "remote_file.txt", "./downloaded_file.txt");
+
+    // With a peer's id (e.g. from on_peer_connected), send a file or a directory:
+    // files-&gt;send_file(peer_id, "my_file.txt");
+    // files-&gt;send_directory(peer_id, "./my_folder");
 
     return 0;
 }</code></pre>

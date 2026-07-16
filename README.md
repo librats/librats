@@ -172,15 +172,15 @@ Node node(NodeConfig{/*listen_port=*/8080});
 node.add_subsystem(std::make_unique<MessageJson>());
 
 // Handlers are additive and keyed by message type. `from` is the authenticated PeerId.
-node.json()->on("chat", [](const PeerId& from, const nlohmann::json& data) {
+node.json()->on("chat", [](const PeerId& from, const librats::Json& data) {
     std::cout << "[chat] " << from.short_hex() << ": " << data.value("text", "") << "\n";
 });
 
 node.start();
 
 // Broadcast / direct send.
-node.json()->send("chat", nlohmann::json{{"text", "Hello, P2P chat!"}});
-node.json()->send(some_peer_id, "chat", nlohmann::json{{"text", "private hi"}});
+node.json()->send("chat", librats::Json{{"text", "Hello, P2P chat!"}});
+node.json()->send(some_peer_id, "chat", librats::Json{{"text", "private hi"}});
 ```
 
 ### 4. GossipSub publish-subscribe
@@ -752,7 +752,7 @@ int main() {
     Node node(NodeConfig{/*listen_port=*/8080});
     node.add_subsystem(std::make_unique<MessageJson>());
 
-    node.json()->on("chat", [](const PeerId& from, const nlohmann::json& d) {
+    node.json()->on("chat", [](const PeerId& from, const librats::Json& d) {
         std::cout << "[" << d.value("user", "?") << "]: " << d.value("text", "") << "\n";
     });
 
@@ -764,7 +764,7 @@ int main() {
     std::string line;
     while (std::getline(std::cin, line) && line != "quit") {
         if (!line.empty())
-            node.json()->send("chat", nlohmann::json{{"user", user}, {"text", line}});
+            node.json()->send("chat", librats::Json{{"user", user}, {"text", line}});
     }
     node.stop();
     return 0;
@@ -844,6 +844,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-- **nlohmann/json**: for the excellent JSON library integration
+- **nlohmann/json**: inspiration for the API surface of librats' own self-contained `librats::Json` type
 - **Contributors**: everyone who has helped make librats better
 
