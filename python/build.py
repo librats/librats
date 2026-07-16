@@ -115,7 +115,8 @@ def build_native_library():
     build_dir.mkdir(exist_ok=True)
 
     run_command(["cmake", "-DRATS_SHARED_LIBRARY=ON",
-                 "-DRATS_BUILD_TESTS=OFF", "-DRATS_BUILD_EXAMPLES=OFF", ".."],
+                 "-DRATS_BUILD_TESTS=OFF", "-DRATS_BUILD_CLIENT=OFF",
+                 "-DRATS_BUILD_EXAMPLES=OFF", ".."],
                 cwd=build_dir)
 
     if os.name == 'nt':

@@ -23,6 +23,7 @@ set(LIBRATS_BINARY_DIR ${CMAKE_BINARY_DIR}/librats_native)
 
 if(EXISTS "${LIBRATS_SOURCE_DIR}/CMakeLists.txt")
     # Options suitable for Android cross-compilation.
+    set(RATS_BUILD_CLIENT OFF CACHE BOOL "Disable the rats-client executable for Android build" FORCE)
     set(RATS_BUILD_EXAMPLES OFF CACHE BOOL "Disable examples for Android build" FORCE)
     set(RATS_BUILD_TESTS OFF CACHE BOOL "Disable tests for Android build" FORCE)
     set(RATS_CROSSCOMPILING ON CACHE BOOL "Indicate cross-compilation environment" FORCE)

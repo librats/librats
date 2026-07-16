@@ -133,6 +133,7 @@ try {
     
     let cmakeArgs = [
         '-DRATS_BUILD_TESTS=OFF',
+        '-DRATS_BUILD_CLIENT=OFF',
         '-DRATS_BUILD_EXAMPLES=OFF',
         '-DRATS_STATIC_LIBRARY=ON',
         '-DRATS_BINDINGS=ON',

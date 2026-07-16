@@ -74,7 +74,8 @@ ctest --output-on-failure
 | Option | Default | Description |
 |--------|---------|-------------|
 | `RATS_BUILD_TESTS` | `ON` | Build unit tests |
-| `RATS_BUILD_EXAMPLES` | `ON` | Build example applications |
+| `RATS_BUILD_CLIENT` | `ON` | Build the `rats-client` reference application |
+| `RATS_BUILD_EXAMPLES` | `OFF` | Build the `examples/` programs |
 | `RATS_ENABLE_ASAN` | `OFF` | Enable AddressSanitizer |
 | `RATS_BINDINGS` | `ON` | Enable C API bindings |
 | `RATS_SHARED_LIBRARY` | `OFF` | Build as shared library |

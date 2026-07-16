@@ -125,6 +125,7 @@ jobs:
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
+            -DRATS_BUILD_CLIENT=OFF \
             -DRATS_CROSSCOMPILING=ON
 
       - name: Build

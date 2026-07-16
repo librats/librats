@@ -71,6 +71,7 @@ class LibratsConan(ConanFile):
         tc.cache_variables["RATS_SHARED_LIBRARY"] = bool(self.options.shared)
         tc.cache_variables["RATS_STATIC_LIBRARY"] = not bool(self.options.shared)
         tc.cache_variables["RATS_BUILD_TESTS"] = False
+        tc.cache_variables["RATS_BUILD_CLIENT"] = False
         tc.cache_variables["RATS_BUILD_EXAMPLES"] = False
         tc.cache_variables["RATS_BINDINGS"] = bool(self.options.bindings)
         tc.cache_variables["RATS_SEARCH_FEATURES"] = bool(self.options.search_features)
