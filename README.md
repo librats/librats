@@ -10,25 +10,9 @@
 
 **A high-performance, lightweight peer-to-peer networking library with C++, C, Node.js, Java, Python, and Android support**
 
-librats is a modern P2P networking library designed for **superior performance** and **simplicity**. Built from the ground up in C++17 with comprehensive language bindings, it provides enterprise-grade P2P networking with minimal overhead and maximum efficiency.
+librats is a modern P2P networking library written in C++17, with bindings for C, Node.js, Java, Python, and Android. It's designed to be fast and light enough for low-power and embedded devices, while staying simple to build on: you start with a tiny core and add exactly the features you need — nothing more.
 
 **Official Website**: [https://librats.com](https://librats.com)
-
-## 🧱 Design at a glance
-
-librats is built around a small, predictable core (`Node`) and a set of **opt-in subsystems** you attach explicitly. A bare `Node` is just the secure transport: an encrypted TCP channel (Noise_XX) with a self-certifying peer identity, manual dialing, and raw channel messaging. Everything else — discovery, pub/sub, typed messaging, file transfer, liveness, NAT port mapping, reconnection — is a `Subsystem` you add **before** `start()`. You pay only for what you attach, and the core stays small and easy to reason about.
-
-```cpp
-librats::NodeConfig config;
-config.listen_port = 8080;
-librats::Node node(config);
-
-// attach only the capabilities you need
-node.add_subsystem(std::make_unique<librats::PubSub>());
-node.add_subsystem(std::make_unique<librats::DhtDiscovery>(dht_config));
-
-node.start();
-```
 
 ## ✨ Key Features
 
@@ -43,7 +27,7 @@ node.start();
 ### **Discovery & Networking**
 - **DHT Discovery**: peer discovery over a Kademlia DHT, fully compatible with the **BitTorrent Mainline DHT** — the largest distributed hash table in the world, with **millions of active nodes** (IPv4 + IPv6 / BEP 32)
 - **mDNS Discovery**: automatic local-network peer discovery with service advertisement
-- **IPv4/IPv6 Dual Stack**: bind dual-stack by default; full support for modern internet protocols
+- **IPv4/IPv6 Dual Stack**: binds dual-stack by default, so a single node accepts both IPv4 and IPv6 peers
 - **Peer Exchange (PEX)**: peers gossip known addresses to grow the mesh
 - **Automatic Reconnection**: re-dials dropped peers with exponential backoff; targets persist to disk when a `data_dir` is set
 - **Network-change awareness**: an optional monitor detects interface/route changes and notifies subsystems so they can re-announce and renew port mappings
@@ -95,7 +79,21 @@ node.start();
 
 ## 🚀 Quick Start
 
-> Examples use the C++ `Node` API. The equivalent C API (`rats_*`) is shown in the [C API](#c-api-bindingsratsh) section.
+Everything in librats revolves around one idea: a small, predictable core (`Node`) plus **opt-in subsystems** you attach explicitly. A bare `Node` is just the secure transport — an encrypted TCP channel (Noise_XX) with a self-certifying peer identity, manual dialing, and raw channel messaging. Everything else — discovery, pub/sub, typed messaging, file transfer, liveness, NAT port mapping, reconnection — is a `Subsystem` you add **before** `start()`. You pay only for what you attach, and the core stays small and easy to reason about.
+
+```cpp
+librats::NodeConfig config;
+config.listen_port = 8080;
+librats::Node node(config);
+
+// attach only the capabilities you need
+node.add_subsystem(std::make_unique<librats::PubSub>());
+node.add_subsystem(std::make_unique<librats::DhtDiscovery>(dht_config));
+
+node.start();
+```
+
+The examples below use the C++ `Node` API. The equivalent C API (`rats_*`) is shown in the [C API](#c-api-bindingsratsh) section.
 
 ### 1. Basic P2P connection
 
@@ -844,6 +842,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
+- **libtorrent**: a huge source of inspiration for librats' DHT and BitTorrent stacks. Many algorithmic ideas and improvements — the traversal/lookup algorithm, the ordered-bucket routing table, IP-diversity admission and other hardening details — are borrowed from its battle-tested design. Big thanks to the libtorrent team for their outstanding work.
 - **nlohmann/json**: inspiration for the API surface of librats' own self-contained `librats::Json` type
 - **Contributors**: everyone who has helped make librats better
 
