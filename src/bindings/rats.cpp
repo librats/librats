@@ -155,7 +155,11 @@ rats_error_t rats_start(rats_t node) {
     return RATS_OK;
 }
 
-void rats_stop(rats_t node) { node_of(node)->stop(); }
+void rats_stop(rats_t node) {
+    auto* h = as_handle(node);
+    h->node->stop();
+    h->started = false;   // allow a subsequent rats_start() to bind again
+}
 
 uint16_t rats_listen_port(rats_t node) { return node_of(node)->listen_port(); }
 

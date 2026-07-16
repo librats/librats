@@ -257,6 +257,32 @@ TEST(NodeTest, DisconnectNotifiesPeer) {
     server.stop();
 }
 
+// stop() must release the bound listen port immediately, not leak it until the
+// Node is destroyed. Regression: a stopped node kept the port bound, so a fresh
+// node on the same fixed port failed to bind (as seen in the Node.js test suite,
+// which reuses fixed ports across sequential cases). We learn a real free port
+// from an ephemeral bind, stop, then re-bind that exact port. Observable on Linux
+// (SO_REUSEADDR there rejects a second listener on a still-bound port); Windows
+// SO_REUSEADDR is permissive enough to mask it, so this passes there regardless.
+TEST(NodeTest, StopReleasesListenPort) {
+    uint16_t port = 0;
+    {
+        NodeConfig c = server_config();       // ephemeral
+        Node first(c);
+        ASSERT_TRUE(first.start());
+        port = first.listen_port();
+        ASSERT_GT(port, 0);
+        first.stop();                         // must free the port here
+    }
+
+    NodeConfig c = server_config();
+    c.listen_port = port;                     // reuse the exact port
+    Node second(c);
+    EXPECT_TRUE(second.start());              // fails if stop() leaked the port
+    EXPECT_EQ(second.listen_port(), port);
+    second.stop();
+}
+
 // A multi-megabyte payload round-trips byte-exact, under both security modes.
 // Exercises frame chunking + reassembly across recv boundaries (and per-frame
 // AEAD when encrypted). Parameterized over Noise / Plaintext.

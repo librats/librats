@@ -132,6 +132,13 @@ void Node::stop() {
     // before the dependency it borrowed is itself stopped and destroyed.
     for (auto it = subsystems_.rbegin(); it != subsystems_.rend(); ++it) (*it)->stop();
     reactors_->stop();                      // then join reactors; close connections
+    // The listen socket is owned by us, not the reactor — close it here, after the
+    // reactor threads have joined (so nothing is still polling it), to release the
+    // bound port immediately on stop() rather than leaking it until destruction.
+    if (is_valid_socket(listen_socket_)) {
+        close_socket(listen_socket_);
+        listen_socket_ = INVALID_SOCKET_VALUE;
+    }
     LOG_INFO("node", "Node " << identity_.id.short_hex() << " stopped");
 }
 
