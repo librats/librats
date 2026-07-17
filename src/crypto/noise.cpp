@@ -150,27 +150,6 @@ size_t NoiseCipherState::decrypt_with_ad(
     return result;
 }
 
-void NoiseCipherState::rekey() {
-    if (!has_key_) {
-        LOG_NOISE_WARN("Rekey called but no key is set");
-        return;
-    }
-    
-    uint8_t zeros[NOISE_KEY_SIZE] = {0};
-    uint8_t new_key[NOISE_KEY_SIZE + NOISE_TAG_SIZE];
-    
-    uint8_t nonce[12];
-    /* Use max nonce value for rekey */
-    memset(nonce, 0xFF, 12);
-    
-    chachapoly_encrypt(key_, nonce, nullptr, 0, zeros, NOISE_KEY_SIZE, new_key);
-    
-    memcpy(key_, new_key, NOISE_KEY_SIZE);
-    secure_zero(new_key, sizeof(new_key));
-    
-    LOG_NOISE_INFO("CipherState rekeyed successfully");
-}
-
 void NoiseCipherState::clear() {
     secure_zero(key_, NOISE_KEY_SIZE);
     nonce_ = 0;

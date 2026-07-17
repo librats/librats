@@ -61,7 +61,7 @@ public:
     /* Get current nonce value */
     uint64_t get_nonce() const { return nonce_; }
     
-    /* Set nonce (for testing/rekey) */
+    /* Set nonce (for testing) */
     void set_nonce(uint64_t n) { nonce_ = n; }
     
     /**
@@ -93,9 +93,6 @@ public:
         const uint8_t* ciphertext, size_t ct_len,
         uint8_t* plaintext
     );
-    
-    /* Rekey the cipher state */
-    void rekey();
     
     /* Clear sensitive data */
     void clear();
