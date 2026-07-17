@@ -18,14 +18,18 @@
  * Backpressure: the sender keeps at most `window_bytes` un-acked; the receiver
  * acks cumulative progress at least twice per window, so the sender never stalls.
  *
- * Safety: temp file names are derived from the transfer id (never the peer's
- * name), and every peer-supplied relative path in a directory manifest is
- * validated against path traversal before use.
+ * Safety: temp file names are derived from the sender's PeerId + the transfer id
+ * (never the peer's self-declared name) — the id alone is only unique per sender,
+ * so two peers' first transfers would otherwise share a temp file. Every
+ * peer-supplied relative path in a directory manifest is validated against path
+ * traversal before use, and a manifest file count is checked against the payload
+ * size before it is used to size an allocation.
  *
  * Threading: a worker pool runs the blocking send loop (one transfer per worker);
  * receiving + all control handling run on the reactor thread; a maintenance
- * thread reaps idle/timed-out transfers and purges finished ones. Each transfer
- * has its own mutex+condvar; the maps are guarded by mutex_.
+ * thread reaps idle/timed-out transfers. A finished transfer is erased as it
+ * completes, so there is no retention window. Each transfer has its own
+ * mutex+condvar; the maps are guarded by mutex_.
  *
  * Wire (MessageType::FileChunk payload, big-endian):
  *   OFFER    [1][id:u64][flags:u8][total:u64][name_len:u16][name][file_count:u32]

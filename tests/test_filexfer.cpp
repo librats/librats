@@ -49,6 +49,12 @@ std::vector<uint8_t> read_all(const std::string& path) {
     return v;
 }
 
+// Big-endian writers, for hand-building a raw FileChunk payload that no honest
+// sender would ever emit.
+void put_u16(std::vector<uint8_t>& b, uint16_t v) { b.push_back(v >> 8); b.push_back(v & 0xFF); }
+void put_u32(std::vector<uint8_t>& b, uint32_t v) { for (int i = 3; i >= 0; --i) b.push_back((v >> (i * 8)) & 0xFF); }
+void put_u64(std::vector<uint8_t>& b, uint64_t v) { for (int i = 7; i >= 0; --i) b.push_back((v >> (i * 8)) & 0xFF); }
+
 // Two connected nodes, each with a FileTransfer subsystem. `send` lives on the
 // dialing client, `recv` on the listening server. Nodes stop on destruction.
 struct Pair {
@@ -430,4 +436,109 @@ TEST(FilexferTest, RejectedOfferFailsCleanly) {
     client.stop();
     server.stop();
     delete_file(src.c_str());
+}
+
+// A manifest file count is the peer's word. Reserving on it directly let a
+// ~30-byte OFFER ask for hundreds of GB; the resulting throw unwound out of the
+// reactor thread — which has no handler above it — and aborted the process. The
+// count must be checked against the bytes actually behind it.
+TEST(FilexferTest, HostileManifestCountIsRejected) {
+    const std::string src = "ft_hostile_src.bin", dst = "ft_hostile_dst.bin";
+    const auto content = make_pattern(128 * 1024);
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+    delete_file(dst.c_str());
+
+    Pair p = make_pair();
+    std::atomic<int> offers{0};
+    std::atomic<bool> rdone{false}, rok{false};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) {
+        offers.fetch_add(1);
+        p.recv->accept(o.from, o.id, dst);
+    });
+    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    std::vector<uint8_t> m;
+    m.push_back(1);                              // OP_OFFER
+    put_u64(m, 9999);                            // id
+    m.push_back(1);                              // is_directory
+    put_u64(m, 0);                               // total
+    put_u16(m, 4);                               // name_len
+    m.insert(m.end(), {'e', 'v', 'i', 'l'});
+    put_u32(m, 0xFFFFFFFFu);                     // file_count — nothing behind it
+    p.client->send(p.server->local_id(), MessageType::FileChunk, ByteView(m));
+
+    // The node must survive and keep serving: a real transfer over the same
+    // connection still completes, and the hostile offer never reaches the app.
+    ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+    EXPECT_TRUE(rok.load());
+    EXPECT_EQ(read_all(dst), content);
+    EXPECT_EQ(offers.load(), 1) << "hostile offer must not reach the offer handler";
+
+    delete_file(src.c_str());
+    delete_file(dst.c_str());
+}
+
+// Transfer ids are per-sender — every node numbers its first offer 1 — so a temp
+// path built from the id alone made two senders' first transfers share one file.
+// The second truncated the first, and both SHA checks still passed, because the
+// hash covers the network stream rather than the bytes on disk: silent
+// corruption, with two ordinary peers and no attack.
+TEST(FilexferTest, TempFilesDoNotCollideAcrossSenders) {
+    const std::string src_a = "ft_ca_src.bin", src_b = "ft_cb_src.bin";
+    const std::string dst_a = "ft_ca_dst.bin", dst_b = "ft_cb_dst.bin";
+    const auto content_a = make_pattern(2 * 1024 * 1024);
+    auto content_b = make_pattern(2 * 1024 * 1024 + 17);
+    for (auto& b : content_b) b = static_cast<uint8_t>(~b);  // distinct from content_a
+    ASSERT_TRUE(create_file_binary(src_a.c_str(), content_a.data(), content_a.size()));
+    ASSERT_TRUE(create_file_binary(src_b.c_str(), content_b.data(), content_b.size()));
+    delete_file(dst_a.c_str());
+    delete_file(dst_b.c_str());
+
+    // One receiver, two independent senders.
+    auto server = std::make_unique<Node>(listening_config());
+    auto ca = std::make_unique<Node>(dialing_config());
+    auto cb = std::make_unique<Node>(dialing_config());
+    auto s = std::make_unique<FileTransfer>(".");
+    auto fa = std::make_unique<FileTransfer>(".");
+    auto fb = std::make_unique<FileTransfer>(".");
+    FileTransfer* recv = s.get();
+    FileTransfer* send_a = fa.get();
+    FileTransfer* send_b = fb.get();
+    server->add_subsystem(std::move(s));
+    ca->add_subsystem(std::move(fa));
+    cb->add_subsystem(std::move(fb));
+
+    std::atomic<int> completed{0}, ok_count{0};
+    recv->on_offer([&](const FileTransfer::Offer& o) {
+        recv->accept(o.from, o.id, o.name == src_a ? dst_a : dst_b);
+    });
+    recv->on_complete([&](uint64_t, bool ok, const std::string&) {
+        if (ok) ok_count.fetch_add(1);
+        completed.fetch_add(1);
+    });
+
+    ASSERT_TRUE(server->start());
+    ASSERT_TRUE(ca->start());
+    ASSERT_TRUE(cb->start());
+    ca->connect("127.0.0.1", server->listen_port());
+    cb->connect("127.0.0.1", server->listen_port());
+    ASSERT_TRUE(wait_for([&] { return server->peer_count() == 2; }));
+
+    const uint64_t id_a = send_a->send_file(server->local_id(), src_a);
+    const uint64_t id_b = send_b->send_file(server->local_id(), src_b);
+    ASSERT_NE(id_a, 0u);
+    ASSERT_NE(id_b, 0u);
+    EXPECT_EQ(id_a, id_b) << "both senders issue id 1 — that collision is the point of this test";
+
+    ASSERT_TRUE(wait_for([&] { return completed.load() == 2; }));
+    EXPECT_EQ(ok_count.load(), 2);
+    EXPECT_EQ(read_all(dst_a), content_a);
+    EXPECT_EQ(read_all(dst_b), content_b);
+
+    delete_file(src_a.c_str());
+    delete_file(src_b.c_str());
+    delete_file(dst_a.c_str());
+    delete_file(dst_b.c_str());
 }

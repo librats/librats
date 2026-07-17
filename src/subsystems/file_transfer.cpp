@@ -17,8 +17,6 @@ enum : uint8_t {
     OP_PROGRESS = 5, OP_COMPLETE = 6, OP_CANCEL = 7, OP_PAUSE = 8, OP_RESUME = 9,
 };
 
-constexpr auto FINISHED_RETENTION = std::chrono::seconds(30);
-
 void put_u16(Bytes& b, uint16_t v) { b.push_back(v >> 8); b.push_back(v & 0xFF); }
 void put_u32(Bytes& b, uint32_t v) { for (int i = 3; i >= 0; --i) b.push_back((v >> (i * 8)) & 0xFF); }
 void put_u64(Bytes& b, uint64_t v) { for (int i = 7; i >= 0; --i) b.push_back((v >> (i * 8)) & 0xFF); }
@@ -33,7 +31,12 @@ struct Reader {
     uint64_t u64() { if (end - p < 8) { ok = false; return 0; } uint64_t v = 0; for (int i = 0; i < 8; ++i) v = (v << 8) | *p++; return v; }
     ByteView bytes(size_t n) { if (size_t(end - p) < n) { ok = false; return {}; } ByteView v(p, n); p += n; return v; }
     ByteView rest() { ByteView v(p, size_t(end - p)); p = end; return v; }
+    size_t   remaining() const { return size_t(end - p); }
 };
+
+// Smallest possible OFFER manifest entry on the wire: [path_len:u16][size:u64]
+// with a zero-length path.
+constexpr uint64_t kMinManifestEntry = 2 + 8;
 
 // Recursively collect regular files under abs_dir, recording POSIX relative paths.
 void scan_directory(const std::string& abs_dir, const std::string& rel_prefix,
@@ -368,8 +371,13 @@ void FileTransfer::accept(const PeerId& from, uint64_t id, const std::string& de
         for (size_t i = 0; i < t->files.size(); ++i) {
             IncomingFile& f = t->files[i];
             f.final_path = t->is_directory ? combine_paths(dest_path, f.relative_path) : dest_path;
+            // Transfer ids are only unique per sender (every node's first offer is
+            // id 1), so the sender's PeerId is what keeps two peers' temp files
+            // apart. Use the full hex: short_hex() is 32 bits, which a peer could
+            // grind a keypair to collide with on purpose.
             f.temp_path  = combine_paths(config_.temp_directory,
-                                         std::to_string(id) + "." + std::to_string(i) + ".part");
+                                         from.to_hex() + "." + std::to_string(id) + "."
+                                             + std::to_string(i) + ".part");
         }
         t->status = Status::Active;
         t->last_activity = std::chrono::steady_clock::now();
@@ -514,9 +522,21 @@ void FileTransfer::on_message(const Peer& peer, ByteView payload) {
             ByteView nm = r.bytes(nlen);
             const uint32_t count = r.u32();
             if (!r.ok) return;
+            // `count` is the peer's word. Reserving on it directly lets a ~30-byte
+            // message ask for hundreds of GB; the resulting bad_alloc/length_error
+            // would unwind out of the reactor thread, which has no handler above it,
+            // and abort the process. Reject a count the rest of the payload cannot
+            // possibly hold, then cap the speculative reserve so memory stays
+            // proportional to the entries actually parsed.
+            if (static_cast<uint64_t>(count) * kMinManifestEntry > r.remaining()) {
+                LOG_WARN("filexfer", "Dropping offer " << id << " from " << from.short_hex()
+                         << ": manifest claims " << count << " file(s) but only "
+                         << r.remaining() << " B remain");
+                return;
+            }
             std::string name(reinterpret_cast<const char*>(nm.data()), nm.size());
             std::vector<FileEntry> files;
-            files.reserve(count);
+            files.reserve(std::min<uint32_t>(count, 4096));
             for (uint32_t i = 0; i < count; ++i) {
                 const uint16_t plen = r.u16();
                 ByteView pb = r.bytes(plen);
