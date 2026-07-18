@@ -127,27 +127,28 @@ size_t NoiseCipherState::decrypt_with_ad(
     
     if (ct_len < NOISE_TAG_SIZE) {
         LOG_NOISE_ERROR("Ciphertext too small: " << ct_len << " bytes (min: " << NOISE_TAG_SIZE << ")");
-        return 0;
+        return NOISE_DECRYPT_FAILED;
     }
-    
+
     uint8_t nonce[12];
     make_nonce(nonce, nonce_);
-    
+
     size_t result = chachapoly_decrypt(
         key_, nonce,
         ad, ad_len,
         ciphertext, ct_len,
         plaintext
     );
-    
-    if (result > 0) {
+
+    /* A valid decryption may return 0 (empty authenticated payload); only the
+     * sentinel signals failure. */
+    if (result != CHACHAPOLY_DECRYPT_FAILED) {
         nonce_++;
         LOG_NOISE_DEBUG("Decrypted " << ct_len << " bytes -> " << result << " bytes (nonce: " << nonce_ << ")");
-    } else {
-        LOG_NOISE_ERROR("Decryption failed for " << ct_len << " bytes - authentication failed");
+        return result;
     }
-    
-    return result;
+    LOG_NOISE_ERROR("Decryption failed for " << ct_len << " bytes - authentication failed");
+    return NOISE_DECRYPT_FAILED;
 }
 
 void NoiseCipherState::clear() {
@@ -234,7 +235,7 @@ size_t NoiseSymmetricState::decrypt_and_hash(const uint8_t* ciphertext, size_t c
     if (pt_max > plaintext_cap) {
         LOG_NOISE_ERROR("decrypt_and_hash: plaintext " << pt_max
                         << " exceeds output buffer capacity " << plaintext_cap);
-        return 0;
+        return NOISE_DECRYPT_FAILED;
     }
 
     /* Save ciphertext for mixing (before decryption modifies anything) */
@@ -385,9 +386,12 @@ NoiseError NoiseHandshakeState::initialize(
     /* Initialize symmetric state with protocol name */
     symmetric_.initialize_symmetric(NOISE_PROTOCOL_NAME);
     
-    /* Mix in prologue if provided */
-    if (prologue != nullptr && prologue_len > 0) {
-        symmetric_.mix_hash(prologue, prologue_len);
+    /* Mix in the prologue unconditionally. Per the Noise spec MixHash(prologue) is
+     * always applied — an empty prologue is still hashed (over zero bytes), which
+     * alters the handshake hash, so both peers must do it whether or not one is set. */
+    {
+        static const uint8_t empty = 0;
+        symmetric_.mix_hash(prologue != nullptr ? prologue : &empty, prologue_len);
         LOG_NOISE_DEBUG("Mixed prologue into handshake hash: " << prologue_len << " bytes");
     }
     
@@ -488,14 +492,20 @@ NoiseError NoiseHandshakeState::write_message(
         }
     }
     
-    /* Add payload if provided */
-    if (payload != nullptr && payload_len > 0) {
-        if (offset + payload_len + (symmetric_.cipher_.has_key() ? NOISE_TAG_SIZE : 0) > max_len) {
+    /* Append the payload. Per the Noise spec EncryptAndHash runs on every message,
+     * even with an empty payload: once a key is established this still emits a
+     * 16-byte auth tag and mixes it into the handshake hash (so the message length
+     * and transcript match a spec-compliant peer). */
+    {
+        const uint8_t* pl  = (payload != nullptr) ? payload : reinterpret_cast<const uint8_t*>("");
+        const size_t   pll = (payload != nullptr) ? payload_len : 0;
+        const size_t   tag = symmetric_.cipher_.has_key() ? NOISE_TAG_SIZE : 0;
+        if (offset + pll + tag > max_len) {
             LOG_NOISE_ERROR("Buffer too small for payload");
             return NoiseError::MESSAGE_TOO_LARGE;
         }
-        offset += symmetric_.encrypt_and_hash(payload, payload_len, message_out + offset);
-        LOG_NOISE_DEBUG("Encrypted payload: " << payload_len << " bytes");
+        offset += symmetric_.encrypt_and_hash(pl, pll, message_out + offset);
+        LOG_NOISE_DEBUG("Encrypted payload: " << pll << " bytes");
     }
     
     *message_out_len = offset;
@@ -587,18 +597,19 @@ NoiseError NoiseHandshakeState::read_message(
         }
     }
     
-    /* Decrypt payload if there's remaining data */
-    if (offset < message_len) {
-        size_t remaining = message_len - offset;
-        size_t pt_len = symmetric_.decrypt_and_hash(message + offset, remaining, payload_out, payload_cap);
-        if (pt_len == 0 && remaining > 0) {
+    /* Decrypt-and-hash the trailing payload. This runs on every message, even when
+     * empty: DecryptAndHash mixes the (possibly empty) ciphertext into the handshake
+     * hash, and once keyed it verifies the trailing auth tag. A successful decrypt
+     * may legitimately yield 0 plaintext bytes, so only the sentinel means failure. */
+    {
+        const size_t remaining = message_len - offset;
+        const size_t pt_len = symmetric_.decrypt_and_hash(message + offset, remaining, payload_out, payload_cap);
+        if (pt_len == NOISE_DECRYPT_FAILED) {
             LOG_NOISE_ERROR("Failed to decrypt payload in handshake message");
             return NoiseError::DECRYPT_FAILED;
         }
         *payload_out_len = pt_len;
         LOG_NOISE_DEBUG("Decrypted payload: " << pt_len << " bytes");
-    } else {
-        *payload_out_len = 0;
     }
     
     message_index_++;
@@ -743,8 +754,10 @@ size_t NoiseSession::decrypt(const uint8_t* ciphertext, size_t ct_len, uint8_t* 
     }
     
     size_t result = recv_cipher_.decrypt_with_ad(nullptr, 0, ciphertext, ct_len, plaintext);
-    if (result > 0) {
+    if (result != NOISE_DECRYPT_FAILED) {
         LOG_NOISE_DEBUG("Session decrypted " << ct_len << " bytes -> " << result << " bytes");
+    } else {
+        LOG_NOISE_ERROR("Session decrypt failed for " << ct_len << " bytes");
     }
     return result;
 }

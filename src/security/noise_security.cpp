@@ -39,7 +39,7 @@ public:
         if (cipher.size() < rats::NOISE_TAG_SIZE) return false;
         out.resize(cipher.size());  // plaintext is always shorter than ciphertext
         const size_t n = session_->decrypt(cipher.data(), cipher.size(), out.data());
-        if (n == 0) return false;
+        if (n == rats::NOISE_DECRYPT_FAILED) return false;  // 0 is a valid (empty) frame
         out.resize(n);
         return true;
     }

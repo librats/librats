@@ -128,8 +128,8 @@ TEST_F(ChaChaPolyTest, DecryptWithWrongADFails) {
         ciphertext.data(), pt_len + CHACHAPOLY_TAG_SIZE,
         decrypted.data()
     );
-    
-    EXPECT_EQ(dec_len, 0u);
+
+    EXPECT_EQ(dec_len, CHACHAPOLY_DECRYPT_FAILED);
 }
 
 TEST_F(ChaChaPolyTest, TamperedCiphertextFails) {
@@ -163,8 +163,8 @@ TEST_F(ChaChaPolyTest, TamperedCiphertextFails) {
         ciphertext.data(), ct_len,
         decrypted.data()
     );
-    
-    EXPECT_EQ(dec_len, 0u);
+
+    EXPECT_EQ(dec_len, CHACHAPOLY_DECRYPT_FAILED);
 }
 
 // =============================================================================
@@ -462,6 +462,85 @@ TEST_F(NoiseHandshakeStateTest, XXPatternFullHandshake) {
         initiator.get_local_static_public(),
         32
     ), 0);
+}
+
+TEST_F(NoiseHandshakeStateTest, SpecMessageSizesWithEmptyPayloads) {
+    // Noise_XX with empty payloads must produce spec-exact message sizes. Once a key
+    // is established, EncryptAndHash over an *empty* payload still emits a 16-byte auth
+    // tag and mixes it into the transcript, so:
+    //   msg0  -> e               : 32                (ephemeral; cipher unkeyed -> no tag)
+    //   msg1  <- e, ee, s, es    : 32 + (32+16) + 16 = 96
+    //   msg2  -> s, se           :      (32+16) + 16 = 64
+    // Omitting those trailing tags (the earlier behavior) diverged from the spec and
+    // broke interop with any compliant Noise implementation.
+    NoiseHandshakeState initiator, responder;
+    ASSERT_EQ(initiator.initialize(true), NoiseError::OK);
+    ASSERT_EQ(responder.initialize(false), NoiseError::OK);
+
+    uint8_t message[256], payload[256];
+    size_t msg_len, payload_len;
+
+    // msg0: -> e
+    msg_len = sizeof(message);
+    ASSERT_EQ(initiator.write_message(nullptr, 0, message, &msg_len), NoiseError::OK);
+    EXPECT_EQ(msg_len, NOISE_DH_SIZE);  // 32
+    payload_len = sizeof(payload);
+    ASSERT_EQ(responder.read_message(message, msg_len, payload, &payload_len), NoiseError::OK);
+    EXPECT_EQ(payload_len, 0u);
+
+    // msg1: <- e, ee, s, es
+    msg_len = sizeof(message);
+    ASSERT_EQ(responder.write_message(nullptr, 0, message, &msg_len), NoiseError::OK);
+    EXPECT_EQ(msg_len, NOISE_DH_SIZE + (NOISE_DH_SIZE + NOISE_TAG_SIZE) + NOISE_TAG_SIZE);  // 96
+    payload_len = sizeof(payload);
+    ASSERT_EQ(initiator.read_message(message, msg_len, payload, &payload_len), NoiseError::OK);
+    EXPECT_EQ(payload_len, 0u);
+
+    // msg2: -> s, se
+    msg_len = sizeof(message);
+    ASSERT_EQ(initiator.write_message(nullptr, 0, message, &msg_len), NoiseError::OK);
+    EXPECT_EQ(msg_len, (NOISE_DH_SIZE + NOISE_TAG_SIZE) + NOISE_TAG_SIZE);  // 64
+    ASSERT_TRUE(initiator.is_handshake_complete());
+    payload_len = sizeof(payload);
+    ASSERT_EQ(responder.read_message(message, msg_len, payload, &payload_len), NoiseError::OK);
+    EXPECT_EQ(payload_len, 0u);
+    ASSERT_TRUE(responder.is_handshake_complete());
+
+    // Both sides must derive the identical transcript hash.
+    EXPECT_EQ(memcmp(initiator.get_handshake_hash(),
+                     responder.get_handshake_hash(), NOISE_HASH_SIZE), 0);
+}
+
+TEST_F(NoiseHandshakeStateTest, NonEmptyHandshakePayloadRoundTrips) {
+    // A non-empty payload carried in the final XX message must decrypt intact, and
+    // the empty-payload path (earlier messages) must not disturb it.
+    NoiseHandshakeState initiator, responder;
+    ASSERT_EQ(initiator.initialize(true), NoiseError::OK);
+    ASSERT_EQ(responder.initialize(false), NoiseError::OK);
+
+    uint8_t message[256], payload[256];
+    size_t msg_len, payload_len;
+
+    msg_len = sizeof(message);
+    ASSERT_EQ(initiator.write_message(nullptr, 0, message, &msg_len), NoiseError::OK);
+    payload_len = sizeof(payload);
+    ASSERT_EQ(responder.read_message(message, msg_len, payload, &payload_len), NoiseError::OK);
+
+    msg_len = sizeof(message);
+    ASSERT_EQ(responder.write_message(nullptr, 0, message, &msg_len), NoiseError::OK);
+    payload_len = sizeof(payload);
+    ASSERT_EQ(initiator.read_message(message, msg_len, payload, &payload_len), NoiseError::OK);
+
+    // msg2 carries a real payload.
+    const char* secret = "payload-in-final-handshake-message";
+    const size_t secret_len = strlen(secret);
+    msg_len = sizeof(message);
+    ASSERT_EQ(initiator.write_message((const uint8_t*)secret, secret_len, message, &msg_len),
+              NoiseError::OK);
+    payload_len = sizeof(payload);
+    ASSERT_EQ(responder.read_message(message, msg_len, payload, &payload_len), NoiseError::OK);
+    ASSERT_EQ(payload_len, secret_len);
+    EXPECT_EQ(memcmp(payload, secret, secret_len), 0);
 }
 
 TEST_F(NoiseHandshakeStateTest, SplitAndTransport) {

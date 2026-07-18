@@ -139,9 +139,9 @@ size_t chachapoly_decrypt(
     size_t pt_len;
     
     if (ct_len < CHACHAPOLY_TAG_SIZE) {
-        return 0;
+        return CHACHAPOLY_DECRYPT_FAILED;
     }
-    
+
     pt_len = ct_len - CHACHAPOLY_TAG_SIZE;
     
     /* Generate Poly1305 key from first ChaCha20 block (counter = 0) */
@@ -177,7 +177,7 @@ size_t chachapoly_decrypt(
         secure_zero(&chacha, sizeof(chacha));
         secure_zero(poly_key, sizeof(poly_key));
         secure_zero(computed_tag, sizeof(computed_tag));
-        return 0;  /* Authentication failed */
+        return CHACHAPOLY_DECRYPT_FAILED;  /* Authentication failed */
     }
     
     /* Decrypt ciphertext */

@@ -25,6 +25,12 @@ constexpr size_t NOISE_DH_SIZE = 32;
 constexpr size_t NOISE_TAG_SIZE = 16;
 constexpr size_t NOISE_MAX_MESSAGE_SIZE = 65535;
 
+/* Returned by decrypt_with_ad / decrypt_and_hash / NoiseSession::decrypt on
+ * authentication failure. A successful decryption returns the plaintext length,
+ * which may be 0 for an empty authenticated message, so failure needs a distinct
+ * sentinel that cannot be confused with a valid (possibly zero) length. */
+constexpr size_t NOISE_DECRYPT_FAILED = static_cast<size_t>(-1);
+
 /* Protocol name for Noise_XX_25519_ChaChaPoly_SHA256 */
 constexpr const char* NOISE_PROTOCOL_NAME = "Noise_XX_25519_ChaChaPoly_SHA256";
 

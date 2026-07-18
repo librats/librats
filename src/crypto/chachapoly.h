@@ -17,6 +17,11 @@ extern "C" {
 #define CHACHAPOLY_NONCE_SIZE 12
 #define CHACHAPOLY_TAG_SIZE 16
 
+/* Sentinel returned by the decrypt functions on authentication failure.
+ * A successful decryption returns the plaintext length, which may legitimately
+ * be 0 (an empty-but-authenticated message), so failure needs a distinct value. */
+#define CHACHAPOLY_DECRYPT_FAILED ((size_t)-1)
+
 /**
  * Encrypt plaintext with ChaCha20-Poly1305 AEAD
  * 
@@ -47,7 +52,8 @@ size_t chachapoly_encrypt(
  * @param ciphertext Input ciphertext (plaintext + 16-byte tag)
  * @param ct_len     Length of ciphertext (must be >= 16)
  * @param plaintext  Output buffer (must be at least ct_len - 16 bytes)
- * @return           Length of plaintext (ct_len - 16) on success, 0 on failure
+ * @return           Length of plaintext (ct_len - 16) on success (may be 0 for an
+ *                   empty authenticated message), CHACHAPOLY_DECRYPT_FAILED on failure
  */
 size_t chachapoly_decrypt(
     const uint8_t key[CHACHAPOLY_KEY_SIZE],
@@ -85,7 +91,8 @@ size_t chachapoly_encrypt_inplace(
  * @param ad_len    Length of additional data
  * @param data      Data buffer (ciphertext + tag in, plaintext out)
  * @param data_len  Length of ciphertext including tag (must be >= 16)
- * @return          Length of plaintext (data_len - 16) on success, 0 on failure
+ * @return          Length of plaintext (data_len - 16) on success (may be 0),
+ *                  CHACHAPOLY_DECRYPT_FAILED on failure
  */
 size_t chachapoly_decrypt_inplace(
     const uint8_t key[CHACHAPOLY_KEY_SIZE],
