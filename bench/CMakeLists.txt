@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(librats_bench CXX)
+project(librats_bench C CXX)  # C: the ported Noise primitives (bench_crypto) are .c
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Layout
@@ -135,6 +135,30 @@ set(IO_UNDER_TEST
     ${LIBRATS_ROOT}/src/wire/frame.cpp                   # needs htonl -> ws2_32
 )
 
+# Crypto primitives librats ported from noise-c (reference2/). Compiled straight
+# in so they are optimized identically to the reference they are measured against.
+set(CRYPTO_UNDER_TEST
+    ${LIBRATS_ROOT}/src/crypto/sha256.c
+    ${LIBRATS_ROOT}/src/crypto/sha512.c
+    ${LIBRATS_ROOT}/src/crypto/blake2b.c
+    ${LIBRATS_ROOT}/src/crypto/blake2s.c
+    ${LIBRATS_ROOT}/src/crypto/chacha.c
+    ${LIBRATS_ROOT}/src/crypto/poly1305.c
+    ${LIBRATS_ROOT}/src/crypto/curve25519.c
+    ${LIBRATS_ROOT}/src/crypto/chachapoly.c
+)
+# The noise-c reference primitives, each symbol-isolated behind nc_* (baseline/).
+set(NOISEC_REF
+    baseline/noisec_sha256.c
+    baseline/noisec_sha512.c
+    baseline/noisec_blake2b.c
+    baseline/noisec_blake2s.c
+    baseline/noisec_chacha.c
+    baseline/noisec_poly1305.c
+    baseline/noisec_curve25519.c
+    baseline/noisec_aead.c
+)
+
 # ── The suites ───────────────────────────────────────────────────────────────
 
 # JSON: librats::Json vs nlohmann vs RapidJSON vs the previous librats::Json.
@@ -182,4 +206,9 @@ add_bench(bench_tx
 # Header-only (src/dht/id.h); brings its own timing loop.
 add_bench(bench_dht
     SOURCES suites/bench_dht.cpp
+)
+
+# Crypto: librats' Noise primitives vs the noise-c reference they were ported from.
+add_bench(bench_crypto
+    SOURCES suites/bench_crypto.cpp ${CRYPTO_UNDER_TEST} ${NOISEC_REF}
 )

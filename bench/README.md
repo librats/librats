@@ -24,7 +24,8 @@ bench/
 │   ├── bench_mem.cpp     resident heap of a parsed DOM
 │   ├── bench_rx.cpp      receive path, current vs pre-5d64343
 │   ├── bench_tx.cpp      send path, current vs pre-5d64343
-│   └── bench_dht.cpp     keyspace primitives vs libtorrent's
+│   ├── bench_dht.cpp     keyspace primitives vs libtorrent's
+│   └── bench_crypto.cpp  Noise primitives vs the noise-c reference
 └── CMakeLists.txt
 ```
 
@@ -166,3 +167,23 @@ and the whole session machinery), so the reference side is a standalone re-port 
 `reference/kademlia/node_id.cpp` + `sha1_hash.hpp`, kept in libtorrent's *native*
 representation (a 160-bit id as 5×uint32) so the comparison isn't rigged. It brings
 its own timing loop rather than using `framework/bench.h`.
+
+## The crypto suite — `bench_crypto`
+
+librats' Noise primitives against the **noise-c** reference (`reference2/`) they
+were ported from: SHA-256/512, BLAKE2b/2s, ChaCha20, Poly1305, the ChaCha20-Poly1305
+AEAD seal, and X25519 scalar multiplication (the Noise_XX handshake hot path — four
+per side). Both sides are compiled from source at `-O3` into one binary and ranked
+head-to-head over 8 KiB payloads.
+
+The reference cannot link as-is — librats kept the upstream function names verbatim
+on copy — so each `baseline/noisec_*.c` shim `#define`-renames the upstream public
+symbols behind an `nc_*`/`ncref_*` prefix before `#include`-ing the reference `.c`,
+exposing only the small one-shot API in `baseline/noisec.h`. For the byte-primitives
+the two sides are the *same source*, so **matching numbers (≈1.00×) are the expected,
+correct result** — the suite exists to prove the port introduced no regression, and
+to catch one if a future edit diverges. The AEAD group pits librats' own `chachapoly`
+glue against the identical RFC 8439 construction over the reference primitives.
+
+Because these are C sources, the bench project enables the C language
+(`project(librats_bench C CXX)`); the other suites are C++ only.
