@@ -1,6 +1,5 @@
 #include "subsystems/file_transfer.h"
 #include "node/node_context.h"
-#include "crc32.h"
 #include "util/fs.h"
 #include "util/logger.h"
 
@@ -288,15 +287,12 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
             finish_outgoing(t, false);
             return;
         }
-        const uint32_t crc = CRC32::calculate(buf.data(), want);
-
         Bytes m;
-        m.reserve(1 + 8 + 4 + 8 + 4 + want);
+        m.reserve(1 + 8 + 4 + 8 + want);
         m.push_back(OP_CHUNK);
         put_u64(m, t->id);
         put_u32(m, static_cast<uint32_t>(file_index));
         put_u64(m, offset);
-        put_u32(m, crc);
         m.insert(m.end(), buf.data(), buf.data() + want);
         send_to(t->peer, m);
 
@@ -562,10 +558,9 @@ void FileTransfer::on_message(const Peer& peer, ByteView payload) {
             const uint64_t id     = r.u64();
             const uint32_t fidx   = r.u32();
             const uint64_t offset = r.u64();
-            const uint32_t crc    = r.u32();
             ByteView data = r.rest();
             if (!r.ok) return;
-            handle_chunk(from, id, fidx, offset, crc, data);
+            handle_chunk(from, id, fidx, offset, data);
             return;
         }
         case OP_FILE_END: {
@@ -661,7 +656,7 @@ void FileTransfer::handle_offer(const PeerId& from, uint64_t id, bool is_dir, ui
 }
 
 void FileTransfer::handle_chunk(const PeerId& from, uint64_t id, uint32_t fidx, uint64_t offset,
-                                uint32_t crc, ByteView data) {
+                                ByteView data) {
     auto t = find_incoming(from, id);
     if (!t) return;
 
@@ -686,13 +681,6 @@ void FileTransfer::handle_chunk(const PeerId& from, uint64_t id, uint32_t fidx, 
         LOG_ERROR("filexfer", "transfer " << id << ": " << fail);
         send_complete(from, id, false);
         finish_incoming(t, false, fail);
-        return;
-    }
-
-    if (config_.verify_integrity && CRC32::calculate(data.data(), data.size()) != crc) {
-        LOG_ERROR("filexfer", "transfer " << id << ": chunk CRC mismatch");
-        send_complete(from, id, false);
-        finish_incoming(t, false, "chunk CRC mismatch");
         return;
     }
 

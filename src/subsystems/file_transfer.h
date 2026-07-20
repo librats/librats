@@ -7,13 +7,14 @@
  *
  * Push model: the sender offers a file/directory; the receiver accepts (choosing
  * a destination) or rejects; the sender streams the data; the receiver verifies a
- * per-chunk CRC32 and a whole-file SHA-256 before moving each temp file into
- * place. All control + data ride on MessageType::FileChunk as compact binary
- * opcodes (no JSON), implemented on the Node/Subsystem plugin model.
+ * whole-file SHA-256 before moving each temp file into place. All control + data
+ * ride on MessageType::FileChunk as compact binary opcodes (no JSON), implemented
+ * on the Node/Subsystem plugin model.
  *
- * Integrity: every chunk carries a CRC32; every file ends with its SHA-256. A
- * mismatch (or a disk-write failure) fails the whole transfer — a temp file is
- * only moved to its destination after its SHA-256 verifies.
+ * Integrity: every file ends with its SHA-256, verified end-to-end before the temp
+ * file is moved into place; a mismatch (or a disk-write failure) fails the whole
+ * transfer. In transit the Noise session already AEAD-authenticates every byte, so
+ * no redundant per-chunk checksum rides the wire.
  *
  * Backpressure: the sender keeps at most `window_bytes` un-acked; the receiver
  * acks cumulative progress at least twice per window, so the sender never stalls.
@@ -35,7 +36,7 @@
  *   OFFER    [1][id:u64][flags:u8][total:u64][name_len:u16][name][file_count:u32]
  *                                      { [path_len:u16][path][size:u64] } × file_count
  *   RESPONSE [2][id:u64][accept:u8]
- *   CHUNK    [3][id:u64][file_index:u32][offset:u64][crc32:u32][data]
+ *   CHUNK    [3][id:u64][file_index:u32][offset:u64][data]
  *   FILE_END [4][id:u64][file_index:u32][sha256:32]
  *   PROGRESS [5][id:u64][received:u64]      (cumulative across all files)
  *   COMPLETE [6][id:u64][ok:u8]
@@ -76,7 +77,7 @@ public:
         uint32_t    progress_interval    = 256 * 1024;       ///< receiver acks every N bytes
         uint32_t    transfer_timeout_secs = 60;              ///< abort a transfer idle this long
         uint32_t    worker_threads       = 4;                ///< concurrent outgoing transfers
-        bool        verify_integrity     = true;             ///< per-chunk CRC32 + whole-file SHA-256
+        bool        verify_integrity     = true;             ///< whole-file SHA-256 end-to-end check
         std::string temp_directory       = ".";              ///< holds in-progress downloads
     };
 
@@ -267,7 +268,7 @@ private:
     void handle_offer(const PeerId& from, uint64_t id, bool is_dir, uint64_t total,
                       std::string name, std::vector<FileEntry> files);
     void handle_chunk(const PeerId& from, uint64_t id, uint32_t fidx, uint64_t offset,
-                      uint32_t crc, ByteView data);
+                      ByteView data);
     void handle_file_end(const PeerId& from, uint64_t id, uint32_t fidx, const uint8_t* sha);
 
     // ── sending ──────────────────────────────────────────────────────────────
