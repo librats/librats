@@ -888,4 +888,126 @@ TEST_F(FSTest, WriteFileChunkMultipleTorrentFiles) {
     delete_directory("./2019 - Digital Hell");
     
     std::cout << "✓ Multi-file torrent simulation test passed" << std::endl;
-} 
+}
+
+// ── FileStream: one open handle across many positioned operations ──────────────
+// Backs the file-transfer hot path (open once per file, not per chunk).
+
+TEST(FileStreamTest, WriteReadRoundTripSequential) {
+    const char* path = "fs_stream_rt.bin";
+    delete_file(path);
+
+    FileStream w;
+    ASSERT_TRUE(w.open_write(path));
+    const char* a = "hello ";
+    const char* b = "world!!";
+    // Positioned writes, contiguous.
+    EXPECT_TRUE(w.write_at(0, a, 6));
+    EXPECT_TRUE(w.write_at(6, b, 7));
+    w.close();
+    EXPECT_FALSE(w.is_open());
+    EXPECT_EQ(get_file_size(path), 13);
+
+    FileStream r;
+    ASSERT_TRUE(r.open_read(path));
+    char buf[16] = {0};
+    EXPECT_EQ(r.read(buf, 13), 13u);
+    EXPECT_STREQ(buf, "hello world!!");
+    // A read past EOF returns fewer bytes (here zero).
+    EXPECT_EQ(r.read(buf, 4), 0u);
+    r.close();
+
+    delete_file(path);
+}
+
+TEST(FileStreamTest, WriteAtArbitraryOffsetsThenSeekRead) {
+    const char* path = "fs_stream_offsets.bin";
+    delete_file(path);
+
+    FileStream w;
+    ASSERT_TRUE(w.open_write(path));
+    // Write out of contiguous order into a pre-grown region.
+    EXPECT_TRUE(w.write_at(8, "BBBB", 4));
+    EXPECT_TRUE(w.write_at(0, "AAAA", 4));
+    EXPECT_TRUE(w.write_at(4, "----", 4));
+    w.close();
+    EXPECT_EQ(get_file_size(path), 12);
+
+    FileStream r;
+    ASSERT_TRUE(r.open_read(path));
+    char buf[8] = {0};
+    ASSERT_TRUE(r.seek(8));                 // jump straight to the third field
+    EXPECT_EQ(r.read(buf, 4), 4u);
+    EXPECT_EQ(std::string(buf, 4), "BBBB");
+    ASSERT_TRUE(r.seek(0));                  // rewind
+    EXPECT_EQ(r.read(buf, 4), 4u);
+    EXPECT_EQ(std::string(buf, 4), "AAAA");
+    r.close();
+
+    delete_file(path);
+}
+
+TEST(FileStreamTest, OpenWriteKeepsExistingContent) {
+    const char* path = "fs_stream_preserve.bin";
+    delete_file(path);
+    // Seed the file, then reopen for writing and overwrite only a middle span.
+    ASSERT_TRUE(create_file_binary(path, "0123456789", 10));
+
+    FileStream w;
+    ASSERT_TRUE(w.open_write(path));         // r+b — must not truncate
+    EXPECT_TRUE(w.write_at(3, "XY", 2));
+    w.close();
+
+    size_t n = 0;
+    void* p = read_file_binary(path, &n);
+    ASSERT_NE(p, nullptr);
+    std::string got(static_cast<char*>(p), n);
+    free_file_buffer(p);
+    EXPECT_EQ(got, "012XY56789");            // length preserved, only [3,5) changed
+
+    delete_file(path);
+}
+
+TEST(FileStreamTest, OpenWriteCreatesParentDirectories) {
+    const char* dir  = "fs_stream_dir";
+    const char* path = "fs_stream_dir/nested/deep.bin";
+    delete_directory(dir);
+
+    FileStream w;
+    ASSERT_TRUE(w.open_write(path));         // parents must be created on the fly
+    EXPECT_TRUE(w.write_at(0, "ok", 2));
+    w.close();
+    EXPECT_TRUE(file_exists(path));
+
+    delete_directory(dir);
+}
+
+TEST(FileStreamTest, OpenReadMissingFileFails) {
+    FileStream r;
+    EXPECT_FALSE(r.open_read("fs_stream_no_such_file_9c2.bin"));
+    EXPECT_FALSE(r.is_open());
+    EXPECT_EQ(r.read(nullptr, 4), 0u);       // operations on a closed stream are inert
+    EXPECT_FALSE(r.write_at(0, "x", 1));
+    EXPECT_FALSE(r.seek(0));
+}
+
+TEST(FileStreamTest, MoveTransfersOwnership) {
+    const char* path = "fs_stream_move.bin";
+    delete_file(path);
+
+    FileStream a;
+    ASSERT_TRUE(a.open_write(path));
+    FileStream b = std::move(a);             // move-construct
+    EXPECT_TRUE(b.is_open());
+    EXPECT_FALSE(a.is_open());               // moved-from is empty
+    EXPECT_TRUE(b.write_at(0, "moved", 5));
+
+    FileStream c;
+    c = std::move(b);                        // move-assign
+    EXPECT_TRUE(c.is_open());
+    EXPECT_FALSE(b.is_open());
+    c.close();
+
+    EXPECT_EQ(get_file_size(path), 5);
+    delete_file(path);
+}

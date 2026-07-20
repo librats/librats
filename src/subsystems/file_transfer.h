@@ -49,6 +49,7 @@
 #include "peer/peer.h"
 #include "core/bytes.h"
 #include "peer/peer_id.h"
+#include "util/fs.h"
 
 extern "C" {
 #include "sha256.h"
@@ -77,6 +78,7 @@ public:
         uint32_t    progress_interval    = 256 * 1024;       ///< receiver acks every N bytes
         uint32_t    transfer_timeout_secs = 60;              ///< abort a transfer idle this long
         uint32_t    worker_threads       = 4;                ///< concurrent outgoing transfers
+        uint32_t    disk_threads         = 4;                ///< receive-side disk-writer pool size
         bool        verify_integrity     = true;             ///< whole-file SHA-256 end-to-end check
         std::string temp_directory       = ".";              ///< holds in-progress downloads
     };
@@ -236,12 +238,23 @@ private:
         uint64_t    size = 0;
         std::string final_path;
         std::string temp_path;
-        uint64_t    received = 0;
+        uint64_t    enqueued = 0;   ///< reactor: bytes handed to the disk writer
+        uint64_t    received = 0;   ///< writer: bytes actually written to disk
         bool        temp_created = false;
-        bool        sha_known = false;
         bool        finalized = false;
-        uint8_t     expected_sha[SHA256_HASH_SIZE]{};
     };
+
+    // A unit of disk work queued by the reactor for the writer pool. A pure data
+    // job carries chunk bytes; a file-end job carries the sender's SHA-256 so the
+    // writer can verify + finalize once all of the file's data is on disk.
+    struct WriteJob {
+        uint32_t fidx = 0;
+        uint64_t offset = 0;
+        Bytes    data;                   ///< chunk bytes (empty for a file-end job)
+        bool     is_file_end = false;
+        uint8_t  sha[SHA256_HASH_SIZE]{};
+    };
+
     struct Incoming {
         uint64_t                   id = 0;
         PeerId                     peer;
@@ -251,16 +264,25 @@ private:
         std::vector<IncomingFile>  files;
 
         std::mutex                 mtx;
-        size_t                     recv_file = 0;
-        uint64_t                   bytes_done = 0;
+        size_t                     recv_file = 0;   ///< reactor cursor: file currently accepting chunks
+        uint64_t                   bytes_done = 0;  ///< writer: total bytes on disk (drives acks/progress)
         uint64_t                   last_ack = 0;
         uint32_t                   files_done = 0;
         Status                     status = Status::Pending;
         bool                       finished = false;
-        sha256_context_t           hash{};
-        uint8_t                    computed_sha[SHA256_HASH_SIZE]{};
         std::chrono::steady_clock::time_point last_activity{};
         RateTracker                rate;
+
+        // ── async disk writer (all fields below the queue are writer-thread only) ─
+        std::queue<WriteJob>       wq;              ///< pending disk jobs (guarded by mtx)
+        uint64_t                   queued_bytes = 0;///< bytes sitting in wq (backpressure)
+        bool                       scheduled = false;///< queued in / owned by the writer pool
+        FileStream                 out;             ///< currently open temp file
+        size_t                     out_idx = SIZE_MAX;
+        int                        hashing_file = -1;///< which file `hash` currently covers
+        sha256_context_t           hash{};
+
+        ~Incoming();  ///< closes `out` and reclaims any un-finalized temp files
     };
 
     // ── message handling (reactor thread) ─────────────────────────────────────
@@ -278,7 +300,15 @@ private:
     void     run_send(const std::shared_ptr<Outgoing>& t);
 
     // ── receiving ────────────────────────────────────────────────────────────
-    void try_finalize_file(const std::shared_ptr<Incoming>& t, size_t file_index);
+    // The reactor thread only validates + copies a chunk into the transfer's write
+    // queue; a disk-writer thread does the blocking write, hashing and finalize off
+    // the reactor. `schedule_writer` hands a transfer to the pool (call with the
+    // transfer's mutex NOT held — pool lock is always taken after the transfer's).
+    void schedule_writer(const std::shared_ptr<Incoming>& t);
+    void disk_worker_loop();
+    void drain_writes(const std::shared_ptr<Incoming>& t);
+    void process_data(const std::shared_ptr<Incoming>& t, WriteJob& job);
+    void process_file_end(const std::shared_ptr<Incoming>& t, WriteJob& job);
 
     // ── lifecycle helpers ─────────────────────────────────────────────────────
     void maintenance_loop();
@@ -310,11 +340,19 @@ private:
     std::unordered_map<PeerId, std::unordered_map<uint64_t, std::shared_ptr<Incoming>>,
                        PeerId::Hash> incoming_;
 
-    // worker pool + send queue
+    // send-side worker pool + send queue
     std::vector<std::thread>  workers_;
     std::mutex                queue_mutex_;
     std::condition_variable   queue_cv_;
     std::queue<uint64_t>      send_queue_;
+
+    // receive-side disk-writer pool + ready queue. A transfer is pushed here when it
+    // has pending write jobs; its `scheduled` flag keeps it single-owner so exactly
+    // one worker drains a given transfer at a time (preserving chunk order).
+    std::vector<std::thread>              disk_workers_;
+    std::mutex                            disk_mutex_;
+    std::condition_variable               disk_cv_;
+    std::queue<std::shared_ptr<Incoming>> disk_ready_;
 
     // maintenance (idle timeout / purge)
     std::thread               maintenance_thread_;

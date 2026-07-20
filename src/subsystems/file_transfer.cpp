@@ -100,6 +100,8 @@ void FileTransfer::start() {
     if (running_.exchange(true)) return;
     const uint32_t n = std::max<uint32_t>(1, config_.worker_threads);
     for (uint32_t i = 0; i < n; ++i) workers_.emplace_back(&FileTransfer::worker_loop, this);
+    const uint32_t d = std::max<uint32_t>(1, config_.disk_threads);
+    for (uint32_t i = 0; i < d; ++i) disk_workers_.emplace_back(&FileTransfer::disk_worker_loop, this);
     maintenance_thread_ = std::thread(&FileTransfer::maintenance_loop, this);
 }
 
@@ -108,6 +110,7 @@ void FileTransfer::stop() {
 
     queue_cv_.notify_all();
     maintenance_cv_.notify_all();
+    disk_cv_.notify_all();
 
     // Wake any worker blocked on a transfer's window/wait so run_send returns.
     {
@@ -116,20 +119,21 @@ void FileTransfer::stop() {
     }
     for (auto& w : workers_) if (w.joinable()) w.join();
     workers_.clear();
+    // Join the disk pool before dropping any Incoming, so no writer touches a temp
+    // file while ~Incoming reclaims it.
+    for (auto& w : disk_workers_) if (w.joinable()) w.join();
+    disk_workers_.clear();
     if (maintenance_thread_.joinable()) maintenance_thread_.join();
 
-    // Drop remaining transfers, reclaiming receiver temp files.
+    // Drop remaining transfers. ~Incoming closes any open handle and reclaims
+    // un-finalized temp files.
     std::unordered_map<PeerId, std::unordered_map<uint64_t, std::shared_ptr<Incoming>>, PeerId::Hash> in;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         outgoing_.clear();
         in.swap(incoming_);
     }
-    for (auto& [peer, m] : in)
-        for (auto& [id, t] : m) {
-            std::lock_guard<std::mutex> lk(t->mtx);
-            for (auto& f : t->files) if (f.temp_created && !f.finalized) delete_file(f.temp_path.c_str());
-        }
+    in.clear();
 }
 
 FileTransfer::Stats FileTransfer::stats() const {
@@ -259,6 +263,12 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
     Bytes m;
     m.reserve(kChunkHeader + config_.chunk_size);
 
+    // The source file is held open across all of its chunks (one open()/close()
+    // per file instead of one per chunk) and read sequentially straight into the
+    // reused send buffer.
+    FileStream fp;
+    size_t     open_idx = SIZE_MAX;
+
     while (running_.load()) {
         size_t      file_index;
         uint64_t    offset, file_size;
@@ -278,13 +288,26 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
         if (file_size == 0) {
             sha256_context_t e; sha256_reset(&e);
             uint8_t digest[SHA256_HASH_SIZE]; sha256_finish(&e, digest);
-            Bytes m; m.push_back(OP_FILE_END); put_u64(m, t->id);
-            put_u32(m, static_cast<uint32_t>(file_index));
-            m.insert(m.end(), digest, digest + SHA256_HASH_SIZE);
-            send_to(t->peer, m);
+            Bytes fe; fe.push_back(OP_FILE_END); put_u64(fe, t->id);
+            put_u32(fe, static_cast<uint32_t>(file_index));
+            fe.insert(fe.end(), digest, digest + SHA256_HASH_SIZE);
+            send_to(t->peer, fe);
+            fp.close(); open_idx = SIZE_MAX;
             std::lock_guard<std::mutex> lk(t->mtx);
             t->cur_file++; t->cur_offset = 0; t->files_done++;
             continue;
+        }
+
+        // (Re)open the source when we start a new file, seeking to the resume offset.
+        if (open_idx != file_index) {
+            fp.close();
+            if (!fp.open_read(source.c_str()) || !fp.seek(offset)) {
+                LOG_ERROR("filexfer", "open/seek error on " << source << " at " << offset);
+                send_complete(t->peer, t->id, false);
+                finish_outgoing(t, false);
+                return;
+            }
+            open_idx = file_index;
         }
 
         const uint32_t want = static_cast<uint32_t>(std::min<uint64_t>(config_.chunk_size, file_size - offset));
@@ -294,7 +317,7 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
         put_u32(m, static_cast<uint32_t>(file_index));
         put_u64(m, offset);
         m.resize(kChunkHeader + want);  // no realloc: capacity was reserved up front
-        if (!read_file_chunk(source.c_str(), offset, m.data() + kChunkHeader, want)) {
+        if (fp.read(m.data() + kChunkHeader, want) != want) {
             LOG_ERROR("filexfer", "read error on " << source << " at " << offset);
             send_complete(t->peer, t->id, false);
             finish_outgoing(t, false);
@@ -408,44 +431,144 @@ void FileTransfer::reject(const PeerId& from, uint64_t id) {
     if (t && complete_handler_) complete_handler_(id, false, "");
 }
 
-void FileTransfer::try_finalize_file(const std::shared_ptr<Incoming>& t, size_t file_index) {
-    std::string final_path, temp_path, rel;
-    bool do_finalize = false, sha_mismatch = false, zero_byte = false;
+// ── Receive-side disk writer (off the reactor thread) ─────────────────────────
+//
+// The reactor validates a chunk and pushes it into t->wq; the writer pool drains
+// that queue on its own thread. `t->out`, `t->hash`, `t->out_idx` and
+// `t->hashing_file` are writer-thread-only: a transfer's `scheduled` flag keeps
+// exactly one worker draining it at a time, so these need no lock even though the
+// worker touches them outside t->mtx.
+
+FileTransfer::Incoming::~Incoming() {
+    out.close();  // must precede the temp-file delete on Windows (can't unlink an open file)
+    for (auto& f : files) if (f.temp_created && !f.finalized) delete_file(f.temp_path.c_str());
+}
+
+void FileTransfer::schedule_writer(const std::shared_ptr<Incoming>& t) {
+    { std::lock_guard<std::mutex> lk(disk_mutex_); disk_ready_.push(t); }
+    disk_cv_.notify_one();
+}
+
+void FileTransfer::disk_worker_loop() {
+    while (running_.load()) {
+        std::shared_ptr<Incoming> t;
+        {
+            std::unique_lock<std::mutex> lk(disk_mutex_);
+            disk_cv_.wait(lk, [this] { return !running_.load() || !disk_ready_.empty(); });
+            if (!running_.load()) return;
+            t = std::move(disk_ready_.front());
+            disk_ready_.pop();
+        }
+        if (t) drain_writes(t);
+    }
+}
+
+void FileTransfer::drain_writes(const std::shared_ptr<Incoming>& t) {
+    for (;;) {
+        WriteJob job;
+        {
+            std::lock_guard<std::mutex> lk(t->mtx);
+            if (t->finished) {                       // torn down elsewhere: drop pending work
+                std::queue<WriteJob> empty; t->wq.swap(empty);
+                t->queued_bytes = 0; t->scheduled = false;
+                return;
+            }
+            if (t->wq.empty()) { t->scheduled = false; return; }
+            job = std::move(t->wq.front());
+            t->wq.pop();
+        }
+        if (job.is_file_end) process_file_end(t, job);
+        else                 process_data(t, job);
+    }
+}
+
+void FileTransfer::process_data(const std::shared_ptr<Incoming>& t, WriteJob& job) {
+    const uint32_t fidx = job.fidx;
+    std::string temp_path;
     {
         std::lock_guard<std::mutex> lk(t->mtx);
-        if (t->finished || file_index >= t->files.size()) return;
-        IncomingFile& f = t->files[file_index];
-        if (f.finalized) return;
-        if (f.received < f.size) return;  // data not complete
-        if (!f.sha_known) return;         // FILE_END not received yet
-
-        uint8_t local[SHA256_HASH_SIZE];
-        if (f.size == 0) { sha256_context_t e; sha256_reset(&e); sha256_finish(&e, local); }
-        else             { std::memcpy(local, t->computed_sha, SHA256_HASH_SIZE); }
-
-        if (config_.verify_integrity && std::memcmp(local, f.expected_sha, SHA256_HASH_SIZE) != 0) {
-            sha_mismatch = true;
-        } else {
-            do_finalize = true;
-            final_path = f.final_path; temp_path = f.temp_path; rel = f.relative_path;
-            zero_byte = (f.size == 0);
-        }
+        if (t->finished || fidx >= t->files.size()) return;
+        temp_path = t->files[fidx].temp_path;
     }
 
-    if (sha_mismatch) {
+    // Open the temp file once per file, then write sequentially at the given offset.
+    if (t->out_idx != fidx) {
+        t->out.close();
+        if (!t->out.open_write(temp_path.c_str())) {
+            send_complete(t->peer, t->id, false);
+            finish_incoming(t, false, "cannot create temp file");
+            return;
+        }
+        t->out_idx = fidx;
+        { std::lock_guard<std::mutex> lk(t->mtx); t->files[fidx].temp_created = true; }
+    }
+    if (t->hashing_file != static_cast<int>(fidx)) { sha256_reset(&t->hash); t->hashing_file = static_cast<int>(fidx); }
+
+    if (!t->out.write_at(job.offset, job.data.data(), job.data.size())) {
+        LOG_ERROR("filexfer", "transfer " << t->id << ": disk write failed");
+        send_complete(t->peer, t->id, false);
+        finish_incoming(t, false, "failed to write chunk to disk");
+        return;
+    }
+    sha256_update(&t->hash, job.data.data(), job.data.size());
+
+    const uint64_t ack_interval =
+        std::min<uint64_t>(config_.progress_interval, std::max<uint32_t>(1, config_.window_bytes / 2));
+    bool send_ack = false; uint64_t ack_bytes = 0;
+    {
+        std::lock_guard<std::mutex> lk(t->mtx);
+        IncomingFile& f = t->files[fidx];
+        f.received += job.data.size();
+        t->bytes_done += job.data.size();
+        if (t->queued_bytes >= job.data.size()) t->queued_bytes -= job.data.size();
+        t->last_activity = std::chrono::steady_clock::now();
+        // Ack on the byte threshold, and always once a file's data is fully on disk
+        // (keeps the sender's window moving across file boundaries).
+        if (f.received >= f.size || t->bytes_done - t->last_ack >= ack_interval) {
+            t->last_ack = t->bytes_done; ack_bytes = t->bytes_done; send_ack = true;
+        }
+    }
+    { std::lock_guard<std::mutex> lk(stats_mutex_); stats_.bytes_received += job.data.size(); }
+
+    if (send_ack) { Bytes m; m.push_back(OP_PROGRESS); put_u64(m, t->id); put_u64(m, ack_bytes); send_to(t->peer, m); }
+    emit_progress(t);
+}
+
+void FileTransfer::process_file_end(const std::shared_ptr<Incoming>& t, WriteJob& job) {
+    const uint32_t fidx = job.fidx;
+    std::string final_path, temp_path, rel;
+    uint64_t fsize = 0;
+    {
+        std::lock_guard<std::mutex> lk(t->mtx);
+        if (t->finished || fidx >= t->files.size()) return;
+        IncomingFile& f = t->files[fidx];
+        if (f.finalized) return;
+        final_path = f.final_path; temp_path = f.temp_path; rel = f.relative_path; fsize = f.size;
+    }
+
+    // Whole-file SHA-256 over exactly the bytes written to disk (a file with no
+    // data — an empty file — hashes the empty input).
+    if (t->hashing_file != static_cast<int>(fidx)) { sha256_reset(&t->hash); t->hashing_file = static_cast<int>(fidx); }
+    uint8_t local[SHA256_HASH_SIZE];
+    sha256_finish(&t->hash, local);
+    t->hashing_file = -1;
+    if (config_.verify_integrity && std::memcmp(local, job.sha, SHA256_HASH_SIZE) != 0) {
         LOG_ERROR("filexfer", "SHA-256 mismatch for " << rel << " on transfer " << t->id);
         send_complete(t->peer, t->id, false);
         finish_incoming(t, false, "SHA-256 mismatch");
         return;
     }
-    if (!do_finalize) return;
+
+    // Close the temp handle before moving it into place (Windows can't rename an
+    // open file).
+    if (t->out_idx == fidx) { t->out.close(); t->out_idx = SIZE_MAX; }
 
     const std::string parent = get_parent_directory(final_path.c_str());
     if (!parent.empty()) create_directories(parent.c_str());
     if (file_exists(final_path.c_str())) delete_file(final_path.c_str());
 
     bool ok;
-    if (zero_byte) {
+    if (fsize == 0) {
         ok = create_file_with_size(final_path.c_str(), 0);
         if (file_exists(temp_path.c_str())) delete_file(temp_path.c_str());
     } else {
@@ -465,10 +588,9 @@ void FileTransfer::try_finalize_file(const std::shared_ptr<Incoming>& t, size_t 
     bool all_done = false;
     {
         std::lock_guard<std::mutex> lk(t->mtx);
-        IncomingFile& f = t->files[file_index];
+        IncomingFile& f = t->files[fidx];
         f.finalized = true;
         t->files_done++;
-        if (file_index == t->recv_file) t->recv_file++;
         all_done = true;
         for (const auto& ff : t->files) if (!ff.finalized) { all_done = false; break; }
     }
@@ -491,8 +613,8 @@ void FileTransfer::finish_incoming(const std::shared_ptr<Incoming>& t, bool succ
         if (!cancelled)
             t->status = success ? Status::Completed : Status::Failed;
         dest = t->dest_root;
-        if (!success)  // reclaim partial temp files
-            for (auto& f : t->files) if (f.temp_created && !f.finalized) delete_file(f.temp_path.c_str());
+        // Partial temp files are reclaimed by ~Incoming, once the disk writer has
+        // released its handle — deleting here could race an in-flight write.
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -661,26 +783,35 @@ void FileTransfer::handle_offer(const PeerId& from, uint64_t id, bool is_dir, ui
     else                reject(from, id);  // no handler → auto-reject
 }
 
+// Reactor thread: validate ordering + copy the chunk into the transfer's write
+// queue, then hand it to the disk-writer pool. No disk I/O or hashing happens
+// here — those would block the reactor, which serves every peer on this shard.
 void FileTransfer::handle_chunk(const PeerId& from, uint64_t id, uint32_t fidx, uint64_t offset,
                                 ByteView data) {
     auto t = find_incoming(from, id);
     if (!t) return;
 
-    const uint64_t ack_interval =
-        std::min<uint64_t>(config_.progress_interval, std::max<uint32_t>(1, config_.window_bytes / 2));
-
-    std::string temp_path, fail;
-    uint64_t file_size = 0;
+    std::string fail;
+    bool need_schedule = false;
     {
         std::lock_guard<std::mutex> lk(t->mtx);
+        if (t->finished) return;
         if (t->status != Status::Active && t->status != Status::Paused) return;
         if (fidx >= t->files.size() || fidx != t->recv_file) {
             fail = "out-of-order file index";
         } else {
             IncomingFile& f = t->files[fidx];
-            if (offset != f.received)            fail = "out-of-order chunk offset";
-            else if (offset + data.size() > f.size) fail = "chunk exceeds declared file size";
-            else { temp_path = f.temp_path; file_size = f.size; }
+            if (offset != f.enqueued)                fail = "out-of-order chunk offset";
+            else if (offset + data.size() > f.size)  fail = "chunk exceeds declared file size";
+            else {
+                WriteJob job;
+                job.fidx = fidx; job.offset = offset; job.data = data.to_bytes();
+                f.enqueued += data.size();
+                t->queued_bytes += data.size();
+                t->last_activity = std::chrono::steady_clock::now();
+                t->wq.push(std::move(job));
+                if (!t->scheduled) { t->scheduled = true; need_schedule = true; }
+            }
         }
     }
     if (!fail.empty()) {
@@ -689,68 +820,40 @@ void FileTransfer::handle_chunk(const PeerId& from, uint64_t id, uint32_t fidx, 
         finish_incoming(t, false, fail);
         return;
     }
-
-    // Create the temp file on first contact, pre-sized to the declared length.
-    {
-        bool need_create;
-        { std::lock_guard<std::mutex> lk(t->mtx); need_create = !t->files[fidx].temp_created; }
-        if (need_create) {
-            if (!create_file_with_size(temp_path.c_str(), file_size)) {
-                send_complete(from, id, false);
-                finish_incoming(t, false, "cannot create temp file");
-                return;
-            }
-            std::lock_guard<std::mutex> lk(t->mtx); t->files[fidx].temp_created = true;
-        }
-    }
-
-    // The disk write is checked: a failure fails the transfer (the SHA must reflect
-    // bytes actually on disk, so we never report success for a corrupt file).
-    if (!write_file_chunk(temp_path.c_str(), offset, data.data(), data.size())) {
-        LOG_ERROR("filexfer", "transfer " << id << ": disk write failed");
-        send_complete(from, id, false);
-        finish_incoming(t, false, "failed to write chunk to disk");
-        return;
-    }
-
-    bool data_complete = false, send_ack = false;
-    uint64_t ack_bytes = 0;
-    {
-        std::lock_guard<std::mutex> lk(t->mtx);
-        IncomingFile& f = t->files[fidx];
-        if (f.received == 0) sha256_reset(&t->hash);
-        sha256_update(&t->hash, data.data(), data.size());
-        f.received += data.size();
-        t->bytes_done += data.size();
-        t->last_activity = std::chrono::steady_clock::now();
-        if (f.received >= f.size) {
-            sha256_finish(&t->hash, t->computed_sha);
-            data_complete = true;
-        }
-        if (data_complete || t->bytes_done - t->last_ack >= ack_interval) {
-            t->last_ack = t->bytes_done; ack_bytes = t->bytes_done; send_ack = true;
-        }
-    }
-    { std::lock_guard<std::mutex> lk(stats_mutex_); stats_.bytes_received += data.size(); }
-
-    if (send_ack) { Bytes m; m.push_back(OP_PROGRESS); put_u64(m, id); put_u64(m, ack_bytes); send_to(from, m); }
-    emit_progress(t);
-
-    if (data_complete) try_finalize_file(t, fidx);
+    if (need_schedule) schedule_writer(t);
 }
 
 void FileTransfer::handle_file_end(const PeerId& from, uint64_t id, uint32_t fidx, const uint8_t* sha) {
     auto t = find_incoming(from, id);
     if (!t) return;
+    std::string fail;
+    bool need_schedule = false;
     {
         std::lock_guard<std::mutex> lk(t->mtx);
         if (t->finished || fidx >= t->files.size()) return;
-        IncomingFile& f = t->files[fidx];
-        if (f.finalized) return;
-        std::memcpy(f.expected_sha, sha, SHA256_HASH_SIZE);
-        f.sha_known = true;
+        if (fidx != t->recv_file) {
+            fail = "file-end out of order";
+        } else {
+            IncomingFile& f = t->files[fidx];
+            if (f.enqueued != f.size) {       // all of the file's data must be queued first
+                fail = "file-end before all data";
+            } else {
+                WriteJob job;
+                job.fidx = fidx; job.is_file_end = true;
+                std::memcpy(job.sha, sha, SHA256_HASH_SIZE);
+                t->wq.push(std::move(job));
+                t->recv_file++;               // subsequent chunks belong to the next file
+                if (!t->scheduled) { t->scheduled = true; need_schedule = true; }
+            }
+        }
     }
-    try_finalize_file(t, fidx);
+    if (!fail.empty()) {
+        LOG_ERROR("filexfer", "transfer " << id << ": " << fail);
+        send_complete(from, id, false);
+        finish_incoming(t, false, fail);
+        return;
+    }
+    if (need_schedule) schedule_writer(t);
 }
 
 // ── Control API (works from either side) ──────────────────────────────────────

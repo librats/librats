@@ -542,3 +542,140 @@ TEST(FilexferTest, TempFilesDoNotCollideAcrossSenders) {
     delete_file(dst_a.c_str());
     delete_file(dst_b.c_str());
 }
+
+// #2 — Integrity is now enforced solely by the whole-file SHA-256, verified on the
+// receiver's disk-writer thread. A sender whose data does not match its declared
+// FILE_END digest must fail the transfer: no destination file, and the temp
+// (.part) reclaimed. Driven with raw FileChunk frames (an honest sender can't
+// produce this), the same technique as the hostile-manifest test.
+TEST(FilexferTest, ShaMismatchRejectsAndReclaimsTemp) {
+    const std::string dst = "ft_shamis_dst.bin";
+    delete_file(dst.c_str());
+
+    Pair p = make_pair();
+    std::atomic<bool> offered{false}, rdone{false}, rok{true};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) { p.recv->accept(o.from, o.id, dst); offered = true; });
+    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    const uint64_t id = 4242;
+    const auto data = make_pattern(2048);  // fits one chunk
+
+    // OFFER: single 2048-byte file.
+    std::vector<uint8_t> off;
+    off.push_back(1);                       // OP_OFFER
+    put_u64(off, id);
+    off.push_back(0);                       // is_directory = false
+    put_u64(off, data.size());              // total
+    put_u16(off, 5); off.insert(off.end(), {'f','.','b','i','n'});
+    put_u32(off, 1);                        // file_count
+    put_u16(off, 5); off.insert(off.end(), {'f','.','b','i','n'});
+    put_u64(off, data.size());              // entry size
+    p.client->send(p.server->local_id(), MessageType::FileChunk, ByteView(off));
+
+    ASSERT_TRUE(wait_for([&] { return offered.load(); }));  // receiver has accepted → Active
+
+    // CHUNK: the real bytes.
+    std::vector<uint8_t> ch;
+    ch.push_back(3);                        // OP_CHUNK
+    put_u64(ch, id);
+    put_u32(ch, 0);                         // file index
+    put_u64(ch, 0);                         // offset
+    ch.insert(ch.end(), data.begin(), data.end());
+    p.client->send(p.server->local_id(), MessageType::FileChunk, ByteView(ch));
+
+    // FILE_END: a deliberately WRONG digest.
+    std::vector<uint8_t> fe;
+    fe.push_back(4);                        // OP_FILE_END
+    put_u64(fe, id);
+    put_u32(fe, 0);
+    fe.insert(fe.end(), SHA256_HASH_SIZE, 0xEE);
+    p.client->send(p.server->local_id(), MessageType::FileChunk, ByteView(fe));
+
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+    EXPECT_FALSE(rok.load()) << "a bad SHA-256 must fail the transfer";
+    EXPECT_FALSE(file_exists(dst.c_str())) << "corrupt data must never be placed at the destination";
+
+    // The temp file is reclaimed by ~Incoming once the writer releases it.
+    const std::string temp = combine_paths(".",
+        p.client->local_id().to_hex() + "." + std::to_string(id) + ".0.part");
+    EXPECT_TRUE(wait_for([&] { return !file_exists(temp.c_str()); }))
+        << "partial temp file must be reclaimed on failure";
+
+    delete_file(dst.c_str());
+    delete_file(temp.c_str());
+}
+
+// #3 — A directory whose manifest interleaves an empty file between two non-empty
+// ones. This exercises the writer's per-file handle switching, the SHA context
+// reset between files, and the zero-byte FILE_END path landing while a handle
+// from the previous file may still be around.
+TEST(FilexferTest, SendsDirectoryWithEmptyFileBetween) {
+    delete_directory("ft_mixsrc");
+    delete_directory("ft_mixdst");
+    ASSERT_TRUE(create_directories("ft_mixsrc"));
+    const auto a = make_pattern(70 * 1024 + 3);   // spans multiple chunks
+    const auto z = make_pattern(9);
+    ASSERT_TRUE(create_file_binary("ft_mixsrc/a.bin", a.data(), a.size()));
+    ASSERT_TRUE(create_file_binary("ft_mixsrc/m_empty.bin", "", 0));  // sorts between a and z
+    ASSERT_TRUE(create_file_binary("ft_mixsrc/z.bin", z.data(), z.size()));
+
+    Pair p = make_pair();
+    std::atomic<bool> rdone{false}, rok{false};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) {
+        EXPECT_TRUE(o.is_directory);
+        EXPECT_EQ(o.files.size(), 3u);
+        p.recv->accept(o.from, o.id, "ft_mixdst");
+    });
+    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    ASSERT_NE(p.send->send_directory(p.server->local_id(), "ft_mixsrc"), 0u);
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+    EXPECT_TRUE(rok.load());
+    EXPECT_EQ(read_all("ft_mixdst/a.bin"), a);
+    EXPECT_TRUE(file_exists("ft_mixdst/m_empty.bin"));
+    EXPECT_EQ(read_all("ft_mixdst/m_empty.bin").size(), 0u);
+    EXPECT_EQ(read_all("ft_mixdst/z.bin"), z);
+
+    delete_directory("ft_mixsrc");
+    delete_directory("ft_mixdst");
+}
+
+// #4 — Cancelling mid-transfer must reclaim the in-progress temp (.part) file.
+// The reclamation moved into ~Incoming (after the disk writer releases its
+// handle); this asserts the file is actually gone, which the existing cancel test
+// does not check.
+TEST(FilexferTest, CancelReclaimsTempFile) {
+    const std::string src = "ft_reclaim_src.bin", dst = "ft_reclaim_dst.bin";
+    const auto content = make_pattern(8 * 1024 * 1024);  // large enough to still be in flight
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+    delete_file(dst.c_str());
+
+    Pair p = make_pair();
+    std::atomic<bool> rdone{false}, cancelled{false};
+    std::atomic<uint64_t> tid{0};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) { tid = o.id; p.recv->accept(o.from, o.id, dst); });
+    p.recv->on_progress([&](const FileTransfer::Progress& pr) {
+        if (pr.direction == FileTransfer::Direction::Receiving && pr.bytes_transferred > 0 &&
+            !cancelled.exchange(true)) {
+            p.recv->cancel(pr.peer, pr.id);
+        }
+    });
+    p.recv->on_complete([&](uint64_t, bool, const std::string&) { rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+    ASSERT_TRUE(cancelled.load());
+
+    const std::string temp = combine_paths(".",
+        p.client->local_id().to_hex() + "." + std::to_string(tid.load()) + ".0.part");
+    EXPECT_TRUE(wait_for([&] { return !file_exists(temp.c_str()); }))
+        << "cancelled transfer must not leave a .part temp behind";
+    EXPECT_NE(read_all(dst), content);  // never completed
+
+    delete_file(src.c_str());
+    delete_file(dst.c_str());
+    delete_file(temp.c_str());
+}

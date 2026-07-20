@@ -51,6 +51,34 @@ bool read_file_chunk(const char* path, uint64_t offset, void* buffer, size_t siz
 bool create_file_with_size(const char* path, uint64_t size); // Pre-allocate file space
 bool rename_file(const char* old_path, const char* new_path);
 
+// A file kept open across many positioned reads/writes. Streaming a large file
+// then costs one open()/close() instead of one per chunk (see read_file_chunk /
+// write_file_chunk, which re-open every call). 64-bit offsets. NOT thread-safe:
+// a stream is meant to be owned by a single thread at a time.
+class RATS_API FileStream {
+public:
+    FileStream() = default;
+    ~FileStream() { close(); }
+    FileStream(const FileStream&) = delete;
+    FileStream& operator=(const FileStream&) = delete;
+    FileStream(FileStream&& o) noexcept : f_(o.f_) { o.f_ = nullptr; }
+    FileStream& operator=(FileStream&& o) noexcept {
+        if (this != &o) { close(); f_ = o.f_; o.f_ = nullptr; }
+        return *this;
+    }
+
+    bool   open_read(const char* path);   ///< open an existing file for reading
+    bool   open_write(const char* path);  ///< open (creating parents+file if needed) for writing
+    bool   seek(uint64_t offset);         ///< reposition the cursor
+    size_t read(void* buffer, size_t size);                      ///< sequential read; returns bytes read
+    bool   write_at(uint64_t offset, const void* data, size_t size);  ///< positioned write
+    void   close();
+    bool   is_open() const { return f_ != nullptr; }
+
+private:
+    FILE* f_ = nullptr;
+};
+
 // Directory listing
 struct DirectoryEntry {
     std::string name;

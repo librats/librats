@@ -520,9 +520,57 @@ bool create_file_with_size(const char* path, uint64_t size) {
     return true;
 }
 
+// ── FileStream: one open handle across many positioned operations ──────────────
+
+static bool fs_seek64(FILE* f, uint64_t offset) {
+#ifdef _WIN32
+    return _fseeki64(f, static_cast<__int64>(offset), SEEK_SET) == 0;
+#else
+    return fseeko(f, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
+}
+
+bool FileStream::open_read(const char* path) {
+    close();
+    if (!path) return false;
+    f_ = fopen(path, "rb");
+    if (!f_) { LOG_ERROR("FS", "FileStream: cannot open for reading: " << path); return false; }
+    return true;
+}
+
+bool FileStream::open_write(const char* path) {
+    close();
+    if (!path) return false;
+    f_ = fopen(path, "r+b");               // keep existing content (positioned writes)
+    if (!f_ && !file_exists(path)) {
+        std::string parent = get_parent_directory(path);
+        if (!parent.empty() && !directory_exists(parent.c_str())) create_directories(parent.c_str());
+        f_ = fopen(path, "w+b");           // create fresh
+    }
+    if (!f_) { LOG_ERROR("FS", "FileStream: cannot open for writing: " << path); return false; }
+    return true;
+}
+
+bool FileStream::seek(uint64_t offset) { return f_ && fs_seek64(f_, offset); }
+
+size_t FileStream::read(void* buffer, size_t size) {
+    if (!f_ || !buffer) return 0;
+    return fread(buffer, 1, size, f_);
+}
+
+bool FileStream::write_at(uint64_t offset, const void* data, size_t size) {
+    if (!f_ || !data) return false;
+    if (!fs_seek64(f_, offset)) return false;
+    return fwrite(data, 1, size, f_) == size;
+}
+
+void FileStream::close() {
+    if (f_) { fclose(f_); f_ = nullptr; }
+}
+
 bool rename_file(const char* old_path, const char* new_path) {
     if (!old_path || !new_path) return false;
-    
+
     return rename(old_path, new_path) == 0;
 }
 
