@@ -250,7 +250,14 @@ void FileTransfer::worker_loop() {
 }
 
 void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
-    std::vector<uint8_t> buf(config_.chunk_size);
+    // One send buffer reused for every chunk: the fixed CHUNK header is written in
+    // place and the file data is read straight into the bytes that follow it, so a
+    // chunk's payload is never copied between the disk read and the wire (the only
+    // remaining copies are the transport's own framing + encryption). Reusing the
+    // buffer also drops the per-chunk allocation.
+    constexpr size_t kChunkHeader = 1 + 8 + 4 + 8;  // op + id + file_index + offset
+    Bytes m;
+    m.reserve(kChunkHeader + config_.chunk_size);
 
     while (running_.load()) {
         size_t      file_index;
@@ -281,26 +288,25 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
         }
 
         const uint32_t want = static_cast<uint32_t>(std::min<uint64_t>(config_.chunk_size, file_size - offset));
-        if (!read_file_chunk(source.c_str(), offset, buf.data(), want)) {
+        m.clear();
+        m.push_back(OP_CHUNK);
+        put_u64(m, t->id);
+        put_u32(m, static_cast<uint32_t>(file_index));
+        put_u64(m, offset);
+        m.resize(kChunkHeader + want);  // no realloc: capacity was reserved up front
+        if (!read_file_chunk(source.c_str(), offset, m.data() + kChunkHeader, want)) {
             LOG_ERROR("filexfer", "read error on " << source << " at " << offset);
             send_complete(t->peer, t->id, false);
             finish_outgoing(t, false);
             return;
         }
-        Bytes m;
-        m.reserve(1 + 8 + 4 + 8 + want);
-        m.push_back(OP_CHUNK);
-        put_u64(m, t->id);
-        put_u32(m, static_cast<uint32_t>(file_index));
-        put_u64(m, offset);
-        m.insert(m.end(), buf.data(), buf.data() + want);
         send_to(t->peer, m);
 
         bool file_done = false;
         uint8_t digest[SHA256_HASH_SIZE];
         {
             std::lock_guard<std::mutex> lk(t->mtx);
-            sha256_update(&t->hash, buf.data(), want);
+            sha256_update(&t->hash, m.data() + kChunkHeader, want);
             t->cur_offset += want;
             t->bytes_done += want;
             t->last_activity = std::chrono::steady_clock::now();
