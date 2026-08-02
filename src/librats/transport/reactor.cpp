@@ -1,9 +1,33 @@
 #include "librats/transport/reactor.h"
+#include "librats/transport/tcp_link.h"
+#include "librats/core/ip_address.h"
 #include "librats/util/logger.h"
+#include "librats/util/network_utils.h"
 
 #include <cstring>
+#include <utility>
 
 namespace librats {
+
+namespace {
+
+/// Turn a dial target into the numeric endpoint the datagram transport needs.
+/// A literal is used as-is; a hostname goes through the resolver, preferring IPv6
+/// exactly as tcp_connect_start() does, so both transports reach the same host.
+std::optional<Address> resolve_dial_target(const std::string& host, int port) {
+    if (auto ip = IpAddress::parse(host))
+        return Address{*ip, static_cast<uint16_t>(port)};
+
+    for (const std::string& text : {network_utils::resolve_hostname_v6(host),
+                                    network_utils::resolve_hostname(host)}) {
+        if (text.empty()) continue;
+        if (auto ip = IpAddress::parse(text))
+            return Address{*ip, static_cast<uint16_t>(port)};
+    }
+    return std::nullopt;
+}
+
+} // namespace
 
 Reactor::Reactor(uint8_t index, ConnectionDelegate& delegate, SecurityProvider& security)
     : index_(index), delegate_(delegate), security_(security), poller_(IOPoller::create()) {}
@@ -16,6 +40,10 @@ Reactor::~Reactor() {
 
 void Reactor::listen(socket_t server_socket) {
     server_socket_ = server_socket;
+}
+
+void Reactor::listen_udp(socket_t udp_socket, AddressFamily family) {
+    mux_ = std::make_unique<UdpMux>(udp_socket, family, *this);
 }
 
 void Reactor::start() {
@@ -54,28 +82,67 @@ void Reactor::execute(Task task) {
     else                     post(std::move(task));
 }
 
-void Reactor::connect(std::string host, int port) {
-    post([this, host = std::move(host), port] {
-        socket_t s = tcp_connect_start(host, port);
-        if (!is_valid_socket(s)) {
-            LOG_DEBUG("reactor", "Outbound connect to " << host << ":" << port << " failed to start");
+ConnId Reactor::connect(std::string host, int port, TransportKind kind) {
+    if (kind == TransportKind::Udp && !mux_) {
+        LOG_DEBUG("reactor", "Reactor " << static_cast<int>(index_)
+                  << " has no datagram transport; refusing UDP dial to " << host << ":" << port);
+        return kInvalidConnId;
+    }
+
+    // Reserve the id here, on the calling thread, rather than inside the task. The
+    // caller can then cancel this exact attempt (close()) before the task has even
+    // run — which is what makes racing one transport against the other cancellable
+    // instead of a matter of luck.
+    const ConnId id = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
+    post([this, host = std::move(host), port, kind, id] { start_dial(id, host, port, kind); });
+    return id;
+}
+
+void Reactor::start_dial(ConnId id, const std::string& host, int port, TransportKind kind) {
+    if (kind == TransportKind::Udp) {
+        const auto target = resolve_dial_target(host, port);
+        if (!target) {
+            LOG_DEBUG("reactor", "Cannot resolve " << host << " for a UDP dial");
+            abort_dial(id, host, port);
             return;
         }
-        Connection* conn = adopt(s, ConnRole::Outbound);
-        conn->set_dial_address(host, static_cast<uint16_t>(port));
-    });
+        std::unique_ptr<Link> link = mux_->connect(*target);
+        if (!link) { abort_dial(id, host, port); return; }
+
+        Connection* conn = adopt(std::move(link), ConnRole::Outbound, id);
+        if (conn) conn->set_dial_address(host, static_cast<uint16_t>(port));
+        return;
+    }
+
+    socket_t sock = tcp_connect_start(host, port);
+    if (!is_valid_socket(sock)) {
+        LOG_DEBUG("reactor", "Outbound connect to " << host << ":" << port << " failed to start");
+        abort_dial(id, host, port);
+        return;
+    }
+    Connection* conn = adopt(std::make_unique<TcpLink>(sock, *this), ConnRole::Outbound, id);
+    if (!conn) { close_socket(sock); return; }   // the dial was cancelled while queued
+    conn->set_dial_address(host, static_cast<uint16_t>(port));
+}
+
+void Reactor::abort_dial(ConnId id, const std::string& host, int port) {
+    resolve_dial(id);  // the id is spent either way; release any cancellation slot
+    delegate_.on_dial_aborted(index_, id, host, static_cast<uint16_t>(port));
 }
 
 void Reactor::close(ConnId id, CloseReason reason) {
     execute([this, id, reason] {
-        auto it = id_to_socket_.find(id);
-        if (it != id_to_socket_.end()) mark_for_close(it->second, reason);
+        if (conns_.count(id)) { mark_for_close(id, reason); return; }
+        // Not adopted yet: its connect task is still queued behind this one. Leave
+        // a note so adopt() drops it on arrival. Ids at or below the watermark have
+        // already come and gone, so they need no slot (and cannot leak one).
+        if (id != kInvalidConnId && id > resolved_watermark_) cancelled_dials_.insert(id);
     });
 }
 
 void Reactor::broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload) {
     execute([this, header, payload = std::move(payload)] {
-        for (auto& [sock, conn] : conns_) {
+        for (auto& [id, conn] : conns_) {
             if (conn->state() == ConnState::Established)
                 conn->send(header, ByteView(*payload));
         }
@@ -95,10 +162,8 @@ void Reactor::cancel(TimerId id) {
 // ── Lookups / interest ──────────────────────────────────────────────────────
 
 Connection* Reactor::find(ConnId id) noexcept {
-    auto it = id_to_socket_.find(id);
-    if (it == id_to_socket_.end()) return nullptr;
-    auto cit = conns_.find(it->second);
-    return cit == conns_.end() ? nullptr : cit->second.get();
+    auto it = conns_.find(id);
+    return it == conns_.end() ? nullptr : it->second.get();
 }
 
 void Reactor::set_interest(socket_t sock, uint32_t events) {
@@ -117,6 +182,11 @@ void Reactor::run() {
     if (is_valid_socket(server_socket_)) {
         set_socket_nonblocking(server_socket_);
         poller_->add(server_socket_, PollIn);
+    }
+    if (mux_) {
+        set_socket_nonblocking(mux_->socket());
+        poller_->add(mux_->socket(), PollIn);
+        schedule_udp_tick();
     }
 
     PollResult        events[kMaxEvents];
@@ -140,6 +210,7 @@ void Reactor::run() {
     drain_tasks(task_batch);
     process_pending_close();
     shutdown_connections();
+    if (mux_) mux_->shutdown();   // after the connections, so no Link outlives it
     LOG_INFO("reactor", "Reactor " << static_cast<int>(index_) << " stopped");
 }
 
@@ -157,29 +228,52 @@ void Reactor::handle_event(const PollResult& ev) {
 
     if (fd == wakeup_.fd()) { drain_wakeup(); return; }
     if (fd == server_socket_) { if (ev.events & PollIn) do_accept(); return; }
+    if (mux_ && fd == mux_->socket()) {
+        // Stopped short of draining the socket: come straight back rather than
+        // waiting for the next datagram to re-arm an edge-triggered poller.
+        if ((ev.events & PollIn) && mux_->on_readable()) wakeup_.signal();
+        return;
+    }
 
-    auto it = conns_.find(fd);
-    if (it == conns_.end()) return;
-    Connection* conn = it->second.get();
+    auto it = fd_to_conn_.find(fd);
+    if (it == fd_to_conn_.end()) return;
+    dispatch_events(it->second, ev.events);
+}
+
+void Reactor::dispatch_events(ConnId id, uint32_t events) {
+    Connection* conn = find(id);
+    if (!conn) return;
     if (conn->state() == ConnState::Closing || conn->state() == ConnState::Closed) return;
 
     bool keep = true;
-    if (ev.events & (PollErr | PollHup)) {
+    if (events & (PollErr | PollHup)) {
         keep = conn->on_error();
     } else {
-        if (keep && (ev.events & PollIn))  keep = conn->on_readable();
-        if (keep && (ev.events & PollOut)) keep = conn->on_writable();
+        if (keep && (events & PollIn))  keep = conn->on_readable();
+        if (keep && (events & PollOut)) keep = conn->on_writable();
     }
 
-    if (!keep) mark_for_close(fd, conn->close_reason());
+    if (!keep) mark_for_close(id, conn->close_reason());
+}
+
+void Reactor::dispatch_link_events(ConnId id, uint32_t events) {
+    dispatch_events(id, events);
 }
 
 void Reactor::schedule_maintenance() {
     timers_.schedule(kMaintenanceInterval, [this] {
         // Connections being torn down this tick are still in conns_; the sweep is
         // read-only with respect to the map, and on_maintenance_tick() never closes.
-        for (auto& [sock, conn] : conns_) conn->on_maintenance_tick();
+        for (auto& [id, conn] : conns_) conn->on_maintenance_tick();
         schedule_maintenance();
+    });
+}
+
+void Reactor::schedule_udp_tick() {
+    timers_.schedule(UdpMux::kTickInterval, [this] {
+        if (!mux_) return;
+        mux_->tick();
+        schedule_udp_tick();
     });
 }
 
@@ -201,34 +295,60 @@ void Reactor::do_accept() {
             continue;
         }
 
-        Connection* conn = adopt(client, ConnRole::Inbound);
+        Connection* conn = adopt(std::make_unique<TcpLink>(client, *this), ConnRole::Inbound,
+                                 next_conn_id_.fetch_add(1, std::memory_order_relaxed));
+        if (!conn) { close_socket(client); continue; }
         conn->start_handshake();  // accepted sockets are already connected
     }
 }
 
-Connection* Reactor::adopt(socket_t sock, ConnRole role) {
-    set_socket_nonblocking(sock);
+ConnId Reactor::adopt_inbound_link(std::unique_ptr<Link> link) {
+    // Same coarse admission gate the TCP listener applies, for the same reason:
+    // turn a flood away before any handshake work is done for it.
+    if (!delegate_.admit_inbound()) return kInvalidConnId;
 
-    const ConnId id = next_conn_id_++;
-    auto conn = std::make_unique<Connection>(id, sock, role, *this, delegate_);
+    const ConnId id = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
+    Connection* conn = adopt(std::move(link), ConnRole::Inbound, id);
+    if (!conn) return kInvalidConnId;
+    conn->start_handshake();  // an accepted stream is already connected
+    return id;
+}
+
+bool Reactor::resolve_dial(ConnId id) {
+    if (id > resolved_watermark_) resolved_watermark_ = id;
+    return cancelled_dials_.erase(id) > 0;
+}
+
+Connection* Reactor::adopt(std::unique_ptr<Link> link, ConnRole role, ConnId id) {
+    // A dial cancelled while its task sat in the queue never becomes a connection;
+    // dropping `link` here is what actually calls the attempt off.
+    if (resolve_dial(id)) return nullptr;
+
+    const socket_t fd = link->fd();
+    if (is_valid_socket(fd)) set_socket_nonblocking(fd);
+
+    auto conn = std::make_unique<Connection>(id, std::move(link), role, *this, delegate_);
     Connection* raw = conn.get();
+    raw->link().attach(id);
 
-    conns_.emplace(sock, std::move(conn));
-    id_to_socket_.emplace(id, sock);
+    conns_.emplace(id, std::move(conn));
     conn_count_.fetch_add(1, std::memory_order_relaxed);
 
-    // Inbound sockets are connected: watch for readable. Outbound sockets are
-    // still connecting: watch for writable, which signals connect completion.
-    poller_->add(sock, role == ConnRole::Inbound ? PollIn : PollOut);
+    if (is_valid_socket(fd)) {
+        fd_to_conn_.emplace(fd, id);
+        // Inbound sockets are connected: watch for readable. Outbound sockets are
+        // still connecting: watch for writable, which signals connect completion.
+        poller_->add(fd, role == ConnRole::Inbound ? PollIn : PollOut);
+    }
 
     // Reap connections that never reach Established (stuck connect or handshake).
-    TimerId timer = timers_.schedule(kEstablishTimeout, [this, sock] {
-        auto it = conns_.find(sock);
+    TimerId timer = timers_.schedule(kEstablishTimeout, [this, id] {
+        auto it = conns_.find(id);
         if (it == conns_.end()) return;
         const ConnState st = it->second->state();
         if (st != ConnState::Established && st != ConnState::Closing && st != ConnState::Closed) {
-            mark_for_close(sock, st == ConnState::Connecting ? CloseReason::ConnectFailed
-                                                             : CloseReason::HandshakeFailed);
+            mark_for_close(id, st == ConnState::Connecting ? CloseReason::ConnectFailed
+                                                           : CloseReason::HandshakeFailed);
         }
     });
     raw->set_establish_timer(timer);
@@ -237,42 +357,52 @@ Connection* Reactor::adopt(socket_t sock, ConnRole role) {
 
 // ── Teardown ────────────────────────────────────────────────────────────────
 
-void Reactor::mark_for_close(socket_t sock, CloseReason reason) {
-    pending_close_.emplace(sock, reason);  // first reason wins
+void Reactor::mark_for_close(ConnId id, CloseReason reason) {
+    pending_close_.emplace(id, reason);  // first reason wins
 }
 
 void Reactor::process_pending_close() {
     if (pending_close_.empty()) return;
     auto batch = std::move(pending_close_);
     pending_close_.clear();
-    for (const auto& [sock, reason] : batch) remove(sock, reason);
+    for (const auto& [id, reason] : batch) remove(id, reason);
 }
 
-void Reactor::remove(socket_t sock, CloseReason reason) {
-    auto it = conns_.find(sock);
+void Reactor::remove(ConnId id, CloseReason reason) {
+    auto it = conns_.find(id);
     if (it == conns_.end()) return;
 
     std::unique_ptr<Connection> conn = std::move(it->second);
     conns_.erase(it);
-    id_to_socket_.erase(conn->id());
-    poller_->remove(sock);
+
+    const socket_t fd = conn->socket();
+    if (is_valid_socket(fd)) {
+        fd_to_conn_.erase(fd);
+        poller_->remove(fd);
+    }
     conn->cancel_establish_timer();  // stop the reaper before this fd can be reused
     conn_count_.fetch_sub(1, std::memory_order_relaxed);
 
-    LOG_DEBUG("reactor", "Connection " << conn->id() << " closed (" << to_string(reason) << ")");
+    LOG_DEBUG("reactor", "Connection " << id << " closed (" << to_string(reason) << ")");
+    conn->shutdown_link(reason);     // let the transport say goodbye / flush
     delegate_.on_closed(*conn, reason);
-    close_socket(sock);
+    if (is_valid_socket(fd)) close_socket(fd);
+    // ~Connection here releases the Link, which is what hands a UDP stream back to
+    // the mux (to linger briefly or go straight away).
 }
 
 void Reactor::shutdown_connections() {
-    for (auto& [sock, conn] : conns_) {
-        poller_->remove(sock);
+    for (auto& [id, conn] : conns_) {
+        const socket_t fd = conn->socket();
+        if (is_valid_socket(fd)) poller_->remove(fd);
+        conn->shutdown_link(CloseReason::ReactorShutdown);
         delegate_.on_closed(*conn, CloseReason::ReactorShutdown);
-        close_socket(sock);
+        if (is_valid_socket(fd)) close_socket(fd);
     }
     conns_.clear();
-    id_to_socket_.clear();
+    fd_to_conn_.clear();
     pending_close_.clear();
+    cancelled_dials_.clear();
     conn_count_.store(0, std::memory_order_relaxed);
 }
 

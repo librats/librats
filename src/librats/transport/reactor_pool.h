@@ -10,6 +10,13 @@
  * the pool grows. (Sharding *inbound* connections across reactors — handing an
  * accepted fd to a non-acceptor reactor — is a future enhancement; for now a
  * single reactor accepts and owns inbound connections.)
+ *
+ * UDP is a deliberate exception to the round-robin. Every UDP connection shares
+ * one socket — that is the point of it — so the mux, and therefore every stream
+ * on it, belongs to the single reactor that owns that socket. Sharding those
+ * across threads would mean handing datagrams between reactors on every packet,
+ * which costs more than the parallelism buys. pick() honours that by routing UDP
+ * dials to the mux's reactor and everything else round-robin.
  */
 
 #include "librats/transport/reactor.h"
@@ -33,14 +40,26 @@ public:
     /// Hand the listening socket to the acceptor reactor (index 0). Before start().
     void listen(socket_t server_socket) { reactors_[0]->listen(server_socket); }
 
+    /// Hand the shared UDP socket to the acceptor reactor (index 0), which then
+    /// owns every datagram connection. Before start().
+    void listen_udp(socket_t udp_socket, AddressFamily family) {
+        reactors_[0]->listen_udp(udp_socket, family);
+    }
+
+    /// Whether the pool can carry UDP connections at all.
+    bool has_udp() const noexcept { return reactors_[0]->has_udp(); }
+
     void start() { for (auto& r : reactors_) r->start(); }
     void stop()  { for (auto& r : reactors_) r->stop(); }
 
     size_t   size() const noexcept { return reactors_.size(); }
     Reactor& by_index(uint8_t i) noexcept { return *reactors_[i]; }
 
-    /// Choose a reactor for a new outbound connection (round-robin).
-    Reactor& pick() noexcept {
+    /// Choose a reactor for a new outbound connection over `kind`. UDP always
+    /// lands on the reactor that owns the socket it must go out on; anything else
+    /// is spread round-robin.
+    Reactor& pick(TransportKind kind = TransportKind::Tcp) noexcept {
+        if (kind == TransportKind::Udp) return *reactors_[0];
         const size_t i = next_.fetch_add(1, std::memory_order_relaxed) % reactors_.size();
         return *reactors_[i];
     }

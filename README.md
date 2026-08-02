@@ -36,6 +36,7 @@ Projects and companies building on librats:
 - **Native C++17** implementation for maximum performance
 - **Cross-platform** support (Windows, Linux, macOS, Android)
 - **Shared-nothing reactor** transport — connections are sharded across reactor threads with no cross-thread locking on the hot path
+- **TCP *and* UDP as equals** — the same encrypted protocol over either wire. The UDP transport is a full ordered/reliable stream (sequencing, selective acks, RTO, congestion + flow control) on one socket shared by all peers, which is what keeps a single NAT mapping open and makes hole punching possible. A dial tries UDP first and races TCP as fallback, so a UDP-hostile network still connects
 - **Self-certifying identity**: every node has a Curve25519 keypair; its `PeerId` *is* its public key, so peers authenticate each other with no PKI or central authority
 - **Stable identity persistence**: point a node at a `data_dir` and its keypair (and therefore its `PeerId`) survives restarts
 - **Composable subsystems**: opt-in plugins attached to a `Node`; a bare node neither discovers peers nor reconnects on its own
@@ -95,7 +96,7 @@ Projects and companies building on librats:
 
 ## 🚀 Quick Start
 
-Everything in librats revolves around one idea: a small, predictable core (`Node`) plus **opt-in subsystems** you attach explicitly. A bare `Node` is just the secure transport — an encrypted TCP channel (Noise_XX) with a self-certifying peer identity, manual dialing, and raw channel messaging. Everything else — discovery, pub/sub, typed messaging, file transfer, liveness, NAT port mapping, reconnection — is a `Subsystem` you add **before** `start()`. You pay only for what you attach, and the core stays small and easy to reason about.
+Everything in librats revolves around one idea: a small, predictable core (`Node`) plus **opt-in subsystems** you attach explicitly. A bare `Node` is just the secure transport — an encrypted channel (Noise_XX) with a self-certifying peer identity, manual dialing, and raw channel messaging. Everything else — discovery, pub/sub, typed messaging, file transfer, liveness, NAT port mapping, reconnection — is a `Subsystem` you add **before** `start()`. You pay only for what you attach, and the core stays small and easy to reason about.
 
 ```cpp
 librats::NodeConfig config;
@@ -107,6 +108,28 @@ node.add_subsystem(std::make_unique<librats::PubSub>());
 node.add_subsystem(std::make_unique<librats::DhtDiscovery>(dht_config));
 
 node.start();
+```
+
+### Two transports, one API
+
+A connection runs over **TCP or UDP**, and nothing above the transport can tell the difference: same framing, same Noise handshake, same guarantees. UDP is not a lossy shortcut here — librats implements ordered, reliable delivery with congestion and flow control on top of datagrams (sequencing, cumulative + selective acks, RFC 6298 retransmission timing, Reno congestion control).
+
+Both are enabled by default and bind the **same port**, so one advertised address is dialable either way. A dial tries UDP first and races TCP alongside it if UDP has not come up within `transport_fallback_ms` — the first handshake to complete wins and the other is dropped.
+
+UDP is the default first choice because it fits peer-to-peer better: every peer shares one socket, so a NAT holds **one** mapping instead of one per peer; the source port a peer sees is the port it can dial back, which is what makes hole punching possible at all; and no middlebox holds per-connection state that can be exhausted or timed out. TCP remains a first-class equal, and is what the fallback exists for — some networks block or throttle UDP outright.
+
+```cpp
+librats::NodeConfig config;
+config.enable_tcp            = true;                          // both on by default
+config.enable_udp            = true;
+config.preferred_transport   = librats::TransportKind::Udp;   // tried first
+config.transport_fallback_ms = 1200;                          // 0 = never fall back
+
+librats::Node node(config);
+node.start();
+
+node.transports();                 // bitmask of what is actually running
+node.peers()[0].transport;         // which wire this peer's link uses
 ```
 
 The examples below use the C++ `Node` API. The equivalent C API (`rats_*`) is shown in the [C API](#c-api-bindingsratsh) section.
@@ -505,11 +528,11 @@ The source tree mirrors these layers: `src/librats/core`, `src/librats/util`, `s
 | Layer | Protocol | Purpose | Where |
 |-------|----------|---------|-------|
 | **DHT layer** | UDP (Kademlia) | **Peer discovery** only | `DhtDiscovery` subsystem |
-| **Peer connection layer** | TCP (Noise) | **Message exchange** | `Node` core: `peers()`, `send`, `broadcast` |
+| **Peer connection layer** | TCP or UDP (Noise) | **Message exchange** | `Node` core: `peers()`, `send`, `broadcast` |
 
 **Key points:**
 - The **DHT routing table** is NOT your connected peers. It holds DHT nodes (often from the global BitTorrent Mainline DHT) that help you *discover* peers.
-- **Peer connections** (`node.peers()`, `node.peer_count()`) are the actual authenticated TCP connections used for communication.
+- **Peer connections** (`node.peers()`, `node.peer_count()`) are the actual authenticated connections used for communication — over TCP or over the reliable UDP transport, whichever the dial settled on.
 - The DHT is for **discovery**, not message routing. For messaging, use the Node core (channels), `MessageJson`, or `PubSub`.
 
 ### Private Network Formation
@@ -529,7 +552,7 @@ node.start();   // discovery uses a hash derived from your protocol identity
 2. **How it works:**
    - `DhtDiscovery` derives a discovery hash from your protocol identity and announces under it in the global DHT.
    - Only peers with the **same** `protocol` id discover each other — and even if a stranger dials you, the protocol identity is bound into the Noise handshake, so the connection cannot complete.
-   - Once discovered, peers connect over authenticated TCP and grow the mesh via Peer Exchange.
+   - Once discovered, peers connect over the authenticated channel (UDP first, TCP as fallback) and grow the mesh via Peer Exchange.
 
 3. **Discovery timing:**
    - DHT discovery is asynchronous — initial peers typically appear in 1–30 seconds.

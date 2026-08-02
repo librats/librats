@@ -28,24 +28,19 @@ constexpr size_t kMaxEagerReserve = 1024 * 1024;
 /// small frame and its length prefix land in the same allocation.
 constexpr size_t kInlineBlockLimit = ChainedSendBuffer::kScratchCapacity;
 
-#ifdef _WIN32
-inline bool last_error_would_block() { return WSAGetLastError() == WSAEWOULDBLOCK; }
-#else
-inline bool last_error_would_block() { return errno == EAGAIN || errno == EWOULDBLOCK; }
-#endif
-
 } // namespace
 
-Connection::Connection(ConnId id, socket_t sock, ConnRole role,
+Connection::Connection(ConnId id, std::unique_ptr<Link> link, ConnRole role,
                        Reactor& reactor, ConnectionDelegate& delegate)
-    : id_(id), socket_(sock), role_(role), reactor_(reactor), delegate_(delegate) {}
+    : id_(id), link_(std::move(link)), role_(role), reactor_(reactor), delegate_(delegate) {}
 
 Connection::~Connection() = default;
 
 IpAddress Connection::remote_ip() const {
-    // The peer's source IP, straight from getpeername() with no textual round-trip.
-    // (The source port is ephemeral and not useful here, so it's discarded.)
-    const auto ep = get_peer_endpoint(socket_);
+    // The peer's source IP as the transport sees it, with no textual round-trip.
+    // (The source port is not dialable — ephemeral on TCP, NAT-rewritten on UDP —
+    // so it is discarded; identify supplies the real listen port.)
+    const auto ep = link_->remote_endpoint();
     return ep ? ep->ip : IpAddress{};
 }
 
@@ -106,8 +101,10 @@ void Connection::start_handshake() {
 
 void Connection::begin_handshake() {
     state_ = ConnState::Handshaking;
+    // The transport is up, so the write-interest raised for the connect itself is
+    // no longer wanted; flush() re-arms it if the handshake outgrows the link.
     want_write_ = false;
-    reactor_.set_interest(socket_, PollIn);
+    link_->want_write(false);
 
     handshaker_ = reactor_.security().create(role_);
     Bytes out;
@@ -170,21 +167,18 @@ bool Connection::on_readable() {
     while (true) {
         const ByteSpan into = rx_.prepare(read_size());
 
-        const int n = ::recv(socket_, reinterpret_cast<char*>(into.data()),
-                             static_cast<int>(into.size()), 0);
-        if (n == 0) {
+        const Link::IoResult r = link_->read(into);
+        if (r.status == Link::Status::Closed) {
             if (!process_blocks()) return false;  // deliver what the peer sent before FIN
             return fail(CloseReason::PeerClosed);
         }
-        if (n < 0) {
-            if (last_error_would_block()) break;
-            return fail(CloseReason::PeerReset);
-        }
+        if (r.status == Link::Status::Error)      return fail(link_->error_reason());
+        if (r.status == Link::Status::WouldBlock) break;
 
-        rx_.commit(static_cast<size_t>(n));
+        rx_.commit(r.bytes);
         if (!process_blocks()) return false;
 
-        if (static_cast<size_t>(n) < into.size()) break;  // kernel buffer drained
+        if (r.bytes < into.size()) break;  // link drained
     }
     return true;
 }
@@ -249,11 +243,11 @@ bool Connection::deliver_frame(ByteView body) {
 }
 
 bool Connection::on_writable() {
-    // Finish a non-blocking connect, then begin the handshake.
+    // Finish the transport-level connect (a non-blocking TCP connect, or a Syn
+    // that has just been acknowledged), then begin the handshake.
     if (state_ == ConnState::Connecting) {
-        int err = tcp_connect_result(socket_);
-        if (err != 0) {
-            LOG_DEBUG("connection", "Peer " << id_ << " connect failed (err " << err << ")");
+        if (!link_->connect_completed()) {
+            LOG_DEBUG("connection", "Peer " << id_ << " connect failed");
             return fail(CloseReason::ConnectFailed);
         }
         begin_handshake();
@@ -263,7 +257,7 @@ bool Connection::on_writable() {
 }
 
 bool Connection::on_error() {
-    return fail(CloseReason::PeerReset);
+    return fail(link_->error_reason());
 }
 
 // ── Send buffer flush + write interest ──────────────────────────────────────
@@ -276,11 +270,10 @@ bool Connection::flush() {
         ByteView slices[kMaxSendSlices];
         const size_t count = tx_.gather(slices, kMaxSendSlices);
 
-        const std::ptrdiff_t n = send_vectored(socket_, slices, count);
-        if (n > 0) { tx_.pop_front(static_cast<size_t>(n)); continue; }
-        if (n == 0) break;  // nothing accepted; try again on the next writable event
-        if (last_error_would_block()) break;
-        return fail(CloseReason::PeerReset);
+        const Link::IoResult r = link_->write(slices, count);
+        if (r.status == Link::Status::Ok) { tx_.pop_front(r.bytes); continue; }
+        if (r.status == Link::Status::WouldBlock) break;  // retry on the next writable event
+        return fail(link_->error_reason());
     }
 
     if (tx_.empty()) disarm_write();
@@ -291,13 +284,13 @@ bool Connection::flush() {
 void Connection::arm_write() {
     if (want_write_) return;
     want_write_ = true;
-    reactor_.set_interest(socket_, PollIn | PollOut);
+    link_->want_write(true);
 }
 
 void Connection::disarm_write() {
     if (!want_write_) return;
     want_write_ = false;
-    reactor_.set_interest(socket_, PollIn);
+    link_->want_write(false);
 }
 
 bool Connection::fail(CloseReason reason) {

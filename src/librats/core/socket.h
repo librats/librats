@@ -247,6 +247,49 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Addre
                   AddressFamily af = AddressFamily::DualStack);
 
 /**
+ * Ask the kernel for larger socket buffers (SO_RCVBUF / SO_SNDBUF).
+ *
+ * Matters most for a datagram socket carrying many peers at once: the kernel has
+ * nowhere to put a datagram that arrives while the receive buffer is full, so it
+ * drops it — and a burst that overruns a small default buffer becomes a
+ * retransmission storm rather than a queue. Best effort: the OS may clamp the
+ * request, which is fine.
+ *
+ * @param recv_bytes Requested receive buffer; 0 leaves it alone.
+ * @param send_bytes Requested send buffer; 0 leaves it alone.
+ * @return true if every requested direction was accepted.
+ */
+bool set_socket_buffer_sizes(socket_t socket, int recv_bytes, int send_bytes);
+
+/**
+ * Send one datagram straight from a raw buffer — no std::vector, no resolution.
+ *
+ * The allocation-free form of send_udp_data(), for engines that emit a packet per
+ * call from a reusable scratch buffer (the reliable-UDP transport builds every
+ * header + payload into one stack buffer and hands it here).
+ *
+ * @return Bytes sent, 0 if the send would block (a full socket send buffer — the
+ *         datagram is simply dropped, exactly as a congested link would), or -1 on
+ *         a real error.
+ */
+std::ptrdiff_t send_udp_to(socket_t socket, const void* data, size_t len,
+                           const Address& dest, AddressFamily af = AddressFamily::DualStack);
+
+/**
+ * Receive one datagram into a caller-owned buffer, without blocking.
+ *
+ * The counterpart of send_udp_to() for a socket driven by an IOPoller: it never
+ * waits, so the caller loops until it reports "nothing left".
+ *
+ * @param from Filled with the sender's endpoint on success.
+ * @return Bytes received (0 is a legal empty datagram), -1 when nothing is pending
+ *         (would-block) and -2 on a socket error.
+ */
+constexpr std::ptrdiff_t kUdpRecvWouldBlock = -1;
+constexpr std::ptrdiff_t kUdpRecvError      = -2;
+std::ptrdiff_t recv_udp_from(socket_t socket, void* buffer, size_t len, Address& from);
+
+/**
  * Receive UDP data with optional timeout
  * @param socket The UDP socket handle
  * @param buffer_size Maximum number of bytes to receive

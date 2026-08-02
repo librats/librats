@@ -24,10 +24,19 @@ enum class ConnRole {
     Outbound,  ///< We dialed out to a remote address.
 };
 
+/// Which wire a connection runs over. Both are first-class: they carry the exact
+/// same block/frame protocol and the same secure handshake, and differ only in how
+/// an ordered, reliable byte stream is obtained — the kernel's TCP stack, or the
+/// library's own reliability layer on top of datagrams (see transport/udp_stream.h).
+enum class TransportKind {
+    Tcp,  ///< One kernel socket per peer.
+    Udp,  ///< Reliable ordered stream over the shared UDP socket (NAT-friendly).
+};
+
 /// Connection lifecycle. A connection moves strictly forward through these.
 enum class ConnState {
-    Connecting,   ///< Outbound TCP connect in flight (waiting for writable).
-    Handshaking,  ///< TCP up; secure-channel handshake in progress.
+    Connecting,   ///< Outbound transport connect in flight (TCP connect / UDP SYN).
+    Handshaking,  ///< Transport up; secure-channel handshake in progress.
     Established,  ///< Handshake done; application frames may flow.
     Closing,      ///< Marked for teardown; no further frames accepted.
     Closed,       ///< Removed from the reactor.
@@ -38,16 +47,19 @@ enum class CloseReason {
     LocalClose,        ///< Application asked to disconnect.
     PeerClosed,        ///< Remote sent FIN (clean close).
     PeerReset,         ///< Connection reset / socket error.
-    ConnectFailed,     ///< Outbound TCP connect never completed.
+    ConnectFailed,     ///< Outbound transport connect never completed.
     HandshakeFailed,   ///< Secure-channel handshake failed or timed out.
     ProtocolError,     ///< Malformed frame / decryption failure on the wire.
     SlowConsumer,      ///< Send buffer exceeded its high-water mark.
     ReactorShutdown,   ///< Reactor is stopping.
     DuplicateConn,     ///< Redundant connection to a peer we already hold; superseded.
     PeerLimit,         ///< Inbound rejected: the configured peer limit is reached.
+    IdleTimeout,       ///< Datagram link went silent past its idle deadline.
+    DialSuperseded,    ///< A racing dial over the other transport won; this one is redundant.
 };
 
 const char* to_string(ConnState) noexcept;
 const char* to_string(CloseReason) noexcept;
+const char* to_string(TransportKind) noexcept;
 
 } // namespace librats

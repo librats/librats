@@ -399,9 +399,11 @@ public:
         
         // Associate socket with IOCP (needed for overlapped I/O)
         CreateIoCompletionPort(reinterpret_cast<HANDLE>(fd), iocp_, 0, 0);
-        
+
+        state->is_datagram = is_datagram_socket(fd);
+
         // Determine socket mode:
-        // - Try zero-byte WSARecv to detect if socket is connected (IOCP mode)
+        // - Try a readiness probe to detect if socket is connected (IOCP mode)
         // - Listen sockets and connecting sockets use WSAPoll fallback
         if (events & PollIn) {
             if (arm_read(state)) {
@@ -543,7 +545,15 @@ public:
                 // Check the NTSTATUS from the overlapped result
                 // 0 = STATUS_SUCCESS, non-zero = error (e.g. connection reset)
                 ULONG_PTR internal_status = io->overlapped.Internal;
-                
+
+                // A datagram readiness probe peeks at one byte of what is always a
+                // larger datagram, so it reports STATUS_BUFFER_OVERFLOW rather than
+                // success. That IS the "data is waiting" signal — the datagram is
+                // still queued (MSG_PEEK took nothing), ready for the real read.
+                constexpr ULONG_PTR kStatusBufferOverflow = 0x80000005ul;
+                if (state->is_datagram && internal_status == kStatusBufferOverflow)
+                    internal_status = 0;
+
                 uint32_t reported_events = 0;
                 if (internal_status == 0) {
                     // Success — report readiness for the event type we were watching
@@ -627,12 +637,15 @@ private:
         bool read_pending;              ///< Zero-byte WSARecv in flight
         bool write_pending;             ///< Zero-byte WSASend in flight
         bool removed;                   ///< Marked for removal
+        bool is_datagram;               ///< SOCK_DGRAM — readiness probed with MSG_PEEK
+        char peek_byte;                 ///< one-byte landing pad for that probe
         IocpOverlapped read_io;         ///< Overlapped for read notification
         IocpOverlapped write_io;        ///< Overlapped for write notification
-        
+
         explicit IocpSocketState(socket_t f)
             : fd(f), desired_events(0), mode(SocketMode::WsaPoll),
-              read_pending(false), write_pending(false), removed(false) {
+              read_pending(false), write_pending(false), removed(false),
+              is_datagram(false), peek_byte(0) {
             read_io.state = this;
             read_io.event_type = PollIn;
             write_io.state = this;
@@ -650,22 +663,52 @@ private:
     // Zero-byte overlapped I/O: readiness notification via IOCP
     //----------------------------------------------------------------------
     
+    /// Is this a datagram socket?
+    ///
+    /// It matters because the zero-byte WSARecv this poller uses for readiness
+    /// notification is only safe on a stream socket. On a datagram socket the
+    /// operation completes with WSAEMSGSIZE — and Windows DISCARDS the datagram
+    /// that satisfied it, because it did not fit in the (empty) buffer, losing one
+    /// datagram per notification. arm_read() therefore probes a datagram socket
+    /// with a one-byte MSG_PEEK instead, which reports the same readiness without
+    /// taking anything off the queue.
+    static bool is_datagram_socket(socket_t fd) {
+        int type = 0;
+        int len  = static_cast<int>(sizeof(type));
+        if (getsockopt(fd, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &len) != 0)
+            return false;
+        return type == SOCK_DGRAM;
+    }
+
     /// Post a zero-byte WSARecv. Completes when data is available to read.
     /// Returns false if the socket is not connected (listen socket).
     bool arm_read(IocpSocketState* state) {
         if (state->read_pending) return true;
         
         std::memset(&state->read_io.overlapped, 0, sizeof(OVERLAPPED));
-        
+
         WSABUF buf;
-        buf.buf = nullptr;
-        buf.len = 0;
-        DWORD flags = 0;
+        DWORD  flags = 0;
+        if (state->is_datagram) {
+            // Peek at one byte rather than receiving zero: MSG_PEEK leaves the
+            // datagram on the queue for the real recvfrom() that follows, where a
+            // zero-byte receive would consume and discard it (see
+            // is_datagram_socket). The completion carries STATUS_BUFFER_OVERFLOW
+            // because one byte is not the whole datagram — which is precisely the
+            // "something is there" signal we are after, and is treated as success
+            // when the completion is dequeued.
+            buf.buf = &state->peek_byte;
+            buf.len = 1;
+            flags   = MSG_PEEK;
+        } else {
+            buf.buf = nullptr;
+            buf.len = 0;
+        }
         DWORD bytes = 0;
-        
+
         int ret = WSARecv(state->fd, &buf, 1, &bytes, &flags,
                           &state->read_io.overlapped, nullptr);
-        
+
         if (ret == 0) {
             // Completed immediately — completion still posted to IOCP
             state->read_pending = true;
@@ -687,7 +730,11 @@ private:
     /// Also wakes GQCS when called from another thread (via modify/send_to_peer).
     bool arm_write(IocpSocketState* state) {
         if (state->write_pending) return true;
-        
+        // A zero-byte WSASend on a datagram socket would put an empty datagram on
+        // the wire rather than probe writability. Nothing asks for PollOut on one
+        // (a datagram socket is writable essentially always), so simply decline.
+        if (state->is_datagram) return false;
+
         std::memset(&state->write_io.overlapped, 0, sizeof(OVERLAPPED));
         
         WSABUF buf;

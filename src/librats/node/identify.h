@@ -18,6 +18,15 @@
  *                   interface IP with the listen port) — the "multiaddr set".
  *   - observed    : the address the sender observed the RECIPIENT connecting from,
  *                   so a node can learn its own public IP as peers see it.
+ *   - transports  : which wires the sender accepts on that port (TCP, the
+ *                   datagram transport, or both). Both bind the SAME port, so
+ *                   this is a property of the node rather than of an address —
+ *                   it tells a peer which transports are worth dialing before it
+ *                   spends a fallback delay finding out.
+ *
+ * The transports byte is appended after the older fields, and decode has always
+ * ignored trailing bytes, so a node that predates it simply reads the message
+ * without it and reports "unspecified" rather than failing.
  *
  * The wire form is a compact, versioned, fully bounds-checked binary blob — decode
  * never trusts a length without checking it against the buffer, and every count is
@@ -39,9 +48,16 @@ struct RATS_API IdentifyMessage {
     static constexpr size_t  kMaxAddresses = 32;  ///< cap advertised addresses
     static constexpr size_t  kMaxIpLength  = 16;  ///< a single IP is 4 (v4) or 16 (v6) bytes
 
+    /// Transport bitmask values, matching PeerTransports in peer/peer_info.h.
+    static constexpr uint8_t kTransportTcp = 1 << 0;
+    static constexpr uint8_t kTransportUdp = 1 << 1;
+
     uint16_t               listen_port = 0;
     std::vector<Address>   addresses;   ///< sender's self-advertised dialable addrs
     std::optional<Address> observed;    ///< address sender saw the recipient at
+    /// Transports the sender accepts on listen_port. 0 means the sender did not
+    /// say (an older peer); treat that as "no better information", not as "none".
+    uint8_t                transports = 0;
 
     /// Serialise to the wire form. Addresses with an empty IP, an over-long IP, or
     /// a zero port are skipped; at most kMaxAddresses are emitted.

@@ -2,22 +2,28 @@
 
 /**
  * @file connection.h
- * @brief A single peer connection: socket, secure-channel handshake, framing.
+ * @brief A single peer connection: byte-stream link, secure handshake, framing.
  *
  * A Connection is owned by exactly one Reactor and is only ever touched by that
  * reactor's thread. Because of that single-threaded ownership it holds NO locks
  * and uses NO atomics — all synchronisation lives at the reactor boundary (the
  * task queue). This is the heart of the shared-nothing model.
  *
+ * It is also transport-agnostic: everything here needs is an ordered, reliable,
+ * non-blocking byte stream, which is exactly what a Link is (see link.h). A
+ * connection over a kernel TCP socket and one over the library's reliable-UDP
+ * stream run the *same* code — same framing, same handshake, same backpressure —
+ * and differ only in which Link they hold.
+ *
  * Lifecycle: Connecting → Handshaking → Established → Closing/Closed.
- *   - Connecting:  outbound TCP connect in flight (inbound skips this).
+ *   - Connecting:  outbound transport connect in flight (inbound skips this).
  *   - Handshaking: a Handshaker (from the reactor's SecurityProvider) runs to
  *                  completion, yielding a Session and the remote PeerId.
  *   - Established: inbound blocks are decrypted into inner frames and delivered;
  *                  outbound frames are encrypted and queued.
  *
- * The Connection reports events through a ConnectionDelegate and asks the
- * Reactor to (dis)arm write-interest; it never touches the poller directly.
+ * The Connection reports events through a ConnectionDelegate and asks its Link
+ * to (dis)arm write-interest; it never touches the poller directly.
  */
 
 #include "librats/util/rats_export.h"
@@ -29,6 +35,7 @@
 #include "librats/core/receive_buffer.h"
 #include "librats/core/chained_send_buffer.h"
 #include "librats/core/socket.h"
+#include "librats/transport/link.h"
 
 #include <memory>
 
@@ -58,6 +65,13 @@ public:
     virtual void on_established(Connection& conn) = 0;
     virtual void on_frame(Connection& conn, const Frame& frame) = 0;
     virtual void on_closed(Connection& conn, CloseReason reason) = 0;
+
+    /// An outbound dial died before there was ever a Connection to report it on —
+    /// an unresolvable host, no route, no socket. Without this a dial policy that
+    /// reserved the ConnId (see Reactor::connect) would wait out a timeout for an
+    /// attempt that never began. Runs on the reactor thread. Default: ignore.
+    virtual void on_dial_aborted(uint8_t /*reactor_index*/, ConnId /*id*/,
+                                 const std::string& /*host*/, uint16_t /*port*/) {}
 };
 
 class Connection {
@@ -66,7 +80,7 @@ public:
     /// connection with CloseReason::SlowConsumer.
     static constexpr size_t kDefaultSendHighWater = 8 * 1024 * 1024;
 
-    Connection(ConnId id, socket_t sock, ConnRole role,
+    Connection(ConnId id, std::unique_ptr<Link> link, ConnRole role,
                Reactor& reactor, ConnectionDelegate& delegate);
     ~Connection();
 
@@ -76,7 +90,11 @@ public:
     // — identity / state (reactor thread) —
     ConnId        id() const noexcept        { return id_; }
     uint8_t       reactor_index() const noexcept;  ///< index of the owning reactor
-    socket_t      socket() const noexcept    { return socket_; }
+    Link&         link() const noexcept      { return *link_; }
+    /// The kernel socket behind this connection, or RATS_INVALID_SOCKET when the
+    /// transport has none of its own (UDP streams share the mux's socket).
+    socket_t      socket() const noexcept    { return link_->fd(); }
+    TransportKind transport() const noexcept { return link_->kind(); }
     ConnRole      role() const noexcept      { return role_; }
     ConnState     state() const noexcept     { return state_; }
     CloseReason   close_reason() const noexcept { return close_reason_; }
@@ -125,11 +143,16 @@ public:
     const std::string& dial_host() const noexcept { return dial_host_; }
     uint16_t           dial_port() const noexcept { return dial_port_; }
 
-    /// The peer's IP as seen on the socket (getpeername), without the ephemeral
-    /// source port. Combined with the peer's advertised listen port by the node's
-    /// identify exchange to form a dialable address — the only way to learn the
-    /// dialable address of an *inbound* peer. Empty string on error.
+    /// The peer's IP as the link sees it, without the source port (ephemeral on
+    /// TCP, NAT-rewritten on UDP). Combined with the peer's advertised listen port
+    /// by the node's identify exchange to form a dialable address — the only way
+    /// to learn the dialable address of an *inbound* peer. Unspecified on error.
     IpAddress          remote_ip() const;
+
+    /// Tell the link the connection is going away, so a transport that owes the
+    /// peer a goodbye (or a last flush) can arrange it. Called by the Reactor
+    /// during teardown, before the Connection is destroyed.
+    void shutdown_link(CloseReason reason) { link_->close(reason); }
 
 private:
     void begin_handshake();             ///< transport up → Handshaking
@@ -144,9 +167,9 @@ private:
     void disarm_write();
     bool fail(CloseReason);             ///< record reason, return false (teardown)
 
-    ConnId              id_;
-    socket_t            socket_;
-    ConnRole            role_;
+    ConnId                id_;
+    std::unique_ptr<Link> link_;
+    ConnRole              role_;
     ConnState           state_ = ConnState::Connecting;
     CloseReason         close_reason_ = CloseReason::PeerClosed;
     Reactor&            reactor_;

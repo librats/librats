@@ -195,7 +195,17 @@ set(LIBRARY_SOURCES
     src/librats/wire/message_router.h
     src/librats/wire/message_router.cpp
 
-# transport/ — shared-nothing reactor, per-connection state machine
+# transport/ — shared-nothing reactor, per-connection state machine,
+#              interchangeable TCP / reliable-UDP links
+    src/librats/transport/link.h
+    src/librats/transport/tcp_link.h
+    src/librats/transport/tcp_link.cpp
+    src/librats/transport/udp_packet.h
+    src/librats/transport/udp_packet.cpp
+    src/librats/transport/udp_stream.h
+    src/librats/transport/udp_stream.cpp
+    src/librats/transport/udp_mux.h
+    src/librats/transport/udp_mux.cpp
     src/librats/transport/connection.h
     src/librats/transport/connection.cpp
     src/librats/transport/reactor.h
@@ -229,6 +239,8 @@ set(LIBRARY_SOURCES
     src/librats/node/node.cpp
     src/librats/node/identify.h
     src/librats/node/identify.cpp
+    src/librats/node/dialer.h
+    src/librats/node/dialer.cpp
 
 # subsystems/ — opt-in plugins attached to a Node
     src/librats/subsystems/ping_service.h
@@ -629,6 +641,7 @@ if(RATS_BUILD_TESTS)
 # Wire framing, reactor transport, node + subsystems
         tests/test_frame.cpp
         tests/test_reactor.cpp
+        tests/test_transport_udp.cpp
         tests/test_handshake.cpp
         tests/test_node.cpp
         tests/test_identify.cpp

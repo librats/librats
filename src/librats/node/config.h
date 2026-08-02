@@ -6,6 +6,8 @@
  */
 
 #include "librats/util/rats_export.h"
+#include "librats/core/types.h"   // TransportKind
+
 #include <cstdint>
 #include <string>
 
@@ -13,9 +15,42 @@ namespace librats {
 
 struct RATS_API NodeConfig {
     /// Listen port for inbound peers. 0 picks an ephemeral port. Ignored if
-    /// enable_listen is false (client-only node).
+    /// enable_listen is false (client-only node). Both transports use this same
+    /// port, so one advertised address is dialable over either.
     uint16_t listen_port = 0;
     bool     enable_listen = true;
+
+    // ── Transports ──────────────────────────────────────────────────────────
+    //
+    // TCP and UDP are equal citizens here: identical framing, identical Noise
+    // handshake, identical guarantees. They differ only in how the ordered,
+    // reliable byte stream underneath is obtained — the kernel's TCP stack, or
+    // the library's own reliability layer over datagrams (transport/udp_stream.h).
+    // A node normally offers both and lets each dial pick.
+
+    /// Accept and dial over TCP.
+    bool enable_tcp = true;
+    /// Accept and dial over the datagram transport. Also gives a dial-only node a
+    /// single UDP socket to dial from, which is what keeps one NAT mapping open
+    /// for every peer instead of one per peer.
+    bool enable_udp = true;
+
+    /// Which transport a dial tries first.
+    ///
+    /// UDP is the default because it is the better fit for peer-to-peer: every
+    /// peer shares one socket and therefore one NAT mapping, the port a peer sees
+    /// us send from is the port it can dial back, which is what makes hole
+    /// punching possible at all, and no middlebox holds per-connection state that
+    /// can be exhausted or timed out from under us. TCP remains a first-class
+    /// equal, and is what the fallback below exists for — some networks block or
+    /// throttle UDP outright.
+    TransportKind preferred_transport = TransportKind::Udp;
+
+    /// How long the preferred transport dials alone before the other one is
+    /// raced alongside it. The first to complete its handshake wins and the loser
+    /// is dropped, so a UDP-blocking network costs this delay rather than a failed
+    /// connection. 0 disables the fallback: only the preferred transport is tried.
+    uint32_t transport_fallback_ms = 1200;
 
     /// Interface to bind the listener to. The address family is derived from it:
     ///   - ""  or "::"      → dual-stack wildcard: reachable over both IPv6 and IPv4

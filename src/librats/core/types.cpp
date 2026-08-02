@@ -25,6 +25,16 @@ const char* to_string(CloseReason r) noexcept {
         case CloseReason::ReactorShutdown: return "ReactorShutdown";
         case CloseReason::DuplicateConn:   return "DuplicateConn";
         case CloseReason::PeerLimit:       return "PeerLimit";
+        case CloseReason::IdleTimeout:     return "IdleTimeout";
+        case CloseReason::DialSuperseded:  return "DialSuperseded";
+    }
+    return "?";
+}
+
+const char* to_string(TransportKind t) noexcept {
+    switch (t) {
+        case TransportKind::Tcp: return "tcp";
+        case TransportKind::Udp: return "udp";
     }
     return "?";
 }

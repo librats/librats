@@ -73,6 +73,10 @@ public:
     std::vector<Address> add_addresses(const PeerId& id, PeerRoute route,
                                        const std::vector<Address>& addresses);
 
+    /// Record which transports a peer advertised in its identify message. Applies
+    /// only while `route` is still the peer's live route. Write lock.
+    void set_supported_transports(const PeerId& id, PeerRoute route, uint8_t mask);
+
     /// Upper bound on stored addresses per peer — caps memory and stops a peer
     /// from flooding us with bogus addresses via the identify/PEX path.
     static constexpr size_t kMaxAddressesPerPeer = 32;

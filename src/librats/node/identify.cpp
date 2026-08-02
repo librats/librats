@@ -77,6 +77,9 @@ Bytes IdentifyMessage::encode() const {
     } else {
         out.push_back(0);
     }
+
+    // Appended last, where a decoder that predates it just ignores it.
+    out.push_back(transports);
     return out;
 }
 
@@ -115,7 +118,12 @@ std::optional<IdentifyMessage> IdentifyMessage::decode(ByteView in) {
         msg.observed = Address{*addr, port};
     }
 
-    // Trailing bytes (e.g. a future minor extension) are tolerated and ignored.
+    // Optional trailing extension. A sender that predates it leaves the field at
+    // 0, which reads as "did not say" rather than "supports nothing".
+    const uint8_t transports = r.u8();
+    if (r.ok) msg.transports = transports;
+
+    // Any further trailing bytes (a future extension) are tolerated and ignored.
     return msg;
 }
 

@@ -17,10 +17,20 @@
 
 namespace librats {
 
+/// Transports a peer says it accepts, as a bitmask (see IdentifyMessage). Kept
+/// separate from `transport`, which is the one this connection actually uses.
+enum PeerTransports : uint8_t {
+    PeerTransportNone = 0,
+    PeerTransportTcp  = 1 << 0,
+    PeerTransportUdp  = 1 << 1,
+};
+
 struct PeerInfo {
     PeerId               id;
     std::vector<Address> addresses;                 ///< known dialable addresses
     ConnRole             direction = ConnRole::Outbound;
+    TransportKind        transport = TransportKind::Tcp;  ///< wire this connection runs on
+    uint8_t              supported_transports = PeerTransportNone;  ///< what the peer advertised
     std::string          agent_version;             ///< optional remote agent string
 };
 

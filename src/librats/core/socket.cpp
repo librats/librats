@@ -1061,6 +1061,74 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data,
     return bytes_sent;
 }
 
+bool set_socket_buffer_sizes(socket_t socket, int recv_bytes, int send_bytes) {
+    bool ok = true;
+    if (recv_bytes > 0 &&
+        setsockopt(socket, SOL_SOCKET, SO_RCVBUF,
+                   reinterpret_cast<const char*>(&recv_bytes), sizeof(recv_bytes)) != 0) {
+        LOG_SOCKET_DEBUG("Could not set SO_RCVBUF to " << recv_bytes);
+        ok = false;
+    }
+    if (send_bytes > 0 &&
+        setsockopt(socket, SOL_SOCKET, SO_SNDBUF,
+                   reinterpret_cast<const char*>(&send_bytes), sizeof(send_bytes)) != 0) {
+        LOG_SOCKET_DEBUG("Could not set SO_SNDBUF to " << send_bytes);
+        ok = false;
+    }
+    return ok;
+}
+
+std::ptrdiff_t send_udp_to(socket_t socket, const void* data, size_t len,
+                           const Address& dest, AddressFamily af) {
+    sockaddr_storage dest_addr;
+    socklen_t addr_len;
+    if (!build_udp_dest_addr(dest.ip, dest.port, af, dest_addr, addr_len)) return -1;
+
+    const int sent = sendto(socket, static_cast<const char*>(data), static_cast<int>(len), 0,
+                            reinterpret_cast<sockaddr*>(&dest_addr), addr_len);
+    if (sent != RATS_SOCKET_ERROR) return sent;
+
+    const int error = get_last_socket_error();
+#ifdef _WIN32
+    if (error == WSAEWOULDBLOCK) return 0;
+#else
+    if (error == EAGAIN || error == EWOULDBLOCK || error == ENOBUFS) return 0;
+#endif
+    // A datagram socket reports per-destination problems (ICMP unreachable on a
+    // connected socket, a route that just went away) asynchronously on a later call.
+    // They say nothing about the socket itself, so they are the caller's business,
+    // not a fatal condition — hence a debug log rather than an error.
+    LOG_SOCKET_DEBUG("Failed to send datagram to " << dest.to_string()
+                     << " (error: " << socket_error_string(error) << ")");
+    return -1;
+}
+
+std::ptrdiff_t recv_udp_from(socket_t socket, void* buffer, size_t len, Address& from) {
+    sockaddr_storage sender_addr;
+    socklen_t sender_addr_len = sizeof(sender_addr);
+
+    const int received = recvfrom(socket, static_cast<char*>(buffer), static_cast<int>(len), 0,
+                                  reinterpret_cast<sockaddr*>(&sender_addr), &sender_addr_len);
+    if (received != RATS_SOCKET_ERROR) {
+        extract_sender_peer(sender_addr, from);
+        return received;
+    }
+
+    const int error = get_last_socket_error();
+#ifdef _WIN32
+    if (error == WSAEWOULDBLOCK) return kUdpRecvWouldBlock;
+    // Windows reports an ICMP port-unreachable for a *previous* datagram as an error
+    // on the next recvfrom(). It concerns one destination, not the socket, so keep
+    // draining rather than treating the whole mux as broken.
+    if (error == WSAECONNRESET || error == WSAENETRESET) return kUdpRecvError;
+#else
+    if (error == EAGAIN || error == EWOULDBLOCK) return kUdpRecvWouldBlock;
+    if (error == EINTR || error == ECONNREFUSED) return kUdpRecvError;
+#endif
+    LOG_SOCKET_DEBUG("Failed to receive datagram: " << socket_error_string(error));
+    return kUdpRecvError;
+}
+
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Address& sender_peer,
                                       int timeout_ms, socket_t interrupt_fd) {
     // Handle timeout (and optional interrupt socket) using select. When no interrupt

@@ -77,6 +77,16 @@ Node::Node(NodeConfig config)
       security_(make_security(config_, identity_)),
       reactors_(std::make_unique<ReactorPool>(config_.reactor_threads, *this, *security_)) {
     max_peers_.store(config_.max_peers, std::memory_order_relaxed);
+
+    DialPolicy policy;
+    policy.preferred      = config_.preferred_transport;
+    policy.allow_tcp      = config_.enable_tcp;
+    policy.allow_udp      = config_.enable_udp;
+    policy.fallback_delay = std::chrono::milliseconds(config_.transport_fallback_ms);
+    dialer_ = std::make_unique<Dialer>(*reactors_, policy,
+                                       [this](const std::string& host, uint16_t port) {
+                                           report_dial_failed(host, port);
+                                       });
 }
 
 Node::~Node() {
@@ -87,20 +97,98 @@ Node::~Node() {
 
 MessageJson* Node::json() noexcept { return subsystem<MessageJson>(); }
 
+bool Node::open_listeners() {
+    // Attempts at finding a port that is free for BOTH transports, when the
+    // choice is ours. A clash is unlikely (TCP and UDP have separate port spaces)
+    // but it is not impossible, and silently landing on mismatched ports would
+    // make every address this node advertises half-wrong.
+    constexpr int kBindAttempts = 5;
+
+    const AddressFamily family = family_for_bind(config_.bind_address);
+    const bool listen_tcp = config_.enable_listen && config_.enable_tcp;
+    const bool listen_udp = config_.enable_listen && config_.enable_udp;
+
+    if (config_.enable_listen && !listen_tcp && !listen_udp) {
+        LOG_ERROR("node", "enable_listen is set but neither transport is enabled");
+        return false;
+    }
+
+    if (!config_.enable_listen) {
+        // Dial-only. TCP needs no socket up front, but the datagram transport
+        // still wants its one shared socket — that single socket is what gives
+        // every peer one NAT mapping instead of one each. It just does not need a
+        // predictable port, since nobody dials us.
+        if (!config_.enable_udp) return true;
+        udp_socket_ = create_udp_socket(0, config_.bind_address, family);
+        if (!is_valid_socket(udp_socket_))
+            LOG_WARN("node", "Could not open a UDP socket; dials will fall back to TCP");
+        else
+            reactors_->listen_udp(udp_socket_, family);
+        return true;
+    }
+
+    for (int attempt = 0; attempt < kBindAttempts; ++attempt) {
+        socket_t udp  = RATS_INVALID_SOCKET;
+        socket_t tcp  = RATS_INVALID_SOCKET;
+        uint16_t port = config_.listen_port;
+
+        // Bind the datagram socket first: when the port is ours to choose it is
+        // the one that reports which ephemeral port it landed on, and the TCP
+        // listener then has to match it.
+        if (listen_udp) {
+            udp = create_udp_socket(port, config_.bind_address, family);
+            if (is_valid_socket(udp)) {
+                port = static_cast<uint16_t>(get_bound_port(udp));
+            } else if (listen_tcp) {
+                LOG_WARN("node", "UDP port " << port << " unavailable; this node runs TCP-only");
+            } else {
+                LOG_ERROR("node", "Failed to listen on UDP "
+                          << config_.bind_address << ":" << port);
+                return false;
+            }
+        }
+
+        if (listen_tcp) {
+            tcp = create_tcp_server(port, 128, config_.bind_address, family);
+            if (!is_valid_socket(tcp)) {
+                if (is_valid_socket(udp)) close_socket(udp);
+                // Only worth retrying when the clash is with a port we picked
+                // ourselves; an explicitly configured one will clash every time.
+                if (config_.listen_port == 0 && listen_udp && attempt + 1 < kBindAttempts) continue;
+                LOG_ERROR("node", "Failed to listen on "
+                          << config_.bind_address << ":" << port);
+                return false;
+            }
+            if (port == 0) port = static_cast<uint16_t>(get_bound_port(tcp));
+        }
+
+        listen_socket_ = tcp;
+        udp_socket_    = udp;
+        listen_port_   = port;
+        if (is_valid_socket(tcp)) {
+            reactors_->listen(tcp);
+            transports_ |= PeerTransportTcp;
+        }
+        if (is_valid_socket(udp)) {
+            reactors_->listen_udp(udp, family);
+            transports_ |= PeerTransportUdp;
+        }
+        return true;
+    }
+
+    LOG_ERROR("node", "Could not find a port free for both transports");
+    return false;
+}
+
 bool Node::start() {
     if (running_.exchange(true)) return false;
     init_socket_library();
 
-    if (config_.enable_listen) {
-        listen_socket_ = create_tcp_server(config_.listen_port, 128, config_.bind_address,
-                                           family_for_bind(config_.bind_address));
-        if (!is_valid_socket(listen_socket_)) {
-            LOG_ERROR("node", "Failed to listen on " << config_.bind_address << ":" << config_.listen_port);
-            running_.store(false);
-            return false;
-        }
-        listen_port_ = static_cast<uint16_t>(get_bound_port(listen_socket_));
-        reactors_->listen(listen_socket_);
+    dialer_->start();  // a node may be restarted; clear any state from the last run
+
+    if (!open_listeners()) {
+        running_.store(false);
+        return false;
     }
 
     // Compute our advertised addresses once; the network monitor refreshes them
@@ -120,25 +208,36 @@ bool Node::start() {
     start_network_monitor();
 
     LOG_INFO("node", "Node " << identity_.id.short_hex() << " started on port " << listen_port_
-             << " (" << reactors_->size() << " reactor(s), " << subsystems_.size() << " subsystem(s))");
+             << " (" << ((transports_ & PeerTransportTcp) ? "tcp" : "")
+             << ((transports_ == (PeerTransportTcp | PeerTransportUdp)) ? "+" : "")
+             << ((transports_ & PeerTransportUdp) ? "udp" : "")
+             << ", " << reactors_->size() << " reactor(s), "
+             << subsystems_.size() << " subsystem(s))");
     return true;
 }
 
 void Node::stop() {
     if (!running_.exchange(false)) return;
+    dialer_->stop();                        // no more fallback attempts get started
     stop_network_monitor();                 // no more NetworkChanged after this
     // Stop subsystems in reverse attach order, so a subsystem that depends on an
     // earlier one (e.g. Bittorrent borrowing DhtDiscovery's DhtClient) tears down
     // before the dependency it borrowed is itself stopped and destroyed.
     for (auto it = subsystems_.rbegin(); it != subsystems_.rend(); ++it) (*it)->stop();
     reactors_->stop();                      // then join reactors; close connections
-    // The listen socket is owned by us, not the reactor — close it here, after the
-    // reactor threads have joined (so nothing is still polling it), to release the
-    // bound port immediately on stop() rather than leaking it until destruction.
+    // The listen sockets are owned by us, not the reactors — close them here,
+    // after the reactor threads have joined (so nothing is still polling them), to
+    // release the bound port immediately on stop() rather than leaking it until
+    // destruction.
     if (is_valid_socket(listen_socket_)) {
         close_socket(listen_socket_);
         listen_socket_ = RATS_INVALID_SOCKET;
     }
+    if (is_valid_socket(udp_socket_)) {
+        close_socket(udp_socket_);
+        udp_socket_ = RATS_INVALID_SOCKET;
+    }
+    transports_ = 0;
     LOG_INFO("node", "Node " << identity_.id.short_hex() << " stopped");
 }
 
@@ -201,7 +300,19 @@ void Node::maintenance_loop() {
 void Node::connect(const Address& address) { connect(address.ip.to_string(), address.port); }
 
 void Node::connect(const std::string& host, uint16_t port) {
-    reactors_->pick().connect(host, port);
+    // The dialer owns the transport choice: preferred first, the other raced in
+    // after the fallback delay, loser dropped. See node/dialer.h.
+    dialer_->dial(host, port);
+}
+
+void Node::report_dial_failed(const std::string& host, uint16_t port) {
+    // Only a numeric target can be handed on as an Address; a dial by hostname has
+    // no dialable Address to report (peers cannot use our resolver), and the
+    // subscribers of this event — a reconnection policy, say — deal in addresses.
+    const auto ip = IpAddress::parse(host);
+    if (!ip) return;
+    const Address addr{*ip, port};
+    for (auto& cb : dial_failed_) cb(addr);
 }
 
 std::optional<Peer> Node::peer(const PeerId& id) {
@@ -271,6 +382,13 @@ bool Node::admit_inbound() {
 }
 
 void Node::on_established(Connection& conn) {
+    // Settle the dial race first: this attempt won its target, so any sibling
+    // attempt over the other transport is redundant and gets closed. Done before
+    // the checks below so a self-connection or a rejected duplicate still counts
+    // as "this dial resolved" rather than leaving the race running.
+    if (conn.role() == ConnRole::Outbound)
+        dialer_->on_established(PeerRoute{conn.reactor_index(), conn.id()});
+
     // Reject self-connections: a self-certifying handshake against our own
     // listener yields our own id. (Common once DHT/discovery starts dialing.)
     if (conn.remote_id() == identity_.id) {
@@ -295,6 +413,7 @@ void Node::on_established(Connection& conn) {
     PeerInfo info;
     info.id        = conn.remote_id();
     info.direction = conn.role();
+    info.transport = conn.transport();
     // Outbound: remember the address we dialed — but only if it was a numeric IP.
     // A dial-by-hostname target isn't a dialable Address (peers can't use our name),
     // and the resolved IP is re-learned via identify anyway.
@@ -318,7 +437,8 @@ void Node::on_established(Connection& conn) {
     // merely swapped the live route keeps the peer connected from the app's view.
     if (outcome.result == PeerTable::AddResult::NewPeer) {
         LOG_INFO("node", "Peer " << conn.remote_id().short_hex() << " connected ("
-                 << (conn.role() == ConnRole::Inbound ? "inbound" : "outbound") << ")");
+                 << (conn.role() == ConnRole::Inbound ? "inbound" : "outbound")
+                 << " over " << to_string(conn.transport()) << ")");
         Peer handle = make_peer(conn.remote_id(), route);
         for (auto& cb : peer_connected_) cb(handle);
     }
@@ -345,18 +465,16 @@ void Node::on_frame(Connection& conn, const Frame& frame) {
 }
 
 void Node::on_closed(Connection& conn, CloseReason reason) {
+    // Tell the dial race this attempt is out. If it was the last one and none
+    // succeeded, the dialer reports the target as failed — a redial policy
+    // (ReconnectionService) needs to know its in-flight dial resolved, or it would
+    // wait out a timeout before retrying. The dialer coalesces that into exactly
+    // one report per target, however many transports were raced.
+    if (conn.role() == ConnRole::Outbound)
+        dialer_->on_closed(PeerRoute{conn.reactor_index(), conn.id()});
+
     // Only peers that actually established were registered.
-    if (conn.remote_id().is_zero()) {
-        // An outbound dial that never came up (connect refused/timed out, or a
-        // failed handshake). There is no peer-disconnected event for it, so report
-        // it as a failed dial — a redial policy (ReconnectionService) needs to know
-        // its in-flight dial resolved, or it would wait out a timeout to retry.
-        if (conn.role() == ConnRole::Outbound && conn.has_dial_address()) {
-            const Address addr{conn.dial_host(), conn.dial_port()};
-            for (auto& cb : dial_failed_) cb(addr);
-        }
-        return;
-    }
+    if (conn.remote_id().is_zero()) return;
 
     const PeerId    id = conn.remote_id();
     const PeerRoute route{conn.reactor_index(), conn.id()};
@@ -368,6 +486,14 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     if (!peers_.remove(id, route)) return;
     LOG_INFO("node", "Peer " << id.short_hex() << " disconnected (" << to_string(reason) << ")");
     for (auto& cb : peer_disconnected_) cb(id);
+}
+
+void Node::on_dial_aborted(uint8_t reactor_index, ConnId id,
+                           const std::string& /*host*/, uint16_t /*port*/) {
+    // The attempt died before there was ever a Connection (unresolvable host, no
+    // socket). It resolves exactly like a connection that closed without
+    // establishing, so the dialer can move on to the next transport at once.
+    dialer_->on_closed(PeerRoute{reactor_index, id});
 }
 
 // ── Identify: dialable-address discovery (reactor thread) ────────────────────
@@ -382,6 +508,9 @@ void Node::send_identify(Connection& conn) {
     IdentifyMessage msg;
     msg.listen_port = listen_port_;
     msg.addresses   = advertised_addresses();
+    // Both transports share listen_port_, so which of them a peer may dial there
+    // is a property of the node, not of the address — say it once, here.
+    msg.transports  = transports_;
     const IpAddress seen_ip = conn.remote_ip();
     if (!seen_ip.is_any())
         msg.observed = Address{seen_ip, 0};  // port is the peer's ephemeral; IP is what matters
@@ -400,6 +529,10 @@ void Node::handle_identify(Connection& conn, const Frame& frame) {
     // The peer's dialable addresses: the address we see it at paired with its
     // advertised listen port (the linchpin for inbound peers), plus any extra
     // addresses it self-advertised. PeerTable de-duplicates and caps the set.
+    const PeerRoute identify_route{conn.reactor_index(), conn.id()};
+    if (msg->transports != 0)
+        peers_.set_supported_transports(conn.remote_id(), identify_route, msg->transports);
+
     std::vector<Address> candidates;
     const IpAddress seen_ip = conn.remote_ip();
     if (msg->listen_port != 0 && !seen_ip.is_any())
@@ -409,8 +542,7 @@ void Node::handle_identify(Connection& conn, const Frame& frame) {
             candidates.push_back(a);
 
     if (!candidates.empty()) {
-        const PeerRoute route{conn.reactor_index(), conn.id()};
-        const auto added = peers_.add_addresses(conn.remote_id(), route, candidates);
+        const auto added = peers_.add_addresses(conn.remote_id(), identify_route, candidates);
         if (!added.empty())
             LOG_DEBUG("node", "Learned " << added.size() << " address(es) for peer "
                       << conn.remote_id().short_hex() << " (e.g. " << added.front().to_string() << ")");

@@ -15,8 +15,11 @@
  *
  * ── What a bare Node does, and what it does NOT ──────────────────────────────
  * A Node on its own is just the secure transport core. Out of the box it gives you:
- *   - an encrypted TCP transport (Noise_XX, or plaintext per NodeConfig::security),
- *     with a self-certifying PeerId and the app protocol bound into the handshake;
+ *   - an encrypted transport (Noise_XX, or plaintext per NodeConfig::security),
+ *     with a self-certifying PeerId and the app protocol bound into the handshake,
+ *     over EITHER wire: TCP, or the library's reliable stream over UDP. Both are
+ *     offered by default on the same port, and a dial tries the preferred one
+ *     (UDP, the better fit for P2P) and races the other after a short delay;
  *   - manual dialing: connect(host, port) / connect(Address) — it never discovers
  *     peers by itself;
  *   - the peer table + admission limit: peers(), peer(), peer_count(), max_peers;
@@ -46,6 +49,7 @@
 #include "librats/security/identity.h"
 #include "librats/security/handshaker.h"  // SecurityProvider
 #include "librats/node/config.h"
+#include "librats/node/dialer.h"
 #include "librats/node/node_context.h"    // NodeContext, EventBus, ServiceRegistry
 #include "librats/peer/peer.h"
 #include "librats/node/peer_network.h"
@@ -104,8 +108,14 @@ public:
 
     /// Our self-certifying peer identity (the public key peers authenticate).
     const PeerId& local_id() const noexcept override { return identity_.id; }
-    /// The bound listen port (the actual port when the config requested 0).
+    /// The bound listen port (the actual port when the config requested 0). Both
+    /// transports share it, so one advertised address is dialable over either.
     uint16_t      listen_port() const noexcept override { return listen_port_; }
+
+    /// Transports this node is actually running, as a PeerTransports bitmask.
+    /// May be narrower than the config asked for — a UDP socket that could not be
+    /// bound leaves the node TCP-only rather than failing to start.
+    uint8_t       transports() const noexcept { return transports_; }
 
     /// Application protocol identity bound into the handshake (see NodeConfig).
     const std::string& protocol() const noexcept override { return config_.protocol; }
@@ -117,9 +127,13 @@ public:
     ServiceRegistry& services() noexcept { return services_; }
 
     // — connections —
-    /// Dial a peer. Non-blocking: the connection (TCP + handshake) completes
+    /// Dial a peer. Non-blocking: the connection (transport + handshake) completes
     /// asynchronously and surfaces via on_peer_connected. A duplicate or
     /// self-connection is detected and dropped after the handshake.
+    ///
+    /// The transport is chosen by the dialer (see node/dialer.h): the preferred
+    /// one first, the other raced in after NodeConfig::transport_fallback_ms if
+    /// the first has not come up. Whichever completes its handshake first wins.
     void connect(const Address& address) override;
     /// @copydoc connect(const Address&)
     void connect(const std::string& host, uint16_t port);
@@ -192,6 +206,14 @@ private:
     void on_established(Connection& conn) override;
     void on_frame(Connection& conn, const Frame& frame) override;
     void on_closed(Connection& conn, CloseReason reason) override;
+    void on_dial_aborted(uint8_t reactor_index, ConnId id,
+                         const std::string& host, uint16_t port) override;
+
+    /// Open the listeners the config asks for, keeping both transports on one
+    /// port. Sets listen_socket_/udp_socket_/listen_port_/transports_.
+    bool open_listeners();
+    /// Report a target every dial attempt failed on (called by the Dialer).
+    void report_dial_failed(const std::string& host, uint16_t port);
 
     Peer make_peer(const PeerId& id, PeerRoute route) { return Peer(id, route, *this); }
     void route_send(PeerRoute route, FrameHeader header, Bytes payload);
@@ -216,6 +238,7 @@ private:
     EventBus                          events_;      ///< host/cross-module notifications
     ServiceRegistry                   services_;    ///< capability lookup between modules
     std::unique_ptr<ReactorPool>      reactors_;
+    std::unique_ptr<Dialer>           dialer_;      ///< transport choice + fallback race
 
     std::vector<std::unique_ptr<Subsystem>> subsystems_;
 
@@ -230,8 +253,10 @@ private:
     bool                            maintenance_pending_ = false;
     bool                            maintenance_stop_    = false;
 
-    socket_t            listen_socket_ = RATS_INVALID_SOCKET;
-    uint16_t            listen_port_   = 0;
+    socket_t            listen_socket_ = RATS_INVALID_SOCKET;  ///< TCP listener
+    socket_t            udp_socket_    = RATS_INVALID_SOCKET;  ///< shared datagram socket
+    uint16_t            listen_port_   = 0;   ///< bound by both transports
+    uint8_t             transports_    = 0;   ///< PeerTransports bitmask actually running
     std::atomic<bool>   running_{false};
     std::atomic<size_t> max_peers_{0};  ///< established-peer cap; 0 = unlimited
 

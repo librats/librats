@@ -55,6 +55,13 @@ std::vector<Address> PeerTable::add_addresses(const PeerId& id, PeerRoute route,
     return added;
 }
 
+void PeerTable::set_supported_transports(const PeerId& id, PeerRoute route, uint8_t mask) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = peers_.find(id);
+    if (it == peers_.end() || it->second.route != route) return;
+    it->second.info.supported_transports = mask;
+}
+
 bool PeerTable::remove(const PeerId& id, PeerRoute route) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = peers_.find(id);
