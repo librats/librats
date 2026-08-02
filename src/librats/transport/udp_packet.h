@@ -75,6 +75,10 @@ enum PacketFlags : uint8_t {
 constexpr size_t kHeaderSize = 16;
 /// Bytes added by the selective-ack word.
 constexpr size_t kSackSize = 4;
+/// The largest a header can get. A sender that keeps this much headroom in front
+/// of a payload can write the header directly ahead of the bytes it describes and
+/// hand the socket one contiguous datagram — see encode_header().
+constexpr size_t kMaxHeaderSize = kHeaderSize + kSackSize;
 
 /// Payload carried by one Data packet. 1200 keeps header+payload inside the
 /// smallest MTU worth designing for (IPv6's 1280 floor, minus room for an IPv6
@@ -86,9 +90,21 @@ constexpr size_t kMaxPayload = 1200;
 constexpr size_t kMaxDatagram = kHeaderSize + kSackSize + kMaxPayload;
 
 /// Packets a receiver will hold out of order, and therefore the largest window it
-/// ever advertises. 256 * 1200 B ≈ 300 KiB of in-flight data per peer, which is
-/// ample for a 100 ms path at 20 Mbit/s and bounds what one peer can make us buffer.
-constexpr uint16_t kMaxWindowPackets = 256;
+/// ever advertises. This is the hard ceiling on in-flight data, so it is also the
+/// ceiling on throughput: a window of W packets on a path of RTT R can never
+/// exceed W * kMaxPayload / R, whatever the link underneath can do.
+///
+/// 1024 * 1200 B ≈ 1.2 MiB, i.e. ~96 Mbit/s at 100 ms and ~48 Mbit/s at 200 ms —
+/// enough that an intercontinental path is limited by the path rather than by
+/// this constant. (At the previous 256 it was ~24 Mbit/s at 100 ms, well under
+/// what TCP would have managed on the same path.)
+///
+/// It is also what bounds the memory one peer can make us hold: the reorder
+/// buffer never holds more than this many packets, so ~1.2 MiB per stream in the
+/// worst case. That worst case needs a window's worth of loss to reach, and both
+/// the reorder map and the retransmission queue only ever grow to what is
+/// actually outstanding — an idle or slow stream costs nothing near it.
+constexpr uint16_t kMaxWindowPackets = 1024;
 
 struct Packet {
     PacketType type   = PacketType::Ack;
@@ -103,8 +119,24 @@ struct Packet {
     bool has_sack() const noexcept { return (flags & FlagSack) != 0; }
 };
 
+/// Bytes `p`'s header occupies on the wire: the fixed part, plus the selective-ack
+/// word when one is carried.
+inline size_t header_size(const Packet& p) noexcept {
+    return p.has_sack() ? kHeaderSize + kSackSize : kHeaderSize;
+}
+
+/// Serialise only `p`'s header (and its optional sack word) into `out`, which must
+/// have room for kMaxHeaderSize bytes. The payload is NOT copied.
+///
+/// This is the form used on the send path: a packet buffer carries kMaxHeaderSize
+/// bytes of headroom in front of its payload, so the header is written directly
+/// ahead of the bytes it describes and the whole datagram goes to the socket in
+/// one piece — no second copy of the payload just to prefix a header to it.
+/// @return the number of bytes written (kHeaderSize, or kHeaderSize + kSackSize).
+size_t encode_header(const Packet& p, uint8_t* out);
+
 /// Serialise `p` (header, optional sack word, then payload) into `out`, which must
-/// have room for kHeaderSize + kSackSize + p.payload.size() bytes.
+/// have room for kMaxHeaderSize + p.payload.size() bytes.
 /// @return the number of bytes written.
 size_t encode(const Packet& p, uint8_t* out);
 

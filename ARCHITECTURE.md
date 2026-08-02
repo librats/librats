@@ -212,7 +212,13 @@ it is the *only* place the two transports differ.
   guarantees itself: packet-numbered sequencing, cumulative acks plus a 32-bit
   selective-ack bitmap, RFC 6298 retransmission timing with Karn's rule, fast
   retransmit and SACK-driven repair, Reno congestion control, and packet-granular
-  flow control. Wire format: `udp_packet.h`.
+  flow control. Wire format: `udp_packet.h`. Two invariants are easy to break and
+  expensive when broken: the congestion window is reduced **once per loss
+  episode**, bounded by a NewReno recovery point (`enter_recovery()`) — several
+  selective acks report the same loss, and halving on each walks the window to its
+  floor; and `kSendQueueLimit` must stay comfortably above a full window
+  (`kMaxWindowPackets * kMaxPayload`), or the send queue, not the window, silently
+  becomes the throughput ceiling.
 - **`UdpMux` (`src/librats/transport/udp_mux.{h,cpp}`)** owns the single UDP socket,
   demultiplexes datagrams to streams by a random 32-bit connection id, admits
   inbound streams, drives every stream's timers from one 20 ms tick, and lingers

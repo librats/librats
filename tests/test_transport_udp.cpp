@@ -45,6 +45,7 @@ public:
 
     void send_datagram(const Address& to, const uint8_t* data, size_t len) override {
         ++sent_;
+        if (drop_next_ > 0) { --drop_next_; ++dropped_; return; }
         if (drop_every_ > 0 && (sent_ % drop_every_) == 0) { ++dropped_; return; }
         queue_.push_back({to, Bytes(data, data + len)});
     }
@@ -79,6 +80,9 @@ public:
     }
 
     void set_drop_every(size_t n) { drop_every_ = n; sent_ = 0; }
+    /// Lose the next `count` datagrams and nothing after them, so a test can open
+    /// a hole of a known size and watch exactly one loss episode play out.
+    void drop_next(size_t count = 1) { drop_next_ = count; }
     size_t dropped() const        { return dropped_; }
     size_t queued() const         { return queue_.size(); }
 
@@ -93,6 +97,7 @@ private:
     size_t                        sent_       = 0;
     size_t                        dropped_    = 0;
     size_t                        drop_every_ = 0;
+    size_t                        drop_next_  = 0;
 };
 
 /// Read everything currently readable out of `s`.
@@ -283,6 +288,48 @@ TEST(RudpPacketTest, RoundTripsEveryField) {
               payload);
 }
 
+TEST(RudpPacketTest, EncodeHeaderMatchesEncodeAndDecodesInPlace) {
+    // The send path writes the header into headroom sitting directly in front of
+    // a payload it never copies, so encode_header() has to produce byte-for-byte
+    // what encode() would have put there — and the result has to decode as one
+    // datagram once the two are adjacent.
+    const std::string payload(rudp::kMaxPayload, 'p');
+
+    for (const bool with_sack : {false, true}) {
+        rudp::Packet in;
+        in.type    = rudp::PacketType::Data;
+        in.flags   = with_sack ? rudp::FlagSack : rudp::FlagNone;
+        in.window  = 4321;
+        in.conn_id = 0x0BADC0DE;
+        in.seq     = 42;
+        in.ack     = 41;
+        in.sack    = with_sack ? 0x00FF00FFu : 0;
+        in.payload = ByteView(payload);
+
+        uint8_t reference[rudp::kMaxDatagram];
+        const size_t whole = rudp::encode(in, reference);
+
+        // Lay the packet out the way the stream does: kMaxHeaderSize of headroom,
+        // payload behind it, header written into the tail of the headroom.
+        uint8_t framed[rudp::kMaxDatagram];
+        std::memcpy(framed + rudp::kMaxHeaderSize, payload.data(), payload.size());
+        const size_t hdr = rudp::header_size(in);
+        EXPECT_EQ(hdr, with_sack ? rudp::kHeaderSize + rudp::kSackSize : rudp::kHeaderSize);
+
+        uint8_t* const start = framed + (rudp::kMaxHeaderSize - hdr);
+        EXPECT_EQ(rudp::encode_header(in, start), hdr);
+        ASSERT_EQ(hdr + payload.size(), whole);
+        EXPECT_EQ(std::memcmp(start, reference, whole), 0);
+
+        rudp::Packet out;
+        ASSERT_TRUE(rudp::decode(start, whole, out));
+        EXPECT_EQ(out.seq, 42u);
+        EXPECT_EQ(out.has_sack(), with_sack);
+        EXPECT_EQ(std::string(reinterpret_cast<const char*>(out.payload.data()),
+                              out.payload.size()), payload);
+    }
+}
+
 TEST(RudpPacketTest, RejectsMalformed) {
     rudp::Packet p;
     p.type    = rudp::PacketType::Ack;
@@ -391,6 +438,92 @@ TEST(UdpStreamTest, RetransmitsWhatTheNetworkDrops) {
 
     EXPECT_GT(pair.net.dropped(), 0u) << "the test never actually dropped anything";
     EXPECT_EQ(received, payload);
+}
+
+TEST(UdpStreamTest, ReducesTheWindowOnceForOneLossEpisode) {
+    Pair pair;
+
+    // Warm the window up so a whole burst can go out at once — a hole is only
+    // interesting when there is enough behind it to selectively acknowledge.
+    const std::string warmup(rudp::kMaxPayload * 64, 'w');
+    ASSERT_EQ(write_all(*pair.initiator, warmup), warmup.size());
+    pair.net.settle(*pair.initiator, *pair.responder, 128);
+    ASSERT_EQ(drain(*pair.responder).size(), warmup.size());
+
+    const uint32_t before      = pair.initiator->cwnd();
+    const uint32_t before_cuts = pair.initiator->window_reductions();
+    ASSERT_GT(before, UdpStream::kMinCwnd * 8) << "the warm-up never grew the window";
+
+    // One loss episode, but a wide one: 24 consecutive packets go missing and the
+    // 40 behind them arrive. The receiver answers each of those with a selective
+    // ack naming the same 24 holes, and the sender repairs at most
+    // kMaxRepairsPerAck of them per ack — so the repair spans several acks.
+    constexpr size_t kHoles = 24;
+    const std::string payload(rudp::kMaxPayload * 64, 'x');
+    pair.net.drop_next(kHoles);
+    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+
+    // Let the repair-spacing floor expire before any ack is seen, so every hole is
+    // eligible at once and the repair really does spread across acks rather than
+    // being skipped as "re-sent very recently".
+    std::this_thread::sleep_for(UdpStream::kMinRepairSpacing + 5ms);
+
+    std::string received;
+    const auto  deadline = std::chrono::steady_clock::now() + 20s;
+    while (received.size() < payload.size() && std::chrono::steady_clock::now() < deadline) {
+        pair.net.deliver();
+        const auto now = std::chrono::steady_clock::now();
+        pair.initiator->tick(now);
+        pair.responder->tick(now);
+        received += drain(*pair.responder);
+        if (pair.net.queued() == 0) std::this_thread::sleep_for(2ms);
+    }
+    ASSERT_EQ(pair.net.dropped(), kHoles) << "the test dropped more than it meant to";
+    ASSERT_EQ(received, payload);
+
+    // The whole point: one episode costs one reduction. Reducing per repairing
+    // ack instead — kHoles / kMaxRepairsPerAck of them here — halves the window
+    // three times over for a loss that warranted one halving, and on a longer
+    // recovery walks it all the way to kMinCwnd.
+    const uint32_t cuts = pair.initiator->window_reductions() - before_cuts;
+    EXPECT_EQ(cuts, 1u) << "the window was reduced " << cuts << " times for one loss episode";
+    EXPECT_LT(pair.initiator->cwnd(), before) << "the loss was not accounted for at all";
+}
+
+TEST(UdpStreamTest, FillsAWindowLargerThanTheOldCeiling) {
+    Pair pair;
+
+    // Slow start doubles the window every round trip, so a transfer long enough
+    // to keep the pipe full runs it up until something stops it. Nothing is lost
+    // here and the receiver is drained every round, so the only thing that can
+    // stop it is the window ceiling itself.
+    const std::string payload(1400 * 1024, 'z');
+    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+
+    size_t peak = 0;
+    for (int round = 0; round < 256 && pair.net.queued() > 0; ++round) {
+        pair.net.deliver();
+        peak = (std::max)(peak, pair.initiator->bytes_in_flight());
+        const auto now = std::chrono::steady_clock::now();
+        pair.initiator->tick(now);
+        pair.responder->tick(now);
+        drain(*pair.responder);  // keep the receiver's advertised window open
+    }
+
+    // The old 256-packet window capped in-flight data at ~300 KiB, which on a
+    // 100 ms path is ~24 Mbit/s however fast the link underneath is.
+    constexpr size_t kOldCeiling = 256 * rudp::kMaxPayload;
+    EXPECT_GT(peak, kOldCeiling) << "in-flight data still capped at the old window";
+}
+
+TEST(UdpStreamTest, SendQueueOutgrowsAFullWindow) {
+    // The send queue bounds `sent_` and `unsent_` together, so at or below a full
+    // window it — not the window — would silently become the throughput ceiling,
+    // and nothing would be queued behind what is in flight to keep the pipe fed.
+    static_assert(UdpStream::kSendQueueLimit >
+                      size_t{rudp::kMaxWindowPackets} * rudp::kMaxPayload,
+                  "send queue must hold more than one full window");
+    SUCCEED();
 }
 
 TEST(UdpStreamTest, SendQueueIsBounded) {

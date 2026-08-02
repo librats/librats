@@ -35,14 +35,33 @@ UdpStream::UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_i
     // covers a lost dial with no special case — only a tighter attempt cap (see
     // kSynMaxAttempts), so a UDP-blocked path gives up quickly enough for the
     // dialer to fall back to TCP.
-    OutPacket syn;
-    syn.type = rudp::PacketType::Syn;
-    syn.seq  = next_seq_++;
+    OutPacket syn = new_packet(rudp::PacketType::Syn);
+    syn.seq = next_seq_++;
     sent_.push_back(std::move(syn));
     transmit(sent_.back(), now);
 }
 
 // ── Outbound ────────────────────────────────────────────────────────────────
+
+UdpStream::OutPacket UdpStream::new_packet(rudp::PacketType type) {
+    OutPacket pkt;
+    pkt.type = type;
+    if (!spare_.empty()) {
+        pkt.buf = std::move(spare_.back());
+        spare_.pop_back();
+        pkt.buf.clear();  // capacity survives; the bytes do not
+    } else {
+        pkt.buf.reserve(rudp::kMaxDatagram);  // headroom + a full payload, allocated once
+    }
+    pkt.buf.resize(rudp::kMaxHeaderSize);     // reserve the headroom transmit() writes into
+    return pkt;
+}
+
+void UdpStream::recycle(OutPacket& pkt) {
+    if (spare_.size() >= kMaxSpareBuffers) return;
+    pkt.buf.clear();
+    spare_.push_back(std::move(pkt.buf));
+}
 
 uint16_t UdpStream::advertised_window() const noexcept {
     // What we are still willing to buffer: the reorder slots a gap is holding,
@@ -62,28 +81,43 @@ void UdpStream::fill_common(rudp::Packet& p) const {
 
     if (reorder_.empty()) return;
 
-    // Selective ack: bit i covers ack+2+i, i.e. the 32 packets that follow the
-    // hole at recv_next_. Only worth building when something is actually held out
-    // of order — which is exactly when the peer needs to know about it.
-    uint32_t bits = 0;
-    for (uint32_t i = 0; i < 32; ++i)
-        if (reorder_.count(recv_next_ + 1 + i)) bits |= (1u << i);
+    const uint32_t bits = sack_bitmap();
     if (bits != 0) {
         p.flags |= rudp::FlagSack;
         p.sack = bits;
     }
 }
 
-void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
-    uint8_t buf[rudp::kMaxDatagram];
+uint32_t UdpStream::sack_bitmap() const noexcept {
+    if (!sack_dirty_) return sack_bits_;
 
+    // Selective ack: bit i covers ack+2+i, i.e. the 32 packets that follow the
+    // hole at recv_next_. Derived from the reorder buffer and recv_next_ alone, so
+    // it is rebuilt only when one of those moves — not on every packet sent.
+    uint32_t bits = 0;
+    for (uint32_t i = 0; i < 32; ++i)
+        if (reorder_.count(recv_next_ + 1 + i)) bits |= (1u << i);
+
+    sack_bits_  = bits;
+    sack_dirty_ = false;
+    return bits;
+}
+
+void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
     rudp::Packet p;
     p.type = pkt.type;
-    fill_common(p);
-    p.seq     = pkt.seq;
-    p.payload = ByteView(pkt.payload);
+    fill_common(p);   // may raise FlagSack, which is what decides the header length
+    p.seq = pkt.seq;
 
-    host_.send_datagram(remote_, buf, rudp::encode(p, buf));
+    // The payload is already sitting in pkt.buf behind kMaxHeaderSize bytes of
+    // headroom, so the header goes in immediately ahead of it and the datagram
+    // leaves as one contiguous range. Nothing is copied here — not on the first
+    // transmission, and not on any retransmission.
+    const size_t   hdr   = rudp::header_size(p);
+    uint8_t* const start = pkt.buf.data() + (rudp::kMaxHeaderSize - hdr);
+    rudp::encode_header(p, start);
+
+    host_.send_datagram(remote_, start, hdr + pkt.size());
 
     pkt.sends++;
     pkt.sent_at = now;
@@ -158,13 +192,12 @@ size_t UdpStream::write(const ByteView* slices, size_t count, Clock::time_point 
             // must stay the last thing in the queue.
             if (unsent_.empty() || unsent_.back().type != rudp::PacketType::Data ||
                 unsent_.back().space() == 0) {
-                unsent_.emplace_back();
-                unsent_.back().payload.reserve(rudp::kMaxPayload);
+                unsent_.push_back(new_packet(rudp::PacketType::Data));
             }
             OutPacket& tail = unsent_.back();
 
             const size_t n = (std::min)({left, tail.space(), budget});
-            tail.payload.insert(tail.payload.end(), src, src + n);
+            tail.buf.insert(tail.buf.end(), src, src + n);
             src           += n;
             left          -= n;
             budget        -= n;
@@ -181,9 +214,7 @@ void UdpStream::begin_close(Clock::time_point now) {
     if (state_ != State::Connected || fin_queued_) return;
     fin_queued_ = true;
 
-    OutPacket fin;
-    fin.type = rudp::PacketType::Fin;
-    unsent_.push_back(std::move(fin));
+    unsent_.push_back(new_packet(rudp::PacketType::Fin));
     pump(now);
 }
 
@@ -258,16 +289,27 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     size_t newly_acked = 0;
     while (!sent_.empty() && rudp::seq_le(sent_.front().seq, p.ack)) {
         OutPacket& front = sent_.front();
+        // Karn's rule: a packet that was retransmitted cannot say which copy this
+        // ack answers, so it contributes no round-trip sample. Nor does one that a
+        // selective ack already retired — its real round trip was over when that
+        // SACK arrived, and measuring it against this later cumulative ack would
+        // inflate the estimate by however long the hole in front of it took to
+        // fill, which is exactly when a *tight* RTO matters most.
+        if (front.sends == 1 && !front.acked) sample_rtt(now - front.sent_at);
+
         if (!front.acked) {
             flight_bytes_ -= front.size();
             queued_bytes_ -= front.size();
             newly_acked   += front.size();
         }
-        // Karn's rule: a packet that was retransmitted cannot say which copy this
-        // ack answers, so it contributes no round-trip sample.
-        if (front.sends == 1) sample_rtt(now - front.sent_at);
+        recycle(front);
         sent_.pop_front();
     }
+
+    // The episode ends once everything that was outstanding when the loss was
+    // detected has been acknowledged (the NewReno recovery point). Until then the
+    // window has already been reduced for it and must not be reduced again.
+    if (in_recovery_ && rudp::seq_le(recover_seq_, p.ack)) in_recovery_ = false;
 
     if (p.has_sack() && !sent_.empty()) {
         // Every packet in the queue occupies exactly one sequence number, so the
@@ -291,9 +333,8 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     if (p.has_sack()) repair_sacked_holes(now);
 
     if (newly_acked > 0) {
-        dup_acks_             = 0;
-        consecutive_timeouts_ = 0;
-        last_ack_recv_        = p.ack;
+        dup_acks_      = 0;
+        last_ack_recv_ = p.ack;
         grow_window(newly_acked);
         // Progress means the path is alive: drop back to the estimated RTO,
         // undoing any doubling a previous timeout applied.
@@ -303,7 +344,7 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
         // arriving past a hole. Three of those is the classic loss signal, and
         // repairing it now saves a whole retransmission timeout.
         if (++dup_acks_ == 3) {
-            on_loss(false);
+            enter_recovery();
             transmit(sent_.front(), now);
             ++retransmits_;
         }
@@ -332,8 +373,12 @@ void UdpStream::repair_sacked_holes(Clock::time_point now) {
         ++retransmits_;
         ++repaired;
     }
-    // One window reduction for the episode, not one per packet repaired.
-    if (repaired > 0) on_loss(false);
+    // One window reduction for the whole episode — not one per packet repaired,
+    // and not one per ack that repairs something. Several selective acks arrive
+    // per round trip and recovery spans several round trips, so halving on each
+    // of them would drive the window to the floor over a loss TCP would have
+    // ridden out with a single halving. enter_recovery() enforces that.
+    if (repaired > 0) enter_recovery();
 }
 
 void UdpStream::handle_sequenced(const rudp::Packet& p) {
@@ -345,6 +390,7 @@ void UdpStream::handle_sequenced(const rudp::Packet& p) {
         ++unacked_packets_;
         deliver(p.payload, p.type == rudp::PacketType::Fin);
         ++recv_next_;
+        sack_dirty_ = true;   // the bitmap is relative to recv_next_, which just moved
         drain_reorder();
         return;
     }
@@ -360,6 +406,7 @@ void UdpStream::handle_sequenced(const rudp::Packet& p) {
     held.payload = p.payload.to_bytes();
     held.fin     = (p.type == rudp::PacketType::Fin);
     reorder_.emplace(p.seq, std::move(held));
+    sack_dirty_ = true;
 }
 
 void UdpStream::deliver(ByteView payload, bool fin) {
@@ -384,6 +431,7 @@ void UdpStream::drain_reorder() {
         deliver(ByteView(it->second.payload), it->second.fin);
         reorder_.erase(it);
         ++recv_next_;
+        sack_dirty_ = true;
     }
 }
 
@@ -419,7 +467,18 @@ void UdpStream::sample_rtt(Clock::duration rtt) {
     rto_ = clamp_duration(srtt_ + 4 * rttvar_, kMinRto, kMaxRto);
 }
 
+void UdpStream::enter_recovery() {
+    if (in_recovery_) return;   // already paid for this episode
+    in_recovery_ = true;
+    // Everything assigned a sequence number so far is what has to be acknowledged
+    // before the episode is over. next_seq_ is the number the *next* packet will
+    // take, so the highest one outstanding is one below it.
+    recover_seq_ = next_seq_ - 1;
+    on_loss(false);
+}
+
 void UdpStream::on_loss(bool timeout) {
+    ++window_reductions_;
     if (timeout) {
         // A timeout says the path is congested enough to have dropped everything
         // in flight: back down to one packet and re-probe from there.
@@ -465,10 +524,15 @@ void UdpStream::tick(Clock::time_point now) {
                 flush_events();
                 return;
             }
+            // A timeout is the stronger signal and always collapses the window,
+            // even mid-recovery — but it also restarts the episode, so the
+            // selective acks that come back as the pipe refills do not each take
+            // another halving out of a window that is already down to one packet.
             on_loss(true);
+            in_recovery_ = true;
+            recover_seq_ = next_seq_ - 1;
             transmit(front, now);
             ++retransmits_;
-            ++consecutive_timeouts_;
             // Exponential backoff, so a path that is down is probed ever more
             // cheaply instead of being hammered.
             rto_ = clamp_duration(rto_ * 2, kMinRto, kMaxRto);
@@ -494,6 +558,9 @@ void UdpStream::die(CloseReason reason) {
     sent_.clear();
     unsent_.clear();
     reorder_.clear();
+    spare_.clear();
+    sack_bits_    = 0;
+    sack_dirty_   = false;
     flight_bytes_ = 0;
     queued_bytes_ = 0;
     raise(PollErr);

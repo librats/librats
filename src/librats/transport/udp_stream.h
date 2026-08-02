@@ -57,6 +57,7 @@
 #include <cstdint>
 #include <deque>
 #include <unordered_map>
+#include <vector>
 
 namespace librats {
 
@@ -90,14 +91,32 @@ public:
     /// The connection keeps the rest in its own send queue, where the existing
     /// high-water mark governs it, so this only bounds what the transport itself
     /// holds — roughly a full window plus room to keep the pipe fed.
-    static constexpr size_t kSendQueueLimit = 512 * 1024;
+    ///
+    /// It has to stay comfortably above a full window (kMaxWindowPackets *
+    /// kMaxPayload ≈ 1.2 MiB), because it caps `sent_` and `unsent_` *together*:
+    /// set at or below the window it, not the window, becomes the throughput
+    /// ceiling, and the pipe drains between acks because nothing is queued behind
+    /// what is in flight.
+    static constexpr size_t kSendQueueLimit = 2 * 1024 * 1024;
+
+    /// Packet buffers kept for reuse after their packet is acknowledged. The send
+    /// path allocates one buffer per packet, and in a bulk transfer that is one
+    /// allocation per 1200 bytes shipped; recycling turns the steady state into no
+    /// allocation at all. Small on purpose — creation and retirement run at the
+    /// same rate once a transfer is going, so a handful covers the churn, and an
+    /// idle stream should not sit on memory it is not using.
+    static constexpr size_t kMaxSpareBuffers = 8;
 
     /// Initial congestion window. Four packets is the classic conservative start
     /// (RFC 3390 territory) — enough to get an RTT sample and trigger fast
     /// retransmit on an early loss, without a burst into an unknown path.
     static constexpr uint32_t kInitialCwnd = 4 * rudp::kMaxPayload;
     static constexpr uint32_t kMinCwnd     = 2 * rudp::kMaxPayload;
-    static constexpr uint32_t kMaxCwnd     = 2u * 1024 * 1024;
+    /// A full window. Growing the congestion window past what the receiver will
+    /// ever hold buys nothing: the packet-count check in can_transmit() would stop
+    /// the sender first, and a cwnd that has run away above the real limit takes a
+    /// spurious loss with it when it is finally halved.
+    static constexpr uint32_t kMaxCwnd     = rudp::kMaxWindowPackets * rudp::kMaxPayload;
 
     static constexpr std::chrono::milliseconds kInitialRto{500};
     static constexpr std::chrono::milliseconds kMinRto{100};
@@ -204,6 +223,10 @@ public:
     size_t   bytes_in_flight() const noexcept { return flight_bytes_; }
     size_t   queued_bytes()  const noexcept { return queued_bytes_; }
     uint32_t retransmits()   const noexcept { return retransmits_; }
+    /// Times the congestion window has been reduced. One per loss *episode* is the
+    /// invariant that keeps a single lost packet from walking the window to the
+    /// floor over the many acks that report it — see enter_recovery().
+    uint32_t window_reductions() const noexcept { return window_reductions_; }
 
 private:
     enum class State {
@@ -213,17 +236,30 @@ private:
     };
 
     /// One packet occupying exactly one sequence number.
+    ///
+    /// `buf` is the datagram itself, laid out as
+    ///
+    ///     [ kMaxHeaderSize bytes of headroom ][ payload ]
+    ///
+    /// so transmit() writes the header into the tail of the headroom, directly in
+    /// front of the payload, and hands the socket one contiguous range. The
+    /// alternative — payload in its own buffer, copied into a scratch datagram
+    /// behind a freshly built header — costs a full payload copy on every send
+    /// *and* every retransmission, on the hottest path this transport has.
     struct OutPacket {
-        Bytes             payload;          ///< empty for Syn/Fin
+        Bytes             buf;              ///< headroom + payload; only headroom for Syn/Fin
         uint32_t          seq  = 0;
         rudp::PacketType  type = rudp::PacketType::Data;
         Clock::time_point sent_at{};
         int               sends = 0;        ///< transmissions so far (0 = still unsent)
         bool              acked = false;    ///< selectively acknowledged, awaiting the cumulative ack
 
-        size_t size() const noexcept { return payload.size(); }
+        /// Payload bytes — what the accounting (flight_bytes_, queued_bytes_) counts.
+        size_t size() const noexcept {
+            return buf.size() > rudp::kMaxHeaderSize ? buf.size() - rudp::kMaxHeaderSize : 0;
+        }
         /// Room left in a partially filled tail packet (only meaningful while unsent).
-        size_t space() const noexcept { return rudp::kMaxPayload - payload.size(); }
+        size_t space() const noexcept { return rudp::kMaxPayload - size(); }
     };
 
     /// A packet held out of order, waiting for the gap in front of it to fill.
@@ -233,6 +269,8 @@ private:
     };
 
     // — outbound —
+    OutPacket new_packet(rudp::PacketType type);
+    void recycle(OutPacket& p);
     void transmit(OutPacket& p, Clock::time_point now);
     void send_control(rudp::PacketType type, Clock::time_point now);
     void pump(Clock::time_point now);
@@ -246,9 +284,11 @@ private:
     void handle_sequenced(const rudp::Packet& p);
     void deliver(ByteView payload, bool fin);
     void drain_reorder();
+    uint32_t sack_bitmap() const noexcept;
 
     // — timing / congestion —
     void sample_rtt(Clock::duration rtt);
+    void enter_recovery();
     void on_loss(bool timeout);
     void grow_window(size_t acked_bytes);
 
@@ -276,6 +316,7 @@ private:
     // be resolved by index rather than by search: sent_[i].seq == sent_[0].seq + i.
     std::deque<OutPacket> sent_;
     std::deque<OutPacket> unsent_;
+    std::vector<Bytes>    spare_;             ///< retired packet buffers, kept for reuse
     uint32_t              next_seq_     = 1;   ///< sequence number for the next packet created
     size_t                flight_bytes_ = 0;   ///< payload bytes transmitted and not yet acked
     size_t                queued_bytes_ = 0;   ///< payload bytes held by sent_ + unsent_
@@ -284,8 +325,18 @@ private:
     uint16_t              peer_window_  = rudp::kMaxWindowPackets;
     uint32_t              last_ack_recv_ = 0;
     int                   dup_acks_     = 0;
-    int                   consecutive_timeouts_ = 0;
     uint32_t              retransmits_  = 0;
+    uint32_t              window_reductions_ = 0;
+
+    // Loss episodes. A window is reduced once per episode, not once per ack that
+    // happens to repair something — several acks arrive per round trip, and each
+    // of them halving again is what turns two losses in a window into a collapse
+    // to the floor. `recover_seq_` is the NewReno recovery point: the highest
+    // sequence number outstanding when the episode began, so the episode ends
+    // exactly when the cumulative ack has covered everything that was in flight
+    // when the loss was detected.
+    bool                  in_recovery_  = false;
+    uint32_t              recover_seq_  = 0;
 
     // — receive side —
     ReceiveBuffer                             inbox_;    ///< in-order bytes awaiting read()
@@ -293,6 +344,13 @@ private:
     uint32_t                                  recv_next_ = 1;  ///< next sequence number expected
     bool                                      need_ack_  = false;
     int                                       unacked_packets_ = 0;
+    /// Cached selective-ack bitmap, rebuilt only when the reorder buffer or the
+    /// expected sequence number moves. Every outgoing packet carries this field,
+    /// so deriving it from 32 hash lookups per *packet* — during loss recovery,
+    /// when packets are at their most frequent — was pure repeated work: it can
+    /// only change when one of the two things it is derived from changes.
+    mutable uint32_t                          sack_bits_  = 0;
+    mutable bool                              sack_dirty_ = false;
 
     // — timing —
     Clock::duration   srtt_{};

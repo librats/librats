@@ -30,7 +30,7 @@ uint32_t get_u32(const uint8_t* p) {
 
 } // namespace
 
-size_t encode(const Packet& p, uint8_t* out) {
+size_t encode_header(const Packet& p, uint8_t* out) {
     const uint8_t flags = p.has_sack() ? static_cast<uint8_t>(p.flags)
                                        : static_cast<uint8_t>(p.flags & ~FlagSack);
 
@@ -46,6 +46,11 @@ size_t encode(const Packet& p, uint8_t* out) {
         put_u32(out + n, p.sack);
         n += kSackSize;
     }
+    return n;
+}
+
+size_t encode(const Packet& p, uint8_t* out) {
+    size_t n = encode_header(p, out);
     if (!p.payload.empty()) {
         std::memcpy(out + n, p.payload.data(), p.payload.size());
         n += p.payload.size();
