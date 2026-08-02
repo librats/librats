@@ -14,6 +14,22 @@ librats is a modern P2P networking library written in C++17, with bindings for C
 
 **Official Website**: [https://librats.com](https://librats.com)
 
+## Used By
+
+Projects and companies building on librats:
+
+<p align="center">
+  <a href="https://github.com/librats/rats-search"><img alt="rats-search" height="48" src="https://raw.githubusercontent.com/DEgITx/rats-search/master/resources/rat-logo.png"></a>
+  &nbsp;&nbsp;
+  <a href="https://github.com/ultravnc/ultravnc-librats"><img alt="uvnc" height="48" src="https://uvnc.com/images/bg_logo2s.gif"></a>
+  &nbsp;&nbsp;
+  <a href="https://github.com/librats/rasync"><img alt="rasync" height="48" src="https://raw.githubusercontent.com/librats/rasync/master/docs/logo.png"></a>
+</p>
+
+<p align="center">
+  <i>Using librats in production? <a href="https://github.com/DEgITx/librats/pulls">Open a PR</a> to add your logo here.</i>
+</p>
+
 ## ✨ Key Features
 
 ### **Core**
