@@ -40,7 +40,8 @@ follows.
 
 A bare `Node`, out of the box, is *only*:
 
-- an **encrypted TCP transport** (Noise_XX) with a **self-certifying identity**,
+- an **encrypted transport** (Noise_XX) with a **self-certifying identity**, over
+  **TCP or UDP** — both first-class, both on the same port,
 - **manual dialing** (`connect(host, port)`) — it never finds peers on its own,
 - a **peer table** with an admission limit,
 - **raw channel messaging** (`send` / `broadcast` / `on("channel", …)`),
@@ -175,19 +176,62 @@ on a lock.
 
 ```
    Connecting ──▶ Handshaking ──▶ Established ──▶ Closing ──▶ Closed
-   (TCP connect)  (Noise / id)    (encrypted      (drain)
+   (link up)      (Noise / id)    (encrypted      (drain)
                                    frames flow)
 ```
 
-- *Connecting* — an outbound TCP connect is in flight (inbound sockets skip this).
+- *Connecting* — an outbound connect is in flight (inbound links skip this).
 - *Handshaking* — a `Handshaker` runs to completion, producing a `Session` and the
   remote's authenticated `PeerId`.
 - *Established* — inbound blocks are decrypted into frames and delivered; outbound
   frames are encrypted and queued.
 
 The connection reports everything through a `ConnectionDelegate` (which `Node`
-implements) and asks its reactor to arm/disarm write-interest — it never touches
+implements) and asks its **link** to arm/disarm write-interest — it never touches
 the poller directly.
+
+### Two transports behind one interface
+
+Everything above the transport needs exactly one thing: an ordered, reliable,
+non-blocking byte stream. That is what **`Link` (`src/librats/transport/link.h`)** is, and
+it is the *only* place the two transports differ.
+
+```
+                    Connection  (framing · Noise · backpressure)
+                         │
+                       Link  ──  read / write / want_write / connect_completed
+                    ╱          ╲
+             TcpLink            UdpStreamLink ──▶ UdpStream ──▶ UdpMux
+        (one kernel socket        (reliability in user space, on ONE
+           per peer)                socket shared by every peer)
+```
+
+- **`TcpLink`** is a thin translation of `recv`/`sendmsg`; the kernel provides
+  the guarantees.
+- **`UdpStream` (`src/librats/transport/udp_stream.{h,cpp}`)** provides the same
+  guarantees itself: packet-numbered sequencing, cumulative acks plus a 32-bit
+  selective-ack bitmap, RFC 6298 retransmission timing with Karn's rule, fast
+  retransmit and SACK-driven repair, Reno congestion control, and packet-granular
+  flow control. Wire format: `udp_packet.h`.
+- **`UdpMux` (`src/librats/transport/udp_mux.{h,cpp}`)** owns the single UDP socket,
+  demultiplexes datagrams to streams by a random 32-bit connection id, admits
+  inbound streams, drives every stream's timers from one 20 ms tick, and lingers
+  a released stream briefly so the last bytes it owes still get delivered.
+
+**Why UDP is the default first choice.** One socket for every peer means a NAT
+holds *one* mapping rather than one per peer; the source port a peer observes is
+the port it can dial back, which is the precondition for hole punching; and no
+middlebox holds per-connection state that can be exhausted or timed out from
+under us. TCP is an equal, not a legacy path — it is what the dialer falls back
+to on networks that block or throttle UDP.
+
+**`Dialer` (`src/librats/node/dialer.{h,cpp}`)** makes that a race rather than a guess,
+in the spirit of Happy Eyeballs (RFC 8305): start the preferred transport, start
+the other one too if the first has not established within
+`NodeConfig::transport_fallback_ms`, keep whichever completes its handshake
+first, close the rest, and report a failed dial exactly once per target. That is
+why `Reactor::connect()` reserves and returns the `ConnId` synchronously — the
+loser has to be cancellable.
 
 **`Reactor` (`src/librats/transport/reactor.{h,cpp}`)** runs one thread driving an
 `IOPoller`. Other threads interact with it *only* through:
@@ -204,6 +248,11 @@ break the `poll()` wait. There are no other locks on the data path.
 peers). Larger pools shard *outbound* connections round-robin across cores; each
 connection is pinned to its reactor for life, so nothing on the data path changes
 as the pool grows. Reactor 0 is the acceptor for inbound connections.
+
+UDP is the deliberate exception to the round-robin: one shared socket means one
+mux, so every datagram connection belongs to the reactor that owns it (reactor
+0). Sharding those across threads would mean handing datagrams between reactors
+on every packet, which costs more than the parallelism buys.
 
 **Backpressure & deadlines** — two safety limits live here:
 
@@ -318,7 +367,7 @@ for an ephemeral identity (fresh random key each run).
 
 ### 4.5 Identify: learning dialable addresses
 
-There's a subtle problem a raw TCP socket can't solve: when a peer *dials in*, the
+There's a subtle problem the socket can't solve: when a peer *dials in*, the
 socket only tells you its *source* endpoint — its IP plus an ephemeral, OS-chosen
 port. That's not the port it *listens* on, so you can't dial it back.
 
@@ -564,10 +613,10 @@ The directory tree mirrors the layers in this document:
 |-----------|----------|
 | `src/librats/core` | sockets, buffers, `IOPoller`, MPSC/timer queues, `EventBus`, `ServiceRegistry` |
 | `src/librats/wire` | two-level framing + `MessageRouter` |
-| `src/librats/transport` | `ReactorPool`, `Reactor`, `Connection` state machine |
+| `src/librats/transport` | `ReactorPool`, `Reactor`, `Connection` state machine, the `Link` abstraction and its two transports (`TcpLink`; `UdpStream` + `UdpMux`) |
 | `src/librats/security` | `Identity`, `Handshaker`/`Session`, Noise & plaintext providers |
 | `src/librats/peer` | self-certifying `PeerId`, `PeerTable`, `Peer` handle |
-| `src/librats/node` | the `Node` facade, `NodeContext`, `PeerNetwork`, identify, host events |
+| `src/librats/node` | the `Node` facade, `NodeContext`, `PeerNetwork`, the transport-choosing `Dialer`, identify, host events |
 | `src/librats/subsystems` | the opt-in plugins |
 | `src/librats/dht` | Kademlia + KRPC (bencode shared with BitTorrent) |
 | `src/librats/mdns` | multicast DNS |
