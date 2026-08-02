@@ -2,6 +2,7 @@
 
 #include "librats/core/socket.h"
 #include "librats/node/node.h"
+#include "librats/transport/udp_mux.h"
 #include "librats/transport/udp_packet.h"
 #include "librats/transport/udp_stream.h"
 
@@ -10,9 +11,11 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 using namespace librats;
@@ -140,6 +143,111 @@ NodeConfig base_config() {
     c.security     = NodeConfig::Security::Noise;
     return c;
 }
+
+// ── A mux driven by hand, on real sockets ───────────────────────────────────
+//
+// The stream tests above run against a simulated path so they can control loss
+// and ordering. These run the mux itself — id pairing, admission, resets and the
+// linger — over two real loopback sockets, with the test standing in for the
+// reactor: it calls on_readable()/tick() instead of a poll loop.
+
+/// The reactor's side of UdpMuxDelegate, reduced to bookkeeping.
+class MuxHost : public UdpMuxDelegate {
+public:
+    ConnId adopt_inbound_link(std::unique_ptr<Link> link) override {
+        // Refusing destroys the link, which releases the stream the mux just
+        // created — the path where a leak or a use-after-free would hide.
+        if (refuse) { ++refused; return kInvalidConnId; }
+
+        const ConnId id = next_id++;
+        link->attach(id);  // exactly what Reactor::adopt() does after adopting
+        links.emplace(id, std::move(link));
+        ++adopted;
+        return id;
+    }
+
+    void dispatch_link_events(ConnId id, uint32_t events) override { delivered[id] |= events; }
+
+    Link* only_link() {
+        return links.size() == 1 ? links.begin()->second.get() : nullptr;
+    }
+
+    std::unordered_map<ConnId, std::unique_ptr<Link>> links;
+    std::unordered_map<ConnId, uint32_t>              delivered;
+    ConnId                                            next_id  = 1;
+    int                                               adopted  = 0;
+    int                                               refused  = 0;
+    bool                                              refuse   = false;
+};
+
+UdpStream& stream_of(Link& link) { return static_cast<UdpStreamLink&>(link).stream(); }
+
+std::string read_all(Link& link) {
+    std::string out;
+    uint8_t     buf[4096];
+    for (;;) {
+        const Link::IoResult r = link.read(ByteSpan(buf, sizeof(buf)));
+        if (r.status != Link::Status::Ok || r.bytes == 0) break;
+        out.append(reinterpret_cast<const char*>(buf), r.bytes);
+    }
+    return out;
+}
+
+/// Two muxes on two loopback sockets. Destruction order matters exactly as it
+/// does in the Reactor: every Link tells its mux, on destruction, that its stream
+/// may go — so the links have to be dropped before the muxes are.
+struct MuxPair {
+    MuxHost                 host_a, host_b;
+    socket_t                sock_a = RATS_INVALID_SOCKET, sock_b = RATS_INVALID_SOCKET;
+    std::unique_ptr<UdpMux> a, b;
+    Address                 addr_a, addr_b;
+
+    MuxPair() {
+        init_socket_library();
+        sock_a = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+        sock_b = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+        EXPECT_TRUE(is_valid_socket(sock_a));
+        EXPECT_TRUE(is_valid_socket(sock_b));
+        set_socket_nonblocking(sock_a);
+        set_socket_nonblocking(sock_b);
+        addr_a = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sock_a))};
+        addr_b = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sock_b))};
+        a = std::make_unique<UdpMux>(sock_a, AddressFamily::IPv4, host_a);
+        b = std::make_unique<UdpMux>(sock_b, AddressFamily::IPv4, host_b);
+    }
+
+    ~MuxPair() {
+        host_a.links.clear();
+        host_b.links.clear();
+        a.reset();
+        b.reset();
+        if (is_valid_socket(sock_a)) close_socket(sock_a);
+        if (is_valid_socket(sock_b)) close_socket(sock_b);
+    }
+
+    /// Drive both muxes until `pred` holds. Ticking far more often than the real
+    /// 20 ms costs nothing — every deadline inside a stream is timestamp-based.
+    template <typename Pred>
+    bool pump_until(Pred pred, std::chrono::milliseconds timeout = 10s) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        for (;;) {
+            a->on_readable();
+            b->on_readable();
+            if (pred()) return true;
+            if (std::chrono::steady_clock::now() >= deadline) return pred();
+            a->tick();
+            b->tick();
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+
+    /// Open a stream from A to B and adopt it on both sides.
+    std::unique_ptr<Link> dial() {
+        auto link = a->connect(addr_b);
+        if (link) link->attach(host_a.next_id++);  // the reactor's job
+        return link;
+    }
+};
 
 } // namespace
 
@@ -343,6 +451,185 @@ TEST(UdpStreamTest, UnansweredDialGivesUp) {
     EXPECT_EQ(dialer.close_reason(), CloseReason::ConnectFailed);
 }
 
+// ── The mux: demultiplexing, admission, resets, linger ──────────────────────
+
+// The dialer picks `base`, keeps it as its recv id and sends under `base + 1`, so
+// the responder derives both ids from the Syn alone — no negotiation round trip.
+TEST(UdpMuxTest, PairsConnectionIdsFromTheSynAlone) {
+    MuxPair net;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.adopted == 1; }))
+        << "the Syn never produced an inbound stream";
+
+    Link* accepted = net.host_b.only_link();
+    ASSERT_NE(accepted, nullptr);
+
+    UdpStream& out = stream_of(*dial);
+    UdpStream& in  = stream_of(*accepted);
+
+    EXPECT_EQ(out.send_id(), out.recv_id() + 1) << "the dialer's id pairing is what B relies on";
+    EXPECT_EQ(in.recv_id(), out.send_id());
+    EXPECT_EQ(in.send_id(), out.recv_id());
+    EXPECT_EQ(in.role(), ConnRole::Inbound);
+
+    EXPECT_TRUE(net.pump_until([&] { return out.connected() && in.connected(); }));
+    EXPECT_EQ(net.a->stream_count(), 1u);
+    EXPECT_EQ(net.b->stream_count(), 1u);
+}
+
+// The same round trip the stream tests do, but through the Link vocabulary and
+// two real sockets — so encode, sendto, demux and decode are all in the path.
+TEST(UdpMuxTest, CarriesDataOverTheSharedSocket) {
+    MuxPair net;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.adopted == 1; }));
+    ASSERT_TRUE(net.pump_until([&] { return stream_of(*dial).connected(); }));
+
+    Link* accepted = net.host_b.only_link();
+    ASSERT_NE(accepted, nullptr);
+
+    const std::string out_msg = "dialer speaking";
+    const std::string in_msg  = "and the other end";
+    const ByteView    out_slice(out_msg), in_slice(in_msg);
+    ASSERT_EQ(dial->write(&out_slice, 1).bytes, out_msg.size());
+    ASSERT_EQ(accepted->write(&in_slice, 1).bytes, in_msg.size());
+
+    std::string got_b, got_a;
+    EXPECT_TRUE(net.pump_until([&] {
+        got_b += read_all(*accepted);
+        got_a += read_all(*dial);
+        return got_b == out_msg && got_a == in_msg;
+    })) << "b got '" << got_b << "', a got '" << got_a << "'";
+}
+
+// Adoption may be refused (the node is at capacity). Refusing destroys the link,
+// which releases the stream the mux created a moment earlier — so nothing may be
+// left behind, and the dialer has to be told rather than retransmitting into a void.
+TEST(UdpMuxTest, RefusedInboundStreamLeavesNothingBehind) {
+    MuxPair net;
+    net.host_b.refuse = true;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.refused >= 1; }))
+        << "admission was never asked";
+
+    EXPECT_EQ(net.host_b.adopted, 0);
+    EXPECT_EQ(net.b->stream_count(), 0u) << "a refused stream was kept";
+
+    EXPECT_TRUE(net.pump_until([&] { return stream_of(*dial).dead(); }))
+        << "the dialer was never told it had been turned away";
+    EXPECT_EQ(stream_of(*dial).close_reason(), CloseReason::PeerReset);
+}
+
+// A datagram for a stream nobody has is answered with a Reset — and that Reset
+// can only echo the id the *sender* uses, which is not the id the sender is keyed
+// by. find_for_reset() bridges the two; without it the peer would retransmit for
+// a minute against a mux that has already forgotten it.
+TEST(UdpMuxTest, ResetForAForgottenStreamFindsItsWayHome) {
+    MuxPair net;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.adopted == 1; }));
+    ASSERT_TRUE(net.pump_until([&] { return stream_of(*dial).connected(); }));
+
+    // B's connection goes away with nothing owed, so the stream is dropped at once.
+    net.host_b.links.clear();
+    ASSERT_EQ(net.b->stream_count(), 0u);
+
+    const std::string msg = "still there?";
+    const ByteView    slice(msg);
+    ASSERT_GT(dial->write(&slice, 1).bytes, 0u);
+
+    EXPECT_TRUE(net.pump_until([&] { return stream_of(*dial).dead(); }))
+        << "the reset never got routed back to the stream that provoked it";
+    EXPECT_EQ(stream_of(*dial).close_reason(), CloseReason::PeerReset);
+}
+
+// TCP gets this from the kernel, which keeps retransmitting after close(). Here it
+// is the mux's job: a node that writes one last message and disconnects must still
+// have it delivered, and the stream must then be reclaimed rather than kept forever.
+TEST(UdpMuxTest, LingersLongEnoughToDeliverTheLastBytes) {
+    MuxPair net;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.adopted == 1; }));
+    ASSERT_TRUE(net.pump_until([&] { return stream_of(*dial).connected(); }));
+
+    Link* accepted = net.host_b.only_link();
+    ASSERT_NE(accepted, nullptr);
+
+    const std::string farewell = "one last thing";
+    const ByteView    slice(farewell);
+    ASSERT_EQ(dial->write(&slice, 1).bytes, farewell.size());
+
+    // The connection disappears immediately after the write — before a single byte
+    // has been acknowledged. This is exactly what the linger exists for.
+    dial.reset();
+    EXPECT_EQ(net.a->stream_count(), 1u) << "the stream was dropped with data still owed";
+
+    std::string got;
+    EXPECT_TRUE(net.pump_until([&] { got += read_all(*accepted); return got == farewell; }))
+        << "the last message was lost; got '" << got << "'";
+
+    // ...and once it is all acknowledged, the mux stops holding it.
+    EXPECT_TRUE(net.pump_until([&] { return net.a->stream_count() == 0; }))
+        << "a flushed lingering stream was never reclaimed";
+}
+
+// Every unknown datagram gets a Reset, which is a reflector unless it is capped.
+// The budget refills per tick, so draining a burst without ticking must yield no
+// more than one tick's worth of replies.
+TEST(UdpMuxTest, ResetsAreCappedSoTheSocketCannotReflect) {
+    MuxPair net;
+
+    socket_t probe = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(probe));
+    set_socket_nonblocking(probe);
+
+    constexpr int kJunk = UdpMux::kMaxResetsPerTick * 3;
+    for (int i = 0; i < kJunk; ++i) {
+        rudp::Packet p;
+        p.type    = rudp::PacketType::Data;   // not a Syn: nothing may be created
+        p.conn_id = 0xC0FFEE00u + static_cast<uint32_t>(i);
+        p.seq     = 1;
+        const uint8_t byte = 'x';
+        p.payload = ByteView(&byte, 1);
+
+        uint8_t buf[rudp::kMaxDatagram];
+        send_udp_to(probe, buf, rudp::encode(p, buf), net.addr_b, AddressFamily::IPv4);
+    }
+
+    // Drain them all WITHOUT a tick — the budget is only refilled by tick().
+    for (int i = 0; i < 100; ++i) {
+        net.b->on_readable();
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(net.b->stream_count(), 0u) << "junk datagrams created streams";
+
+    int resets = 0, quiet = 0;
+    while (quiet < 50) {
+        uint8_t      buf[rudp::kMaxDatagram];
+        Address      from;
+        const auto   n = recv_udp_from(probe, buf, sizeof(buf), from);
+        if (n < 0) { ++quiet; std::this_thread::sleep_for(1ms); continue; }
+        quiet = 0;
+        rudp::Packet p;
+        if (rudp::decode(buf, static_cast<size_t>(n), p) && p.type == rudp::PacketType::Reset)
+            ++resets;
+    }
+    close_socket(probe);
+
+    EXPECT_GT(resets, 0) << "an unknown stream should be answered, not ignored";
+    EXPECT_LE(resets, UdpMux::kMaxResetsPerTick) << "the per-tick reset budget was not enforced";
+}
+
 // ── End to end, through a Node ──────────────────────────────────────────────
 
 TEST(TransportUdpTest, TwoNodesConnectOverUdp) {
@@ -473,6 +760,32 @@ TEST(TransportUdpTest, PrefersUdpWhenBothAreAvailable) {
     ASSERT_EQ(peers.size(), 1u);
     EXPECT_EQ(peers[0].transport, TransportKind::Udp);
     EXPECT_EQ(server.peer_count(), 1u);
+
+    client.stop();
+    server.stop();
+}
+
+// With no fallback delay both transports really are in flight at once, so the
+// supersede path is exercised rather than skipped: the first handshake to finish
+// wins and closes its sibling, and neither end may be left holding a duplicate.
+TEST(TransportUdpTest, RacingAttemptsLeaveExactlyOnePeer) {
+    Node       server(base_config());
+    NodeConfig client_cfg           = base_config();
+    client_cfg.enable_listen        = false;
+    client_cfg.transport_fallback_ms = 1;   // race both from the very start
+
+    Node client(client_cfg);
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+
+    // Let the losing attempt finish whatever it was doing before asserting that it
+    // did not survive it.
+    std::this_thread::sleep_for(1s);
+    EXPECT_EQ(client.peer_count(), 1u) << "a superseded attempt was kept";
+    EXPECT_EQ(server.peer_count(), 1u) << "the server kept a duplicate of the same peer";
 
     client.stop();
     server.stop();

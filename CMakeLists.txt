@@ -642,6 +642,7 @@ if(RATS_BUILD_TESTS)
         tests/test_frame.cpp
         tests/test_reactor.cpp
         tests/test_transport_udp.cpp
+        tests/test_dialer.cpp
         tests/test_handshake.cpp
         tests/test_node.cpp
         tests/test_identify.cpp
