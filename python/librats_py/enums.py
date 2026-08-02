@@ -28,6 +28,23 @@ class Security(IntEnum):
     PLAINTEXT = 1  # unencrypted, ids exchanged in the clear
 
 
+class Transport(IntEnum):
+    """``rats_transport_t`` — which wire a peer connection runs on.
+
+    Both carry the identical protocol and the identical encrypted handshake;
+    they differ only in how the ordered, reliable byte stream underneath is
+    obtained.
+    """
+    TCP = 0  # one kernel socket per peer
+    UDP = 1  # reliable stream over the shared UDP socket
+
+
+class TransportMask(IntEnum):
+    """Bitmask returned by :meth:`RatsClient.transports` and friends."""
+    TCP = 0x1
+    UDP = 0x2
+
+
 class LogLevel(IntEnum):
     """``rats_log_level_t`` — process-global logging verbosity."""
     DEBUG = 0

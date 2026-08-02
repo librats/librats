@@ -41,6 +41,18 @@ typedef enum {
     RATS_SECURITY_PLAINTEXT = 1   /* unencrypted, ids exchanged in the clear */
 } rats_security_t;
 
+/* Which wire a peer connection runs on. Both carry the identical protocol and
+ * the identical encrypted handshake; they differ only in how the ordered,
+ * reliable byte stream underneath is obtained. */
+typedef enum {
+    RATS_TRANSPORT_TCP = 0,  /* one kernel socket per peer */
+    RATS_TRANSPORT_UDP = 1   /* reliable stream over the shared UDP socket */
+} rats_transport_t;
+
+/* Bitmask of transports (see rats_transports / rats_peer_transports). */
+#define RATS_TRANSPORT_MASK_TCP 0x1u
+#define RATS_TRANSPORT_MASK_UDP 0x2u
+
 /* Result of a fallible operation. RATS_OK is 0; any non-zero value is an error.
  * NOTE: this inverts the truthiness of the old int-returning calls — test against
  * RATS_OK, not against zero/non-zero, e.g. `if (rats_start(n) != RATS_OK) …`. */
@@ -74,6 +86,14 @@ typedef struct {
     const char*     data_dir;         /* persistent state dir; NULL/"" → ephemeral identity each run */
     const char*     protocol;         /* handshake app id (e.g. "myapp/1.0"); NULL → "librats/1.0" */
     size_t          max_peers;        /* established-peer cap; 0 = unlimited */
+
+    /* Transports. Both are enabled by default and bind the SAME port, so one
+     * advertised address is dialable either way. */
+    int              enable_tcp;              /* accept and dial over TCP (default 1) */
+    int              enable_udp;              /* accept and dial over UDP (default 1) */
+    rats_transport_t preferred_transport;     /* tried first when dialing (default UDP) */
+    uint32_t         transport_fallback_ms;   /* delay before racing the other transport;
+                                               * 0 = never fall back (default 1200) */
 } rats_config_t;
 
 /** A config pre-filled with the library defaults (listening, Noise, ephemeral
@@ -98,6 +118,12 @@ RATS_API void         rats_destroy(rats_t node);
 RATS_API rats_error_t rats_start(rats_t node);   /* RATS_OK / RATS_ERR_ALREADY_STARTED / RATS_ERR_BIND */
 RATS_API void         rats_stop(rats_t node);
 RATS_API uint16_t     rats_listen_port(rats_t node);
+
+/** Transports this node is actually running, as a RATS_TRANSPORT_MASK_* bitmask.
+ *  May be narrower than the config asked for: a UDP socket that could not be
+ *  bound leaves the node TCP-only rather than failing to start. 0 before
+ *  rats_start() and after rats_stop(). */
+RATS_API uint32_t     rats_transports(rats_t node);
 
 /** Our self-certifying peer id as hex. Caller frees with rats_string_free(). */
 RATS_API char*    rats_local_id(rats_t node);
@@ -151,6 +177,14 @@ RATS_API rats_error_t rats_enable_port_mapping(rats_t node, int enable_upnp, int
  *  Returns NULL (and *count = 0) when there are no peers. */
 RATS_API char** rats_peer_ids(rats_t node, size_t* count);
 RATS_API void   rats_free_peer_ids(char** ids, size_t count);
+
+/** Which transport a connected peer's link runs on, or -1 if not connected. */
+RATS_API int rats_peer_transport(rats_t node, const char* peer_id_hex);
+
+/** Transports a connected peer advertised in its identify message, as a
+ *  RATS_TRANSPORT_MASK_* bitmask. 0 means the peer did not say (an older build),
+ *  which is "no information", not "none". -1 if the peer is not connected. */
+RATS_API int rats_peer_transports(rats_t node, const char* peer_id_hex);
 
 /* — pub/sub (topic-based, raw bytes; enable + subscribe before start) — */
 

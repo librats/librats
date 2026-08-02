@@ -188,6 +188,20 @@ RatsClient::RatsClient(const Napi::CallbackInfo& info)
         if (cfg.Has("maxPeers"))
             c.max_peers = static_cast<size_t>(cfg.Get("maxPeers").As<Napi::Number>().Int64Value());
 
+        // Transports. Both are on by default and share one port; preferredTransport
+        // decides which a dial tries first (UDP), transportFallbackMs how long
+        // before the other is raced alongside it.
+        if (cfg.Has("enableTcp"))
+            c.enable_tcp = cfg.Get("enableTcp").As<Napi::Boolean>().Value() ? 1 : 0;
+        if (cfg.Has("enableUdp"))
+            c.enable_udp = cfg.Get("enableUdp").As<Napi::Boolean>().Value() ? 1 : 0;
+        if (cfg.Has("preferredTransport"))
+            c.preferred_transport = static_cast<rats_transport_t>(
+                cfg.Get("preferredTransport").As<Napi::Number>().Int32Value());
+        if (cfg.Has("transportFallbackMs"))
+            c.transport_fallback_ms =
+                cfg.Get("transportFallbackMs").As<Napi::Number>().Uint32Value();
+
         node_ = rats_create_config(&c);
     } else {
         int port = 0;

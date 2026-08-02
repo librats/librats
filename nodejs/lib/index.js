@@ -48,6 +48,22 @@ const Security = Object.freeze({
   PLAINTEXT: 1, // unencrypted, ids exchanged in the clear
 });
 
+/**
+ * Which wire a peer connection runs on (see rats_transport_t). Both carry the
+ * identical protocol and the identical encrypted handshake; they differ only in
+ * how the ordered, reliable byte stream underneath is obtained.
+ */
+const Transport = Object.freeze({
+  TCP: 0, // one kernel socket per peer
+  UDP: 1, // reliable stream over the shared UDP socket
+});
+
+/** Bitmask of transports, as reported by peer/node transport queries. */
+const TransportMask = Object.freeze({
+  TCP: 0x1,
+  UDP: 0x2,
+});
+
 /** Global log levels (see rats_log_level_t). */
 const LogLevel = Object.freeze({
   DEBUG: 0,
@@ -67,7 +83,12 @@ class RatsClient {
   /**
    * @param {number|object} [portOrConfig] - listen port (0 = ephemeral) or a
    *   config object: { listenPort, enableListen, bindAddress, security,
-   *   dataDir, protocol, maxPeers }.
+   *   dataDir, protocol, maxPeers, enableTcp, enableUdp, preferredTransport,
+   *   transportFallbackMs }.
+   *
+   *   Both transports are enabled by default and bind the same port. A dial
+   *   tries `preferredTransport` (UDP: one socket and one NAT mapping for every
+   *   peer) and races the other after `transportFallbackMs`.
    */
   constructor(portOrConfig = 0) {
     this._native = new addon.RatsClient(portOrConfig);
@@ -272,6 +293,8 @@ class RatsClient {
 module.exports = {
   RatsClient,
   Security,
+  Transport,
+  TransportMask,
   LogLevel,
 
   // Library info

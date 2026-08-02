@@ -110,6 +110,10 @@ rats_config_t rats_config_default(void) {
     c.data_dir         = nullptr;
     c.protocol         = nullptr;
     c.max_peers        = 0;
+    c.enable_tcp            = 1;
+    c.enable_udp            = 1;
+    c.preferred_transport   = RATS_TRANSPORT_UDP;
+    c.transport_fallback_ms = 1200;
     return c;
 }
 
@@ -124,6 +128,13 @@ rats_t rats_create_config(const rats_config_t* cfg) {
         if (cfg->data_dir)         config.data_dir         = cfg->data_dir;
         if (cfg->protocol)         config.protocol         = cfg->protocol;
         config.max_peers = cfg->max_peers;
+
+        config.enable_tcp = cfg->enable_tcp != 0;
+        config.enable_udp = cfg->enable_udp != 0;
+        config.preferred_transport = (cfg->preferred_transport == RATS_TRANSPORT_TCP)
+                                         ? TransportKind::Tcp
+                                         : TransportKind::Udp;
+        config.transport_fallback_ms = cfg->transport_fallback_ms;
     }
     return make_handle(std::move(config));
 }
@@ -162,6 +173,8 @@ void rats_stop(rats_t node) {
 }
 
 uint16_t rats_listen_port(rats_t node) { return node_of(node)->listen_port(); }
+
+uint32_t rats_transports(rats_t node) { return node_of(node)->transports(); }
 
 char* rats_local_id(rats_t node) { return dup_string(node_of(node)->local_id().to_hex()); }
 
@@ -269,6 +282,25 @@ char** rats_peer_ids(rats_t node, size_t* count) {
     if (!ids) { if (count) *count = 0; return nullptr; }
     for (size_t i = 0; i < infos.size(); ++i) ids[i] = dup_string(infos[i].id.to_hex());
     return ids;
+}
+
+int rats_peer_transport(rats_t node, const char* peer_id_hex) {
+    if (!peer_id_hex) return -1;
+    auto id = PeerId::from_hex(peer_id_hex);
+    if (!id) return -1;
+    for (const PeerInfo& info : node_of(node)->peers())
+        if (info.id == *id)
+            return info.transport == TransportKind::Udp ? RATS_TRANSPORT_UDP : RATS_TRANSPORT_TCP;
+    return -1;
+}
+
+int rats_peer_transports(rats_t node, const char* peer_id_hex) {
+    if (!peer_id_hex) return -1;
+    auto id = PeerId::from_hex(peer_id_hex);
+    if (!id) return -1;
+    for (const PeerInfo& info : node_of(node)->peers())
+        if (info.id == *id) return static_cast<int>(info.supported_transports);
+    return -1;
 }
 
 void rats_free_peer_ids(char** ids, size_t count) {

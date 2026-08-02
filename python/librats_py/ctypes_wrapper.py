@@ -44,6 +44,12 @@ class RatsConfig(Structure):
         ("data_dir", c_char_p),          # const char*
         ("protocol", c_char_p),          # const char* (NULL → "librats/1.0")
         ("max_peers", c_size_t),         # size_t (0 = unlimited)
+        # Transports. Both are on by default and bind the SAME port, so one
+        # advertised address is dialable either way.
+        ("enable_tcp", c_int),           # int (default 1)
+        ("enable_udp", c_int),           # int (default 1)
+        ("preferred_transport", c_int),  # rats_transport_t (default UDP)
+        ("transport_fallback_ms", c_uint32),  # 0 = never race the other transport
     ]
 
 
@@ -156,6 +162,15 @@ class LibratsCtypes:
 
         lib.rats_listen_port.argtypes = [c_void_p]
         lib.rats_listen_port.restype = c_uint16
+
+        lib.rats_transports.argtypes = [c_void_p]
+        lib.rats_transports.restype = c_uint32
+
+        lib.rats_peer_transport.argtypes = [c_void_p, c_char_p]
+        lib.rats_peer_transport.restype = c_int
+
+        lib.rats_peer_transports.argtypes = [c_void_p, c_char_p]
+        lib.rats_peer_transports.restype = c_int
 
         lib.rats_local_id.argtypes = [c_void_p]
         lib.rats_local_id.restype = c_void_p  # heap; free with rats_string_free

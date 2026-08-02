@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Optional
 from ctypes import byref, c_size_t, c_int, string_at
 
 from .ctypes_wrapper import get_librats, take_string, RatsConfig
-from .enums import RatsError as ErrorCode, Security, LogLevel, VersionInfo
+from .enums import (RatsError as ErrorCode, Security, Transport, TransportMask,
+                    LogLevel, VersionInfo)
 from .exceptions import RatsError, RatsConnectionError, check_error
 from .callbacks import (
     PeerCallback, MessageCallback, TopicCallback, JsonCallback,
@@ -49,11 +50,15 @@ class RatsClient:
         data_dir: Optional[str] = None,
         protocol: Optional[str] = None,
         max_peers: int = 0,
+        enable_tcp: bool = True,
+        enable_udp: bool = True,
+        preferred_transport: Transport = Transport.UDP,
+        transport_fallback_ms: int = 1200,
     ):
         """Create a node.
 
         Args:
-            listen_port: Inbound TCP port (0 = ephemeral).
+            listen_port: Inbound port, used by both transports (0 = ephemeral).
             enable_listen: ``False`` makes a dial-only node (no listener).
             bind_address: Bind address; ``None`` → ``"::"`` dual-stack wildcard.
             security: :class:`~librats_py.enums.Security` mode (default Noise).
@@ -61,6 +66,13 @@ class RatsClient:
             protocol: Handshake app id, e.g. ``"myapp/1.0"``; ``None`` →
                 ``"librats/1.0"``. Peers whose protocol differs cannot connect.
             max_peers: Established-peer cap (0 = unlimited).
+            enable_tcp: Accept and dial over TCP.
+            enable_udp: Accept and dial over the datagram transport.
+            preferred_transport: Which one a dial tries first. UDP by default —
+                one socket and one NAT mapping for every peer, and a source port
+                a peer can dial back.
+            transport_fallback_ms: How long the preferred transport dials alone
+                before the other is raced alongside it; 0 disables the fallback.
         """
         self._lib = get_librats()
 
@@ -69,6 +81,10 @@ class RatsClient:
         cfg.enable_listen = 1 if enable_listen else 0
         cfg.security = int(security)
         cfg.max_peers = max_peers
+        cfg.enable_tcp = 1 if enable_tcp else 0
+        cfg.enable_udp = 1 if enable_udp else 0
+        cfg.preferred_transport = int(preferred_transport)
+        cfg.transport_fallback_ms = transport_fallback_ms
         # Keep bytes alive for the duration of the create call.
         self._cfg_keepalive = [
             _b(bind_address), _b(data_dir), _b(protocol),
@@ -139,6 +155,29 @@ class RatsClient:
 
     def get_listen_port(self) -> int:
         return self.listen_port
+
+    @property
+    def transports(self) -> int:
+        """Transports actually running, as a :class:`TransportMask` bitmask.
+
+        May be narrower than requested: a UDP socket that could not be bound
+        leaves the node TCP-only rather than failing to start.
+        """
+        return self._lib.lib.rats_transports(self._handle)
+
+    def peer_transport(self, peer_id: str) -> Optional[Transport]:
+        """Which transport a connected peer's link runs on, or ``None``."""
+        result = self._lib.lib.rats_peer_transport(self._handle, _b(peer_id))
+        return None if result < 0 else Transport(result)
+
+    def peer_transports(self, peer_id: str) -> Optional[int]:
+        """Transports a peer advertised, as a bitmask; ``None`` if not connected.
+
+        0 means the peer did not say (an older build) — "no information", not
+        "no transports".
+        """
+        result = self._lib.lib.rats_peer_transports(self._handle, _b(peer_id))
+        return None if result < 0 else result
 
     @property
     def local_id(self) -> str:

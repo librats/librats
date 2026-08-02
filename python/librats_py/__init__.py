@@ -11,6 +11,8 @@ from .core import RatsClient
 from .enums import (
     RatsError as ErrorCode,
     Security,
+    Transport,
+    TransportMask,
     LogLevel,
     FileTransferStatus,
     VersionInfo,
@@ -44,6 +46,8 @@ __all__ = [
     # enums
     "ErrorCode",
     "Security",
+    "Transport",
+    "TransportMask",
     "LogLevel",
     "FileTransferStatus",
     "VersionInfo",
