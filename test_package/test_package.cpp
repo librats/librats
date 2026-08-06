@@ -1,9 +1,11 @@
-#include "librats.h"
+#include "node/node.h"
 
 #include <cstdio>
 
 int main() {
-    librats::RatsClient client(/*listen_port=*/0);
-    std::printf("librats peer id: %s\n", client.get_our_peer_id().c_str());
+    librats::NodeConfig config;
+    config.listen_port = 0;  // ephemeral
+    librats::Node node(config);
+    std::printf("librats peer id: %s\n", node.local_id().short_hex().c_str());
     return 0;
 }
