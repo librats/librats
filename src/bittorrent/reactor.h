@@ -17,6 +17,7 @@
  * if you are elsewhere.
  */
 
+#include "util/rats_export.h"
 #include "core/io_poller.h"
 #include "core/mpsc_queue.h"
 #include "core/notifier.h"
@@ -33,7 +34,7 @@
 
 namespace librats::bittorrent {
 
-class Reactor {
+class RATS_API Reactor {
 public:
     using Task          = std::function<void()>;
     using IoCallback    = std::function<void(std::uint32_t events)>;

@@ -10,6 +10,7 @@
  * 40-char hex or a 32-char base32 SHA-1.
  */
 
+#include "util/rats_export.h"
 #include "bittorrent/types.h"
 
 #include <optional>
@@ -18,7 +19,7 @@
 
 namespace librats::bittorrent {
 
-struct MagnetUri {
+struct RATS_API MagnetUri {
     InfoHash                 info_hash{};
     std::string              display_name;   ///< dn
     std::vector<std::string> trackers;       ///< tr

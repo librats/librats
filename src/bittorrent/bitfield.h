@@ -13,13 +13,15 @@
  * Owned by a single torrent on the network thread — deliberately not thread-safe.
  */
 
+#include "util/rats_export.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
 namespace librats::bittorrent {
 
-class Bitfield {
+class RATS_API Bitfield {
 public:
     Bitfield() = default;
     explicit Bitfield(std::size_t bits, bool value = false) { resize(bits, value); }

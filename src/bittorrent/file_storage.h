@@ -12,6 +12,8 @@
  * via a binary search over the sorted file offsets.
  */
 
+#include "util/rats_export.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -35,7 +37,7 @@ struct FileSlice {
     std::int64_t size       = 0;
 };
 
-class FileStorage {
+class RATS_API FileStorage {
 public:
     void set_piece_length(std::uint32_t length) noexcept { piece_length_ = length; }
     void set_name(std::string name) { name_ = std::move(name); }

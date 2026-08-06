@@ -14,6 +14,7 @@
  * re-hashing always reproduce the original hash.
  */
 
+#include "util/rats_export.h"
 #include "bittorrent/file_storage.h"
 #include "bittorrent/types.h"
 #include "core/bytes.h"
@@ -33,7 +34,7 @@ struct TorrentParseError {
     std::string message;
 };
 
-class TorrentInfo {
+class RATS_API TorrentInfo {
 public:
     using TrackerTier = std::vector<std::string>;
     struct DhtNode { std::string host; std::uint16_t port = 0; };

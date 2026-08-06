@@ -12,6 +12,7 @@
  * if present, is re-hashed against the info-hash before it is believed.
  */
 
+#include "util/rats_export.h"
 #include "bittorrent/bitfield.h"
 #include "bittorrent/types.h"
 #include "core/bytes.h"
@@ -22,7 +23,7 @@
 
 namespace librats::bittorrent {
 
-struct ResumeData {
+struct RATS_API ResumeData {
     InfoHash      info_hash{};
     std::string   name;
     std::string   save_path;

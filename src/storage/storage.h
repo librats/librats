@@ -28,6 +28,7 @@
  * persistent key-value store; all network operations no-op until attach().
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "peer/peer.h"
 #include "peer/peer_id.h"
@@ -80,7 +81,7 @@ enum class StorageSyncStatus {
 /**
  * Storage entry - represents a single key-value pair in the database
  */
-struct StorageEntry {
+struct RATS_API StorageEntry {
     std::string key;                    // Key string
     StorageValueType type;              // Value type
     std::vector<uint8_t> data;          // Serialized value data
@@ -183,7 +184,7 @@ using StorageSyncCompleteCallback = std::function<void(bool success, const std::
  * the mesh only via PeerNetwork. It can also be used standalone as a local,
  * persistent key-value store (network operations no-op until attached).
  */
-class StorageManager final : public Subsystem {
+class RATS_API StorageManager final : public Subsystem {
 public:
     /**
      * Constructor.

@@ -20,6 +20,7 @@
  * learns at handshake and drops at close.
  */
 
+#include "util/rats_export.h"
 #include "bittorrent/choker.h"
 #include "bittorrent/disk_io.h"
 #include "bittorrent/extensions.h"
@@ -49,7 +50,7 @@ namespace librats::bittorrent {
 class Torrent;
 
 /// What a Torrent needs from its owning Client: outgoing connects and our id.
-class TorrentHost {
+class RATS_API TorrentHost {
 public:
     virtual ~TorrentHost() = default;
     virtual void          connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port) = 0;
@@ -64,7 +65,7 @@ public:
     virtual void announce_to_dht(const InfoHash& /*info_hash*/, std::uint16_t /*port*/) {}
 };
 
-class Torrent final : public PeerConnection::Observer {
+class RATS_API Torrent final : public PeerConnection::Observer {
 public:
     enum class State { Stopped, Metadata, Checking, Downloading, Seeding };
 
