@@ -1,8 +1,8 @@
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
-    REPO DEgITx/librats
-    REF "v${VERSION}"
-    SHA512 0  # replace with real SHA512 once a release tag exists
+    REPO librats/librats
+    REF "${VERSION}"
+    SHA512 e931f2bfec34758dba522a70bdfbde44bfbc787b571450762aa6cfc77033ffc2b120e96a0795754af9c3be7895987ac67d9810bd666bafab31f16727d6ff8490
     HEAD_REF master
 )
 
@@ -41,3 +41,6 @@ file(REMOVE_RECURSE
 )
 
 vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE")
+
+file(INSTALL "${CMAKE_CURRENT_LIST_DIR}/usage"
+     DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
