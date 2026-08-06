@@ -45,6 +45,7 @@
  *   RESUME   [9][id:u64]
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "peer/peer.h"
 #include "core/bytes.h"
@@ -70,7 +71,7 @@ extern "C" {
 
 namespace librats {
 
-class FileTransfer final : public Subsystem {
+class RATS_API FileTransfer final : public Subsystem {
 public:
     struct Config {
         uint32_t    chunk_size           = 64 * 1024;        ///< payload bytes per chunk

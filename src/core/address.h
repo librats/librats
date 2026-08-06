@@ -20,6 +20,7 @@
  * separator. parse() accepts both forms and is the exact inverse of to_string().
  */
 
+#include "util/rats_export.h"
 #include "core/ip_address.h"
 
 #include <cstdint>
@@ -30,7 +31,7 @@
 
 namespace librats {
 
-struct Address {
+struct RATS_API Address {
     IpAddress ip;
     uint16_t  port = 0;
 

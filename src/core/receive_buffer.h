@@ -50,6 +50,7 @@
  *       buf.consume(msg.size());                   // O(1)
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 
 #include <cstddef>
@@ -59,7 +60,7 @@
 
 namespace librats {
 
-class ReceiveBuffer {
+class RATS_API ReceiveBuffer {
 public:
     /// Floor for any allocation, and the size the buffer shrinks back towards.
     static constexpr size_t kMinCapacity = 1024;

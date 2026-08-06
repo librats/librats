@@ -11,6 +11,7 @@
  * A subsystem is mocked in tests by implementing this one interface.
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 #include "wire/frame.h"   // MessageType
 #include "peer/peer_id.h"
@@ -26,7 +27,7 @@ namespace librats {
 
 class Peer;
 
-class PeerNetwork {
+class RATS_API PeerNetwork {
 public:
     virtual ~PeerNetwork() = default;
     using MessageHandler = std::function<void(const Peer&, ByteView)>;
@@ -62,7 +63,7 @@ struct NodeContext;  // node/node_context.h — bundles network + events + servi
 /// reaches the rest of the node only through the NodeContext it is attached to
 /// (the peer mesh via ctx.network, host events via ctx.events, sibling modules via
 /// ctx.services). A subsystem is mocked in tests by faking those interfaces.
-class Subsystem {
+class RATS_API Subsystem {
 public:
     virtual ~Subsystem() = default;
     virtual void attach(NodeContext& ctx) = 0;

@@ -37,6 +37,8 @@
 #ifndef LIBRATS_CURVE25519_H
 #define LIBRATS_CURVE25519_H
 
+#include "util/rats_export.h"
+
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -59,7 +61,7 @@ int curve25519_donna(uint8_t *mypublic, const uint8_t *secret, const uint8_t *ba
  * The Curve25519 basepoint (9).
  * Use this as basepoint to derive a public key from a private key.
  */
-extern const uint8_t curve25519_basepoint[32];
+RATS_API extern const uint8_t curve25519_basepoint[32];
 
 #ifdef __cplusplus
 }

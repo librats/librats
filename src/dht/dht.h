@@ -14,6 +14,7 @@
  * stable public types so consumers (and their includes) are unchanged.
  */
 
+#include "util/rats_export.h"
 #include "core/address.h"
 #include "core/host_endpoint.h"
 #include "core/socket.h"   // AddressFamily
@@ -46,7 +47,7 @@ using SpiderAnnounceCallback = std::function<void(const InfoHash& info_hash, con
 /**
  * Kademlia DHT client (BEP 5/32/42). One instance serves one address family.
  */
-class DhtClient {
+class RATS_API DhtClient {
 public:
     DhtClient(int port = DHT_PORT, const std::string& bind_address = "",
               const std::string& data_directory = "",

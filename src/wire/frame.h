@@ -28,6 +28,7 @@
  * caller's buffer and are valid only until it is consumed.
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 
 #include <cstdint>
@@ -68,14 +69,14 @@ constexpr uint32_t kMaxBlockSize     = 64u * 1024 * 1024;  ///< body cap
 // ── Outer block (length-prefixed opaque body) ───────────────────────────────
 
 /// Append `[u32 len][body]` to `out`.
-void encode_block(Bytes& out, ByteView body);
+RATS_API void encode_block(Bytes& out, ByteView body);
 
 /// Write just the `[u32 len]` prefix into `out` (exactly kLengthPrefixSize bytes).
 /// The send path uses this to queue the prefix as its own gather slice, so the body
 /// — an encrypted frame, possibly megabytes — never has to be copied to be framed.
-void encode_block_header(uint8_t* out, size_t body_size);
+RATS_API void encode_block_header(uint8_t* out, size_t body_size);
 
-struct Block {
+struct RATS_API Block {
     enum Status { Ok, Incomplete, Error } status = Incomplete;
     size_t   consumed = 0;  ///< bytes to consume from the buffer (when Ok)
     ByteView body{};        ///< the block body (when Ok); views the input
@@ -89,12 +90,12 @@ struct Block {
 };
 
 /// Try to take one block from the front of `[data, data+size)` without copying.
-Block try_take_block(const uint8_t* data, size_t size);
+RATS_API Block try_take_block(const uint8_t* data, size_t size);
 
 // ── Inner message (fixed header + payload, no length prefix) ─────────────────
 
 /// Append `[type][flags][channel][payload]` to `out` (no length prefix).
-void encode_message(Bytes& out, FrameHeader header, ByteView payload);
+RATS_API void encode_message(Bytes& out, FrameHeader header, ByteView payload);
 
 struct Message {
     bool  ok = false;
@@ -102,7 +103,7 @@ struct Message {
 };
 
 /// Parse an inner message from `inner` (header + payload). `ok` false if short.
-Message parse_message(ByteView inner);
+RATS_API Message parse_message(ByteView inner);
 
 } // namespace framer
 } // namespace librats

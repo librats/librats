@@ -13,6 +13,7 @@
  * changes the entire security posture without touching the transport.
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 #include "core/types.h"   // ConnRole
 #include "peer/peer_id.h"
@@ -33,7 +34,7 @@ inline std::string protocol_id(const std::string& protocol) {
     return std::string("librats-proto\x1f", 14) + protocol;  // tag + opaque id
 }
 
-class Handshaker {
+class RATS_API Handshaker {
 public:
     struct Outcome {
         enum Status { NeedMore, Done, Failed } status = NeedMore;
@@ -51,7 +52,7 @@ public:
     virtual Outcome consume(ByteView incoming, Bytes& out) = 0;
 };
 
-class SecurityProvider {
+class RATS_API SecurityProvider {
 public:
     virtual ~SecurityProvider() = default;
 

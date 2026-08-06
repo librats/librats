@@ -31,6 +31,7 @@
  * pool), so the cooldown set is mutex-guarded. The subsystem owns no thread.
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "peer/peer.h"
 #include "peer/peer_id.h"
@@ -46,7 +47,7 @@
 
 namespace librats {
 
-class PeerExchange final : public Subsystem {
+class RATS_API PeerExchange final : public Subsystem {
 public:
     struct Config {
         size_t max_addresses_per_response = 32;  ///< cap entries we send / act on per response

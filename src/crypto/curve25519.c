@@ -48,8 +48,9 @@
 #include "curve25519.h"
 #include <string.h>
 
-/* The Curve25519 basepoint */
-const uint8_t curve25519_basepoint[32] = {9};
+/* The Curve25519 basepoint. RATS_API here is what puts the symbol in the DLL:
+ * unlike functions, exported data needs the attribute on the definition too. */
+RATS_API const uint8_t curve25519_basepoint[32] = {9};
 
 #ifdef _MSC_VER
 #define inline __inline

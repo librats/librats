@@ -10,6 +10,7 @@
  * the static key it proved — so a completed handshake is also identity proof.
  */
 
+#include "util/rats_export.h"
 #include "security/handshaker.h"
 #include "security/identity.h"
 
@@ -18,7 +19,7 @@
 
 namespace librats {
 
-class NoiseSecurity final : public SecurityProvider {
+class RATS_API NoiseSecurity final : public SecurityProvider {
 public:
     /// @param protocol Application protocol id, bound into the Noise handshake
     ///        prologue. Peers whose protocol differs cannot complete a handshake

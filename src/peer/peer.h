@@ -10,6 +10,7 @@
  * consult the directory, on demand, for metadata.
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 #include "peer/peer_id.h"
 #include "peer/peer_info.h"
@@ -22,7 +23,7 @@ namespace librats {
 
 class Node;
 
-class Peer {
+class RATS_API Peer {
 public:
     const PeerId& id() const noexcept { return id_; }
 

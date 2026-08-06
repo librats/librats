@@ -1,6 +1,8 @@
 #ifndef LIBRATS_CRC32_H
 #define LIBRATS_CRC32_H
 
+#include "util/rats_export.h"
+
 #include <cstdint>
 #include <cstddef>
 #include <vector>
@@ -25,7 +27,7 @@ namespace librats {
  * uint32_t checksum2 = CRC32::calculate("Hello World", 11);
  * @endcode
  */
-class CRC32 {
+class RATS_API CRC32 {
 public:
     /**
      * @brief Construct a new CRC32 object with initial state

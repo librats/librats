@@ -13,6 +13,7 @@
  * straight into unordered_map / set as a key.
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 
 #include <array>
@@ -23,7 +24,7 @@
 
 namespace librats {
 
-class PeerId {
+class RATS_API PeerId {
 public:
     static constexpr size_t kSize = 32;  ///< SHA-256 digest length
 

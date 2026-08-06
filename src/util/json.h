@@ -33,6 +33,7 @@
  *    adversarial deeply-nested input fails cleanly instead of smashing the stack.
  */
 
+#include "util/rats_export.h"
 #include <cstdint>
 #include <initializer_list>
 #include <iosfwd>
@@ -52,7 +53,7 @@ public:
     explicit JsonError(const std::string& what) : std::runtime_error(what) {}
 };
 
-class Json {
+class RATS_API Json {
 public:
     enum class Type : uint8_t {
         Null,

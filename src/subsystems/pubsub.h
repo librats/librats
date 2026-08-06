@@ -28,6 +28,7 @@
  *   IWANT       [6][count:u16][id:40]*                          // "send me these message ids"
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "peer/peer.h"
 #include "core/bytes.h"
@@ -55,7 +56,7 @@ namespace librats {
 /// IGNORE drops it silently; ACCEPT delivers locally and forwards along the mesh.
 enum class ValidationResult { Accept, Reject, Ignore };
 
-class PubSub final : public Subsystem {
+class RATS_API PubSub final : public Subsystem {
 public:
     using Handler   = std::function<void(const PeerId& from, const std::string& topic, ByteView data)>;
     using Validator = std::function<ValidationResult(const PeerId& from, const std::string& topic, ByteView data)>;

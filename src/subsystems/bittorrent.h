@@ -24,6 +24,7 @@
  * wrappers here delegate to whichever DHT the client ended up using.
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"          // Subsystem, NodeContext (fwd)
 #include "bittorrent/client.h"          // bittorrent::Client, TorrentInfo, InfoHash
 #include "dht/dht.h"                     // DhtClient, SpiderAnnounceCallback
@@ -40,7 +41,7 @@ namespace librats {
 
 class ServiceRegistry;
 
-class Bittorrent final : public Subsystem {
+class RATS_API Bittorrent final : public Subsystem {
 public:
     struct Config {
         bittorrent::Client::Config client;       ///< download path, listen port, …

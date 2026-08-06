@@ -24,6 +24,7 @@
  * capped, so a malformed or hostile payload yields nullopt rather than misbehaving.
  */
 
+#include "util/rats_export.h"
 #include "core/address.h"
 #include "core/bytes.h"
 
@@ -33,7 +34,7 @@
 
 namespace librats {
 
-struct IdentifyMessage {
+struct RATS_API IdentifyMessage {
     static constexpr uint8_t kVersion      = 1;   ///< IPs on the wire are raw bytes (4/16), not text
     static constexpr size_t  kMaxAddresses = 32;  ///< cap advertised addresses
     static constexpr size_t  kMaxIpLength  = 16;  ///< a single IP is 4 (v4) or 16 (v6) bytes

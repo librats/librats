@@ -21,6 +21,7 @@
  * resets the attempt counter, so only persistently-dead addresses are reaped.
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "peer/peer.h"
 #include "core/address.h"
@@ -38,7 +39,7 @@
 
 namespace librats {
 
-class ReconnectionService final : public Subsystem {
+class RATS_API ReconnectionService final : public Subsystem {
 public:
     struct Config {
         std::string               store_path = "";          ///< persist the peer book here (empty = memory only)

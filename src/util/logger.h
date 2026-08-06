@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/rats_export.h"
 #include <string>
 #include <iostream>
 #include <mutex>
@@ -39,7 +40,7 @@ enum class LogLevel {
     ERROR = 3
 };
 
-class Logger {
+class RATS_API Logger {
 public:
     // Singleton pattern - implementation in logger.cpp to ensure single instance across TUs
     static Logger& getInstance();

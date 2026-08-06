@@ -20,6 +20,7 @@
  * callbacks to PeerNetwork::connect().
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "subsystems/dht_service.h"
 #include "dht/dht.h"
@@ -37,7 +38,7 @@
 
 namespace librats {
 
-class DhtDiscovery final : public Subsystem, public DhtService {
+class RATS_API DhtDiscovery final : public Subsystem, public DhtService {
 public:
     struct Config {
         uint16_t                  dht_port = 0;          ///< 0 = ephemeral

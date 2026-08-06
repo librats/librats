@@ -27,6 +27,7 @@
  * thread-safe and may happen before or after start().
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "peer/peer.h"
 #include "peer/peer_id.h"
@@ -41,7 +42,7 @@
 
 namespace librats {
 
-class MessageJson final : public Subsystem {
+class RATS_API MessageJson final : public Subsystem {
 public:
     using Handler      = std::function<void(const PeerId& from, const librats::Json& data)>;
     using SendCallback = std::function<void(bool ok, const std::string& error)>;

@@ -19,11 +19,13 @@
  *         if (auto* c = dht->dht_client()) bt_client_->set_external_dht(c);
  */
 
+#include "util/rats_export.h"
+
 namespace librats {
 
 class DhtClient;
 
-struct DhtService {
+struct RATS_API DhtService {
     virtual ~DhtService() = default;
 
     /// The primary live DHT client (IPv4 preferred, IPv6 as fallback), or nullptr

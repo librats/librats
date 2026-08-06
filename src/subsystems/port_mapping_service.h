@@ -16,6 +16,7 @@
  * take the lock from handle_result(), so holding it across stop() would deadlock.
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "nat/port_mapping.h"   // PortMappingConfig, PortMapResult, PortMapCallback
 
@@ -34,7 +35,7 @@ class NatPmpClient;
 /// Maps the node's TCP listen port through the home router via UPnP and/or
 /// NAT-PMP. Owns its backends' worker threads; reaches the node only for its
 /// listen port (it neither sends nor receives peer traffic).
-class PortMappingService final : public Subsystem {
+class RATS_API PortMappingService final : public Subsystem {
 public:
     explicit PortMappingService(PortMappingConfig config = {});
     ~PortMappingService() override;

@@ -107,6 +107,14 @@ class LibratsConan(ConanFile):
         if self.options.storage:
             self.cpp_info.defines.append("RATS_STORAGE")
 
+        # Consumers of the Windows DLL need __declspec(dllimport) on the public
+        # classes (see src/util/rats_export.h). CMakeDeps generates its own config
+        # from this method and never reads the project's ratsConfig.cmake, so the
+        # INTERFACE define set in CMakeLists.txt does not reach Conan consumers —
+        # it has to be repeated here. Keep both sides in sync.
+        if self.options.shared and self.settings.os == "Windows":
+            self.cpp_info.defines.append("RATS_IMPORT_DLL")
+
         if self.settings.os in ("Linux", "FreeBSD"):
             self.cpp_info.system_libs = ["pthread"]
         elif self.settings.os == "Windows":

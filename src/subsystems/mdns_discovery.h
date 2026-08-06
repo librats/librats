@@ -11,6 +11,7 @@
  * same host don't collide and can filter out their own announcement.
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "mdns/mdns.h"
 
@@ -22,7 +23,7 @@
 
 namespace librats {
 
-class MdnsDiscovery final : public Subsystem {
+class RATS_API MdnsDiscovery final : public Subsystem {
 public:
     struct Config {
         std::string instance_name = "";  ///< empty → derived from our PeerId

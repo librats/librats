@@ -11,12 +11,13 @@
  * encryption — no `if (encrypted)` scattered through the hot path.
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 #include "peer/peer_id.h"
 
 namespace librats {
 
-class Session {
+class RATS_API Session {
 public:
     virtual ~Session() = default;
 

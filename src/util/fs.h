@@ -9,47 +9,47 @@
 namespace librats {
 
 // File/Directory existence check
-bool file_or_directory_exists(const char* path);
+RATS_API bool file_or_directory_exists(const char* path);
 RATS_API bool directory_exists(const char* path);
-bool file_exists(const char* path);
+RATS_API bool file_exists(const char* path);
 
 // File creation and writing
-bool create_file(const char* path, const char* content);
-bool create_file_binary(const char* path, const void* data, size_t size);
-bool append_to_file(const char* path, const char* content);
+RATS_API bool create_file(const char* path, const char* content);
+RATS_API bool create_file_binary(const char* path, const void* data, size_t size);
+RATS_API bool append_to_file(const char* path, const char* content);
 
 // File reading
-char* read_file_text(const char* path, size_t* size_out = nullptr);
-void* read_file_binary(const char* path, size_t* size_out);
+RATS_API char* read_file_text(const char* path, size_t* size_out = nullptr);
+RATS_API void* read_file_binary(const char* path, size_t* size_out);
 
 // Directory operations
-bool create_directory(const char* path);
+RATS_API bool create_directory(const char* path);
 RATS_API bool create_directories(const char* path); // Create parent directories if needed
 
 // File information
-int64_t get_file_size(const char* path);
-bool is_file(const char* path);
-bool is_directory(const char* path);
+RATS_API int64_t get_file_size(const char* path);
+RATS_API bool is_file(const char* path);
+RATS_API bool is_directory(const char* path);
 
 // File operations
-bool delete_file(const char* path);
-bool delete_directory(const char* path);
-bool copy_file(const char* src_path, const char* dest_path);
-bool move_file(const char* src_path, const char* dest_path);
+RATS_API bool delete_file(const char* path);
+RATS_API bool delete_directory(const char* path);
+RATS_API bool copy_file(const char* src_path, const char* dest_path);
+RATS_API bool move_file(const char* src_path, const char* dest_path);
 
 // File metadata operations
-uint64_t get_file_modified_time(const char* path);
-std::string get_file_extension(const char* path);
-std::string get_filename_from_path(const char* path);
-std::string get_parent_directory(const char* path);
+RATS_API uint64_t get_file_modified_time(const char* path);
+RATS_API std::string get_file_extension(const char* path);
+RATS_API std::string get_filename_from_path(const char* path);
+RATS_API std::string get_parent_directory(const char* path);
 
 // File chunk operations
-bool write_file_chunk(const char* path, uint64_t offset, const void* data, size_t size);
-bool read_file_chunk(const char* path, uint64_t offset, void* buffer, size_t size);
+RATS_API bool write_file_chunk(const char* path, uint64_t offset, const void* data, size_t size);
+RATS_API bool read_file_chunk(const char* path, uint64_t offset, void* buffer, size_t size);
 
 // Advanced file operations
-bool create_file_with_size(const char* path, uint64_t size); // Pre-allocate file space
-bool rename_file(const char* old_path, const char* new_path);
+RATS_API bool create_file_with_size(const char* path, uint64_t size); // Pre-allocate file space
+RATS_API bool rename_file(const char* old_path, const char* new_path);
 
 // A file kept open across many positioned reads/writes. Streaming a large file
 // then costs one open()/close() instead of one per chunk (see read_file_chunk /
@@ -87,16 +87,16 @@ struct DirectoryEntry {
     uint64_t size;
     uint64_t modified_time;
 };
-bool list_directory(const char* path, std::vector<DirectoryEntry>& entries);
+RATS_API bool list_directory(const char* path, std::vector<DirectoryEntry>& entries);
 
 // Path utilities
-std::string combine_paths(const std::string& base, const std::string& relative);
-bool validate_path(const char* path, bool check_write_access = false);
+RATS_API std::string combine_paths(const std::string& base, const std::string& relative);
+RATS_API bool validate_path(const char* path, bool check_write_access = false);
 
 // Utility functions
-void free_file_buffer(void* buffer); // Free memory allocated by read functions
-bool get_current_directory(char* buffer, size_t buffer_size);
-bool set_current_directory(const char* path);
+RATS_API void free_file_buffer(void* buffer); // Free memory allocated by read functions
+RATS_API bool get_current_directory(char* buffer, size_t buffer_size);
+RATS_API bool set_current_directory(const char* path);
 
 // C++ convenience wrappers
 inline bool file_or_directory_exists(const std::string& path) { return file_or_directory_exists(path.c_str()); }

@@ -20,6 +20,7 @@
  * Reactor to (dis)arm write-interest; it never touches the poller directly.
  */
 
+#include "util/rats_export.h"
 #include "core/types.h"
 #include "core/bytes.h"
 #include "wire/frame.h"
@@ -44,7 +45,7 @@ class Reactor;
  * the last call and is invoked by the Reactor during teardown, so a delegate may
  * safely close other connections from within it.
  */
-class ConnectionDelegate {
+class RATS_API ConnectionDelegate {
 public:
     virtual ~ConnectionDelegate() = default;
 

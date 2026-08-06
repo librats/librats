@@ -21,6 +21,7 @@
  *   }
  */
 
+#include "util/rats_export.h"
 #include "core/socket.h"
 
 #include <memory>
@@ -72,7 +73,7 @@ struct PollResult {
  * - wait: Should be called from a single I/O thread.
  * - add/modify/remove can be called concurrently with wait().
  */
-class IOPoller {
+class RATS_API IOPoller {
 public:
     virtual ~IOPoller() = default;
     

@@ -11,6 +11,7 @@
  * 16-bit space — on_channel() logs if a new name collides with a registered one.
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 #include "wire/frame.h"
 #include "peer/peer.h"
@@ -24,7 +25,7 @@
 
 namespace librats {
 
-class MessageRouter {
+class RATS_API MessageRouter {
 public:
     using Handler = std::function<void(const Peer&, ByteView)>;
 

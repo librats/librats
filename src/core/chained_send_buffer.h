@@ -51,6 +51,7 @@
  *   if (sent > 0) buf.pop_front(size_t(sent));          // O(1)
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 
 #include <cstddef>
@@ -61,7 +62,7 @@
 
 namespace librats {
 
-class ChainedSendBuffer {
+class RATS_API ChainedSendBuffer {
 public:
     /// Capacity of a chunk opened for a small copy-append. Sized so a run of
     /// protocol chatter (keep-alives, HAVEs, REQUESTs, ACKs) packs into one.

@@ -15,6 +15,7 @@
  *   the original sender decodes them in its own format (endianness irrelevant).
  */
 
+#include "util/rats_export.h"
 #include "node/peer_network.h"
 #include "peer/peer.h"
 #include "peer/peer_id.h"
@@ -30,7 +31,7 @@
 
 namespace librats {
 
-class PingService final : public Subsystem {
+class RATS_API PingService final : public Subsystem {
 public:
     explicit PingService(std::chrono::milliseconds interval = std::chrono::seconds(10));
     ~PingService() override;

@@ -382,7 +382,16 @@ if(RATS_SHARED_LIBRARY)
         VERSION ${VERSION_STRING}
         SOVERSION ${VERSION_MAJOR}
     )
-    target_compile_definitions(rats PRIVATE RATS_EXPORT_DLL)
+    # PRIVATE: dllexport while compiling the library itself.
+    # INTERFACE: dllimport for anyone linking the shared library. This rides the
+    # exported target (install(EXPORT) writes it into ratsTargets.cmake), which
+    # covers find_package and vcpkg. Conan builds its own config from
+    # conanfile.py's package_info() and ignores ratsConfig.cmake, so the same
+    # define is declared there too — keep the two in sync.
+    target_compile_definitions(rats
+        PRIVATE   RATS_EXPORT_DLL
+        INTERFACE RATS_IMPORT_DLL
+    )
 else()
     add_library(rats STATIC ${LIBRARY_SOURCES})
 endif()

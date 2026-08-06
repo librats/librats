@@ -24,6 +24,7 @@
  * The "id" field is omitted for peers we have only ever seen, never connected to.
  */
 
+#include "util/rats_export.h"
 #include "core/address.h"
 #include "peer/peer_id.h"
 
@@ -45,7 +46,7 @@ struct PeerRecord {
     uint32_t fail_streak    = 0;  ///< consecutive failed dials since the last success
 };
 
-class PeerBook {
+class RATS_API PeerBook {
 public:
     explicit PeerBook(std::string path) : path_(std::move(path)) {}
 

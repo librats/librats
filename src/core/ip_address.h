@@ -15,6 +15,7 @@
  * one or more IpAddress only after the resolver runs at the network boundary.
  */
 
+#include "util/rats_export.h"
 #include "core/bytes.h"
 
 #include <array>
@@ -29,7 +30,7 @@ struct sockaddr;
 
 namespace librats {
 
-class IpAddress {
+class RATS_API IpAddress {
 public:
     enum class Family : uint8_t { None, V4, V6 };
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/rats_export.h"
 #include "core/ip_address.h"
 
 #include <string>
@@ -13,35 +14,35 @@ namespace network_utils {
  * @param hostname The hostname to resolve (can be hostname or IP address)
  * @return IP address string, or empty string on error
  */
-std::string resolve_hostname(const std::string& hostname);
+RATS_API std::string resolve_hostname(const std::string& hostname);
 
 /**
  * Resolve hostname to IPv6 address
  * @param hostname The hostname to resolve (can be hostname or IPv6 address)
  * @return IPv6 address string, or empty string on error
  */
-std::string resolve_hostname_v6(const std::string& hostname);
+RATS_API std::string resolve_hostname_v6(const std::string& hostname);
 
 /**
  * Check if a string is a valid IPv4 address
  * @param ip_str The string to validate
  * @return true if valid IPv4 address, false otherwise
  */
-bool is_valid_ipv4(const std::string& ip_str);
+RATS_API bool is_valid_ipv4(const std::string& ip_str);
 
 /**
  * Check if a string is a valid IPv6 address
  * @param ip_str The string to validate
  * @return true if valid IPv6 address, false otherwise
  */
-bool is_valid_ipv6(const std::string& ip_str);
+RATS_API bool is_valid_ipv6(const std::string& ip_str);
 
 /**
  * Check if a string is a hostname (not an IP address)
  * @param str The string to check
  * @return true if it's a hostname, false if it's an IP address
  */
-bool is_hostname(const std::string& str);
+RATS_API bool is_hostname(const std::string& str);
 
 /**
  * Check whether an IP address is publicly routable (not a private/reserved range).
@@ -54,17 +55,17 @@ bool is_hostname(const std::string& str);
  * forwarding to detect a double-NAT gateway whose reported "external" IP is itself
  * private and therefore not a usable public endpoint.
  */
-bool is_public_ip(const std::string& ip);
+RATS_API bool is_public_ip(const std::string& ip);
 
 /// Byte-based overload: classifies directly from the address bytes, with no textual
 /// re-parse. The string overload above is a thin wrapper that parses then delegates.
-bool is_public_ip(const IpAddress& ip);
+RATS_API bool is_public_ip(const IpAddress& ip);
 
 /**
  * Get all local network interface addresses (IPv4 and IPv6)
  * @return Vector of local IP addresses from all network interfaces
  */
-std::vector<std::string> get_local_interface_addresses();
+RATS_API std::vector<std::string> get_local_interface_addresses();
 
 /**
  * Get the default IPv4 gateway address(es) of the host.
@@ -78,7 +79,7 @@ std::vector<std::string> get_local_interface_addresses();
  *
  * @return Vector of gateway IPv4 addresses, most specific first. May be empty.
  */
-std::vector<std::string> get_default_gateways();
+RATS_API std::vector<std::string> get_default_gateways();
 
 } // namespace network_utils
 } // namespace librats

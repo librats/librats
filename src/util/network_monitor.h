@@ -29,6 +29,7 @@
  * long; offload slow recovery work (STUN, port mapping) to another thread.
  */
 
+#include "util/rats_export.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -41,7 +42,7 @@
 
 namespace librats {
 
-class NetworkMonitor {
+class RATS_API NetworkMonitor {
 public:
     /// Invoked (debounced) whenever the set of local interface addresses changes.
     /// @param current_addresses the new, full list of local interface addresses.

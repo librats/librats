@@ -9,6 +9,7 @@
  * persisted private key to keep a stable PeerId across restarts.
  */
 
+#include "util/rats_export.h"
 #include "peer/peer_id.h"
 #include "noise.h"
 
@@ -16,7 +17,7 @@
 
 namespace librats {
 
-struct Identity {
+struct RATS_API Identity {
     rats::NoiseKeyPair static_keypair;
     PeerId             id;
 

@@ -15,6 +15,7 @@
  * reactor().run_one() so everything stays single-threaded and deterministic.
  */
 
+#include "util/rats_export.h"
 #include "bittorrent/peer_connection.h"
 #include "bittorrent/reactor.h"
 #include "bittorrent/torrent.h"
@@ -57,7 +58,7 @@ struct TorrentStatus {
     std::vector<File> files;             ///< populated once metadata is known
 };
 
-class Client final : public TorrentHost {
+class RATS_API Client final : public TorrentHost {
 public:
     struct Config {
         std::uint16_t listen_port    = 6881;   ///< 0 = ephemeral

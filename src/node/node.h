@@ -36,6 +36,7 @@
  * the node stays a small, predictable core, and you pay only for what you attach.
  */
 
+#include "util/rats_export.h"
 #include "transport/connection.h"      // ConnectionDelegate
 #include "transport/reactor_pool.h"
 #include "core/address.h"
@@ -67,7 +68,7 @@ namespace librats {
 class NetworkMonitor;  // util/network_monitor.h — owned via unique_ptr, included in node.cpp
 class MessageJson;     // subsystems/message_json.h — reached via json() (json.h stays out of node.h)
 
-class Node final : public ConnectionDelegate, public PeerNetwork {
+class RATS_API Node final : public ConnectionDelegate, public PeerNetwork {
 public:
     /// Construct a node from its configuration (see NodeConfig). This only loads
     /// the identity and prepares the layers; no socket is opened until start().
