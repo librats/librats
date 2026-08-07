@@ -229,3 +229,42 @@ add_bench(bench_dht
 add_bench(bench_crypto
     SOURCES suites/bench_crypto.cpp ${CRYPTO_UNDER_TEST} ${NOISEC_REF}
 )
+
+# ── Transport: TCP vs the reliable-UDP stream, end to end ────────────────────
+#
+# The one suite here whose subject is a whole path rather than a component: two
+# real Nodes, real loopback sockets, a real Noise_XX handshake. It therefore
+# needs the whole library, not a hand-listed handful of sources, so this target
+# builds librats as a subproject and links it instead of compiling sources in.
+#
+# The "optimized identically to what it is compared against" rule still holds:
+# add_compile_options(-O3 -DNDEBUG) above applies to every directory added after
+# it, so the library is built with the same flags as the suite regardless of how
+# the parent tree is configured. Everything the parent build offers that is not
+# the library itself (tests, client, examples, bindings, install rules) is forced
+# off — this is a benchmark, not a build of the project.
+#
+# -DBENCH_TRANSPORT=OFF skips it if you only want the micro-suites.
+option(BENCH_TRANSPORT "Build the end-to-end transport suite (builds librats)" ON)
+
+if(BENCH_TRANSPORT)
+    set(RATS_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
+    set(RATS_BUILD_CLIENT    OFF CACHE BOOL "" FORCE)
+    set(RATS_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
+    set(RATS_BINDINGS        OFF CACHE BOOL "" FORCE)
+    set(RATS_INSTALL         OFF CACHE BOOL "" FORCE)
+    set(RATS_STATIC_LIBRARY  ON  CACHE BOOL "" FORCE)
+    set(RATS_SHARED_LIBRARY  OFF CACHE BOOL "" FORCE)
+
+    if(NOT TARGET rats)
+        add_subdirectory(${LIBRATS_ROOT} librats_build EXCLUDE_FROM_ALL)
+    endif()
+
+    add_bench(bench_transport SOURCES suites/bench_transport.cpp)
+    target_link_libraries(bench_transport PRIVATE rats)
+    find_package(Threads REQUIRED)
+    target_link_libraries(bench_transport PRIVATE Threads::Threads)
+    if(WIN32)
+        target_link_libraries(bench_transport PRIVATE psapi)  # resident_bytes()
+    endif()
+endif()

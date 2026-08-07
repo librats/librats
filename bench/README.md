@@ -25,7 +25,8 @@ bench/
 │   ├── bench_rx.cpp      receive path, current vs pre-5d64343
 │   ├── bench_tx.cpp      send path, current vs pre-5d64343
 │   ├── bench_dht.cpp     keyspace primitives vs libtorrent's
-│   └── bench_crypto.cpp  Noise primitives vs the noise-c reference
+│   ├── bench_crypto.cpp  Noise primitives vs the noise-c reference
+│   └── bench_transport.cpp  TCP vs the reliable-UDP stream, two live Nodes
 └── CMakeLists.txt
 ```
 
@@ -53,6 +54,7 @@ belongs to: `#include "framework/bench.h"`, `"support/net_mock.h"`,
 cmake -S bench -B bench/build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build bench/build
 ./bench/build/bin/bench_rx        # …or bench_tx, bench_json, bench_dht, …
+./bench/build/bin/bench_transport # two live Nodes on loopback; takes ~1 min
 ```
 
 Benchmarks are always compiled `-O3 -DNDEBUG`, whatever the parent tree is
@@ -167,6 +169,65 @@ and the whole session machinery), so the reference side is a standalone re-port 
 `reference/kademlia/node_id.cpp` + `sha1_hash.hpp`, kept in libtorrent's *native*
 representation (a 160-bit id as 5×uint32) so the comparison isn't rigged. It brings
 its own timing loop rather than using `framework/bench.h`.
+
+## The transport suite — `bench_transport`
+
+The odd one out here, deliberately. Every other suite measures a **component**
+against the implementation it replaced; this one measures a **path**: the same
+encrypted protocol carried by the kernel's TCP stack and by the library's own
+reliability layer over datagrams (`src/librats/transport/udp_stream.*`, `udp_mux.*`).
+Nothing is mocked — two real `librats::Node`s in one process, real loopback
+sockets, a real Noise_XX handshake, one reactor thread each.
+
+Because the subject is the whole path, this is also the only target that **links
+librats built as a subproject** instead of compiling a hand-listed set of sources
+(`add_subdirectory` with tests/client/examples/bindings/install forced off). The
+"optimized identically" rule still holds: `add_compile_options(-O3 -DNDEBUG)` is
+issued before the subdirectory is added, so the library is built with the suite's
+flags whatever the parent tree is configured as. `-DBENCH_TRANSPORT=OFF` skips it
+if you only want the micro-suites.
+
+The question it answers is not "is our UDP faster than TCP" — on loopback that
+comparison is rigged, because a user-space stack skips no kernel work there. It
+is **what moving reliability into user space costs, and where the two wires stop
+being interchangeable**. `Link` (`src/librats/transport/link.h`) promises a peer over
+either wire is indistinguishable to every layer above; these experiments are
+picked to find where that promise is thin.
+
+| experiment | what it isolates |
+|---|---|
+| `dial`     | round trips before the first application byte: TCP connect + Noise_XX vs Syn/Ack + Noise_XX |
+| `rtt`      | serial request/response — the shape most likely to put `UdpStream::kDelayedAck` (20 ms) on the critical path |
+| `bulk`     | steady-state throughput and, more usefully, **CPU-seconds per gigabyte** |
+| `small`    | per-message rather than per-byte costs |
+| `idle`     | N connected peers doing nothing — the price of `UdpMux::kTickInterval` sweeping every stream every 20 ms, plus resident bytes per peer |
+| `burst`    | the largest *unpaced* application burst each wire survives before `CloseReason::SlowConsumer` |
+| `fallback` | what the Happy-Eyeballs race in `node/dialer.h` costs against a TCP-only peer, cold and on a re-dial |
+
+Three of these exist mainly because they can fail:
+
+* **`burst`** — on TCP the burst lands in the kernel's send buffer; on the
+  datagram side there is no such buffer, so `UdpStream::kSendQueueLimit` (2 MiB)
+  is all that absorbs it and the rest piles into the connection's queue until it
+  crosses `Connection::kDefaultSendHighWater` (8 MiB). Identical application code
+  can therefore survive on one wire and lose its peer on the other, with no
+  writable/backpressure callback through which it could have known. The row
+  reports where that line sits.
+* **`small`** — the large gap this shows is *not* the datagram stack being fast.
+  `UdpStream` disables Nagle by design; the TCP path never sets `TCP_NODELAY`, so
+  a window of small messages hits the classic Nagle/delayed-ACK interaction. Read
+  it together with `rtt`, which cannot trigger Nagle (nothing outstanding) and so
+  shows the two wires at parity.
+* **`fallback`** — `identify` already tells a node which transports a peer
+  accepts. A re-dial that costs the same as a cold one means that knowledge never
+  reaches the dial.
+
+**Reading the numbers.** CPU is whole-process: both nodes live in the benchmark,
+so a figure covers sender *and* receiver — the honest number for a P2P node,
+which is usually both. Loopback has no loss, no reordering and a near-zero RTT,
+so congestion control, retransmission and the selective-ack path are all measured
+at their cheapest: **every UDP figure is a floor on cost, not a ceiling.** Loss
+behaviour needs a lossy path (`netem`) and is deliberately out of scope.
 
 ## The crypto suite — `bench_crypto`
 
