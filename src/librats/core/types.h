@@ -5,6 +5,8 @@
  * @brief Core transport identifiers and enums shared across the reactor layer.
  */
 
+#include "librats/util/rats_export.h"
+
 #include <cstdint>
 
 namespace librats {
@@ -60,6 +62,10 @@ enum class CloseReason {
 
 const char* to_string(ConnState) noexcept;
 const char* to_string(CloseReason) noexcept;
-const char* to_string(TransportKind) noexcept;
+/// Exported, unlike its siblings above: TransportKind is part of the public
+/// surface (NodeConfig::preferred_transport, PeerInfo::transport), so a consumer
+/// of the shared build needs to be able to render one. ConnState/CloseReason only
+/// ever appear on Connection, which does not cross the library boundary.
+RATS_API const char* to_string(TransportKind) noexcept;
 
 } // namespace librats
