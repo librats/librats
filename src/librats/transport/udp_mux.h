@@ -20,7 +20,23 @@
  *     learns immediately instead of retransmitting into a void;
  *   - drive every stream's timers from one periodic tick;
  *   - keep a stream alive briefly after its connection is gone, so the last
- *     bytes it owes the peer still get delivered (see release()).
+ *     bytes it owes the peer still get delivered (see release());
+ *   - move datagrams in batches rather than one syscall at a time (see
+ *     flush_output()).
+ *
+ * ── Why the socket is worked in batches ─────────────────────────────────────
+ * A datagram transport emits one packet per call, so at a 1200-byte payload a
+ * bulk transfer costs tens of thousands of syscalls per megabyte — far more than
+ * the framing, the congestion control and the encryption above it put together,
+ * and the reason a user-space stream costs measurably more CPU per byte than the
+ * kernel's TCP. So the mux does not hand each datagram to the socket as it is
+ * produced: outgoing datagrams are staged and leave together (kUdpBatchMax per
+ * syscall), and incoming ones are collected the same way.
+ *
+ * Staging is deliberately *not* deferred past the work that produced it. Every
+ * entry point flushes before it returns, and the Reactor flushes once more at the
+ * end of each loop turn to cover datagrams produced by application sends — so a
+ * packet never waits on a timer, and batching costs no latency, only syscalls.
  *
  * Threading follows the rest of the transport: the mux belongs to exactly one
  * Reactor and is touched only by that reactor's thread.
@@ -37,6 +53,7 @@
 #include "librats/transport/link.h"
 #include "librats/transport/udp_stream.h"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -118,6 +135,13 @@ public:
     /// Reset every stream (the node is going down) and drop them.
     void shutdown();
 
+    /// Put every staged datagram on the wire. Called by each of the entry points
+    /// above before it returns, and by the Reactor at the end of a loop turn to
+    /// cover the ones an application send produced (Connection::send → the stream's
+    /// write path, which reaches this class from outside any datagram batch).
+    /// Cheap and idempotent when nothing is staged.
+    void flush_output();
+
     size_t stream_count() const noexcept { return streams_.size(); }
 
     // — UdpStreamHost —
@@ -146,6 +170,16 @@ private:
     std::unordered_map<uint32_t, Entry> streams_;  ///< keyed by our recv id
     std::vector<std::pair<ConnId, uint32_t>> pending_events_;
     std::vector<uint32_t>                    expired_;  ///< scratch for tick()
+
+    // Batch scratch. Both directions keep kUdpBatchMax datagrams' worth of storage
+    // for the life of the mux — allocated once, never grown, so neither the receive
+    // loop nor the send path allocates. The slots point into the storage and are
+    // set up in the constructor; only their lengths and endpoints move afterwards.
+    std::vector<uint8_t>                      recv_storage_;
+    std::vector<uint8_t>                      send_storage_;
+    std::array<UdpBatchSlot, kUdpBatchMax>    recv_slots_{};
+    std::array<UdpBatchSlot, kUdpBatchMax>    send_slots_{};
+    size_t                                    staged_ = 0;  ///< datagrams awaiting flush_output()
 
     std::mt19937 rng_;
     int          resets_this_tick_ = 0;

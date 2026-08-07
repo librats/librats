@@ -202,6 +202,11 @@ void Reactor::run() {
         for (int i = 0; i < n; ++i) handle_event(events[i]);
         timers_.run_due();
         process_pending_close();
+        // The mux batches its datagrams; the ones it collected inside a readable
+        // event or a tick have already gone out, but an application send reaches a
+        // UDP stream from a task, outside any batch of its own. Flushing once here
+        // covers those without giving any of them a timer to wait on.
+        if (mux_) mux_->flush_output();
     }
 
     // Graceful drain: run whatever was queued before/around stop() so in-flight

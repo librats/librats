@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include "librats/core/socket.h"
-#include <thread>
 #include <chrono>
+#include <cstring>
+#include <thread>
+#include <vector>
 
 using namespace librats;
 
@@ -234,4 +236,92 @@ TEST_F(SocketTest, EdgeCasesTest) {
     // Test creating client with invalid port
     socket_t client2 = create_tcp_client("127.0.0.1", -1);
     EXPECT_FALSE(is_valid_socket(client2));
+}
+
+// ── Batched datagram I/O ────────────────────────────────────────────────────
+//
+// One syscall per datagram is the dominant cost of a user-space reliability layer,
+// so recv_udp_batch/send_udp_batch move a whole array at a time (recvmmsg/sendmmsg
+// where the platform has them, a loop where it does not). What matters at the call
+// site is that the two shapes are indistinguishable: same datagrams, same order,
+// same senders — which is what these tests pin down.
+
+namespace {
+
+/// Storage for one batch, with the slots already pointed at their slices.
+struct BatchBuffers {
+    static constexpr size_t kSlotSize = 1500;
+
+    std::vector<uint8_t>      storage = std::vector<uint8_t>(kUdpBatchMax * kSlotSize);
+    std::vector<UdpBatchSlot> slots   = std::vector<UdpBatchSlot>(kUdpBatchMax);
+
+    BatchBuffers() {
+        for (size_t i = 0; i < kUdpBatchMax; ++i) {
+            slots[i].data = storage.data() + i * kSlotSize;
+            slots[i].len  = kSlotSize;
+        }
+    }
+
+    void reset_capacities() {
+        for (auto& slot : slots) slot.len = kSlotSize;
+    }
+};
+
+} // namespace
+
+TEST_F(SocketTest, UdpBatchRoundTripsEveryDatagramInOrder) {
+    socket_t sender   = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    socket_t receiver = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(sender));
+    ASSERT_TRUE(is_valid_socket(receiver));
+    set_socket_nonblocking(receiver);
+
+    const Address sender_addr{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sender))};
+    const Address dest{"127.0.0.1", static_cast<uint16_t>(get_bound_port(receiver))};
+
+    // A batch of datagrams of differing lengths, each carrying its own index, so a
+    // reordered or mis-sized result cannot pass.
+    constexpr size_t kCount = 8;
+    BatchBuffers out;
+    for (size_t i = 0; i < kCount; ++i) {
+        out.slots[i].endpoint = dest;
+        out.slots[i].len      = 16 + i * 7;
+        std::memset(out.slots[i].data, static_cast<int>('a' + i), out.slots[i].len);
+    }
+    ASSERT_EQ(send_udp_batch(sender, out.slots.data(), kCount, AddressFamily::IPv4), kCount);
+
+    // Loopback delivery is prompt but not instantaneous; collect until we have them.
+    BatchBuffers in;
+    size_t       got = 0;
+    for (int attempt = 0; attempt < 200 && got < kCount; ++attempt) {
+        in.reset_capacities();
+        const std::ptrdiff_t n = recv_udp_batch(receiver, in.slots.data() + got, kCount - got);
+        if (n > 0) {
+            got += static_cast<size_t>(n);
+            continue;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(got, kCount) << "only " << got << " of " << kCount << " datagrams arrived";
+
+    for (size_t i = 0; i < kCount; ++i) {
+        EXPECT_EQ(in.slots[i].len, 16 + i * 7) << "datagram " << i << " has the wrong length";
+        EXPECT_EQ(in.slots[i].endpoint.port, sender_addr.port) << "wrong sender on datagram " << i;
+        for (size_t b = 0; b < in.slots[i].len; ++b)
+            ASSERT_EQ(in.slots[i].data[b], 'a' + i) << "datagram " << i << " is not itself";
+    }
+
+    close_socket(sender);
+    close_socket(receiver);
+}
+
+TEST_F(SocketTest, UdpBatchReceiveReportsWouldBlockOnAnEmptySocket) {
+    socket_t sock = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(sock));
+    set_socket_nonblocking(sock);
+
+    BatchBuffers in;
+    EXPECT_EQ(recv_udp_batch(sock, in.slots.data(), kUdpBatchMax), kUdpRecvWouldBlock);
+
+    close_socket(sock);
 }

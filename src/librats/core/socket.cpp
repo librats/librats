@@ -19,6 +19,15 @@
     #endif
 #endif
 
+// recvmmsg/sendmmsg — one syscall for a whole array of datagrams. Linux has had
+// both since 2.6.33 (bionic exposes them from API 21); everything else takes the
+// loop fallback in recv_udp_batch/send_udp_batch, which is the same shape at the
+// call site. FreeBSD has them too, but only as of 11, and the version guard is
+// not worth the cost of being wrong there.
+#if defined(__linux__) && (!defined(__ANDROID__) || __ANDROID_API__ >= 21)
+    #define RATS_HAVE_MMSG 1
+#endif
+
 // On Windows, SIO_UDP_CONNRESET lives in <mstcpip.h>, which mingw doesn't always pull
 // in via <winsock2.h>. Define it from its well-known control code as a fallback.
 #if defined(_WIN32) && !defined(SIO_UDP_CONNRESET)
@@ -1127,6 +1136,114 @@ std::ptrdiff_t recv_udp_from(socket_t socket, void* buffer, size_t len, Address&
 #endif
     LOG_SOCKET_DEBUG("Failed to receive datagram: " << socket_error_string(error));
     return kUdpRecvError;
+}
+
+// ── Batched datagram I/O ────────────────────────────────────────────────────
+
+std::ptrdiff_t recv_udp_batch(socket_t socket, UdpBatchSlot* slots, size_t count) {
+    if (count == 0) return kUdpRecvWouldBlock;
+    if (count > kUdpBatchMax) count = kUdpBatchMax;
+
+#ifdef RATS_HAVE_MMSG
+    mmsghdr          msgs[kUdpBatchMax];
+    iovec            iov[kUdpBatchMax];
+    sockaddr_storage addrs[kUdpBatchMax];
+
+    memset(msgs, 0, sizeof(mmsghdr) * count);
+    for (size_t i = 0; i < count; ++i) {
+        iov[i].iov_base             = slots[i].data;
+        iov[i].iov_len              = slots[i].len;
+        msgs[i].msg_hdr.msg_name    = &addrs[i];
+        msgs[i].msg_hdr.msg_namelen = sizeof(sockaddr_storage);
+        msgs[i].msg_hdr.msg_iov     = &iov[i];
+        msgs[i].msg_hdr.msg_iovlen  = 1;
+    }
+
+    // MSG_DONTWAIT matters even on a socket that is already non-blocking: without
+    // it recvmmsg() waits for the *whole* array to fill when no timeout is given.
+    const int n = recvmmsg(socket, msgs, static_cast<unsigned int>(count), MSG_DONTWAIT, nullptr);
+    if (n > 0) {
+        for (int i = 0; i < n; ++i) {
+            slots[i].len = msgs[i].msg_len;
+            extract_sender_peer(addrs[i], slots[i].endpoint);
+        }
+        return n;
+    }
+    if (n == 0) return kUdpRecvWouldBlock;
+
+    const int error = get_last_socket_error();
+    if (error == EAGAIN || error == EWOULDBLOCK) return kUdpRecvWouldBlock;
+    // Only an error on the *first* datagram is reported here; one further in simply
+    // truncates the batch, which is why a short result is not proof of an empty
+    // queue. Either way this concerns one destination, not the socket.
+    if (error == EINTR || error == ECONNREFUSED) return kUdpRecvError;
+    LOG_SOCKET_DEBUG("Failed to receive a datagram batch: " << socket_error_string(error));
+    return kUdpRecvError;
+#else
+    size_t got = 0;
+    for (size_t i = 0; i < count; ++i) {
+        Address from;
+        const std::ptrdiff_t n = recv_udp_from(socket, slots[i].data, slots[i].len, from);
+        if (n == kUdpRecvWouldBlock) break;
+        // Report what has already arrived and let the caller come back for the rest;
+        // only an error on the very first datagram has nothing to report alongside it.
+        if (n == kUdpRecvError) return got > 0 ? static_cast<std::ptrdiff_t>(got) : kUdpRecvError;
+        slots[i].len      = static_cast<size_t>(n);
+        slots[i].endpoint = from;
+        ++got;
+    }
+    return got > 0 ? static_cast<std::ptrdiff_t>(got) : kUdpRecvWouldBlock;
+#endif
+}
+
+size_t send_udp_batch(socket_t socket, const UdpBatchSlot* slots, size_t count, AddressFamily af) {
+    if (count == 0) return 0;
+    if (count > kUdpBatchMax) count = kUdpBatchMax;
+
+#ifdef RATS_HAVE_MMSG
+    mmsghdr          msgs[kUdpBatchMax];
+    iovec            iov[kUdpBatchMax];
+    sockaddr_storage addrs[kUdpBatchMax];
+    socklen_t        addr_lens[kUdpBatchMax];
+
+    memset(msgs, 0, sizeof(mmsghdr) * count);
+    size_t staged = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (slots[i].len == 0) continue;
+        // An unspecified destination has nowhere to go; skip it rather than letting
+        // one bad slot fail the whole batch.
+        if (!build_udp_dest_addr(slots[i].endpoint.ip, slots[i].endpoint.port, af,
+                                 addrs[staged], addr_lens[staged]))
+            continue;
+
+        iov[staged].iov_base             = const_cast<uint8_t*>(slots[i].data);
+        iov[staged].iov_len              = slots[i].len;
+        msgs[staged].msg_hdr.msg_name    = &addrs[staged];
+        msgs[staged].msg_hdr.msg_namelen = addr_lens[staged];
+        msgs[staged].msg_hdr.msg_iov     = &iov[staged];
+        msgs[staged].msg_hdr.msg_iovlen  = 1;
+        ++staged;
+    }
+    if (staged == 0) return 0;
+
+    const int n = sendmmsg(socket, msgs, static_cast<unsigned int>(staged),
+                           MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (n >= 0) return static_cast<size_t>(n);
+
+    const int error = get_last_socket_error();
+    // A full send buffer drops the batch, exactly as a congested link would drop it.
+    if (error == EAGAIN || error == EWOULDBLOCK || error == ENOBUFS) return 0;
+    LOG_SOCKET_DEBUG("Failed to send a datagram batch (error: "
+                     << socket_error_string(error) << ")");
+    return 0;
+#else
+    size_t sent = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (slots[i].len == 0) continue;
+        if (send_udp_to(socket, slots[i].data, slots[i].len, slots[i].endpoint, af) > 0) ++sent;
+    }
+    return sent;
+#endif
 }
 
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Address& sender_peer,

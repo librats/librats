@@ -2,14 +2,26 @@
 #include "librats/core/io_poller.h"
 #include "librats/util/logger.h"
 
+#include <algorithm>
+#include <cstring>
 #include <random>
 #include <utility>
 
 namespace librats {
 
 UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate)
-    : socket_(socket), family_(family), delegate_(delegate), rng_(std::random_device{}()) {
+    : socket_(socket), family_(family), delegate_(delegate),
+      recv_storage_(kUdpBatchMax * rudp::kMaxDatagram),
+      send_storage_(kUdpBatchMax * rudp::kMaxDatagram),
+      rng_(std::random_device{}()) {
     set_socket_buffer_sizes(socket_, kSocketBufferBytes, kSocketBufferBytes);
+
+    // Point each slot at its slice of the storage, once. From here on a batch only
+    // ever moves lengths and endpoints around — the buffers never move.
+    for (size_t i = 0; i < kUdpBatchMax; ++i) {
+        recv_slots_[i].data = recv_storage_.data() + i * rudp::kMaxDatagram;
+        send_slots_[i].data = send_storage_.data() + i * rudp::kMaxDatagram;
+    }
 }
 
 UdpMux::~UdpMux() {
@@ -19,7 +31,28 @@ UdpMux::~UdpMux() {
 // ── Wire ────────────────────────────────────────────────────────────────────
 
 void UdpMux::send_datagram(const Address& to, const uint8_t* data, size_t len) {
-    send_udp_to(socket_, data, len, to, family_);
+    // Staged, not sent: a full congestion window is dozens of datagrams produced
+    // back to back, and handing each one to the kernel separately is where most of
+    // this transport's CPU used to go. They leave together in flush_output(), which
+    // every entry point calls before it returns — so nothing waits on a timer.
+    if (len == 0 || len > rudp::kMaxDatagram) return;  // nothing this class produces
+    if (staged_ == kUdpBatchMax) flush_output();
+
+    UdpBatchSlot& slot = send_slots_[staged_++];
+    slot.endpoint      = to;
+    slot.len           = len;
+    std::memcpy(slot.data, data, len);
+}
+
+void UdpMux::flush_output() {
+    if (staged_ == 0) return;
+    const size_t staged = staged_;
+    staged_ = 0;  // spent either way: what the socket refused is a dropped datagram
+
+    const size_t sent = send_udp_batch(socket_, send_slots_.data(), staged, family_);
+    if (sent < staged)
+        LOG_DEBUG("udp", "Socket took " << sent << "/" << staged
+                  << " datagrams; the rest are dropped (retransmission covers them)");
 }
 
 void UdpMux::stream_events(UdpStream& stream, uint32_t events) {
@@ -41,7 +74,6 @@ void UdpMux::send_reset(const Address& to, uint32_t conn_id) {
 // ── Inbound datagrams ───────────────────────────────────────────────────────
 
 bool UdpMux::on_readable() {
-    uint8_t buf[rudp::kMaxDatagram];
     const auto now = Clock::now();
 
     size_t drained = 0;
@@ -49,22 +81,33 @@ bool UdpMux::on_readable() {
     for (;;) {
         if (drained >= kMaxDatagramsPerRead) { more = true; break; }
 
-        Address from;
-        const std::ptrdiff_t n = recv_udp_from(socket_, buf, sizeof(buf), from);
-        if (n == kUdpRecvWouldBlock) break;
-        ++drained;
+        // Never ask for more than the cap allows, so the bound on how long one
+        // flood can hold the loop stays exact rather than approximate.
+        const size_t want = (std::min)(kUdpBatchMax, kMaxDatagramsPerRead - drained);
+        for (size_t i = 0; i < want; ++i) recv_slots_[i].len = rudp::kMaxDatagram;
+
+        const std::ptrdiff_t got = recv_udp_batch(socket_, recv_slots_.data(), want);
+        if (got == kUdpRecvWouldBlock) break;
         // A per-destination error (an ICMP unreachable for an earlier datagram,
         // which Windows in particular reports on the *next* receive) says nothing
         // about the socket, so keep draining rather than abandoning every other
         // peer on it. The loop is bounded, so a persistent error cannot spin.
-        if (n == kUdpRecvError) continue;
+        if (got == kUdpRecvError) { ++drained; continue; }
 
-        rudp::Packet p;
-        if (!rudp::decode(buf, static_cast<size_t>(n), p)) continue;
-        handle_datagram(p, from, now);
+        for (std::ptrdiff_t i = 0; i < got; ++i) {
+            const UdpBatchSlot& slot = recv_slots_[static_cast<size_t>(i)];
+            rudp::Packet p;
+            if (!rudp::decode(slot.data, slot.len, p)) continue;
+            handle_datagram(p, slot.endpoint, now);
+        }
+        drained += static_cast<size_t>(got);
+        // A short batch usually means the queue is empty, but not always (a
+        // per-datagram error truncates one too), and the kqueue backend is
+        // edge-triggered — so keep going until the socket says would-block.
     }
 
     dispatch_pending();
+    flush_output();  // the acks and repairs the batch above produced leave together
     return more;
 }
 
@@ -170,6 +213,7 @@ std::unique_ptr<Link> UdpMux::connect(const Address& remote) {
                                               ConnRole::Outbound, Clock::now());
     UdpStream* raw = stream.get();
     streams_.emplace(recv_id, Entry{std::move(stream), Clock::time_point{}});
+    flush_output();  // the Syn is the dial; it does not wait for company
     return std::make_unique<UdpStreamLink>(*this, *raw);
 }
 
@@ -187,19 +231,20 @@ void UdpMux::release(UdpStream& stream) {
         // would keep asking a peer to open a stream nobody will read.
         stream.abort(Clock::now());
         streams_.erase(it);
-        return;
-    }
-
-    if (stream.dead() || stream.flushed()) {
+    } else if (stream.dead() || stream.flushed()) {
         streams_.erase(it);
-        return;
+    } else {
+        // Something is still owed to the peer. Keep the stream just long enough to
+        // hand it over — this is the user-space equivalent of the kernel continuing
+        // to retransmit after close(), and without it a node that sends a final
+        // message and disconnects would drop it on the floor.
+        it->second.linger_until = Clock::now() + kLingerTimeout;
     }
 
-    // Something is still owed to the peer. Keep the stream just long enough to
-    // hand it over — this is the user-space equivalent of the kernel continuing to
-    // retransmit after close(), and without it a node that sends a final message
-    // and disconnects would drop it on the floor.
-    it->second.linger_until = Clock::now() + kLingerTimeout;
+    // The Connection told the link goodbye just before letting go of it, so a Fin
+    // or a Reset is usually staged by the time we get here. It must not outlive the
+    // call that produced it.
+    flush_output();
 }
 
 void UdpMux::tick() {
@@ -219,11 +264,13 @@ void UdpMux::tick() {
     expired_.clear();
 
     dispatch_pending();
+    flush_output();  // one syscall for every stream's retransmissions and keep-alives
 }
 
 void UdpMux::shutdown() {
     const auto now = Clock::now();
     for (auto& entry : streams_) entry.second.stream->abort(now);
+    flush_output();  // the goodbyes go out before the streams they came from
     streams_.clear();
     pending_events_.clear();
 }

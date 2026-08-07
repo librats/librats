@@ -716,6 +716,85 @@ TEST(UdpMuxTest, LingersLongEnoughToDeliverTheLastBytes) {
         << "a flushed lingering stream was never reclaimed";
 }
 
+// The mux stages outgoing datagrams so a burst leaves in one syscall instead of
+// dozens. Staging is only sound if nothing is ever left waiting for a later timer,
+// so every entry point flushes before it returns — which is what this pins down.
+// A dial that sat in the staging buffer until the next tick would still work, and
+// would still be a 20 ms regression on every connection the node makes.
+TEST(UdpMuxTest, StagedDatagramsLeaveBeforeTheCallThatMadeThemReturns) {
+    MuxPair net;
+
+    socket_t probe = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(probe));
+    set_socket_nonblocking(probe);
+    const Address probe_addr{"127.0.0.1", static_cast<uint16_t>(get_bound_port(probe))};
+
+    // Read one packet from the probe, without ever ticking the mux. The decoded
+    // payload points into `into`, so that buffer belongs to the caller and has to
+    // outlive every use of the packet.
+    uint8_t    into[rudp::kMaxDatagram];
+    const auto next_packet = [&](rudp::Packet& out) {
+        for (int attempt = 0; attempt < 500; ++attempt) {
+            Address    from;
+            const auto n = recv_udp_from(probe, into, sizeof(into), from);
+            if (n >= 0 && rudp::decode(into, static_cast<size_t>(n), out)) return true;
+            std::this_thread::sleep_for(1ms);
+        }
+        return false;
+    };
+
+    // connect(): the Syn IS the dial, so it cannot wait for company.
+    auto dial = net.a->connect(probe_addr);
+    ASSERT_TRUE(dial);
+    dial->attach(net.host_a.next_id++);
+
+    rudp::Packet syn;
+    ASSERT_TRUE(next_packet(syn)) << "the Syn never left the staging buffer";
+    EXPECT_EQ(syn.type, rudp::PacketType::Syn);
+
+    // on_readable(): the ack for what just arrived goes out with it. Answering the
+    // Syn by hand is enough to bring the dialer's stream up.
+    rudp::Packet ack;
+    ack.type    = rudp::PacketType::Ack;
+    ack.conn_id = syn.conn_id - 1;   // the id pairing the dialer chose
+    ack.seq     = 1;
+    ack.ack     = syn.seq;
+    ack.window  = rudp::kMaxWindowPackets;
+    uint8_t ack_buf[rudp::kMaxDatagram];
+    ASSERT_GT(send_udp_to(probe, ack_buf, rudp::encode(ack, ack_buf), net.addr_a,
+                          AddressFamily::IPv4), 0);
+
+    ASSERT_TRUE(wait_for([&] { net.a->on_readable(); return stream_of(*dial).connected(); }))
+        << "the hand-written ack never brought the stream up";
+
+    // A write now produces a Data packet from outside any datagram batch, exactly
+    // as an application send does. It must not wait for the next tick either — the
+    // Reactor flushes at the end of its loop turn, and MuxPair has no reactor, so
+    // this leans on release()/on_readable() rather than on tick().
+    const std::string msg = "no waiting";
+    const ByteView    slice(msg);
+    ASSERT_EQ(dial->write(&slice, 1).bytes, msg.size());
+    net.a->flush_output();
+
+    rudp::Packet data;
+    ASSERT_TRUE(next_packet(data)) << "the payload never left the staging buffer";
+    EXPECT_EQ(data.type, rudp::PacketType::Data);
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(data.payload.data()),
+                          data.payload.size()), msg);
+
+    // release(): the Connection says goodbye through the Link and only then lets go
+    // of it, so the Fin is staged by a call that is not itself a mux entry point.
+    // Handing the stream back is what has to put it on the wire.
+    dial->close(CloseReason::LocalClose);   // stages a Fin; flushes nothing
+    dial.reset();                           // release() → flush_output()
+
+    rudp::Packet bye;
+    ASSERT_TRUE(next_packet(bye)) << "the stream went away without saying so";
+    EXPECT_EQ(bye.type, rudp::PacketType::Fin);
+
+    close_socket(probe);
+}
+
 // Every unknown datagram gets a Reset, which is a reflector unless it is capped.
 // The budget refills per tick, so draining a burst without ticking must yield no
 // more than one tick's worth of replies.
