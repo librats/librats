@@ -19,14 +19,9 @@
     #endif
 #endif
 
-// recvmmsg/sendmmsg — one syscall for a whole array of datagrams. Linux has had
-// both since 2.6.33 (bionic exposes them from API 21); everything else takes the
-// loop fallback in recv_udp_batch/send_udp_batch, which is the same shape at the
-// call site. FreeBSD has them too, but only as of 11, and the version guard is
-// not worth the cost of being wrong there.
-#if defined(__linux__) && (!defined(__ANDROID__) || __ANDROID_API__ >= 21)
-    #define RATS_HAVE_MMSG 1
-#endif
+// RATS_HAVE_MMSG (recvmmsg/sendmmsg availability) is decided in socket.h, next to
+// the kUdpBatchIsOneSyscall it publishes — callers outside this file need to know
+// whether a batch is genuinely one syscall.
 
 // On Windows, SIO_UDP_CONNRESET lives in <mstcpip.h>, which mingw doesn't always pull
 // in via <winsock2.h>. Define it from its well-known control code as a fallback.

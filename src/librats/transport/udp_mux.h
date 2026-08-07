@@ -38,6 +38,13 @@
  * end of each loop turn to cover datagrams produced by application sends — so a
  * packet never waits on a timer, and batching costs no latency, only syscalls.
  *
+ * All of that is conditional on the platform actually having a batched send
+ * (kUdpBatchIsOneSyscall). Where it does not — Windows, macOS — staging would pay
+ * a copy per datagram to save syscalls that cannot be saved, so send_datagram()
+ * hands each datagram to the socket as it is produced and the staging path is
+ * compiled out entirely. The receive side has no such split: its fallback fills
+ * the caller's slots directly, so it costs nothing extra either way.
+ *
  * Threading follows the rest of the transport: the mux belongs to exactly one
  * Reactor and is touched only by that reactor's thread.
  *

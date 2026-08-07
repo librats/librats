@@ -31,7 +31,10 @@ UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
                UdpMuxLimits limits)
     : socket_(socket), family_(family), delegate_(delegate), limits_(limits),
       recv_storage_(kUdpBatchMax * rudp::kMaxDatagram),
-      send_storage_(kUdpBatchMax * rudp::kMaxDatagram),
+      // Only where a batch is really one syscall. Without that, send_datagram()
+      // goes straight to the socket and never stages anything, so this would be
+      // 39 KiB per node that is allocated and never touched.
+      send_storage_(kUdpBatchIsOneSyscall ? kUdpBatchMax * rudp::kMaxDatagram : 0),
       secret_rotated_at_(Clock::now()),
       rng_(std::random_device{}()) {
     set_socket_buffer_sizes(socket_, kSocketBufferBytes, kSocketBufferBytes);
@@ -40,7 +43,8 @@ UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
     // ever moves lengths and endpoints around — the buffers never move.
     for (size_t i = 0; i < kUdpBatchMax; ++i) {
         recv_slots_[i].data = recv_storage_.data() + i * rudp::kMaxDatagram;
-        send_slots_[i].data = send_storage_.data() + i * rudp::kMaxDatagram;
+        if (kUdpBatchIsOneSyscall)
+            send_slots_[i].data = send_storage_.data() + i * rudp::kMaxDatagram;
     }
 
     for (CookieSecret& secret : cookie_secret_) fill_random(secret.data(), secret.size());
@@ -53,11 +57,22 @@ UdpMux::~UdpMux() {
 // ── Wire ────────────────────────────────────────────────────────────────────
 
 void UdpMux::send_datagram(const Address& to, const uint8_t* data, size_t len) {
+    if (len == 0 || len > rudp::kMaxDatagram) return;  // nothing this class produces
+
+    // Where the socket cannot take a batch in one call, staging buys nothing:
+    // flush_output() would make exactly the per-datagram calls this makes here, and
+    // the copy into the staging buffer on the way there would be pure loss — it
+    // would also undo the headroom trick in OutPacket, whose whole purpose is to
+    // hand the socket the packet where it already lies. So go straight to the wire.
+    if constexpr (!kUdpBatchIsOneSyscall) {
+        send_udp_to(socket_, data, len, to, family_);
+        return;
+    }
+
     // Staged, not sent: a full congestion window is dozens of datagrams produced
     // back to back, and handing each one to the kernel separately is where most of
     // this transport's CPU used to go. They leave together in flush_output(), which
     // every entry point calls before it returns — so nothing waits on a timer.
-    if (len == 0 || len > rudp::kMaxDatagram) return;  // nothing this class produces
     if (staged_ == kUdpBatchMax) flush_output();
 
     UdpBatchSlot& slot = send_slots_[staged_++];

@@ -307,6 +307,30 @@ std::ptrdiff_t recv_udp_from(socket_t socket, void* buffer, size_t len, Address&
  */
 constexpr size_t kUdpBatchMax = 32;
 
+// recvmmsg/sendmmsg — one syscall for a whole array of datagrams. Linux has had
+// both since 2.6.33 (bionic exposes them from API 21); everything else takes the
+// loop fallback below. FreeBSD has them too, but only as of 11, and the version
+// guard is not worth the cost of being wrong there.
+#if defined(__linux__) && (!defined(__ANDROID__) || __ANDROID_API__ >= 21)
+    #define RATS_HAVE_MMSG 1
+#endif
+
+/**
+ * Whether a batched call really is one syscall here, or a loop wearing the same
+ * interface.
+ *
+ * Both forms are correct everywhere, so this is not needed to *use* them. It
+ * matters to a caller deciding whether to stage datagrams for later: staging pays
+ * a copy per datagram to save syscalls, and where the loop fallback is in force
+ * there are no syscalls to save — so the copy would be pure loss and the caller
+ * should hand each datagram over as it is produced instead.
+ */
+#ifdef RATS_HAVE_MMSG
+constexpr bool kUdpBatchIsOneSyscall = true;
+#else
+constexpr bool kUdpBatchIsOneSyscall = false;
+#endif
+
 /**
  * One datagram in a batch. The payload buffer belongs to the caller — a receive
  * loop reuses the same storage every round and a send path stages into it — so a
