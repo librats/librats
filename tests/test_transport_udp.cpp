@@ -490,6 +490,57 @@ TEST(UdpStreamTest, RetransmitsWhatTheNetworkDrops) {
     EXPECT_EQ(received, payload);
 }
 
+// What a retransmission timeout owes the sender's accounting.
+//
+// A timeout means everything outstanding is presumed gone from the path, and the
+// window has just been collapsed to a single packet to say so. If those bytes stay
+// counted as in flight, the sender is measuring a whole window against a one-packet
+// budget: it can transmit neither the repairs it owes nor the data queued behind
+// them, and creeps forward one packet per timeout instead. A brief outage then
+// costs not a round trip but the rest of the transfer — the stream keeps its
+// connection and delivers at a few tens of kilobytes per second until the window
+// has been unpicked packet by packet.
+TEST(UdpStreamTest, ATimeoutReleasesTheWindowItGaveUpOn) {
+    Pair pair;
+
+    const std::string payload(rudp::kMaxPayload * 200, 'x');
+    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+
+    // A path that swallows everything, held long enough for the timeout to fire.
+    pair.net.drop_next(1000 * 1000);
+    const auto blackout_until = std::chrono::steady_clock::now() + 400ms;
+    while (std::chrono::steady_clock::now() < blackout_until) {
+        const auto now = std::chrono::steady_clock::now();
+        pair.net.deliver();
+        pair.initiator->tick(now);
+        pair.responder->tick(now);
+        std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_GT(pair.initiator->retransmits(), 0u) << "the timeout never fired";
+
+    // The invariant the whole thing turns on: whatever the sender still counts as
+    // in flight has to fit in the window it is allowed to use, or nothing can move.
+    EXPECT_LE(pair.initiator->bytes_in_flight(), pair.initiator->cwnd())
+        << "a window the timeout abandoned is still counted against the sender";
+
+    pair.net.drop_next(0);  // the path comes back
+
+    std::string received;
+    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    while (received.size() < payload.size() && std::chrono::steady_clock::now() < deadline) {
+        const auto now = std::chrono::steady_clock::now();
+        pair.net.deliver();
+        pair.initiator->tick(now);
+        pair.responder->tick(now);
+        received += drain(*pair.responder);
+        std::this_thread::sleep_for(1ms);
+    }
+
+    EXPECT_EQ(received, payload) << "the transfer never recovered from the outage";
+    EXPECT_GT(pair.initiator->cwnd(), UdpStream::kMinCwnd)
+        << "the window never grew back after the outage";
+}
+
 TEST(UdpStreamTest, ReducesTheWindowOnceForOneLossEpisode) {
     Pair pair;
 

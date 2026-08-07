@@ -255,6 +255,12 @@ private:
         Clock::time_point sent_at{};
         int               sends = 0;        ///< transmissions so far (0 = still unsent)
         bool              acked = false;    ///< selectively acknowledged, awaiting the cumulative ack
+        /// This packet's bytes are counted in flight_bytes_ right now. Set by the
+        /// transmission that put them on the wire, cleared when they are either
+        /// acknowledged or declared lost — because a packet a retransmission
+        /// timeout has given up on is no longer occupying the path, and leaving it
+        /// counted is what would stop the sender from ever refilling the pipe.
+        bool              in_flight = false;
 
         /// Payload bytes — what the accounting (flight_bytes_, queued_bytes_) counts.
         size_t size() const noexcept {
@@ -276,7 +282,9 @@ private:
     void transmit(OutPacket& p, Clock::time_point now);
     void send_control(rudp::PacketType type, Clock::time_point now);
     void pump(Clock::time_point now);
+    void retransmit_lost(Clock::time_point now);
     bool can_transmit() const noexcept;
+    bool cwnd_allows(size_t bytes) const noexcept;
     void fill_common(rudp::Packet& p) const;
     uint16_t advertised_window() const noexcept;
 
@@ -290,6 +298,7 @@ private:
     uint32_t sack_bitmap() const noexcept;
 
     // — timing / congestion —
+    void on_rto(Clock::time_point now);
     void sample_rtt(Clock::duration rtt);
     void enter_recovery();
     void on_loss(bool timeout);
@@ -344,6 +353,10 @@ private:
     // when the loss was detected.
     bool                  in_recovery_  = false;
     uint32_t              recover_seq_  = 0;
+    /// A retransmission timeout has given up on packets still sitting in `sent_`,
+    /// so retransmit_lost() has work to do. Purely a hint that keeps it from
+    /// scanning the whole queue on every acknowledgement of a healthy transfer.
+    bool                  have_lost_    = false;
 
     // — receive side —
     ReceiveBuffer                             inbox_;    ///< in-order bytes awaiting read()
@@ -367,6 +380,16 @@ private:
     Clock::time_point last_recv_;
     Clock::time_point last_send_;
     Clock::time_point ack_due_{};   ///< when a delayed ack must go out (epoch = none)
+    /// When the retransmission timeout fires (epoch = the timer is not running).
+    ///
+    /// One deadline for the stream, not one per packet — RFC 6298's model. It is
+    /// started by a transmission that finds it idle, restarted whenever an
+    /// acknowledgement covers new data, and turned off once nothing is outstanding.
+    /// Deriving it instead from `sent_.front().sent_at` (the obvious shortcut) is
+    /// wrong after a timeout: the packets behind the one that was resent still
+    /// carry their original timestamps, so every one of them looks instantly
+    /// overdue and the window is driven back to the floor on every tick.
+    Clock::time_point rto_deadline_{};
 };
 
 } // namespace librats

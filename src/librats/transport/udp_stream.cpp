@@ -119,6 +119,16 @@ void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
 
     host_.send_datagram(remote_, start, hdr + pkt.size());
 
+    // These bytes are on the path now. A retransmission of a packet that was never
+    // given up on adds nothing — it is the same bytes travelling again, not more of
+    // them — which is why this is a transition rather than an addition.
+    if (!pkt.in_flight) {
+        pkt.in_flight  = true;
+        flight_bytes_ += pkt.size();
+    }
+    // RFC 6298 (5.1): something is outstanding, so the timer has to be running.
+    if (rto_deadline_ == kNoDeadline) rto_deadline_ = now + rto_;
+
     pkt.sends++;
     pkt.sent_at = now;
     last_send_  = now;
@@ -150,28 +160,59 @@ void UdpStream::send_control(rudp::PacketType type, Clock::time_point now) {
     ack_due_         = kNoDeadline;
 }
 
+bool UdpStream::cwnd_allows(size_t bytes) const noexcept {
+    // Always allow one packet out when the path is idle. This keeps a stream from
+    // deadlocking when the window shrinks below a single packet, and doubles as the
+    // zero-window probe: the lone in-flight packet is retransmitted on the RTO until
+    // the peer opens up again, which is exactly what a persist timer does.
+    if (flight_bytes_ == 0) return true;
+    return flight_bytes_ + bytes <= cwnd_;
+}
+
 bool UdpStream::can_transmit() const noexcept {
     if (state_ != State::Connected) return false;   // nothing may overtake the Syn
     if (unsent_.empty()) return false;
-    // Always allow one packet out. This keeps a stream from deadlocking when the
-    // window shrinks below a single packet, and doubles as the zero-window probe:
-    // the lone in-flight packet is retransmitted on the RTO until the peer opens
-    // up again, which is exactly what a persist timer does.
     if (sent_.empty()) return true;
     if (sent_.size() >= peer_window_) return false;
     if (sent_.size() >= rudp::kMaxWindowPackets) return false;
-    return flight_bytes_ + unsent_.front().size() <= cwnd_;
+    return cwnd_allows(unsent_.front().size());
+}
+
+void UdpStream::retransmit_lost(Clock::time_point now) {
+    // The flag keeps this off the hot path entirely: without it the scan below
+    // would walk the whole retransmission queue on every acknowledgement of a
+    // healthy transfer — a window's worth of packets, every time — to discover
+    // that there is nothing to repair.
+    if (!have_lost_) return;
+
+    // Packets a timeout has given up on: still owed to the peer, no longer counted
+    // against the window. They are re-sent from the front, under whatever the
+    // congestion window currently allows — so the pipe refills at the rate the
+    // recovering window dictates instead of all at once, and a hole is always
+    // repaired before anything queued behind it is sent.
+    for (OutPacket& pkt : sent_) {
+        if (pkt.acked || pkt.in_flight) continue;  // the peer has it, or it is already back out
+        if (pkt.sends == 0) continue;              // never sent; pump() owns it
+        if (!cwnd_allows(pkt.size())) return;      // more still owed: come back with a bigger window
+        transmit(pkt, now);
+        ++retransmits_;
+    }
+    have_lost_ = false;  // the scan reached the end, so nothing is waiting to go back out
 }
 
 void UdpStream::pump(Clock::time_point now) {
+    // Repairs first: what the peer is missing blocks everything queued behind it,
+    // so spending the window on new data before the hole is filled would only grow
+    // the peer's reorder buffer.
+    retransmit_lost(now);
+
     while (can_transmit()) {
         OutPacket pkt = std::move(unsent_.front());
         unsent_.pop_front();
         pkt.seq = next_seq_++;
 
-        flight_bytes_ += pkt.size();
         sent_.push_back(std::move(pkt));
-        transmit(sent_.back(), now);
+        transmit(sent_.back(), now);   // this is what puts it in flight
     }
 }
 
@@ -296,6 +337,7 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     if (rudp::seq_less(next_seq_ - 1, p.ack)) return;
 
     size_t newly_acked = 0;
+    size_t retired     = 0;   ///< packets the cumulative ack removed from the queue
     while (!sent_.empty() && rudp::seq_le(sent_.front().seq, p.ack)) {
         OutPacket& front = sent_.front();
         // Karn's rule: a packet that was retransmitted cannot say which copy this
@@ -306,13 +348,20 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
         // fill, which is exactly when a *tight* RTO matters most.
         if (front.sends == 1 && !front.acked) sample_rtt(now - front.sent_at);
 
+        if (front.in_flight) {
+            flight_bytes_   -= front.size();
+            front.in_flight  = false;
+        }
+        // A packet a selective ack already retired left the queue's accounting then;
+        // one a timeout gave up on left only the *flight* accounting, and still owes
+        // its bytes to queued_bytes_ — which is why the two are settled separately.
         if (!front.acked) {
-            flight_bytes_ -= front.size();
             queued_bytes_ -= front.size();
             newly_acked   += front.size();
         }
         recycle(front);
         sent_.pop_front();
+        ++retired;
     }
 
     // The episode ends once everything that was outstanding when the loss was
@@ -330,8 +379,11 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
             if (idx < 0 || static_cast<size_t>(idx) >= sent_.size()) continue;
             OutPacket& pkt = sent_[static_cast<size_t>(idx)];
             if (pkt.acked) continue;
-            pkt.acked      = true;
-            flight_bytes_ -= pkt.size();
+            pkt.acked = true;
+            if (pkt.in_flight) {
+                flight_bytes_  -= pkt.size();
+                pkt.in_flight   = false;
+            }
             queued_bytes_ -= pkt.size();
         }
     }
@@ -358,6 +410,14 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
             ++retransmits_;
         }
     }
+
+    // RFC 6298 (5.2/5.3): the timer restarts whenever the cumulative ack retires
+    // something, and stops once nothing is outstanding. Counted in packets rather
+    // than bytes, because a Syn and a Fin each occupy a sequence number while
+    // carrying no payload — a byte count would leave the timer running on the
+    // deadline the *handshake* set, which is neither the one the first data packet
+    // deserves nor one anything else will correct.
+    if (retired > 0) rto_deadline_ = sent_.empty() ? kNoDeadline : now + rto_;
 }
 
 void UdpStream::handle_retry(const rudp::Packet& p, Clock::time_point now) {
@@ -378,12 +438,17 @@ void UdpStream::handle_retry(const rudp::Packet& p, Clock::time_point now) {
     // counters, so anything that grows a queued packet must add to them first.
     syn.buf.resize(rudp::kMaxHeaderSize);
     syn.buf.insert(syn.buf.end(), p.payload.begin(), p.payload.end());
-    flight_bytes_ += rudp::kCookieSize;
     queued_bytes_ += rudp::kCookieSize;
+    // Only if the packet is currently counted as in flight: if a timeout has just
+    // given up on it, transmit() below will count the whole grown packet afresh,
+    // and adding the difference here as well would count the cookie twice.
+    if (syn.in_flight) flight_bytes_ += rudp::kCookieSize;
 
     // The round trip we just spent proving our address is not a lost packet, so it
-    // does not count against the dial's attempt budget.
-    syn.sends = 0;
+    // does not count against the dial's attempt budget — and the dial gets a fresh
+    // timeout to answer in, rather than what was left of the first one.
+    syn.sends     = 0;
+    rto_deadline_ = now + rto_;
     transmit(syn, now);
 
     LOG_DEBUG("udp", "Stream " << recv_id_ << " re-dialing " << remote_.to_string()
@@ -537,6 +602,59 @@ void UdpStream::on_loss(bool timeout) {
     }
 }
 
+void UdpStream::on_rto(Clock::time_point now) {
+    // Find the oldest packet the peer has not confirmed. A selectively acknowledged
+    // one at the front would mean the peer already has it, so it is not what the
+    // timeout is about.
+    OutPacket* oldest = nullptr;
+    for (OutPacket& pkt : sent_) {
+        if (!pkt.acked) { oldest = &pkt; break; }
+    }
+    if (!oldest || oldest->sends == 0) {
+        rto_deadline_ = kNoDeadline;  // nothing outstanding; the timer has no work
+        return;
+    }
+
+    const int cap = (state_ == State::SynSent) ? kSynMaxAttempts : kMaxRetransmits;
+    if (oldest->sends >= cap) {
+        die(state_ == State::SynSent ? CloseReason::ConnectFailed : CloseReason::PeerReset);
+        return;
+    }
+
+    // A timeout is the stronger signal and always collapses the window, even
+    // mid-recovery — but it also restarts the episode, so the selective acks that
+    // come back as the pipe refills do not each take another halving out of a
+    // window that is already down to one packet. (on_loss reads flight_bytes_, so
+    // it has to run before the accounting below is undone.)
+    on_loss(true);
+    in_recovery_ = true;
+    recover_seq_ = next_seq_ - 1;
+
+    // Everything outstanding has had a full retransmission timeout to arrive and
+    // nothing acknowledged it, so it is presumed lost and stops occupying the path.
+    //
+    // This step is what makes recovery possible at all. Leaving the bytes counted
+    // would leave flight_bytes_ holding a whole window while cwnd_ is back down to
+    // one packet, and cwnd_allows() — the gate every transmission goes through —
+    // would refuse for as long as those packets sat in the queue. The sender would
+    // then crawl forward one packet per timeout, unable to grow the window or
+    // repair the rest, until the transfer effectively stopped.
+    for (OutPacket& pkt : sent_) {
+        if (!pkt.in_flight) continue;
+        pkt.in_flight  = false;
+        flight_bytes_ -= pkt.size();
+        have_lost_     = true;
+    }
+
+    // Exponential backoff, so a path that is down is probed ever more cheaply
+    // instead of being hammered. The deadline is set from it before anything goes
+    // out, so the retransmissions below do not each restart the timer.
+    rto_          = clamp_duration(rto_ * 2, kMinRto, kMaxRto);
+    rto_deadline_ = now + rto_;
+
+    retransmit_lost(now);
+}
+
 void UdpStream::grow_window(size_t acked_bytes) {
     if (cwnd_ < ssthresh_) {
         cwnd_ += static_cast<uint32_t>((std::min)(acked_bytes, size_t{rudp::kMaxPayload} * 2));
@@ -560,28 +678,9 @@ void UdpStream::tick(Clock::time_point now) {
         return;
     }
 
-    if (!sent_.empty()) {
-        OutPacket& front = sent_.front();
-        if (front.sends > 0 && now - front.sent_at >= rto_) {
-            const int cap = (state_ == State::SynSent) ? kSynMaxAttempts : kMaxRetransmits;
-            if (front.sends >= cap) {
-                die(state_ == State::SynSent ? CloseReason::ConnectFailed : CloseReason::PeerReset);
-                flush_events();
-                return;
-            }
-            // A timeout is the stronger signal and always collapses the window,
-            // even mid-recovery — but it also restarts the episode, so the
-            // selective acks that come back as the pipe refills do not each take
-            // another halving out of a window that is already down to one packet.
-            on_loss(true);
-            in_recovery_ = true;
-            recover_seq_ = next_seq_ - 1;
-            transmit(front, now);
-            ++retransmits_;
-            // Exponential backoff, so a path that is down is probed ever more
-            // cheaply instead of being hammered.
-            rto_ = clamp_duration(rto_ * 2, kMinRto, kMaxRto);
-        }
+    if (rto_deadline_ != kNoDeadline && now >= rto_deadline_) {
+        on_rto(now);
+        if (state_ == State::Dead) { flush_events(); return; }
     }
 
     if (need_ack_ && ack_due_ != kNoDeadline && now >= ack_due_) {
@@ -608,6 +707,8 @@ void UdpStream::die(CloseReason reason) {
     sack_dirty_   = false;
     flight_bytes_ = 0;
     queued_bytes_ = 0;
+    rto_deadline_ = kNoDeadline;
+    have_lost_    = false;
     raise(PollErr);
 }
 
