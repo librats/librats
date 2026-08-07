@@ -282,6 +282,7 @@ private:
 
     // — inbound —
     void handle_ack(const rudp::Packet& p, Clock::time_point now);
+    void handle_retry(const rudp::Packet& p, Clock::time_point now);
     void repair_sacked_holes(Clock::time_point now);
     void handle_sequenced(const rudp::Packet& p);
     void deliver(ByteView payload, bool fin);
@@ -310,6 +311,10 @@ private:
     bool        peer_fin_  = false;  ///< peer's Fin delivered in order
     bool        fin_queued_ = false; ///< our Fin is in the send queue
     bool        want_write_ = false;
+    /// A Retry has already been answered on this stream. The responder is entitled
+    /// to ask us to prove our address once; honouring a second one would let anyone
+    /// who can forge a datagram from the peer keep the dial going round forever.
+    bool        retried_    = false;
     uint32_t    events_     = 0;     ///< pending PollIn/PollOut/PollErr
 
     // — send side —

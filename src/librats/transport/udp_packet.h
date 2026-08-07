@@ -41,6 +41,12 @@
  *  - window  : how many further packets the sender of this datagram can buffer,
  *              in packets. This is the flow-control signal; 0 stops the peer.
  *
+ * Only three types carry anything after the header. Data carries stream bytes.
+ * Retry and Syn carry the kCookieSize address-validation cookie, or nothing —
+ * a responder under load answers a Syn with a Retry rather than opening a stream,
+ * and only a Syn that hands the cookie back costs it any memory (see udp_mux.h).
+ * Everything else is header-only, and a datagram that pads one is rejected.
+ *
  * Sequence numbers are 32-bit and wrap; compare them only with seq_less/seq_diff,
  * never with < on the raw value.
  */
@@ -64,6 +70,7 @@ enum class PacketType : uint8_t {
     Ack   = 2,  ///< pure acknowledgement / window update / keep-alive
     Fin   = 3,  ///< orderly end of the sender's stream; consumes a sequence number
     Reset = 4,  ///< abort now: the stream is gone or was never known
+    Retry = 5,  ///< "prove you are at that address first" — carries a cookie, holds no state
 };
 
 enum PacketFlags : uint8_t {
@@ -79,6 +86,13 @@ constexpr size_t kSackSize = 4;
 /// of a payload can write the header directly ahead of the bytes it describes and
 /// hand the socket one contiguous datagram — see encode_header().
 constexpr size_t kMaxHeaderSize = kHeaderSize + kSackSize;
+
+/// Bytes of the address-validation cookie a Retry hands out and a Syn hands back
+/// (see udp_mux.h). Four is the width of the truncated keyed hash it carries: an
+/// attacker who cannot receive at the address it is bound to gets one guess in
+/// 2^32 per Syn, which is the same order of protection a TCP SYN cookie encodes
+/// into a 32-bit sequence number.
+constexpr size_t kCookieSize = 4;
 
 /// Payload carried by one Data packet. 1200 keeps header+payload inside the
 /// smallest MTU worth designing for (IPv6's 1280 floor, minus room for an IPv6

@@ -191,6 +191,12 @@ public:
 
 UdpStream& stream_of(Link& link) { return static_cast<UdpStreamLink&>(link).stream(); }
 
+/// Is anything waiting on `sock`? Peeks, so the caller still gets to read it.
+bool probe_has_data(socket_t sock) {
+    uint8_t byte = 0;
+    return ::recv(sock, reinterpret_cast<char*>(&byte), 1, MSG_PEEK) >= 0;
+}
+
 std::string read_all(Link& link) {
     std::string out;
     uint8_t     buf[4096];
@@ -211,7 +217,10 @@ struct MuxPair {
     std::unique_ptr<UdpMux> a, b;
     Address                 addr_a, addr_b;
 
-    MuxPair() {
+    /// `b_limits` is what the *responder* admits with; the defaults never make a
+    /// test node validate anything, so a test that wants the loaded-node behaviour
+    /// asks for it explicitly rather than opening a thousand streams to earn it.
+    explicit MuxPair(UdpMuxLimits b_limits = {}) {
         init_socket_library();
         sock_a = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
         sock_b = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
@@ -222,7 +231,7 @@ struct MuxPair {
         addr_a = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sock_a))};
         addr_b = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sock_b))};
         a = std::make_unique<UdpMux>(sock_a, AddressFamily::IPv4, host_a);
-        b = std::make_unique<UdpMux>(sock_b, AddressFamily::IPv4, host_b);
+        b = std::make_unique<UdpMux>(sock_b, AddressFamily::IPv4, host_b, b_limits);
     }
 
     ~MuxPair() {
@@ -367,6 +376,40 @@ TEST(RudpPacketTest, RejectsMalformed) {
     std::memcpy(padded, buf, n);
     padded[n] = 0xAA;
     EXPECT_FALSE(rudp::decode(padded, n + 1, out));
+}
+
+// Syn and Retry carry the address-validation cookie — and only that. Letting a
+// Syn carry an arbitrary payload would hand an attacker a way to push bytes at a
+// responder that has not agreed to hold anything for it, and would put those
+// bytes in front of the stream the handshake is about to run over.
+TEST(RudpPacketTest, OnlyACookieSizedPayloadRidesOnSynAndRetry) {
+    const uint8_t cookie[rudp::kCookieSize] = {0xDE, 0xAD, 0xBE, 0xEF};
+
+    for (const rudp::PacketType type : {rudp::PacketType::Syn, rudp::PacketType::Retry}) {
+        rudp::Packet p;
+        p.type    = type;
+        p.conn_id = 0x1234;
+        p.seq     = 1;
+
+        uint8_t      buf[rudp::kMaxDatagram];
+        rudp::Packet out;
+
+        // Bare is fine: only a loaded responder asks for a cookie at all.
+        EXPECT_TRUE(rudp::decode(buf, rudp::encode(p, buf), out)) << to_string(type);
+        EXPECT_TRUE(out.payload.empty());
+
+        // Exactly a cookie is fine, and survives the round trip.
+        p.payload = ByteView(cookie, sizeof(cookie));
+        const size_t n = rudp::encode(p, buf);
+        ASSERT_TRUE(rudp::decode(buf, n, out)) << to_string(type);
+        ASSERT_EQ(out.payload.size(), rudp::kCookieSize);
+        EXPECT_EQ(std::memcmp(out.payload.data(), cookie, sizeof(cookie)), 0);
+
+        // Anything else is not a cookie, whichever side of the width it falls.
+        EXPECT_FALSE(rudp::decode(buf, n - 1, out)) << to_string(type) << " short";
+        buf[n] = 0x00;
+        EXPECT_FALSE(rudp::decode(buf, n + 1, out)) << to_string(type) << " long";
+    }
 }
 
 // ── Stream behaviour ────────────────────────────────────────────────────────
@@ -720,6 +763,193 @@ TEST(UdpMuxTest, LingersLongEnoughToDeliverTheLastBytes) {
         << "a flushed lingering stream was never reclaimed";
 }
 
+// ── Admission: what an unproven dial is allowed to cost ─────────────────────
+//
+// A TCP listener is protected by arithmetic it never has to write: an inbound
+// connection costs a file descriptor, and no forged source address can make the
+// kernel hand one out, because the three-way handshake has to complete first.
+// A datagram listener has neither. Without the two checks these tests cover, a
+// sixteen-byte Syn from an address that does not exist buys an attacker a stream,
+// a connection and a half-built Noise handshake, held for the establish timeout —
+// and nothing at all bounds how many of those they can buy at once.
+
+TEST(UdpMuxTest, AnUnprovenDialCostsTheResponderNothing) {
+    UdpMuxLimits validate_everything;
+    validate_everything.validate_above = 0;
+    MuxPair net{validate_everything};
+
+    socket_t probe = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(probe));
+    set_socket_nonblocking(probe);
+
+    // A Syn from an address B has never heard from. This is the forged datagram.
+    constexpr uint32_t kBase = 0x0BADC0DEu;
+    rudp::Packet syn;
+    syn.type    = rudp::PacketType::Syn;
+    syn.conn_id = kBase + 1;   // dialers send under base + 1 and listen on base
+    syn.seq     = 1;
+    uint8_t syn_buf[rudp::kMaxDatagram];
+    ASSERT_GT(send_udp_to(probe, syn_buf, rudp::encode(syn, syn_buf), net.addr_b,
+                          AddressFamily::IPv4), 0);
+
+    ASSERT_TRUE(wait_for([&] { net.b->on_readable(); return net.b->stream_count() > 0
+                                                          || net.host_b.adopted > 0
+                                                          || probe_has_data(probe); }))
+        << "the dial was neither answered nor refused";
+
+    EXPECT_EQ(net.b->stream_count(), 0u) << "an unproven dial created a stream";
+    EXPECT_EQ(net.host_b.adopted, 0)     << "an unproven dial reached the connection layer";
+
+    // What came back instead is a cookie, addressed to the id the dialer listens on.
+    uint8_t      buf[rudp::kMaxDatagram];
+    Address      from;
+    const auto   n = recv_udp_from(probe, buf, sizeof(buf), from);
+    ASSERT_GE(n, 0);
+    rudp::Packet retry;
+    ASSERT_TRUE(rudp::decode(buf, static_cast<size_t>(n), retry));
+    ASSERT_EQ(retry.type, rudp::PacketType::Retry);
+    EXPECT_EQ(retry.conn_id, kBase) << "the Retry went to the wrong id";
+    ASSERT_EQ(retry.payload.size(), rudp::kCookieSize);
+    const Bytes cookie = retry.payload.to_bytes();
+
+    // A cookie that was not issued buys nothing either.
+    Bytes forged = cookie;
+    forged[0] ^= 0xFF;
+    syn.payload = ByteView(forged);
+    ASSERT_GT(send_udp_to(probe, syn_buf, rudp::encode(syn, syn_buf), net.addr_b,
+                          AddressFamily::IPv4), 0);
+    for (int i = 0; i < 50; ++i) { net.b->on_readable(); std::this_thread::sleep_for(1ms); }
+    EXPECT_EQ(net.b->stream_count(), 0u) << "a forged cookie was accepted";
+
+    // The real one does, because only something that can receive at this address
+    // could have got hold of it.
+    syn.payload = ByteView(cookie);
+    ASSERT_GT(send_udp_to(probe, syn_buf, rudp::encode(syn, syn_buf), net.addr_b,
+                          AddressFamily::IPv4), 0);
+    EXPECT_TRUE(wait_for([&] { net.b->on_readable(); return net.host_b.adopted == 1; }))
+        << "a validated dial was still refused";
+    EXPECT_EQ(net.b->stream_count(), 1u);
+
+    close_socket(probe);
+}
+
+// The property the whole mechanism exists for, stated directly: however many
+// dials arrive from addresses that never answer, the memory they can make this
+// node hold does not grow past the validation threshold. Before there was one,
+// each of these bought a stream, a connection and a half-built Noise handshake
+// for fifteen seconds — and nothing capped how many.
+TEST(UdpMuxTest, AFloodOfUnansweredDialsCannotGrowPastTheThreshold) {
+    UdpMuxLimits limits;
+    limits.validate_above = 8;      // small, so the flood needed to pass it is small
+    limits.max_streams    = 4096;   // well clear, so it is the threshold being tested
+    MuxPair net{limits};
+
+    socket_t probe = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(probe));
+    set_socket_nonblocking(probe);
+
+    // Two thousand distinct dials, none of which ever comes back with its cookie —
+    // which is exactly what an attacker with a forged source address looks like,
+    // since the cookie is delivered to the address they claimed to be.
+    constexpr int kDials = 2000;
+    for (int i = 0; i < kDials; ++i) {
+        rudp::Packet syn;
+        syn.type    = rudp::PacketType::Syn;
+        syn.conn_id = 0x0100'0000u + static_cast<uint32_t>(i) * 2 + 1;
+        syn.seq     = 1;
+
+        uint8_t buf[rudp::kMaxDatagram];
+        send_udp_to(probe, buf, rudp::encode(syn, buf), net.addr_b, AddressFamily::IPv4);
+
+        // Keep the socket drained so the flood is processed rather than dropped by
+        // the kernel — the point is what the mux does with it, not what it misses.
+        if (i % 16 == 0) { net.b->on_readable(); net.b->tick(); }
+    }
+    for (int i = 0; i < 100; ++i) { net.b->on_readable(); net.b->tick();
+                                    std::this_thread::sleep_for(1ms); }
+
+    // Exactly the threshold: enough of the flood got through to fill every slot the
+    // node is willing to hand out unproven (so the test is not passing vacuously),
+    // and not one dial beyond it cost anything at all.
+    EXPECT_EQ(net.b->stream_count(), limits.validate_above);
+    EXPECT_EQ(static_cast<size_t>(net.host_b.adopted), limits.validate_above);
+
+    close_socket(probe);
+}
+
+// The extra round trip is the transport's business, not the caller's: a dialer
+// that is asked to prove its address does so and connects, with nothing above the
+// stream aware that anything happened.
+TEST(UdpMuxTest, ValidationIsInvisibleToARealDial) {
+    UdpMuxLimits validate_everything;
+    validate_everything.validate_above = 0;
+    MuxPair net{validate_everything};
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.adopted == 1; }))
+        << "the dialer never came back with the cookie it was given";
+    ASSERT_TRUE(net.pump_until([&] { return stream_of(*dial).connected(); }));
+
+    Link* accepted = net.host_b.only_link();
+    ASSERT_NE(accepted, nullptr);
+
+    // And the cookie is not mistaken for stream content: the first bytes the peer
+    // reads must be the ones actually written, not four bytes of hash in front.
+    const std::string msg = "first bytes on the stream";
+    const ByteView    slice(msg);
+    ASSERT_EQ(dial->write(&slice, 1).bytes, msg.size());
+
+    std::string got;
+    EXPECT_TRUE(net.pump_until([&] { got += read_all(*accepted); return got == msg; }))
+        << "got '" << got << "'";
+}
+
+// The backstop under the cookie. Everything counted here has already proved its
+// address, so reaching it means real peers — but the ceiling has to exist, or
+// "validated" would still mean "unbounded".
+TEST(UdpMuxTest, RefusesDialsAtTheStreamCeiling) {
+    UdpMuxLimits tiny;
+    tiny.max_streams    = 1;
+    tiny.validate_above = SIZE_MAX;   // isolate the ceiling from the cookie
+    MuxPair net{tiny};
+
+    auto first = net.dial();
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.adopted == 1; }));
+    ASSERT_EQ(net.b->stream_count(), 1u);
+
+    // A second dial from a different socket, so it is a genuinely new stream.
+    socket_t probe = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(probe));
+    set_socket_nonblocking(probe);
+
+    rudp::Packet syn;
+    syn.type    = rudp::PacketType::Syn;
+    syn.conn_id = 0x5EC0'0DE1u;
+    syn.seq     = 1;
+    uint8_t syn_buf[rudp::kMaxDatagram];
+    ASSERT_GT(send_udp_to(probe, syn_buf, rudp::encode(syn, syn_buf), net.addr_b,
+                          AddressFamily::IPv4), 0);
+
+    ASSERT_TRUE(wait_for([&] { net.b->on_readable(); return probe_has_data(probe); }))
+        << "the dial at the ceiling was ignored rather than refused";
+
+    uint8_t    buf[rudp::kMaxDatagram];
+    Address    from;
+    const auto n = recv_udp_from(probe, buf, sizeof(buf), from);
+    ASSERT_GE(n, 0);
+    rudp::Packet reply;
+    ASSERT_TRUE(rudp::decode(buf, static_cast<size_t>(n), reply));
+    EXPECT_EQ(reply.type, rudp::PacketType::Reset) << "a refused dial should be told so";
+
+    EXPECT_EQ(net.b->stream_count(), 1u) << "the ceiling was crossed";
+    EXPECT_EQ(net.host_b.adopted, 1);
+
+    close_socket(probe);
+}
+
 // How a burst of packets for one stream turns into readable events decides two
 // things at once, and they pull in opposite directions.
 //
@@ -874,7 +1104,7 @@ TEST(UdpMuxTest, ResetsAreCappedSoTheSocketCannotReflect) {
     ASSERT_TRUE(is_valid_socket(probe));
     set_socket_nonblocking(probe);
 
-    constexpr int kJunk = UdpMux::kMaxResetsPerTick * 3;
+    constexpr int kJunk = UdpMux::kMaxUnsolicitedRepliesPerTick * 3;
     for (int i = 0; i < kJunk; ++i) {
         rudp::Packet p;
         p.type    = rudp::PacketType::Data;   // not a Syn: nothing may be created
@@ -908,7 +1138,7 @@ TEST(UdpMuxTest, ResetsAreCappedSoTheSocketCannotReflect) {
     close_socket(probe);
 
     EXPECT_GT(resets, 0) << "an unknown stream should be answered, not ignored";
-    EXPECT_LE(resets, UdpMux::kMaxResetsPerTick) << "the per-tick reset budget was not enforced";
+    EXPECT_LE(resets, UdpMux::kMaxUnsolicitedRepliesPerTick) << "the per-tick reset budget was not enforced";
 }
 
 // ── End to end, through a Node ──────────────────────────────────────────────

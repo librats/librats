@@ -1,5 +1,6 @@
 #include "librats/transport/udp_mux.h"
 #include "librats/core/io_poller.h"
+#include "librats/crypto/blake2s.h"
 #include "librats/util/logger.h"
 
 #include <algorithm>
@@ -9,10 +10,29 @@
 
 namespace librats {
 
-UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate)
-    : socket_(socket), family_(family), delegate_(delegate),
+namespace {
+
+/// Fresh bytes for a cookie secret. Straight from the system source rather than
+/// the mux's mt19937: that generator is seeded once and its output is predictable
+/// from enough samples, which is the wrong property for the one value standing
+/// between a forged source address and an allocation.
+void fill_random(uint8_t* out, size_t len) {
+    std::random_device dev;
+    for (size_t i = 0; i < len; i += sizeof(unsigned int)) {
+        const unsigned int word = dev();
+        const size_t       n    = (std::min)(sizeof(word), len - i);
+        std::memcpy(out + i, &word, n);
+    }
+}
+
+} // namespace
+
+UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
+               UdpMuxLimits limits)
+    : socket_(socket), family_(family), delegate_(delegate), limits_(limits),
       recv_storage_(kUdpBatchMax * rudp::kMaxDatagram),
       send_storage_(kUdpBatchMax * rudp::kMaxDatagram),
+      secret_rotated_at_(Clock::now()),
       rng_(std::random_device{}()) {
     set_socket_buffer_sizes(socket_, kSocketBufferBytes, kSocketBufferBytes);
 
@@ -22,6 +42,8 @@ UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate)
         recv_slots_[i].data = recv_storage_.data() + i * rudp::kMaxDatagram;
         send_slots_[i].data = send_storage_.data() + i * rudp::kMaxDatagram;
     }
+
+    for (CookieSecret& secret : cookie_secret_) fill_random(secret.data(), secret.size());
 }
 
 UdpMux::~UdpMux() {
@@ -89,6 +111,80 @@ void UdpMux::send_reset(const Address& to, uint32_t conn_id) {
     p.type    = rudp::PacketType::Reset;
     p.conn_id = conn_id;
     send_datagram(to, buf, rudp::encode(p, buf));
+}
+
+void UdpMux::send_retry(const Address& to, uint32_t conn_id, uint32_t cookie) {
+    uint8_t cookie_bytes[rudp::kCookieSize] = {
+        static_cast<uint8_t>(cookie >> 24), static_cast<uint8_t>(cookie >> 16),
+        static_cast<uint8_t>(cookie >> 8),  static_cast<uint8_t>(cookie),
+    };
+
+    uint8_t buf[rudp::kHeaderSize + rudp::kCookieSize];
+    rudp::Packet p;
+    p.type    = rudp::PacketType::Retry;
+    p.conn_id = conn_id;
+    p.payload = ByteView(cookie_bytes, sizeof(cookie_bytes));
+    send_datagram(to, buf, rudp::encode(p, buf));
+}
+
+bool UdpMux::spend_reply_budget() {
+    if (replies_this_tick_ >= kMaxUnsolicitedRepliesPerTick) return false;
+    ++replies_this_tick_;
+    return true;
+}
+
+// ── Address validation ──────────────────────────────────────────────────────
+
+uint32_t UdpMux::cookie_for(const Address& from, uint32_t conn_id,
+                            const CookieSecret& secret) const {
+    // A keyed hash of everything the cookie has to be tied to, truncated to the
+    // four bytes the wire carries. The secret goes in first: BLAKE2 is designed to
+    // be a MAC in exactly this prefix form (it has no length-extension weakness to
+    // work around), so there is no reason to reach for HMAC here.
+    //
+    // Binding the port as well as the address is what makes the cookie useless to
+    // anyone but the socket that asked for it, and binding conn_id keeps one cookie
+    // from opening a second stream. Nothing binds a timestamp: the secret's own
+    // rotation is what expires a cookie.
+    const ByteView ip    = from.ip.bytes();
+    const uint8_t  tail[6] = {
+        static_cast<uint8_t>(from.port >> 8), static_cast<uint8_t>(from.port),
+        static_cast<uint8_t>(conn_id >> 24),  static_cast<uint8_t>(conn_id >> 16),
+        static_cast<uint8_t>(conn_id >> 8),   static_cast<uint8_t>(conn_id),
+    };
+
+    rats_blake2s_context_t ctx;
+    rats_blake2s_reset(&ctx);
+    rats_blake2s_update(&ctx, secret.data(), secret.size());
+    rats_blake2s_update(&ctx, ip.data(), ip.size());
+    rats_blake2s_update(&ctx, tail, sizeof(tail));
+
+    uint8_t hash[RATS_BLAKE2S_HASH_SIZE];
+    rats_blake2s_finish(&ctx, hash);
+    return (static_cast<uint32_t>(hash[0]) << 24) | (static_cast<uint32_t>(hash[1]) << 16) |
+           (static_cast<uint32_t>(hash[2]) << 8)  |  static_cast<uint32_t>(hash[3]);
+}
+
+bool UdpMux::cookie_valid(const Address& from, uint32_t conn_id, ByteView payload) const {
+    if (payload.size() != rudp::kCookieSize) return false;
+
+    const uint8_t* bytes   = payload.data();
+    const uint32_t offered = (static_cast<uint32_t>(bytes[0]) << 24) |
+                             (static_cast<uint32_t>(bytes[1]) << 16) |
+                             (static_cast<uint32_t>(bytes[2]) << 8)  |
+                              static_cast<uint32_t>(bytes[3]);
+
+    // Both secrets, so a cookie handed out just before a rotation is still good.
+    for (const CookieSecret& secret : cookie_secret_)
+        if (cookie_for(from, conn_id, secret) == offered) return true;
+    return false;
+}
+
+void UdpMux::rotate_cookie_secret(Clock::time_point now) {
+    if (now - secret_rotated_at_ < kCookieSecretLifetime) return;
+    cookie_secret_[1] = cookie_secret_[0];
+    fill_random(cookie_secret_[0].data(), cookie_secret_[0].size());
+    secret_rotated_at_ = now;
 }
 
 // ── Inbound datagrams ───────────────────────────────────────────────────────
@@ -161,7 +257,7 @@ void UdpMux::handle_datagram(const rudp::Packet& p, const Address& from, Clock::
     }
 
     if (p.type == rudp::PacketType::Syn) {
-        accept_inbound(p, from, now);
+        if (admit_syn(p, from)) accept_inbound(p, from, now);
         return;
     }
 
@@ -176,10 +272,38 @@ void UdpMux::handle_datagram(const rudp::Packet& p, const Address& from, Clock::
     // previous run of this node. Say so, so the peer gives up now instead of
     // retransmitting for a minute — but never more than a fixed number per tick,
     // so a flood of garbage cannot turn this socket into a reflector.
-    if (resets_this_tick_ < kMaxResetsPerTick) {
-        ++resets_this_tick_;
-        send_reset(from, p.conn_id);
+    if (spend_reply_budget()) send_reset(from, p.conn_id);
+}
+
+bool UdpMux::admit_syn(const rudp::Packet& syn, const Address& from) {
+    // Everything this function refuses is refused BEFORE a stream exists. That is
+    // the whole point: a Syn is sixteen bytes from an address nobody has verified,
+    // and answering it with a stream, a connection and a half-built Noise handshake
+    // is a trade an attacker with a forged source address would happily make a
+    // million times a second. TCP is spared this by its three-way handshake and by
+    // the file descriptor an accepted connection costs; here the two checks below
+    // stand in for both.
+    //
+    // The id the dialer listens on is one below the one it sent under, so that is
+    // where any answer has to go — the same pairing accept_inbound() relies on.
+    const uint32_t reply_id = syn.conn_id - 1;
+
+    if (streams_.size() >= limits_.max_streams) {
+        LOG_DEBUG("udp", "Refusing a dial from " << from.to_string() << ": at the stream ceiling ("
+                  << limits_.max_streams << ")");
+        if (spend_reply_budget()) send_reset(from, reply_id);
+        return false;
     }
+
+    if (streams_.size() < limits_.validate_above) return true;  // not under pressure
+
+    if (cookie_valid(from, syn.conn_id, syn.payload)) return true;
+
+    // Unproven. Hand back a cookie and keep nothing: if the address was forged, the
+    // cookie goes to whoever really lives there and this dial simply never happens.
+    if (spend_reply_budget())
+        send_retry(from, reply_id, cookie_for(from, syn.conn_id, cookie_secret_[0]));
+    return false;
 }
 
 void UdpMux::accept_inbound(const rudp::Packet& syn, const Address& from, Clock::time_point now) {
@@ -283,7 +407,8 @@ void UdpMux::release(UdpStream& stream) {
 
 void UdpMux::tick() {
     const auto now = Clock::now();
-    resets_this_tick_ = 0;
+    replies_this_tick_ = 0;
+    rotate_cookie_secret(now);
 
     expired_.clear();
     for (auto& entry : streams_) {

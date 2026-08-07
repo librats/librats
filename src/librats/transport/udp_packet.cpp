@@ -63,7 +63,7 @@ bool decode(const uint8_t* data, size_t len, Packet& out) {
     if ((data[0] >> 4) != kVersion) return false;
 
     const uint8_t type = data[0] & 0x0F;
-    if (type > static_cast<uint8_t>(PacketType::Reset)) return false;
+    if (type > static_cast<uint8_t>(PacketType::Retry)) return false;
 
     out.type    = static_cast<PacketType>(type);
     out.flags   = data[1];
@@ -83,11 +83,23 @@ bool decode(const uint8_t* data, size_t len, Packet& out) {
 
     out.payload = ByteView(data + offset, len - offset);
 
-    // Only Data carries a payload. Rejecting bytes on the other types keeps a
-    // padded or spliced datagram from ever reaching the stream as stream content,
-    // and keeps the accounting ("a Data packet is worth payload.size() bytes")
-    // true by construction.
-    if (out.type != PacketType::Data && !out.payload.empty()) return false;
+    // What a type is allowed to carry after the header. Being strict here is what
+    // keeps a padded or spliced datagram from ever reaching a stream as stream
+    // content, and keeps the accounting ("a Data packet is worth payload.size()
+    // bytes") true by construction.
+    switch (out.type) {
+        case PacketType::Data:
+            break;  // stream bytes, any length up to kMaxPayload
+        case PacketType::Syn:
+        case PacketType::Retry:
+            // The address-validation cookie, or nothing at all. Fixed width, so
+            // there is no room to smuggle anything alongside it.
+            if (!out.payload.empty() && out.payload.size() != kCookieSize) return false;
+            break;
+        default:
+            if (!out.payload.empty()) return false;  // Ack/Fin/Reset are header-only
+            break;
+    }
     if (out.payload.size() > kMaxPayload) return false;
 
     return true;
@@ -100,6 +112,7 @@ const char* to_string(PacketType t) noexcept {
         case PacketType::Ack:   return "ACK";
         case PacketType::Fin:   return "FIN";
         case PacketType::Reset: return "RESET";
+        case PacketType::Retry: return "RETRY";
     }
     return "?";
 }

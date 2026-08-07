@@ -80,6 +80,35 @@ public:
     virtual void dispatch_link_events(ConnId id, uint32_t events) = 0;
 };
 
+/// What the mux is willing to spend on peers it has not heard a round trip from.
+///
+/// A TCP listener gets this for free: an inbound connection costs a file
+/// descriptor, and an attacker cannot make the kernel allocate one without
+/// completing a three-way handshake — which a forged source address cannot do.
+/// A datagram listener has neither the descriptor nor the handshake, so an
+/// unanswered Syn would otherwise buy an attacker a stream, a connection and a
+/// half-built Noise handshake for the price of sixteen forged bytes. These two
+/// numbers are what puts the datagram side back on the same footing.
+struct UdpMuxLimits {
+    /// Concurrent streams the mux will hold at all. A backstop rather than the
+    /// working limit — with validation on (below), everything counted here has
+    /// proved it can receive at its address, and the node's own peer cap governs
+    /// long before this does. Reaching it answers further dials with a Reset.
+    size_t max_streams = 8192;
+
+    /// Streams above which a Syn must carry a valid address-validation cookie
+    /// before it costs anything. This, not max_streams, is the bound on state a
+    /// forged source address can create: past it a bare Syn is answered with a
+    /// Retry and nothing is kept, so unvalidated state can never exceed roughly
+    /// this many streams (~1.5 MiB at the default).
+    ///
+    /// The cost of validation is one extra round trip on an inbound dial, paid
+    /// only by a node that is already carrying this many streams — so an ordinary
+    /// node never pays it, and a node under a flood pays it instead of dying.
+    /// 0 validates every inbound dial; SIZE_MAX never validates any.
+    size_t validate_above = 1024;
+};
+
 class UdpMux final : public UdpStreamHost {
 public:
     using Clock = UdpStream::Clock;
@@ -102,9 +131,19 @@ public:
     /// which makes "drain until empty" a correctness requirement, not a nicety).
     static constexpr size_t kMaxDatagramsPerRead = 4096;
 
-    /// Resets emitted per tick in reply to datagrams for unknown streams. A
-    /// hostile sender must not be able to turn us into a reflector.
-    static constexpr int kMaxResetsPerTick = 64;
+    /// Replies emitted per tick to datagrams that belong to no stream — the Reset
+    /// that tells a peer we have forgotten it, and the Retry that asks an unproven
+    /// one to come back with a cookie. Both are answers to unauthenticated traffic
+    /// from an address we have not verified, so both are budgeted together: a
+    /// hostile sender must not be able to turn this socket into a reflector,
+    /// whichever of the two it provokes.
+    static constexpr int kMaxUnsolicitedRepliesPerTick = 64;
+
+    /// How long a cookie secret stays current. Two are kept, so a cookie is good
+    /// for between one and two of these — long enough to survive a slow round trip
+    /// and a retransmitted Syn, short enough that a leaked secret is worthless
+    /// almost at once.
+    static constexpr std::chrono::seconds kCookieSecretLifetime{30};
 
     /// Socket buffer requested in each direction. One socket carries every peer,
     /// so the default (tens of kilobytes on most systems) is far too small: a
@@ -113,7 +152,8 @@ public:
     /// datagram throughput.
     static constexpr int kSocketBufferBytes = 4 * 1024 * 1024;
 
-    UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate);
+    UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
+           UdpMuxLimits limits = {});
     ~UdpMux() override;
 
     UdpMux(const UdpMux&) = delete;
@@ -161,15 +201,28 @@ private:
     };
 
     void        handle_datagram(const rudp::Packet& p, const Address& from, Clock::time_point now);
+    /// Decide whether a Syn for an unknown stream may become one. Answers the peer
+    /// itself (Reset at the ceiling, Retry when it has yet to prove its address)
+    /// and returns false when nothing should be created.
+    bool        admit_syn(const rudp::Packet& syn, const Address& from);
     void        accept_inbound(const rudp::Packet& syn, const Address& from, Clock::time_point now);
     void        send_reset(const Address& to, uint32_t conn_id);
+    void        send_retry(const Address& to, uint32_t conn_id, uint32_t cookie);
+    bool        spend_reply_budget();
     UdpStream*  find_for_reset(uint32_t conn_id, const Address& from);
     bool        allocate_ids(uint32_t& recv_id, uint32_t& send_id);
     void        dispatch_pending();
 
+    // — address validation —
+    using CookieSecret = std::array<uint8_t, 32>;
+    uint32_t cookie_for(const Address& from, uint32_t conn_id, const CookieSecret& secret) const;
+    bool     cookie_valid(const Address& from, uint32_t conn_id, ByteView payload) const;
+    void     rotate_cookie_secret(Clock::time_point now);
+
     socket_t        socket_;
     AddressFamily   family_;
     UdpMuxDelegate& delegate_;
+    UdpMuxLimits    limits_;
 
     std::unordered_map<uint32_t, Entry> streams_;  ///< keyed by our recv id
     std::vector<std::pair<ConnId, uint32_t>> pending_events_;
@@ -185,8 +238,13 @@ private:
     std::array<UdpBatchSlot, kUdpBatchMax>    send_slots_{};
     size_t                                    staged_ = 0;  ///< datagrams awaiting flush_output()
 
+    // Cookie secrets: [0] is current, [1] the one it replaced. A cookie is checked
+    // against both, so one that was handed out just before a rotation still works.
+    std::array<CookieSecret, 2> cookie_secret_{};
+    Clock::time_point           secret_rotated_at_{};
+
     std::mt19937 rng_;
-    int          resets_this_tick_ = 0;
+    int          replies_this_tick_ = 0;
 };
 
 /// The Link a Connection holds for a UDP stream.

@@ -238,6 +238,15 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
         return;
     }
 
+    // Handled before anything else reads the header: a Retry comes from a responder
+    // that is holding no state for us at all, so its window and sequence number
+    // describe nothing and must not be folded into what we believe about the peer.
+    if (p.type == rudp::PacketType::Retry) {
+        handle_retry(p, now);
+        flush_events();
+        return;
+    }
+
     peer_window_ = p.window;
 
     bool ack_now = (p.type == rudp::PacketType::Syn || p.type == rudp::PacketType::Fin);
@@ -351,6 +360,36 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     }
 }
 
+void UdpStream::handle_retry(const rudp::Packet& p, Clock::time_point now) {
+    // "Not until you prove you are really at that address." A responder under load
+    // answers a dial with a cookie instead of a stream, and will not spend a byte of
+    // memory on us until it comes back. Only a dial that has not been answered yet
+    // can be retried, and only once — see retried_.
+    if (state_ != State::SynSent || retried_) return;
+    if (p.payload.size() != rudp::kCookieSize) return;
+    if (sent_.empty() || sent_.front().type != rudp::PacketType::Syn) return;
+
+    retried_ = true;
+    OutPacket& syn = sent_.front();
+
+    // The same Syn, same sequence number, now carrying the cookie. Its payload was
+    // empty until now, and the send accounting has to learn about the bytes: the
+    // cumulative ack that eventually retires this packet subtracts size() from both
+    // counters, so anything that grows a queued packet must add to them first.
+    syn.buf.resize(rudp::kMaxHeaderSize);
+    syn.buf.insert(syn.buf.end(), p.payload.begin(), p.payload.end());
+    flight_bytes_ += rudp::kCookieSize;
+    queued_bytes_ += rudp::kCookieSize;
+
+    // The round trip we just spent proving our address is not a lost packet, so it
+    // does not count against the dial's attempt budget.
+    syn.sends = 0;
+    transmit(syn, now);
+
+    LOG_DEBUG("udp", "Stream " << recv_id_ << " re-dialing " << remote_.to_string()
+              << " with an address-validation cookie");
+}
+
 void UdpStream::repair_sacked_holes(Clock::time_point now) {
     // Everything before the highest selectively acknowledged packet has had its
     // chance: the peer received something sent *after* it, so it is not merely
@@ -386,9 +425,15 @@ void UdpStream::handle_sequenced(const rudp::Packet& p) {
 
     if (rudp::seq_less(p.seq, recv_next_)) return;  // already delivered; just re-ack
 
+    // Only Data carries stream content. A Syn occupies a sequence number like any
+    // other packet, but what it carries is the address-validation cookie the mux
+    // has already checked — delivering that as stream bytes would splice four bytes
+    // of nonsense into the front of the peer's handshake.
+    const ByteView body = (p.type == rudp::PacketType::Data) ? p.payload : ByteView{};
+
     if (p.seq == recv_next_) {
         ++unacked_packets_;
-        deliver(p.payload, p.type == rudp::PacketType::Fin);
+        deliver(body, p.type == rudp::PacketType::Fin);
         ++recv_next_;
         sack_dirty_ = true;   // the bitmap is relative to recv_next_, which just moved
         drain_reorder();
@@ -403,7 +448,7 @@ void UdpStream::handle_sequenced(const rudp::Packet& p) {
     if (reorder_.count(p.seq)) return;
 
     InPacket held;
-    held.payload = p.payload.to_bytes();
+    held.payload = body.to_bytes();
     held.fin     = (p.type == rudp::PacketType::Fin);
     reorder_.emplace(p.seq, std::move(held));
     sack_dirty_ = true;
