@@ -171,7 +171,10 @@ public:
         return id;
     }
 
-    void dispatch_link_events(ConnId id, uint32_t events) override { delivered[id] |= events; }
+    void dispatch_link_events(ConnId id, uint32_t events) override {
+        delivered[id] |= events;
+        ++dispatches;
+    }
 
     Link* only_link() {
         return links.size() == 1 ? links.begin()->second.get() : nullptr;
@@ -182,6 +185,7 @@ public:
     ConnId                                            next_id  = 1;
     int                                               adopted  = 0;
     int                                               refused  = 0;
+    size_t                                            dispatches = 0;
     bool                                              refuse   = false;
 };
 
@@ -714,6 +718,71 @@ TEST(UdpMuxTest, LingersLongEnoughToDeliverTheLastBytes) {
     // ...and once it is all acknowledged, the mux stops holding it.
     EXPECT_TRUE(net.pump_until([&] { return net.a->stream_count() == 0; }))
         << "a flushed lingering stream was never reclaimed";
+}
+
+// How a burst of packets for one stream turns into readable events decides two
+// things at once, and they pull in opposite directions.
+//
+// A stream raises PollIn for every packet it delivers, so the naive answer — one
+// dispatch each — spends a map lookup and a read attempt per packet, and all but
+// the first find the buffer already drained. Coalescing fixes that.
+//
+// The opposite mistake is to coalesce so well that the whole drain becomes one
+// dispatch. Delivered bytes wait in the stream's in-order buffer until its
+// connection reads them out, so a single dispatch at the end lets that buffer grow
+// to everything the peer managed to send — through main memory rather than cache,
+// and far enough to close the receive window mid-drain. So the events are handed
+// over once per receive batch: often enough to bound the buffer, rarely enough
+// that the per-packet cost is gone.
+TEST(UdpMuxTest, BurstsCoalesceIntoOneEventPerBatchRatherThanOnePerPacket) {
+    MuxPair net;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.adopted == 1; }));
+    ASSERT_TRUE(net.pump_until([&] { return stream_of(*dial).connected(); }));
+
+    Link* accepted = net.host_b.only_link();
+    ASSERT_NE(accepted, nullptr);
+    const uint32_t stream_id = stream_of(*accepted).recv_id();
+
+    // Hand-built packets rather than a real write, so the burst is not shaped by
+    // the sender's congestion window: this is about what the receiver does with a
+    // pile of datagrams, and the pile has to be bigger than one batch to tell the
+    // two failure modes apart. They come from A's socket because a stream only
+    // accepts datagrams from the address it was established with. The Syn took
+    // sequence number 1, so the data starts at 2.
+    constexpr size_t kPackets = kUdpBatchMax * 2 + 6;
+    for (size_t i = 0; i < kPackets; ++i) {
+        rudp::Packet p;
+        p.type    = rudp::PacketType::Data;
+        p.conn_id = stream_id;
+        p.seq     = static_cast<uint32_t>(2 + i);
+        p.window  = rudp::kMaxWindowPackets;
+        const uint8_t byte = 'x';
+        p.payload = ByteView(&byte, 1);
+
+        uint8_t buf[rudp::kMaxDatagram];
+        ASSERT_GT(send_udp_to(net.sock_a, buf, rudp::encode(p, buf), net.addr_b,
+                              AddressFamily::IPv4), 0);
+    }
+
+    // Let the whole burst land before B looks at the socket even once.
+    std::this_thread::sleep_for(100ms);
+    net.host_b.dispatches = 0;
+    net.b->on_readable();
+
+    const size_t consumed = read_all(*accepted).size();  // one byte per packet
+    ASSERT_GE(consumed, kUdpBatchMax * 2)
+        << "the burst did not arrive as one readable event; there is nothing to measure";
+
+    EXPECT_LT(net.host_b.dispatches, consumed)
+        << "one dispatch per packet — the events were not coalesced";
+    EXPECT_GE(net.host_b.dispatches, 2u)
+        << "one dispatch for the whole drain — the in-order buffer is free to grow "
+           "to everything the peer sent before the connection is ever told to read";
+    EXPECT_LE(net.host_b.dispatches, 6u)
+        << "more dispatches than there were receive batches";
 }
 
 // The mux stages outgoing datagrams so a burst leaves in one syscall instead of

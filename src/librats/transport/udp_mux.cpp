@@ -59,8 +59,28 @@ void UdpMux::stream_events(UdpStream& stream, uint32_t events) {
     // Recorded, never delivered from here: see the file comment. A stream with no
     // connection (one that is lingering after its connection went away) has
     // nowhere to send events, and quietly drops them.
-    if (stream.conn_id() == kInvalidConnId) return;
-    pending_events_.emplace_back(stream.conn_id(), events);
+    const ConnId id = stream.conn_id();
+    if (id == kInvalidConnId) return;
+
+    // Coalesce. A stream raises PollIn for every packet it delivers, so a run of
+    // datagrams from one peer used to queue one dispatch per packet — and every one
+    // after the first found the connection's buffer already drained, having paid a
+    // map lookup and a read attempt to find that out.
+    //
+    // Scanning the tail rather than the whole list is what keeps this O(1) in the
+    // size of the node: during a receive batch the list cannot be longer than the
+    // batch, so the window covers all of it and the coalescing is exact; in tick(),
+    // where the list can hold an entry per stream, each stream is visited once and
+    // there is nothing to coalesce anyway.
+    const size_t from = pending_events_.size() > kUdpBatchMax
+                            ? pending_events_.size() - kUdpBatchMax
+                            : 0;
+    for (size_t i = from; i < pending_events_.size(); ++i) {
+        if (pending_events_[i].first != id) continue;
+        pending_events_[i].second |= events;
+        return;
+    }
+    pending_events_.emplace_back(id, events);
 }
 
 void UdpMux::send_reset(const Address& to, uint32_t conn_id) {
@@ -101,6 +121,20 @@ bool UdpMux::on_readable() {
             handle_datagram(p, slot.endpoint, now);
         }
         drained += static_cast<size_t>(got);
+
+        // Hand this batch's events over before reading the next one, rather than
+        // saving them all for the end of the drain. What a stream delivers sits in
+        // its in-order buffer until its connection reads it out, so deferring the
+        // whole drain let that buffer grow to everything one peer managed to send
+        // in it — a megabyte and more, written and then read back through main
+        // memory, and enough to close the receive window mid-drain. Draining per
+        // batch keeps it to one batch's worth, which stays in cache.
+        //
+        // Safe here and nowhere earlier: the slot loop above has finished, so no
+        // reference into streams_ is live, and a handler that closes its connection
+        // only marks it — the teardown that would free a stream runs later, on the
+        // reactor.
+        dispatch_pending();
         // A short batch usually means the queue is empty, but not always (a
         // per-datagram error truncates one too), and the kqueue backend is
         // edge-triggered — so keep going until the socket says would-block.

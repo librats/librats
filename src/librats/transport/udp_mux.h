@@ -41,10 +41,14 @@
  * Threading follows the rest of the transport: the mux belongs to exactly one
  * Reactor and is touched only by that reactor's thread.
  *
- * Events are never delivered from inside the datagram loop. A stream records
- * what its connection should see, and the mux dispatches the batch once the loop
- * is done — so a handler that tears its connection down can never free a stream
- * the loop is still standing in.
+ * Events are never delivered from inside the datagram loop. A stream records what
+ * its connection should see, and the mux dispatches once the batch it is standing
+ * in is finished — so a handler that tears its connection down can never free a
+ * stream the loop is still walking. Per batch, not per drain: what a stream
+ * delivers waits in its in-order buffer until the connection reads it out, so
+ * holding every event to the end of the drain would let that buffer grow to
+ * everything one peer could send in it. Events for the same connection coalesce,
+ * because a bulk sender raises one per packet and only the first has work to do.
  */
 
 #include "librats/core/address.h"

@@ -77,7 +77,9 @@ public:
     /// that owns `stream`. Implementations must only *record*: the events are
     /// dispatched once the current batch of packets or timers is done, so a
     /// handler that tears the connection down cannot pull the stream out from
-    /// under the code that is still walking it.
+    /// under the code that is still walking it. Repeated events for one stream
+    /// within a batch are expected — a stream raises PollIn per packet delivered —
+    /// and an implementation is free to coalesce them into one dispatch.
     virtual void stream_events(UdpStream& stream, uint32_t events) = 0;
 };
 
