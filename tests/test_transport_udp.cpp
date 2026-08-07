@@ -193,8 +193,11 @@ UdpStream& stream_of(Link& link) { return static_cast<UdpStreamLink&>(link).stre
 
 /// Is anything waiting on `sock`? Peeks, so the caller still gets to read it.
 bool probe_has_data(socket_t sock) {
-    uint8_t byte = 0;
-    return ::recv(sock, reinterpret_cast<char*>(&byte), 1, MSG_PEEK) >= 0;
+    // A one-byte MSG_PEEK is not enough on Windows: peeking less than the whole
+    // datagram completes with WSAEMSGSIZE, which reads as "nothing here" — the same
+    // quirk the IOCP poller works around. Peek a full datagram's worth instead.
+    uint8_t buf[rudp::kMaxDatagram];
+    return ::recv(sock, reinterpret_cast<char*>(buf), sizeof(buf), MSG_PEEK) >= 0;
 }
 
 std::string read_all(Link& link) {
