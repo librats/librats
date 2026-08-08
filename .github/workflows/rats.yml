@@ -17,7 +17,12 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - windows-latest
+          - windows-11-arm
+          - macos-latest
         build-type: [Debug, Release]
 
     steps:
@@ -40,7 +45,13 @@ jobs:
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+          # Both the x64 and the arm64 images ship CMake in PATH; only fall back to
+          # Chocolatey when it is missing (it is not present on windows-11-arm).
+          if (Get-Command cmake -ErrorAction SilentlyContinue) {
+            cmake --version
+          } else {
+            choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+          }
       
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
