@@ -118,7 +118,7 @@ class LibratsConan(ConanFile):
         if self.settings.os in ("Linux", "FreeBSD"):
             self.cpp_info.system_libs = ["pthread"]
         elif self.settings.os == "Windows":
-            self.cpp_info.system_libs = ["ws2_32", "iphlpapi", "bcrypt"]
+            self.cpp_info.system_libs = ["ws2_32", "iphlpapi", "bcrypt", "advapi32"]
         elif self.settings.os == "Android":
             # Android NDK provides log/dl; threading is in libc.
             self.cpp_info.system_libs = ["log"]

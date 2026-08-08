@@ -2,7 +2,7 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO librats/librats
     REF "${VERSION}"
-    SHA512 e931f2bfec34758dba522a70bdfbde44bfbc787b571450762aa6cfc77033ffc2b120e96a0795754af9c3be7895987ac67d9810bd666bafab31f16727d6ff8490
+    SHA512 77efccd059b6faaac14824f2a62e04682cc900f4b40e2ea294c8a0a65e20db0d81d43e946f34f00433306f96af9daa896557bbcd639b094a5bae7cf00e6e83a3
     HEAD_REF master
 )
 
@@ -41,6 +41,3 @@ file(REMOVE_RECURSE
 )
 
 vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE")
-
-file(INSTALL "${CMAKE_CURRENT_LIST_DIR}/usage"
-     DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
