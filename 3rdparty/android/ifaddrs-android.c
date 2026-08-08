@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
 /*
 Copyright (c) 2013, Kenneth MacKay
 All rights reserved.

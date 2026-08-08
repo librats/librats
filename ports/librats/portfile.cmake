@@ -40,4 +40,25 @@ file(REMOVE_RECURSE
     "${CURRENT_PACKAGES_DIR}/debug/share"
 )
 
-vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE")
+# librats is MIT, but it embeds adapted single-primitive crypto sources and, for
+# Android API < 24, a getifaddrs() shim. Each keeps its own notice; see
+# THIRD_PARTY_NOTICES.md upstream for provenance and the list of modifications.
+vcpkg_install_copyright(
+    COMMENT [[
+librats is licensed under the MIT license. It additionally embeds adapted
+third-party sources that carry their own notices, reproduced below:
+
+  * src/crypto/curve25519.*        curve25519-donna       BSD-3-Clause
+  * src/crypto/poly1305.*          poly1305-donna         MIT
+  * src/crypto/{chacha,sha256,sha512,blake2*}.*
+                                   noise-c                MIT
+  * 3rdparty/android/ifaddrs-*     ifaddrs-android        BSD-2-Clause AND
+                                   (Android API < 24)     BSD-1-Clause
+]]
+    FILE_LIST
+        "${SOURCE_PATH}/LICENSE"
+        "${SOURCE_PATH}/licenses/curve25519-donna.LICENSE"
+        "${SOURCE_PATH}/licenses/poly1305-donna.LICENSE"
+        "${SOURCE_PATH}/licenses/noise-c.LICENSE"
+        "${SOURCE_PATH}/licenses/ifaddrs-android.LICENSE"
+)

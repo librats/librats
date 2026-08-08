@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
  * poly1305-donna
  * https://github.com/floodyberry/poly1305-donna

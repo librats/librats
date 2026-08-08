@@ -856,9 +856,12 @@ make -j$(nproc)
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+librats also embeds a few adapted third-party cryptographic and platform-compatibility sources under BSD terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the component list and full notices.
+
 ## 🙏 Acknowledgments
 
 - **libtorrent**: a huge source of inspiration for librats' DHT and BitTorrent stacks. Many algorithmic ideas and improvements — the traversal/lookup algorithm, the ordered-bucket routing table, IP-diversity admission and other hardening details — are borrowed from its battle-tested design. Big thanks to the libtorrent team for their outstanding work.
+- **[noise-c](https://github.com/rweather/noise-c)** by Rhys Weatherley / Southern Storm Software: the reference librats' Noise Protocol implementation was written against. The ChaCha20, SHA-256/512 and BLAKE2b/BLAKE2s primitives in `src/crypto/` are derived from it (MIT), as are — through it — [curve25519-donna](https://github.com/agl/curve25519-donna) by Adam Langley (BSD-3-Clause) and [poly1305-donna](https://github.com/floodyberry/poly1305-donna) by Andrew Moon (MIT). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for provenance and the full notices.
 - **nlohmann/json**: inspiration for the API surface of librats' own self-contained `librats::Json` type
 - **Contributors**: everyone who has helped make librats better
 
