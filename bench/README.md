@@ -62,10 +62,13 @@ configured as, and librats sources are compiled *into* each binary rather than
 linked from the main build — so the code under test is optimized identically to
 whatever it is being compared against.
 
-`-DBENCH_FETCH_REFS=OFF` configures without a network. Only the JSON suites need
-nlohmann/RapidJSON (fetched at configure time, optional — whichever the build finds
-becomes an extra column); everything else has no third-party dependency and builds
-straight from a compiler if you prefer:
+`-DBENCH_FETCH_REFS=OFF` configures without a network. Three suites want a
+third-party reference, all fetched at configure time and all optional: the JSON
+suites take nlohmann/RapidJSON (whichever the build finds becomes an extra column)
+and `bench_crypto` takes noise-c (without it that suite is skipped, with a warning
+naming `-DBENCH_NOISEC_DIR=/path/to/noise-c` if you already have a checkout).
+Everything else has no third-party dependency and builds straight from a compiler
+if you prefer:
 
 ```bash
 g++ -std=c++17 -O3 -DNDEBUG -Isrc -Ibench \
@@ -231,16 +234,18 @@ behaviour needs a lossy path (`netem`) and is deliberately out of scope.
 
 ## The crypto suite — `bench_crypto`
 
-librats' Noise primitives against the **noise-c** reference (`reference2/`) they
-were ported from: SHA-256/512, BLAKE2b/2s, ChaCha20, Poly1305, the ChaCha20-Poly1305
+librats' Noise primitives against the **noise-c** reference they were ported from
+(fetched at configure time, or `-DBENCH_NOISEC_DIR=...`): SHA-256/512, BLAKE2b/2s, ChaCha20, Poly1305, the ChaCha20-Poly1305
 AEAD seal, and X25519 scalar multiplication (the Noise_XX handshake hot path — four
 per side). Both sides are compiled from source at `-O3` into one binary and ranked
 head-to-head over 8 KiB payloads.
 
 The reference cannot link as-is — librats kept the upstream function names verbatim
 on copy — so each `baseline/noisec_*.c` shim `#define`-renames the upstream public
-symbols behind an `nc_*`/`ncref_*` prefix before `#include`-ing the reference `.c`,
-exposing only the small one-shot API in `baseline/noisec.h`. For the byte-primitives
+symbols behind an `nc_*`/`ncref_*` prefix before `#include`-ing the reference `.c`
+(as `<src/crypto/...>`, resolved against whatever noise-c root is on the include
+path), exposing only the small one-shot API in `baseline/noisec.h`. Nothing of
+noise-c is *built* — only those few `.c` files are pulled in. For the byte-primitives
 the two sides are the *same source*, so **matching numbers (≈1.00×) are the expected,
 correct result** — the suite exists to prove the port introduced no regression, and
 to catch one if a future edit diverges. The AEAD group pits librats' own `chachapoly`

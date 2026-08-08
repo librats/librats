@@ -2,7 +2,7 @@
 #define BLAKE2b_reset  ncref_BLAKE2b_reset
 #define BLAKE2b_update ncref_BLAKE2b_update
 #define BLAKE2b_finish ncref_BLAKE2b_finish
-#include "../../reference2/src/crypto/blake2/blake2b.c"
+#include <src/crypto/blake2/blake2b.c>
 #include "noisec.h"
 
 void nc_blake2b(uint8_t out[64], const void* data, size_t len) {

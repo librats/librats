@@ -104,6 +104,10 @@ FetchContent_Declare(rapidjson                           # header-only tree
     GIT_TAG 24b5e7a8b27f42fa16b96fc70aade9106cf7102f     # master @ 2023, stable headers
     GIT_SHALLOW TRUE
 )
+FetchContent_Declare(noisec                              # bench_crypto's reference
+    GIT_REPOSITORY https://github.com/rweather/noise-c.git
+    GIT_TAG cfe25410979a87391bb9ac8d4d4bef64e9f268c6     # master @ 2023-12
+)
 
 set(BENCH_DEFS "")
 set(BENCH_INCLUDES "")
@@ -139,6 +143,32 @@ else()
     message(WARNING "bench: RapidJSON NOT available — skipping that column")
 endif()
 
+# noise-c — the reference bench_crypto measures against. The baseline/noisec_*.c
+# shims #include the upstream .c files as <src/crypto/...>, so all that is needed
+# is the noise-c root on the include path. Point BENCH_NOISEC_DIR at an existing
+# checkout to use it instead of fetching (nothing is built from the tree — only
+# those few .c files are #include-d).
+set(BENCH_NOISEC_DIR "" CACHE PATH "Existing noise-c checkout for bench_crypto (fetched if empty)")
+
+if(BENCH_NOISEC_DIR)
+    set(NOISEC_DIR "${BENCH_NOISEC_DIR}")
+elseif(BENCH_FETCH_REFS)
+    FetchContent_GetProperties(noisec)
+    if(NOT noisec_POPULATED)
+        FetchContent_Populate(noisec)
+    endif()
+    set(NOISEC_DIR "${noisec_SOURCE_DIR}")
+endif()
+
+if(NOISEC_DIR AND EXISTS "${NOISEC_DIR}/src/crypto/sha2/sha256.c")
+    set(BENCH_HAVE_NOISEC TRUE)
+    message(STATUS "bench: noise-c reference at ${NOISEC_DIR}")
+else()
+    set(BENCH_HAVE_NOISEC FALSE)
+    message(WARNING "bench: noise-c reference NOT available — skipping bench_crypto "
+                    "(pass -DBENCH_NOISEC_DIR=/path/to/noise-c)")
+endif()
+
 # ── The code under test ──────────────────────────────────────────────────────
 #
 # librats sources are compiled straight into each benchmark rather than linked
@@ -152,8 +182,8 @@ set(IO_UNDER_TEST
     ${LIBRATS_ROOT}/src/librats/wire/frame.cpp                   # needs htonl -> ws2_32
 )
 
-# Crypto primitives librats ported from noise-c (reference2/). Compiled straight
-# in so they are optimized identically to the reference they are measured against.
+# Crypto primitives librats ported from noise-c. Compiled straight in so they are
+# optimized identically to the reference they are measured against.
 set(CRYPTO_UNDER_TEST
     ${LIBRATS_ROOT}/src/librats/crypto/sha256.c
     ${LIBRATS_ROOT}/src/librats/crypto/sha512.c
@@ -226,9 +256,12 @@ add_bench(bench_dht
 )
 
 # Crypto: librats' Noise primitives vs the noise-c reference they were ported from.
-add_bench(bench_crypto
-    SOURCES suites/bench_crypto.cpp ${CRYPTO_UNDER_TEST} ${NOISEC_REF}
-)
+if(BENCH_HAVE_NOISEC)
+    add_bench(bench_crypto
+        SOURCES  suites/bench_crypto.cpp ${CRYPTO_UNDER_TEST} ${NOISEC_REF}
+        INCLUDES ${NOISEC_DIR}
+    )
+endif()
 
 # ── Transport: TCP vs the reliable-UDP stream, end to end ────────────────────
 #

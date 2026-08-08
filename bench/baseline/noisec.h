@@ -1,14 +1,18 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-//  noisec.h — one-shot C entry points into the *noise-c* reference primitives
-//  (reference2/), used by suites/bench_crypto.cpp to measure librats' crypto
-//  against the upstream code it was ported from.
+//  noisec.h — one-shot C entry points into the *noise-c* reference primitives,
+//  used by suites/bench_crypto.cpp to measure librats' crypto against the
+//  upstream code it was ported from.
 //
 //  librats kept the upstream function names verbatim on copy, so the reference
 //  .c files cannot be linked next to librats' as-is. Each noisec_*.c shim
 //  #defines the upstream public symbols to an `ncref_`/`ncaead_` prefix before
 //  #including the reference .c, then exposes the small `nc_*` API declared here.
 //  Only these `nc_*` symbols are visible to the benchmark.
+//
+//  The reference tree is included as <src/crypto/...>, i.e. resolved against the
+//  noise-c root on the include path — the bench CMake fetches it (or takes an
+//  existing checkout via -DBENCH_NOISEC_DIR=...). No fixed sibling path.
 // ─────────────────────────────────────────────────────────────────────────────
 #include <stdint.h>
 #include <stddef.h>

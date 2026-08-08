@@ -2,7 +2,7 @@
 #define chacha_keysetup      ncref_chacha_keysetup
 #define chacha_ivsetup       ncref_chacha_ivsetup
 #define chacha_encrypt_bytes ncref_chacha_encrypt_bytes
-#include "../../reference2/src/crypto/chacha/chacha.c"
+#include <src/crypto/chacha/chacha.c>
 #include "noisec.h"
 
 void nc_chacha20(uint8_t* out, const uint8_t* in, size_t len,

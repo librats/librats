@@ -9,7 +9,7 @@
 #define chacha_keysetup      ncaead_chacha_keysetup
 #define chacha_ivsetup       ncaead_chacha_ivsetup
 #define chacha_encrypt_bytes ncaead_chacha_encrypt_bytes
-#include "../../reference2/src/crypto/chacha/chacha.c"
+#include <src/crypto/chacha/chacha.c>
 
 #define poly1305_init   ncaead_poly1305_init
 #define poly1305_update ncaead_poly1305_update
@@ -17,7 +17,7 @@
 #define poly1305_auth   ncaead_poly1305_auth
 #define poly1305_verify ncaead_poly1305_verify
 #define poly1305_power_on_self_test ncaead_poly1305_power_on_self_test
-#include "../../reference2/src/crypto/donna/poly1305-donna.c"
+#include <src/crypto/donna/poly1305-donna.c>
 
 #include "noisec.h"
 #include <string.h>
