@@ -15,9 +15,6 @@
       "host": true
     }
   ],
-  "default-features": [
-    "bindings"
-  ],
   "features": {
     "bindings": {
       "description": "Build the C API used by Node.js / Python / Java bindings"
