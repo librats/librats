@@ -5,8 +5,8 @@
 
 #include <gtest/gtest.h>
 #include <cstring>
-#include "chacha.h"
-#include "poly1305.h"
+#include "crypto/chacha.h"
+#include "crypto/poly1305.h"
 
 class ChaChaTest : public ::testing::Test {
 protected:

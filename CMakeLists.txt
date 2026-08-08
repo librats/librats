@@ -406,13 +406,17 @@ include(GNUInstallDirs)
 
 # Include directories. INSTALL_INTERFACE entries are only consumed via the
 # exported target, so they are safe to declare even when RATS_INSTALL is OFF.
+#
+# Exactly ONE include root, and the installed tree mirrors it: every header
+# outside its own directory is included as "<subdir>/<name>.h" (crypto included),
+# so include/librats/ alone is enough to compile any installed header. Do not add
+# a second root here — a header that only resolves through it would build in-tree
+# and break for installed consumers.
 target_include_directories(rats
     PUBLIC
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
-        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/crypto>
         $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/src>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/librats>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/librats/crypto>
 )
 
 # Find and link threading support
@@ -732,8 +736,10 @@ if(RATS_INSTALL)
             PATTERN "*.h"
             PATTERN "*.hpp"
     )
+    # Mirrors its in-tree location (src/util/version.h): sources include it as
+    # "util/version.h", so it must land under librats/util/, not librats/.
     install(FILES ${PROJECT_BINARY_DIR}/src/util/version.h
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats/util
     )
 
     install(EXPORT ratsTargets

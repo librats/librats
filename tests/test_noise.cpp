@@ -6,11 +6,11 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include <vector>
-#include "noise.h"
+#include "crypto/noise.h"
 
 extern "C" {
-#include "chachapoly.h"
-#include "hkdf.h"
+#include "crypto/chachapoly.h"
+#include "crypto/hkdf.h"
 }
 
 using namespace rats;

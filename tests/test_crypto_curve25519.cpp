@@ -5,7 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <cstring>
-#include "curve25519.h"
+#include "crypto/curve25519.h"
 
 class Curve25519Test : public ::testing::Test {
 protected:

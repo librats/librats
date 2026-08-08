@@ -11,7 +11,7 @@
 
 #include "util/rats_export.h"
 #include "peer/peer_id.h"
-#include "noise.h"
+#include "crypto/noise.h"
 
 #include <cstring>
 

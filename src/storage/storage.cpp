@@ -1,6 +1,6 @@
 #include "storage/storage.h"
 #include "node/node_context.h"
-#include "crc32.h"
+#include "crypto/crc32.h"
 #include "util/fs.h"
 #include "util/logger.h"
 #include <algorithm>

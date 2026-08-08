@@ -1,5 +1,5 @@
 #include "security/noise_security.h"
-#include "noise.h"
+#include "crypto/noise.h"
 #include "util/logger.h"
 
 namespace librats {

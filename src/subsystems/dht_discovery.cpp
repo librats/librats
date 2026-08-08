@@ -2,7 +2,7 @@
 #include "node/node_context.h"
 #include "node/host_events.h"
 #include "nat/stun.h"
-#include "sha1.h"
+#include "crypto/sha1.h"
 #include "util/fs.h"
 #include "util/logger.h"
 

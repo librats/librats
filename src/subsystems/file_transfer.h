@@ -53,7 +53,7 @@
 #include "util/fs.h"
 
 extern "C" {
-#include "sha256.h"
+#include "crypto/sha256.h"
 }
 
 #include <atomic>
