@@ -438,7 +438,7 @@ endif()
 
 # Link networking libraries
 if(WIN32)
-    target_link_libraries(rats ws2_32 iphlpapi bcrypt)
+    target_link_libraries(rats ws2_32 iphlpapi bcrypt advapi32)
 endif()
 
 if(ANDROID)

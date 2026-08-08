@@ -5,6 +5,7 @@
 #include <fstream>
 #include <thread>
 #include <cstdlib>
+#include <cstring>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -85,26 +86,55 @@ std::string get_hostname() {
     return "Unknown";
 }
 
-std::string get_cpu_model() {
-    int CPUInfo[4] = {-1};
-    unsigned nExIds, i = 0;
-    char CPUBrandString[0x40];
-    
-    __cpuid(CPUInfo, 0x80000000);
-    nExIds = CPUInfo[0];
-    
-    for (i = 0x80000000; i <= nExIds; ++i) {
-        __cpuid(CPUInfo, i);
-        
-        if (i == 0x80000002)
-            memcpy(CPUBrandString, CPUInfo, sizeof(CPUInfo));
-        else if (i == 0x80000003)
-            memcpy(CPUBrandString + 16, CPUInfo, sizeof(CPUInfo));
-        else if (i == 0x80000004)
-            memcpy(CPUBrandString + 32, CPUInfo, sizeof(CPUInfo));
+// Reads the CPU name the kernel published in the registry. Works on every
+// Windows architecture, and is the only option on ARM64 (no CPUID there).
+static std::string get_cpu_model_from_registry() {
+    HKEY key;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                      "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                      0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return "Unknown";
     }
-    
-    return std::string(CPUBrandString);
+
+    char name[256] = {0};
+    DWORD size = sizeof(name) - 1;
+    DWORD type = 0;
+    LONG result = RegQueryValueExA(key, "ProcessorNameString", nullptr, &type,
+                                   reinterpret_cast<LPBYTE>(name), &size);
+    RegCloseKey(key);
+
+    if (result != ERROR_SUCCESS || type != REG_SZ) {
+        return "Unknown";
+    }
+
+    std::string model(name);
+    // Trim whitespace
+    size_t first = model.find_first_not_of(" \t");
+    if (first == std::string::npos) {
+        return "Unknown";
+    }
+    model = model.substr(first, model.find_last_not_of(" \t") - first + 1);
+    return model;
+}
+
+std::string get_cpu_model() {
+#if defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
+    int CPUInfo[4] = {-1};
+    char CPUBrandString[0x40] = {0};
+
+    __cpuid(CPUInfo, 0x80000000);
+    unsigned nExIds = static_cast<unsigned>(CPUInfo[0]);
+
+    if (nExIds >= 0x80000004) {
+        for (unsigned i = 0x80000002; i <= 0x80000004; ++i) {
+            __cpuid(CPUInfo, static_cast<int>(i));
+            memcpy(CPUBrandString + (i - 0x80000002) * sizeof(CPUInfo), CPUInfo, sizeof(CPUInfo));
+        }
+        return std::string(CPUBrandString);
+    }
+#endif
+    // ARM/ARM64 (and x86 CPUs without the brand string leaf)
+    return get_cpu_model_from_registry();
 }
 
 int get_cpu_cores() {
