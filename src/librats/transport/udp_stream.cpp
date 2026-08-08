@@ -95,7 +95,7 @@ uint32_t UdpStream::sack_bitmap() const noexcept {
     // hole at recv_next_. Derived from the reorder buffer and recv_next_ alone, so
     // it is rebuilt only when one of those moves — not on every packet sent.
     uint32_t bits = 0;
-    for (uint32_t i = 0; i < 32; ++i)
+    for (uint32_t i = 0; i < rudp::kSackBits; ++i)
         if (reorder_.count(recv_next_ + 1 + i)) bits |= (1u << i);
 
     sack_bits_  = bits;
@@ -373,7 +373,7 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
         // Every packet in the queue occupies exactly one sequence number, so the
         // packet a bit refers to is found by subtraction rather than by search.
         const uint32_t base = p.ack + 2;
-        for (uint32_t i = 0; i < 32; ++i) {
+        for (uint32_t i = 0; i < rudp::kSackBits; ++i) {
             if ((p.sack & (1u << i)) == 0) continue;
             const int32_t idx = rudp::seq_diff(base + i, sent_.front().seq);
             if (idx < 0 || static_cast<size_t>(idx) >= sent_.size()) continue;
@@ -477,9 +477,22 @@ void UdpStream::repair_sacked_holes(Clock::time_point now) {
     // chance: the peer received something sent *after* it, so it is not merely
     // late. Three packets of margin is the usual allowance for reordering — the
     // same threshold the duplicate-ack rule uses, for the same reason.
+    //
+    // The search is bounded by the reach of a selective ack rather than by the
+    // length of the queue. A bit can only ever mark the kSackBits packets after
+    // the hole — handle_ack() resolves bit i to index (p.ack + 2 + i) - front,
+    // and the cumulative retire above leaves front at exactly p.ack + 1, so the
+    // highest index it can set is kSackBits — and an index only ever moves *down*
+    // as the queue drains from the front. So nothing past that window can carry
+    // the flag, and walking the whole queue to discover it (a full window of
+    // packets, on every acknowledgement of a loss episode — which is when they
+    // are at their most frequent) was searching where the answer cannot be.
+    // Backwards inside that window, so the common case returns on the first hit.
+    const size_t limit = (std::min)(sent_.size(), size_t{rudp::kSackBits} + 1);
     int highest_acked = -1;
-    for (size_t i = 0; i < sent_.size(); ++i)
-        if (sent_[i].acked) highest_acked = static_cast<int>(i);
+    for (size_t i = limit; i-- > 0;) {
+        if (sent_[i].acked) { highest_acked = static_cast<int>(i); break; }
+    }
     if (highest_acked < 3) return;
 
     const auto spacing = (std::max)(std::chrono::duration_cast<Clock::duration>(kMinRepairSpacing),

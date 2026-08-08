@@ -82,6 +82,12 @@ enum PacketFlags : uint8_t {
 constexpr size_t kHeaderSize = 16;
 /// Bytes added by the selective-ack word.
 constexpr size_t kSackSize = 4;
+/// Packets one selective-ack word can name — the 32 that follow the hole at
+/// ack+1. This is a reach as well as a width: a sender learns nothing about a
+/// packet further than this past its oldest unacknowledged one, which is what
+/// bounds how far into the retransmission queue an acknowledgement can ever mark
+/// anything (see UdpStream::repair_sacked_holes).
+constexpr uint32_t kSackBits = 8 * static_cast<uint32_t>(kSackSize);
 /// The largest a header can get. A sender that keeps this much headroom in front
 /// of a payload can write the header directly ahead of the bytes it describes and
 /// hand the socket one contiguous datagram — see encode_header().
