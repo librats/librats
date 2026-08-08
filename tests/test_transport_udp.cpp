@@ -79,6 +79,24 @@ public:
         }
     }
 
+    /// Deliver only what is addressed to `only`, leaving the other direction
+    /// queued. Lets a test hold one side's packet genuinely in flight — neither
+    /// lost nor arrived — while the other side keeps talking.
+    void deliver_to(const Address& only) {
+        std::deque<Datagram> batch;
+        batch.swap(queue_);
+
+        const auto now = std::chrono::steady_clock::now();
+        for (const Datagram& d : batch) {
+            if (d.to != only) { queue_.push_back(d); continue; }
+            auto it = endpoints_.find(d.to);
+            if (it == endpoints_.end()) continue;
+            rudp::Packet p;
+            if (!rudp::decode(d.bytes.data(), d.bytes.size(), p)) continue;
+            it->second->on_packet(p, now);
+        }
+    }
+
     void set_drop_every(size_t n) { drop_every_ = n; sent_ = 0; }
     /// Lose the next `count` datagrams and nothing after them, so a test can open
     /// a hole of a known size and watch exactly one loss episode play out.
@@ -589,6 +607,53 @@ TEST(UdpStreamTest, ReducesTheWindowOnceForOneLossEpisode) {
     const uint32_t cuts = pair.initiator->window_reductions() - before_cuts;
     EXPECT_EQ(cuts, 1u) << "the window was reduced " << cuts << " times for one loss episode";
     EXPECT_LT(pair.initiator->cwnd(), before) << "the loss was not accounted for at all";
+}
+
+// A duplicate acknowledgement has to be a *pure* acknowledgement.
+//
+// Every packet on this wire carries the ack field, so on a two-way stream the
+// peer's own data rides over the same cumulative ack until our next packet
+// reaches it. Counted as duplicate acks, three of those are a loss signal that no
+// loss produced: the window is halved and a packet that was merely still in
+// flight is sent again. On a peer-to-peer link — gossip during a transfer, any
+// request while a response streams back — that is the ordinary shape of traffic
+// rather than a corner case, so a sender would spend the whole connection with
+// its window pinned near the floor and every small message duplicated.
+TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
+    Pair pair;
+
+    // One exchange the peer really does acknowledge, so the sender has a "highest
+    // ack seen" for a later one to look like a repeat of.
+    ASSERT_GT(write_all(*pair.initiator, std::string(100, 'A')), 0u);
+    pair.net.settle(*pair.initiator, *pair.responder);
+    ASSERT_EQ(drain(*pair.responder).size(), 100u);
+
+    const uint32_t cwnd_before = pair.initiator->cwnd();
+    ASSERT_EQ(pair.initiator->retransmits(), 0u);
+    ASSERT_EQ(pair.initiator->window_reductions(), 0u);
+
+    // Our next packet stays in flight: queued on the path, neither delivered nor
+    // dropped, exactly as a packet mid-flight on a real link.
+    ASSERT_GT(write_all(*pair.initiator, std::string(100, 'B')), 0u);
+
+    // Meanwhile the peer sends traffic of its own. Every one of these carries the
+    // same cumulative ack, because 'B' has not reached it yet — and well past the
+    // three that the duplicate-ack rule treats as a loss.
+    for (int i = 0; i < 6; ++i) {
+        ASSERT_GT(write_all(*pair.responder, std::string(200, 'x')), 0u);
+        pair.net.deliver_to(kAlice);  // responder → initiator only
+    }
+
+    EXPECT_EQ(pair.initiator->retransmits(), 0u)
+        << "the peer's own data was mistaken for a duplicate ack";
+    EXPECT_EQ(pair.initiator->window_reductions(), 0u)
+        << "the window was reduced for a loss that never happened";
+    EXPECT_GE(pair.initiator->cwnd(), cwnd_before);
+
+    // Nothing was actually lost, so the stream still owes nothing once the held
+    // packet finally lands.
+    pair.net.settle(*pair.initiator, *pair.responder);
+    EXPECT_EQ(drain(*pair.responder), std::string(100, 'B'));
 }
 
 TEST(UdpStreamTest, FillsAWindowLargerThanTheOldCeiling) {

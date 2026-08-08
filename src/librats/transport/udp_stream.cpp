@@ -400,10 +400,27 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
         // Progress means the path is alive: drop back to the estimated RTO,
         // undoing any doubling a previous timeout applied.
         if (have_rtt_) rto_ = clamp_duration(srtt_ + 4 * rttvar_, kMinRto, kMaxRto);
-    } else if (p.ack == last_ack_recv_ && p.ack != 0 && !sent_.empty()) {
-        // The cumulative ack stood still while the peer kept talking: packets are
-        // arriving past a hole. Three of those is the classic loss signal, and
-        // repairing it now saves a whole retransmission timeout.
+    } else if (p.type == rudp::PacketType::Ack && p.ack == last_ack_recv_ && p.ack != 0 &&
+               !sent_.empty()) {
+        // A *pure* ack whose cumulative number stood still: the peer is receiving
+        // packets past a hole and re-reporting the same edge. Three of those is the
+        // classic loss signal, and repairing it now saves a whole retransmission
+        // timeout.
+        //
+        // The type check is what makes this a loss signal rather than a coincidence,
+        // and RFC 5681 defines a duplicate ack that way for exactly this reason. Every
+        // packet here carries the ack field, so on a two-way stream the peer's own
+        // Data rides over the same number until our next packet reaches it — three of
+        // *those* say nothing about loss, they only say the peer had something of its
+        // own to send. Counting them halved the window and re-sent a packet that was
+        // merely still in flight, on a stream where nothing had been dropped at all —
+        // which on a peer-to-peer link (gossip during a transfer, any request while a
+        // response streams back) is the normal case rather than the corner one.
+        //
+        // Nothing is lost by being strict: a hole makes the receiver acknowledge at
+        // once (see on_packet), so a one-way flow still produces the pure acks this
+        // counts, and a two-way one is covered by repair_sacked_holes() above, which
+        // names the missing packets outright instead of inferring them.
         if (++dup_acks_ == 3) {
             enter_recovery();
             transmit(sent_.front(), now);
