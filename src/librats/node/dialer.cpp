@@ -6,7 +6,16 @@
 
 namespace librats {
 
-std::vector<TransportKind> Dialer::transport_order() const {
+namespace {
+
+/// The PeerTransports bit standing for one transport.
+uint8_t mask_for(TransportKind kind) noexcept {
+    return kind == TransportKind::Udp ? PeerTransportUdp : PeerTransportTcp;
+}
+
+} // namespace
+
+std::vector<TransportKind> Dialer::transport_order(uint8_t known) const {
     const TransportKind first  = policy_.preferred;
     const TransportKind second = first == TransportKind::Udp ? TransportKind::Tcp
                                                              : TransportKind::Udp;
@@ -22,27 +31,103 @@ std::vector<TransportKind> Dialer::transport_order() const {
     // ...unless the preferred one is not available at all, in which case the other
     // is not a fallback, it is the only way out.
     if (order.empty() && allowed(second)) order.push_back(second);
+
+    // A peer at this address has already told us which wires it accepts. Bring
+    // those to the front — stably, so the policy still decides between two the
+    // peer accepts equally. Nothing is dropped: the knowledge can be stale, and
+    // the cost of acting on a stale entry must stay "one fallback delay", never
+    // "this target is undialable". A single-entry order is left alone, which is
+    // what keeps a zero fallback delay meaning exactly what it says.
+    if (known != PeerTransportNone && order.size() > 1) {
+        std::stable_partition(order.begin(), order.end(), [known](TransportKind k) {
+            return (known & mask_for(k)) != 0;
+        });
+    }
     return order;
 }
 
 void Dialer::dial(const std::string& host, uint16_t port) {
-    auto target     = std::make_shared<Target>();
-    target->host    = host;
-    target->port    = port;
-    target->pending = transport_order();
+    auto target  = std::make_shared<Target>();
+    target->host = host;
+    target->port = port;
 
     bool started = false;
-    if (!target->pending.empty()) {
+    bool empty   = false;
+    {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopped_) return;
-        started = start_next(target);
-    } else {
-        LOG_WARN("dialer", "No transport enabled; cannot dial " << host << ":" << port);
+        // Under the lock: the order depends on what identify has taught us about
+        // this address, which lives behind the same mutex as the bookkeeping.
+        target->pending = transport_order(recall(host, port));
+        empty           = target->pending.empty();
+        if (!empty) started = start_next(target);
     }
+
+    if (empty) LOG_WARN("dialer", "No transport enabled; cannot dial " << host << ":" << port);
 
     // Never with the lock held: a failure handler may well dial again (that is
     // what a reconnection policy does), and this mutex is not recursive.
     if (!started) on_failed_(host, port);
+}
+
+// ── What identify taught us about an address ────────────────────────────────
+
+std::string Dialer::key_for(const std::string& host, uint16_t port) {
+    return host + ":" + std::to_string(port);
+}
+
+uint8_t Dialer::recall(const std::string& host, uint16_t port) const {
+    const auto it = known_.find(key_for(host, port));
+    if (it == known_.end()) return PeerTransportNone;
+    if (Clock::now() - it->second.learned_at > kMemoryTtl) return PeerTransportNone;
+    return it->second.transports;
+}
+
+void Dialer::evict_one(Clock::time_point now) {
+    // One pass, and only when the cache is full: drop everything that has expired,
+    // and note the oldest survivor in case nothing had. A map capped at
+    // kMaxRemembered makes this bounded work on a path that runs once per dial.
+    auto oldest = known_.end();
+    for (auto it = known_.begin(); it != known_.end();) {
+        if (now - it->second.learned_at > kMemoryTtl) {
+            it = known_.erase(it);
+            continue;
+        }
+        if (oldest == known_.end() || it->second.learned_at < oldest->second.learned_at)
+            oldest = it;
+        ++it;
+    }
+    if (known_.size() >= kMaxRemembered && oldest != known_.end()) known_.erase(oldest);
+}
+
+void Dialer::remember(const std::string& host, uint16_t port, uint8_t transports) {
+    // 0 is "the peer did not say" (an older node predating the field), not
+    // "supports nothing" — storing it would teach us the opposite of the truth.
+    if (transports == PeerTransportNone || port == 0 || host.empty()) return;
+
+    const auto now = Clock::now();
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::string key = key_for(host, port);
+    const auto  it  = known_.find(key);
+    if (it != known_.end()) {
+        it->second.transports = transports;
+        it->second.learned_at = now;
+        return;
+    }
+
+    if (known_.size() >= kMaxRemembered) evict_one(now);
+    known_.emplace(std::move(key), Known{transports, now});
+}
+
+uint8_t Dialer::known_transports(const std::string& host, uint16_t port) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return recall(host, port);
+}
+
+std::vector<TransportKind> Dialer::planned_order(const std::string& host, uint16_t port) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return transport_order(recall(host, port));
 }
 
 bool Dialer::start_next(const std::shared_ptr<Target>& target) {

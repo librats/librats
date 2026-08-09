@@ -568,13 +568,17 @@ double bench_burst(TransportKind kind, size_t frame_size, size_t cap_bytes) {
 //            already completed and reported (via IdentifyMessage::transports)
 //            that the peer is TCP-only.
 //
-// A re-dial that costs the same as a cold one is the interesting result, and
-// there are two independent reasons it does. The Dialer (node/dialer.h) picks
-// its transport order from DialPolicy alone and never looks a peer up; and
-// PeerTable::remove() erases the entry outright on disconnect, so the bitmask
-// PeerTable::set_supported_transports() stored is gone by the time a re-dial
-// happens anyway. Making the reconnect cheap needs both: somewhere for the fact
-// to survive, and a dialer that asks.
+// The gap between the two is the whole point. A re-dial should cost nothing like
+// a cold one: Node::handle_identify hands the transports bitmask to
+// Dialer::remember(), keyed by the address rather than by the peer — so it
+// outlives the disconnect that erases the PeerTable entry — and the next dial to
+// that address starts with the transport the peer actually has. The fallback
+// timer is still armed behind it, because the knowledge can be stale, but it
+// never fires when the hint is right.
+//
+// A re-dial back up at the cold figure would mean that path has been broken:
+// either identify is not reaching the dialer, or the address the reconnect uses
+// is not the one that was recorded.
 
 struct FallbackResult { double cold_ms = 0, warm_ms = 0; uint32_t configured_ms = 0; };
 
@@ -620,6 +624,21 @@ FallbackResult bench_fallback(uint32_t fallback_ms) {
     };
 
     dial_once(out.cold_ms);
+
+    // Wait for the identify to actually land before tearing the peer down.
+    //
+    // Not a formality: on Noise_XX the initiator is established a message earlier
+    // than the responder, so on_peer_connected — which is what dial_once waits for
+    // — fires on this side before the peer has even finished its own handshake,
+    // let alone sent its identify. Dropping the server here would measure a
+    // re-dial to a peer this node never actually learned anything about, which is
+    // the cold case wearing the warm case's name. A non-zero transports mask is
+    // exactly the fact the re-dial is supposed to exploit, so it is the condition
+    // worth waiting on.
+    wait_for([&] {
+        const std::vector<PeerInfo> known = client.peers();
+        return !known.empty() && known.front().supported_transports != PeerTransportNone;
+    }, 5s);
 
     // Drop the connection but keep the client node alive, so the second dial is
     // made by a node that has already completed a connection to this address and
@@ -745,10 +764,10 @@ int main() {
         std::printf("  configured transport_fallback_ms   %8u ms\n", fb.configured_ms);
         std::printf("  cold dial  (address never tried)   %8.1f ms\n", fb.cold_ms);
         std::printf("  re-dial    (same address, met it)  %8.1f ms\n", fb.warm_ms);
-        std::printf("  (identify already told this node the peer is TCP-only. A re-dial that\n"
-                    "   costs the same as a cold one means that knowledge is not reaching the\n"
-                    "   dial: the Dialer picks its order from DialPolicy alone, and PeerTable\n"
-                    "   erases the entry on disconnect, so nothing survives to consult.)\n");
+        std::printf("  (identify already told this node the peer is TCP-only, and Dialer::remember\n"
+                    "   keeps that by address, so it outlives the disconnect. The re-dial should\n"
+                    "   therefore start on TCP and never reach the fallback timer; a figure back up\n"
+                    "   at the cold one means that knowledge stopped reaching the dial.)\n");
     }
 
     std::printf("\nnote: loopback has no loss, no reordering and a near-zero RTT, so congestion\n"

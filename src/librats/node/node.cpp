@@ -530,11 +530,24 @@ void Node::handle_identify(Connection& conn, const Frame& frame) {
     // advertised listen port (the linchpin for inbound peers), plus any extra
     // addresses it self-advertised. PeerTable de-duplicates and caps the set.
     const PeerRoute identify_route{conn.reactor_index(), conn.id()};
-    if (msg->transports != 0)
+    const IpAddress seen_ip = conn.remote_ip();
+    if (msg->transports != 0) {
         peers_.set_supported_transports(conn.remote_id(), identify_route, msg->transports);
+        // ...and tell the dialer, which is the half that actually saves anything:
+        // without it every later dial to this address pays the fallback delay again
+        // to rediscover what we are being told right here. Only addresses this node
+        // can vouch for are recorded — the one we dialed ourselves, and the IP we
+        // observe the peer at paired with the listen port it claims. The addresses
+        // in msg->addresses are the peer's unverified word about where *anyone*
+        // lives, so letting them carry a transports mask would let one peer set the
+        // dial order for somebody else's address.
+        if (conn.has_dial_address())
+            dialer_->remember(conn.dial_host(), conn.dial_port(), msg->transports);
+        if (msg->listen_port != 0 && !seen_ip.is_any())
+            dialer_->remember(seen_ip.to_string(), msg->listen_port, msg->transports);
+    }
 
     std::vector<Address> candidates;
-    const IpAddress seen_ip = conn.remote_ip();
     if (msg->listen_port != 0 && !seen_ip.is_any())
         candidates.push_back(Address{seen_ip, msg->listen_port});
     for (const Address& a : msg->addresses)

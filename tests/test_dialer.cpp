@@ -10,8 +10,10 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace librats;
 using namespace std::chrono_literals;
@@ -75,6 +77,14 @@ public:
     void on_frame(Connection&, const Frame&) override {}
     void on_closed(Connection& conn, CloseReason) override {
         if (conn.role() != ConnRole::Outbound) return;
+        {
+            // Only one attempt per target is ever in flight until it resolves (the
+            // tests that care use a fallback delay far longer than they run), so the
+            // order attempts END is the order they were STARTED — which is the only
+            // way to observe the dialer's transport choice from outside.
+            std::lock_guard<std::mutex> lock(ended_mutex_);
+            ended_transports_.push_back(conn.transport());
+        }
         ++attempts_ended_;
         dialer_->on_closed(PeerRoute{conn.reactor_index(), conn.id()});
     }
@@ -85,6 +95,12 @@ public:
 
     Dialer& dialer() { return *dialer_; }
 
+    /// The transports whose attempts have resolved, in order — see on_closed().
+    std::vector<TransportKind> ended_transports() const {
+        std::lock_guard<std::mutex> lock(ended_mutex_);
+        return ended_transports_;
+    }
+
     std::atomic<int> failures_{0};       ///< targets reported as failed
     std::atomic<int> established_{0};
     std::atomic<int> attempts_ended_{0}; ///< individual attempts that resolved
@@ -94,6 +110,9 @@ private:
     ReactorPool             pool_;
     std::unique_ptr<Dialer> dialer_;
     socket_t                udp_ = RATS_INVALID_SOCKET;
+
+    mutable std::mutex         ended_mutex_;
+    std::vector<TransportKind> ended_transports_;
 };
 
 DialPolicy policy_for(TransportKind preferred, std::chrono::milliseconds fallback) {
@@ -181,6 +200,93 @@ TEST(DialerTest, AnAbortedDialStillResolvesTheTarget) {
     ASSERT_TRUE(wait_for([&] { return h.failures_.load() == 1; }, 20s))
         << "a dial that never started never resolved";
     EXPECT_EQ(h.dialer().in_flight(), 0u);
+}
+
+// What identify says a peer accepts has to reach the dial, or the fallback delay
+// is paid again on every reconnect to an address that already told us — and a
+// reconnection policy redials the same handful of addresses for the life of the
+// node. This pins the decision itself, before anything is dialed.
+TEST(DialerTest, DialsTheTransportThePeerSaidItAccepts) {
+    // TCP preferred, so choosing UDP can only come from what was remembered.
+    DialerHarness h(policy_for(TransportKind::Tcp, 30s), /*with_udp=*/true);
+
+    const std::vector<TransportKind> tcp_first{TransportKind::Tcp, TransportKind::Udp};
+    const std::vector<TransportKind> udp_first{TransportKind::Udp, TransportKind::Tcp};
+
+    // Nothing known: the policy decides, and the fallback is what discovers the rest.
+    EXPECT_EQ(h.dialer().planned_order("10.0.0.1", 5000), tcp_first);
+
+    // A peer that accepts only UDP: dial that first instead of rediscovering it.
+    h.dialer().remember("10.0.0.1", 5000, PeerTransportUdp);
+    EXPECT_EQ(h.dialer().planned_order("10.0.0.1", 5000), udp_first)
+        << "what the peer said about itself never reached the dial";
+
+    // A peer that accepts both says nothing the policy did not already decide.
+    h.dialer().remember("10.0.0.1", 5000, PeerTransportTcp | PeerTransportUdp);
+    EXPECT_EQ(h.dialer().planned_order("10.0.0.1", 5000), tcp_first)
+        << "a peer that accepts everything overrode the configured preference";
+
+    // Per address: one node's answer must not reorder a dial to another.
+    EXPECT_EQ(h.dialer().planned_order("10.0.0.2", 5000), tcp_first);
+}
+
+// Knowledge can be stale — a peer restarts on a different config — so acting on
+// it must never cost more than a fallback delay. The transport the peer did not
+// claim is demoted, never dropped.
+TEST(DialerTest, RememberedTransportsReorderRatherThanRemove) {
+    // A fallback delay far longer than this test runs, so the queue — not the
+    // timer — is what brings the second transport in, and the order attempts end
+    // is exactly the order they were started.
+    DialerHarness h(policy_for(TransportKind::Tcp, 60s), /*with_udp=*/true);
+    const uint16_t port = dead_port();
+
+    // A lie, in effect: nothing answers UDP there. The dial must still resolve,
+    // and it must resolve by falling back to the transport that was demoted.
+    h.dialer().remember("127.0.0.1", port, PeerTransportUdp);
+    h.dial("127.0.0.1", port);
+
+    ASSERT_TRUE(wait_for([&] { return h.failures_.load() == 1; }, 40s))
+        << "a stale transports hint left the target undialable";
+
+    const std::vector<TransportKind> ended = h.ended_transports();
+    ASSERT_EQ(ended.size(), 2u)
+        << "the transport the peer did not claim was dropped instead of demoted";
+    EXPECT_EQ(ended[0], TransportKind::Udp) << "the remembered transport was not tried first";
+    EXPECT_EQ(ended[1], TransportKind::Tcp);
+    EXPECT_EQ(h.dialer().in_flight(), 0u);
+}
+
+// The cache only ever holds something a peer actually said. A mask of 0 means
+// "an older peer did not mention it", which must not be stored as "supports
+// nothing" — that would be the opposite of the truth.
+TEST(DialerTest, RemembersOnlyWhatAPeerActuallySaid) {
+    DialerHarness h(policy_for(TransportKind::Udp, 200ms), /*with_udp=*/false);
+
+    EXPECT_EQ(h.dialer().known_transports("10.0.0.1", 4321), PeerTransportNone)
+        << "an address nobody has met came back with an opinion";
+
+    h.dialer().remember("10.0.0.1", 4321, PeerTransportNone);
+    EXPECT_EQ(h.dialer().known_transports("10.0.0.1", 4321), PeerTransportNone)
+        << "'did not say' was stored as 'supports nothing'";
+
+    h.dialer().remember("10.0.0.1", 4321, PeerTransportTcp | PeerTransportUdp);
+    EXPECT_EQ(h.dialer().known_transports("10.0.0.1", 4321),
+              PeerTransportTcp | PeerTransportUdp);
+
+    // A later report replaces the earlier one rather than merging with it: a peer
+    // that has turned a transport off has to be able to say so.
+    h.dialer().remember("10.0.0.1", 4321, PeerTransportTcp);
+    EXPECT_EQ(h.dialer().known_transports("10.0.0.1", 4321), PeerTransportTcp);
+
+    // Keyed by address AND port — one node's answer must not speak for another's.
+    EXPECT_EQ(h.dialer().known_transports("10.0.0.1", 4322), PeerTransportNone);
+
+    // A restart clears in-flight bookkeeping, but what the network told us about
+    // an address is still true afterwards — and re-learning it would mean paying
+    // the fallback delay once more for nothing.
+    h.dialer().stop();
+    h.dialer().start();
+    EXPECT_EQ(h.dialer().known_transports("10.0.0.1", 4321), PeerTransportTcp);
 }
 
 // stop() drops every attempt, and start() must leave the dialer usable again —
