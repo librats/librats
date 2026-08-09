@@ -108,6 +108,15 @@ public:
     /// a delayed ack has nothing to deliver and no side effect to observe.
     size_t sent() const           { return sent_; }
 
+    /// Decode the most recently queued datagram, so a test can read a field off the
+    /// wire (a window, an ack) rather than infer it from behaviour. `out.payload`
+    /// points into the queue and is valid only until it next moves.
+    bool peek_last(rudp::Packet& out) const {
+        if (queue_.empty()) return false;
+        const Datagram& d = queue_.back();
+        return rudp::decode(d.bytes.data(), d.bytes.size(), out);
+    }
+
 private:
     struct Datagram {
         Address to;
@@ -877,6 +886,58 @@ TEST(UdpStreamTest, AClosedReceiveWindowStopsTheSenderAndResumesOnRead) {
     }
 
     EXPECT_EQ(received, payload) << "the transfer never resumed after the window reopened";
+}
+
+// A window that re-opens has to be announced, with nothing to announce it on.
+//
+// The test above lets the sender find out for itself: a stopped sender still probes,
+// and the acknowledgement of a probe carries the current window, so the transfer
+// recovers whether or not the receiver ever volunteers anything. That hides the
+// contract this test pins down. While the window is zero there is, by construction,
+// no traffic for an acknowledgement to ride on — so if draining the buffer does not
+// make the receiver speak up by itself, the only thing left to restart the transfer
+// is whatever the peer happens to probe with, at whatever interval its retransmission
+// timeout has backed off to. read() records that the window re-opened; the point here
+// is that the record is acted on.
+//
+// It also matters ahead of any tightening of flow control: a receiver that starts
+// *refusing* data past the window it advertised (as TCP does) has no probe to answer,
+// and this ack becomes the only way out of a zero window at all.
+TEST(UdpStreamTest, AReopenedWindowIsAnnouncedWithoutPeerTraffic) {
+    Pair pair;
+
+    // Fill the receive buffer by hand rather than by running a real transfer: what
+    // is under test is the *receiver's* behaviour once it is full, and getting there
+    // through the sender would spend a thousand round trips on setup.
+    const Bytes body(rudp::kMaxPayload, 'x');
+    const auto  now = std::chrono::steady_clock::now();
+    for (uint32_t i = 0; i < rudp::kMaxWindowPackets; ++i) {
+        rudp::Packet p;
+        p.type    = rudp::PacketType::Data;
+        p.conn_id = pair.responder->recv_id();
+        p.seq     = 2 + i;   // the Syn took sequence number 1
+        p.ack     = 0;       // nothing of the responder's is outstanding to retire
+        p.window  = rudp::kMaxWindowPackets;
+        p.payload = ByteView(body);
+        pair.responder->on_packet(p, now);
+    }
+
+    rudp::Packet closed;
+    ASSERT_TRUE(pair.net.peek_last(closed)) << "the receiver acknowledged nothing at all";
+    ASSERT_EQ(closed.window, 0) << "the receive buffer never actually filled";
+
+    // From here the peer says nothing more — it is stopped on a zero window and,
+    // correctly, will not send again until it is told otherwise.
+    const size_t before = pair.net.sent();
+    EXPECT_EQ(drain(*pair.responder).size(),
+              size_t{rudp::kMaxWindowPackets} * rudp::kMaxPayload);
+
+    pair.responder->tick(std::chrono::steady_clock::now());
+
+    ASSERT_GT(pair.net.sent(), before) << "the window re-opened and nobody was told";
+    rudp::Packet update;
+    ASSERT_TRUE(pair.net.peek_last(update));
+    EXPECT_GT(update.window, 0) << "the update carried the same closed window";
 }
 
 // A hole is repaired from what the selective ack names, not from a timeout.

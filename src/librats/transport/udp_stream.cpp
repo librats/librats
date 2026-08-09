@@ -584,7 +584,10 @@ size_t UdpStream::read(uint8_t* into, size_t len) {
     inbox_.consume(n);
     // Draining the buffer may have re-opened a window we had advertised as full.
     // The peer is waiting on that number, so it has to be told without waiting for
-    // traffic that will never come while it is stopped.
+    // traffic that will never come while it is stopped — hence an owed ack with no
+    // deadline attached, which the next tick() sends outright rather than holding
+    // for company (see there). Leaving ack_due_ unset is the *signal*, not an
+    // omission: everything else that owes an ack has a packet of its own to wait for.
     if (before == 0 && advertised_window() > 0) need_ack_ = true;
     return n;
 }
@@ -713,7 +716,12 @@ void UdpStream::tick(Clock::time_point now) {
         if (state_ == State::Dead) { flush_events(); return; }
     }
 
-    if (need_ack_ && ack_due_ != kNoDeadline && now >= ack_due_) {
+    // A delayed acknowledgement that has come due — or one carrying no deadline at
+    // all, which is how read() asks for a window update. That case deliberately has
+    // no deadline to wait out: the peer is stopped on a window of zero and will send
+    // nothing for an acknowledgement to ride on, so an ack sent from here is the
+    // only thing that can tell it to start again.
+    if (need_ack_ && (ack_due_ == kNoDeadline || now >= ack_due_)) {
         send_control(rudp::PacketType::Ack, now);
     } else if (state_ == State::Connected && now - last_send_ >= kKeepAlive) {
         // Say something now and then: it keeps the peer's idle timer from firing

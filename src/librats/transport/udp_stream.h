@@ -379,7 +379,11 @@ private:
     Clock::duration   rto_ = kInitialRto;
     Clock::time_point last_recv_;
     Clock::time_point last_send_;
-    Clock::time_point ack_due_{};   ///< when a delayed ack must go out (epoch = none)
+    /// When an owed acknowledgement must go out. The epoch means "no deadline",
+    /// which with need_ack_ set is not "never" but "at once": read() leaves it that
+    /// way to ask for a window update, because a peer stopped on a zero window sends
+    /// nothing for the ack to ride on. Every other owed ack arms a real deadline.
+    Clock::time_point ack_due_{};
     /// When the retransmission timeout fires (epoch = the timer is not running).
     ///
     /// One deadline for the stream, not one per packet — RFC 6298's model. It is
