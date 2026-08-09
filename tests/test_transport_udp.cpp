@@ -103,6 +103,10 @@ public:
     void drop_next(size_t count = 1) { drop_next_ = count; }
     size_t dropped() const        { return dropped_; }
     size_t queued() const         { return queue_.size(); }
+    /// Datagrams handed to the "wire", dropped ones included. What a test watches
+    /// when the question is whether a stream said anything at all — a keep-alive or
+    /// a delayed ack has nothing to deliver and no side effect to observe.
+    size_t sent() const           { return sent_; }
 
 private:
     struct Datagram {
@@ -433,6 +437,67 @@ TEST(RudpPacketTest, OnlyACookieSizedPayloadRidesOnSynAndRetry) {
     }
 }
 
+// Sequence numbers advance forever in a 32-bit space and wrap. Every window check
+// in the stream — "has this been acknowledged", "is this past the gap", "is this
+// ack ahead of anything we sent" — goes through these three functions, so the wrap
+// is handled in exactly one place. Comparing the raw values instead would invert
+// the moment the counter rolls over: a sender would decide the peer had
+// acknowledged packets it had never sent, and a receiver would treat everything
+// arriving after the roll as already delivered.
+//
+// Reaching the wrap for real costs 2^32 packets (~5 TB on one stream), so it is
+// the arithmetic that is tested here rather than a stream that has been driven
+// there. That is where the whole risk lives: the stream only ever *uses* these.
+TEST(RudpPacketTest, SequenceComparisonSurvivesTheWrap) {
+    constexpr uint32_t kLast = 0xFFFFFFFFu;  // the number just before the roll
+
+    // Ordinary ordering, far from the boundary.
+    EXPECT_TRUE(rudp::seq_less(5, 6));
+    EXPECT_FALSE(rudp::seq_less(6, 5));
+    EXPECT_FALSE(rudp::seq_less(5, 5));
+    EXPECT_TRUE(rudp::seq_le(5, 5));
+    EXPECT_EQ(rudp::seq_diff(9, 5), 4);
+
+    // Across the roll: 0 and 1 come *after* 0xFFFFFFFF, not billions before it.
+    EXPECT_TRUE(rudp::seq_less(kLast, 0)) << "the wrap inverted the ordering";
+    EXPECT_TRUE(rudp::seq_less(kLast - 3, 2));
+    EXPECT_FALSE(rudp::seq_less(2, kLast - 3));
+    EXPECT_TRUE(rudp::seq_le(kLast, kLast));
+
+    // Distance is signed and stays exact across the roll — this is what resolves a
+    // selective-ack bit to an index in the retransmission queue.
+    EXPECT_EQ(rudp::seq_diff(2, kLast), 3);
+    EXPECT_EQ(rudp::seq_diff(kLast, 2), -3);
+    EXPECT_EQ(rudp::seq_diff(0, kLast), 1);
+
+    // A window's worth of packets astride the boundary keeps its order throughout,
+    // which is the only span the stream ever compares over.
+    for (uint32_t i = 0; i + 1 < rudp::kMaxWindowPackets; ++i) {
+        const uint32_t a = kLast - rudp::kMaxWindowPackets / 2 + i;
+        EXPECT_TRUE(rudp::seq_less(a, a + 1)) << "at offset " << i;
+        EXPECT_EQ(rudp::seq_diff(a + 1, a), 1) << "at offset " << i;
+    }
+}
+
+// The header carries the raw 32-bit value, so nothing about the wrap may be lost
+// on the wire — a boundary sequence number has to survive the round trip intact.
+TEST(RudpPacketTest, CarriesSequenceNumbersAtTheBoundary) {
+    for (const uint32_t seq : {uint32_t{0}, uint32_t{1}, uint32_t{0x7FFFFFFF},
+                               uint32_t{0x80000000}, uint32_t{0xFFFFFFFF}}) {
+        rudp::Packet in;
+        in.type    = rudp::PacketType::Ack;
+        in.conn_id = 0xABCDEF01;
+        in.seq     = seq;
+        in.ack     = seq - 1;  // wraps to 0xFFFFFFFF when seq is 0
+
+        uint8_t      buf[rudp::kMaxDatagram];
+        rudp::Packet out;
+        ASSERT_TRUE(rudp::decode(buf, rudp::encode(in, buf), out)) << "seq " << seq;
+        EXPECT_EQ(out.seq, seq);
+        EXPECT_EQ(out.ack, static_cast<uint32_t>(seq - 1));
+    }
+}
+
 // ── Stream behaviour ────────────────────────────────────────────────────────
 
 TEST(UdpStreamTest, HandshakeBringsBothSidesUp) {
@@ -748,6 +813,219 @@ TEST(UdpStreamTest, UnansweredDialGivesUp) {
 
     ASSERT_TRUE(dialer.dead()) << "a dial into the void never gave up";
     EXPECT_EQ(dialer.close_reason(), CloseReason::ConnectFailed);
+}
+
+// Flow control is separate from congestion control and absolute: the receiver says
+// how much more it will buffer, and the sender does not exceed it whatever the
+// congestion window would allow. Without it a peer that stops reading decides how
+// much memory we spend on it — the receive buffer would grow to everything the
+// sender is willing to queue, and the only bound left would be the send queue at
+// the far end.
+//
+// The far more interesting half is the recovery: a window that closes has to
+// reopen without either side being told to look. The sender is not sending (it has
+// no room to send into), so nothing of its own will carry the news back, and the
+// receiver has no traffic to append the update to.
+TEST(UdpStreamTest, AClosedReceiveWindowStopsTheSenderAndResumesOnRead) {
+    Pair pair;
+
+    // More than a full receive window, so the receiver's buffer really does fill
+    // while nothing reads it. That the send queue can hold more than one window is
+    // exactly what makes this reachable — see SendQueueOutgrowsAFullWindow.
+    constexpr size_t kWindowBytes = size_t{rudp::kMaxWindowPackets} * rudp::kMaxPayload;
+    std::string      payload(UdpStream::kSendQueueLimit, '\0');
+    for (size_t i = 0; i < payload.size(); ++i)
+        payload[i] = static_cast<char>((i * 13 + 7) & 0xFF);
+    ASSERT_GT(payload.size(), kWindowBytes) << "the transfer cannot fill a window";
+    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+
+    // Phase one: run the path with the receiver never reading a byte.
+    const auto stall_until = std::chrono::steady_clock::now() + 3s;
+    while (std::chrono::steady_clock::now() < stall_until) {
+        pair.net.deliver();
+        const auto now = std::chrono::steady_clock::now();
+        pair.initiator->tick(now);
+        pair.responder->tick(now);
+        if (pair.net.queued() == 0) std::this_thread::sleep_for(1ms);
+    }
+
+    // The stall is the point: the sender still owes data it cannot send.
+    EXPECT_GT(pair.initiator->queued_bytes(), 0u)
+        << "the sender handed over everything despite a closed window";
+    // Neither side may treat a stopped peer as a dead one. The sender probes a
+    // zero window with a single packet on the retransmission timeout, and the
+    // receiver acknowledges each probe — so the attempt counter never builds up
+    // and nothing here is on a path to being declared gone.
+    EXPECT_FALSE(pair.initiator->dead()) << "a full receiver was mistaken for a lost one";
+    EXPECT_FALSE(pair.responder->dead());
+
+    const std::string first = drain(*pair.responder);
+    EXPECT_LT(first.size(), payload.size()) << "flow control never stopped the sender";
+    EXPECT_GT(first.size(), kWindowBytes / 2) << "the sender stopped far short of the window";
+
+    // Phase two: the buffer has just been drained, so the window is open again and
+    // the transfer has to pick itself back up with no help from the test.
+    std::string received = first;
+    const auto  deadline = std::chrono::steady_clock::now() + 20s;
+    while (received.size() < payload.size() && std::chrono::steady_clock::now() < deadline) {
+        pair.net.deliver();
+        const auto now = std::chrono::steady_clock::now();
+        pair.initiator->tick(now);
+        pair.responder->tick(now);
+        received += drain(*pair.responder);
+        if (pair.net.queued() == 0) std::this_thread::sleep_for(1ms);
+    }
+
+    EXPECT_EQ(received, payload) << "the transfer never resumed after the window reopened";
+}
+
+// A hole is repaired from what the selective ack names, not from a timeout.
+//
+// The sender's queue here is far longer than a selective ack can reach: one word
+// names the 32 packets after the hole, while the queue behind it runs to hundreds.
+// That gap is load-bearing — repair_sacked_holes() bounds its search by the reach
+// of the ack rather than by the length of the queue, which is only sound because a
+// bit cannot mark anything further out. If that bound were ever tightened past the
+// real reach, this is the test that would notice: the repair would silently stop
+// happening and recovery would fall back to waiting out a retransmission timeout,
+// with the transfer still completing and nothing else looking wrong.
+TEST(UdpStreamTest, AHoleBehindALongQueueIsRepairedWithoutATimeout) {
+    Pair pair;
+
+    // Warm the window up, so the burst that follows is long enough to outrun what
+    // one selective ack can describe.
+    const std::string warmup(rudp::kMaxPayload * 64, 'w');
+    ASSERT_EQ(write_all(*pair.initiator, warmup), warmup.size());
+    pair.net.settle(*pair.initiator, *pair.responder, 128);
+    ASSERT_EQ(drain(*pair.responder).size(), warmup.size());
+    ASSERT_EQ(pair.initiator->window_reductions(), 0u) << "the warm-up lost something";
+
+    const uint32_t repairs_before = pair.initiator->retransmits();
+
+    // Lose the four packets at the front of the next burst; everything behind them
+    // arrives. Four, not one: a single hole is repaired by the duplicate-ack rule
+    // long before the selective ack is consulted — which is exactly what a mutation
+    // test showed, so a one-packet hole proves nothing about this path. The
+    // duplicate-ack rule resends only sent_.front(), and only once per episode, so
+    // the three holes behind it can be closed by nothing but the selective ack (or,
+    // if that fails, by a timeout — which is what the clock below rules out).
+    constexpr size_t kHoles        = 4;
+    constexpr size_t kBurstPackets = 64;
+    ASSERT_GT(kBurstPackets, rudp::kSackBits) << "the queue must outrun one sack word";
+    pair.net.drop_next(kHoles);
+    const std::string payload(rudp::kMaxPayload * kBurstPackets, 'x');
+    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+
+    // Let the repair-spacing floor expire before any ack lands, so the repair is
+    // not skipped as "re-sent very recently" and the clock below measures the
+    // decision rather than the floor.
+    std::this_thread::sleep_for(UdpStream::kMinRepairSpacing + 5ms);
+
+    // Watch for the repairs themselves, not for the transfer to finish: a
+    // retransmission that happens sooner than the *minimum* retransmission timeout
+    // could not have come from a timeout, so it can only have come from the
+    // acknowledgement. All kHoles of them, so the count cannot be satisfied by the
+    // one packet the duplicate-ack rule is entitled to resend.
+    const auto started  = std::chrono::steady_clock::now();
+    const auto give_up  = started + 5s;
+    while (pair.initiator->retransmits() - repairs_before < kHoles &&
+           std::chrono::steady_clock::now() < give_up) {
+        pair.net.deliver();
+        const auto now = std::chrono::steady_clock::now();
+        pair.initiator->tick(now);
+        pair.responder->tick(now);
+        drain(*pair.responder);
+        if (pair.net.queued() == 0) std::this_thread::sleep_for(1ms);
+    }
+    const auto took = std::chrono::steady_clock::now() - started;
+
+    ASSERT_GE(pair.initiator->retransmits() - repairs_before, kHoles)
+        << "only " << (pair.initiator->retransmits() - repairs_before) << " of " << kHoles
+        << " holes were repaired; the rest were left to a timeout";
+    EXPECT_LT(took, UdpStream::kMinRto)
+        << "the holes waited out a retransmission timeout instead of being repaired from the ack";
+    // A timeout would have collapsed the window to a single packet; a repair driven
+    // by an acknowledgement halves it, because packets are demonstrably still
+    // flowing. One episode, either way — but only one of them leaves room to send.
+    EXPECT_GT(pair.initiator->cwnd(), rudp::kMaxPayload)
+        << "the window collapsed as it would on a timeout";
+    EXPECT_EQ(pair.initiator->window_reductions(), 1u);
+}
+
+// A pure acknowledgement is worth a datagram of its own only when it has to be.
+// Every packet carries the ack field, so one that waits a moment usually finds
+// something to ride along on for free; one sent per arriving packet doubles the
+// packet count of every bulk transfer for nothing.
+TEST(UdpStreamTest, APureAckIsDelayedRatherThanSentPerPacket) {
+    Pair pair;
+
+    const size_t before = pair.net.sent();
+
+    // One in-order packet: no gap in front of it, and the ack-every-other-packet
+    // rule not yet reached. There is nothing to say that cannot wait.
+    ASSERT_GT(write_all(*pair.initiator, std::string(64, 'q')), 0u);
+    pair.net.deliver();
+    EXPECT_EQ(pair.net.sent(), before + 1)
+        << "a lone in-order packet was acknowledged with a datagram of its own";
+
+    // Waiting is not forgetting: the delayed-ack deadline is what gets it out when
+    // nothing came along to carry it.
+    pair.responder->tick(std::chrono::steady_clock::now() + UdpStream::kDelayedAck + 5ms);
+    EXPECT_EQ(pair.net.sent(), before + 2) << "the delayed acknowledgement never went out";
+}
+
+// The other half of that rule: a bulk sender must not have to wait out the delay
+// on every second packet, or its window opens one delayed ack at a time.
+TEST(UdpStreamTest, EveryOtherPacketIsAcknowledgedAtOnce) {
+    Pair pair;
+
+    const size_t before = pair.net.sent();
+
+    // Two packets' worth in one write, so the second arrival reaches the
+    // ack-every-other-segment threshold within the same batch.
+    const std::string payload(rudp::kMaxPayload + 100, 'z');
+    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+    pair.net.deliver();
+
+    // Two data packets out, one acknowledgement straight back — no timer involved.
+    EXPECT_EQ(pair.net.sent(), before + 3)
+        << "the second packet did not draw an immediate acknowledgement";
+    EXPECT_EQ(drain(*pair.responder), payload);
+}
+
+// An idle stream still has to say something now and then. It keeps the peer's idle
+// timer from firing, and — the reason it matters more here than it would on TCP —
+// it keeps the NAT mapping for this port from being reclaimed underneath a node
+// that is simply not busy.
+TEST(UdpStreamTest, KeepAliveBreaksALongSilence) {
+    Pair pair;
+    ASSERT_TRUE(pair.initiator->connected());
+
+    const size_t before = pair.net.sent();
+
+    // Well short of the interval: nothing is owed, so nothing is said.
+    pair.initiator->tick(std::chrono::steady_clock::now() + UdpStream::kKeepAlive / 2);
+    EXPECT_EQ(pair.net.sent(), before) << "an idle stream chattered";
+
+    // Past it: an acknowledgement goes out for its own sake.
+    pair.initiator->tick(std::chrono::steady_clock::now() + UdpStream::kKeepAlive + 1s);
+    EXPECT_EQ(pair.net.sent(), before + 1) << "the keep-alive never went out";
+}
+
+// And the converse: silence long enough to outlast several keep-alives is a peer
+// that is gone, not one that is quiet. Holding the stream open would leak it —
+// a datagram transport gets no close notification from anywhere.
+TEST(UdpStreamTest, ASilentPeerTimesOut) {
+    Pair pair;
+    ASSERT_TRUE(pair.responder->connected());
+
+    // Just short of the timeout, with nothing arriving: still a live stream.
+    pair.responder->tick(std::chrono::steady_clock::now() + UdpStream::kIdleTimeout - 1s);
+    EXPECT_FALSE(pair.responder->dead()) << "a quiet stream was closed too early";
+
+    pair.responder->tick(std::chrono::steady_clock::now() + UdpStream::kIdleTimeout + 1s);
+    EXPECT_TRUE(pair.responder->dead()) << "a stream whose peer vanished was held open";
+    EXPECT_EQ(pair.responder->close_reason(), CloseReason::IdleTimeout);
 }
 
 // ── The mux: demultiplexing, admission, resets, linger ──────────────────────
