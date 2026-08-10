@@ -1553,8 +1553,10 @@ TEST(UdpMuxTest, StagedDatagramsLeaveBeforeTheCallThatMadeThemReturns) {
 }
 
 // Every unknown datagram gets a Reset, which is a reflector unless it is capped.
-// The budget refills per tick, so draining a burst without ticking must yield no
-// more than one tick's worth of replies.
+// The budget is a sliding window on the clock rather than a per-tick counter (the
+// mux has no fixed tick to hang it on, and a node with no streams — the one a
+// junk flood is aimed at — would never tick at all), so the property to test is a
+// *rate*: a burst drained inside one window may not outrun one window's budget.
 TEST(UdpMuxTest, ResetsAreCappedSoTheSocketCannotReflect) {
     MuxPair net;
 
@@ -1562,7 +1564,7 @@ TEST(UdpMuxTest, ResetsAreCappedSoTheSocketCannotReflect) {
     ASSERT_TRUE(is_valid_socket(probe));
     set_socket_nonblocking(probe);
 
-    constexpr int kJunk = UdpMux::kMaxUnsolicitedRepliesPerTick * 3;
+    constexpr int kJunk = UdpMux::kMaxUnsolicitedReplies * 3;
     for (int i = 0; i < kJunk; ++i) {
         rudp::Packet p;
         p.type    = rudp::PacketType::Data;   // not a Syn: nothing may be created
@@ -1575,11 +1577,13 @@ TEST(UdpMuxTest, ResetsAreCappedSoTheSocketCannotReflect) {
         send_udp_to(probe, buf, rudp::encode(p, buf), net.addr_b, AddressFamily::IPv4);
     }
 
-    // Drain them all WITHOUT a tick — the budget is only refilled by tick().
-    for (int i = 0; i < 100; ++i) {
-        net.b->on_readable();
-        std::this_thread::sleep_for(1ms);
-    }
+    // Drain the whole burst as fast as the socket will give it up, with no sleeps:
+    // three windows' worth of junk delivered inside as little of one window as this
+    // machine allows. (The replies are staged, and on_readable() flushes them before
+    // it returns, so they are all on the wire by the end of this loop.)
+    const auto drain_from = std::chrono::steady_clock::now();
+    for (int i = 0; i < 50; ++i) net.b->on_readable();
+    const auto drain_to = std::chrono::steady_clock::now();
     EXPECT_EQ(net.b->stream_count(), 0u) << "junk datagrams created streams";
 
     int resets = 0, quiet = 0;
@@ -1595,8 +1599,92 @@ TEST(UdpMuxTest, ResetsAreCappedSoTheSocketCannotReflect) {
     }
     close_socket(probe);
 
+    // What the limiter is entitled to have emitted: one window's budget for every
+    // window the drain spanned, plus the one it started inside. Deriving the bound
+    // from measured time rather than fixing it keeps this a test of the rate even
+    // if the scheduler takes the drain loop away for a while.
+    const auto spanned = std::chrono::duration_cast<std::chrono::milliseconds>(drain_to - drain_from);
+    const int  windows = static_cast<int>(spanned / UdpMux::kUnsolicitedReplyWindow) + 1;
+
     EXPECT_GT(resets, 0) << "an unknown stream should be answered, not ignored";
-    EXPECT_LE(resets, UdpMux::kMaxUnsolicitedRepliesPerTick) << "the per-tick reset budget was not enforced";
+    EXPECT_LE(resets, UdpMux::kMaxUnsolicitedReplies * windows)
+        << "the reset budget was not enforced (drain spanned " << spanned.count() << " ms)";
+    EXPECT_LT(resets, kJunk) << "every junk datagram was answered; the budget did nothing";
+}
+
+// ── Scheduling: what the mux asks the reactor to wake up for ────────────────
+//
+// Every stream owes its peer work on a deadline — a retransmission timeout, a
+// delayed ack, a keep-alive, the idle timer. Serving those by sweeping every
+// stream on a fixed 20 ms cadence woke the reactor fifty times a second for the
+// life of the process, whether or not any stream had anything to do, and whether
+// or not the node had any streams at all. These fix the replacement: a deadline
+// queue that asks for nothing when there is nothing due, sleeps all the way to
+// the next real deadline when there is, and is told whenever one moves earlier.
+
+TEST(UdpMuxTest, AMuxWithNoStreamsAsksForNoWakeups) {
+    MuxPair net;
+    // The cap is what a caller offers as "I would sleep this long anyway". Handing
+    // it straight back is the mux saying it needs nothing sooner.
+    EXPECT_EQ(net.a->next_timeout_ms(60'000), 60'000)
+        << "a mux with no streams at all still wanted waking";
+}
+
+/// Drive `net` until A's mux has settled to a genuinely idle schedule.
+///
+/// Settling is not instant, and deliberately so: a deadline that moves *later*
+/// (the dial's retransmission timeout giving way to the keep-alive once the Syn is
+/// acknowledged) does not get a heap slot of its own. The stale slot is left to
+/// fire, find nothing to do, and re-arm from there — one early wake-up, once,
+/// against a heap push on every packet if it were kept exact. So the property
+/// under test is where it converges, not what it reports mid-flight.
+namespace {
+bool settle_idle(MuxPair& net, std::unique_ptr<Link>& dial) {
+    if (!net.pump_until([&] { return stream_of(*dial).connected(); })) return false;
+    if (!net.pump_until([&] { return stream_of(*dial).flushed(); })) return false;
+    return net.pump_until([&] { return net.a->next_timeout_ms(60'000) > 1000; }, 3s);
+}
+} // namespace
+
+TEST(UdpMuxTest, AnIdleStreamSleepsUntilItsKeepAlive) {
+    MuxPair net;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(settle_idle(net, dial));
+
+    // Nothing outstanding, nothing to acknowledge: the earliest deadline is the
+    // keep-alive, three orders of magnitude past the 20 ms sweep this replaced.
+    const int ms = net.a->next_timeout_ms(60'000);
+    const auto keep_alive_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(UdpStream::kKeepAlive).count();
+    EXPECT_GT(ms, 1000) << "an idle stream still asked to be woken in " << ms << " ms";
+    EXPECT_LE(ms, keep_alive_ms) << "the keep-alive would have been missed";
+}
+
+TEST(UdpMuxTest, DataToSendBringsTheNextWakeupForward) {
+    MuxPair net;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(settle_idle(net, dial));
+
+    const int idle_ms = net.a->next_timeout_ms(60'000);
+    ASSERT_GT(idle_ms, 1000) << "the stream was not actually idle";
+
+    // A write starts the retransmission timer, which is due long before the
+    // keep-alive the mux had scheduled. Nothing on the datagram path was involved,
+    // so the mux learns of it only because UdpStreamLink::write tells it — and if
+    // it did not, this packet would go unrepaired until the keep-alive fired.
+    const std::string payload = "wake me sooner than that";
+    const ByteView    slice(payload);
+    ASSERT_GT(dial->write(&slice, 1).bytes, 0u);
+
+    const int armed_ms = net.a->next_timeout_ms(60'000);
+    const auto rto_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(UdpStream::kInitialRto).count();
+    EXPECT_LT(armed_ms, idle_ms) << "a deadline that moved earlier never reached the mux";
+    EXPECT_LE(armed_ms, rto_ms)  << "the retransmission timeout would have been missed";
 }
 
 // ── End to end, through a Node ──────────────────────────────────────────────

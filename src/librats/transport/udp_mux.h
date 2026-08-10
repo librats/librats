@@ -18,11 +18,35 @@
  *     (after asking the delegate whether a new inbound peer is welcome);
  *   - answer a datagram for a stream we do not have with a Reset, so the peer
  *     learns immediately instead of retransmitting into a void;
- *   - drive every stream's timers from one periodic tick;
+ *   - run every stream's timers off one deadline queue (see below);
  *   - keep a stream alive briefly after its connection is gone, so the last
  *     bytes it owes the peer still get delivered (see release());
  *   - move datagrams in batches rather than one syscall at a time (see
  *     flush_output()).
+ *
+ * ── Why the timers are scheduled, not swept ─────────────────────────────────
+ * Every stream owes its peer some work on a deadline: a retransmission timeout, a
+ * delayed acknowledgement, a keep-alive, and the idle timeout that ends it. The
+ * obvious way to serve those is a fixed sweep — visit every stream every 20 ms and
+ * ask each what it needs. It is simple, and it is wrong in both directions:
+ *
+ *   - it costs O(streams) whether or not anything is due, and
+ *   - far worse, it wakes the reactor fifty times a second *forever*. A connected
+ *     stream that is doing nothing genuinely needs to be visited once per
+ *     keep-alive — every 10 s — and a node with no datagram streams at all needs
+ *     no timer whatsoever. A sweep pays 500x that, and a dial-only node pays it
+ *     for peers it does not have.
+ *
+ * So each stream reports when it next needs servicing (UdpStream::next_deadline)
+ * and the mux keeps them in a min-heap ordered by that deadline. tick() services
+ * only what has come due — O(due + log n) — and next_timeout_ms() tells the
+ * reactor how long it may sleep, so an idle mux contributes no wake-ups at all.
+ *
+ * Keeping that honest is one rule: a deadline must never move *earlier* without
+ * the mux being told. Every path that can mutate a stream therefore re-arms it —
+ * the datagram path here, and read()/write()/close() through UdpStreamLink, which
+ * call stream_touched(). Moving a deadline *later* needs no notification: the
+ * stream is then visited early, finds nothing to do, and re-arms itself.
  *
  * ── Why the socket is worked in batches ─────────────────────────────────────
  * A datagram transport emits one packet per call, so at a 1200-byte payload a
@@ -120,12 +144,6 @@ class UdpMux final : public UdpStreamHost {
 public:
     using Clock = UdpStream::Clock;
 
-    /// How often every stream's timers are serviced. 20 ms is fine-grained enough
-    /// that a delayed ack is never the bottleneck and coarse enough that sweeping
-    /// thousands of streams costs nothing measurable — each visit is a handful of
-    /// timestamp comparisons.
-    static constexpr std::chrono::milliseconds kTickInterval{20};
-
     /// How long a stream is kept after its connection is gone, to finish handing
     /// over what it already accepted from the application. TCP gets this from the
     /// kernel, which keeps retransmitting after close(); without it, a node that
@@ -138,13 +156,19 @@ public:
     /// which makes "drain until empty" a correctness requirement, not a nicety).
     static constexpr size_t kMaxDatagramsPerRead = 4096;
 
-    /// Replies emitted per tick to datagrams that belong to no stream — the Reset
-    /// that tells a peer we have forgotten it, and the Retry that asks an unproven
-    /// one to come back with a cookie. Both are answers to unauthenticated traffic
-    /// from an address we have not verified, so both are budgeted together: a
-    /// hostile sender must not be able to turn this socket into a reflector,
-    /// whichever of the two it provokes.
-    static constexpr int kMaxUnsolicitedRepliesPerTick = 64;
+    /// Replies emitted per kUnsolicitedReplyWindow to datagrams that belong to no
+    /// stream — the Reset that tells a peer we have forgotten it, and the Retry
+    /// that asks an unproven one to come back with a cookie. Both are answers to
+    /// unauthenticated traffic from an address we have not verified, so both are
+    /// budgeted together: a hostile sender must not be able to turn this socket
+    /// into a reflector, whichever of the two it provokes.
+    ///
+    /// The budget is anchored to the clock rather than to tick(), because tick()
+    /// no longer runs on a fixed cadence — and the case this defends against is a
+    /// flood of junk at a node with *no* streams, which is precisely when a
+    /// deadline-driven tick would never run at all.
+    static constexpr int                      kMaxUnsolicitedReplies = 64;
+    static constexpr std::chrono::milliseconds kUnsolicitedReplyWindow{20};
 
     /// How long a cookie secret stays current. Two are kept, so a cookie is good
     /// for between one and two of these — long enough to survive a slow round trip
@@ -172,8 +196,23 @@ public:
     /// kMaxDatagramsPerRead with more possibly pending.
     bool on_readable();
 
-    /// Service every stream's timers, and retire finished lingering streams.
+    /// Service the streams whose deadline has passed, and retire finished
+    /// lingering ones. Cheap to call on every turn of the reactor loop — with
+    /// nothing due it is one comparison against the earliest deadline.
     void tick();
+
+    /// How long the reactor may sleep before tick() has work: milliseconds until
+    /// the earliest scheduled deadline, 0 if one has already passed, and `max_ms`
+    /// when no stream is scheduled at all. Mirrors TimerQueue::next_timeout_ms,
+    /// including the round-up (truncating a sub-millisecond remainder to 0 would
+    /// busy-spin to the deadline instead of sleeping through it).
+    int next_timeout_ms(int max_ms) const noexcept;
+
+    /// Re-read `stream`'s deadline after something outside the datagram path
+    /// changed it. Called by UdpStreamLink for read/write/close — read() can
+    /// re-open a closed window (an ack owed at once) and write() starts the
+    /// retransmission timer, both of which move the deadline *earlier*.
+    void stream_touched(UdpStream& stream);
 
     /// Open an outbound stream to `remote`, ready to be adopted as a connection.
     /// Returns nullptr only if no free connection id could be found.
@@ -205,20 +244,48 @@ private:
         /// When a released stream stops being worth keeping. Epoch = still owned
         /// by a live connection.
         Clock::time_point linger_until{};
+        /// The deadline this stream currently occupies a slot in `due_` for.
+        /// Meaningful only while `armed`; the pair is what makes lazy deletion
+        /// work — a heap slot whose deadline no longer matches has been
+        /// superseded by an earlier one and is dropped when it surfaces.
+        Clock::time_point scheduled{};
+        bool              armed = false;
+    };
+
+    /// One slot in the deadline heap. Deliberately a plain value (8 + 4 bytes, no
+    /// pointer into the map) so a stream can be erased without hunting down the
+    /// slots that name it.
+    struct Due {
+        Clock::time_point at;
+        uint32_t          id;   ///< the stream's recv id, i.e. its key in streams_
+    };
+    /// Min-heap ordering: std::*_heap build max-heaps, so "later first" puts the
+    /// earliest deadline at front().
+    struct LaterFirst {
+        bool operator()(const Due& a, const Due& b) const noexcept { return a.at > b.at; }
     };
 
     void        handle_datagram(const rudp::Packet& p, const Address& from, Clock::time_point now);
     /// Decide whether a Syn for an unknown stream may become one. Answers the peer
     /// itself (Reset at the ceiling, Retry when it has yet to prove its address)
     /// and returns false when nothing should be created.
-    bool        admit_syn(const rudp::Packet& syn, const Address& from);
+    bool        admit_syn(const rudp::Packet& syn, const Address& from, Clock::time_point now);
     void        accept_inbound(const rudp::Packet& syn, const Address& from, Clock::time_point now);
     void        send_reset(const Address& to, uint32_t conn_id);
     void        send_retry(const Address& to, uint32_t conn_id, uint32_t cookie);
-    bool        spend_reply_budget();
+    bool        spend_reply_budget(Clock::time_point now);
     UdpStream*  find_for_reset(uint32_t conn_id, const Address& from);
     bool        allocate_ids(uint32_t& recv_id, uint32_t& send_id);
     void        dispatch_pending();
+
+    // — deadline scheduling —
+    /// Give `entry` a heap slot for its next deadline, unless the one it already
+    /// holds comes first. Idempotent, and cheap in the common case: a deadline
+    /// that moved later costs one comparison and no allocation.
+    void        arm(uint32_t id, Entry& entry);
+    /// Rebuild the heap without the slots lazy deletion left behind, once they
+    /// outnumber the live ones badly enough to be worth the pass.
+    void        compact_due();
 
     // — address validation —
     using CookieSecret = std::array<uint8_t, 32>;
@@ -232,8 +299,8 @@ private:
     UdpMuxLimits    limits_;
 
     std::unordered_map<uint32_t, Entry> streams_;  ///< keyed by our recv id
+    std::vector<Due>                    due_;      ///< min-heap of stream deadlines
     std::vector<std::pair<ConnId, uint32_t>> pending_events_;
-    std::vector<uint32_t>                    expired_;  ///< scratch for tick()
 
     // Batch scratch. Both directions keep kUdpBatchMax datagrams' worth of storage
     // for the life of the mux — allocated once, never grown, so neither the receive
@@ -250,8 +317,9 @@ private:
     std::array<CookieSecret, 2> cookie_secret_{};
     Clock::time_point           secret_rotated_at_{};
 
-    std::mt19937 rng_;
-    int          replies_this_tick_ = 0;
+    std::mt19937      rng_;
+    Clock::time_point reply_window_started_{};
+    int               replies_in_window_ = 0;
 };
 
 /// The Link a Connection holds for a UDP stream.

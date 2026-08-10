@@ -700,6 +700,31 @@ void UdpStream::grow_window(size_t acked_bytes) {
     cwnd_ = (std::min)(cwnd_, kMaxCwnd);
 }
 
+std::optional<Clock::time_point> UdpStream::next_deadline() const noexcept {
+    // A dead stream has no timers left to run; the mux collects it instead of
+    // servicing it, so it asks for no wake-up at all.
+    if (state_ == State::Dead) return std::nullopt;
+
+    // The idle deadline is the one thing always armed: silence from the peer ends
+    // the stream whatever else is or is not outstanding.
+    Clock::time_point due = last_recv_ + kIdleTimeout;
+
+    // An owed acknowledgement. The epoch here is not "no deadline" but "at once" —
+    // read() leaves it that way to ask for a window update, and a peer stopped on a
+    // zero window sends nothing for the ack to ride on. Returning the epoch makes
+    // that the earliest possible deadline, which is exactly what it means.
+    if (need_ack_) due = (std::min)(due, ack_due_);
+
+    if (rto_deadline_ != kNoDeadline) due = (std::min)(due, rto_deadline_);
+
+    // Keep-alive: says we are still here, and keeps a NAT's mapping for this port
+    // open. Only meaningful once the stream is up — a Syn in flight is covered by
+    // the retransmission timeout above.
+    if (state_ == State::Connected) due = (std::min)(due, last_send_ + kKeepAlive);
+
+    return due;
+}
+
 void UdpStream::tick(Clock::time_point now) {
     if (state_ == State::Dead) return;
 

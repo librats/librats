@@ -137,7 +137,6 @@ private:
     void dispatch_events(ConnId id, uint32_t events);
     void do_accept();
     void schedule_maintenance();
-    void schedule_udp_tick();
     void start_dial(ConnId id, const std::string& host, int port, TransportKind kind);
     void abort_dial(ConnId id, const std::string& host, int port);
     Connection* adopt(std::unique_ptr<Link> link, ConnRole role, ConnId id);

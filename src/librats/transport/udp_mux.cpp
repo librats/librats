@@ -142,10 +142,86 @@ void UdpMux::send_retry(const Address& to, uint32_t conn_id, uint32_t cookie) {
     send_datagram(to, buf, rudp::encode(p, buf));
 }
 
-bool UdpMux::spend_reply_budget() {
-    if (replies_this_tick_ >= kMaxUnsolicitedRepliesPerTick) return false;
-    ++replies_this_tick_;
+bool UdpMux::spend_reply_budget(Clock::time_point now) {
+    // A window anchored to the clock, not a counter reset by tick(). The mux no
+    // longer sweeps on a fixed cadence, so "per tick" would mean "at whatever rate
+    // the streams happen to need servicing" — and on the node this budget actually
+    // protects, one with no streams at all being flooded with junk, that rate is
+    // zero. The rate itself is unchanged: 64 per 20 ms.
+    if (now - reply_window_started_ >= kUnsolicitedReplyWindow) {
+        reply_window_started_ = now;
+        replies_in_window_    = 0;
+    }
+    if (replies_in_window_ >= kMaxUnsolicitedReplies) return false;
+    ++replies_in_window_;
     return true;
+}
+
+// ── Deadline scheduling ─────────────────────────────────────────────────────
+
+void UdpMux::arm(uint32_t id, Entry& entry) {
+    std::optional<Clock::time_point> due = entry.stream->next_deadline();
+
+    if (entry.linger_until != Clock::time_point{}) {
+        // A released stream is also on a clock of its own. And once it has handed
+        // over everything it owed — or died trying — there is nothing left to wait
+        // for, so it wants collecting at the first opportunity rather than at the
+        // end of the linger. tick() runs once per reactor turn, so "the epoch"
+        // here means the very next turn.
+        if (entry.stream->flushed() || entry.stream->dead()) due = Clock::time_point{};
+        else if (!due)                                       due = entry.linger_until;
+        else                                                 due = (std::min)(*due, entry.linger_until);
+    }
+
+    if (!due) return;   // dead and still owned: release() will drop it, no timer needed
+
+    // Already covered. Note the asymmetry — a deadline that moved *earlier* must
+    // get a slot of its own, one that moved later needs nothing: the existing slot
+    // simply visits the stream early, finds nothing due, and re-arms from there.
+    if (entry.armed && *due >= entry.scheduled) return;
+
+    entry.scheduled = *due;
+    entry.armed     = true;
+    due_.push_back(Due{*due, id});
+    std::push_heap(due_.begin(), due_.end(), LaterFirst{});
+}
+
+void UdpMux::compact_due() {
+    // Lazy deletion leaves a slot behind for every deadline that moved earlier, and
+    // for every stream that went away with a far-off deadline still scheduled — up
+    // to 45 s of idle timeout on a node with heavy connection churn. Each is
+    // dropped when it surfaces, so this only exists to stop them accumulating in
+    // between; the thresholds keep it off the path of anything but real churn.
+    if (due_.size() <= 64 || due_.size() <= 4 * streams_.size()) return;
+
+    std::vector<Due> live;
+    live.reserve(streams_.size());
+    for (const Due& slot : due_) {
+        const auto it = streams_.find(slot.id);
+        if (it != streams_.end() && it->second.armed && it->second.scheduled == slot.at)
+            live.push_back(slot);
+    }
+    due_.swap(live);
+    std::make_heap(due_.begin(), due_.end(), LaterFirst{});
+}
+
+int UdpMux::next_timeout_ms(int max_ms) const noexcept {
+    if (due_.empty()) return max_ms;   // no stream wants waking: contribute nothing
+
+    const auto now = Clock::now();
+    const auto at  = due_.front().at;
+    if (at <= now) return 0;
+    // Round up, exactly as TimerQueue does: truncating a sub-millisecond remainder
+    // to 0 would poll with a 0 ms timeout and burn CPU until the deadline instead
+    // of sleeping through it.
+    const auto ms = std::chrono::ceil<std::chrono::milliseconds>(at - now).count();
+    return static_cast<int>((std::min<long long>)(ms, max_ms));
+}
+
+void UdpMux::stream_touched(UdpStream& stream) {
+    const auto it = streams_.find(stream.recv_id());
+    if (it == streams_.end() || it->second.stream.get() != &stream) return;
+    arm(it->first, it->second);
 }
 
 // ── Address validation ──────────────────────────────────────────────────────
@@ -206,6 +282,11 @@ void UdpMux::rotate_cookie_secret(Clock::time_point now) {
 
 bool UdpMux::on_readable() {
     const auto now = Clock::now();
+    // Cookies are minted from here (a Retry answering an unproven Syn), so this is
+    // where the secret has to be current. tick() rotates it too, but a node with no
+    // streams has no deadlines and therefore no ticks — and that is exactly the
+    // node a flood of Syns arrives at.
+    rotate_cookie_secret(now);
 
     size_t drained = 0;
     bool   more    = false;
@@ -268,29 +349,33 @@ void UdpMux::handle_datagram(const rudp::Packet& p, const Address& from, Clock::
         // handshake makes cheap and safe.)
         if (stream.remote() != from) return;
         stream.on_packet(p, now);
+        arm(it->first, it->second);   // the packet may have brought a deadline forward
         return;
     }
 
     if (p.type == rudp::PacketType::Syn) {
-        if (admit_syn(p, from)) accept_inbound(p, from, now);
+        if (admit_syn(p, from, now)) accept_inbound(p, from, now);
         return;
     }
 
     if (p.type == rudp::PacketType::Reset) {
         // A reset for a stream the sender never knew carries the id *it* was
         // given, which is our send id rather than our recv id — see find_for_reset.
-        if (UdpStream* stream = find_for_reset(p.conn_id, from)) stream->on_packet(p, now);
+        if (UdpStream* stream = find_for_reset(p.conn_id, from)) {
+            stream->on_packet(p, now);
+            stream_touched(*stream);   // now dead, or a lingering one worth collecting
+        }
         return;
     }
 
     // Nothing here answers to that id: a stream we closed, or one left over from a
     // previous run of this node. Say so, so the peer gives up now instead of
-    // retransmitting for a minute — but never more than a fixed number per tick,
-    // so a flood of garbage cannot turn this socket into a reflector.
-    if (spend_reply_budget()) send_reset(from, p.conn_id);
+    // retransmitting for a minute — but never more than a bounded rate, so a flood
+    // of garbage cannot turn this socket into a reflector.
+    if (spend_reply_budget(now)) send_reset(from, p.conn_id);
 }
 
-bool UdpMux::admit_syn(const rudp::Packet& syn, const Address& from) {
+bool UdpMux::admit_syn(const rudp::Packet& syn, const Address& from, Clock::time_point now) {
     // Everything this function refuses is refused BEFORE a stream exists. That is
     // the whole point: a Syn is sixteen bytes from an address nobody has verified,
     // and answering it with a stream, a connection and a half-built Noise handshake
@@ -306,7 +391,7 @@ bool UdpMux::admit_syn(const rudp::Packet& syn, const Address& from) {
     if (streams_.size() >= limits_.max_streams) {
         LOG_DEBUG("udp", "Refusing a dial from " << from.to_string() << ": at the stream ceiling ("
                   << limits_.max_streams << ")");
-        if (spend_reply_budget()) send_reset(from, reply_id);
+        if (spend_reply_budget(now)) send_reset(from, reply_id);
         return false;
     }
 
@@ -316,7 +401,7 @@ bool UdpMux::admit_syn(const rudp::Packet& syn, const Address& from) {
 
     // Unproven. Hand back a cookie and keep nothing: if the address was forged, the
     // cookie goes to whoever really lives there and this dial simply never happens.
-    if (spend_reply_budget())
+    if (spend_reply_budget(now))
         send_retry(from, reply_id, cookie_for(from, syn.conn_id, cookie_secret_[0]));
     return false;
 }
@@ -332,7 +417,7 @@ void UdpMux::accept_inbound(const rudp::Packet& syn, const Address& from, Clock:
     auto stream = std::make_unique<UdpStream>(*this, from, recv_id, send_id,
                                               ConnRole::Inbound, now);
     UdpStream* raw = stream.get();
-    streams_.emplace(recv_id, Entry{std::move(stream), Clock::time_point{}});
+    streams_.emplace(recv_id, Entry{std::move(stream)});
 
     // Adoption takes the link; refusing it destroys the link, which releases the
     // stream — so `raw` must not be touched again on that path.
@@ -344,6 +429,7 @@ void UdpMux::accept_inbound(const rudp::Packet& syn, const Address& from, Clock:
 
     LOG_DEBUG("udp", "Accepted stream " << recv_id << " from " << from.to_string());
     raw->on_packet(syn, now);  // acknowledges the Syn and opens the stream
+    stream_touched(*raw);      // first deadline: the idle timer, at the very least
 }
 
 UdpStream* UdpMux::find_for_reset(uint32_t conn_id, const Address& from) {
@@ -385,7 +471,8 @@ std::unique_ptr<Link> UdpMux::connect(const Address& remote) {
     auto stream = std::make_unique<UdpStream>(*this, remote, recv_id, send_id,
                                               ConnRole::Outbound, Clock::now());
     UdpStream* raw = stream.get();
-    streams_.emplace(recv_id, Entry{std::move(stream), Clock::time_point{}});
+    const auto inserted = streams_.emplace(recv_id, Entry{std::move(stream)});
+    arm(recv_id, inserted.first->second);  // the Syn's retransmission timeout
     flush_output();  // the Syn is the dial; it does not wait for company
     return std::make_unique<UdpStreamLink>(*this, *raw);
 }
@@ -412,6 +499,7 @@ void UdpMux::release(UdpStream& stream) {
         // to retransmit after close(), and without it a node that sends a final
         // message and disconnects would drop it on the floor.
         it->second.linger_until = Clock::now() + kLingerTimeout;
+        arm(it->first, it->second);   // the linger is a deadline like any other
     }
 
     // The Connection told the link goodbye just before letting go of it, so a Fin
@@ -421,22 +509,48 @@ void UdpMux::release(UdpStream& stream) {
 }
 
 void UdpMux::tick() {
+    // The whole point of the deadline heap: with nothing scheduled, or nothing yet
+    // due, this is one comparison — which is what makes it safe for the reactor to
+    // call on every turn of its loop instead of arming a timer for it.
+    if (due_.empty()) return;
     const auto now = Clock::now();
-    replies_this_tick_ = 0;
+    if (due_.front().at > now) return;
+
     rotate_cookie_secret(now);
 
-    expired_.clear();
-    for (auto& entry : streams_) {
-        UdpStream& stream = *entry.second.stream;
+    // Only what has come due. Bounded by the slots that were already scheduled when
+    // this call began: servicing a stream re-arms it, and a re-arm that lands on
+    // "now" (a lingering stream that just flushed) would otherwise be picked up by
+    // this same loop. Deferring those to the next turn — which the reactor takes
+    // immediately, since next_timeout_ms() then returns 0 — keeps the loop finite
+    // by construction rather than by argument.
+    size_t budget = due_.size();
+    while (budget-- > 0 && !due_.empty() && due_.front().at <= now) {
+        const Due slot = due_.front();
+        std::pop_heap(due_.begin(), due_.end(), LaterFirst{});
+        due_.pop_back();
+
+        const auto it = streams_.find(slot.id);
+        if (it == streams_.end()) continue;   // the stream went away; the slot is litter
+        Entry& entry = it->second;
+        // Superseded: a later arm() gave this stream an earlier slot, which has
+        // already been (or is about to be) serviced. Lazy deletion, so arm() never
+        // has to find and remove anything.
+        if (!entry.armed || entry.scheduled != slot.at) continue;
+        entry.armed = false;
+
+        UdpStream& stream = *entry.stream;
         stream.tick(now);
 
-        const bool lingering = entry.second.linger_until != Clock::time_point{};
-        if (lingering && (stream.flushed() || stream.dead() || now >= entry.second.linger_until))
-            expired_.push_back(entry.first);
+        const bool lingering = entry.linger_until != Clock::time_point{};
+        if (lingering && (stream.flushed() || stream.dead() || now >= entry.linger_until)) {
+            streams_.erase(it);
+            continue;
+        }
+        arm(slot.id, entry);
     }
-    for (const uint32_t id : expired_) streams_.erase(id);
-    expired_.clear();
 
+    compact_due();
     dispatch_pending();
     flush_output();  // one syscall for every stream's retransmissions and keep-alives
 }
@@ -446,6 +560,7 @@ void UdpMux::shutdown() {
     for (auto& entry : streams_) entry.second.stream->abort(now);
     flush_output();  // the goodbyes go out before the streams they came from
     streams_.clear();
+    due_.clear();
     pending_events_.clear();
 }
 
@@ -463,6 +578,12 @@ void UdpMux::dispatch_pending() {
 
 Link::IoResult UdpStreamLink::read(ByteSpan into) {
     const size_t n = stream_.read(into.data(), into.size());
+    // Draining the in-order buffer can re-open a receive window we had advertised
+    // as full, which the stream owes the peer an acknowledgement for *at once* —
+    // the earliest deadline there is. Re-arming here is what stops that ack from
+    // waiting on some unrelated timer.
+    if (n > 0) mux_.stream_touched(stream_);
+
     if (n > 0) return {n, Status::Ok};
     if (stream_.eof()) return {0, Status::Closed};
     if (stream_.dead()) return {0, Status::Error};
@@ -472,6 +593,11 @@ Link::IoResult UdpStreamLink::read(ByteSpan into) {
 Link::IoResult UdpStreamLink::write(const ByteView* slices, size_t count) {
     if (stream_.dead()) return {0, Status::Error};
     const size_t n = stream_.write(slices, count, UdpMux::Clock::now());
+    // Whatever went out started the retransmission timer. On a stream that was idle
+    // a moment ago that is a deadline hundreds of milliseconds out, against a
+    // keep-alive ten seconds out — so without this the first loss on a quiet stream
+    // would not be repaired until the keep-alive happened to wake it.
+    if (n > 0) mux_.stream_touched(stream_);
     return {n, n > 0 ? Status::Ok : Status::WouldBlock};
 }
 
@@ -485,6 +611,7 @@ void UdpStreamLink::close(CloseReason reason) {
         stream_.begin_close(now);
     else
         stream_.abort(now);
+    mux_.stream_touched(stream_);
 }
 
 } // namespace librats

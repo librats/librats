@@ -186,7 +186,6 @@ void Reactor::run() {
     if (mux_) {
         set_socket_nonblocking(mux_->socket());
         poller_->add(mux_->socket(), PollIn);
-        schedule_udp_tick();
     }
 
     PollResult        events[kMaxEvents];
@@ -195,12 +194,23 @@ void Reactor::run() {
     schedule_maintenance();
 
     while (running_.load(std::memory_order_relaxed)) {
-        const int timeout = timers_.next_timeout_ms(kMaxPollMs);
+        int timeout = timers_.next_timeout_ms(kMaxPollMs);
+        // The datagram transport keeps its own deadlines — retransmission timeouts,
+        // delayed acks, keep-alives — rather than being swept on a fixed cadence, so
+        // the wait has to cover the earliest of them too. With no stream due it
+        // contributes nothing, and an idle mux costs no wake-ups at all.
+        if (mux_) timeout = mux_->next_timeout_ms(timeout);
         const int n = poller_->wait(events, kMaxEvents, timeout);
 
         drain_tasks(task_batch);                         // connect/close/send-arm
         for (int i = 0; i < n; ++i) handle_event(events[i]);
         timers_.run_due();
+        // Service whatever datagram deadlines have come due. Deliberately not a
+        // TimerQueue entry: those deadlines move on nearly every packet, and
+        // re-scheduling a timer that often would cost far more than the one
+        // comparison this is when nothing is due. Before process_pending_close(),
+        // so a stream that dies here is torn down in the same turn.
+        if (mux_) mux_->tick();
         process_pending_close();
         // The mux batches its datagrams; the ones it collected inside a readable
         // event or a tick have already gone out, but an application send reaches a
@@ -271,14 +281,6 @@ void Reactor::schedule_maintenance() {
         // read-only with respect to the map, and on_maintenance_tick() never closes.
         for (auto& [id, conn] : conns_) conn->on_maintenance_tick();
         schedule_maintenance();
-    });
-}
-
-void Reactor::schedule_udp_tick() {
-    timers_.schedule(UdpMux::kTickInterval, [this] {
-        if (!mux_) return;
-        mux_->tick();
-        schedule_udp_tick();
     });
 }
 

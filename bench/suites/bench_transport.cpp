@@ -38,8 +38,9 @@
 //               does not.
 //   small       many small frames. Per-packet costs dominate, which is where
 //               syscall batching (sendmmsg/recvmmsg, kUdpBatchMax) pays off.
-//   idle        N connected peers doing nothing. UdpMux::kTickInterval sweeps
-//               every stream every 20 ms; this is what that sweep costs.
+//   idle        N connected peers doing nothing. The datagram side schedules
+//               each stream at its own deadline rather than sweeping them, so
+//               this is what a connected-but-silent stream still costs.
 //   burst       the largest unpaced application burst the connection survives
 //               before Connection::kDefaultSendHighWater drops it as a slow
 //               consumer. The two wires differ sharply here — see the note at
@@ -451,10 +452,11 @@ SmallResult bench_small(TransportKind kind, int count, size_t size, int credit_m
 // ── Experiment: idle cost ───────────────────────────────────────────────────
 //
 // N connected peers with no traffic at all. TCP's cost here is a poll that never
-// fires. The datagram side additionally runs UdpMux::tick() every 20 ms, which
-// visits *every* stream to service retransmission timers, delayed acks and
-// keep-alives — so this row is the price of that sweep, and the row to watch if
-// the tick is ever replaced by a per-stream deadline queue.
+// fires. The datagram side runs UdpMux::tick() from the reactor loop, but that is
+// a single comparison against the earliest scheduled deadline unless something has
+// actually come due — an idle stream schedules itself one keep-alive ahead. This
+// row is what is left of that: the reactor's own idle poll cap, plus the keep-alive
+// traffic itself.
 //
 // Also reports resident memory. Each peer here is a whole Node, so the figure
 // covers both ends — and on the datagram side most of the difference is not
@@ -739,8 +741,12 @@ int main() {
         row("CPU",             tcp.cpu_percent_core, udp.cpu_percent_core, "% core", true);
         row("resident / peer", tcp.bytes_per_peer / 1024.0, udp.bytes_per_peer / 1024.0,
             "KiB", true);
-        std::printf("  (UDP additionally sweeps every stream every UdpMux::kTickInterval = 20 ms.\n"
-                    "   Each peer here is a whole Node, so 'resident / peer' covers both ends.)\n");
+        std::printf("  (the datagram side schedules each stream at its own next deadline\n"
+                    "   (UdpStream::next_deadline), so an idle stream asks to be woken once\n"
+                    "   per keep-alive rather than every 20 ms. What is left here is the\n"
+                    "   reactor's own Reactor::kMaxPollMs = 50 ms idle poll cap, which both\n"
+                    "   transports pay. Each peer is a whole Node, so 'resident / peer'\n"
+                    "   covers both ends.)\n");
     }
 
     // ── burst ───────────────────────────────────────────────────────────────

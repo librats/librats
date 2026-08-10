@@ -56,6 +56,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -181,6 +182,24 @@ public:
 
     /// Periodic work: retransmission, delayed acks, keep-alive, idle death.
     void tick(Clock::time_point now);
+
+    /// When tick() next has something to do — the earliest of the retransmission
+    /// timeout, an owed acknowledgement, the keep-alive and the idle deadline.
+    ///
+    /// This is what lets the mux schedule streams instead of sweeping them: a
+    /// stream that is merely connected wants to be visited once per keep-alive
+    /// (10 s), not fifty times a second, and a node with no streams at all wants
+    /// no timer whatsoever. Every mutating entry point re-reads this, so a
+    /// deadline can never move earlier without the owner being told.
+    ///
+    /// Two values are special:
+    ///   - `nullopt` — never; only a dead stream, which the mux drops rather than
+    ///     services.
+    ///   - the clock epoch — *now*. An acknowledgement owed with no deadline (see
+    ///     `ack_due_`) is one that must go out at the first opportunity, because
+    ///     the peer it is meant for is stopped on a zero window and will send
+    ///     nothing for it to ride on.
+    std::optional<Clock::time_point> next_deadline() const noexcept;
 
     // ── Driven by the Link / Connection ─────────────────────────────────────
 
