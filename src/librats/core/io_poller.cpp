@@ -37,8 +37,12 @@
 #elif defined(POLLER_USE_IOCP)
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    #include "librats/core/notifier.h"   // wakes the readiness thread out of WSAPoll
+    #include <condition_variable>
     #include <mutex>
+    #include <thread>
     #include <unordered_map>
+    #include <unordered_set>
     #include <vector>
     #include <memory>
 #elif defined(POLLER_USE_POLL)
@@ -343,10 +347,27 @@ private:
 //   readiness notifications through the IOCP completion port (proactor
 //   model adapted to reactor semantics).
 //
-//   Listen sockets and connecting sockets (where overlapped recv/send
-//   cannot be used) fall back to a non-blocking WSAPoll check done
-//   inside wait() — typically only 1 listen + ~30 connecting sockets,
-//   so this is negligible overhead.
+//   Listen sockets and connecting sockets cannot carry a zero-byte
+//   overlapped operation (WSARecv on either fails with WSAENOTCONN), so
+//   IOCP never has anything to tell us about them. They are checked with
+//   a non-blocking WSAPoll at the top of wait() instead.
+//
+//   That check ALONE is not enough, and getting this wrong is expensive:
+//   wait() then blocks in GQCS for the caller's full timeout, so readiness
+//   on one of those sockets is not noticed until wait() happens to return
+//   for some other reason — up to Reactor::kMaxPollMs (50 ms) late. Every
+//   outbound connect and every inbound accept paid that delay. So a small
+//   readiness thread (aux_loop) blocks in WSAPoll on exactly those sockets
+//   and posts a completion packet the moment one is ready, which is what
+//   GQCS is waiting for. The thread is only a WAKE source: the events
+//   themselves still come from check_wsapoll_sockets() under the mutex,
+//   against the live socket set — so a stale entry in the thread's
+//   snapshot can cost a spurious wakeup and nothing more.
+//
+//   wsapoll_mode_ indexes those sockets separately from active_. The check
+//   runs on every wait() and used to walk every registered socket to find
+//   the one or two that are not IOCP-driven; with the index it costs
+//   nothing at all when there are none (the common steady state).
 //
 //   When send_to_peer() on another thread arms a write via modify(),
 //   the zero-byte WSASend completes and wakes GQCS immediately —
@@ -365,14 +386,40 @@ public:
     IocpPoller() {
         iocp_ = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 1);
         if (!iocp_) {
-            LOG_POLLER_ERROR("CreateIoCompletionPort failed: " + 
+            LOG_POLLER_ERROR("CreateIoCompletionPort failed: " +
                             std::to_string(GetLastError()));
-        } else {
-            LOG_POLLER_INFO("Created IOCP poller");
+            return;
         }
+        LOG_POLLER_INFO("Created IOCP poller");
+
+        // The readiness thread for listen/connecting sockets. It parks on the
+        // condition variable whenever there is nothing in WSAPoll mode, which on a
+        // node whose connections are all established is most of the time.
+        //
+        // Its wakeup socket is built here rather than as a plain member because a
+        // poller is constructed with the Reactor, which happens before anything
+        // calls init_socket_library() — and a Notifier built before WSAStartup is a
+        // Notifier that silently does nothing. Idempotent, so asking again is free.
+        init_socket_library();
+        aux_wake_ = std::make_unique<Notifier>();
+        if (!is_valid_socket(aux_wake_->fd())) {
+            LOG_POLLER_WARN("No wakeup socket for the readiness thread; "
+                            "listen/connect readiness falls back to a short poll timeout");
+        }
+        aux_thread_ = std::thread(&IocpPoller::aux_loop, this);
     }
-    
+
     ~IocpPoller() override {
+        // Stop the readiness thread FIRST: it touches active_ and posts to iocp_,
+        // so neither may be torn down while it is still running.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            aux_stop_ = true;
+        }
+        aux_cv_.notify_all();
+        if (aux_wake_) aux_wake_->signal();
+        if (aux_thread_.joinable()) aux_thread_.join();
+
         {
             std::lock_guard<std::mutex> lock(mutex_);
             // Cancel all pending I/O before destroying
@@ -382,6 +429,7 @@ public:
                 }
             }
             active_.clear();
+            wsapoll_mode_.clear();
             all_states_.clear();
         }
         if (iocp_) {
@@ -421,10 +469,17 @@ public:
         if (state->mode == SocketMode::Iocp && (events & PollOut)) {
             arm_write(state);
         }
-        
+
         active_[fd] = state;
         all_states_.push_back(std::move(state_ptr));
-        
+
+        // A socket IOCP cannot watch has to be picked up by the readiness thread,
+        // which is very likely blocked in WSAPoll on a set that predates this one.
+        if (state->mode == SocketMode::WsaPoll) {
+            wsapoll_mode_.insert(fd);
+            wake_aux();
+        }
+
         return true;
     }
     
@@ -443,9 +498,16 @@ public:
         if (state->mode == SocketMode::WsaPoll && (events & PollIn)) {
             if (arm_read(state)) {
                 state->mode = SocketMode::Iocp;
+                wsapoll_mode_.erase(fd);
+                wake_aux();   // one fewer socket to watch; re-snapshot
             }
         }
-        
+        // A socket that stays in WSAPoll mode may have changed which events it
+        // wants (a connecting socket disarming PollOut), and the readiness thread
+        // is holding the previous mask.
+        if (state->mode == SocketMode::WsaPoll) wake_aux();
+
+
         // Arm overlapped ops as needed for IOCP-mode sockets
         if (state->mode == SocketMode::Iocp) {
             if ((events & PollIn) && !state->read_pending) {
@@ -476,6 +538,11 @@ public:
         }
         
         active_.erase(it);
+        // Before the caller closes this socket. The readiness thread may still be
+        // polling it from an older snapshot — harmless (a closed handle reports
+        // POLLNVAL, and only the live set produces events), but waking it now
+        // means it stops looking at a descriptor that is about to be reused.
+        if (wsapoll_mode_.erase(fd) > 0) wake_aux();
         ++removed_count_;
         // Note: SocketState is NOT freed yet — it stays in all_states_ so
         // that the OVERLAPPED pointers remain valid until cancelled
@@ -489,13 +556,23 @@ public:
         
         //------------------------------------------------------------------
         // Step 1: Check WSAPoll-mode sockets (listen + connecting)
-        //         Non-blocking check (timeout=0), typically <= 31 sockets
+        //         Non-blocking check (timeout=0), and free when there are none
         //------------------------------------------------------------------
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // Re-arm the readiness thread here rather than at the end of the last
+            // wait(): the caller coming back for more is what says it has finished
+            // handling the previous batch. Re-arming any earlier would have the
+            // thread reporting sockets the caller has not dealt with yet.
+            if (wake_pending_) {
+                wake_pending_ = false;
+                aux_cv_.notify_one();
+            }
             count = check_wsapoll_sockets(results, max_results);
         }
-        
+
+        const int wsapoll_count = count;
+
         //------------------------------------------------------------------
         // Step 2: Wait for IOCP completions (connected data sockets)
         //         If Step 1 already found events, don't block (timeout=0)
@@ -527,10 +604,16 @@ public:
         //------------------------------------------------------------------
         if (iocp_count > 0) {
             std::lock_guard<std::mutex> lock(mutex_);
-            
+            bool woken = false;
+
             for (ULONG i = 0; i < iocp_count && count < max_results; ++i) {
-                if (!entries[i].lpOverlapped) continue;
-                
+                // The readiness thread's wake packet: no overlapped, and the only
+                // completion key this poller ever posts by hand.
+                if (!entries[i].lpOverlapped) {
+                    if (entries[i].lpCompletionKey == kAuxWakeKey) woken = true;
+                    continue;
+                }
+
                 auto* io = reinterpret_cast<IocpOverlapped*>(entries[i].lpOverlapped);
                 auto* state = io->state;
                 if (!state) continue;
@@ -592,7 +675,20 @@ public:
                     ++count;
                 }
             }
-            
+
+            // The wake packet says a listen/connecting socket became ready while
+            // we were blocked, so look again now instead of making the caller come
+            // back for it. Only when step 1 found nothing there: the two modes are
+            // disjoint sets of sockets, so with wsapoll_count == 0 nothing this can
+            // add is already in `results`.
+            if (woken && wsapoll_count == 0 && count < max_results) {
+                if (wake_pending_) {
+                    wake_pending_ = false;
+                    aux_cv_.notify_one();
+                }
+                count += check_wsapoll_sockets(results + count, max_results - count);
+            }
+
             // GC removed states whose cancelled I/O has fully drained.
             // Threshold: at least 64 removed, or removed > half of total —
             // avoids running the sweep on every wait() call.
@@ -656,9 +752,130 @@ private:
     std::mutex mutex_;
     std::unordered_map<socket_t, IocpSocketState*> active_;     ///< fd → state lookup
     std::vector<std::unique_ptr<IocpSocketState>> all_states_;  ///< Owns all states
+    /// The subset of active_ that IOCP cannot watch (listen + connecting sockets).
+    /// Indexed separately so check_wsapoll_sockets() costs nothing when it is empty
+    /// instead of walking every registered socket to discover that.
+    std::unordered_set<socket_t> wsapoll_mode_;
     std::vector<WSAPOLLFD> wsapoll_fds_;                    ///< Reusable WSAPoll buffer
     size_t removed_count_ = 0;                              ///< Number of removed states awaiting GC
-    
+
+    //----------------------------------------------------------------------
+    // Readiness thread for WSAPoll-mode sockets
+    //----------------------------------------------------------------------
+
+    /// Completion key of the packet the readiness thread posts. Sockets are
+    /// associated with key 0, so this cannot collide with a real completion.
+    static constexpr ULONG_PTR kAuxWakeKey = 1;
+
+    /// Backstop timeout for the thread's WSAPoll. Every change to the watched set
+    /// signals aux_wake_, so this only has to cover a wakeup that went missing;
+    /// without a wakeup socket at all it becomes the actual notification latency,
+    /// hence the much shorter degraded value.
+    static constexpr int kAuxPollMs         = 250;
+    static constexpr int kAuxPollDegradedMs = 5;
+
+    std::thread               aux_thread_;
+    std::condition_variable   aux_cv_;
+    std::unique_ptr<Notifier> aux_wake_;            ///< breaks the thread out of WSAPoll
+    bool                    aux_stop_     = false;  ///< guarded by mutex_
+    /// A wake packet is in the completion queue and wait() has not looked yet.
+    /// While it is set the thread stays parked, so one ready socket can only ever
+    /// produce one packet however long the caller takes to come back. Guarded by
+    /// mutex_.
+    bool                    wake_pending_ = false;
+
+    /// Tell the readiness thread its view of the watched set is out of date.
+    /// Called under mutex_; wakes it whether it is parked on the condition
+    /// variable or blocked inside WSAPoll.
+    void wake_aux() {
+        aux_cv_.notify_one();
+        if (aux_wake_) aux_wake_->signal();
+    }
+
+    /// The readiness thread's wakeup socket, or INVALID if it has none.
+    socket_t aux_wake_fd() const noexcept {
+        return aux_wake_ ? aux_wake_->fd() : RATS_INVALID_SOCKET;
+    }
+
+    /// Block in WSAPoll on the sockets IOCP cannot watch, and post a completion
+    /// packet the moment one is ready — nothing more. wait() still derives the
+    /// events themselves from the live set under the mutex, so everything this
+    /// thread knows is allowed to be slightly stale.
+    void aux_loop() {
+        const socket_t wake_fd     = aux_wake_fd();
+        const int      poll_timeout = is_valid_socket(wake_fd) ? kAuxPollMs
+                                                               : kAuxPollDegradedMs;
+        std::vector<WSAPOLLFD> fds;
+
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                // Park while there is nothing to watch, or while a wake packet is
+                // still outstanding — polling then would only rediscover a socket
+                // the caller has already been told about.
+                aux_cv_.wait(lock, [this] {
+                    return aux_stop_ || (!wake_pending_ && !wsapoll_mode_.empty());
+                });
+                if (aux_stop_) return;
+
+                fds.clear();
+                fds.reserve(wsapoll_mode_.size() + 1);
+                for (const socket_t fd : wsapoll_mode_) {
+                    const auto it = active_.find(fd);
+                    if (it == active_.end() || it->second->removed) continue;
+
+                    WSAPOLLFD pfd{};
+                    pfd.fd = fd;
+                    if (it->second->desired_events & PollIn)  pfd.events |= POLLIN;
+                    if (it->second->desired_events & PollOut) pfd.events |= POLLOUT;
+                    if (pfd.events == 0) continue;
+                    fds.push_back(pfd);
+                }
+            }
+
+            // Always last, so the set is never empty and WSAPoll always blocks.
+            if (is_valid_socket(wake_fd)) {
+                WSAPOLLFD pfd{};
+                pfd.fd     = wake_fd;
+                pfd.events = POLLIN;
+                fds.push_back(pfd);
+            }
+            if (fds.empty()) continue;   // no wakeup socket and nothing left to watch
+
+            const int n = WSAPoll(fds.data(), static_cast<ULONG>(fds.size()), poll_timeout);
+            if (n <= 0) continue;        // timed out, or the set went stale under us
+
+            // The wakeup itself only means "the set changed, look again", so drain
+            // it and drop it before asking whether a watched socket fired.
+            if (is_valid_socket(wake_fd)) {
+                if (fds.back().revents != 0) aux_wake_->drain();
+                fds.pop_back();
+            }
+
+            bool ready = false;
+            for (const WSAPOLLFD& pfd : fds) {
+                if (pfd.revents != 0) { ready = true; break; }
+            }
+            if (!ready) continue;   // only the wakeup fired: re-snapshot and poll again
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (aux_stop_) return;
+                if (wake_pending_) continue;   // one packet is already owed
+                wake_pending_ = true;
+            }
+            if (!PostQueuedCompletionStatus(iocp_, 0, kAuxWakeKey, nullptr)) {
+                // Nothing will consume the packet we just promised, so take the
+                // promise back — otherwise this thread parks for good.
+                LOG_POLLER_ERROR("PostQueuedCompletionStatus failed: " +
+                                 std::to_string(GetLastError()));
+                std::lock_guard<std::mutex> lock(mutex_);
+                wake_pending_ = false;
+            }
+        }
+    }
+
+
     //----------------------------------------------------------------------
     // Zero-byte overlapped I/O: readiness notification via IOCP
     //----------------------------------------------------------------------
@@ -784,46 +1001,85 @@ private:
     // WSAPoll fallback for listen + connecting sockets
     //----------------------------------------------------------------------
     
+    /// Has this socket's connect attempt already failed?
+    ///
+    /// WSAPoll does not report a failed connection attempt — documented Windows
+    /// behaviour, not an accident: neither POLLERR nor POLLWRNORM is raised for one.
+    /// Left at that, a refused or unreachable dial produces no event at all and sits
+    /// until the reactor's establish deadline reaps it fifteen seconds later. The
+    /// socket does carry the error, so ask it directly.
+    ///
+    /// Only ever consulted for a socket WSAPoll reported nothing about, so this
+    /// costs one getsockopt per *connecting* socket per wait() — there are only ever
+    /// a handful. A connect still in flight reads back 0, so there are no false
+    /// positives. (SO_ERROR is read-and-clear, but the caller that acts on the
+    /// PollErr never reads it again — Connection::on_error does not.)
+    static bool connect_failed(socket_t fd) {
+        int err = 0;
+        int len = static_cast<int>(sizeof(err));
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&err), &len) != 0)
+            return false;
+        return err != 0;
+    }
+
     /// Non-blocking check of WSAPoll-mode sockets. Called under mutex.
+    ///
+    /// Walks wsapoll_mode_ rather than active_: these are the one listen socket and
+    /// however many dials are in flight, where active_ is every connection the
+    /// reactor owns. This runs on every wait(), so the difference is the whole cost
+    /// of the fallback at scale — and it is now zero when there is nothing in it.
     int check_wsapoll_sockets(PollResult* results, int max_results) {
+        if (wsapoll_mode_.empty() || max_results <= 0) return 0;
+
         wsapoll_fds_.clear();
-        
-        for (auto& [fd, state] : active_) {
+        wsapoll_fds_.reserve(wsapoll_mode_.size());
+
+        for (const socket_t fd : wsapoll_mode_) {
+            const auto it = active_.find(fd);
+            if (it == active_.end()) continue;
+            const auto* state = it->second;
             if (state->removed || state->mode != SocketMode::WsaPoll) continue;
-            
+
             WSAPOLLFD pfd;
             pfd.fd = fd;
             pfd.events = 0;
             if (state->desired_events & PollIn)  pfd.events |= POLLIN;
             if (state->desired_events & PollOut) pfd.events |= POLLOUT;
             pfd.revents = 0;
-            
+            if (pfd.events == 0) continue;
+
             wsapoll_fds_.push_back(pfd);
         }
-        
+
         if (wsapoll_fds_.empty()) return 0;
-        
+
         // Non-blocking poll (timeout = 0)
-        int n = WSAPoll(wsapoll_fds_.data(),
-                        static_cast<ULONG>(wsapoll_fds_.size()), 0);
-        if (n <= 0) return 0;
-        
+        const int n = WSAPoll(wsapoll_fds_.data(),
+                              static_cast<ULONG>(wsapoll_fds_.size()), 0);
+        if (n < 0) return 0;
+
         int count = 0;
         for (auto& pfd : wsapoll_fds_) {
             if (count >= max_results) break;
-            if (pfd.revents == 0) continue;
-            
+
             uint32_t events = 0;
             if (pfd.revents & POLLIN)  events |= PollIn;
             if (pfd.revents & POLLOUT) events |= PollOut;
             if (pfd.revents & POLLERR) events |= PollErr;
             if (pfd.revents & POLLHUP) events |= PollHup;
-            
+
+            // Silence from a socket that is waiting to become writable is the one
+            // case WSAPoll cannot speak for; see connect_failed().
+            if (events == 0) {
+                if (!(pfd.events & POLLOUT) || !connect_failed(pfd.fd)) continue;
+                events = PollErr;
+            }
+
             results[count].fd = pfd.fd;
             results[count].events = events;
             ++count;
         }
-        
+
         return count;
     }
 };
