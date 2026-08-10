@@ -244,9 +244,16 @@ void Reactor::handle_event(const PollResult& ev) {
     if (fd == wakeup_.fd()) { drain_wakeup(); return; }
     if (fd == server_socket_) { if (ev.events & PollIn) do_accept(); return; }
     if (mux_ && fd == mux_->socket()) {
-        // Stopped short of draining the socket: come straight back rather than
-        // waiting for the next datagram to re-arm an edge-triggered poller.
-        if ((ev.events & PollIn) && mux_->on_readable()) wakeup_.signal();
+        // Any event, not just PollIn. An error on a datagram socket belongs to one
+        // datagram — Windows reports an ICMP complaint about an earlier send on the
+        // *next* receive — and not to the socket, which stays usable; the cure is
+        // therefore to read, which surfaces or clears it and drains whatever queued
+        // up behind it. Treating PollErr as "nothing to do" would strand every
+        // datagram after it, since nothing else here ever re-arms this socket.
+        //
+        // Stopped short of draining: come straight back rather than waiting for the
+        // next datagram to re-arm an edge-triggered poller.
+        if (mux_->on_readable()) wakeup_.signal();
         return;
     }
 

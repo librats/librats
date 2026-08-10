@@ -24,6 +24,7 @@ bench/
 │   ├── bench_mem.cpp     resident heap of a parsed DOM
 │   ├── bench_rx.cpp      receive path, current vs pre-5d64343
 │   ├── bench_tx.cpp      send path, current vs pre-5d64343
+│   ├── bench_poller.cpp  readiness notifications: how many, and what each costs
 │   ├── bench_dht.cpp     keyspace primitives vs libtorrent's
 │   ├── bench_crypto.cpp  Noise primitives vs the noise-c reference
 │   └── bench_transport.cpp  TCP vs the reliable-UDP stream, two live Nodes
@@ -163,6 +164,49 @@ as a peer sends one big message and then falls silent. The old buffer is a flat 
 flush *once*, the way libtorrent's `cork` does. It is **not** in the library — every
 `send_*()` flushes immediately — and the column exists to show what the gather
 machinery is still leaving on the table.
+
+## The poller suite — `bench_poller`
+
+`bench_rx` and `bench_tx` measure what happens *after* the poller says a socket is
+ready. This one measures the saying: how many times `src/librats/core/io_poller.cpp` has to
+wake the reactor to deliver one application message, and what each of those wakeups
+costs as the registered set grows. Nothing is mocked — real loopback sockets, the
+real poller, driven exactly the way `Reactor::run()` drives it (one blocking
+`wait()`, read the socket dry, then keep asking with a zero timeout). A readiness
+notification is not something you can mock and still be measuring it.
+
+| experiment | what it isolates |
+|---|---|
+| `reports`  | readiness notifications spent per message, stream and datagram. **1.00 is the floor** |
+| `recovery` | the same datagram socket before and after an unreachable destination |
+| `scale`    | cost per event with N sockets registered, and what a listen socket adds |
+
+The headline number is a ratio, not a duration, and it is the one to read first.
+Every backend can deliver a message in one notification, but a completion-port
+design has to work for it: arming the next overlapped receive while the data that
+triggered the last one is still unread makes that receive complete on the spot, and
+the caller comes back to an empty socket. That was the measured state of this code
+— exactly **2.00** reports per message, half of them finding nothing — and it
+doubled wakeups *and* reads across the whole receive path.
+
+The two `recovery` rows must stay **equal**. On Windows an ICMP Port Unreachable
+for an earlier send is delivered to the next receive as an error, the arm that
+follows fails with it, and the poller hands the socket to its WSAPoll fallback so
+that it cannot be left holding nothing — correct, but a hop slower (measured at
+1.4x per datagram), and nothing else would ever move it back: `modify()` is the
+only other promotion path and the reactor never calls it on the mux socket. A gap
+between those rows means one transient ICMP packet now pins the busiest socket in
+the process to the slow path for the rest of its life.
+
+`scale` is flat in the number of *idle* sockets, as it should be — the interesting
+row is `1 socket + a listener`, currently **1.4x**. A listen socket cannot carry
+overlapped I/O, so on Windows it lives in a second mechanism that is polled on
+every `wait()`; every server node pays that on every iteration of its reactor loop,
+whether or not anything is connecting.
+
+Loopback delivery is immediate, so these figures isolate the poller's own cost and
+nothing else. A real network adds latency to the wait, not to the work measured
+here — which is exactly why a wasted wakeup shows up so clearly.
 
 ## The DHT suite — `bench_dht`
 

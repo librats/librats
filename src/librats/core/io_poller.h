@@ -68,8 +68,10 @@ struct PollResult {
  * @brief Abstract I/O multiplexer
  * 
  * Thread-safety:
- * - add/modify/remove: Safe to call from any thread (epoll_ctl is thread-safe,
- *   kqueue changes are atomic, WSAPoll rebuilds on wait).
+ * - add/modify/remove: Safe to call from any thread. epoll_ctl is thread-safe on
+ *   its own; the backends that keep a registration table of their own (kqueue,
+ *   IOCP, poll) guard it with a mutex that wait() never takes, so a control call
+ *   cannot stall the event loop.
  * - wait: Should be called from a single I/O thread.
  * - add/modify/remove can be called concurrently with wait().
  */
@@ -89,10 +91,13 @@ public:
     
     /**
      * @brief Add a socket to the poll set
-     * 
+     *
+     * A socket that is already in the set is rejected rather than re-registered:
+     * use modify() to change what an existing registration watches for.
+     *
      * @param fd Socket to monitor
      * @param events Bitmask of PollFlags to watch for
-     * @return true on success
+     * @return true on success, false if fd is already registered or on error
      */
     virtual bool add(socket_t fd, uint32_t events) = 0;
     

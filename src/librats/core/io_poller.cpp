@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <mutex>
 #include <set>
 
 //=============================================================================
@@ -197,15 +198,21 @@ public:
     }
     
     bool add(socket_t fd, uint32_t events) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Already registered — answer as epoll does (EEXIST → false) rather than
+        // quietly re-arming under the caller. A second add is a caller bug, and
+        // the backends have to agree on what it does; see IocpPoller::add().
+        if (registered_.find(fd) != registered_.end()) return false;
         if (!apply_changes(fd, events, EV_ADD | EV_CLEAR))
             return false;
         registered_.insert(fd);
         return true;
     }
-    
+
     bool modify(socket_t fd, uint32_t events) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (registered_.find(fd) == registered_.end()) return false;
-        
+
         // kqueue: adding a filter that already exists replaces it.
         // We also need to delete filters that are no longer wanted.
         struct kevent changes[4];
@@ -234,8 +241,9 @@ public:
     }
     
     bool remove(socket_t fd) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (registered_.erase(fd) == 0) return false;
-        
+
         struct kevent changes[2];
         // Delete both read and write filters. Ignore errors (filter may not exist).
         EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
@@ -312,8 +320,13 @@ public:
     
 private:
     int kqfd_ = -1;
+    /// Guards registered_ only. wait() never touches it, so the event loop is
+    /// never blocked by a control call — but add/modify/remove are documented as
+    /// callable from any thread (io_poller.h), and the concurrency tests take that
+    /// literally, so the set itself has to be safe against concurrent mutation.
+    std::mutex mutex_;
     std::set<socket_t> registered_;  ///< Track registered fds
-    
+
     bool apply_changes(socket_t fd, uint32_t events, uint16_t kq_flags) {
         struct kevent changes[2];
         int nchanges = 0;
@@ -430,6 +443,7 @@ public:
             }
             active_.clear();
             wsapoll_mode_.clear();
+            demoted_.clear();
             all_states_.clear();
         }
         if (iocp_) {
@@ -440,7 +454,20 @@ public:
     
     bool add(socket_t fd, uint32_t events) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+
+        // Already registered. Overwriting active_[fd] would orphan the old state:
+        // it stays in all_states_ with removed == false, so gc_removed_states()
+        // never frees it, and its outstanding zero-byte WSARecv keeps completing
+        // — reporting events for an fd this poller has since been told to forget,
+        // by which time Windows may have handed the descriptor number to a
+        // different socket. epoll answers EEXIST here; answer the same and let the
+        // caller reach for modify().
+        if (active_.find(fd) != active_.end()) {
+            LOG_POLLER_DEBUG("add: fd " + std::to_string(fd) +
+                             " is already registered; use modify()");
+            return false;
+        }
+
         auto state_ptr = std::make_unique<IocpSocketState>(fd);
         auto* state = state_ptr.get();
         state->desired_events = events;
@@ -473,6 +500,13 @@ public:
         active_[fd] = state;
         all_states_.push_back(std::move(state_ptr));
 
+        // Which of the two mechanisms a socket ended up on decides how it behaves
+        // under load and on error, and it is not visible from anywhere else — so say
+        // it once, here, rather than leave the next person to infer it.
+        LOG_POLLER_DEBUG("add: fd " + std::to_string(fd) + " → " +
+                         (state->mode == SocketMode::Iocp ? "IOCP" : "WSAPoll") +
+                         " mode" + (state->is_datagram ? " (datagram)" : ""));
+
         // A socket IOCP cannot watch has to be picked up by the readiness thread,
         // which is very likely blocked in WSAPoll on a set that predates this one.
         if (state->mode == SocketMode::WsaPoll) {
@@ -499,6 +533,7 @@ public:
             if (arm_read(state)) {
                 state->mode = SocketMode::Iocp;
                 wsapoll_mode_.erase(fd);
+                demoted_.erase(fd);
                 wake_aux();   // one fewer socket to watch; re-snapshot
             }
         }
@@ -543,6 +578,7 @@ public:
         // POLLNVAL, and only the live set produces events), but waking it now
         // means it stops looking at a descriptor that is about to be reused.
         if (wsapoll_mode_.erase(fd) > 0) wake_aux();
+        demoted_.erase(fd);
         ++removed_count_;
         // Note: SocketState is NOT freed yet — it stays in all_states_ so
         // that the OVERLAPPED pointers remain valid until cancelled
@@ -568,6 +604,11 @@ public:
                 wake_pending_ = false;
                 aux_cv_.notify_one();
             }
+            // Order matters: retry the older demotions first, so a socket demoted by
+            // arm_pending() below waits for the next wait() instead of being asked to
+            // arm twice in a row microseconds apart.
+            promote_demoted();
+            arm_pending();
             count = check_wsapoll_sockets(results, max_results);
         }
 
@@ -641,23 +682,29 @@ public:
                 if (internal_status == 0) {
                     // Success — report readiness for the event type we were watching
                     reported_events = io->event_type & state->desired_events;
-                    
-                    // Re-arm overlapped I/O for next notification.
-                    // Without this, the socket becomes deaf after the first
-                    // completion because sync_poller() only calls modify()
-                    // when desired_events change — which they don't for a
-                    // socket that stays PollIn-only.
-                    if ((io->event_type & PollIn) && (state->desired_events & PollIn)) {
-                        arm_read(state);
-                    }
-                    if ((io->event_type & PollOut) && (state->desired_events & PollOut)) {
-                        arm_write(state);
-                    }
                 } else {
                     // I/O error (connection reset, cancelled, etc.)
                     reported_events = PollErr;
                 }
-                
+
+                // This socket needs a fresh overlapped operation, or it goes deaf:
+                // nothing else arms it, since modify() is called only when the
+                // watched events change and for a socket that stays PollIn-only they
+                // never do. The work is queued rather than done here — see
+                // arm_pending(), which is also where a socket that cannot be armed
+                // gets handed to the readiness thread.
+                //
+                // Queued after an ERROR for a datagram socket but not for a stream
+                // one, and the asymmetry is the whole point. A stream error is
+                // terminal: the owner closes the connection on PollErr, so arming
+                // again would only race that close. A datagram error is not — it
+                // belongs to ONE datagram (Windows reports an ICMP complaint about an
+                // earlier send on the next receive) while the socket stays perfectly
+                // usable, and skipping it there costs every datagram that reactor
+                // would have received from then on.
+                if (internal_status == 0 || state->is_datagram)
+                    pending_arm_.push_back(state->fd);
+
                 if (reported_events == 0) continue;
                 
                 // Merge events for the same fd (read + write may fire together)
@@ -756,6 +803,14 @@ private:
     /// Indexed separately so check_wsapoll_sockets() costs nothing when it is empty
     /// instead of walking every registered socket to discover that.
     std::unordered_set<socket_t> wsapoll_mode_;
+    /// The subset of wsapoll_mode_ that belongs on IOCP and is only there because
+    /// arming failed — see promote_demoted(). A listen socket is never in here.
+    std::unordered_set<socket_t> demoted_;
+    /// Sockets whose completion has been handed to the caller and which therefore
+    /// need a fresh overlapped operation — posted at the top of the next wait(),
+    /// once the caller has drained them. See arm_pending(). Holds fds rather than
+    /// state pointers so that a socket removed in the meantime is simply not found.
+    std::vector<socket_t> pending_arm_;
     std::vector<WSAPOLLFD> wsapoll_fds_;                    ///< Reusable WSAPoll buffer
     size_t removed_count_ = 0;                              ///< Number of removed states awaiting GC
 
@@ -1027,6 +1082,97 @@ private:
         return err != 0;
     }
 
+    /// Post the overlapped operations the last batch of completions made necessary.
+    /// Called under mutex, at the top of wait().
+    ///
+    /// Deliberately NOT done where the completion is processed. There the data that
+    /// triggered it is still sitting unread in the socket buffer — the caller only
+    /// reads after wait() has returned — so a fresh zero-byte WSARecv completes on
+    /// the spot and queues a second completion with nothing behind it. That is one
+    /// wasted wakeup and one empty read for every burst of data: measured at exactly
+    /// 2.00 readiness reports per message where 1.00 is achievable, half of them
+    /// finding an empty socket.
+    ///
+    /// Waiting until the caller comes back for more is what lets the arm find an
+    /// empty buffer and actually pend, which is the entire point of arming. It is
+    /// the same signal wake_pending_ already relies on: a caller asking for the next
+    /// batch has finished with the one it was given. Nothing is lost in between — if
+    /// data lands while no operation is posted, the arm below completes immediately
+    /// and step 2 of this very wait() dequeues it.
+    void arm_pending() {
+        if (pending_arm_.empty()) return;
+
+        for (const socket_t fd : pending_arm_) {
+            const auto it = active_.find(fd);
+            if (it == active_.end()) continue;      // removed while we were away
+            auto* state = it->second;
+            if (state->removed || state->mode != SocketMode::Iocp) continue;
+
+            if ((state->desired_events & PollIn)  && !state->read_pending)
+                arm_read(state);
+            if ((state->desired_events & PollOut) && !state->write_pending)
+                arm_write(state);
+
+            // Arming can fail outright: WSARecv hands back a queued error instead of
+            // pending (exactly what a datagram socket does while it still has ICMP
+            // reports to deliver), or the system is out of buffers. Nothing is then
+            // left in flight to bring us back to this socket and nobody arms it
+            // again, so hand it to the readiness thread — which polls instead of
+            // arming and therefore cannot be left holding nothing. Slower per event,
+            // and the only alternative is deaf.
+            if ((state->desired_events & PollIn) && !state->read_pending) {
+                state->mode = SocketMode::WsaPoll;
+                wsapoll_mode_.insert(fd);
+                demoted_.insert(fd);            // and try to get it back later
+                wake_aux();
+                LOG_POLLER_DEBUG("fd " + std::to_string(fd) +
+                                 " could not be armed; demoted to WSAPoll mode");
+            }
+        }
+        pending_arm_.clear();
+    }
+
+    /// Put demoted sockets back on the completion port. Called under mutex.
+    ///
+    /// A socket reaches WSAPoll mode two ways, and only one of them is permanent.
+    /// A listen socket can never carry overlapped I/O and belongs there for good;
+    /// a socket that was demoted because arming failed is there only until the
+    /// condition that failed it clears — a datagram socket with an ICMP report
+    /// still queued arms perfectly well once that queue drains. Nothing else would
+    /// ever move it back: modify() is the only other promotion path and the reactor
+    /// never calls it on the mux socket, so one transient ICMP would otherwise pin
+    /// the busiest socket in the process to the slow path for the rest of its life
+    /// (measured at ~1.3x per datagram, and ~2.7x per readiness notification).
+    ///
+    /// Costs one WSARecv attempt per demoted socket per wait(), and a socket leaves
+    /// the set the moment one succeeds. Sockets that were never on IOCP are not in
+    /// the set at all, so the steady-state cost is one empty-container check.
+    void promote_demoted() {
+        if (demoted_.empty()) return;
+
+        for (auto it = demoted_.begin(); it != demoted_.end(); ) {
+            const socket_t fd  = *it;
+            const auto     ait = active_.find(fd);
+            if (ait == active_.end() || ait->second->removed) {
+                it = demoted_.erase(it);
+                continue;
+            }
+
+            auto* state = ait->second;
+            if (!(state->desired_events & PollIn) || !arm_read(state)) {
+                ++it;             // still cannot be armed; try again next time
+                continue;
+            }
+
+            state->mode = SocketMode::Iocp;
+            wsapoll_mode_.erase(fd);
+            it = demoted_.erase(it);
+            wake_aux();           // one fewer socket for the readiness thread
+            LOG_POLLER_DEBUG("fd " + std::to_string(fd) +
+                             " armed again; back on IOCP mode");
+        }
+    }
+
     /// Non-blocking check of WSAPoll-mode sockets. Called under mutex.
     ///
     /// Walks wsapoll_mode_ rather than active_: these are the one listen socket and
@@ -1111,7 +1257,8 @@ public:
     
     bool add(socket_t fd, uint32_t events) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        registered_[fd] = events;
+        // Reject a duplicate like every other backend does — see IocpPoller::add().
+        if (!registered_.emplace(fd, events).second) return false;
         dirty_ = true;
         return true;
     }

@@ -249,6 +249,23 @@ add_bench(bench_tx
     STATIC_RUNTIME
 )
 
+# Poller: what one readiness notification costs — how many wakeups it takes to
+# deliver one message, and what each costs as the registered set grows. Real
+# loopback sockets: a readiness notification is not something you can mock and
+# still be measuring it, so this suite counts wakeups rather than syscalls.
+add_bench(bench_poller
+    SOURCES  suites/bench_poller.cpp
+             ${LIBRATS_ROOT}/src/librats/core/io_poller.cpp
+             ${LIBRATS_ROOT}/src/librats/core/socket.cpp        # + what socket.cpp pulls in
+             ${LIBRATS_ROOT}/src/librats/core/address.cpp
+             ${LIBRATS_ROOT}/src/librats/core/ip_address.cpp
+             ${LIBRATS_ROOT}/src/librats/core/endpoint_parse.cpp
+             ${LIBRATS_ROOT}/src/librats/util/logger.cpp
+             ${LIBRATS_ROOT}/src/librats/util/network_utils.cpp
+             ${LIBRATS_ROOT}/src/librats/util/fs.cpp            # logger's rotation support
+    WIN_LIBS ws2_32 iphlpapi
+)
+
 # DHT: librats' keyspace primitives vs a standalone re-port of libtorrent's.
 # Header-only (src/librats/dht/id.h); brings its own timing loop.
 add_bench(bench_dht

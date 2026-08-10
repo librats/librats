@@ -112,6 +112,46 @@ protected:
         return port;
     }
 
+    /// Non-blocking UDP socket bound to an ephemeral loopback port.
+    static socket_t make_udp_socket(int* port_out) {
+        socket_t s = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+        EXPECT_TRUE(is_valid_socket(s));
+        set_socket_nonblocking(s);
+        if (port_out) {
+            *port_out = get_bound_port(s);
+            EXPECT_GT(*port_out, 0);
+        }
+        return s;
+    }
+
+    /// A bound UDP socket built by hand, deliberately WITHOUT the hardening
+    /// create_udp_socket() applies. That helper turns off SIO_UDP_CONNRESET, which
+    /// is what suppresses the "an earlier send drew an ICMP Port Unreachable"
+    /// report Windows would otherwise deliver to the next receive. Here we want
+    /// that report: it is the only portable way to make a datagram socket produce
+    /// an error without breaking it, which is the case the poller has to survive.
+    static socket_t make_raw_udp_socket(int* port_out) {
+        socket_t s = socket(AF_INET, SOCK_DGRAM, 0);
+        EXPECT_TRUE(is_valid_socket(s));
+        sockaddr_in addr = loopback_addr(0);
+        EXPECT_EQ(::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+        set_socket_nonblocking(s);
+        if (port_out) {
+            *port_out = get_bound_port(s);
+            EXPECT_GT(*port_out, 0);
+        }
+        return s;
+    }
+
+    /// A datagram whose bytes are checkable and which is comfortably longer than
+    /// the one-byte probe the Windows backend uses on a datagram socket.
+    static std::vector<uint8_t> make_payload(uint8_t seed, size_t len = 512) {
+        std::vector<uint8_t> p(len);
+        for (size_t i = 0; i < len; ++i)
+            p[i] = static_cast<uint8_t>(i * 31 + seed);
+        return p;
+    }
+
     /// Non-blocking listen socket on an ephemeral loopback port.
     static socket_t make_listener(int* port_out) {
         socket_t s = create_tcp_server(0, 5, "127.0.0.1", AddressFamily::IPv4);
@@ -550,6 +590,156 @@ TEST_F(IOPollerTest, DetectsConnectCompletion) {
     if (is_valid_socket(accepted)) close_socket(accepted);
     close_socket(client);
     close_socket(listen_sock);
+}
+
+//=============================================================================
+// Datagram sockets
+//
+// A completion-port backend cannot get readiness on a datagram socket the way it
+// does on a stream one: the zero-byte WSARecv it would post completes with
+// WSAEMSGSIZE and Windows DISCARDS the datagram that satisfied it, losing one
+// datagram per notification. The backend therefore probes with a one-byte
+// MSG_PEEK, which reports the same readiness while leaving the queue untouched.
+//
+// Both properties below are invisible to a test that only asks "did PollIn
+// arrive?" — a probe that ATE the datagram raises PollIn just as convincingly.
+// It is the payload that separates the two.
+//=============================================================================
+
+TEST_F(IOPollerTest, DatagramReadinessLeavesDatagramIntact) {
+    int      port = 0;
+    socket_t rx   = make_udp_socket(&port);
+    socket_t tx   = make_udp_socket(nullptr);
+    ASSERT_TRUE(is_valid_socket(rx));
+    ASSERT_TRUE(is_valid_socket(tx));
+    ASSERT_TRUE(poller_->add(rx, PollIn));
+
+    PollResult results[8];
+    ASSERT_EQ(poller_->wait(results, 8, 0), 0) << "nothing has been sent yet";
+
+    const std::vector<uint8_t> payload = make_payload(0xA5);
+    ASSERT_EQ(send_udp_data(tx, payload, "127.0.0.1", port, AddressFamily::IPv4),
+              static_cast<int>(payload.size()));
+
+    long long latency = 0;
+    EXPECT_TRUE(await_events(rx, 200, 1000, clock_t_::now(), &latency) & PollIn)
+        << "a queued datagram should make the socket readable";
+
+    std::vector<uint8_t> buf(2048);
+    Address              from;
+    const std::ptrdiff_t got = recv_udp_from(rx, buf.data(), buf.size(), from);
+    ASSERT_EQ(got, static_cast<std::ptrdiff_t>(payload.size()))
+        << "the readiness probe consumed or truncated the datagram";
+    buf.resize(static_cast<size_t>(got));
+    EXPECT_EQ(buf, payload) << "datagram came back altered";
+
+    poller_->remove(rx);
+    close_socket(rx);
+    close_socket(tx);
+}
+
+TEST_F(IOPollerTest, DatagramReadinessRepeatsAcrossDatagrams) {
+    // The probe has to be re-armed after every completion. One round would also
+    // pass on a backend that arms it once and then goes deaf.
+    int      port = 0;
+    socket_t rx   = make_udp_socket(&port);
+    socket_t tx   = make_udp_socket(nullptr);
+    ASSERT_TRUE(is_valid_socket(rx));
+    ASSERT_TRUE(is_valid_socket(tx));
+    ASSERT_TRUE(poller_->add(rx, PollIn));
+
+    for (int round = 0; round < 5; ++round) {
+        const std::vector<uint8_t> payload =
+            make_payload(static_cast<uint8_t>(round), 200u + round * 100u);
+        ASSERT_EQ(send_udp_data(tx, payload, "127.0.0.1", port, AddressFamily::IPv4),
+                  static_cast<int>(payload.size()))
+            << "round " << round;
+
+        long long latency = 0;
+        ASSERT_TRUE(await_events(rx, 200, 1000, clock_t_::now(), &latency) & PollIn)
+            << "round " << round << ": readiness stopped being reported";
+
+        // Drain fully, so the next round's PollIn can only come from the next
+        // datagram rather than from what is still sitting in the queue.
+        std::vector<uint8_t> buf(2048);
+        Address              from;
+        const std::ptrdiff_t got = recv_udp_from(rx, buf.data(), buf.size(), from);
+        ASSERT_EQ(got, static_cast<std::ptrdiff_t>(payload.size())) << "round " << round;
+        buf.resize(static_cast<size_t>(got));
+        EXPECT_EQ(buf, payload) << "round " << round << ": datagram came back altered";
+        while (recv_udp_from(rx, buf.data(), buf.size(), from) >= 0) {}
+    }
+
+    poller_->remove(rx);
+    close_socket(rx);
+    close_socket(tx);
+}
+
+TEST_F(IOPollerTest, DatagramSurvivesErrorAndKeepsReporting) {
+    // An error on a datagram socket belongs to ONE datagram, not to the socket.
+    // Here it is provoked by sending to a port nobody is bound to: the ICMP Port
+    // Unreachable that comes back is handed to the next receive on the *sending*
+    // socket as an error rather than as data. The socket itself stays perfectly
+    // usable, so everything sent to it afterwards must still be reported.
+    //
+    // This is the one case a completion-port backend gets wrong by omission: it
+    // arms readiness with an overlapped receive, and if an error completion is
+    // treated as terminal — no fresh receive posted — nothing ever arms it again,
+    // because the reactor only calls modify() when the watched events change and
+    // for this socket they never do. The socket is then deaf for good, silently,
+    // which is how an entire UDP transport disappears without a single log line.
+    int      port      = 0;
+    socket_t rx        = make_raw_udp_socket(&port);
+    socket_t peer      = make_raw_udp_socket(nullptr);
+    ASSERT_TRUE(is_valid_socket(rx));
+    ASSERT_TRUE(is_valid_socket(peer));
+    ASSERT_TRUE(poller_->add(rx, PollIn));
+
+    const int dead_port = dead_loopback_port();
+    ASSERT_GT(dead_port, 0);
+    const std::vector<uint8_t> probe = make_payload(0x11, 64);
+    for (int i = 0; i < 3; ++i)
+        send_udp_data(rx, probe, "127.0.0.1", dead_port, AddressFamily::IPv4);
+
+    // Let the ICMP reports land and turn into a pending error on rx, and give the
+    // poller a chance to observe it — this is the moment the socket goes deaf.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    PollResult results[8];
+    poller_->wait(results, 8, 50);   // may report PollErr, may report nothing
+
+    const std::vector<uint8_t> payload = make_payload(0x5A);
+    ASSERT_EQ(send_udp_data(peer, payload, "127.0.0.1", port, AddressFamily::IPv4),
+              static_cast<int>(payload.size()));
+
+    // Pump until the datagram is delivered. Which flag carries the readiness is the
+    // backend's business — the queued errors are handed out one per receive and may
+    // well be reported before the data — but the datagram has to arrive, and it has
+    // to arrive because the poller pointed at the socket, not because we read blind.
+    std::vector<uint8_t> received;
+    PollResult           pump[8];
+    const auto           start = clock_t_::now();
+    while (received.empty() && ms_since(start) < 3000) {
+        const int n = poller_->wait(pump, 8, 200);
+        bool      reported = false;
+        for (int i = 0; i < n; ++i)
+            if (pump[i].fd == rx) reported = true;
+        if (!reported) continue;
+
+        std::vector<uint8_t> buf(2048);
+        Address              from;
+        const std::ptrdiff_t got = recv_udp_from(rx, buf.data(), buf.size(), from);
+        if (got < 0) continue;                  // a queued error, not the data
+        buf.resize(static_cast<size_t>(got));
+        received = buf;
+    }
+
+    ASSERT_FALSE(received.empty())
+        << "the socket stopped reporting readiness after a per-datagram error";
+    EXPECT_EQ(received, payload);
+
+    poller_->remove(rx);
+    close_socket(rx);
+    close_socket(peer);
 }
 
 //=============================================================================
@@ -1087,23 +1277,71 @@ TEST_F(IOPollerTest, RepeatedReadNotificationAfterNewData) {
     close_pair(pair);
 }
 
+TEST_F(IOPollerTest, ReadinessCostsOneReportPerBurst) {
+    // One burst of data should cost one readiness report. A completion-port backend
+    // that arms its next receive while the data is still unread gets a second,
+    // empty one for free: the fresh zero-byte receive completes on the spot, and the
+    // caller comes back to a socket with nothing in it. That doubles wakeups and
+    // reads across the entire receive path — measured at exactly 2.00 reports per
+    // message, half of them finding an empty socket.
+
+    auto pair = create_connected_pair();
+    ASSERT_TRUE(poller_->add(pair.server, PollIn));
+
+    constexpr int kMessages = 200;
+    int           reports   = 0;
+
+    for (int i = 0; i < kMessages; ++i) {
+        char msg[64];
+        std::memset(msg, 'x', sizeof(msg));
+        ASSERT_GT(send(pair.client, msg, sizeof(msg), 0), 0);
+
+        // Exactly how the reactor drives it: one blocking wait, read the socket dry,
+        // then keep asking until wait() has nothing left to say. Only the first wait
+        // of a round may block — the follow-ups ask "anything else?" and must not
+        // sit out a timeout to answer no.
+        for (bool first = true;; first = false) {
+            PollResult results[8];
+            const int  n = poller_->wait(results, 8, first ? 500 : 0);
+            if (n <= 0) break;
+            for (int r = 0; r < n; ++r) {
+                if (results[r].fd != pair.server) continue;
+                if (!(results[r].events & PollIn)) continue;
+                ++reports;
+                char buf[256];
+                while (recv(pair.server, buf, sizeof(buf), 0) > 0) {}
+            }
+        }
+    }
+
+    EXPECT_GE(reports, kMessages) << "every message has to be reported";
+    // The doubling is exactly 2.00 per message, so 1.5 separates "fixed" from
+    // "regressed" with room to spare for a send the stack legitimately splits.
+    EXPECT_LT(reports, kMessages * 3 / 2)
+        << reports << " readiness reports for " << kMessages
+        << " messages — a burst is costing more than one wakeup";
+
+    poller_->remove(pair.server);
+    close_pair(pair);
+}
+
 //=============================================================================
 // Double add: adding the same fd twice
 //=============================================================================
 
 TEST_F(IOPollerTest, DoubleAddSameFd) {
-    // Adding the same fd a second time should either fail or succeed
-    // (platform-dependent), but must not crash. Events should still work.
-    
+    // Adding the same fd a second time is rejected on every backend, and leaves the
+    // first registration working untouched.
+
     auto pair = create_connected_pair();
-    
+
     EXPECT_TRUE(poller_->add(pair.server, PollIn));
-    
-    // Second add of same fd — may return true or false depending on backend
-    // (epoll returns EEXIST → false, IOCP may succeed)
-    // The key contract: should NOT crash, and events should still work.
-    poller_->add(pair.server, PollIn);
-    
+
+    // epoll answers EEXIST; the backends that keep their own table answer the same
+    // rather than layering a second registration on top of the first.
+    EXPECT_FALSE(poller_->add(pair.server, PollIn))
+        << "a second add of a registered fd must be rejected; use modify()";
+
     // Send data and verify events still fire
     const char msg[] = "test";
     send(pair.client, msg, sizeof(msg), 0);
@@ -1123,6 +1361,38 @@ TEST_F(IOPollerTest, DoubleAddSameFd) {
     recv(pair.server, buf, sizeof(buf), 0);
     
     poller_->remove(pair.server);
+    close_pair(pair);
+}
+
+TEST_F(IOPollerTest, RemoveIsFinalAfterDoubleAdd) {
+    // One remove has to undo everything a double add left behind. A backend that
+    // let the second add create a parallel registration is still holding it here,
+    // and will report this fd after the caller was told it is gone — by which time
+    // the descriptor number may have been recycled onto an unrelated socket.
+
+    auto pair = create_connected_pair();
+
+    ASSERT_TRUE(poller_->add(pair.server, PollIn));
+    poller_->add(pair.server, PollIn);          // rejected; must leave nothing behind
+
+    ASSERT_TRUE(poller_->remove(pair.server));
+    EXPECT_FALSE(poller_->remove(pair.server)) << "nothing should be left to remove";
+
+    // Make the socket as loud as it can be: readable, then hung up.
+    const char msg[] = "data";
+    send(pair.client, msg, sizeof(msg), 0);
+    close_socket(pair.client);
+    pair.client = RATS_INVALID_SOCKET;
+
+    PollResult results[8];
+    const auto start = clock_t_::now();
+    while (ms_since(start) < 400) {
+        const int n = poller_->wait(results, 8, 50);
+        for (int i = 0; i < n; ++i)
+            EXPECT_NE(results[i].fd, pair.server)
+                << "wait() reported an fd that was removed";
+    }
+
     close_pair(pair);
 }
 
