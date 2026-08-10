@@ -1003,15 +1003,20 @@ private:
     
     /// Has this socket's connect attempt already failed?
     ///
-    /// WSAPoll does not report a failed connection attempt — documented Windows
-    /// behaviour, not an accident: neither POLLERR nor POLLWRNORM is raised for one.
-    /// Left at that, a refused or unreachable dial produces no event at all and sits
-    /// until the reactor's establish deadline reaps it fifteen seconds later. The
-    /// socket does carry the error, so ask it directly.
+    /// MSDN lists "WSAPoll does not report a failed connection attempt" as a known
+    /// limitation: neither POLLERR nor POLLWRNORM raised, so a refused or
+    /// unreachable dial produces no event at all and sits until the reactor's
+    /// establish deadline reaps it fifteen seconds later. Measured on Windows 11
+    /// that no longer reproduces — a refused loopback dial comes back as
+    /// POLLERR|POLLHUP|POLLWRNORM, and a single WSAPoll spanning the failure sees
+    /// it too — so on a current build this is belt and braces. It stays because
+    /// the limitation is still documented, the affected builds are still out
+    /// there, and the fallback is one getsockopt: the socket carries the error
+    /// either way, so ask it directly rather than depend on which behaviour we got.
     ///
-    /// Only ever consulted for a socket WSAPoll reported nothing about, so this
-    /// costs one getsockopt per *connecting* socket per wait() — there are only ever
-    /// a handful. A connect still in flight reads back 0, so there are no false
+    /// Only ever consulted for a socket WSAPoll reported nothing about, so it costs
+    /// one getsockopt per *connecting* socket per wait() — there are only ever a
+    /// handful. A connect still in flight reads back 0, so there are no false
     /// positives. (SO_ERROR is read-and-clear, but the caller that acts on the
     /// PollErr never reads it again — Connection::on_error does not.)
     static bool connect_failed(socket_t fd) {
@@ -1068,8 +1073,8 @@ private:
             if (pfd.revents & POLLERR) events |= PollErr;
             if (pfd.revents & POLLHUP) events |= PollHup;
 
-            // Silence from a socket that is waiting to become writable is the one
-            // case WSAPoll cannot speak for; see connect_failed().
+            // Silence from a socket waiting to become writable is the one case
+            // WSAPoll is documented not to speak for; see connect_failed().
             if (events == 0) {
                 if (!(pfd.events & POLLOUT) || !connect_failed(pfd.fd)) continue;
                 events = PollErr;

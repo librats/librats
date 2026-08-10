@@ -6,6 +6,8 @@
 #include <chrono>
 #include <vector>
 #include <atomic>
+#include <memory>
+#include <set>
 #include <cstring>
 
 #ifdef _WIN32
@@ -47,43 +49,108 @@ protected:
         // Create listen socket
         socket_t listen_sock = create_tcp_server(0, 5, "127.0.0.1", AddressFamily::IPv4);
         EXPECT_TRUE(is_valid_socket(listen_sock));
-        
+
         int port = get_bound_port(listen_sock);
         EXPECT_GT(port, 0);
-        
+
         // Create client and connect
         socket_t client = socket(AF_INET, SOCK_STREAM, 0);
         EXPECT_TRUE(is_valid_socket(client));
-        
-        sockaddr_in addr;
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(static_cast<uint16_t>(port));
-        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-        
+
+        sockaddr_in addr = loopback_addr(port);
         int ret = connect(client, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
         EXPECT_EQ(ret, 0);
-        
+
         // Accept
         socket_t server = accept_client(listen_sock);
         EXPECT_TRUE(is_valid_socket(server));
-        
+
         close_socket(listen_sock);
-        
+
         // Set both to non-blocking
         set_socket_nonblocking(client);
         set_socket_nonblocking(server);
-        
+
         return {server, client};
     }
-    
+
     void close_pair(SocketPair& pair) {
         if (is_valid_socket(pair.server)) close_socket(pair.server);
         if (is_valid_socket(pair.client)) close_socket(pair.client);
         pair.server = RATS_INVALID_SOCKET;
         pair.client = RATS_INVALID_SOCKET;
     }
-    
+
+    /// sockaddr for 127.0.0.1:port
+    static sockaddr_in loopback_addr(int port) {
+        sockaddr_in addr;
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(static_cast<uint16_t>(port));
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        return addr;
+    }
+
+    /// Start a non-blocking connect to 127.0.0.1:port. The socket comes back with
+    /// the attempt already in flight — on loopback it may even be finished.
+    static socket_t start_connect(int port) {
+        socket_t s = socket(AF_INET, SOCK_STREAM, 0);
+        EXPECT_TRUE(is_valid_socket(s));
+        set_socket_nonblocking(s);
+        sockaddr_in addr = loopback_addr(port);
+        connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        return s;
+    }
+
+    /// A loopback port with nothing listening on it: bind one to learn a free
+    /// number, then hand it straight back.
+    static int dead_loopback_port() {
+        socket_t s = create_tcp_server(0, 1, "127.0.0.1", AddressFamily::IPv4);
+        EXPECT_TRUE(is_valid_socket(s));
+        const int port = get_bound_port(s);
+        close_socket(s);
+        return port;
+    }
+
+    /// Non-blocking listen socket on an ephemeral loopback port.
+    static socket_t make_listener(int* port_out) {
+        socket_t s = create_tcp_server(0, 5, "127.0.0.1", AddressFamily::IPv4);
+        EXPECT_TRUE(is_valid_socket(s));
+        set_socket_nonblocking(s);
+        *port_out = get_bound_port(s);
+        EXPECT_GT(*port_out, 0);
+        return s;
+    }
+
+    using clock_t_ = std::chrono::steady_clock;
+
+    static long long ms_since(clock_t_::time_point t) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            clock_t_::now() - t).count();
+    }
+
+    /// Pump wait() until `fd` reports something, or `budget_ms` of wall clock is
+    /// gone. Returns the accumulated events (0 if none arrived) and, in
+    /// `latency_ms`, how long it took measured from `since`.
+    uint32_t await_events(socket_t fd, int wait_timeout_ms, long long budget_ms,
+                          clock_t_::time_point since, long long* latency_ms) {
+        PollResult results[8];
+        const auto deadline_start = clock_t_::now();
+        while (ms_since(deadline_start) < budget_ms) {
+            const int n = poller_->wait(results, 8, wait_timeout_ms);
+            const long long took = ms_since(since);
+            uint32_t events = 0;
+            for (int i = 0; i < n; ++i)
+                if (results[i].fd == fd) events |= results[i].events;
+            if (events != 0) {
+                if (latency_ms) *latency_ms = took;
+                return events;
+            }
+        }
+        if (latency_ms) *latency_ms = ms_since(since);
+        return 0;
+    }
+
     std::unique_ptr<IOPoller> poller_;
 };
 
@@ -417,48 +484,31 @@ TEST_F(IOPollerTest, DetectsPeerClose) {
 //=============================================================================
 
 TEST_F(IOPollerTest, DetectsIncomingConnection) {
-    // Create listen socket
-    socket_t listen_sock = create_tcp_server(0, 5, "127.0.0.1", AddressFamily::IPv4);
+    int port = 0;
+    socket_t listen_sock = make_listener(&port);
     ASSERT_TRUE(is_valid_socket(listen_sock));
-    set_socket_nonblocking(listen_sock);
-    
-    int port = get_bound_port(listen_sock);
-    ASSERT_GT(port, 0);
-    
+
     EXPECT_TRUE(poller_->add(listen_sock, PollIn));
-    
+
     // No connections yet → timeout
     PollResult results[8];
-    int n = poller_->wait(results, 8, 0);
-    EXPECT_EQ(n, 0);
-    
+    EXPECT_EQ(poller_->wait(results, 8, 0), 0);
+
     // Connect from a client
-    socket_t client = socket(AF_INET, SOCK_STREAM, 0);
+    socket_t client = start_connect(port);
     ASSERT_TRUE(is_valid_socket(client));
-    
-    sockaddr_in addr;
-    std::memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    connect(client, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    
+
     // Listen socket should become readable (pending accept)
-    bool found = false;
-    for (int attempt = 0; attempt < 5 && !found; ++attempt) {
-        n = poller_->wait(results, 8, 200);
-        for (int i = 0; i < n; ++i) {
-            if (results[i].fd == listen_sock && (results[i].events & PollIn)) {
-                found = true;
-            }
-        }
-    }
-    EXPECT_TRUE(found) << "Listen socket should be readable when connection is pending";
-    
+    long long latency = 0;
+    const uint32_t events = await_events(listen_sock, 200, 1000,
+                                         clock_t_::now(), &latency);
+    EXPECT_TRUE(events & PollIn)
+        << "Listen socket should be readable when connection is pending";
+
     // Accept the connection
     socket_t accepted = accept_client(listen_sock);
     EXPECT_TRUE(is_valid_socket(accepted));
-    
+
     poller_->remove(listen_sock);
     close_socket(accepted);
     close_socket(client);
@@ -470,56 +520,221 @@ TEST_F(IOPollerTest, DetectsIncomingConnection) {
 //=============================================================================
 
 TEST_F(IOPollerTest, DetectsConnectCompletion) {
-    // Create listen socket
-    socket_t listen_sock = create_tcp_server(0, 5, "127.0.0.1", AddressFamily::IPv4);
+    int port = 0;
+    socket_t listen_sock = make_listener(&port);
     ASSERT_TRUE(is_valid_socket(listen_sock));
-    
-    int port = get_bound_port(listen_sock);
-    ASSERT_GT(port, 0);
-    
-    // Create non-blocking client
-    socket_t client = socket(AF_INET, SOCK_STREAM, 0);
-    ASSERT_TRUE(is_valid_socket(client));
-    set_socket_nonblocking(client);
-    
-    sockaddr_in addr;
-    std::memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-    
-    int ret = connect(client, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+
     // On loopback, connect may succeed immediately or return EINPROGRESS/WSAEWOULDBLOCK
-    
+    socket_t client = start_connect(port);
+    ASSERT_TRUE(is_valid_socket(client));
+
     // Monitor for PollOut (connect completion)
     EXPECT_TRUE(poller_->add(client, PollOut));
-    
-    PollResult results[8];
-    bool connected = false;
-    
-    for (int attempt = 0; attempt < 10 && !connected; ++attempt) {
-        int n = poller_->wait(results, 8, 200);
-        for (int i = 0; i < n; ++i) {
-            if (results[i].fd == client && (results[i].events & PollOut)) {
-                connected = true;
-            }
-        }
-    }
-    EXPECT_TRUE(connected) << "Should detect connect completion via PollOut";
-    
-    // Verify connection is actually established
+
+    long long latency = 0;
+    const uint32_t events = await_events(client, 200, 2000, clock_t_::now(), &latency);
+    EXPECT_TRUE(events & PollOut) << "Should detect connect completion via PollOut";
+    EXPECT_FALSE(events & PollErr) << "A connect to a live listener must not fail";
+
+    // Verify the connection is actually established. Read SO_ERROR exactly once:
+    // it is read-and-clear, and a backend that probes it has already taken it.
     int sock_error = 0;
     socklen_t len = sizeof(sock_error);
     getsockopt(client, SOL_SOCKET, SO_ERROR,
               reinterpret_cast<char*>(&sock_error), &len);
     EXPECT_EQ(sock_error, 0) << "Socket should have no error after connect";
-    
+
     poller_->remove(client);
-    
+
     socket_t accepted = accept_client(listen_sock);
     if (is_valid_socket(accepted)) close_socket(accepted);
     close_socket(client);
     close_socket(listen_sock);
+}
+
+//=============================================================================
+// Out-of-band readiness: sockets a completion-port backend cannot watch
+//
+// A listen socket, and a socket whose connect is still in flight, carry no
+// overlapped I/O — so on Windows IOCP has nothing to say about them and the
+// poller must watch them by other means. These tests pin down the part of that
+// contract which costs the most when it is wrong: readiness on such a socket
+// has to INTERRUPT a wait() that is already blocked. They deliberately pass a
+// wait() timeout far longer than the latency they accept. With a short timeout
+// a backend that only glances at these sockets on the way *into* wait() still
+// looks correct, while every accept and every dial silently pays the timeout.
+//=============================================================================
+
+TEST_F(IOPollerTest, ListenSocketWakesBlockedWait) {
+    static constexpr int       kWaitTimeoutMs = 2000;
+    static constexpr long long kMaxLatencyMs  = 400;
+
+    int port = 0;
+    socket_t listen_sock = make_listener(&port);
+    ASSERT_TRUE(is_valid_socket(listen_sock));
+    ASSERT_TRUE(poller_->add(listen_sock, PollIn));
+
+    PollResult results[8];
+    ASSERT_EQ(poller_->wait(results, 8, 0), 0) << "nothing is pending before the first dial";
+
+    // Several rounds: one alone would also pass on a backend that arms its watch
+    // once and never re-arms it after reporting.
+    for (int round = 0; round < 4; ++round) {
+        std::atomic<long long> dialed_at{0};
+        socket_t client = RATS_INVALID_SOCKET;
+
+        std::thread dialer([&] {
+            // Long enough that the main thread is parked inside wait() by the
+            // time the connection lands.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            dialed_at.store(clock_t_::now().time_since_epoch().count());
+            client = start_connect(port);
+        });
+
+        uint32_t  events  = 0;
+        long long latency = 0;
+        const auto start = clock_t_::now();
+        while (events == 0 && ms_since(start) < kWaitTimeoutMs) {
+            const int n = poller_->wait(results, 8, kWaitTimeoutMs);
+            const auto woke = clock_t_::now();
+            for (int i = 0; i < n; ++i)
+                if (results[i].fd == listen_sock) events |= results[i].events;
+            if (events != 0) {
+                latency = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    woke - clock_t_::time_point(clock_t_::duration(dialed_at.load()))).count();
+            }
+        }
+        dialer.join();
+
+        ASSERT_TRUE(events & PollIn)
+            << "round " << round << ": listen socket never became readable";
+        EXPECT_LT(latency, kMaxLatencyMs)
+            << "round " << round << ": accept took " << latency
+            << " ms to surface — wait() sat out its timeout instead of being woken";
+
+        socket_t accepted = accept_client(listen_sock);
+        EXPECT_TRUE(is_valid_socket(accepted)) << "round " << round;
+        if (is_valid_socket(accepted)) close_socket(accepted);
+        if (is_valid_socket(client))   close_socket(client);
+    }
+
+    poller_->remove(listen_sock);
+    close_socket(listen_sock);
+}
+
+TEST_F(IOPollerTest, FailedConnectWakesBlockedWait) {
+    // A dial nobody answers. Windows spends a couple of seconds retransmitting
+    // the SYN before giving up, even on loopback — which is what makes this a
+    // real test: the failure necessarily arrives while wait() is already parked.
+    // Left unreported it would hang the connection until the caller's own
+    // establish deadline (15 s in Reactor) reaps it.
+    static constexpr int       kWaitTimeoutMs = 8000;
+    static constexpr long long kBudgetMs      = 5000;
+
+    const int port = dead_loopback_port();
+    ASSERT_GT(port, 0);
+
+    const auto start = clock_t_::now();
+    socket_t client = start_connect(port);
+    ASSERT_TRUE(is_valid_socket(client));
+    ASSERT_TRUE(poller_->add(client, PollOut));
+
+    long long latency = 0;
+    const uint32_t events = await_events(client, kWaitTimeoutMs, kBudgetMs, start, &latency);
+
+    // Which flag carries it is the backend's business — epoll raises
+    // EPOLLERR|EPOLLHUP|EPOLLOUT, kqueue an EV_EOF write event, WSAPoll
+    // POLLERR|POLLHUP|POLLWRNORM. The caller resolves the outcome with SO_ERROR
+    // either way; what matters here is that *something* is reported, promptly.
+    EXPECT_NE(events, 0u)
+        << "a refused connect must be reported (waited " << latency << " ms)";
+    EXPECT_LT(latency, kBudgetMs)
+        << "refused connect surfaced only after " << latency << " ms";
+
+    poller_->remove(client);
+    close_socket(client);
+}
+
+TEST_F(IOPollerTest, ListenSocketRemovedFromAnotherThreadDuringWait) {
+    // Two listen sockets; one is removed and closed from another thread while
+    // wait() is parked. A backend keeping a private copy of the watched set is
+    // then holding a descriptor that is about to be recycled — it must not act
+    // on it, and the survivor must keep reporting.
+    int port_a = 0, port_b = 0;
+    socket_t a = make_listener(&port_a);
+    socket_t b = make_listener(&port_b);
+    ASSERT_TRUE(is_valid_socket(a));
+    ASSERT_TRUE(is_valid_socket(b));
+    ASSERT_TRUE(poller_->add(a, PollIn));
+    ASSERT_TRUE(poller_->add(b, PollIn));
+
+    socket_t client = RATS_INVALID_SOCKET;
+    std::atomic<bool> removed{false};
+
+    std::thread worker([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        poller_->remove(a);
+        close_socket(a);          // a is the worker's to close from here on
+        removed = true;
+        client = start_connect(port_b);
+    });
+
+    long long latency = 0;
+    const uint32_t events = await_events(b, 2000, 3000, clock_t_::now(), &latency);
+    worker.join();
+
+    EXPECT_TRUE(removed.load());
+    EXPECT_TRUE(events & PollIn)
+        << "the surviving listen socket should still report after its sibling went away";
+
+    socket_t accepted = accept_client(b);
+    EXPECT_TRUE(is_valid_socket(accepted));
+    if (is_valid_socket(accepted)) close_socket(accepted);
+    if (is_valid_socket(client))   close_socket(client);
+
+    poller_->remove(b);
+    close_socket(b);
+}
+
+TEST_F(IOPollerTest, MultipleListenSocketsAllReport) {
+    // More than the one listen socket a node normally has, so a backend that
+    // indexes these sockets separately from its main table is exercised with a
+    // set rather than with a single special case.
+    constexpr int kCount = 4;
+    socket_t listeners[kCount];
+    socket_t clients[kCount];
+    int      ports[kCount] = {0};
+
+    for (int i = 0; i < kCount; ++i) {
+        listeners[i] = make_listener(&ports[i]);
+        ASSERT_TRUE(is_valid_socket(listeners[i]));
+        ASSERT_TRUE(poller_->add(listeners[i], PollIn));
+        clients[i] = RATS_INVALID_SOCKET;
+    }
+    for (int i = 0; i < kCount; ++i) clients[i] = start_connect(ports[i]);
+
+    std::set<socket_t> seen;
+    PollResult results[8];
+    const auto start = clock_t_::now();
+    while (seen.size() < static_cast<size_t>(kCount) && ms_since(start) < 3000) {
+        const int n = poller_->wait(results, 8, 500);
+        for (int i = 0; i < n; ++i) {
+            if (!(results[i].events & PollIn)) continue;
+            seen.insert(results[i].fd);
+            // Drain the backlog so this listener stops firing.
+            socket_t accepted = accept_client(results[i].fd);
+            if (is_valid_socket(accepted)) close_socket(accepted);
+        }
+    }
+
+    EXPECT_EQ(seen.size(), static_cast<size_t>(kCount))
+        << "every registered listen socket should report its pending connection";
+
+    for (int i = 0; i < kCount; ++i) {
+        poller_->remove(listeners[i]);
+        close_socket(listeners[i]);
+        if (is_valid_socket(clients[i])) close_socket(clients[i]);
+    }
 }
 
 //=============================================================================
