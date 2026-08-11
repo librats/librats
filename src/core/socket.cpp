@@ -93,9 +93,9 @@ static socket_t create_tcp_client_v4(const std::string& host, int port, int time
     LOG_SOCKET_DEBUG("Creating TCP client socket (IPv4) for " << host << ":" << port);
 
     socket_t client_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (client_socket == INVALID_SOCKET_VALUE) {
+    if (client_socket == RATS_INVALID_SOCKET) {
         LOG_SOCKET_ERROR("Failed to create IPv4 client socket");
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
     suppress_sigpipe(client_socket);
 
@@ -108,13 +108,13 @@ static socket_t create_tcp_client_v4(const std::string& host, int port, int time
     if (resolved_ip.empty()) {
         LOG_SOCKET_ERROR("Failed to resolve hostname: " << host);
         close_socket(client_socket);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     if (inet_pton(AF_INET, resolved_ip.c_str(), &server_addr.sin_addr) <= 0) {
         LOG_SOCKET_ERROR("Invalid address: " << resolved_ip);
         close_socket(client_socket);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     LOG_SOCKET_DEBUG("Connecting to " << resolved_ip << ":" << port);
@@ -124,13 +124,13 @@ static socket_t create_tcp_client_v4(const std::string& host, int port, int time
                                   sizeof(server_addr), timeout_ms);
     } else {
         ok = (connect(client_socket, reinterpret_cast<sockaddr*>(&server_addr),
-                      sizeof(server_addr)) != SOCKET_ERROR_VALUE);
+                      sizeof(server_addr)) != RATS_SOCKET_ERROR);
     }
 
     if (!ok) {
         LOG_SOCKET_DEBUG("Connection to " << resolved_ip << ":" << port << " failed");
         close_socket(client_socket);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     LOG_SOCKET_INFO("Successfully connected to " << resolved_ip << ":" << port);
@@ -141,9 +141,9 @@ static socket_t create_tcp_client_v6(const std::string& host, int port, int time
     LOG_SOCKET_DEBUG("Creating TCP client socket (IPv6) for " << host << ":" << port);
 
     socket_t client_socket = socket(AF_INET6, SOCK_STREAM, 0);
-    if (client_socket == INVALID_SOCKET_VALUE) {
+    if (client_socket == RATS_INVALID_SOCKET) {
         LOG_SOCKET_ERROR("Failed to create IPv6 client socket");
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
     suppress_sigpipe(client_socket);
 
@@ -156,13 +156,13 @@ static socket_t create_tcp_client_v6(const std::string& host, int port, int time
     if (resolved_ip.empty()) {
         LOG_SOCKET_DEBUG("Failed to resolve hostname to IPv6: " << host);
         close_socket(client_socket);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     if (inet_pton(AF_INET6, resolved_ip.c_str(), &server_addr.sin6_addr) <= 0) {
         LOG_SOCKET_ERROR("Invalid IPv6 address: " << resolved_ip);
         close_socket(client_socket);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     LOG_SOCKET_DEBUG("Connecting to IPv6 " << resolved_ip << ":" << port);
@@ -172,13 +172,13 @@ static socket_t create_tcp_client_v6(const std::string& host, int port, int time
                                   sizeof(server_addr), timeout_ms);
     } else {
         ok = (connect(client_socket, reinterpret_cast<sockaddr*>(&server_addr),
-                      sizeof(server_addr)) != SOCKET_ERROR_VALUE);
+                      sizeof(server_addr)) != RATS_SOCKET_ERROR);
     }
 
     if (!ok) {
         LOG_SOCKET_DEBUG("Connection to IPv6 " << resolved_ip << ":" << port << " failed");
         close_socket(client_socket);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     LOG_SOCKET_INFO("Successfully connected to IPv6 " << resolved_ip << ":" << port);
@@ -311,12 +311,12 @@ bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr
 
 static socket_t tcp_connect_start_family(int family, const std::string& resolved_ip, int port) {
     socket_t s = socket(family, SOCK_STREAM, 0);
-    if (s == INVALID_SOCKET_VALUE) return INVALID_SOCKET_VALUE;
+    if (s == RATS_INVALID_SOCKET) return RATS_INVALID_SOCKET;
     suppress_sigpipe(s);
 
     if (!set_socket_nonblocking(s)) {
         close_socket(s);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     sockaddr_storage ss;
@@ -329,7 +329,7 @@ static socket_t tcp_connect_start_family(int family, const std::string& resolved
         a->sin_port = htons(static_cast<uint16_t>(port));
         if (inet_pton(AF_INET, resolved_ip.c_str(), &a->sin_addr) <= 0) {
             close_socket(s);
-            return INVALID_SOCKET_VALUE;
+            return RATS_INVALID_SOCKET;
         }
         addr_len = sizeof(sockaddr_in);
     } else {
@@ -338,7 +338,7 @@ static socket_t tcp_connect_start_family(int family, const std::string& resolved
         a->sin6_port = htons(static_cast<uint16_t>(port));
         if (inet_pton(AF_INET6, resolved_ip.c_str(), &a->sin6_addr) <= 0) {
             close_socket(s);
-            return INVALID_SOCKET_VALUE;
+            return RATS_INVALID_SOCKET;
         }
         addr_len = sizeof(sockaddr_in6);
     }
@@ -355,11 +355,11 @@ static socket_t tcp_connect_start_family(int family, const std::string& resolved
 #endif
     LOG_SOCKET_DEBUG("Non-blocking connect to " << resolved_ip << ":" << port << " failed to start");
     close_socket(s);
-    return INVALID_SOCKET_VALUE;
+    return RATS_INVALID_SOCKET;
 }
 
 socket_t tcp_connect_start(const std::string& host, int port) {
-    if (!validate_port(port)) return INVALID_SOCKET_VALUE;
+    if (!validate_port(port)) return RATS_INVALID_SOCKET;
 
     // Prefer IPv6, fall back to IPv4 — same precedence as create_tcp_client().
     // Note: fallback happens at *resolution* time; a v6 address that resolves
@@ -377,7 +377,7 @@ socket_t tcp_connect_start(const std::string& host, int port) {
         if (is_valid_socket(s)) return s;
     }
 
-    return INVALID_SOCKET_VALUE;
+    return RATS_INVALID_SOCKET;
 }
 
 int tcp_connect_result(socket_t socket) {
@@ -396,13 +396,13 @@ int tcp_connect_result(socket_t socket) {
 // ── TCP Socket Functions ────────────────────────────────────────────────────
 
 socket_t create_tcp_client(const std::string& host, int port, int timeout_ms) {
-    if (!validate_port(port)) return INVALID_SOCKET_VALUE;
+    if (!validate_port(port)) return RATS_INVALID_SOCKET;
 
     LOG_SOCKET_DEBUG("Creating TCP client socket (dual stack) for " << host << ":" << port);
 
     // Try IPv6 first
     socket_t client_socket = create_tcp_client_v6(host, port, timeout_ms);
-    if (client_socket != INVALID_SOCKET_VALUE) {
+    if (client_socket != RATS_INVALID_SOCKET) {
         LOG_SOCKET_INFO("Successfully connected using IPv6");
         return client_socket;
     }
@@ -410,17 +410,17 @@ socket_t create_tcp_client(const std::string& host, int port, int timeout_ms) {
     // Fall back to IPv4
     LOG_SOCKET_DEBUG("IPv6 connection failed, trying IPv4");
     client_socket = create_tcp_client_v4(host, port, timeout_ms);
-    if (client_socket != INVALID_SOCKET_VALUE) {
+    if (client_socket != RATS_INVALID_SOCKET) {
         LOG_SOCKET_INFO("Successfully connected using IPv4");
         return client_socket;
     }
 
     LOG_SOCKET_DEBUG("Failed to connect using both IPv6 and IPv4");
-    return INVALID_SOCKET_VALUE;
+    return RATS_INVALID_SOCKET;
 }
 
 socket_t create_tcp_server(int port, int backlog, const std::string& bind_address, AddressFamily af) {
-    if (!validate_port(port)) return INVALID_SOCKET_VALUE;
+    if (!validate_port(port)) return RATS_INVALID_SOCKET;
 
     const char* af_label = (af == AddressFamily::IPv4) ? "IPv4" :
                            (af == AddressFamily::IPv6) ? "IPv6" : "dual stack";
@@ -430,25 +430,25 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
     int family = (af == AddressFamily::IPv4) ? AF_INET : AF_INET6;
 
     socket_t server_socket = socket(family, SOCK_STREAM, 0);
-    if (server_socket == INVALID_SOCKET_VALUE) {
+    if (server_socket == RATS_INVALID_SOCKET) {
         LOG_SOCKET_ERROR("Failed to create " << af_label << " server socket");
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     // Set socket option to reuse address
     int opt = 1;
     if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR,
-                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
+                   (char*)&opt, sizeof(opt)) == RATS_SOCKET_ERROR) {
         LOG_SOCKET_ERROR("Failed to set " << af_label << " socket options");
         close_socket(server_socket);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     // For IPv6/DualStack sockets, configure IPV6_V6ONLY
     if (family == AF_INET6) {
         int ipv6_only = (af == AddressFamily::IPv6) ? 1 : 0;
         if (setsockopt(server_socket, IPPROTO_IPV6, IPV6_V6ONLY,
-                       (char*)&ipv6_only, sizeof(ipv6_only)) == SOCKET_ERROR_VALUE) {
+                       (char*)&ipv6_only, sizeof(ipv6_only)) == RATS_SOCKET_ERROR) {
             if (af == AddressFamily::DualStack) {
                 LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
             }
@@ -468,15 +468,15 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
             if (inet_pton(AF_INET, bind_address.c_str(), &server_addr.sin_addr) != 1) {
                 LOG_SOCKET_ERROR("Invalid IPv4 bind address: " << bind_address);
                 close_socket(server_socket);
-                return INVALID_SOCKET_VALUE;
+                return RATS_INVALID_SOCKET;
             }
         }
 
         if (bind(server_socket, reinterpret_cast<sockaddr*>(&server_addr),
-                 sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
+                 sizeof(server_addr)) == RATS_SOCKET_ERROR) {
             LOG_SOCKET_ERROR("Failed to bind " << af_label << " server socket to port " << port);
             close_socket(server_socket);
-            return INVALID_SOCKET_VALUE;
+            return RATS_INVALID_SOCKET;
         }
     } else {
         sockaddr_in6 server_addr;
@@ -490,22 +490,22 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
             if (inet_pton(AF_INET6, bind_address.c_str(), &server_addr.sin6_addr) != 1) {
                 LOG_SOCKET_ERROR("Invalid IPv6 bind address: " << bind_address);
                 close_socket(server_socket);
-                return INVALID_SOCKET_VALUE;
+                return RATS_INVALID_SOCKET;
             }
         }
 
         if (bind(server_socket, reinterpret_cast<sockaddr*>(&server_addr),
-                 sizeof(server_addr)) == SOCKET_ERROR_VALUE) {
+                 sizeof(server_addr)) == RATS_SOCKET_ERROR) {
             LOG_SOCKET_ERROR("Failed to bind " << af_label << " server socket to port " << port);
             close_socket(server_socket);
-            return INVALID_SOCKET_VALUE;
+            return RATS_INVALID_SOCKET;
         }
     }
 
-    if (listen(server_socket, backlog) == SOCKET_ERROR_VALUE) {
+    if (listen(server_socket, backlog) == RATS_SOCKET_ERROR) {
         LOG_SOCKET_ERROR("Failed to listen on " << af_label << " server socket");
         close_socket(server_socket);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     LOG_SOCKET_INFO(af_label << " server listening on port " << port << " (backlog: " << backlog << ")");
@@ -517,9 +517,9 @@ socket_t accept_client(socket_t server_socket) {
     socklen_t client_addr_len = sizeof(client_addr);
 
     socket_t client_socket = accept(server_socket, reinterpret_cast<sockaddr*>(&client_addr), &client_addr_len);
-    if (client_socket == INVALID_SOCKET_VALUE) {
+    if (client_socket == RATS_INVALID_SOCKET) {
         LOG_SOCKET_ERROR("Failed to accept client connection");
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
     suppress_sigpipe(client_socket);
 
@@ -544,7 +544,7 @@ std::string get_peer_address(socket_t socket) {
     sockaddr_storage peer_addr;
     socklen_t peer_addr_len = sizeof(peer_addr);
 
-    if (getpeername(socket, reinterpret_cast<sockaddr*>(&peer_addr), &peer_addr_len) == SOCKET_ERROR_VALUE) {
+    if (getpeername(socket, reinterpret_cast<sockaddr*>(&peer_addr), &peer_addr_len) == RATS_SOCKET_ERROR) {
         LOG_SOCKET_ERROR("Failed to get peer address for socket " << socket);
         return "";
     }
@@ -575,7 +575,7 @@ std::string get_peer_address(socket_t socket) {
 std::optional<Address> get_peer_endpoint(socket_t socket) {
     sockaddr_storage ss;
     socklen_t len = sizeof(ss);
-    if (getpeername(socket, reinterpret_cast<sockaddr*>(&ss), &len) == SOCKET_ERROR_VALUE)
+    if (getpeername(socket, reinterpret_cast<sockaddr*>(&ss), &len) == RATS_SOCKET_ERROR)
         return std::nullopt;
     auto ip = IpAddress::from_sockaddr(reinterpret_cast<sockaddr*>(&ss));
     if (!ip) return std::nullopt;
@@ -637,7 +637,7 @@ int send_tcp_data(socket_t socket, const std::vector<uint8_t>& data) {
 #else
         int bytes_sent = send(socket, buffer + total_sent, remaining, MSG_NOSIGNAL);
 #endif
-        if (bytes_sent == SOCKET_ERROR_VALUE) {
+        if (bytes_sent == RATS_SOCKET_ERROR) {
             int error = get_last_socket_error();
 #ifdef _WIN32
             if (error == WSAEWOULDBLOCK) { continue; }
@@ -676,7 +676,7 @@ std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size) {
     std::vector<uint8_t> buffer(buffer_size);
 
     int bytes_received = recv(socket, reinterpret_cast<char*>(buffer.data()), buffer_size, 0);
-    if (bytes_received == SOCKET_ERROR_VALUE) {
+    if (bytes_received == RATS_SOCKET_ERROR) {
         int error = get_last_socket_error();
 #ifdef _WIN32
         if (error == WSAEWOULDBLOCK) { return {}; }
@@ -732,7 +732,7 @@ static std::vector<uint8_t> receive_exact_bytes(socket_t socket, size_t num_byte
         std::vector<uint8_t> buffer(num_bytes - total_received);
         int bytes_received = recv(socket, reinterpret_cast<char*>(buffer.data()), buffer.size(), 0);
 
-        if (bytes_received == SOCKET_ERROR_VALUE) {
+        if (bytes_received == RATS_SOCKET_ERROR) {
             int error = get_last_socket_error();
 #ifdef _WIN32
             if (error == WSAEWOULDBLOCK) {
@@ -809,7 +809,7 @@ int send_tcp_string(socket_t socket, const std::string& data) {
 // ── UDP Socket Functions ────────────────────────────────────────────────────
 
 socket_t create_udp_socket(int port, const std::string& bind_address, AddressFamily af) {
-    if (!validate_port(port)) return INVALID_SOCKET_VALUE;
+    if (!validate_port(port)) return RATS_INVALID_SOCKET;
 
     const char* af_label = (af == AddressFamily::IPv4) ? "IPv4" :
                            (af == AddressFamily::IPv6) ? "IPv6" : "dual stack";
@@ -819,10 +819,10 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
     int family = (af == AddressFamily::IPv4) ? AF_INET : AF_INET6;
 
     socket_t udp_socket = socket(family, SOCK_DGRAM, 0);
-    if (udp_socket == INVALID_SOCKET_VALUE) {
+    if (udp_socket == RATS_INVALID_SOCKET) {
         LOG_SOCKET_ERROR("Failed to create " << af_label << " UDP socket (error: "
                          << socket_error_string(get_last_socket_error()) << ")");
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
 #ifdef _WIN32
@@ -842,17 +842,17 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
     // Set socket option to reuse address
     int opt = 1;
     if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR,
-                   (char*)&opt, sizeof(opt)) == SOCKET_ERROR_VALUE) {
+                   (char*)&opt, sizeof(opt)) == RATS_SOCKET_ERROR) {
         LOG_SOCKET_ERROR("Failed to set " << af_label << " UDP socket options");
         close_socket(udp_socket);
-        return INVALID_SOCKET_VALUE;
+        return RATS_INVALID_SOCKET;
     }
 
     // For IPv6/DualStack sockets, configure IPV6_V6ONLY
     if (family == AF_INET6) {
         int ipv6_only = (af == AddressFamily::IPv6) ? 1 : 0;
         if (setsockopt(udp_socket, IPPROTO_IPV6, IPV6_V6ONLY,
-                       (char*)&ipv6_only, sizeof(ipv6_only)) == SOCKET_ERROR_VALUE) {
+                       (char*)&ipv6_only, sizeof(ipv6_only)) == RATS_SOCKET_ERROR) {
             if (af == AddressFamily::DualStack) {
                 LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
             }
@@ -872,15 +872,15 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
             if (inet_pton(AF_INET, bind_address.c_str(), &addr.sin_addr) != 1) {
                 LOG_SOCKET_ERROR("Invalid IPv4 bind address: " << bind_address);
                 close_socket(udp_socket);
-                return INVALID_SOCKET_VALUE;
+                return RATS_INVALID_SOCKET;
             }
         }
 
-        if (bind(udp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR_VALUE) {
+        if (bind(udp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == RATS_SOCKET_ERROR) {
             LOG_SOCKET_ERROR("Failed to bind " << af_label << " UDP socket to port " << port
                              << " (error: " << socket_error_string(get_last_socket_error()) << ")");
             close_socket(udp_socket);
-            return INVALID_SOCKET_VALUE;
+            return RATS_INVALID_SOCKET;
         }
     } else {
         sockaddr_in6 addr;
@@ -894,15 +894,15 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
             if (inet_pton(AF_INET6, bind_address.c_str(), &addr.sin6_addr) != 1) {
                 LOG_SOCKET_ERROR("Invalid IPv6 bind address: " << bind_address);
                 close_socket(udp_socket);
-                return INVALID_SOCKET_VALUE;
+                return RATS_INVALID_SOCKET;
             }
         }
 
-        if (bind(udp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR_VALUE) {
+        if (bind(udp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == RATS_SOCKET_ERROR) {
             LOG_SOCKET_ERROR("Failed to bind " << af_label << " UDP socket to port " << port
                              << " (error: " << socket_error_string(get_last_socket_error()) << ")");
             close_socket(udp_socket);
-            return INVALID_SOCKET_VALUE;
+            return RATS_INVALID_SOCKET;
         }
     }
 
@@ -1000,7 +1000,7 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data,
 
     int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0,
                             reinterpret_cast<sockaddr*>(&dest_addr), addr_len);
-    if (bytes_sent == SOCKET_ERROR_VALUE) {
+    if (bytes_sent == RATS_SOCKET_ERROR) {
         LOG_SOCKET_ERROR("Failed to send UDP data to " << host << ":" << port
                          << " (error: " << socket_error_string(get_last_socket_error()) << ")");
         return -1;
@@ -1053,7 +1053,7 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data,
 
     int bytes_sent = sendto(socket, (char*)data.data(), data.size(), 0,
                             reinterpret_cast<sockaddr*>(&dest_addr), addr_len);
-    if (bytes_sent == SOCKET_ERROR_VALUE) {
+    if (bytes_sent == RATS_SOCKET_ERROR) {
         LOG_SOCKET_ERROR("Failed to send UDP data to " << dest.to_string()
                          << " (error: " << socket_error_string(get_last_socket_error()) << ")");
         return -1;
@@ -1110,7 +1110,7 @@ std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Addre
     int bytes_received = recvfrom(socket, (char*)buffer.data(), buffer_size, 0,
                                  reinterpret_cast<sockaddr*>(&sender_addr), &sender_addr_len);
 
-    if (bytes_received == SOCKET_ERROR_VALUE) {
+    if (bytes_received == RATS_SOCKET_ERROR) {
         int error = get_last_socket_error();
 #ifdef _WIN32
         if (error == WSAEWOULDBLOCK) { return {}; }
@@ -1155,12 +1155,16 @@ void close_socket(socket_t socket, bool force) {
 #endif
         }
 
-        closesocket(socket);
+#ifdef _WIN32
+        ::closesocket(socket);
+#else
+        ::close(socket);
+#endif
     }
 }
 
 bool is_valid_socket(socket_t socket) {
-    return socket != INVALID_SOCKET_VALUE;
+    return socket != RATS_INVALID_SOCKET;
 }
 
 bool set_socket_nonblocking(socket_t socket) {

@@ -137,7 +137,7 @@ void Node::stop() {
     // bound port immediately on stop() rather than leaking it until destruction.
     if (is_valid_socket(listen_socket_)) {
         close_socket(listen_socket_);
-        listen_socket_ = INVALID_SOCKET_VALUE;
+        listen_socket_ = RATS_INVALID_SOCKET;
     }
     LOG_INFO("node", "Node " << identity_.id.short_hex() << " stopped");
 }

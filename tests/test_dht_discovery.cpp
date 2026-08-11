@@ -46,7 +46,7 @@ public:
 
     void stop() {
         running_ = false;
-        if (is_valid_socket(socket_)) { close_socket(socket_); socket_ = INVALID_SOCKET_VALUE; }
+        if (is_valid_socket(socket_)) { close_socket(socket_); socket_ = RATS_INVALID_SOCKET; }
         if (thread_.joinable()) thread_.join();
     }
 
@@ -73,7 +73,7 @@ private:
 
     std::string       public_ip_;
     std::atomic<bool> running_{false};
-    socket_t          socket_ = INVALID_SOCKET_VALUE;
+    socket_t          socket_ = RATS_INVALID_SOCKET;
     int               port_ = 0;
     std::thread       thread_;
 };

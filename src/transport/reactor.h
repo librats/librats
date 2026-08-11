@@ -136,7 +136,7 @@ private:
     std::unordered_map<ConnId, socket_t>                       id_to_socket_;
     std::unordered_map<socket_t, CloseReason>                  pending_close_;
 
-    socket_t            server_socket_ = INVALID_SOCKET_VALUE;
+    socket_t            server_socket_ = RATS_INVALID_SOCKET;
     ConnId              next_conn_id_ = 1;
     std::atomic<size_t> conn_count_{0};
     std::atomic<bool>   running_{false};

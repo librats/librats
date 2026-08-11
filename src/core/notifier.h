@@ -67,8 +67,8 @@ public:
     }
 
 private:
-    socket_t reader_ = INVALID_SOCKET_VALUE;
-    socket_t writer_ = INVALID_SOCKET_VALUE;
+    socket_t reader_ = RATS_INVALID_SOCKET;
+    socket_t writer_ = RATS_INVALID_SOCKET;
 };
 
 } // namespace librats

@@ -80,8 +80,8 @@ protected:
     void close_pair(SocketPair& pair) {
         if (is_valid_socket(pair.server)) close_socket(pair.server);
         if (is_valid_socket(pair.client)) close_socket(pair.client);
-        pair.server = INVALID_SOCKET_VALUE;
-        pair.client = INVALID_SOCKET_VALUE;
+        pair.server = RATS_INVALID_SOCKET;
+        pair.client = RATS_INVALID_SOCKET;
     }
     
     std::unique_ptr<IOPoller> poller_;
@@ -389,7 +389,7 @@ TEST_F(IOPollerTest, DetectsPeerClose) {
     
     // Close client side → server should get PollIn (0-byte read) or PollHup
     close_socket(pair.client);
-    pair.client = INVALID_SOCKET_VALUE;
+    pair.client = RATS_INVALID_SOCKET;
     
     PollResult results[8];
     uint32_t combined = 0;
@@ -705,7 +705,7 @@ TEST_F(IOPollerTest, DetectsConnectionRefusedAsError) {
     setsockopt(pair.client, SOL_SOCKET, SO_LINGER,
                reinterpret_cast<const char*>(&lg), sizeof(lg));
     close_socket(pair.client, true);  // Sends RST instead of FIN
-    pair.client = INVALID_SOCKET_VALUE;
+    pair.client = RATS_INVALID_SOCKET;
     
     PollResult results[8];
     uint32_t combined = 0;
@@ -1015,7 +1015,7 @@ TEST_F(IOPollerTest, RemoveThenCloseSafety) {
     // Remove and close server side
     EXPECT_TRUE(poller_->remove(pair.server));
     close_socket(pair.server);
-    pair.server = INVALID_SOCKET_VALUE;
+    pair.server = RATS_INVALID_SOCKET;
     
     // Subsequent wait() should not crash — only client is registered.
     // The client may receive the server-close event on this very first call

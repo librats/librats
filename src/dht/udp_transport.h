@@ -37,12 +37,12 @@ public:
     // watched alongside the data socket: when it becomes readable the wait returns early
     // (as nullopt), letting the caller react to posted work without waiting out the timeout.
     std::optional<std::vector<uint8_t>> recv(int timeout_ms, Address& from,
-                                             socket_t interrupt_fd = INVALID_SOCKET_VALUE);
+                                             socket_t interrupt_fd = RATS_INVALID_SOCKET);
 
     void close();
 
 private:
-    socket_t      socket_ = INVALID_SOCKET_VALUE;
+    socket_t      socket_ = RATS_INVALID_SOCKET;
     AddressFamily family_;
     uint16_t      port_ = 0;
 };

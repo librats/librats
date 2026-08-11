@@ -41,7 +41,7 @@ void Client::stop() {
     // never run now that the reactor is stopped).
     for (socket_t s : pending_connects_) { reactor_.remove(s); close_socket(s); }
     pending_connects_.clear();
-    if (is_valid_socket(listener_)) { reactor_.remove(listener_); close_socket(listener_); listener_ = INVALID_SOCKET_VALUE; }
+    if (is_valid_socket(listener_)) { reactor_.remove(listener_); close_socket(listener_); listener_ = RATS_INVALID_SOCKET; }
 }
 
 void Client::open_listener() {

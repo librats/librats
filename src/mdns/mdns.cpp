@@ -1,4 +1,5 @@
 #include "mdns/mdns.h"
+#include "mdns/log.h"
 #include "util/network_utils.h"
 #include "util/os.h"
 #include "core/socket.h"
@@ -26,7 +27,7 @@ MdnsClient::MdnsClient(const std::string& service_instance_name, uint16_t servic
     : service_instance_name_(service_instance_name),
       service_port_(service_port),
       service_type_(LIBRATS_SERVICE_TYPE),  // Default service type
-      multicast_socket_(INVALID_SOCKET_VALUE),
+      multicast_socket_(RATS_INVALID_SOCKET),
       running_(false),
       announcing_(false),
       discovering_(false),
@@ -324,7 +325,7 @@ bool MdnsClient::create_multicast_socket() {
         LOG_MDNS_ERROR("Failed to bind to mDNS port " << MDNS_PORT << " (error: " << strerror(errno) << ")");
 #endif
         close_socket(multicast_socket_);
-        multicast_socket_ = INVALID_SOCKET_VALUE;
+        multicast_socket_ = RATS_INVALID_SOCKET;
         return false;
     }
     
@@ -419,7 +420,7 @@ void MdnsClient::close_multicast_socket() {
     if (librats::is_valid_socket(multicast_socket_)) {
         leave_multicast_group();
         librats::close_socket(multicast_socket_, true);
-        multicast_socket_ = INVALID_SOCKET_VALUE;
+        multicast_socket_ = RATS_INVALID_SOCKET;
     }
 }
 

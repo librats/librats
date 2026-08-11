@@ -230,7 +230,7 @@ private:
     bool                            maintenance_pending_ = false;
     bool                            maintenance_stop_    = false;
 
-    socket_t            listen_socket_ = INVALID_SOCKET_VALUE;
+    socket_t            listen_socket_ = RATS_INVALID_SOCKET;
     uint16_t            listen_port_   = 0;
     std::atomic<bool>   running_{false};
     std::atomic<size_t> max_peers_{0};  ///< established-peer cap; 0 = unlimited

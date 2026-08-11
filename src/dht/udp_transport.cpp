@@ -41,7 +41,7 @@ std::optional<std::vector<uint8_t>> UdpTransport::recv(int timeout_ms, Address& 
 void UdpTransport::close() {
     if (is_valid_socket(socket_)) {
         close_socket(socket_);
-        socket_ = INVALID_SOCKET_VALUE;
+        socket_ = RATS_INVALID_SOCKET;
     }
 }
 

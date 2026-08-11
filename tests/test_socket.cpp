@@ -43,7 +43,7 @@ TEST_F(SocketTest, SocketValidityTest) {
     
     close_socket(valid_socket);
     
-    socket_t invalid_socket = INVALID_SOCKET_VALUE;
+    socket_t invalid_socket = RATS_INVALID_SOCKET;
     EXPECT_FALSE(is_valid_socket(invalid_socket));
 }
 
@@ -206,7 +206,7 @@ TEST_F(SocketTest, SocketCloseTest) {
 
 // Test invalid operations
 TEST_F(SocketTest, InvalidOperationsTest) {
-    socket_t invalid_socket = INVALID_SOCKET_VALUE;
+    socket_t invalid_socket = RATS_INVALID_SOCKET;
     
     // Test sending to invalid socket
     int result = send_tcp_string(invalid_socket, "test");

@@ -89,7 +89,7 @@ PeerConnection::~PeerConnection() {
     if (!closed_ && is_valid_socket(sock_)) {
         reactor_.remove(sock_);
         close_socket(sock_);
-        sock_ = INVALID_SOCKET_VALUE;
+        sock_ = RATS_INVALID_SOCKET;
     }
 }
 
@@ -144,7 +144,7 @@ void PeerConnection::close(const std::string& reason) {
     if (is_valid_socket(sock_)) {
         reactor_.remove(sock_);
         close_socket(sock_);
-        sock_ = INVALID_SOCKET_VALUE;
+        sock_ = RATS_INVALID_SOCKET;
     }
     // Drop the send backlog; rx_ is deliberately left alone — close() can be called
     // from inside a message handler that still holds a ByteView into it.

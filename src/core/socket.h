@@ -16,21 +16,32 @@
     #ifdef _MSC_VER
         #pragma comment(lib, "ws2_32.lib")
     #endif
-    typedef SOCKET socket_t;
-    #define INVALID_SOCKET_VALUE INVALID_SOCKET
-    #define SOCKET_ERROR_VALUE SOCKET_ERROR
 #else
     #include <sys/socket.h>
     #include <arpa/inet.h>
     #include <netinet/in.h>
     #include <unistd.h>
-    typedef int socket_t;
-    #define INVALID_SOCKET_VALUE -1
-    #define SOCKET_ERROR_VALUE -1
-    #define closesocket close
 #endif
 
 namespace librats {
+
+/*
+ * socket_t and the sentinel values live in the namespace, and the macros carry
+ * the RATS_ prefix, because this header is installed: a bare `socket_t` typedef
+ * or a bare `closesocket` macro at global scope collides with any other library
+ * that installs the same portability shim (and a function-like macro named
+ * `closesocket` would silently rewrite the consumer's own calls). Use
+ * close_socket() below rather than reintroducing that macro.
+ */
+#ifdef _WIN32
+    typedef SOCKET socket_t;
+    #define RATS_INVALID_SOCKET INVALID_SOCKET
+    #define RATS_SOCKET_ERROR SOCKET_ERROR
+#else
+    typedef int socket_t;
+    #define RATS_INVALID_SOCKET -1
+    #define RATS_SOCKET_ERROR -1
+#endif
 
 /**
  * Address family for socket creation
@@ -59,7 +70,7 @@ void cleanup_socket_library();
  * @param host The hostname or IP address to connect to
  * @param port The port number to connect to
  * @param timeout_ms Connection timeout in milliseconds (0 for blocking)
- * @return Socket handle, or INVALID_SOCKET_VALUE on error
+ * @return Socket handle, or RATS_INVALID_SOCKET on error
  */
 socket_t create_tcp_client(const std::string& host, int port, int timeout_ms = 0);
 
@@ -74,7 +85,7 @@ socket_t create_tcp_client(const std::string& host, int port, int timeout_ms = 0
  * @param host The hostname or IP address to connect to
  * @param port The port number to connect to
  * @return A non-blocking socket with a connect in progress (or completed), or
- *         INVALID_SOCKET_VALUE if the socket could not be created/resolved.
+ *         RATS_INVALID_SOCKET if the socket could not be created/resolved.
  */
 socket_t tcp_connect_start(const std::string& host, int port);
 
@@ -91,7 +102,7 @@ int tcp_connect_result(socket_t socket);
  * @param backlog The maximum number of pending connections
  * @param bind_address The interface IP address to bind to (empty for all interfaces)
  * @param af Address family (DualStack by default)
- * @return Socket handle, or INVALID_SOCKET_VALUE on error
+ * @return Socket handle, or RATS_INVALID_SOCKET on error
  */
 socket_t create_tcp_server(int port, int backlog = 5, const std::string& bind_address = "",
                            AddressFamily af = AddressFamily::DualStack);
@@ -99,7 +110,7 @@ socket_t create_tcp_server(int port, int backlog = 5, const std::string& bind_ad
 /**
  * Accept a client connection on a server socket
  * @param server_socket The server socket handle
- * @return Client socket handle, or INVALID_SOCKET_VALUE on error
+ * @return Client socket handle, or RATS_INVALID_SOCKET on error
  */
 socket_t accept_client(socket_t server_socket);
 
@@ -207,7 +218,7 @@ int send_tcp_string(socket_t socket, const std::string& data);
  * @param port The port to bind to (0 for any available port)
  * @param bind_address The interface IP address to bind to (empty for all interfaces)
  * @param af Address family (DualStack by default)
- * @return UDP socket handle, or INVALID_SOCKET_VALUE on error
+ * @return UDP socket handle, or RATS_INVALID_SOCKET on error
  */
 socket_t create_udp_socket(int port = 0, const std::string& bind_address = "",
                            AddressFamily af = AddressFamily::DualStack);
@@ -243,12 +254,12 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Addre
  * @param timeout_ms Timeout in milliseconds (-1 for blocking, 0 for non-blocking, >0 for timeout)
  * @param interrupt_fd Optional second socket to watch; when it becomes readable the
  *                     call returns immediately with an empty vector (used to wake a
- *                     blocking receive on shutdown). INVALID_SOCKET_VALUE disables it.
+ *                     blocking receive on shutdown). RATS_INVALID_SOCKET disables it.
  * @return Received data, empty vector on timeout, error or interrupt
  */
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Address& sender_peer,
                                       int timeout_ms = -1,
-                                      socket_t interrupt_fd = INVALID_SOCKET_VALUE);
+                                      socket_t interrupt_fd = RATS_INVALID_SOCKET);
 
 // Common Socket Functions
 /**

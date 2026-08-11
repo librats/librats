@@ -425,7 +425,7 @@ public:
         running_ = false;
         if (is_valid_socket(socket_)) {
             close_socket(socket_);
-            socket_ = INVALID_SOCKET_VALUE;
+            socket_ = RATS_INVALID_SOCKET;
         }
         if (server_thread_.joinable()) {
             server_thread_.join();
@@ -461,7 +461,7 @@ private:
     }
     
     std::atomic<bool> running_;
-    socket_t socket_ = INVALID_SOCKET_VALUE;
+    socket_t socket_ = RATS_INVALID_SOCKET;
     int port_;
     std::thread server_thread_;
 };

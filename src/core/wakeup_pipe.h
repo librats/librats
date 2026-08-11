@@ -76,7 +76,7 @@ public:
     }
 
 private:
-    socket_t sock_ = INVALID_SOCKET_VALUE;
+    socket_t sock_ = RATS_INVALID_SOCKET;
     uint16_t port_ = 0;
 };
 

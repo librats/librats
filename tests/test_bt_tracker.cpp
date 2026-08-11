@@ -38,7 +38,7 @@ public:
     void stop() {
         running_ = false;
         if (thread_.joinable()) thread_.join();
-        if (is_valid_socket(sock_)) { close_socket(sock_); sock_ = INVALID_SOCKET_VALUE; }
+        if (is_valid_socket(sock_)) { close_socket(sock_); sock_ = RATS_INVALID_SOCKET; }
     }
     std::uint16_t port() const { return port_; }
     // BEP 15 event codes: 0=none, 1=completed, 2=started, 3=stopped.
@@ -78,7 +78,7 @@ private:
 
     std::string       peer_ip_;
     std::uint16_t     peer_port_;
-    socket_t          sock_ = INVALID_SOCKET_VALUE;
+    socket_t          sock_ = RATS_INVALID_SOCKET;
     std::uint16_t     port_ = 0;
     std::atomic<bool>         running_{true};
     std::atomic<std::uint32_t> events_{0};   ///< bitmask of BEP15 event codes seen

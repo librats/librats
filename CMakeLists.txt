@@ -273,6 +273,7 @@ set(LIBRARY_SOURCES
 
 # mdns/ — local-network service discovery
     src/mdns/mdns.h
+    src/mdns/log.h
     src/mdns/mdns.cpp
 
 # crypto/ — hashes, ciphers, KDFs

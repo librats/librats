@@ -89,7 +89,7 @@ protected:
     }
 
     Reactor       r_;
-    socket_t      sa_ = INVALID_SOCKET_VALUE, sb_ = INVALID_SOCKET_VALUE;
+    socket_t      sa_ = RATS_INVALID_SOCKET, sb_ = RATS_INVALID_SOCKET;
     InfoHash      info_{};
     PeerId        pa_{}, pb_{};
     std::uint32_t num_pieces_ = 4;

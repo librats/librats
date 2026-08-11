@@ -1,7 +1,6 @@
 #pragma once
 
 #include "core/socket.h"
-#include "util/logger.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -16,11 +15,6 @@
 #include <random>
 
 namespace librats {
-
-#define LOG_MDNS_DEBUG(message) LOG_DEBUG("mdns", message)
-#define LOG_MDNS_INFO(message)  LOG_INFO("mdns", message)
-#define LOG_MDNS_WARN(message)  LOG_WARN("mdns", message)
-#define LOG_MDNS_ERROR(message) LOG_ERROR("mdns", message)
 
 // mDNS protocol constants
 const uint16_t MDNS_PORT = 5353;

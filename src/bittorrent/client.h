@@ -187,7 +187,7 @@ private:
     Reactor       reactor_;
     Config        config_;
     PeerId        peer_id_;
-    socket_t      listener_     = INVALID_SOCKET_VALUE;
+    socket_t      listener_     = RATS_INVALID_SOCKET;
     std::uint16_t actual_port_  = 0;
     bool          opened_       = false;
     TimerId       reap_timer_   = kInvalidTimerId;
