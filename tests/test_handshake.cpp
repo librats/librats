@@ -148,7 +148,7 @@ TEST(HandshakeTest, PlaintextAlsoGuardsProtocol) {
 
 TEST(PeerIdTest, DerivedFromKeyIsStableAndHex) {
     Identity id = Identity::generate();
-    PeerId again = PeerId::from_public_key(id.static_keypair.public_key, rats::NOISE_DH_SIZE);
+    PeerId again = PeerId::from_public_key(id.static_keypair.public_key, librats::NOISE_DH_SIZE);
     EXPECT_EQ(id.id, again);
     EXPECT_EQ(id.id.to_hex().size(), PeerId::kSize * 2);
 

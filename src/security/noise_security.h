@@ -4,7 +4,7 @@
  * @file noise_security.h
  * @brief Noise_XX_25519_ChaChaPoly_SHA256 secure channel with self-certifying ids.
  *
- * Wraps the existing rats::NoiseSession (src/noise.h) behind the
+ * Wraps the existing librats::NoiseSession (src/noise.h) behind the
  * SecurityProvider/Handshaker/Session contract. The XX pattern mutually
  * authenticates both static keys, and each side derives the other's PeerId from
  * the static key it proved — so a completed handshake is also identity proof.

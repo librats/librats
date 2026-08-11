@@ -23,7 +23,7 @@ extern "C" {
 #define LOG_NOISE_WARN(message)  LOG_WARN("noise", message)
 #define LOG_NOISE_ERROR(message) LOG_ERROR("noise", message)
 
-namespace rats {
+namespace librats {
 
 /* Helper to format public key prefix for logging (first 8 hex chars) */
 static std::string format_key_prefix(const uint8_t* key) {
@@ -811,4 +811,4 @@ void noise_derive_public_key(const uint8_t private_key[NOISE_DH_SIZE],
     LOG_NOISE_DEBUG("Derived public key from private key (pub: " << format_key_prefix(public_key) << "...)");
 }
 
-} /* namespace rats */
+} /* namespace librats */

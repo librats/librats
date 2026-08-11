@@ -13,7 +13,7 @@ extern "C" {
 #include "crypto/hkdf.h"
 }
 
-using namespace rats;
+using namespace librats;
 
 // =============================================================================
 // ChaCha20-Poly1305 AEAD Tests

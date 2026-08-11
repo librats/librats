@@ -52,9 +52,9 @@ Identity load_or_create_identity(const std::string& data_dir) {
     size_t size = 0;
     void* data = read_file_binary(key_path.c_str(), &size);
     if (data) {
-        if (size == rats::NOISE_DH_SIZE) {
-            uint8_t priv[rats::NOISE_DH_SIZE];
-            std::memcpy(priv, data, rats::NOISE_DH_SIZE);
+        if (size == librats::NOISE_DH_SIZE) {
+            uint8_t priv[librats::NOISE_DH_SIZE];
+            std::memcpy(priv, data, librats::NOISE_DH_SIZE);
             free_file_buffer(data);
             return Identity::from_private_key(priv);
         }
@@ -64,7 +64,7 @@ Identity load_or_create_identity(const std::string& data_dir) {
 
     Identity identity = Identity::generate();
     create_directories(data_dir.c_str());
-    if (!create_file_binary(key_path.c_str(), identity.static_keypair.private_key, rats::NOISE_DH_SIZE))
+    if (!create_file_binary(key_path.c_str(), identity.static_keypair.private_key, librats::NOISE_DH_SIZE))
         LOG_WARN("node", "Failed to persist identity key to " << key_path);
     return identity;
 }

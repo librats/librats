@@ -16,7 +16,7 @@
 #include <memory>
 #include <string>
 
-namespace rats {
+namespace librats {
 
 /* Constants */
 constexpr size_t NOISE_KEY_SIZE = 32;
@@ -412,6 +412,6 @@ void noise_generate_keypair(NoiseKeyPair& keypair);
 void noise_derive_public_key(const uint8_t private_key[NOISE_DH_SIZE], 
                              uint8_t public_key[NOISE_DH_SIZE]);
 
-} /* namespace rats */
+} /* namespace librats */
 
 #endif /* RATS_NOISE_H */
