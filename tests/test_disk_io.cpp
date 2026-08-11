@@ -2,6 +2,7 @@
 #include "librats/bittorrent/disk_io.h"
 #include "librats/util/fs.h"
 #include "librats/crypto/sha1.h"
+#include "test_paths.h"
 #include <thread>
 #include <chrono>
 #include <atomic>
@@ -12,8 +13,10 @@ using namespace librats;
 class DiskIOTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Create test directory
-        test_dir_ = "test_disk_io_temp";
+        // Create test directory. Named after the running case: ctest runs cases as
+        // concurrent processes in one working directory, and TearDown deletes this
+        // whole tree — a shared name would let one case wipe another's files.
+        test_dir_ = librats_test::scratch_name("test_disk_io_temp");
         create_directories(test_dir_.c_str());
         
         // Ensure DiskIO is started

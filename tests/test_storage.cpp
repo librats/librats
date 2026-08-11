@@ -2,6 +2,7 @@
 #include "librats/storage/storage.h"
 #include "librats/node/node.h"
 #include "librats/util/fs.h"
+#include "test_paths.h"
 #include <algorithm>
 #include <chrono>
 #include <memory>
@@ -30,7 +31,9 @@ bool wait_for(Pred pred, std::chrono::milliseconds timeout = 15s) {
 class StorageTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        test_dir_ = "./test_storage_data";
+        // Named after the running case: TearDown deletes this directory, and ctest
+        // runs the cases as concurrent processes in one working directory.
+        test_dir_ = "./" + librats_test::scratch_name("test_storage_data");
         create_directories(test_dir_.c_str());
         cleanup_test_dir();
     }

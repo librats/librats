@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "librats/util/logger.h"
+#include "test_paths.h"
 
 #include <cstdio>
 #include <fstream>
@@ -28,7 +29,10 @@ bool contains(const std::string& haystack, const std::string& needle) {
 class LoggingTest : public ::testing::Test {
 protected:
     Logger& log = Logger::getInstance();
-    const std::string path = "test_logging_out.log";
+    // Named after the running case: SetUp/TearDown delete this file and its
+    // rotations, and ctest runs the cases as concurrent processes sharing one
+    // working directory, so a fixed name would have them deleting each other's log.
+    const std::string path = librats_test::scratch_name("test_logging_out") + ".log";
 
     void SetUp() override {
         remove_logs();

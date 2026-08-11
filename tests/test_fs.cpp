@@ -1,110 +1,42 @@
 #include <gtest/gtest.h>
 #include "librats/util/fs.h"
+#include "test_paths.h"
+#include <filesystem>
 #include <iostream>
 #include <string>
 
 using namespace librats;
 
+// Every case runs inside its own scratch directory, so the plain relative names
+// used throughout this file stay readable while being private to the case —
+// under `ctest -j` two FSTest cases run as concurrent processes sharing one
+// working directory, and a shared "test_file.txt" is a race (see test_paths.h).
+// Wiping the directory is also the whole cleanup: no per-file delete list to keep
+// in sync with the tests. std::filesystem is used deliberately — the fixture must
+// not depend on the very functions under test.
 class FSTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Cleanup any leftover test files
-        delete_file("test_file.txt");
-        delete_file("test_binary.bin");
-        delete_file("test_cpp_wrapper.txt");
-        delete_file("test_move_src.txt");
-        delete_file("test_move_dest.txt");
-        delete_file("test_old_name.txt");
-        delete_file("test_new_name.txt");
-        delete_file("test_metadata.txt");
-        delete_file("test_chunks.bin");
-        delete_file("test_sized.bin");
-        delete_file("validation_test.txt");
-        delete_file("test_copy.txt");
-        delete_file("test_file_exists.txt");
-        delete_file("test_null_content.txt");
-        delete_file("test_null_binary.bin");
-        delete_file("test_chunk_edge_cases.bin");
-        delete_file("validate_path_test.txt");
-        delete_file("buffer_test.txt");
-        delete_file("large_file_test.bin");
-        delete_file("zero_size.bin");
-        delete_file("test_listing/file1.txt");
-        delete_file("test_listing/file2.bin");
-        delete_directory("test_listing/subdir");
-        delete_directory("test_listing");
-        delete_directory("test_change_directory");
-        delete_directory("test_dir_exists");
-        delete_directory("validate_dir");
-        delete_directory("empty_test_dir");
-        delete_directory("test_directory/nested/deep");
-        delete_directory("test_directory/nested");
-        delete_directory("test_directory");
-        // Cleanup for write_file_chunk auto-directory tests
-        delete_file("test_auto_dir/nested/deep/subdir/testfile.bin");
-        delete_directory("test_auto_dir/nested/deep/subdir");
-        delete_directory("test_auto_dir/nested/deep");
-        delete_directory("test_auto_dir/nested");
-        delete_directory("test_auto_dir");
-        delete_file("torrent_download/Artist/Album/track01.flac");
-        delete_directory("torrent_download/Artist/Album");
-        delete_directory("torrent_download/Artist");
-        delete_directory("torrent_download");
-        delete_file("./2019 - Digital Hell/01. Track One.flac");
-        delete_file("./2019 - Digital Hell/02. Track Two.flac");
-        delete_file("./2019 - Digital Hell/cover.jpg");
-        delete_directory("./2019 - Digital Hell");
+        prev_cwd_ = std::filesystem::current_path();
+        dir_      = prev_cwd_ / ("fs_" + librats_test::current_test_tag());
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);  // leftovers from a crashed run
+        ASSERT_TRUE(std::filesystem::create_directories(dir_, ec)) << ec.message();
+        std::filesystem::current_path(dir_);
     }
-    
+
     void TearDown() override {
-        // Cleanup test files after each test
-        delete_file("test_file.txt");
-        delete_file("test_binary.bin");
-        delete_file("test_cpp_wrapper.txt");
-        delete_file("test_move_src.txt");
-        delete_file("test_move_dest.txt");
-        delete_file("test_old_name.txt");
-        delete_file("test_new_name.txt");
-        delete_file("test_metadata.txt");
-        delete_file("test_chunks.bin");
-        delete_file("test_sized.bin");
-        delete_file("validation_test.txt");
-        delete_file("test_copy.txt");
-        delete_file("test_file_exists.txt");
-        delete_file("test_null_content.txt");
-        delete_file("test_null_binary.bin");
-        delete_file("test_chunk_edge_cases.bin");
-        delete_file("validate_path_test.txt");
-        delete_file("buffer_test.txt");
-        delete_file("large_file_test.bin");
-        delete_file("zero_size.bin");
-        delete_file("test_listing/file1.txt");
-        delete_file("test_listing/file2.bin");
-        delete_directory("test_listing/subdir");
-        delete_directory("test_listing");
-        delete_directory("test_change_directory");
-        delete_directory("test_dir_exists");
-        delete_directory("validate_dir");
-        delete_directory("empty_test_dir");
-        delete_directory("test_directory/nested/deep");
-        delete_directory("test_directory/nested");
-        delete_directory("test_directory");
-        // Cleanup for write_file_chunk auto-directory tests
-        delete_file("test_auto_dir/nested/deep/subdir/testfile.bin");
-        delete_directory("test_auto_dir/nested/deep/subdir");
-        delete_directory("test_auto_dir/nested/deep");
-        delete_directory("test_auto_dir/nested");
-        delete_directory("test_auto_dir");
-        delete_file("torrent_download/Artist/Album/track01.flac");
-        delete_directory("torrent_download/Artist/Album");
-        delete_directory("torrent_download/Artist");
-        delete_directory("torrent_download");
-        delete_file("./2019 - Digital Hell/01. Track One.flac");
-        delete_file("./2019 - Digital Hell/02. Track Two.flac");
-        delete_file("./2019 - Digital Hell/cover.jpg");
-        delete_directory("./2019 - Digital Hell");
+        // Restore first: a test may have chdir'd deeper, and a directory cannot be
+        // removed while it is the working directory on Windows.
+        std::filesystem::current_path(prev_cwd_);
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
     }
+
+    std::filesystem::path prev_cwd_;
+    std::filesystem::path dir_;
 };
+
 
 TEST_F(FSTest, BasicFileOperations) {
     const char* test_file = "test_file.txt";
