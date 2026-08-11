@@ -101,6 +101,33 @@ void Torrent::on_check_complete(Bitfield have) {
     if (picker_->is_finished()) { state_ = State::Seeding; completed_announced_ = true; }
     else                        { state_ = State::Downloading; }
 
+    // A peer that connected while the check was still running was handed an EMPTY
+    // bitfield: it is sent from on_peer_connected, and the protocol pins it to the
+    // first message after the handshake, so it cannot be re-sent now that we know
+    // what is on disk (our own receiver rejects it too — see piece_state_begun_).
+    // Announce the verified pieces with HAVE instead — otherwise such a peer never
+    // sees us as interesting, never asks for a block, and the transfer sits at 0%
+    // forever. A tracker/DHT answer landing inside the check window hits this every
+    // time, which is what BtTracker.DiscoversSeederViaTrackerAndDownloads tripped on.
+    //
+    // Cost: send_have() flushes per message, so this is one syscall per piece per
+    // peer — ~3 us each, i.e. ~50 ms per peer on a 20k-piece torrent (whose check
+    // runs for minutes, so peers really do pile up). It is a cold path — once per
+    // torrent, never per piece or per block — so the burst is accepted rather than
+    // batched; revisit with a batched send_haves() if the stall ever shows up.
+    //
+    // Iterate a SNAPSHOT: a failing send closes the connection inline (flush ->
+    // close -> on_closed -> remove_peer), which erases from peers_ mid-loop. With
+    // num_pieces sends per peer, hitting a dead socket in here is likely enough to
+    // matter, and iterating the live vector would be UB.
+    for (PeerConnection* pc : std::vector<PeerConnection*>(peers_)) {
+        if (!alive(pc)) continue;  // dropped by an earlier peer's teardown
+        for (std::uint32_t p = 0; p < info_.num_pieces(); ++p)
+            if (picker_->have_piece(p)) pc->send_have(p);
+        if (!alive(pc)) continue;  // ...or by its own
+        update_interest(*pc);  // our own interest is stale too: we may now have it all
+    }
+
     if (state_ == State::Seeding)
         LOG_INFO("bt.torrent", short_hash(info_hash()) << " check complete: all "
                                << info_.num_pieces() << " pieces present → Seeding");

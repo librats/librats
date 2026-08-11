@@ -184,6 +184,48 @@ TEST_F(BtDownload, SingleFileDownloadCompletes) {
     leecher.stop();
 }
 
+// Regression: a peer that connects while the seeder is still hash-checking gets an
+// EMPTY bitfield — the bitfield is pinned to the first message after the handshake,
+// so it cannot be re-sent later. The seeder must therefore announce what the check
+// verified with HAVE; without that the leecher never sees anything interesting,
+// never requests a block, and the transfer sits at 0% until it times out.
+//
+// The window is real, not theoretical: a tracker or DHT answer routinely lands
+// within the few ms a check takes (BtTracker.DiscoversSeederViaTrackerAndDownloads
+// hit exactly this). Here it is made deterministic instead of raced — the check
+// completion is delivered as a reactor task, so it cannot possibly have run before
+// the first pump below, and the payload is large enough that the hashing worker is
+// still busy while the loopback handshake completes.
+TEST_F(BtDownload, PeerConnectingDuringSeederCheckStillDownloads) {
+    Bytes data = make_data(2 * 1024 * 1024);  // 128 pieces to hash before seeding
+    TorrentInfo info = build_and_seed_single("solo.bin", data, 16384, seed_dir());
+
+    Client seeder(Client::Config{0, seed_dir(), "-LR0001-"});
+    Client leecher(Client::Config{0, dl_dir(), "-LR0002-"});
+    seeder.open();
+    leecher.open();
+
+    Torrent* st = seeder.add_torrent(info, seed_dir());
+    Torrent* lt = leecher.add_torrent(info, dl_dir());
+    ASSERT_NE(st, nullptr);
+    ASSERT_NE(lt, nullptr);
+
+    // Deliberately NO pump to Seeding first: dial straight into the checking window.
+    ASSERT_EQ(st->state(), Torrent::State::Checking);
+    lt->add_peer("127.0.0.1", seeder.listen_port());
+
+    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }))
+        << "seeder=" << int(st->state()) << " progress=" << lt->progress()
+        << " peers=" << lt->num_peers();
+
+    std::ifstream f((stdfs::path(dl_dir()) / "solo.bin").string(), std::ios::binary);
+    Bytes got((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(got, data);
+
+    seeder.stop();
+    leecher.stop();
+}
+
 // Regression: resuming a complete torrent must not double-count downloaded bytes.
 // load_resume_data restores the cumulative counter (total_downloaded) AND the
 // have-bitfield; the on-disk check must not fold the on-disk pieces back into that
