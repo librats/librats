@@ -39,12 +39,12 @@
      (ptr)[2] = (uint8_t)((v) >> 16), \
      (ptr)[3] = (uint8_t)((v) >> 24))
 
-#ifdef CHACHA_USE_VECTOR_MATH
+#ifdef RATS_CHACHA_USE_VECTOR_MATH
 
 /* Assumption: CPU is little-endian and can perform unaligned
    32-bit loads and stores */
 #define fromLittleVec(ptr)  \
-    (ChaChaVectorUInt32){((const uint32_t *)(ptr))[0], \
+    (RatsChaChaVectorUInt32){((const uint32_t *)(ptr))[0], \
                          ((const uint32_t *)(ptr))[1], \
                          ((const uint32_t *)(ptr))[2], \
                          ((const uint32_t *)(ptr))[3]}
@@ -72,13 +72,13 @@
         (b) = leftRotate((b) ^ (c), 7); \
     } while (0)
 
-void chacha_keysetup(chacha_ctx *x, const uint8_t *k, uint32_t kbits)
+void rats_chacha_keysetup(rats_chacha_ctx *x, const uint8_t *k, uint32_t kbits)
 {
     static const char tag128[] = "expand 16-byte k";
     static const char tag256[] = "expand 32-byte k";
     if (kbits == 256) {
         memcpy(x->input, tag256, 16);
-#ifdef CHACHA_USE_VECTOR_MATH
+#ifdef RATS_CHACHA_USE_VECTOR_MATH
         x->input[1] = fromLittleVec(k);
         x->input[2] = fromLittleVec(k + 16);
 #else
@@ -93,7 +93,7 @@ void chacha_keysetup(chacha_ctx *x, const uint8_t *k, uint32_t kbits)
 #endif
     } else {
         memcpy(x->input, tag128, 16);
-#ifdef CHACHA_USE_VECTOR_MATH
+#ifdef RATS_CHACHA_USE_VECTOR_MATH
         x->input[2] = x->input[1] = fromLittleVec(k);
 #else
         x->input[8]  = x->input[4] = fromLittle(k);
@@ -102,23 +102,23 @@ void chacha_keysetup(chacha_ctx *x, const uint8_t *k, uint32_t kbits)
         x->input[11] = x->input[7] = fromLittle(k + 12);
 #endif
     }
-#ifdef CHACHA_USE_VECTOR_MATH
-    x->input[3] = (ChaChaVectorUInt32){0, 0, 0, 0};
+#ifdef RATS_CHACHA_USE_VECTOR_MATH
+    x->input[3] = (RatsChaChaVectorUInt32){0, 0, 0, 0};
 #else
     memset(x->input + 12, 0, 16);
 #endif
 }
 
-void chacha_ivsetup(chacha_ctx *x, const uint8_t *iv, const uint8_t *counter)
+void rats_chacha_ivsetup(rats_chacha_ctx *x, const uint8_t *iv, const uint8_t *counter)
 {
-#ifdef CHACHA_USE_VECTOR_MATH
+#ifdef RATS_CHACHA_USE_VECTOR_MATH
     if (counter) {
-        x->input[3] = (ChaChaVectorUInt32){fromLittle(counter),
+        x->input[3] = (RatsChaChaVectorUInt32){fromLittle(counter),
                                            fromLittle(counter + 4),
                                            fromLittle(iv),
                                            fromLittle(iv + 4)};
     } else {
-        x->input[3] = (ChaChaVectorUInt32){0, 0, fromLittle(iv), fromLittle(iv + 4)};
+        x->input[3] = (RatsChaChaVectorUInt32){0, 0, fromLittle(iv), fromLittle(iv + 4)};
     }
 #else
     if (counter) {
@@ -133,15 +133,15 @@ void chacha_ivsetup(chacha_ctx *x, const uint8_t *iv, const uint8_t *counter)
 #endif
 }
 
-#ifdef CHACHA_USE_VECTOR_MATH
+#ifdef RATS_CHACHA_USE_VECTOR_MATH
 
-#define shuffleLeft1(x) (ChaChaVectorUInt32){(x)[1], (x)[2], (x)[3], (x)[0]}
-#define shuffleLeft2(x) (ChaChaVectorUInt32){(x)[2], (x)[3], (x)[0], (x)[1]}
-#define shuffleLeft3(x) (ChaChaVectorUInt32){(x)[3], (x)[0], (x)[1], (x)[2]}
+#define shuffleLeft1(x) (RatsChaChaVectorUInt32){(x)[1], (x)[2], (x)[3], (x)[0]}
+#define shuffleLeft2(x) (RatsChaChaVectorUInt32){(x)[2], (x)[3], (x)[0], (x)[1]}
+#define shuffleLeft3(x) (RatsChaChaVectorUInt32){(x)[3], (x)[0], (x)[1], (x)[2]}
 
-void chacha_encrypt_bytes(chacha_ctx *x, const uint8_t *m, uint8_t *c, uint32_t bytes)
+void rats_chacha_encrypt_bytes(rats_chacha_ctx *x, const uint8_t *m, uint8_t *c, uint32_t bytes)
 {
-    ChaChaVectorUInt32 out0, out1, out2, out3;
+    RatsChaChaVectorUInt32 out0, out1, out2, out3;
     uint32_t index;
     uint8_t temp[64];
     uint8_t *t;
@@ -205,9 +205,9 @@ void chacha_encrypt_bytes(chacha_ctx *x, const uint8_t *m, uint8_t *c, uint32_t 
     }
 }
 
-#else /* !CHACHA_USE_VECTOR_MATH */
+#else /* !RATS_CHACHA_USE_VECTOR_MATH */
 
-void chacha_encrypt_bytes(chacha_ctx *x, const uint8_t *m, uint8_t *c, uint32_t bytes)
+void rats_chacha_encrypt_bytes(rats_chacha_ctx *x, const uint8_t *m, uint8_t *c, uint32_t bytes)
 {
     uint32_t in0, in1, in2, in3, in4, in5, in6, in7;
     uint32_t in8, in9, in10, in11, in12, in13, in14, in15;
@@ -310,4 +310,4 @@ void chacha_encrypt_bytes(chacha_ctx *x, const uint8_t *m, uint8_t *c, uint32_t 
     x->input[13] = in13;
 }
 
-#endif /* !CHACHA_USE_VECTOR_MATH */
+#endif /* !RATS_CHACHA_USE_VECTOR_MATH */

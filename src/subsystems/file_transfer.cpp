@@ -281,16 +281,16 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
             offset     = t->cur_offset;
             file_size  = t->files[file_index].size;
             source     = t->sources[file_index];
-            if (offset == 0) sha256_reset(&t->hash);
+            if (offset == 0) rats_sha256_reset(&t->hash);
         }
 
         // Empty file: no chunks, just the per-file SHA (of the empty input).
         if (file_size == 0) {
-            sha256_context_t e; sha256_reset(&e);
-            uint8_t digest[SHA256_HASH_SIZE]; sha256_finish(&e, digest);
+            rats_sha256_context_t e; rats_sha256_reset(&e);
+            uint8_t digest[RATS_SHA256_HASH_SIZE]; rats_sha256_finish(&e, digest);
             Bytes fe; fe.push_back(OP_FILE_END); put_u64(fe, t->id);
             put_u32(fe, static_cast<uint32_t>(file_index));
-            fe.insert(fe.end(), digest, digest + SHA256_HASH_SIZE);
+            fe.insert(fe.end(), digest, digest + RATS_SHA256_HASH_SIZE);
             send_to(t->peer, fe);
             fp.close(); open_idx = SIZE_MAX;
             std::lock_guard<std::mutex> lk(t->mtx);
@@ -326,15 +326,15 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
         send_to(t->peer, m);
 
         bool file_done = false;
-        uint8_t digest[SHA256_HASH_SIZE];
+        uint8_t digest[RATS_SHA256_HASH_SIZE];
         {
             std::lock_guard<std::mutex> lk(t->mtx);
-            sha256_update(&t->hash, m.data() + kChunkHeader, want);
+            rats_sha256_update(&t->hash, m.data() + kChunkHeader, want);
             t->cur_offset += want;
             t->bytes_done += want;
             t->last_activity = std::chrono::steady_clock::now();
             if (t->cur_offset >= file_size) {
-                sha256_finish(&t->hash, digest);
+                rats_sha256_finish(&t->hash, digest);
                 t->cur_file++; t->cur_offset = 0; t->files_done++;
                 file_done = true;
             }
@@ -344,7 +344,7 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
         if (file_done) {
             Bytes e; e.push_back(OP_FILE_END); put_u64(e, t->id);
             put_u32(e, static_cast<uint32_t>(file_index));
-            e.insert(e.end(), digest, digest + SHA256_HASH_SIZE);
+            e.insert(e.end(), digest, digest + RATS_SHA256_HASH_SIZE);
             send_to(t->peer, e);
         }
         emit_progress(t);
@@ -502,7 +502,7 @@ void FileTransfer::process_data(const std::shared_ptr<Incoming>& t, WriteJob& jo
         t->out_idx = fidx;
         { std::lock_guard<std::mutex> lk(t->mtx); t->files[fidx].temp_created = true; }
     }
-    if (t->hashing_file != static_cast<int>(fidx)) { sha256_reset(&t->hash); t->hashing_file = static_cast<int>(fidx); }
+    if (t->hashing_file != static_cast<int>(fidx)) { rats_sha256_reset(&t->hash); t->hashing_file = static_cast<int>(fidx); }
 
     if (!t->out.write_at(job.offset, job.data.data(), job.data.size())) {
         LOG_ERROR("filexfer", "transfer " << t->id << ": disk write failed");
@@ -510,7 +510,7 @@ void FileTransfer::process_data(const std::shared_ptr<Incoming>& t, WriteJob& jo
         finish_incoming(t, false, "failed to write chunk to disk");
         return;
     }
-    sha256_update(&t->hash, job.data.data(), job.data.size());
+    rats_sha256_update(&t->hash, job.data.data(), job.data.size());
 
     const uint64_t ack_interval =
         std::min<uint64_t>(config_.progress_interval, std::max<uint32_t>(1, config_.window_bytes / 2));
@@ -548,11 +548,11 @@ void FileTransfer::process_file_end(const std::shared_ptr<Incoming>& t, WriteJob
 
     // Whole-file SHA-256 over exactly the bytes written to disk (a file with no
     // data — an empty file — hashes the empty input).
-    if (t->hashing_file != static_cast<int>(fidx)) { sha256_reset(&t->hash); t->hashing_file = static_cast<int>(fidx); }
-    uint8_t local[SHA256_HASH_SIZE];
-    sha256_finish(&t->hash, local);
+    if (t->hashing_file != static_cast<int>(fidx)) { rats_sha256_reset(&t->hash); t->hashing_file = static_cast<int>(fidx); }
+    uint8_t local[RATS_SHA256_HASH_SIZE];
+    rats_sha256_finish(&t->hash, local);
     t->hashing_file = -1;
-    if (config_.verify_integrity && std::memcmp(local, job.sha, SHA256_HASH_SIZE) != 0) {
+    if (config_.verify_integrity && std::memcmp(local, job.sha, RATS_SHA256_HASH_SIZE) != 0) {
         LOG_ERROR("filexfer", "SHA-256 mismatch for " << rel << " on transfer " << t->id);
         send_complete(t->peer, t->id, false);
         finish_incoming(t, false, "SHA-256 mismatch");
@@ -694,7 +694,7 @@ void FileTransfer::on_message(const Peer& peer, ByteView payload) {
         case OP_FILE_END: {
             const uint64_t id   = r.u64();
             const uint32_t fidx = r.u32();
-            ByteView sha = r.bytes(SHA256_HASH_SIZE);
+            ByteView sha = r.bytes(RATS_SHA256_HASH_SIZE);
             if (!r.ok) return;
             handle_file_end(from, id, fidx, sha.data());
             return;
@@ -840,7 +840,7 @@ void FileTransfer::handle_file_end(const PeerId& from, uint64_t id, uint32_t fid
             } else {
                 WriteJob job;
                 job.fidx = fidx; job.is_file_end = true;
-                std::memcpy(job.sha, sha, SHA256_HASH_SIZE);
+                std::memcpy(job.sha, sha, RATS_SHA256_HASH_SIZE);
                 t->wq.push(std::move(job));
                 t->recv_file++;               // subsequent chunks belong to the next file
                 if (!t->scheduled) { t->scheduled = true; need_schedule = true; }

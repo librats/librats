@@ -31,34 +31,34 @@
 extern "C" {
 #endif
 
-#define CHACHA_KEY_SIZE 32
-#define CHACHA_NONCE_SIZE 8
-#define CHACHA_BLOCK_SIZE 64
+#define RATS_CHACHA_KEY_SIZE 32
+#define RATS_CHACHA_NONCE_SIZE 8
+#define RATS_CHACHA_BLOCK_SIZE 64
 
 #if defined(__SSE2__) && defined(__GNUC__) && __GNUC__ >= 4
-#define CHACHA_USE_VECTOR_MATH 1
+#define RATS_CHACHA_USE_VECTOR_MATH 1
 #ifdef __clang__
-typedef uint32_t ChaChaVectorUInt32 __attribute__((ext_vector_type(4)));
+typedef uint32_t RatsChaChaVectorUInt32 __attribute__((ext_vector_type(4)));
 #else
-typedef uint32_t ChaChaVectorUInt32 __attribute__((__vector_size__(16)));
+typedef uint32_t RatsChaChaVectorUInt32 __attribute__((__vector_size__(16)));
 #endif
 #else
-#undef CHACHA_USE_VECTOR_MATH
+#undef RATS_CHACHA_USE_VECTOR_MATH
 #endif
 
 typedef struct
 {
-#ifdef CHACHA_USE_VECTOR_MATH
-    ChaChaVectorUInt32 input[4];
+#ifdef RATS_CHACHA_USE_VECTOR_MATH
+    RatsChaChaVectorUInt32 input[4];
 #else
     uint32_t input[16];
 #endif
 
-} chacha_ctx;
+} rats_chacha_ctx;
 
-void chacha_keysetup(chacha_ctx *x, const uint8_t *k, uint32_t kbits);
-void chacha_ivsetup(chacha_ctx *x, const uint8_t *iv, const uint8_t *counter);
-void chacha_encrypt_bytes(chacha_ctx *x, const uint8_t *m, uint8_t *c, uint32_t bytes);
+void rats_chacha_keysetup(rats_chacha_ctx *x, const uint8_t *k, uint32_t kbits);
+void rats_chacha_ivsetup(rats_chacha_ctx *x, const uint8_t *iv, const uint8_t *counter);
+void rats_chacha_encrypt_bytes(rats_chacha_ctx *x, const uint8_t *m, uint8_t *c, uint32_t bytes);
 
 #ifdef __cplusplus
 }

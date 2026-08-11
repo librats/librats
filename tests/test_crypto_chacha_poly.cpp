@@ -48,10 +48,10 @@ TEST_F(ChaChaTest, RFC7539TestVector) {
     memcpy(plaintext, plaintext_str, len);
     memcpy(ciphertext, plaintext, len);
     
-    chacha_ctx ctx;
-    chacha_keysetup(&ctx, key, 256);
-    chacha_ivsetup(&ctx, nonce, counter);
-    chacha_encrypt_bytes(&ctx, ciphertext, ciphertext, (uint32_t)len);
+    rats_chacha_ctx ctx;
+    rats_chacha_keysetup(&ctx, key, 256);
+    rats_chacha_ivsetup(&ctx, nonce, counter);
+    rats_chacha_encrypt_bytes(&ctx, ciphertext, ciphertext, (uint32_t)len);
     
     // Verify ciphertext is different from plaintext
     EXPECT_NE(memcmp(plaintext, ciphertext, len), 0);
@@ -60,9 +60,9 @@ TEST_F(ChaChaTest, RFC7539TestVector) {
     uint8_t decrypted[128];
     memcpy(decrypted, ciphertext, len);
     
-    chacha_keysetup(&ctx, key, 256);
-    chacha_ivsetup(&ctx, nonce, counter);
-    chacha_encrypt_bytes(&ctx, decrypted, decrypted, (uint32_t)len);
+    rats_chacha_keysetup(&ctx, key, 256);
+    rats_chacha_ivsetup(&ctx, nonce, counter);
+    rats_chacha_encrypt_bytes(&ctx, decrypted, decrypted, (uint32_t)len);
     
     EXPECT_EQ(memcmp(plaintext, decrypted, len), 0);
 }
@@ -81,19 +81,19 @@ TEST_F(ChaChaTest, EncryptDecryptSymmetric) {
     
     size_t len = strlen((char*)plaintext) + 1;
     
-    chacha_ctx ctx;
+    rats_chacha_ctx ctx;
     
     // Encrypt
-    chacha_keysetup(&ctx, key, 256);
-    chacha_ivsetup(&ctx, nonce, NULL);
+    rats_chacha_keysetup(&ctx, key, 256);
+    rats_chacha_ivsetup(&ctx, nonce, NULL);
     memcpy(ciphertext, plaintext, len);
-    chacha_encrypt_bytes(&ctx, ciphertext, ciphertext, (uint32_t)len);
+    rats_chacha_encrypt_bytes(&ctx, ciphertext, ciphertext, (uint32_t)len);
     
     // Decrypt
-    chacha_keysetup(&ctx, key, 256);
-    chacha_ivsetup(&ctx, nonce, NULL);
+    rats_chacha_keysetup(&ctx, key, 256);
+    rats_chacha_ivsetup(&ctx, nonce, NULL);
     memcpy(decrypted, ciphertext, len);
-    chacha_encrypt_bytes(&ctx, decrypted, decrypted, (uint32_t)len);
+    rats_chacha_encrypt_bytes(&ctx, decrypted, decrypted, (uint32_t)len);
     
     EXPECT_EQ(memcmp(plaintext, decrypted, len), 0);
 }
@@ -110,15 +110,15 @@ TEST_F(ChaChaTest, DifferentKeysProduceDifferentOutput) {
     uint8_t plaintext[32] = {0};
     uint8_t ciphertext1[32], ciphertext2[32];
     
-    chacha_ctx ctx;
+    rats_chacha_ctx ctx;
     
-    chacha_keysetup(&ctx, key1, 256);
-    chacha_ivsetup(&ctx, nonce, NULL);
-    chacha_encrypt_bytes(&ctx, plaintext, ciphertext1, 32);
+    rats_chacha_keysetup(&ctx, key1, 256);
+    rats_chacha_ivsetup(&ctx, nonce, NULL);
+    rats_chacha_encrypt_bytes(&ctx, plaintext, ciphertext1, 32);
     
-    chacha_keysetup(&ctx, key2, 256);
-    chacha_ivsetup(&ctx, nonce, NULL);
-    chacha_encrypt_bytes(&ctx, plaintext, ciphertext2, 32);
+    rats_chacha_keysetup(&ctx, key2, 256);
+    rats_chacha_ivsetup(&ctx, nonce, NULL);
+    rats_chacha_encrypt_bytes(&ctx, plaintext, ciphertext2, 32);
     
     EXPECT_NE(memcmp(ciphertext1, ciphertext2, 32), 0);
 }
@@ -141,7 +141,7 @@ TEST_F(Poly1305Test, RFC7539TestVector) {
     };
     
     uint8_t tag[16];
-    poly1305_auth(tag, (const uint8_t*)message, len, key);
+    rats_poly1305_auth(tag, (const uint8_t*)message, len, key);
     
     EXPECT_EQ(memcmp(tag, expected_tag, 16), 0);
 }
@@ -154,9 +154,9 @@ TEST_F(Poly1305Test, VerifyCorrectTag) {
     size_t len = strlen(message);
     
     uint8_t tag[16];
-    poly1305_auth(tag, (const uint8_t*)message, len, key);
+    rats_poly1305_auth(tag, (const uint8_t*)message, len, key);
     
-    EXPECT_EQ(poly1305_verify(tag, tag), 1);
+    EXPECT_EQ(rats_poly1305_verify(tag, tag), 1);
 }
 
 TEST_F(Poly1305Test, VerifyIncorrectTag) {
@@ -167,17 +167,17 @@ TEST_F(Poly1305Test, VerifyIncorrectTag) {
     size_t len = strlen(message);
     
     uint8_t tag1[16], tag2[16];
-    poly1305_auth(tag1, (const uint8_t*)message, len, key);
+    rats_poly1305_auth(tag1, (const uint8_t*)message, len, key);
     
     // Modify the message and compute new tag
     const char *modified = "Test message for Poly1306";
-    poly1305_auth(tag2, (const uint8_t*)modified, strlen(modified), key);
+    rats_poly1305_auth(tag2, (const uint8_t*)modified, strlen(modified), key);
     
-    EXPECT_EQ(poly1305_verify(tag1, tag2), 0);
+    EXPECT_EQ(rats_poly1305_verify(tag1, tag2), 0);
 }
 
 TEST_F(Poly1305Test, SelfTest) {
-    EXPECT_EQ(poly1305_power_on_self_test(), 1);
+    EXPECT_EQ(rats_poly1305_power_on_self_test(), 1);
 }
 
 TEST_F(Poly1305Test, IncrementalUpdate) {
@@ -189,15 +189,15 @@ TEST_F(Poly1305Test, IncrementalUpdate) {
     
     // Compute tag in one go
     uint8_t tag1[16];
-    poly1305_auth(tag1, (const uint8_t*)message, len, key);
+    rats_poly1305_auth(tag1, (const uint8_t*)message, len, key);
     
     // Compute tag incrementally
     uint8_t tag2[16];
-    poly1305_context ctx;
-    poly1305_init(&ctx, key);
-    poly1305_update(&ctx, (const uint8_t*)message, 20);
-    poly1305_update(&ctx, (const uint8_t*)message + 20, len - 20);
-    poly1305_finish(&ctx, tag2);
+    rats_poly1305_context ctx;
+    rats_poly1305_init(&ctx, key);
+    rats_poly1305_update(&ctx, (const uint8_t*)message, 20);
+    rats_poly1305_update(&ctx, (const uint8_t*)message + 20, len - 20);
+    rats_poly1305_finish(&ctx, tag2);
     
     EXPECT_EQ(memcmp(tag1, tag2, 16), 0);
 }

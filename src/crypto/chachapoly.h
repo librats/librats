@@ -13,14 +13,14 @@
 extern "C" {
 #endif
 
-#define CHACHAPOLY_KEY_SIZE 32
-#define CHACHAPOLY_NONCE_SIZE 12
-#define CHACHAPOLY_TAG_SIZE 16
+#define RATS_CHACHAPOLY_KEY_SIZE 32
+#define RATS_CHACHAPOLY_NONCE_SIZE 12
+#define RATS_CHACHAPOLY_TAG_SIZE 16
 
 /* Sentinel returned by the decrypt functions on authentication failure.
  * A successful decryption returns the plaintext length, which may legitimately
  * be 0 (an empty-but-authenticated message), so failure needs a distinct value. */
-#define CHACHAPOLY_DECRYPT_FAILED ((size_t)-1)
+#define RATS_CHACHAPOLY_DECRYPT_FAILED ((size_t)-1)
 
 /**
  * Encrypt plaintext with ChaCha20-Poly1305 AEAD
@@ -34,9 +34,9 @@ extern "C" {
  * @param ciphertext Output buffer (must be at least pt_len + 16 bytes)
  * @return          Length of ciphertext (pt_len + 16) on success, 0 on failure
  */
-size_t chachapoly_encrypt(
-    const uint8_t key[CHACHAPOLY_KEY_SIZE],
-    const uint8_t nonce[CHACHAPOLY_NONCE_SIZE],
+size_t rats_chachapoly_encrypt(
+    const uint8_t key[RATS_CHACHAPOLY_KEY_SIZE],
+    const uint8_t nonce[RATS_CHACHAPOLY_NONCE_SIZE],
     const uint8_t *ad, size_t ad_len,
     const uint8_t *plaintext, size_t pt_len,
     uint8_t *ciphertext
@@ -53,11 +53,11 @@ size_t chachapoly_encrypt(
  * @param ct_len     Length of ciphertext (must be >= 16)
  * @param plaintext  Output buffer (must be at least ct_len - 16 bytes)
  * @return           Length of plaintext (ct_len - 16) on success (may be 0 for an
- *                   empty authenticated message), CHACHAPOLY_DECRYPT_FAILED on failure
+ *                   empty authenticated message), RATS_CHACHAPOLY_DECRYPT_FAILED on failure
  */
-size_t chachapoly_decrypt(
-    const uint8_t key[CHACHAPOLY_KEY_SIZE],
-    const uint8_t nonce[CHACHAPOLY_NONCE_SIZE],
+size_t rats_chachapoly_decrypt(
+    const uint8_t key[RATS_CHACHAPOLY_KEY_SIZE],
+    const uint8_t nonce[RATS_CHACHAPOLY_NONCE_SIZE],
     const uint8_t *ad, size_t ad_len,
     const uint8_t *ciphertext, size_t ct_len,
     uint8_t *plaintext
@@ -75,9 +75,9 @@ size_t chachapoly_decrypt(
  * @param data_len  Length of plaintext
  * @return          Length of output (data_len + 16) on success, 0 on failure
  */
-size_t chachapoly_encrypt_inplace(
-    const uint8_t key[CHACHAPOLY_KEY_SIZE],
-    const uint8_t nonce[CHACHAPOLY_NONCE_SIZE],
+size_t rats_chachapoly_encrypt_inplace(
+    const uint8_t key[RATS_CHACHAPOLY_KEY_SIZE],
+    const uint8_t nonce[RATS_CHACHAPOLY_NONCE_SIZE],
     const uint8_t *ad, size_t ad_len,
     uint8_t *data, size_t data_len
 );
@@ -92,11 +92,11 @@ size_t chachapoly_encrypt_inplace(
  * @param data      Data buffer (ciphertext + tag in, plaintext out)
  * @param data_len  Length of ciphertext including tag (must be >= 16)
  * @return          Length of plaintext (data_len - 16) on success (may be 0),
- *                  CHACHAPOLY_DECRYPT_FAILED on failure
+ *                  RATS_CHACHAPOLY_DECRYPT_FAILED on failure
  */
-size_t chachapoly_decrypt_inplace(
-    const uint8_t key[CHACHAPOLY_KEY_SIZE],
-    const uint8_t nonce[CHACHAPOLY_NONCE_SIZE],
+size_t rats_chachapoly_decrypt_inplace(
+    const uint8_t key[RATS_CHACHAPOLY_KEY_SIZE],
+    const uint8_t nonce[RATS_CHACHAPOLY_NONCE_SIZE],
     const uint8_t *ad, size_t ad_len,
     uint8_t *data, size_t data_len
 );

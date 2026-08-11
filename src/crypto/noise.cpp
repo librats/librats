@@ -96,7 +96,7 @@ size_t NoiseCipherState::encrypt_with_ad(
     uint8_t nonce[12];
     make_nonce(nonce, nonce_);
     
-    size_t result = chachapoly_encrypt(
+    size_t result = rats_chachapoly_encrypt(
         key_, nonce,
         ad, ad_len,
         plaintext, pt_len,
@@ -133,7 +133,7 @@ size_t NoiseCipherState::decrypt_with_ad(
     uint8_t nonce[12];
     make_nonce(nonce, nonce_);
 
-    size_t result = chachapoly_decrypt(
+    size_t result = rats_chachapoly_decrypt(
         key_, nonce,
         ad, ad_len,
         ciphertext, ct_len,
@@ -142,7 +142,7 @@ size_t NoiseCipherState::decrypt_with_ad(
 
     /* A valid decryption may return 0 (empty authenticated payload); only the
      * sentinel signals failure. */
-    if (result != CHACHAPOLY_DECRYPT_FAILED) {
+    if (result != RATS_CHACHAPOLY_DECRYPT_FAILED) {
         nonce_++;
         LOG_NOISE_DEBUG("Decrypted " << ct_len << " bytes -> " << result << " bytes (nonce: " << nonce_ << ")");
         return result;
@@ -177,7 +177,7 @@ void NoiseSymmetricState::initialize_symmetric(const char* protocol_name) {
         memcpy(h_, protocol_name, name_len);
     } else {
         /* Otherwise, hash the protocol name */
-        sha256_hash(h_, protocol_name, name_len);
+        rats_sha256_hash(h_, protocol_name, name_len);
     }
     
     /* ck = h */
@@ -190,7 +190,7 @@ void NoiseSymmetricState::mix_key(const uint8_t* input_key_material, size_t len)
     uint8_t temp_k[NOISE_KEY_SIZE];
     
     /* HKDF(ck, input_key_material) -> (new_ck, temp_k) */
-    noise_hkdf_2(ck_, input_key_material, len, ck_, temp_k);
+    rats_noise_hkdf_2(ck_, input_key_material, len, ck_, temp_k);
     
     /* Initialize cipher with temp_k */
     cipher_.initialize_key(temp_k);
@@ -202,11 +202,11 @@ void NoiseSymmetricState::mix_key(const uint8_t* input_key_material, size_t len)
 
 void NoiseSymmetricState::mix_hash(const uint8_t* data, size_t len) {
     /* h = SHA256(h || data) */
-    sha256_context_t ctx;
-    sha256_reset(&ctx);
-    sha256_update(&ctx, h_, NOISE_HASH_SIZE);
-    sha256_update(&ctx, data, len);
-    sha256_finish(&ctx, h_);
+    rats_sha256_context_t ctx;
+    rats_sha256_reset(&ctx);
+    rats_sha256_update(&ctx, h_, NOISE_HASH_SIZE);
+    rats_sha256_update(&ctx, data, len);
+    rats_sha256_finish(&ctx, h_);
     
     LOG_NOISE_DEBUG("MixHash: mixed " << len << " bytes into handshake hash");
 }
@@ -257,7 +257,7 @@ void NoiseSymmetricState::split(NoiseCipherState& c1, NoiseCipherState& c2) {
     uint8_t temp_k2[NOISE_KEY_SIZE];
     
     /* HKDF(ck, empty) -> (temp_k1, temp_k2) */
-    noise_hkdf_2(ck_, nullptr, 0, temp_k1, temp_k2);
+    rats_noise_hkdf_2(ck_, nullptr, 0, temp_k1, temp_k2);
     
     c1.initialize_key(temp_k1);
     c2.initialize_key(temp_k2);
@@ -297,7 +297,7 @@ void NoiseHandshakeState::generate_ephemeral() {
     e_.private_key[31] |= 64;
     
     /* Derive public key */
-    curve25519_donna(e_.public_key, e_.private_key, curve25519_basepoint);
+    rats_curve25519_donna(e_.public_key, e_.private_key, rats_curve25519_basepoint);
     e_.has_keys = true;
     
     LOG_NOISE_DEBUG("Generated ephemeral keypair (pub: " << format_key_prefix(e_.public_key) << "...)");
@@ -306,7 +306,7 @@ void NoiseHandshakeState::generate_ephemeral() {
 void NoiseHandshakeState::mix_dh(const uint8_t* local_private, const uint8_t* remote_public) {
     uint8_t dh_output[NOISE_DH_SIZE];
     
-    curve25519_donna(dh_output, local_private, remote_public);
+    rats_curve25519_donna(dh_output, local_private, remote_public);
     symmetric_.mix_key(dh_output, NOISE_DH_SIZE);
     
     secure_zero(dh_output, NOISE_DH_SIZE);
@@ -789,7 +789,7 @@ void noise_generate_keypair(NoiseKeyPair& keypair) {
     keypair.private_key[31] |= 64;
     
     /* Derive public key */
-    curve25519_donna(keypair.public_key, keypair.private_key, curve25519_basepoint);
+    rats_curve25519_donna(keypair.public_key, keypair.private_key, rats_curve25519_basepoint);
     keypair.has_keys = true;
     
     LOG_NOISE_DEBUG("Generated static keypair (pub: " << format_key_prefix(keypair.public_key) << "...)");
@@ -804,7 +804,7 @@ void noise_derive_public_key(const uint8_t private_key[NOISE_DH_SIZE],
     clamped[31] &= 127;
     clamped[31] |= 64;
     
-    curve25519_donna(public_key, clamped, curve25519_basepoint);
+    rats_curve25519_donna(public_key, clamped, rats_curve25519_basepoint);
     
     secure_zero(clamped, NOISE_DH_SIZE);
     

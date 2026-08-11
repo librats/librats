@@ -229,7 +229,7 @@ private:
         Status                   status = Status::Pending;
         bool                     worker_active = false;
         bool                     finished = false;
-        sha256_context_t         hash{};
+        rats_sha256_context_t         hash{};
         std::chrono::steady_clock::time_point last_activity{};
         RateTracker              rate;
     };
@@ -253,7 +253,7 @@ private:
         uint64_t offset = 0;
         Bytes    data;                   ///< chunk bytes (empty for a file-end job)
         bool     is_file_end = false;
-        uint8_t  sha[SHA256_HASH_SIZE]{};
+        uint8_t  sha[RATS_SHA256_HASH_SIZE]{};
     };
 
     struct Incoming {
@@ -281,7 +281,7 @@ private:
         FileStream                 out;             ///< currently open temp file
         size_t                     out_idx = SIZE_MAX;
         int                        hashing_file = -1;///< which file `hash` currently covers
-        sha256_context_t           hash{};
+        rats_sha256_context_t           hash{};
 
         ~Incoming();  ///< closes `out` and reclaims any un-finalized temp files
     };

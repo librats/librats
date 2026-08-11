@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define HKDF_SHA256_HASH_LEN 32
+#define RATS_HKDF_SHA256_HASH_LEN 32
 
 /**
  * HMAC-SHA256 function
@@ -24,10 +24,10 @@ extern "C" {
  * @param data_len Length of data
  * @param output   Output buffer (32 bytes)
  */
-void hmac_sha256(
+void rats_hmac_sha256(
     const uint8_t *key, size_t key_len,
     const uint8_t *data, size_t data_len,
-    uint8_t output[HKDF_SHA256_HASH_LEN]
+    uint8_t output[RATS_HKDF_SHA256_HASH_LEN]
 );
 
 /**
@@ -41,11 +41,11 @@ void hmac_sha256(
  * @param data2_len Length of second data block
  * @param output    Output buffer (32 bytes)
  */
-void hmac_sha256_2(
+void rats_hmac_sha256_2(
     const uint8_t *key, size_t key_len,
     const uint8_t *data1, size_t data1_len,
     const uint8_t *data2, size_t data2_len,
-    uint8_t output[HKDF_SHA256_HASH_LEN]
+    uint8_t output[RATS_HKDF_SHA256_HASH_LEN]
 );
 
 /**
@@ -57,10 +57,10 @@ void hmac_sha256_2(
  * @param ikm_len  Length of IKM
  * @param prk      Output pseudorandom key (32 bytes)
  */
-void hkdf_sha256_extract(
+void rats_hkdf_sha256_extract(
     const uint8_t *salt, size_t salt_len,
     const uint8_t *ikm, size_t ikm_len,
-    uint8_t prk[HKDF_SHA256_HASH_LEN]
+    uint8_t prk[RATS_HKDF_SHA256_HASH_LEN]
 );
 
 /**
@@ -72,8 +72,8 @@ void hkdf_sha256_extract(
  * @param okm      Output keying material
  * @param okm_len  Length of OKM (max 255 * 32 = 8160 bytes)
  */
-void hkdf_sha256_expand(
-    const uint8_t prk[HKDF_SHA256_HASH_LEN],
+void rats_hkdf_sha256_expand(
+    const uint8_t prk[RATS_HKDF_SHA256_HASH_LEN],
     const uint8_t *info, size_t info_len,
     uint8_t *okm, size_t okm_len
 );
@@ -90,7 +90,7 @@ void hkdf_sha256_expand(
  * @param okm      Output keying material
  * @param okm_len  Length of OKM
  */
-void hkdf_sha256(
+void rats_hkdf_sha256(
     const uint8_t *salt, size_t salt_len,
     const uint8_t *ikm, size_t ikm_len,
     const uint8_t *info, size_t info_len,
@@ -108,11 +108,11 @@ void hkdf_sha256(
  * @param output1      First output key (32 bytes)
  * @param output2      Second output key (32 bytes)
  */
-void noise_hkdf_2(
-    const uint8_t chaining_key[HKDF_SHA256_HASH_LEN],
+void rats_noise_hkdf_2(
+    const uint8_t chaining_key[RATS_HKDF_SHA256_HASH_LEN],
     const uint8_t *input_key, size_t input_len,
-    uint8_t output1[HKDF_SHA256_HASH_LEN],
-    uint8_t output2[HKDF_SHA256_HASH_LEN]
+    uint8_t output1[RATS_HKDF_SHA256_HASH_LEN],
+    uint8_t output2[RATS_HKDF_SHA256_HASH_LEN]
 );
 
 /**
@@ -126,12 +126,12 @@ void noise_hkdf_2(
  * @param output2      Second output key (32 bytes)
  * @param output3      Third output key (32 bytes)
  */
-void noise_hkdf_3(
-    const uint8_t chaining_key[HKDF_SHA256_HASH_LEN],
+void rats_noise_hkdf_3(
+    const uint8_t chaining_key[RATS_HKDF_SHA256_HASH_LEN],
     const uint8_t *input_key, size_t input_len,
-    uint8_t output1[HKDF_SHA256_HASH_LEN],
-    uint8_t output2[HKDF_SHA256_HASH_LEN],
-    uint8_t output3[HKDF_SHA256_HASH_LEN]
+    uint8_t output1[RATS_HKDF_SHA256_HASH_LEN],
+    uint8_t output2[RATS_HKDF_SHA256_HASH_LEN],
+    uint8_t output3[RATS_HKDF_SHA256_HASH_LEN]
 );
 
 #ifdef __cplusplus

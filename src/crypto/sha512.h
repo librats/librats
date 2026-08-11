@@ -31,8 +31,8 @@
 extern "C" {
 #endif
 
-#define SHA512_HASH_SIZE 64
-#define SHA512_BLOCK_SIZE 128
+#define RATS_SHA512_HASH_SIZE 64
+#define RATS_SHA512_BLOCK_SIZE 128
 
 typedef struct
 {
@@ -41,12 +41,12 @@ typedef struct
     uint64_t length; /* Restricted to 2^56 bytes of input */
     uint8_t  posn;
 
-} sha512_context_t;
+} rats_sha512_context_t;
 
-void sha512_reset(sha512_context_t *context);
-void sha512_update(sha512_context_t *context, const void *data, size_t size);
-void sha512_finish(sha512_context_t *context, uint8_t *hash);
-void sha512_hash(uint8_t *hash, const void *data, size_t size);
+void rats_sha512_reset(rats_sha512_context_t *context);
+void rats_sha512_update(rats_sha512_context_t *context, const void *data, size_t size);
+void rats_sha512_finish(rats_sha512_context_t *context, uint8_t *hash);
+void rats_sha512_hash(uint8_t *hash, const void *data, size_t size);
 
 #ifdef __cplusplus
 }

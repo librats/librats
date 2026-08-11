@@ -24,7 +24,7 @@
 #include "sha256.h"
 #include <string.h>
 
-void sha256_reset(sha256_context_t *context)
+void rats_sha256_reset(rats_sha256_context_t *context)
 {
     context->h[0] = 0x6a09e667;
     context->h[1] = 0xbb67ae85;
@@ -40,7 +40,7 @@ void sha256_reset(sha256_context_t *context)
 
 #define rightRotate(v, n) (((v) >> (n)) | ((v) << (32 - (n))))
 
-static void sha256_transform(sha256_context_t *context, const uint8_t *m)
+static void rats_sha256_transform(rats_sha256_context_t *context, const uint8_t *m)
 {
     static uint32_t const k[64] = {
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
@@ -127,12 +127,12 @@ static void sha256_transform(sha256_context_t *context, const uint8_t *m)
     context->h[7] += h;
 }
 
-void sha256_update(sha256_context_t *context, const void *data, size_t size)
+void rats_sha256_update(rats_sha256_context_t *context, const void *data, size_t size)
 {
     const uint8_t *d = (const uint8_t *)data;
     while (size > 0) {
         if (context->posn == 0 && size >= 64) {
-            sha256_transform(context, d);
+            rats_sha256_transform(context, d);
             d += 64;
             size -= 64;
             context->length += 64 * 8;
@@ -143,7 +143,7 @@ void sha256_update(sha256_context_t *context, const void *data, size_t size)
             memcpy(context->m + context->posn, d, temp);
             context->posn += (uint8_t)temp;
             if (context->posn >= 64) {
-                sha256_transform(context, context->m);
+                rats_sha256_transform(context, context->m);
                 context->posn = 0;
             }
             d += temp;
@@ -161,7 +161,7 @@ static void write_be32(uint8_t *out, uint32_t value)
     out[3] = (uint8_t)value;
 }
 
-void sha256_finish(sha256_context_t *context, uint8_t *hash)
+void rats_sha256_finish(rats_sha256_context_t *context, uint8_t *hash)
 {
     uint8_t posn = context->posn;
     if (posn <= (64 - 9)) {
@@ -170,21 +170,21 @@ void sha256_finish(sha256_context_t *context, uint8_t *hash)
     } else {
         context->m[posn] = 0x80;
         memset(context->m + posn + 1, 0, 64 - (posn + 1));
-        sha256_transform(context, context->m);
+        rats_sha256_transform(context, context->m);
         memset(context->m, 0, 64 - 8);
     }
     write_be32(context->m + 64 - 8, (uint32_t)(context->length >> 32));
     write_be32(context->m + 64 - 4, (uint32_t)context->length);
-    sha256_transform(context, context->m);
+    rats_sha256_transform(context, context->m);
     context->posn = 0;
     for (posn = 0; posn < 8; ++posn)
         write_be32(hash + posn * 4, context->h[posn]);
 }
 
-void sha256_hash(uint8_t *hash, const void *data, size_t size)
+void rats_sha256_hash(uint8_t *hash, const void *data, size_t size)
 {
-    sha256_context_t context;
-    sha256_reset(&context);
-    sha256_update(&context, data, size);
-    sha256_finish(&context, hash);
+    rats_sha256_context_t context;
+    rats_sha256_reset(&context);
+    rats_sha256_update(&context, data, size);
+    rats_sha256_finish(&context, hash);
 }

@@ -32,25 +32,25 @@
 #include <string.h>
 
 /* Initialization vectors for BLAKE2b */
-#define BLAKE2b_IV0 0x6a09e667f3bcc908ULL
-#define BLAKE2b_IV1 0xbb67ae8584caa73bULL
-#define BLAKE2b_IV2 0x3c6ef372fe94f82bULL
-#define BLAKE2b_IV3 0xa54ff53a5f1d36f1ULL
-#define BLAKE2b_IV4 0x510e527fade682d1ULL
-#define BLAKE2b_IV5 0x9b05688c2b3e6c1fULL
-#define BLAKE2b_IV6 0x1f83d9abfb41bd6bULL
-#define BLAKE2b_IV7 0x5be0cd19137e2179ULL
+#define rats_blake2b_IV0 0x6a09e667f3bcc908ULL
+#define rats_blake2b_IV1 0xbb67ae8584caa73bULL
+#define rats_blake2b_IV2 0x3c6ef372fe94f82bULL
+#define rats_blake2b_IV3 0xa54ff53a5f1d36f1ULL
+#define rats_blake2b_IV4 0x510e527fade682d1ULL
+#define rats_blake2b_IV5 0x9b05688c2b3e6c1fULL
+#define rats_blake2b_IV6 0x1f83d9abfb41bd6bULL
+#define rats_blake2b_IV7 0x5be0cd19137e2179ULL
 
-void BLAKE2b_reset(BLAKE2b_context_t *context)
+void rats_blake2b_reset(rats_blake2b_context_t *context)
 {
-    context->h[0] = BLAKE2b_IV0 ^ 0x01010040; /* Default output length of 64 */
-    context->h[1] = BLAKE2b_IV1;
-    context->h[2] = BLAKE2b_IV2;
-    context->h[3] = BLAKE2b_IV3;
-    context->h[4] = BLAKE2b_IV4;
-    context->h[5] = BLAKE2b_IV5;
-    context->h[6] = BLAKE2b_IV6;
-    context->h[7] = BLAKE2b_IV7;
+    context->h[0] = rats_blake2b_IV0 ^ 0x01010040; /* Default output length of 64 */
+    context->h[1] = rats_blake2b_IV1;
+    context->h[2] = rats_blake2b_IV2;
+    context->h[3] = rats_blake2b_IV3;
+    context->h[4] = rats_blake2b_IV4;
+    context->h[5] = rats_blake2b_IV5;
+    context->h[6] = rats_blake2b_IV6;
+    context->h[7] = rats_blake2b_IV7;
     context->length = 0;
     context->posn = 0;
 }
@@ -88,7 +88,7 @@ static const uint8_t sigma[12][16] = {
     } while (0)
 
 static void blake2b_transform
-    (BLAKE2b_context_t *context, const uint8_t *data, uint64_t f0)
+    (rats_blake2b_context_t *context, const uint8_t *data, uint64_t f0)
 {
     uint8_t index;
     uint64_t m[16];
@@ -96,7 +96,7 @@ static void blake2b_transform
     const uint8_t *sigma_row;
 
     /* Unpack the input data from little-endian */
-#if BLAKE2_LITTLE_ENDIAN
+#if RATS_BLAKE2_LITTLE_ENDIAN
     memcpy(m, data, sizeof(m));
 #else
     for (index = 0; index < 16; ++index, data += 8) {
@@ -113,14 +113,14 @@ static void blake2b_transform
 
     /* Format the block to be hashed */
     memcpy(v, context->h, sizeof(context->h));
-    v[8]  = BLAKE2b_IV0;
-    v[9]  = BLAKE2b_IV1;
-    v[10] = BLAKE2b_IV2;
-    v[11] = BLAKE2b_IV3;
-    v[12] = BLAKE2b_IV4 ^ context->length;
-    v[13] = BLAKE2b_IV5;
-    v[14] = BLAKE2b_IV6 ^ f0;
-    v[15] = BLAKE2b_IV7;
+    v[8]  = rats_blake2b_IV0;
+    v[9]  = rats_blake2b_IV1;
+    v[10] = rats_blake2b_IV2;
+    v[11] = rats_blake2b_IV3;
+    v[12] = rats_blake2b_IV4 ^ context->length;
+    v[13] = rats_blake2b_IV5;
+    v[14] = rats_blake2b_IV6 ^ f0;
+    v[15] = rats_blake2b_IV7;
 
     /* Perform the 12 BLAKE2b rounds */
     sigma_row = sigma[0];
@@ -143,7 +143,7 @@ static void blake2b_transform
         context->h[index] ^= (v[index] ^ v[index + 8]);
 }
 
-void BLAKE2b_update(BLAKE2b_context_t *context, const void *data, size_t size)
+void rats_blake2b_update(rats_blake2b_context_t *context, const void *data, size_t size)
 {
     /* Break the input up into 1024-bit chunks and process each in turn */
     const uint8_t *d = (const uint8_t *)data;
@@ -175,14 +175,14 @@ void BLAKE2b_update(BLAKE2b_context_t *context, const void *data, size_t size)
     }
 }
 
-void BLAKE2b_finish(BLAKE2b_context_t *context, uint8_t *hash)
+void rats_blake2b_finish(rats_blake2b_context_t *context, uint8_t *hash)
 {
     /* Pad the last chunk and hash it with f0 set to all-ones */
     memset(context->m + context->posn, 0, 128 - context->posn);
     blake2b_transform(context, context->m, 0xFFFFFFFFFFFFFFFFULL);
 
     /* Copy the hash to the caller's return buffer in little-endian */
-#if BLAKE2_LITTLE_ENDIAN
+#if RATS_BLAKE2_LITTLE_ENDIAN
     memcpy(hash, context->h, sizeof(context->h));
 #else
     {

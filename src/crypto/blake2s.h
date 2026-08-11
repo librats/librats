@@ -31,24 +31,24 @@
 extern "C" {
 #endif
 
-#define BLAKE2S_HASH_SIZE 32
-#define BLAKE2S_BLOCK_SIZE 64
+#define RATS_BLAKE2S_HASH_SIZE 32
+#define RATS_BLAKE2S_BLOCK_SIZE 64
 
 #if defined(__SSE2__) && defined(__GNUC__) && __GNUC__ >= 4
-#define BLAKE2S_USE_VECTOR_MATH 1
+#define RATS_BLAKE2S_USE_VECTOR_MATH 1
 #ifdef __clang__
-typedef uint32_t BlakeVectorUInt32 __attribute__((ext_vector_type(4)));
+typedef uint32_t RatsBlakeVectorUInt32 __attribute__((ext_vector_type(4)));
 #else
-typedef uint32_t BlakeVectorUInt32 __attribute__((__vector_size__(16)));
+typedef uint32_t RatsBlakeVectorUInt32 __attribute__((__vector_size__(16)));
 #endif
 #else
-#undef BLAKE2S_USE_VECTOR_MATH
+#undef RATS_BLAKE2S_USE_VECTOR_MATH
 #endif
 
 typedef struct
 {
-#if BLAKE2S_USE_VECTOR_MATH
-    BlakeVectorUInt32 h[2];
+#if RATS_BLAKE2S_USE_VECTOR_MATH
+    RatsBlakeVectorUInt32 h[2];
 #else
     uint32_t h[8];
 #endif
@@ -56,11 +56,11 @@ typedef struct
     uint64_t length;
     uint8_t  posn;
 
-} BLAKE2s_context_t;
+} rats_blake2s_context_t;
 
-void BLAKE2s_reset(BLAKE2s_context_t *context);
-void BLAKE2s_update(BLAKE2s_context_t *context, const void *data, size_t size);
-void BLAKE2s_finish(BLAKE2s_context_t *context, uint8_t *hash);
+void rats_blake2s_reset(rats_blake2s_context_t *context);
+void rats_blake2s_update(rats_blake2s_context_t *context, const void *data, size_t size);
+void rats_blake2s_finish(rats_blake2s_context_t *context, uint8_t *hash);
 
 #ifdef __cplusplus
 }

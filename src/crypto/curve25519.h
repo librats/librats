@@ -46,7 +46,7 @@
 extern "C" {
 #endif
 
-#define CURVE25519_KEY_SIZE 32
+#define RATS_CURVE25519_KEY_SIZE 32
 
 /**
  * Computes a Curve25519 shared secret or public key.
@@ -56,13 +56,13 @@ extern "C" {
  * @param basepoint Public key of the other party, or the Curve25519 basepoint
  * @return 0 on success
  */
-int curve25519_donna(uint8_t *mypublic, const uint8_t *secret, const uint8_t *basepoint);
+int rats_curve25519_donna(uint8_t *mypublic, const uint8_t *secret, const uint8_t *basepoint);
 
 /**
  * The Curve25519 basepoint (9).
  * Use this as basepoint to derive a public key from a private key.
  */
-RATS_API extern const uint8_t curve25519_basepoint[32];
+RATS_API extern const uint8_t rats_curve25519_basepoint[32];
 
 #ifdef __cplusplus
 }

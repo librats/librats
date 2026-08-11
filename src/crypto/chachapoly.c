@@ -57,80 +57,80 @@ static void secure_zero(void *ptr, size_t len) {
 }
 
 /* Pad to 16-byte boundary for Poly1305 */
-static void poly1305_pad16(poly1305_context *ctx, size_t data_len) {
+static void rats_poly1305_pad16(rats_poly1305_context *ctx, size_t data_len) {
     static const uint8_t zeros[16] = {0};
     size_t pad = (16 - (data_len % 16)) % 16;
     if (pad > 0) {
-        poly1305_update(ctx, zeros, pad);
+        rats_poly1305_update(ctx, zeros, pad);
     }
 }
 
-size_t chachapoly_encrypt(
-    const uint8_t key[CHACHAPOLY_KEY_SIZE],
-    const uint8_t nonce[CHACHAPOLY_NONCE_SIZE],
+size_t rats_chachapoly_encrypt(
+    const uint8_t key[RATS_CHACHAPOLY_KEY_SIZE],
+    const uint8_t nonce[RATS_CHACHAPOLY_NONCE_SIZE],
     const uint8_t *ad, size_t ad_len,
     const uint8_t *plaintext, size_t pt_len,
     uint8_t *ciphertext
 ) {
-    chacha_ctx chacha;
-    poly1305_context poly;
+    rats_chacha_ctx chacha;
+    rats_poly1305_context poly;
     uint8_t poly_key[64];
     uint8_t block0_counter[8] = {0};
     uint8_t block1_counter[8] = {1, 0, 0, 0, 0, 0, 0, 0};
     uint8_t len_block[16];
     
     /* Generate Poly1305 key from first ChaCha20 block (counter = 0) */
-    chacha_keysetup(&chacha, key, 256);
-    chacha_ivsetup(&chacha, nonce + 4, block0_counter);
+    rats_chacha_keysetup(&chacha, key, 256);
+    rats_chacha_ivsetup(&chacha, nonce + 4, block0_counter);
     memset(poly_key, 0, 64);
-    chacha_encrypt_bytes(&chacha, poly_key, poly_key, 64);
+    rats_chacha_encrypt_bytes(&chacha, poly_key, poly_key, 64);
     
     /* Encrypt plaintext with ChaCha20 (counter = 1) */
-    chacha_keysetup(&chacha, key, 256);
-    chacha_ivsetup(&chacha, nonce + 4, block1_counter);
+    rats_chacha_keysetup(&chacha, key, 256);
+    rats_chacha_ivsetup(&chacha, nonce + 4, block1_counter);
     if (pt_len > 0) {
-        chacha_encrypt_bytes(&chacha, plaintext, ciphertext, (uint32_t)pt_len);
+        rats_chacha_encrypt_bytes(&chacha, plaintext, ciphertext, (uint32_t)pt_len);
     }
     
     /* Compute Poly1305 tag */
-    poly1305_init(&poly, poly_key);
+    rats_poly1305_init(&poly, poly_key);
     
     /* Authenticate AD */
     if (ad_len > 0) {
-        poly1305_update(&poly, ad, ad_len);
-        poly1305_pad16(&poly, ad_len);
+        rats_poly1305_update(&poly, ad, ad_len);
+        rats_poly1305_pad16(&poly, ad_len);
     }
     
     /* Authenticate ciphertext */
     if (pt_len > 0) {
-        poly1305_update(&poly, ciphertext, pt_len);
-        poly1305_pad16(&poly, pt_len);
+        rats_poly1305_update(&poly, ciphertext, pt_len);
+        rats_poly1305_pad16(&poly, pt_len);
     }
     
     /* Authenticate lengths */
     write_le64(len_block, ad_len);
     write_le64(len_block + 8, pt_len);
-    poly1305_update(&poly, len_block, 16);
+    rats_poly1305_update(&poly, len_block, 16);
     
     /* Output tag */
-    poly1305_finish(&poly, ciphertext + pt_len);
+    rats_poly1305_finish(&poly, ciphertext + pt_len);
     
     /* Clean up sensitive data */
     secure_zero(&chacha, sizeof(chacha));
     secure_zero(poly_key, sizeof(poly_key));
     
-    return pt_len + CHACHAPOLY_TAG_SIZE;
+    return pt_len + RATS_CHACHAPOLY_TAG_SIZE;
 }
 
-size_t chachapoly_decrypt(
-    const uint8_t key[CHACHAPOLY_KEY_SIZE],
-    const uint8_t nonce[CHACHAPOLY_NONCE_SIZE],
+size_t rats_chachapoly_decrypt(
+    const uint8_t key[RATS_CHACHAPOLY_KEY_SIZE],
+    const uint8_t nonce[RATS_CHACHAPOLY_NONCE_SIZE],
     const uint8_t *ad, size_t ad_len,
     const uint8_t *ciphertext, size_t ct_len,
     uint8_t *plaintext
 ) {
-    chacha_ctx chacha;
-    poly1305_context poly;
+    rats_chacha_ctx chacha;
+    rats_poly1305_context poly;
     uint8_t poly_key[64];
     uint8_t block0_counter[8] = {0};
     uint8_t block1_counter[8] = {1, 0, 0, 0, 0, 0, 0, 0};
@@ -138,53 +138,53 @@ size_t chachapoly_decrypt(
     uint8_t computed_tag[16];
     size_t pt_len;
     
-    if (ct_len < CHACHAPOLY_TAG_SIZE) {
-        return CHACHAPOLY_DECRYPT_FAILED;
+    if (ct_len < RATS_CHACHAPOLY_TAG_SIZE) {
+        return RATS_CHACHAPOLY_DECRYPT_FAILED;
     }
 
-    pt_len = ct_len - CHACHAPOLY_TAG_SIZE;
+    pt_len = ct_len - RATS_CHACHAPOLY_TAG_SIZE;
     
     /* Generate Poly1305 key from first ChaCha20 block (counter = 0) */
-    chacha_keysetup(&chacha, key, 256);
-    chacha_ivsetup(&chacha, nonce + 4, block0_counter);
+    rats_chacha_keysetup(&chacha, key, 256);
+    rats_chacha_ivsetup(&chacha, nonce + 4, block0_counter);
     memset(poly_key, 0, 64);
-    chacha_encrypt_bytes(&chacha, poly_key, poly_key, 64);
+    rats_chacha_encrypt_bytes(&chacha, poly_key, poly_key, 64);
     
     /* Compute Poly1305 tag */
-    poly1305_init(&poly, poly_key);
+    rats_poly1305_init(&poly, poly_key);
     
     /* Authenticate AD */
     if (ad_len > 0) {
-        poly1305_update(&poly, ad, ad_len);
-        poly1305_pad16(&poly, ad_len);
+        rats_poly1305_update(&poly, ad, ad_len);
+        rats_poly1305_pad16(&poly, ad_len);
     }
     
     /* Authenticate ciphertext */
     if (pt_len > 0) {
-        poly1305_update(&poly, ciphertext, pt_len);
-        poly1305_pad16(&poly, pt_len);
+        rats_poly1305_update(&poly, ciphertext, pt_len);
+        rats_poly1305_pad16(&poly, pt_len);
     }
     
     /* Authenticate lengths */
     write_le64(len_block, ad_len);
     write_le64(len_block + 8, pt_len);
-    poly1305_update(&poly, len_block, 16);
+    rats_poly1305_update(&poly, len_block, 16);
     
     /* Compute and verify tag */
-    poly1305_finish(&poly, computed_tag);
+    rats_poly1305_finish(&poly, computed_tag);
     
-    if (!secure_compare(computed_tag, ciphertext + pt_len, CHACHAPOLY_TAG_SIZE)) {
+    if (!secure_compare(computed_tag, ciphertext + pt_len, RATS_CHACHAPOLY_TAG_SIZE)) {
         secure_zero(&chacha, sizeof(chacha));
         secure_zero(poly_key, sizeof(poly_key));
         secure_zero(computed_tag, sizeof(computed_tag));
-        return CHACHAPOLY_DECRYPT_FAILED;  /* Authentication failed */
+        return RATS_CHACHAPOLY_DECRYPT_FAILED;  /* Authentication failed */
     }
     
     /* Decrypt ciphertext */
-    chacha_keysetup(&chacha, key, 256);
-    chacha_ivsetup(&chacha, nonce + 4, block1_counter);
+    rats_chacha_keysetup(&chacha, key, 256);
+    rats_chacha_ivsetup(&chacha, nonce + 4, block1_counter);
     if (pt_len > 0) {
-        chacha_encrypt_bytes(&chacha, ciphertext, plaintext, (uint32_t)pt_len);
+        rats_chacha_encrypt_bytes(&chacha, ciphertext, plaintext, (uint32_t)pt_len);
     }
     
     /* Clean up sensitive data */
@@ -195,20 +195,20 @@ size_t chachapoly_decrypt(
     return pt_len;
 }
 
-size_t chachapoly_encrypt_inplace(
-    const uint8_t key[CHACHAPOLY_KEY_SIZE],
-    const uint8_t nonce[CHACHAPOLY_NONCE_SIZE],
+size_t rats_chachapoly_encrypt_inplace(
+    const uint8_t key[RATS_CHACHAPOLY_KEY_SIZE],
+    const uint8_t nonce[RATS_CHACHAPOLY_NONCE_SIZE],
     const uint8_t *ad, size_t ad_len,
     uint8_t *data, size_t data_len
 ) {
-    return chachapoly_encrypt(key, nonce, ad, ad_len, data, data_len, data);
+    return rats_chachapoly_encrypt(key, nonce, ad, ad_len, data, data_len, data);
 }
 
-size_t chachapoly_decrypt_inplace(
-    const uint8_t key[CHACHAPOLY_KEY_SIZE],
-    const uint8_t nonce[CHACHAPOLY_NONCE_SIZE],
+size_t rats_chachapoly_decrypt_inplace(
+    const uint8_t key[RATS_CHACHAPOLY_KEY_SIZE],
+    const uint8_t nonce[RATS_CHACHAPOLY_NONCE_SIZE],
     const uint8_t *ad, size_t ad_len,
     uint8_t *data, size_t data_len
 ) {
-    return chachapoly_decrypt(key, nonce, ad, ad_len, data, data_len, data);
+    return rats_chachapoly_decrypt(key, nonce, ad, ad_len, data, data_len, data);
 }

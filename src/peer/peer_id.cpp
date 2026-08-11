@@ -21,7 +21,7 @@ int hex_value(char c) {
 
 PeerId PeerId::from_public_key(const uint8_t* key, size_t len) {
     PeerId id;
-    sha256_hash(id.bytes_.data(), key, len);
+    rats_sha256_hash(id.bytes_.data(), key, len);
     return id;
 }
 

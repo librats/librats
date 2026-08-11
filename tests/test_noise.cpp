@@ -35,21 +35,21 @@ TEST_F(ChaChaPolyTest, EncryptDecrypt) {
     const char* plaintext = "Hello, Noise Protocol!";
     size_t pt_len = strlen(plaintext);
     
-    std::vector<uint8_t> ciphertext(pt_len + CHACHAPOLY_TAG_SIZE);
+    std::vector<uint8_t> ciphertext(pt_len + RATS_CHACHAPOLY_TAG_SIZE);
     std::vector<uint8_t> decrypted(pt_len);
     
     // Encrypt
-    size_t ct_len = chachapoly_encrypt(
+    size_t ct_len = rats_chachapoly_encrypt(
         key, nonce,
         nullptr, 0,
         (const uint8_t*)plaintext, pt_len,
         ciphertext.data()
     );
     
-    EXPECT_EQ(ct_len, pt_len + CHACHAPOLY_TAG_SIZE);
+    EXPECT_EQ(ct_len, pt_len + RATS_CHACHAPOLY_TAG_SIZE);
     
     // Decrypt
-    size_t dec_len = chachapoly_decrypt(
+    size_t dec_len = rats_chachapoly_decrypt(
         key, nonce,
         nullptr, 0,
         ciphertext.data(), ct_len,
@@ -72,21 +72,21 @@ TEST_F(ChaChaPolyTest, EncryptDecryptWithAD) {
     size_t pt_len = strlen(plaintext);
     size_t ad_len = strlen(ad);
     
-    std::vector<uint8_t> ciphertext(pt_len + CHACHAPOLY_TAG_SIZE);
+    std::vector<uint8_t> ciphertext(pt_len + RATS_CHACHAPOLY_TAG_SIZE);
     std::vector<uint8_t> decrypted(pt_len);
     
     // Encrypt
-    size_t ct_len = chachapoly_encrypt(
+    size_t ct_len = rats_chachapoly_encrypt(
         key, nonce,
         (const uint8_t*)ad, ad_len,
         (const uint8_t*)plaintext, pt_len,
         ciphertext.data()
     );
     
-    EXPECT_EQ(ct_len, pt_len + CHACHAPOLY_TAG_SIZE);
+    EXPECT_EQ(ct_len, pt_len + RATS_CHACHAPOLY_TAG_SIZE);
     
     // Decrypt with correct AD
-    size_t dec_len = chachapoly_decrypt(
+    size_t dec_len = rats_chachapoly_decrypt(
         key, nonce,
         (const uint8_t*)ad, ad_len,
         ciphertext.data(), ct_len,
@@ -110,11 +110,11 @@ TEST_F(ChaChaPolyTest, DecryptWithWrongADFails) {
     size_t pt_len = strlen(plaintext);
     size_t ad_len = strlen(ad);
     
-    std::vector<uint8_t> ciphertext(pt_len + CHACHAPOLY_TAG_SIZE);
+    std::vector<uint8_t> ciphertext(pt_len + RATS_CHACHAPOLY_TAG_SIZE);
     std::vector<uint8_t> decrypted(pt_len);
     
     // Encrypt
-    chachapoly_encrypt(
+    rats_chachapoly_encrypt(
         key, nonce,
         (const uint8_t*)ad, ad_len,
         (const uint8_t*)plaintext, pt_len,
@@ -122,14 +122,14 @@ TEST_F(ChaChaPolyTest, DecryptWithWrongADFails) {
     );
     
     // Decrypt with wrong AD should fail
-    size_t dec_len = chachapoly_decrypt(
+    size_t dec_len = rats_chachapoly_decrypt(
         key, nonce,
         (const uint8_t*)wrong_ad, strlen(wrong_ad),
-        ciphertext.data(), pt_len + CHACHAPOLY_TAG_SIZE,
+        ciphertext.data(), pt_len + RATS_CHACHAPOLY_TAG_SIZE,
         decrypted.data()
     );
 
-    EXPECT_EQ(dec_len, CHACHAPOLY_DECRYPT_FAILED);
+    EXPECT_EQ(dec_len, RATS_CHACHAPOLY_DECRYPT_FAILED);
 }
 
 TEST_F(ChaChaPolyTest, TamperedCiphertextFails) {
@@ -142,11 +142,11 @@ TEST_F(ChaChaPolyTest, TamperedCiphertextFails) {
     const char* plaintext = "Hello, Noise!";
     size_t pt_len = strlen(plaintext);
     
-    std::vector<uint8_t> ciphertext(pt_len + CHACHAPOLY_TAG_SIZE);
+    std::vector<uint8_t> ciphertext(pt_len + RATS_CHACHAPOLY_TAG_SIZE);
     std::vector<uint8_t> decrypted(pt_len);
     
     // Encrypt
-    size_t ct_len = chachapoly_encrypt(
+    size_t ct_len = rats_chachapoly_encrypt(
         key, nonce,
         nullptr, 0,
         (const uint8_t*)plaintext, pt_len,
@@ -157,14 +157,14 @@ TEST_F(ChaChaPolyTest, TamperedCiphertextFails) {
     ciphertext[0] ^= 0x01;
     
     // Decrypt should fail
-    size_t dec_len = chachapoly_decrypt(
+    size_t dec_len = rats_chachapoly_decrypt(
         key, nonce,
         nullptr, 0,
         ciphertext.data(), ct_len,
         decrypted.data()
     );
 
-    EXPECT_EQ(dec_len, CHACHAPOLY_DECRYPT_FAILED);
+    EXPECT_EQ(dec_len, RATS_CHACHAPOLY_DECRYPT_FAILED);
 }
 
 // =============================================================================
@@ -185,7 +185,7 @@ TEST_F(HKDFTest, HMACSHA256) {
     const char* data = "Hi There";
     uint8_t output[32];
     
-    hmac_sha256(key, 20, (const uint8_t*)data, strlen(data), output);
+    rats_hmac_sha256(key, 20, (const uint8_t*)data, strlen(data), output);
     
     // Expected output from RFC 4231
     uint8_t expected[32] = {
@@ -206,14 +206,14 @@ TEST_F(HKDFTest, NoiseHKDF2) {
     for (int i = 0; i < 32; i++) input[i] = (uint8_t)i;
     
     uint8_t out1[32], out2[32];
-    noise_hkdf_2(ck, input, 32, out1, out2);
+    rats_noise_hkdf_2(ck, input, 32, out1, out2);
     
     // Outputs should be different
     EXPECT_NE(memcmp(out1, out2, 32), 0);
     
     // Should be deterministic
     uint8_t out1_2[32], out2_2[32];
-    noise_hkdf_2(ck, input, 32, out1_2, out2_2);
+    rats_noise_hkdf_2(ck, input, 32, out1_2, out2_2);
     
     EXPECT_EQ(memcmp(out1, out1_2, 32), 0);
     EXPECT_EQ(memcmp(out2, out2_2, 32), 0);
@@ -227,7 +227,7 @@ TEST_F(HKDFTest, NoiseHKDF3) {
     for (int i = 0; i < 32; i++) input[i] = (uint8_t)(i + 100);
     
     uint8_t out1[32], out2[32], out3[32];
-    noise_hkdf_3(ck, input, 32, out1, out2, out3);
+    rats_noise_hkdf_3(ck, input, 32, out1, out2, out3);
     
     // All outputs should be different
     EXPECT_NE(memcmp(out1, out2, 32), 0);

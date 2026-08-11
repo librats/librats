@@ -46,11 +46,11 @@ protected:
 
 TEST_F(BLAKE2sTest, EmptyString) {
     uint8_t hash[32];
-    BLAKE2s_context_t ctx;
+    rats_blake2s_context_t ctx;
     
-    BLAKE2s_reset(&ctx);
-    BLAKE2s_update(&ctx, "", 0);
-    BLAKE2s_finish(&ctx, hash);
+    rats_blake2s_reset(&ctx);
+    rats_blake2s_update(&ctx, "", 0);
+    rats_blake2s_finish(&ctx, hash);
     
     // BLAKE2s-256 of empty string
     std::string expected = "69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9";
@@ -59,11 +59,11 @@ TEST_F(BLAKE2sTest, EmptyString) {
 
 TEST_F(BLAKE2sTest, ABC) {
     uint8_t hash[32];
-    BLAKE2s_context_t ctx;
+    rats_blake2s_context_t ctx;
     
-    BLAKE2s_reset(&ctx);
-    BLAKE2s_update(&ctx, "abc", 3);
-    BLAKE2s_finish(&ctx, hash);
+    rats_blake2s_reset(&ctx);
+    rats_blake2s_update(&ctx, "abc", 3);
+    rats_blake2s_finish(&ctx, hash);
     
     // BLAKE2s-256 of "abc"
     std::string expected = "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982";
@@ -76,19 +76,19 @@ TEST_F(BLAKE2sTest, IncrementalUpdate) {
     
     // Compute hash in one go
     uint8_t hash1[32];
-    BLAKE2s_context_t ctx1;
+    rats_blake2s_context_t ctx1;
     std::string full = std::string(part1) + part2;
-    BLAKE2s_reset(&ctx1);
-    BLAKE2s_update(&ctx1, full.c_str(), full.length());
-    BLAKE2s_finish(&ctx1, hash1);
+    rats_blake2s_reset(&ctx1);
+    rats_blake2s_update(&ctx1, full.c_str(), full.length());
+    rats_blake2s_finish(&ctx1, hash1);
     
     // Compute hash incrementally
     uint8_t hash2[32];
-    BLAKE2s_context_t ctx2;
-    BLAKE2s_reset(&ctx2);
-    BLAKE2s_update(&ctx2, part1, strlen(part1));
-    BLAKE2s_update(&ctx2, part2, strlen(part2));
-    BLAKE2s_finish(&ctx2, hash2);
+    rats_blake2s_context_t ctx2;
+    rats_blake2s_reset(&ctx2);
+    rats_blake2s_update(&ctx2, part1, strlen(part1));
+    rats_blake2s_update(&ctx2, part2, strlen(part2));
+    rats_blake2s_finish(&ctx2, hash2);
     
     EXPECT_EQ(memcmp(hash1, hash2, 32), 0);
 }
@@ -98,32 +98,32 @@ TEST_F(BLAKE2sTest, LongMessage) {
     std::string input(256, 'a');
     
     uint8_t hash[32];
-    BLAKE2s_context_t ctx;
-    BLAKE2s_reset(&ctx);
-    BLAKE2s_update(&ctx, input.c_str(), input.length());
-    BLAKE2s_finish(&ctx, hash);
+    rats_blake2s_context_t ctx;
+    rats_blake2s_reset(&ctx);
+    rats_blake2s_update(&ctx, input.c_str(), input.length());
+    rats_blake2s_finish(&ctx, hash);
     
     // Just verify it produces a hash (deterministic test)
     uint8_t hash2[32];
-    BLAKE2s_context_t ctx2;
-    BLAKE2s_reset(&ctx2);
-    BLAKE2s_update(&ctx2, input.c_str(), input.length());
-    BLAKE2s_finish(&ctx2, hash2);
+    rats_blake2s_context_t ctx2;
+    rats_blake2s_reset(&ctx2);
+    rats_blake2s_update(&ctx2, input.c_str(), input.length());
+    rats_blake2s_finish(&ctx2, hash2);
     
     EXPECT_EQ(memcmp(hash, hash2, 32), 0);
 }
 
 TEST_F(BLAKE2sTest, DifferentInputsDifferentHashes) {
     uint8_t hash1[32], hash2[32];
-    BLAKE2s_context_t ctx;
+    rats_blake2s_context_t ctx;
     
-    BLAKE2s_reset(&ctx);
-    BLAKE2s_update(&ctx, "message1", 8);
-    BLAKE2s_finish(&ctx, hash1);
+    rats_blake2s_reset(&ctx);
+    rats_blake2s_update(&ctx, "message1", 8);
+    rats_blake2s_finish(&ctx, hash1);
     
-    BLAKE2s_reset(&ctx);
-    BLAKE2s_update(&ctx, "message2", 8);
-    BLAKE2s_finish(&ctx, hash2);
+    rats_blake2s_reset(&ctx);
+    rats_blake2s_update(&ctx, "message2", 8);
+    rats_blake2s_finish(&ctx, hash2);
     
     EXPECT_NE(memcmp(hash1, hash2, 32), 0);
 }
@@ -132,11 +132,11 @@ TEST_F(BLAKE2sTest, DifferentInputsDifferentHashes) {
 
 TEST_F(BLAKE2bTest, EmptyString) {
     uint8_t hash[64];
-    BLAKE2b_context_t ctx;
+    rats_blake2b_context_t ctx;
     
-    BLAKE2b_reset(&ctx);
-    BLAKE2b_update(&ctx, "", 0);
-    BLAKE2b_finish(&ctx, hash);
+    rats_blake2b_reset(&ctx);
+    rats_blake2b_update(&ctx, "", 0);
+    rats_blake2b_finish(&ctx, hash);
     
     // BLAKE2b-512 of empty string
     std::string expected = "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419"
@@ -146,11 +146,11 @@ TEST_F(BLAKE2bTest, EmptyString) {
 
 TEST_F(BLAKE2bTest, ABC) {
     uint8_t hash[64];
-    BLAKE2b_context_t ctx;
+    rats_blake2b_context_t ctx;
     
-    BLAKE2b_reset(&ctx);
-    BLAKE2b_update(&ctx, "abc", 3);
-    BLAKE2b_finish(&ctx, hash);
+    rats_blake2b_reset(&ctx);
+    rats_blake2b_update(&ctx, "abc", 3);
+    rats_blake2b_finish(&ctx, hash);
     
     // BLAKE2b-512 of "abc"
     std::string expected = "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1"
@@ -164,19 +164,19 @@ TEST_F(BLAKE2bTest, IncrementalUpdate) {
     
     // Compute hash in one go
     uint8_t hash1[64];
-    BLAKE2b_context_t ctx1;
+    rats_blake2b_context_t ctx1;
     std::string full = std::string(part1) + part2;
-    BLAKE2b_reset(&ctx1);
-    BLAKE2b_update(&ctx1, full.c_str(), full.length());
-    BLAKE2b_finish(&ctx1, hash1);
+    rats_blake2b_reset(&ctx1);
+    rats_blake2b_update(&ctx1, full.c_str(), full.length());
+    rats_blake2b_finish(&ctx1, hash1);
     
     // Compute hash incrementally
     uint8_t hash2[64];
-    BLAKE2b_context_t ctx2;
-    BLAKE2b_reset(&ctx2);
-    BLAKE2b_update(&ctx2, part1, strlen(part1));
-    BLAKE2b_update(&ctx2, part2, strlen(part2));
-    BLAKE2b_finish(&ctx2, hash2);
+    rats_blake2b_context_t ctx2;
+    rats_blake2b_reset(&ctx2);
+    rats_blake2b_update(&ctx2, part1, strlen(part1));
+    rats_blake2b_update(&ctx2, part2, strlen(part2));
+    rats_blake2b_finish(&ctx2, hash2);
     
     EXPECT_EQ(memcmp(hash1, hash2, 64), 0);
 }
@@ -186,32 +186,32 @@ TEST_F(BLAKE2bTest, LongMessage) {
     std::string input(512, 'a');
     
     uint8_t hash[64];
-    BLAKE2b_context_t ctx;
-    BLAKE2b_reset(&ctx);
-    BLAKE2b_update(&ctx, input.c_str(), input.length());
-    BLAKE2b_finish(&ctx, hash);
+    rats_blake2b_context_t ctx;
+    rats_blake2b_reset(&ctx);
+    rats_blake2b_update(&ctx, input.c_str(), input.length());
+    rats_blake2b_finish(&ctx, hash);
     
     // Just verify it produces a hash (deterministic test)
     uint8_t hash2[64];
-    BLAKE2b_context_t ctx2;
-    BLAKE2b_reset(&ctx2);
-    BLAKE2b_update(&ctx2, input.c_str(), input.length());
-    BLAKE2b_finish(&ctx2, hash2);
+    rats_blake2b_context_t ctx2;
+    rats_blake2b_reset(&ctx2);
+    rats_blake2b_update(&ctx2, input.c_str(), input.length());
+    rats_blake2b_finish(&ctx2, hash2);
     
     EXPECT_EQ(memcmp(hash, hash2, 64), 0);
 }
 
 TEST_F(BLAKE2bTest, DifferentInputsDifferentHashes) {
     uint8_t hash1[64], hash2[64];
-    BLAKE2b_context_t ctx;
+    rats_blake2b_context_t ctx;
     
-    BLAKE2b_reset(&ctx);
-    BLAKE2b_update(&ctx, "message1", 8);
-    BLAKE2b_finish(&ctx, hash1);
+    rats_blake2b_reset(&ctx);
+    rats_blake2b_update(&ctx, "message1", 8);
+    rats_blake2b_finish(&ctx, hash1);
     
-    BLAKE2b_reset(&ctx);
-    BLAKE2b_update(&ctx, "message2", 8);
-    BLAKE2b_finish(&ctx, hash2);
+    rats_blake2b_reset(&ctx);
+    rats_blake2b_update(&ctx, "message2", 8);
+    rats_blake2b_finish(&ctx, hash2);
     
     EXPECT_NE(memcmp(hash1, hash2, 64), 0);
 }
@@ -222,19 +222,19 @@ TEST_F(BLAKE2bTest, ByteByByteUpdate) {
     
     // Hash all at once
     uint8_t hash1[64];
-    BLAKE2b_context_t ctx1;
-    BLAKE2b_reset(&ctx1);
-    BLAKE2b_update(&ctx1, message, len);
-    BLAKE2b_finish(&ctx1, hash1);
+    rats_blake2b_context_t ctx1;
+    rats_blake2b_reset(&ctx1);
+    rats_blake2b_update(&ctx1, message, len);
+    rats_blake2b_finish(&ctx1, hash1);
     
     // Hash byte by byte
     uint8_t hash2[64];
-    BLAKE2b_context_t ctx2;
-    BLAKE2b_reset(&ctx2);
+    rats_blake2b_context_t ctx2;
+    rats_blake2b_reset(&ctx2);
     for (size_t i = 0; i < len; i++) {
-        BLAKE2b_update(&ctx2, message + i, 1);
+        rats_blake2b_update(&ctx2, message + i, 1);
     }
-    BLAKE2b_finish(&ctx2, hash2);
+    rats_blake2b_finish(&ctx2, hash2);
     
     EXPECT_EQ(memcmp(hash1, hash2, 64), 0);
 }

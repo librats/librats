@@ -48,45 +48,45 @@ int main() {
 
     // ── SHA-256 ──────────────────────────────────────────────────────────────
     b.group("SHA-256  (8 KiB)").bytes(N);
-    b.run("librats", [&]{ sha256_hash(h32, in.data(), N); do_not_optimize(h32); });
+    b.run("librats", [&]{ rats_sha256_hash(h32, in.data(), N); do_not_optimize(h32); });
     b.run("noise-c", [&]{ nc_sha256(h32, in.data(), N);   do_not_optimize(h32); });
 
     // ── SHA-512 ──────────────────────────────────────────────────────────────
     b.group("SHA-512  (8 KiB)").bytes(N);
-    b.run("librats", [&]{ sha512_hash(h64, in.data(), N); do_not_optimize(h64); });
+    b.run("librats", [&]{ rats_sha512_hash(h64, in.data(), N); do_not_optimize(h64); });
     b.run("noise-c", [&]{ nc_sha512(h64, in.data(), N);   do_not_optimize(h64); });
 
     // ── BLAKE2b ──────────────────────────────────────────────────────────────
     b.group("BLAKE2b  (8 KiB)").bytes(N);
-    b.run("librats", [&]{ BLAKE2b_context_t c; BLAKE2b_reset(&c);
-                          BLAKE2b_update(&c, in.data(), N); BLAKE2b_finish(&c, h64);
+    b.run("librats", [&]{ rats_blake2b_context_t c; rats_blake2b_reset(&c);
+                          rats_blake2b_update(&c, in.data(), N); rats_blake2b_finish(&c, h64);
                           do_not_optimize(h64); });
     b.run("noise-c", [&]{ nc_blake2b(h64, in.data(), N); do_not_optimize(h64); });
 
     // ── BLAKE2s ──────────────────────────────────────────────────────────────
     b.group("BLAKE2s  (8 KiB)").bytes(N);
-    b.run("librats", [&]{ BLAKE2s_context_t c; BLAKE2s_reset(&c);
-                          BLAKE2s_update(&c, in.data(), N); BLAKE2s_finish(&c, h32);
+    b.run("librats", [&]{ rats_blake2s_context_t c; rats_blake2s_reset(&c);
+                          rats_blake2s_update(&c, in.data(), N); rats_blake2s_finish(&c, h32);
                           do_not_optimize(h32); });
     b.run("noise-c", [&]{ nc_blake2s(h32, in.data(), N); do_not_optimize(h32); });
 
     // ── ChaCha20 keystream ───────────────────────────────────────────────────
     b.group("ChaCha20  (8 KiB)").bytes(N);
-    b.run("librats", [&]{ chacha_ctx x; chacha_keysetup(&x, key, 256);
-                          chacha_ivsetup(&x, iv, counter);
-                          chacha_encrypt_bytes(&x, in.data(), out.data(), (uint32_t)N);
+    b.run("librats", [&]{ rats_chacha_ctx x; rats_chacha_keysetup(&x, key, 256);
+                          rats_chacha_ivsetup(&x, iv, counter);
+                          rats_chacha_encrypt_bytes(&x, in.data(), out.data(), (uint32_t)N);
                           do_not_optimize(out[0]); });
     b.run("noise-c", [&]{ nc_chacha20(out.data(), in.data(), N, key, iv, counter);
                           do_not_optimize(out[0]); });
 
     // ── Poly1305 MAC ─────────────────────────────────────────────────────────
     b.group("Poly1305  (8 KiB)").bytes(N);
-    b.run("librats", [&]{ poly1305_auth(mac, in.data(), N, key); do_not_optimize(mac); });
+    b.run("librats", [&]{ rats_poly1305_auth(mac, in.data(), N, key); do_not_optimize(mac); });
     b.run("noise-c", [&]{ nc_poly1305(mac, in.data(), N, key);   do_not_optimize(mac); });
 
     // ── ChaCha20-Poly1305 AEAD (seal) ────────────────────────────────────────
     b.group("ChaCha20-Poly1305 seal  (8 KiB)").bytes(N);
-    b.run("librats", [&]{ chachapoly_encrypt(key, nonce, nullptr, 0, in.data(), N, out.data());
+    b.run("librats", [&]{ rats_chachapoly_encrypt(key, nonce, nullptr, 0, in.data(), N, out.data());
                           do_not_optimize(out[0]); });
     b.run("noise-c", [&]{ nc_chachapoly_encrypt(key, nonce, nullptr, 0, in.data(), N, out.data());
                           do_not_optimize(out[0]); });
@@ -96,9 +96,9 @@ int main() {
     // ops/s (a Noise_XX handshake performs 4 of these per side).
     uint8_t sk[32]; memcpy(sk, key, 32);
     b.group("X25519 scalarmult  (per op)").items(1);
-    b.run("librats", [&]{ curve25519_donna(pub, sk, curve25519_basepoint);
+    b.run("librats", [&]{ rats_curve25519_donna(pub, sk, rats_curve25519_basepoint);
                           sk[0] = pub[0]; do_not_optimize(pub); });
-    b.run("noise-c", [&]{ nc_curve25519(pub, sk, curve25519_basepoint);
+    b.run("noise-c", [&]{ nc_curve25519(pub, sk, rats_curve25519_basepoint);
                           sk[0] = pub[0]; do_not_optimize(pub); });
 
     b.report();

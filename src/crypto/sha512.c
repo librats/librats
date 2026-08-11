@@ -24,7 +24,7 @@
 #include "sha512.h"
 #include <string.h>
 
-void sha512_reset(sha512_context_t *context)
+void rats_sha512_reset(rats_sha512_context_t *context)
 {
     static uint64_t const hash_start[8] = {
         0x6A09E667F3BCC908ULL, 0xBB67AE8584CAA73BULL, 0x3C6EF372FE94F82BULL,
@@ -38,7 +38,7 @@ void sha512_reset(sha512_context_t *context)
 
 #define rightRotate(v, n) (((v) >> (n)) | ((v) << (64 - (n))))
 
-static void sha512_transform(sha512_context_t *context, const uint8_t *m)
+static void rats_sha512_transform(rats_sha512_context_t *context, const uint8_t *m)
 {
     static uint64_t const k[80] = {
         0x428A2F98D728AE22ULL, 0x7137449123EF65CDULL, 0xB5C0FBCFEC4D3B2FULL,
@@ -140,12 +140,12 @@ static void sha512_transform(sha512_context_t *context, const uint8_t *m)
     context->h[7] += h;
 }
 
-void sha512_update(sha512_context_t *context, const void *data, size_t size)
+void rats_sha512_update(rats_sha512_context_t *context, const void *data, size_t size)
 {
     const uint8_t *d = (const uint8_t *)data;
     while (size > 0) {
         if (context->posn == 0 && size >= 128) {
-            sha512_transform(context, d);
+            rats_sha512_transform(context, d);
             d += 128;
             size -= 128;
             context->length += 128 * 8;
@@ -156,7 +156,7 @@ void sha512_update(sha512_context_t *context, const void *data, size_t size)
             memcpy(context->m + context->posn, d, temp);
             context->posn += (uint8_t)temp;
             if (context->posn >= 128) {
-                sha512_transform(context, context->m);
+                rats_sha512_transform(context, context->m);
                 context->posn = 0;
             }
             d += temp;
@@ -178,7 +178,7 @@ static void write_be64(uint8_t *out, uint64_t value)
     out[7] = (uint8_t)value;
 }
 
-void sha512_finish(sha512_context_t *context, uint8_t *hash)
+void rats_sha512_finish(rats_sha512_context_t *context, uint8_t *hash)
 {
     uint8_t posn = context->posn;
     if (posn <= (128 - 17)) {
@@ -187,21 +187,21 @@ void sha512_finish(sha512_context_t *context, uint8_t *hash)
     } else {
         context->m[posn] = 0x80;
         memset(context->m + posn + 1, 0, 128 - (posn + 1));
-        sha512_transform(context, context->m);
+        rats_sha512_transform(context, context->m);
         memset(context->m, 0, 128 - 16);
     }
     write_be64(context->m + 128 - 16, 0);
     write_be64(context->m + 128 - 8, context->length);
-    sha512_transform(context, context->m);
+    rats_sha512_transform(context, context->m);
     context->posn = 0;
     for (posn = 0; posn < 8; ++posn)
         write_be64(hash + posn * 8, context->h[posn]);
 }
 
-void sha512_hash(uint8_t *hash, const void *data, size_t size)
+void rats_sha512_hash(uint8_t *hash, const void *data, size_t size)
 {
-    sha512_context_t context;
-    sha512_reset(&context);
-    sha512_update(&context, data, size);
-    sha512_finish(&context, hash);
+    rats_sha512_context_t context;
+    rats_sha512_reset(&context);
+    rats_sha512_update(&context, data, size);
+    rats_sha512_finish(&context, hash);
 }

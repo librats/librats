@@ -31,8 +31,8 @@
 extern "C" {
 #endif
 
-#define BLAKE2B_HASH_SIZE 64
-#define BLAKE2B_BLOCK_SIZE 128
+#define RATS_BLAKE2B_HASH_SIZE 64
+#define RATS_BLAKE2B_BLOCK_SIZE 128
 
 typedef struct
 {
@@ -41,11 +41,11 @@ typedef struct
     uint64_t length;    /* Limited to 2^64 - 1 bytes */
     uint8_t  posn;
 
-} BLAKE2b_context_t;
+} rats_blake2b_context_t;
 
-void BLAKE2b_reset(BLAKE2b_context_t *context);
-void BLAKE2b_update(BLAKE2b_context_t *context, const void *data, size_t size);
-void BLAKE2b_finish(BLAKE2b_context_t *context, uint8_t *hash);
+void rats_blake2b_reset(rats_blake2b_context_t *context);
+void rats_blake2b_update(rats_blake2b_context_t *context, const void *data, size_t size);
+void rats_blake2b_finish(rats_blake2b_context_t *context, uint8_t *hash);
 
 #ifdef __cplusplus
 }

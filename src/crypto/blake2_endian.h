@@ -24,35 +24,32 @@
 #ifndef LIBRATS_BLAKE2_ENDIAN_H
 #define LIBRATS_BLAKE2_ENDIAN_H
 
-#if defined(__WIN32__) || defined(WIN32) || defined(_WIN32)
-#ifndef __BIG_ENDIAN
-#define __BIG_ENDIAN 4321
+/*
+ * Defines RATS_BLAKE2_LITTLE_ENDIAN when the target is little-endian, and
+ * nothing else. This header is installed, so it must NOT define __BYTE_ORDER /
+ * __LITTLE_ENDIAN / __BIG_ENDIAN: those names are reserved to the platform, and
+ * defining them here leaks into every consumer translation unit that includes
+ * us. Detect the byte order instead of asserting it.
+ */
+
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+/* GCC and Clang predefine these on every target — no system header needed. */
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define RATS_BLAKE2_LITTLE_ENDIAN 1
 #endif
-#ifndef __LITTLE_ENDIAN
-#define __LITTLE_ENDIAN 1234
-#endif
-#ifndef __BYTE_ORDER
-#define __BYTE_ORDER __LITTLE_ENDIAN
-#endif
+#elif defined(_WIN32)
+/* MSVC predefines no byte-order macro; every Windows target it ships is LE. */
+#define RATS_BLAKE2_LITTLE_ENDIAN 1
 #elif defined(__APPLE__)
 #include <machine/endian.h>
-#if !defined( __BYTE_ORDER) && defined(__DARWIN_BYTE_ORDER)
-#define __BYTE_ORDER __DARWIN_BYTE_ORDER
+#if __DARWIN_BYTE_ORDER == __DARWIN_LITTLE_ENDIAN
+#define RATS_BLAKE2_LITTLE_ENDIAN 1
 #endif
-#if !defined( __BIG_ENDIAN) && defined(__DARWIN_BIG_ENDIAN)
-#define __BIG_ENDIAN __DARWIN_BIG_ENDIAN
-#endif
-#if !defined( __LITTLE_ENDIAN) && defined(__DARWIN_LITTLE_ENDIAN)
-#define __LITTLE_ENDIAN __DARWIN_LITTLE_ENDIAN
-#endif
-#elif defined(__ANDROID__)
-#include <endian.h>
 #else
 #include <endian.h>
-#endif
-
 #if __BYTE_ORDER == __LITTLE_ENDIAN
-#define BLAKE2_LITTLE_ENDIAN 1
+#define RATS_BLAKE2_LITTLE_ENDIAN 1
+#endif
 #endif
 
 #endif /* LIBRATS_BLAKE2_ENDIAN_H */

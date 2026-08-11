@@ -30,17 +30,17 @@
     #define POLY1305_NOINLINE
 #endif
 
-#define poly1305_block_size 16
+#define rats_poly1305_block_size 16
 
 /* 17 + sizeof(size_t) + 14*sizeof(unsigned long) */
-typedef struct poly1305_state_internal_t {
+typedef struct rats_poly1305_state_internal_t {
     unsigned long r[5];
     unsigned long h[5];
     unsigned long pad[4];
     size_t leftover;
-    unsigned char buffer[poly1305_block_size];
+    unsigned char buffer[rats_poly1305_block_size];
     unsigned char final;
-} poly1305_state_internal_t;
+} rats_poly1305_state_internal_t;
 
 /* interpret four 8 bit unsigned integers as a 32 bit unsigned integer in little endian */
 static unsigned long
@@ -62,8 +62,8 @@ U32TO8(unsigned char *p, unsigned long v) {
 }
 
 void
-poly1305_init(poly1305_context *ctx, const unsigned char key[32]) {
-    poly1305_state_internal_t *st = (poly1305_state_internal_t *)ctx;
+rats_poly1305_init(rats_poly1305_context *ctx, const unsigned char key[32]) {
+    rats_poly1305_state_internal_t *st = (rats_poly1305_state_internal_t *)ctx;
 
     /* r &= 0xffffffc0ffffffc0ffffffc0fffffff */
     st->r[0] = (U8TO32(&key[ 0])     ) & 0x3ffffff;
@@ -90,7 +90,7 @@ poly1305_init(poly1305_context *ctx, const unsigned char key[32]) {
 }
 
 static void
-poly1305_blocks(poly1305_state_internal_t *st, const unsigned char *m, size_t bytes) {
+rats_poly1305_blocks(rats_poly1305_state_internal_t *st, const unsigned char *m, size_t bytes) {
     const unsigned long hibit = (st->final) ? 0 : (1UL << 24); /* 1 << 128 */
     unsigned long r0,r1,r2,r3,r4;
     unsigned long s1,s2,s3,s4;
@@ -115,7 +115,7 @@ poly1305_blocks(poly1305_state_internal_t *st, const unsigned char *m, size_t by
     h3 = st->h[3];
     h4 = st->h[4];
 
-    while (bytes >= poly1305_block_size) {
+    while (bytes >= rats_poly1305_block_size) {
         /* h += m[i] */
         h0 += (U8TO32(m+ 0)     ) & 0x3ffffff;
         h1 += (U8TO32(m+ 3) >> 2) & 0x3ffffff;
@@ -139,8 +139,8 @@ poly1305_blocks(poly1305_state_internal_t *st, const unsigned char *m, size_t by
         h0 += c * 5;  c =                (h0 >> 26); h0 =                h0 & 0x3ffffff;
         h1 += c;
 
-        m += poly1305_block_size;
-        bytes -= poly1305_block_size;
+        m += rats_poly1305_block_size;
+        bytes -= rats_poly1305_block_size;
     }
 
     st->h[0] = h0;
@@ -151,8 +151,8 @@ poly1305_blocks(poly1305_state_internal_t *st, const unsigned char *m, size_t by
 }
 
 POLY1305_NOINLINE void
-poly1305_finish(poly1305_context *ctx, unsigned char mac[16]) {
-    poly1305_state_internal_t *st = (poly1305_state_internal_t *)ctx;
+rats_poly1305_finish(rats_poly1305_context *ctx, unsigned char mac[16]) {
+    rats_poly1305_state_internal_t *st = (rats_poly1305_state_internal_t *)ctx;
     unsigned long h0,h1,h2,h3,h4,c;
     unsigned long g0,g1,g2,g3,g4;
     unsigned long long f;
@@ -162,10 +162,10 @@ poly1305_finish(poly1305_context *ctx, unsigned char mac[16]) {
     if (st->leftover) {
         size_t i = st->leftover;
         st->buffer[i++] = 1;
-        for (; i < poly1305_block_size; i++)
+        for (; i < rats_poly1305_block_size; i++)
             st->buffer[i] = 0;
         st->final = 1;
-        poly1305_blocks(st, st->buffer, poly1305_block_size);
+        rats_poly1305_blocks(st, st->buffer, rats_poly1305_block_size);
     }
 
     /* fully carry h */
@@ -274,17 +274,17 @@ poly1305_finish(poly1305_context *ctx, unsigned char mac[16]) {
     #define POLY1305_NOINLINE __attribute__((noinline))
 #endif
 
-#define poly1305_block_size 16
+#define rats_poly1305_block_size 16
 
 /* 17 + sizeof(size_t) + 8*sizeof(unsigned long long) */
-typedef struct poly1305_state_internal_t {
+typedef struct rats_poly1305_state_internal_t {
     unsigned long long r[3];
     unsigned long long h[3];
     unsigned long long pad[2];
     size_t leftover;
-    unsigned char buffer[poly1305_block_size];
+    unsigned char buffer[rats_poly1305_block_size];
     unsigned char final;
-} poly1305_state_internal_t;
+} rats_poly1305_state_internal_t;
 
 /* interpret eight 8 bit unsigned integers as a 64 bit unsigned integer in little endian */
 static unsigned long long
@@ -314,8 +314,8 @@ U64TO8(unsigned char *p, unsigned long long v) {
 }
 
 void
-poly1305_init(poly1305_context *ctx, const unsigned char key[32]) {
-    poly1305_state_internal_t *st = (poly1305_state_internal_t *)ctx;
+rats_poly1305_init(rats_poly1305_context *ctx, const unsigned char key[32]) {
+    rats_poly1305_state_internal_t *st = (rats_poly1305_state_internal_t *)ctx;
     unsigned long long t0,t1;
 
     /* r &= 0xffffffc0ffffffc0ffffffc0fffffff */
@@ -340,7 +340,7 @@ poly1305_init(poly1305_context *ctx, const unsigned char key[32]) {
 }
 
 static void
-poly1305_blocks(poly1305_state_internal_t *st, const unsigned char *m, size_t bytes) {
+rats_poly1305_blocks(rats_poly1305_state_internal_t *st, const unsigned char *m, size_t bytes) {
     const unsigned long long hibit = (st->final) ? 0 : ((unsigned long long)1 << 40); /* 1 << 128 */
     unsigned long long r0,r1,r2;
     unsigned long long s1,s2;
@@ -359,7 +359,7 @@ poly1305_blocks(poly1305_state_internal_t *st, const unsigned char *m, size_t by
     s1 = r1 * (5 << 2);
     s2 = r2 * (5 << 2);
 
-    while (bytes >= poly1305_block_size) {
+    while (bytes >= rats_poly1305_block_size) {
         unsigned long long t0,t1;
 
         /* h += m[i] */
@@ -382,8 +382,8 @@ poly1305_blocks(poly1305_state_internal_t *st, const unsigned char *m, size_t by
         h0  += c * 5; c = (h0 >> 44);  h0 =    h0  & 0xfffffffffffULL;
         h1  += c;
 
-        m += poly1305_block_size;
-        bytes -= poly1305_block_size;
+        m += rats_poly1305_block_size;
+        bytes -= rats_poly1305_block_size;
     }
 
     st->h[0] = h0;
@@ -393,8 +393,8 @@ poly1305_blocks(poly1305_state_internal_t *st, const unsigned char *m, size_t by
 
 
 POLY1305_NOINLINE void
-poly1305_finish(poly1305_context *ctx, unsigned char mac[16]) {
-    poly1305_state_internal_t *st = (poly1305_state_internal_t *)ctx;
+rats_poly1305_finish(rats_poly1305_context *ctx, unsigned char mac[16]) {
+    rats_poly1305_state_internal_t *st = (rats_poly1305_state_internal_t *)ctx;
     unsigned long long h0,h1,h2,c;
     unsigned long long g0,g1,g2;
     unsigned long long t0,t1;
@@ -403,10 +403,10 @@ poly1305_finish(poly1305_context *ctx, unsigned char mac[16]) {
     if (st->leftover) {
         size_t i = st->leftover;
         st->buffer[i] = 1;
-        for (i = i + 1; i < poly1305_block_size; i++)
+        for (i = i + 1; i < rats_poly1305_block_size; i++)
             st->buffer[i] = 0;
         st->final = 1;
-        poly1305_blocks(st, st->buffer, poly1305_block_size);
+        rats_poly1305_blocks(st, st->buffer, rats_poly1305_block_size);
     }
 
     /* fully carry h */
@@ -466,13 +466,13 @@ poly1305_finish(poly1305_context *ctx, unsigned char mac[16]) {
 #endif /* POLY1305_64BIT */
 
 void
-poly1305_update(poly1305_context *ctx, const unsigned char *m, size_t bytes) {
-    poly1305_state_internal_t *st = (poly1305_state_internal_t *)ctx;
+rats_poly1305_update(rats_poly1305_context *ctx, const unsigned char *m, size_t bytes) {
+    rats_poly1305_state_internal_t *st = (rats_poly1305_state_internal_t *)ctx;
     size_t i;
 
     /* handle leftover */
     if (st->leftover) {
-        size_t want = (poly1305_block_size - st->leftover);
+        size_t want = (rats_poly1305_block_size - st->leftover);
         if (want > bytes)
             want = bytes;
         for (i = 0; i < want; i++)
@@ -480,16 +480,16 @@ poly1305_update(poly1305_context *ctx, const unsigned char *m, size_t bytes) {
         bytes -= want;
         m += want;
         st->leftover += want;
-        if (st->leftover < poly1305_block_size)
+        if (st->leftover < rats_poly1305_block_size)
             return;
-        poly1305_blocks(st, st->buffer, poly1305_block_size);
+        rats_poly1305_blocks(st, st->buffer, rats_poly1305_block_size);
         st->leftover = 0;
     }
 
     /* process full blocks */
-    if (bytes >= poly1305_block_size) {
-        size_t want = (bytes & ~(poly1305_block_size - 1));
-        poly1305_blocks(st, m, want);
+    if (bytes >= rats_poly1305_block_size) {
+        size_t want = (bytes & ~(rats_poly1305_block_size - 1));
+        rats_poly1305_blocks(st, m, want);
         m += want;
         bytes -= want;
     }
@@ -503,15 +503,15 @@ poly1305_update(poly1305_context *ctx, const unsigned char *m, size_t bytes) {
 }
 
 void
-poly1305_auth(unsigned char mac[16], const unsigned char *m, size_t bytes, const unsigned char key[32]) {
-    poly1305_context ctx;
-    poly1305_init(&ctx, key);
-    poly1305_update(&ctx, m, bytes);
-    poly1305_finish(&ctx, mac);
+rats_poly1305_auth(unsigned char mac[16], const unsigned char *m, size_t bytes, const unsigned char key[32]) {
+    rats_poly1305_context ctx;
+    rats_poly1305_init(&ctx, key);
+    rats_poly1305_update(&ctx, m, bytes);
+    rats_poly1305_finish(&ctx, mac);
 }
 
 int
-poly1305_verify(const unsigned char mac1[16], const unsigned char mac2[16]) {
+rats_poly1305_verify(const unsigned char mac1[16], const unsigned char mac2[16]) {
     size_t i;
     unsigned int dif = 0;
     for (i = 0; i < 16; i++)
@@ -523,7 +523,7 @@ poly1305_verify(const unsigned char mac1[16], const unsigned char mac2[16]) {
 
 /* test a few basic operations */
 int
-poly1305_power_on_self_test(void) {
+rats_poly1305_power_on_self_test(void) {
     /* example from nacl */
     static const unsigned char nacl_key[32] = {
         0xee,0xa6,0xa7,0x25,0x1c,0x1e,0x72,0x91,
@@ -560,8 +560,8 @@ poly1305_power_on_self_test(void) {
     unsigned char mac[16];
     int result = 1;
 
-    poly1305_auth(mac, nacl_msg, sizeof(nacl_msg), nacl_key);
-    result &= poly1305_verify(nacl_mac, mac);
+    rats_poly1305_auth(mac, nacl_msg, sizeof(nacl_msg), nacl_key);
+    result &= rats_poly1305_verify(nacl_mac, mac);
 
     return result;
 }

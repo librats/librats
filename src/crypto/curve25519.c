@@ -51,7 +51,7 @@
 
 /* The Curve25519 basepoint. RATS_API here is what puts the symbol in the DLL:
  * unlike functions, exported data needs the attribute on the definition too. */
-RATS_API const uint8_t curve25519_basepoint[32] = {9};
+RATS_API const uint8_t rats_curve25519_basepoint[32] = {9};
 
 #ifdef _MSC_VER
 #define inline __inline
@@ -846,7 +846,7 @@ crecip(limb *out, const limb *z) {
 }
 
 int
-curve25519_donna(u8 *mypublic, const u8 *secret, const u8 *basepoint) {
+rats_curve25519_donna(u8 *mypublic, const u8 *secret, const u8 *basepoint) {
   limb bp[10], x[10], z[11], zmone[10];
   uint8_t e[32];
   int i;

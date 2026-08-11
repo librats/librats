@@ -33,31 +33,31 @@
 #include <string.h>
 
 /* Initialization vectors for BLAKE2s */
-#define BLAKE2s_IV0 0x6A09E667
-#define BLAKE2s_IV1 0xBB67AE85
-#define BLAKE2s_IV2 0x3C6EF372
-#define BLAKE2s_IV3 0xA54FF53A
-#define BLAKE2s_IV4 0x510E527F
-#define BLAKE2s_IV5 0x9B05688C
-#define BLAKE2s_IV6 0x1F83D9AB
-#define BLAKE2s_IV7 0x5BE0CD19
+#define rats_blake2s_IV0 0x6A09E667
+#define rats_blake2s_IV1 0xBB67AE85
+#define rats_blake2s_IV2 0x3C6EF372
+#define rats_blake2s_IV3 0xA54FF53A
+#define rats_blake2s_IV4 0x510E527F
+#define rats_blake2s_IV5 0x9B05688C
+#define rats_blake2s_IV6 0x1F83D9AB
+#define rats_blake2s_IV7 0x5BE0CD19
 
-void BLAKE2s_reset(BLAKE2s_context_t *context)
+void rats_blake2s_reset(rats_blake2s_context_t *context)
 {
-#if BLAKE2S_USE_VECTOR_MATH
-    context->h[0] = (BlakeVectorUInt32){BLAKE2s_IV0 ^ 0x01010020,
-                                        BLAKE2s_IV1, BLAKE2s_IV2, BLAKE2s_IV3};
-    context->h[1] = (BlakeVectorUInt32){BLAKE2s_IV4, BLAKE2s_IV5,
-                                        BLAKE2s_IV6, BLAKE2s_IV7};
+#if RATS_BLAKE2S_USE_VECTOR_MATH
+    context->h[0] = (RatsBlakeVectorUInt32){rats_blake2s_IV0 ^ 0x01010020,
+                                        rats_blake2s_IV1, rats_blake2s_IV2, rats_blake2s_IV3};
+    context->h[1] = (RatsBlakeVectorUInt32){rats_blake2s_IV4, rats_blake2s_IV5,
+                                        rats_blake2s_IV6, rats_blake2s_IV7};
 #else
-    context->h[0] = BLAKE2s_IV0 ^ 0x01010020; /* Default output length of 32 */
-    context->h[1] = BLAKE2s_IV1;
-    context->h[2] = BLAKE2s_IV2;
-    context->h[3] = BLAKE2s_IV3;
-    context->h[4] = BLAKE2s_IV4;
-    context->h[5] = BLAKE2s_IV5;
-    context->h[6] = BLAKE2s_IV6;
-    context->h[7] = BLAKE2s_IV7;
+    context->h[0] = rats_blake2s_IV0 ^ 0x01010020; /* Default output length of 32 */
+    context->h[1] = rats_blake2s_IV1;
+    context->h[2] = rats_blake2s_IV2;
+    context->h[3] = rats_blake2s_IV3;
+    context->h[4] = rats_blake2s_IV4;
+    context->h[5] = rats_blake2s_IV5;
+    context->h[6] = rats_blake2s_IV6;
+    context->h[7] = rats_blake2s_IV7;
 #endif
     context->length = 0;
     context->posn = 0;
@@ -93,11 +93,11 @@ static const uint8_t sigma[10][16] = {
         (b) = rightRotate((b) ^ (c), 7); \
     } while (0)
 
-#if BLAKE2S_USE_VECTOR_MATH
+#if RATS_BLAKE2S_USE_VECTOR_MATH
 
-#define shuffleLeft1(x) (BlakeVectorUInt32){(x)[1], (x)[2], (x)[3], (x)[0]}
-#define shuffleLeft2(x) (BlakeVectorUInt32){(x)[2], (x)[3], (x)[0], (x)[1]}
-#define shuffleLeft3(x) (BlakeVectorUInt32){(x)[3], (x)[0], (x)[1], (x)[2]}
+#define shuffleLeft1(x) (RatsBlakeVectorUInt32){(x)[1], (x)[2], (x)[3], (x)[0]}
+#define shuffleLeft2(x) (RatsBlakeVectorUInt32){(x)[2], (x)[3], (x)[0], (x)[1]}
+#define shuffleLeft3(x) (RatsBlakeVectorUInt32){(x)[3], (x)[0], (x)[1], (x)[2]}
 
 /* Perform a BLAKE2s quarter round operation with vector math */
 #define quarterRoundVec(a, b, c, d, mv0, mv1) \
@@ -115,31 +115,31 @@ static const uint8_t sigma[10][16] = {
 #endif
 
 static void blake2s_transform
-    (BLAKE2s_context_t *context, const uint8_t *data, uint32_t f0)
+    (rats_blake2s_context_t *context, const uint8_t *data, uint32_t f0)
 {
-#if BLAKE2S_USE_VECTOR_MATH
+#if RATS_BLAKE2S_USE_VECTOR_MATH
     /* Assumption: CPU is little-endian and supports unaligned 32-bit loads */
     uint8_t index;
     const uint32_t *m = (const uint32_t *)data;
-    BlakeVectorUInt32 v0, v1, v2, v3, mv0, mv1;
+    RatsBlakeVectorUInt32 v0, v1, v2, v3, mv0, mv1;
     const uint8_t *sigma_row;
 
     /* Format the block to be hashed */
     v0 = context->h[0];
     v1 = context->h[1];
-    v2 = (BlakeVectorUInt32){BLAKE2s_IV0, BLAKE2s_IV1,
-                             BLAKE2s_IV2, BLAKE2s_IV3};
-    v3 = (BlakeVectorUInt32){BLAKE2s_IV4 ^ (uint32_t)(context->length),
-                             BLAKE2s_IV5 ^ (uint32_t)(context->length >> 32),
-                             BLAKE2s_IV6 ^ f0, BLAKE2s_IV7};
+    v2 = (RatsBlakeVectorUInt32){rats_blake2s_IV0, rats_blake2s_IV1,
+                             rats_blake2s_IV2, rats_blake2s_IV3};
+    v3 = (RatsBlakeVectorUInt32){rats_blake2s_IV4 ^ (uint32_t)(context->length),
+                             rats_blake2s_IV5 ^ (uint32_t)(context->length >> 32),
+                             rats_blake2s_IV6 ^ f0, rats_blake2s_IV7};
 
     /* Perform the 10 BLAKE2s rounds */
     sigma_row = sigma[0];
     for (index = 0; index < 10; ++index, sigma_row += 16) {
         /* Column round */
-        mv0 = (BlakeVectorUInt32){m[sigma_row[0]], m[sigma_row[2]],
+        mv0 = (RatsBlakeVectorUInt32){m[sigma_row[0]], m[sigma_row[2]],
                                   m[sigma_row[4]], m[sigma_row[6]]};
-        mv1 = (BlakeVectorUInt32){m[sigma_row[1]], m[sigma_row[3]],
+        mv1 = (RatsBlakeVectorUInt32){m[sigma_row[1]], m[sigma_row[3]],
                                   m[sigma_row[5]], m[sigma_row[7]]};
         quarterRoundVec(v0, v1, v2, v3, mv0, mv1);
         v1 = shuffleLeft1(v1);
@@ -147,9 +147,9 @@ static void blake2s_transform
         v3 = shuffleLeft3(v3);
 
         /* Diagonal round */
-        mv0 = (BlakeVectorUInt32){m[sigma_row[8]],  m[sigma_row[10]],
+        mv0 = (RatsBlakeVectorUInt32){m[sigma_row[8]],  m[sigma_row[10]],
                                   m[sigma_row[12]], m[sigma_row[14]]};
-        mv1 = (BlakeVectorUInt32){m[sigma_row[9]],  m[sigma_row[11]],
+        mv1 = (RatsBlakeVectorUInt32){m[sigma_row[9]],  m[sigma_row[11]],
                                   m[sigma_row[13]], m[sigma_row[15]]};
         quarterRoundVec(v0, v1, v2, v3, mv0, mv1);
         v1 = shuffleLeft3(v1);
@@ -160,14 +160,14 @@ static void blake2s_transform
     /* Combine the new and old hash values */
     context->h[0] ^= v0 ^ v2;
     context->h[1] ^= v1 ^ v3;
-#else /* !BLAKE2S_USE_VECTOR_MATH */
+#else /* !RATS_BLAKE2S_USE_VECTOR_MATH */
     uint8_t index;
     uint32_t m[16];
     uint32_t v[16];
     const uint8_t *sigma_row;
 
     /* Unpack the input data from little-endian */
-#if BLAKE2_LITTLE_ENDIAN
+#if RATS_BLAKE2_LITTLE_ENDIAN
     memcpy(m, data, sizeof(m));
 #else
     for (index = 0; index < 16; ++index, data += 4) {
@@ -180,14 +180,14 @@ static void blake2s_transform
 
     /* Format the block to be hashed */
     memcpy(v, context->h, sizeof(context->h));
-    v[8]  = BLAKE2s_IV0;
-    v[9]  = BLAKE2s_IV1;
-    v[10] = BLAKE2s_IV2;
-    v[11] = BLAKE2s_IV3;
-    v[12] = BLAKE2s_IV4 ^ (uint32_t)(context->length);
-    v[13] = BLAKE2s_IV5 ^ (uint32_t)(context->length >> 32);
-    v[14] = BLAKE2s_IV6 ^ f0;
-    v[15] = BLAKE2s_IV7;
+    v[8]  = rats_blake2s_IV0;
+    v[9]  = rats_blake2s_IV1;
+    v[10] = rats_blake2s_IV2;
+    v[11] = rats_blake2s_IV3;
+    v[12] = rats_blake2s_IV4 ^ (uint32_t)(context->length);
+    v[13] = rats_blake2s_IV5 ^ (uint32_t)(context->length >> 32);
+    v[14] = rats_blake2s_IV6 ^ f0;
+    v[15] = rats_blake2s_IV7;
 
     /* Perform the 10 BLAKE2s rounds */
     sigma_row = sigma[0];
@@ -208,10 +208,10 @@ static void blake2s_transform
     /* Combine the new and old hash values */
     for (index = 0; index < 8; ++index)
         context->h[index] ^= (v[index] ^ v[index + 8]);
-#endif /* !BLAKE2S_USE_VECTOR_MATH */
+#endif /* !RATS_BLAKE2S_USE_VECTOR_MATH */
 }
 
-void BLAKE2s_update(BLAKE2s_context_t *context, const void *data, size_t size)
+void rats_blake2s_update(rats_blake2s_context_t *context, const void *data, size_t size)
 {
     /* Break the input up into 512-bit chunks and process each in turn */
     const uint8_t *d = (const uint8_t *)data;
@@ -243,14 +243,14 @@ void BLAKE2s_update(BLAKE2s_context_t *context, const void *data, size_t size)
     }
 }
 
-void BLAKE2s_finish(BLAKE2s_context_t *context, uint8_t *hash)
+void rats_blake2s_finish(rats_blake2s_context_t *context, uint8_t *hash)
 {
     /* Pad the last chunk and hash it with f0 set to all-ones */
     memset(context->m + context->posn, 0, 64 - context->posn);
     blake2s_transform(context, context->m, 0xFFFFFFFF);
 
     /* Copy the hash to the caller's return buffer in little-endian */
-#if BLAKE2_LITTLE_ENDIAN
+#if RATS_BLAKE2_LITTLE_ENDIAN
     memcpy(hash, context->h, sizeof(context->h));
 #else
     {

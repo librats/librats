@@ -31,8 +31,8 @@
 extern "C" {
 #endif
 
-#define SHA256_HASH_SIZE 32
-#define SHA256_BLOCK_SIZE 64
+#define RATS_SHA256_HASH_SIZE 32
+#define RATS_SHA256_BLOCK_SIZE 64
 
 typedef struct
 {
@@ -41,12 +41,12 @@ typedef struct
     uint64_t length;
     uint8_t  posn;
 
-} sha256_context_t;
+} rats_sha256_context_t;
 
-void sha256_reset(sha256_context_t *context);
-void sha256_update(sha256_context_t *context, const void *data, size_t size);
-void sha256_finish(sha256_context_t *context, uint8_t *hash);
-void sha256_hash(uint8_t *hash, const void *data, size_t size);
+void rats_sha256_reset(rats_sha256_context_t *context);
+void rats_sha256_update(rats_sha256_context_t *context, const void *data, size_t size);
+void rats_sha256_finish(rats_sha256_context_t *context, uint8_t *hash);
+void rats_sha256_hash(uint8_t *hash, const void *data, size_t size);
 
 #ifdef __cplusplus
 }

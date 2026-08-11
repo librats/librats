@@ -34,7 +34,7 @@ TEST_F(Curve25519Test, RFC7748TestVector1) {
     uint8_t alice_public[32];
     
     // Derive public key from private key
-    curve25519_donna(alice_public, alice_private, curve25519_basepoint);
+    rats_curve25519_donna(alice_public, alice_private, rats_curve25519_basepoint);
     
     EXPECT_EQ(memcmp(alice_public, alice_public_expected, 32), 0);
 }
@@ -59,7 +59,7 @@ TEST_F(Curve25519Test, RFC7748TestVector2) {
     uint8_t bob_public[32];
     
     // Derive public key from private key
-    curve25519_donna(bob_public, bob_private, curve25519_basepoint);
+    rats_curve25519_donna(bob_public, bob_private, rats_curve25519_basepoint);
     
     EXPECT_EQ(memcmp(bob_public, bob_public_expected, 32), 0);
 }
@@ -93,12 +93,12 @@ TEST_F(Curve25519Test, SharedSecretAgreement) {
     uint8_t shared_alice[32], shared_bob[32];
     
     // Generate public keys
-    curve25519_donna(alice_public, alice_private, curve25519_basepoint);
-    curve25519_donna(bob_public, bob_private, curve25519_basepoint);
+    rats_curve25519_donna(alice_public, alice_private, rats_curve25519_basepoint);
+    rats_curve25519_donna(bob_public, bob_private, rats_curve25519_basepoint);
     
     // Compute shared secrets
-    curve25519_donna(shared_alice, alice_private, bob_public);
-    curve25519_donna(shared_bob, bob_private, alice_public);
+    rats_curve25519_donna(shared_alice, alice_private, bob_public);
+    rats_curve25519_donna(shared_bob, bob_private, alice_public);
     
     // Both should derive the same shared secret
     EXPECT_EQ(memcmp(shared_alice, shared_bob, 32), 0);
@@ -112,7 +112,7 @@ TEST_F(Curve25519Test, BasepointIsCorrect) {
     uint8_t expected_basepoint[32] = {9};
     memset(expected_basepoint + 1, 0, 31);
     
-    EXPECT_EQ(memcmp(curve25519_basepoint, expected_basepoint, 32), 0);
+    EXPECT_EQ(memcmp(rats_curve25519_basepoint, expected_basepoint, 32), 0);
 }
 
 TEST_F(Curve25519Test, DeterministicOutput) {
@@ -125,8 +125,8 @@ TEST_F(Curve25519Test, DeterministicOutput) {
     }
     
     // Generate public key twice
-    curve25519_donna(public1, private_key, curve25519_basepoint);
-    curve25519_donna(public2, private_key, curve25519_basepoint);
+    rats_curve25519_donna(public1, private_key, rats_curve25519_basepoint);
+    rats_curve25519_donna(public2, private_key, rats_curve25519_basepoint);
     
     // Should be identical
     EXPECT_EQ(memcmp(public1, public2, 32), 0);
