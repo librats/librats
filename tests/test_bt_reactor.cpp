@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/reactor.h"
-#include "core/socket.h"
+#include "librats/bittorrent/reactor.h"
+#include "librats/core/socket.h"
 
 #include <atomic>
 #include <chrono>

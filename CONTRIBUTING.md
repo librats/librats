@@ -106,22 +106,25 @@ cmake --build .
 
 ```cpp
 // Classes and Structs: PascalCase
-class RatsClient { };
-struct NatTraversalConfig { };
+class Node { };
+struct NodeConfig { };
 
 // Functions and Methods: snake_case
-void connect_to_peer();
+bool connect(const Address& addr);
 bool is_running() const;
 
 // Variables: snake_case
 int listen_port_;           // Member variables end with underscore
 std::string peer_id;        // Local variables without underscore
 
-// Constants and Enums: SCREAMING_SNAKE_CASE or PascalCase
-static constexpr int MAX_PEERS = 100;
-enum class ConnectionStrategy { DIRECT_ONLY, AUTO_ADAPTIVE };
+// Constants: kCamelCase for constexpr
+constexpr uint32_t kMaxBlockSize = 64u * 1024 * 1024;
 
-// Namespaces: lowercase
+// Enums: enum class with PascalCase enumerators
+enum class CloseReason { LocalClose, PeerClosed, HandshakeFailed };
+
+// Namespaces: lowercase — everything lives under librats,
+// with librats::dht, librats::bittorrent, … nested inside it
 namespace librats { }
 ```
 
@@ -130,9 +133,10 @@ namespace librats { }
 ```cpp
 #pragma once  // Use pragma once for header guards
 
-#include "local_header.h"      // Local includes first
-#include <system_header>        // System includes second
-#include <third_party_header>   // Third-party includes last
+#include "librats/core/address.h"  // librats includes first — always the full
+#include "librats/node/config.h"    // "librats/..." path, even for a sibling
+#include <system_header>            // System includes second
+#include <third_party_header>       // Third-party includes last
 
 namespace librats {
 
@@ -161,14 +165,13 @@ Use Doxygen-style comments for public APIs:
 
 ```cpp
 /**
- * Connect to a peer with automatic NAT traversal
+ * Dial a peer. Non-blocking and thread-safe: the work is posted to the
+ * owning reactor, and the outcome arrives via on_peer_connected().
+ *
  * @param host Target host/IP address
  * @param port Target port
- * @param strategy Connection strategy to use
- * @return true if connection initiated successfully
  */
-bool connect_to_peer(const std::string& host, int port, 
-                    ConnectionStrategy strategy = ConnectionStrategy::AUTO_ADAPTIVE);
+void connect(const std::string& host, uint16_t port);
 ```
 
 #### Error Handling
@@ -188,14 +191,21 @@ if (!socket_valid) {
 
 - Document thread safety guarantees
 - Use `mutable std::mutex` for const methods that need locking
-- Follow the mutex locking order documented in `librats.h`
 - Use RAII lock guards (`std::lock_guard`, `std::unique_lock`)
+- **Do not add locks to the per-connection path.** A `Connection` is owned by
+  exactly one `Reactor` and touched only by that reactor's thread, so it holds
+  no locks and no atomics — that shared-nothing rule is the core invariant.
+  Post work to the owning reactor instead, and offload heavy work to your
+  subsystem's own thread. See [ARCHITECTURE.md](ARCHITECTURE.md) for the
+  threading model.
+- All event callbacks (`on_peer_connected`, message handlers, …) run on a
+  reactor thread — register them before `start()` and keep them non-blocking
 
 ### File Organization
 
 - One class per file (except for closely related small classes)
-- Header files in `src/` with `.h` extension
-- Implementation files in `src/` with `.cpp` extension
+- Header files in `src/librats/` with `.h` extension
+- Implementation files in `src/librats/` with `.cpp` extension
 - Test files in `tests/` with `test_` prefix
 
 ## Testing
@@ -221,7 +231,7 @@ We use GoogleTest for unit testing. Place tests in `tests/test_<module>.cpp`:
 ```cpp
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
-#include "your_module.h"
+#include "librats/<subdir>/your_module.h"
 
 using namespace librats;
 
@@ -376,45 +386,63 @@ Describe:
 
 ## Project Structure
 
+The include root is `src/`, and everything the library ships lives one level
+down in `src/librats/` — so the tree in the repository mirrors the installed
+`<prefix>/include/librats/` exactly, and both resolve `librats/node/node.h`
+the same way.
+
 ```
 librats/
-├── src/                    # Core C++ source files
-│   ├── librats.h          # Main public API header
-│   ├── librats.cpp        # Core implementation
-│   ├── librats_c.h        # C API bindings
-│   ├── socket.cpp/h       # Socket abstraction
-│   ├── dht.cpp/h          # DHT implementation
-│   ├── stun.cpp/h         # STUN client
-│   ├── ice.cpp/h          # ICE implementation
-│   ├── mdns.cpp/h         # mDNS discovery
-│   ├── noise.cpp/h        # Noise Protocol encryption
-│   ├── gossipsub.cpp/h    # GossipSub pub-sub
-│   ├── file_transfer.cpp/h # File transfer
+├── src/                        # Include root — nothing lives here directly
+│   ├── librats/                # Everything installed, mirrors include/librats/
+│   │   ├── core/              # Sockets, buffers, IOPoller, MPSC/timer queues,
+│   │   │                      #   EventBus, ServiceRegistry
+│   │   ├── wire/              # Two-level framing + MessageRouter
+│   │   ├── transport/         # ReactorPool, Reactor, Connection, TCP/UDP links
+│   │   ├── security/          # Identity, Handshaker/Session, Noise & plaintext
+│   │   ├── peer/              # Self-certifying PeerId, PeerTable, Peer handle
+│   │   ├── node/              # Node facade, NodeContext, PeerNetwork, dialer
+│   │   ├── subsystems/        # The opt-in plugins (PubSub, FileTransfer, …)
+│   │   ├── dht/               # Kademlia + KRPC
+│   │   ├── mdns/              # Multicast DNS
+│   │   ├── nat/               # STUN, UPnP, NAT-PMP
+│   │   ├── crypto/            # curve25519 / chacha / poly1305 / blake2 / sha
+│   │   │                      #   + the Noise framework
+│   │   ├── bittorrent/        # BitTorrent (gated by RATS_SEARCH_FEATURES)
+│   │   ├── storage/           # Distributed KV store (gated by RATS_STORAGE)
+│   │   ├── bindings/          # rats.{h,cpp} — the C ABI all FFI bindings use
+│   │   └── util/              # Logger, JSON, filesystem, OS helpers
+│   └── main.cpp                # rats-client reference app — not library code
+├── tests/                      # Unit tests
+│   ├── test_main.cpp          # Test runner
+│   ├── test_socket.cpp        # Socket tests
 │   └── ...
-├── tests/                  # Unit tests
-│   ├── test_main.cpp      # Test runner
-│   ├── test_socket.cpp    # Socket tests
-│   └── ...
-├── docs/                   # Documentation
-├── nodejs/                 # Node.js bindings
-├── python/                 # Python bindings
-├── android/                # Android integration
-├── .github/workflows/      # CI configuration
-├── CMakeLists.txt         # Build configuration
-└── README.md              # Project documentation
+├── examples/                   # Focused, self-contained example programs
+├── docs/                       # Doxygen config output + the project website
+├── ports/librats/              # vcpkg port (portfile.cmake, vcpkg.json)
+├── nodejs/                     # Node.js bindings
+├── python/                     # Python bindings
+├── android/                    # Android integration
+├── .github/workflows/          # CI configuration
+├── CMakeLists.txt             # Build configuration
+└── README.md                  # Project documentation
 ```
 
 ### Key Components
 
 | Component | Files | Description |
 |-----------|-------|-------------|
-| Core | `librats.cpp/h` | Main RatsClient implementation |
-| Networking | `socket.cpp/h` | Cross-platform socket abstraction |
-| Discovery | `dht.cpp/h`, `mdns.cpp/h` | Peer discovery mechanisms |
-| NAT | `stun.cpp/h`, `ice.cpp/h` | NAT traversal |
-| Security | `noise.cpp/h` | End-to-end encryption |
-| Messaging | `gossipsub.cpp/h` | Pub-sub protocol |
-| Transfer | `file_transfer.cpp/h` | File/directory transfer |
+| Core | `node/node.{cpp,h}` | The `Node` facade — the public entry point |
+| Networking | `core/socket.{cpp,h}` | Cross-platform socket abstraction |
+| Transport | `transport/connection.{cpp,h}`, `transport/reactor.{cpp,h}` | Per-peer state machine + reactor threads |
+| Discovery | `dht/dht.{cpp,h}`, `mdns/mdns.{cpp,h}` | Peer discovery mechanisms |
+| NAT | `nat/stun.{cpp,h}`, `nat/port_mapping.{cpp,h}` | NAT traversal and port mapping |
+| Security | `crypto/noise.{cpp,h}`, `security/noise_security.{cpp,h}` | End-to-end encryption |
+| Messaging | `subsystems/pubsub.{cpp,h}` | GossipSub pub-sub |
+| Transfer | `subsystems/file_transfer.{cpp,h}` | File/directory transfer |
+| C ABI | `bindings/rats.{cpp,h}` | The C API every language binding builds on |
+
+Paths are relative to `src/librats/`.
 
 ## Language Bindings
 
@@ -422,7 +450,11 @@ librats/
 
 When contributing language bindings:
 
-1. **Use the C API** (`librats_c.h`) as the foundation
+1. **Use the C API** (`src/librats/bindings/rats.h`, included as
+   `<librats/bindings/rats.h>`) as the foundation. When you add a public C++
+   capability that should be reachable from other languages, surface it there
+   first — typically as a `rats_enable_*` call made before `rats_start` — and
+   keep the language wrappers in sync.
 2. **Follow language conventions** for the target language
 3. **Provide examples** showing common use cases
 4. **Document installation** and usage

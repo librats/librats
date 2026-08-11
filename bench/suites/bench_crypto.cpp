@@ -14,14 +14,14 @@
 #include "baseline/noisec.h"
 
 extern "C" {
-#include "crypto/sha256.h"
-#include "crypto/sha512.h"
-#include "crypto/blake2b.h"
-#include "crypto/blake2s.h"
-#include "crypto/chacha.h"
-#include "crypto/poly1305.h"
-#include "crypto/curve25519.h"
-#include "crypto/chachapoly.h"
+#include "librats/crypto/sha256.h"
+#include "librats/crypto/sha512.h"
+#include "librats/crypto/blake2b.h"
+#include "librats/crypto/blake2s.h"
+#include "librats/crypto/chacha.h"
+#include "librats/crypto/poly1305.h"
+#include "librats/crypto/curve25519.h"
+#include "librats/crypto/chachapoly.h"
 }
 
 #include <cstdint>

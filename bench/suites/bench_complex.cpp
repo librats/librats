@@ -16,7 +16,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "framework/bench.h"
-#include "util/json.h"
+#include "librats/util/json.h"
 
 #include <cstdint>
 #include <cstdio>

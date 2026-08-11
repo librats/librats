@@ -24,25 +24,25 @@
 // Pub/sub, typed JSON messaging and file transfer are always enabled. Type
 // "/help" once running for the interactive command list.
 
-#include "node/node.h"
-#include "subsystems/dht_discovery.h"
-#include "subsystems/mdns_discovery.h"
-#include "subsystems/pubsub.h"
-#include "subsystems/message_json.h"
-#include "subsystems/file_transfer.h"
-#include "subsystems/ping_service.h"
-#include "subsystems/port_mapping_service.h"
-#include "subsystems/peer_exchange.h"
-#include "subsystems/reconnection.h"
-#include "core/address.h"
-#include "util/fs.h"
-#include "util/json.h"
-#include "util/logger.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/dht_discovery.h"
+#include "librats/subsystems/mdns_discovery.h"
+#include "librats/subsystems/pubsub.h"
+#include "librats/subsystems/message_json.h"
+#include "librats/subsystems/file_transfer.h"
+#include "librats/subsystems/ping_service.h"
+#include "librats/subsystems/port_mapping_service.h"
+#include "librats/subsystems/peer_exchange.h"
+#include "librats/subsystems/reconnection.h"
+#include "librats/core/address.h"
+#include "librats/util/fs.h"
+#include "librats/util/json.h"
+#include "librats/util/logger.h"
 #ifdef RATS_SEARCH_FEATURES
-#include "subsystems/bittorrent.h"
+#include "librats/subsystems/bittorrent.h"
 #endif
 #ifdef RATS_STORAGE
-#include "storage/storage.h"
+#include "librats/storage/storage.h"
 #endif
 
 #include <cstdint>

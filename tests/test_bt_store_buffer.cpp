@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/store_buffer.h"
+#include "librats/bittorrent/store_buffer.h"
 
 using namespace librats::bittorrent;
 using librats::Bytes;

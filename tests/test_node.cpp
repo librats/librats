@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "core/address.h"
-#include "core/socket.h"
+#include "librats/node/node.h"
+#include "librats/core/address.h"
+#include "librats/core/socket.h"
 
 #include <algorithm>
 #include <atomic>

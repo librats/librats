@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
-#include "core/address.h"
-#include "core/host_endpoint.h"
-#include "core/ip_address.h"
-#include "core/socket.h"
+#include "librats/core/address.h"
+#include "librats/core/host_endpoint.h"
+#include "librats/core/ip_address.h"
+#include "librats/core/socket.h"
 
 #include <array>
 #include <unordered_map>

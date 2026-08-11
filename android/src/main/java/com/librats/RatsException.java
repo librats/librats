@@ -4,7 +4,7 @@ package com.librats;
  * Exception thrown by {@link RatsClient} for failed native operations.
  *
  * <p>The {@link #getErrorCode()} mirrors the C ABI {@code rats_error_t} enum
- * (see {@code src/bindings/rats.h}). {@link RatsClient#OK} (0) is success; any
+ * (see {@code src/librats/bindings/rats.h}). {@link RatsClient#OK} (0) is success; any
  * other value is an error.</p>
  */
 public class RatsException extends RuntimeException {

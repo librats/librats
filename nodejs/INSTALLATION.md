@@ -41,7 +41,7 @@ nodejs/
 │   ├── index.js             # JavaScript wrapper (loads native addon)
 │   └── index.d.ts           # TypeScript definitions
 ├── src/
-│   └── librats_node.cpp     # N-API addon over the C ABI (src/bindings/rats.h)
+│   └── librats_node.cpp     # N-API addon over the C ABI (src/librats/bindings/rats.h)
 ├── scripts/
 │   ├── build-librats.js     # Builds the native librats library
 │   ├── postinstall.js       # Post-installation verification

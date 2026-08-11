@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "wire/frame.h"
+#include "librats/wire/frame.h"
 
 #include <string>
 

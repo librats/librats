@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "util/fs.h"
+#include "librats/node/node.h"
+#include "librats/util/fs.h"
 
 #include <string>
 

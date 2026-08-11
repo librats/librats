@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/choker.h"
+#include "librats/bittorrent/choker.h"
 
 #include <algorithm>
 #include <cstdint>

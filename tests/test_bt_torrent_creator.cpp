@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/torrent_creator.h"
-#include "bittorrent/torrent_info.h"
-#include "bittorrent/client.h"
+#include "librats/bittorrent/torrent_creator.h"
+#include "librats/bittorrent/torrent_info.h"
+#include "librats/bittorrent/client.h"
 
 #include <filesystem>
 #include <fstream>

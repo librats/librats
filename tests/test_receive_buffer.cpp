@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "core/receive_buffer.h"
+#include "librats/core/receive_buffer.h"
 
 #include <algorithm>
 #include <numeric>

@@ -13,8 +13,8 @@
 //   ./02_pubsub 9002 news 127.0.0.1 9001
 // A line typed at A is delivered to C even though they never connected directly.
 
-#include "node/node.h"
-#include "subsystems/pubsub.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/pubsub.h>
 
 #include <iostream>
 #include <string>

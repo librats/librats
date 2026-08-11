@@ -3,9 +3,9 @@
 Build script for librats Python bindings.
 
 The bindings load the librats shared library (built from the C++ core plus the
-C ABI in ``src/bindings/rats.cpp``) via ctypes. The recommended way to build it
+C ABI in ``src/librats/bindings/rats.cpp``) via ctypes. The recommended way to build it
 is CMake with ``-DRATS_SHARED_LIBRARY=ON`` (``--build-native`` below), which
-compiles the full ``LIBRARY_SOURCES`` list — including ``src/bindings/rats.cpp``
+compiles the full ``LIBRARY_SOURCES`` list — including ``src/librats/bindings/rats.cpp``
 (gated by ``RATS_BINDINGS``, ON by default) — and links the platform libraries
 (ws2_32/iphlpapi/bcrypt on Windows, pthread elsewhere).
 
@@ -23,7 +23,10 @@ import shutil
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
-SRC = PROJECT_ROOT / "src"
+# SRC_ROOT is the include root (headers resolve as "librats/<subdir>/<name>.h");
+# SRC is where the translation units actually live.
+SRC_ROOT = PROJECT_ROOT / "src"
+SRC = SRC_ROOT / "librats"
 
 # Mirrors the .cpp/.c translation units in CMakeLists.txt LIBRARY_SOURCES
 # (headers omitted). Keep in sync with the CMake list. RATS_SEARCH_FEATURES /
@@ -105,7 +108,7 @@ def _copy_built_library(build_dir: Path):
 def build_native_library():
     """Build the native librats shared library via CMake.
 
-    CMake compiles the full LIBRARY_SOURCES set (including src/bindings/rats.cpp
+    CMake compiles the full LIBRARY_SOURCES set (including src/librats/bindings/rats.cpp
     via RATS_BINDINGS) and links ws2_32/iphlpapi/bcrypt on Windows / pthread
     elsewhere.
     """
@@ -132,7 +135,8 @@ def compile_direct():
     """CMake-free fallback: compile LIBRARY_SOURCES into a shared library.
 
     Generates version.h from the template, compiles every source in
-    LIBRARY_SOURCES with -I src and -I <generated version dir>, and links the
+    LIBRARY_SOURCES with -I src (the include root, so headers resolve as
+    "librats/<subdir>/<name>.h") and -I <generated version dir>, and links the
     platform libraries. Mirrors the CMake build for environments without CMake.
     """
     import sysconfig  # noqa: F401  (kept for parity / future use)
@@ -142,7 +146,7 @@ def compile_direct():
 
     # Generate version.h from version.h.in (best-effort defaults).
     version_in = SRC / "util" / "version.h.in"
-    version_out_dir = out_dir / "src" / "util"
+    version_out_dir = out_dir / "src" / "librats" / "util"
     version_out_dir.mkdir(parents=True, exist_ok=True)
     version_h = version_out_dir / "version.h"
     if version_in.exists():
@@ -156,8 +160,7 @@ def compile_direct():
             text = text.replace(f"@{key}@", val)
         version_h.write_text(text, encoding="utf-8")
 
-    includes = ["-I", str(SRC), "-I", str(SRC / "crypto"),
-                "-I", str(out_dir / "src")]
+    includes = ["-I", str(SRC_ROOT), "-I", str(out_dir / "src")]
 
     is_windows = os.name == 'nt'
     cxx = os.environ.get("CXX", "cl" if is_windows else "g++")

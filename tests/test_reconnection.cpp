@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "subsystems/reconnection.h"
-#include "peer/peer_book.h"
-#include "util/fs.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/reconnection.h"
+#include "librats/peer/peer_book.h"
+#include "librats/util/fs.h"
 
 #include <algorithm>
 #include <chrono>

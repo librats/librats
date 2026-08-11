@@ -11,9 +11,9 @@
  */
 
 #include <gtest/gtest.h>
-#include "util/network_monitor.h"
-#include "util/network_utils.h"
-#include "core/socket.h"
+#include "librats/util/network_monitor.h"
+#include "librats/util/network_utils.h"
+#include "librats/core/socket.h"
 
 #include <atomic>
 #include <chrono>

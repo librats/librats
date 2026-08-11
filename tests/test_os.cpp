@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "util/os.h"
+#include "librats/util/os.h"
 #include <iostream>
 
 using namespace librats;

@@ -113,8 +113,8 @@ endif()
 
 # Configure version.h from template
 configure_file(
-    ${PROJECT_SOURCE_DIR}/src/util/version.h.in
-    ${PROJECT_BINARY_DIR}/src/util/version.h
+    ${PROJECT_SOURCE_DIR}/src/librats/util/version.h.in
+    ${PROJECT_BINARY_DIR}/src/librats/util/version.h
     @ONLY
 )
 
@@ -127,236 +127,236 @@ if(WIN32)
     )
 endif()
 
-# Define library sources, grouped by subsystem (mirrors the src/ layout)
+# Define library sources, grouped by subsystem (mirrors the src/librats/ layout)
 set(LIBRARY_SOURCES
 # core/ — sockets, async I/O buffers, platform I/O multiplexing, reactor primitives
-    src/core/socket.h
-    src/core/socket.cpp
-    src/core/receive_buffer.h
-    src/core/receive_buffer.cpp
-    src/core/chained_send_buffer.h
-    src/core/chained_send_buffer.cpp
-    src/core/io_poller.h
-    src/core/io_poller.cpp
-    src/core/bytes.h
-    src/core/address.h
-    src/core/address.cpp
-    src/core/ip_address.h
-    src/core/ip_address.cpp
-    src/core/host_endpoint.h
-    src/core/endpoint_parse.h
-    src/core/endpoint_parse.cpp
-    src/core/types.h
-    src/core/types.cpp
-    src/core/mpsc_queue.h
-    src/core/timer_queue.h
-    src/core/notifier.h
-    src/core/event_bus.h
-    src/core/service_registry.h
+    src/librats/core/socket.h
+    src/librats/core/socket.cpp
+    src/librats/core/receive_buffer.h
+    src/librats/core/receive_buffer.cpp
+    src/librats/core/chained_send_buffer.h
+    src/librats/core/chained_send_buffer.cpp
+    src/librats/core/io_poller.h
+    src/librats/core/io_poller.cpp
+    src/librats/core/bytes.h
+    src/librats/core/address.h
+    src/librats/core/address.cpp
+    src/librats/core/ip_address.h
+    src/librats/core/ip_address.cpp
+    src/librats/core/host_endpoint.h
+    src/librats/core/endpoint_parse.h
+    src/librats/core/endpoint_parse.cpp
+    src/librats/core/types.h
+    src/librats/core/types.cpp
+    src/librats/core/mpsc_queue.h
+    src/librats/core/timer_queue.h
+    src/librats/core/notifier.h
+    src/librats/core/event_bus.h
+    src/librats/core/service_registry.h
 
 # util/ — networking helpers, OS/filesystem, logging, version
-    src/util/network_utils.h
-    src/util/network_utils.cpp
-    src/util/network_monitor.h
-    src/util/network_monitor.cpp
-    src/util/os.h
-    src/util/os.cpp
-    src/util/fs.h
-    src/util/fs.cpp
-    src/util/logger.h
-    src/util/logger.cpp
-    src/util/json.h
-    src/util/json.cpp
-    src/util/version.cpp
-    src/util/rats_export.h
-    ${PROJECT_BINARY_DIR}/src/util/version.h
+    src/librats/util/network_utils.h
+    src/librats/util/network_utils.cpp
+    src/librats/util/network_monitor.h
+    src/librats/util/network_monitor.cpp
+    src/librats/util/os.h
+    src/librats/util/os.cpp
+    src/librats/util/fs.h
+    src/librats/util/fs.cpp
+    src/librats/util/logger.h
+    src/librats/util/logger.cpp
+    src/librats/util/json.h
+    src/librats/util/json.cpp
+    src/librats/util/version.cpp
+    src/librats/util/rats_export.h
+    ${PROJECT_BINARY_DIR}/src/librats/util/version.h
 
 # wire/ — length-prefixed frame format + type-routed dispatch
-    src/wire/frame.h
-    src/wire/frame.cpp
-    src/wire/message_router.h
-    src/wire/message_router.cpp
+    src/librats/wire/frame.h
+    src/librats/wire/frame.cpp
+    src/librats/wire/message_router.h
+    src/librats/wire/message_router.cpp
 
 # transport/ — shared-nothing reactor, per-connection state machine
-    src/transport/connection.h
-    src/transport/connection.cpp
-    src/transport/reactor.h
-    src/transport/reactor.cpp
-    src/transport/reactor_pool.h
+    src/librats/transport/connection.h
+    src/librats/transport/connection.cpp
+    src/librats/transport/reactor.h
+    src/librats/transport/reactor.cpp
+    src/librats/transport/reactor_pool.h
 
 # peer/ — self-certifying peer ids, routing/connection tables
-    src/peer/peer_id.h
-    src/peer/peer_id.cpp
-    src/peer/peer_info.h
-    src/peer/peer.h
-    src/peer/peer_table.h
-    src/peer/peer_table.cpp
-    src/peer/peer_book.h
-    src/peer/peer_book.cpp
+    src/librats/peer/peer_id.h
+    src/librats/peer/peer_id.cpp
+    src/librats/peer/peer_info.h
+    src/librats/peer/peer.h
+    src/librats/peer/peer_table.h
+    src/librats/peer/peer_table.cpp
+    src/librats/peer/peer_book.h
+    src/librats/peer/peer_book.cpp
 
 # security/ — Noise XX / plaintext over a self-certifying identity
-    src/security/session.h
-    src/security/identity.h
-    src/security/handshaker.h
-    src/security/noise_security.h
-    src/security/noise_security.cpp
-    src/security/plaintext_security.h
+    src/librats/security/session.h
+    src/librats/security/identity.h
+    src/librats/security/handshaker.h
+    src/librats/security/noise_security.h
+    src/librats/security/noise_security.cpp
+    src/librats/security/plaintext_security.h
 
 # node/ — node facade, peer-network contract, identify handshake
-    src/node/config.h
-    src/node/host_events.h
-    src/node/node_context.h
-    src/node/peer_network.h
-    src/node/node.h
-    src/node/node.cpp
-    src/node/identify.h
-    src/node/identify.cpp
+    src/librats/node/config.h
+    src/librats/node/host_events.h
+    src/librats/node/node_context.h
+    src/librats/node/peer_network.h
+    src/librats/node/node.h
+    src/librats/node/node.cpp
+    src/librats/node/identify.h
+    src/librats/node/identify.cpp
 
 # subsystems/ — opt-in plugins attached to a Node
-    src/subsystems/ping_service.h
-    src/subsystems/ping_service.cpp
-    src/subsystems/pubsub.h
-    src/subsystems/pubsub.cpp
-    src/subsystems/message_json.h
-    src/subsystems/message_json.cpp
-    src/subsystems/file_transfer.h
-    src/subsystems/file_transfer.cpp
-    src/subsystems/dht_service.h
-    src/subsystems/dht_discovery.h
-    src/subsystems/dht_discovery.cpp
-    src/subsystems/mdns_discovery.h
-    src/subsystems/mdns_discovery.cpp
-    src/subsystems/reconnection.h
-    src/subsystems/reconnection.cpp
-    src/subsystems/peer_exchange.h
-    src/subsystems/peer_exchange.cpp
-    src/subsystems/port_mapping_service.h
-    src/subsystems/port_mapping_service.cpp
+    src/librats/subsystems/ping_service.h
+    src/librats/subsystems/ping_service.cpp
+    src/librats/subsystems/pubsub.h
+    src/librats/subsystems/pubsub.cpp
+    src/librats/subsystems/message_json.h
+    src/librats/subsystems/message_json.cpp
+    src/librats/subsystems/file_transfer.h
+    src/librats/subsystems/file_transfer.cpp
+    src/librats/subsystems/dht_service.h
+    src/librats/subsystems/dht_discovery.h
+    src/librats/subsystems/dht_discovery.cpp
+    src/librats/subsystems/mdns_discovery.h
+    src/librats/subsystems/mdns_discovery.cpp
+    src/librats/subsystems/reconnection.h
+    src/librats/subsystems/reconnection.cpp
+    src/librats/subsystems/peer_exchange.h
+    src/librats/subsystems/peer_exchange.cpp
+    src/librats/subsystems/port_mapping_service.h
+    src/librats/subsystems/port_mapping_service.cpp
 
 # dht/ — Kademlia DHT + KRPC (bencode is shared with bittorrent, always built)
-    src/dht/dht.h
-    src/dht/dht.cpp
-    src/dht/krpc.h
-    src/dht/krpc.cpp
+    src/librats/dht/dht.h
+    src/librats/dht/dht.cpp
+    src/librats/dht/krpc.h
+    src/librats/dht/krpc.cpp
 # dht/ modular layer (rewrite in progress) — leaf types
-    src/dht/id.h
-    src/dht/log.h
-    src/dht/node_entry.h
-    src/dht/bep42.h
-    src/dht/bep42.cpp
-    src/dht/routing_table.h
-    src/dht/routing_table.cpp
-    src/dht/transport.h
-    src/dht/observer.h
-    src/dht/rpc_manager.h
-    src/dht/rpc_manager.cpp
-    src/dht/traversal.h
-    src/dht/traversal.cpp
-    src/dht/find_peers.h
-    src/dht/find_peers.cpp
-    src/dht/announce.h
-    src/dht/announce.cpp
-    src/dht/storage.h
-    src/dht/storage.cpp
-    src/dht/dos_blocker.h
-    src/dht/dos_blocker.cpp
-    src/dht/node.h
-    src/dht/node.cpp
-    src/dht/udp_transport.h
-    src/dht/udp_transport.cpp
-    src/dht/dht_runner.h
-    src/dht/dht_runner.cpp
-    src/dht/persistence.h
-    src/dht/persistence.cpp
-    src/bittorrent/bencode.h
-    src/bittorrent/bencode.cpp
+    src/librats/dht/id.h
+    src/librats/dht/log.h
+    src/librats/dht/node_entry.h
+    src/librats/dht/bep42.h
+    src/librats/dht/bep42.cpp
+    src/librats/dht/routing_table.h
+    src/librats/dht/routing_table.cpp
+    src/librats/dht/transport.h
+    src/librats/dht/observer.h
+    src/librats/dht/rpc_manager.h
+    src/librats/dht/rpc_manager.cpp
+    src/librats/dht/traversal.h
+    src/librats/dht/traversal.cpp
+    src/librats/dht/find_peers.h
+    src/librats/dht/find_peers.cpp
+    src/librats/dht/announce.h
+    src/librats/dht/announce.cpp
+    src/librats/dht/storage.h
+    src/librats/dht/storage.cpp
+    src/librats/dht/dos_blocker.h
+    src/librats/dht/dos_blocker.cpp
+    src/librats/dht/node.h
+    src/librats/dht/node.cpp
+    src/librats/dht/udp_transport.h
+    src/librats/dht/udp_transport.cpp
+    src/librats/dht/dht_runner.h
+    src/librats/dht/dht_runner.cpp
+    src/librats/dht/persistence.h
+    src/librats/dht/persistence.cpp
+    src/librats/bittorrent/bencode.h
+    src/librats/bittorrent/bencode.cpp
 
 # mdns/ — local-network service discovery
-    src/mdns/mdns.h
-    src/mdns/log.h
-    src/mdns/mdns.cpp
+    src/librats/mdns/mdns.h
+    src/librats/mdns/log.h
+    src/librats/mdns/mdns.cpp
 
 # crypto/ — hashes, ciphers, KDFs
-    src/crypto/sha1.h
-    src/crypto/sha1.cpp
-    src/crypto/crc32.h
-    src/crypto/crc32.cpp
-    src/crypto/curve25519.c
-    src/crypto/curve25519.h
-    src/crypto/chacha.c
-    src/crypto/chacha.h
-    src/crypto/poly1305.c
-    src/crypto/poly1305.h
-    src/crypto/chachapoly.c
-    src/crypto/chachapoly.h
-    src/crypto/sha256.c
-    src/crypto/sha256.h
-    src/crypto/sha512.c
-    src/crypto/sha512.h
-    src/crypto/hkdf.c
-    src/crypto/hkdf.h
-    src/crypto/blake2s.c
-    src/crypto/blake2s.h
-    src/crypto/blake2b.c
-    src/crypto/blake2b.h
-    src/crypto/blake2_endian.h
+    src/librats/crypto/sha1.h
+    src/librats/crypto/sha1.cpp
+    src/librats/crypto/crc32.h
+    src/librats/crypto/crc32.cpp
+    src/librats/crypto/curve25519.c
+    src/librats/crypto/curve25519.h
+    src/librats/crypto/chacha.c
+    src/librats/crypto/chacha.h
+    src/librats/crypto/poly1305.c
+    src/librats/crypto/poly1305.h
+    src/librats/crypto/chachapoly.c
+    src/librats/crypto/chachapoly.h
+    src/librats/crypto/sha256.c
+    src/librats/crypto/sha256.h
+    src/librats/crypto/sha512.c
+    src/librats/crypto/sha512.h
+    src/librats/crypto/hkdf.c
+    src/librats/crypto/hkdf.h
+    src/librats/crypto/blake2s.c
+    src/librats/crypto/blake2s.h
+    src/librats/crypto/blake2b.c
+    src/librats/crypto/blake2b.h
+    src/librats/crypto/blake2_endian.h
 
 # crypto/ — Noise Protocol framework (Noise_XX transport encryption)
-    src/crypto/noise.cpp
-    src/crypto/noise.h
+    src/librats/crypto/noise.cpp
+    src/librats/crypto/noise.h
 
 # nat/ — STUN public-IP discovery + UPnP IGD / NAT-PMP port forwarding
-    src/nat/stun.h
-    src/nat/stun.cpp
-    src/nat/port_mapping.h
-    src/nat/upnp.h
-    src/nat/upnp.cpp
-    src/nat/natpmp.h
-    src/nat/natpmp.cpp
+    src/librats/nat/stun.h
+    src/librats/nat/stun.cpp
+    src/librats/nat/port_mapping.h
+    src/librats/nat/upnp.h
+    src/librats/nat/upnp.cpp
+    src/librats/nat/natpmp.h
+    src/librats/nat/natpmp.cpp
 )
 
 # Add BitTorrent sources if RATS_SEARCH_FEATURES is enabled
 if(RATS_SEARCH_FEATURES)
     list(APPEND LIBRARY_SOURCES
-        src/bittorrent/types.h
-        src/bittorrent/types.cpp
-        src/bittorrent/byte_io.h
-        src/bittorrent/bitfield.h
-        src/bittorrent/bitfield.cpp
-        src/bittorrent/file_storage.h
-        src/bittorrent/file_storage.cpp
-        src/bittorrent/magnet_uri.h
-        src/bittorrent/magnet_uri.cpp
-        src/bittorrent/torrent_info.h
-        src/bittorrent/torrent_info.cpp
-        src/bittorrent/store_buffer.h
-        src/bittorrent/store_buffer.cpp
-        src/bittorrent/disk_io.h
-        src/bittorrent/disk_io.cpp
-        src/bittorrent/piece_picker.h
-        src/bittorrent/piece_picker.cpp
-        src/bittorrent/reactor.h
-        src/bittorrent/reactor.cpp
-        src/bittorrent/peer_connection.h
-        src/bittorrent/peer_connection.cpp
-        src/bittorrent/choker.h
-        src/bittorrent/choker.cpp
-        src/bittorrent/torrent.h
-        src/bittorrent/torrent.cpp
-        src/bittorrent/client.h
-        src/bittorrent/client.cpp
-        src/bittorrent/extensions.h
-        src/bittorrent/extensions.cpp
-        src/bittorrent/peer_list.h
-        src/bittorrent/peer_list.cpp
-        src/bittorrent/tracker.h
-        src/bittorrent/tracker.cpp
-        src/bittorrent/resume_data.h
-        src/bittorrent/resume_data.cpp
-        src/bittorrent/torrent_creator.h
-        src/bittorrent/torrent_creator.cpp
-        src/subsystems/bittorrent.h
-        src/subsystems/bittorrent.cpp
+        src/librats/bittorrent/types.h
+        src/librats/bittorrent/types.cpp
+        src/librats/bittorrent/byte_io.h
+        src/librats/bittorrent/bitfield.h
+        src/librats/bittorrent/bitfield.cpp
+        src/librats/bittorrent/file_storage.h
+        src/librats/bittorrent/file_storage.cpp
+        src/librats/bittorrent/magnet_uri.h
+        src/librats/bittorrent/magnet_uri.cpp
+        src/librats/bittorrent/torrent_info.h
+        src/librats/bittorrent/torrent_info.cpp
+        src/librats/bittorrent/store_buffer.h
+        src/librats/bittorrent/store_buffer.cpp
+        src/librats/bittorrent/disk_io.h
+        src/librats/bittorrent/disk_io.cpp
+        src/librats/bittorrent/piece_picker.h
+        src/librats/bittorrent/piece_picker.cpp
+        src/librats/bittorrent/reactor.h
+        src/librats/bittorrent/reactor.cpp
+        src/librats/bittorrent/peer_connection.h
+        src/librats/bittorrent/peer_connection.cpp
+        src/librats/bittorrent/choker.h
+        src/librats/bittorrent/choker.cpp
+        src/librats/bittorrent/torrent.h
+        src/librats/bittorrent/torrent.cpp
+        src/librats/bittorrent/client.h
+        src/librats/bittorrent/client.cpp
+        src/librats/bittorrent/extensions.h
+        src/librats/bittorrent/extensions.cpp
+        src/librats/bittorrent/peer_list.h
+        src/librats/bittorrent/peer_list.cpp
+        src/librats/bittorrent/tracker.h
+        src/librats/bittorrent/tracker.cpp
+        src/librats/bittorrent/resume_data.h
+        src/librats/bittorrent/resume_data.cpp
+        src/librats/bittorrent/torrent_creator.h
+        src/librats/bittorrent/torrent_creator.cpp
+        src/librats/subsystems/bittorrent.h
+        src/librats/subsystems/bittorrent.cpp
     )
 endif()
 
@@ -364,15 +364,15 @@ endif()
 # StorageManager is a Node subsystem (reaches the mesh via PeerNetwork).
 if(RATS_STORAGE)
     list(APPEND LIBRARY_SOURCES
-        src/storage/storage.cpp
-        src/storage/storage.h
+        src/librats/storage/storage.cpp
+        src/librats/storage/storage.h
     )
 endif()
 
 if(RATS_BINDINGS)
     list(APPEND LIBRARY_SOURCES
-        src/bindings/rats.h
-        src/bindings/rats.cpp
+        src/librats/bindings/rats.h
+        src/librats/bindings/rats.cpp
     )
 endif()
 
@@ -408,16 +408,18 @@ include(GNUInstallDirs)
 # Include directories. INSTALL_INTERFACE entries are only consumed via the
 # exported target, so they are safe to declare even when RATS_INSTALL is OFF.
 #
-# Exactly ONE include root, and the installed tree mirrors it: every header
-# outside its own directory is included as "<subdir>/<name>.h" (crypto included),
-# so include/librats/ alone is enough to compile any installed header. Do not add
-# a second root here — a header that only resolves through it would build in-tree
-# and break for installed consumers.
+# The include root is the PARENT of the librats/ directory — src/ in the build
+# tree, <prefix>/include once installed — and every header spells its own path in
+# full, "librats/<subdir>/<name>.h", even for a sibling in the same directory.
+# That is what makes an installed header compile from -I<prefix>/include alone
+# and keeps generic names (core/, node/, util/, …) off the consumer's include
+# path. Do not add src/librats or include/librats as a second root: a header that
+# resolved only through it would build in-tree and break for installed consumers.
 target_include_directories(rats
     PUBLIC
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>
         $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/src>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/librats>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 # Find and link threading support
@@ -725,21 +727,23 @@ if(RATS_INSTALL)
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
 
-    # Headers form a tightly coupled graph (librats.h pulls in dht/krpc/bencode/
-    # bt_*/storage/io_poller/etc.), so install the whole header tree under
-    # include/librats/. .cpp / .c / .in files are excluded.
-    install(DIRECTORY ${PROJECT_SOURCE_DIR}/src/
+    # Headers form a tightly coupled graph (node.h pulls in transport/core, and
+    # with the search/storage features dht/krpc/bencode/bt_*/storage too), so
+    # install the whole header tree. The installed layout mirrors src/librats/
+    # exactly, which is what keeps "librats/<subdir>/<name>.h" resolving the same
+    # in-tree and installed. .cpp / .c / .in files are excluded.
+    install(DIRECTORY ${PROJECT_SOURCE_DIR}/src/librats/
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats
         FILES_MATCHING
             PATTERN "*.h"
             PATTERN "*.hpp"
     )
-    # Mirrors its in-tree location (src/util/version.h): sources include it as
-    # "util/version.h", so it must land under librats/util/, not librats/.
-    install(FILES ${PROJECT_BINARY_DIR}/src/util/version.h
+    # Mirrors its in-tree location (src/librats/util/version.h): sources include it
+    # as "librats/util/version.h", so it must land under librats/util/.
+    install(FILES ${PROJECT_BINARY_DIR}/src/librats/util/version.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats/util
     )
 

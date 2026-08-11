@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
-#include "dht/rpc_manager.h"
-#include "dht/observer.h"
-#include "dht/transport.h"
-#include "dht/krpc.h"
+#include "librats/dht/rpc_manager.h"
+#include "librats/dht/observer.h"
+#include "librats/dht/transport.h"
+#include "librats/dht/krpc.h"
 
 #include <chrono>
 #include <utility>

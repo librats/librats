@@ -1,0 +1,367 @@
+#pragma once
+
+/**
+ * @file file_transfer.h
+ * @brief Stream a file or a whole directory tree to a peer, with integrity,
+ *        backpressure, pause/resume/cancel, idle-timeout and crash-safe writes.
+ *
+ * Push model: the sender offers a file/directory; the receiver accepts (choosing
+ * a destination) or rejects; the sender streams the data; the receiver verifies a
+ * whole-file SHA-256 before moving each temp file into place. All control + data
+ * ride on MessageType::FileChunk as compact binary opcodes (no JSON), implemented
+ * on the Node/Subsystem plugin model.
+ *
+ * Integrity: every file ends with its SHA-256, verified end-to-end before the temp
+ * file is moved into place; a mismatch (or a disk-write failure) fails the whole
+ * transfer. In transit the Noise session already AEAD-authenticates every byte, so
+ * no redundant per-chunk checksum rides the wire.
+ *
+ * Backpressure: the sender keeps at most `window_bytes` un-acked; the receiver
+ * acks cumulative progress at least twice per window, so the sender never stalls.
+ *
+ * Safety: temp file names are derived from the sender's PeerId + the transfer id
+ * (never the peer's self-declared name) — the id alone is only unique per sender,
+ * so two peers' first transfers would otherwise share a temp file. Every
+ * peer-supplied relative path in a directory manifest is validated against path
+ * traversal before use, and a manifest file count is checked against the payload
+ * size before it is used to size an allocation.
+ *
+ * Threading: a worker pool runs the blocking send loop (one transfer per worker);
+ * receiving + all control handling run on the reactor thread; a maintenance
+ * thread reaps idle/timed-out transfers. A finished transfer is erased as it
+ * completes, so there is no retention window. Each transfer has its own
+ * mutex+condvar; the maps are guarded by mutex_.
+ *
+ * Wire (MessageType::FileChunk payload, big-endian):
+ *   OFFER    [1][id:u64][flags:u8][total:u64][name_len:u16][name][file_count:u32]
+ *                                      { [path_len:u16][path][size:u64] } × file_count
+ *   RESPONSE [2][id:u64][accept:u8]
+ *   CHUNK    [3][id:u64][file_index:u32][offset:u64][data]
+ *   FILE_END [4][id:u64][file_index:u32][sha256:32]
+ *   PROGRESS [5][id:u64][received:u64]      (cumulative across all files)
+ *   COMPLETE [6][id:u64][ok:u8]
+ *   CANCEL   [7][id:u64]
+ *   PAUSE    [8][id:u64]
+ *   RESUME   [9][id:u64]
+ */
+
+#include "librats/util/rats_export.h"
+#include "librats/node/peer_network.h"
+#include "librats/peer/peer.h"
+#include "librats/core/bytes.h"
+#include "librats/peer/peer_id.h"
+#include "librats/util/fs.h"
+
+extern "C" {
+#include "librats/crypto/sha256.h"
+}
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+namespace librats {
+
+class RATS_API FileTransfer final : public Subsystem {
+public:
+    struct Config {
+        uint32_t    chunk_size           = 64 * 1024;        ///< payload bytes per chunk
+        uint32_t    window_bytes         = 4 * 1024 * 1024;  ///< max un-acked bytes in flight
+        uint32_t    progress_interval    = 256 * 1024;       ///< receiver acks every N bytes
+        uint32_t    transfer_timeout_secs = 60;              ///< abort a transfer idle this long
+        uint32_t    worker_threads       = 4;                ///< concurrent outgoing transfers
+        uint32_t    disk_threads         = 4;                ///< receive-side disk-writer pool size
+        bool        verify_integrity     = true;             ///< whole-file SHA-256 end-to-end check
+        std::string temp_directory       = ".";              ///< holds in-progress downloads
+    };
+
+    enum class Status   { Pending, Active, Paused, Completed, Failed, Cancelled };
+    enum class Direction { Sending, Receiving };
+
+    /// One file inside a transfer (a single-file transfer has exactly one).
+    struct FileEntry {
+        std::string relative_path;  ///< POSIX path relative to the transfer root
+        uint64_t    size = 0;
+    };
+
+    /// Delivered to the offer callback so the app can accept() or reject().
+    struct Offer {
+        PeerId                 from;
+        uint64_t               id = 0;
+        std::string            name;             ///< file or directory name
+        uint64_t               size = 0;         ///< total size across all files
+        bool                   is_directory = false;
+        std::vector<FileEntry> files;            ///< full manifest
+    };
+
+    /// Snapshot passed to the progress callback (both directions).
+    struct Progress {
+        uint64_t   id = 0;
+        PeerId     peer;
+        Direction  direction = Direction::Sending;
+        Status     status = Status::Pending;
+        uint64_t   bytes_transferred = 0;
+        uint64_t   total_bytes = 0;
+        uint32_t   files_completed = 0;
+        uint32_t   total_files = 0;
+
+        double transfer_rate_bps = 0.0;  ///< recent (smoothed) throughput, bytes/sec
+        double average_rate_bps  = 0.0;  ///< mean throughput since the transfer went live
+        std::chrono::milliseconds elapsed{0};                  ///< time since it went live
+        std::chrono::milliseconds estimated_time_remaining{0}; ///< ETA at the recent rate (0 = unknown)
+
+        /// Completion in [0, 100].
+        double percent() const {
+            if (total_bytes == 0) return status == Status::Completed ? 100.0 : 0.0;
+            return static_cast<double>(bytes_transferred) / static_cast<double>(total_bytes) * 100.0;
+        }
+    };
+
+    /// Aggregate counters.
+    struct Stats {
+        uint64_t bytes_sent = 0, bytes_received = 0;
+        uint64_t completed = 0, failed = 0;
+    };
+
+    using OfferHandler    = std::function<void(const Offer&)>;
+    using ProgressHandler = std::function<void(const Progress&)>;
+    using CompleteHandler = std::function<void(uint64_t id, bool success, const std::string& path)>;
+
+    explicit FileTransfer(std::string temp_dir = ".");
+    explicit FileTransfer(Config config);
+    ~FileTransfer() override;
+
+    void on_offer(OfferHandler handler)       { offer_handler_ = std::move(handler); }
+    void on_progress(ProgressHandler handler) { progress_handler_ = std::move(handler); }
+    void on_complete(CompleteHandler handler) { complete_handler_ = std::move(handler); }
+
+    /// Offer a single file. Returns the transfer id (0 if the file is unusable).
+    uint64_t send_file(const PeerId& to, const std::string& path);
+    /// Offer a directory tree. Returns the transfer id (0 if the dir is unusable).
+    uint64_t send_directory(const PeerId& to, const std::string& dir_path);
+
+    /// Accept an offered transfer. For a single file, dest_path is the file path;
+    /// for a directory, it is the destination directory. (from, id) names the offer.
+    void accept(const PeerId& from, uint64_t id, const std::string& dest_path);
+    void reject(const PeerId& from, uint64_t id);
+
+    /// Control a live transfer (works from either side); (peer, id) names it.
+    bool cancel(const PeerId& peer, uint64_t id);
+    bool pause(const PeerId& peer, uint64_t id);
+    bool resume(const PeerId& peer, uint64_t id);
+
+    Stats stats() const;
+
+    /// A relative path from a peer's directory manifest is safe only if it stays
+    /// inside the destination: non-empty, not absolute, no drive letter, and no
+    /// "."/".." component. Public + static so it can be unit-tested directly.
+    static bool is_safe_relative_path(const std::string& p);
+
+    void attach(NodeContext& ctx) override;
+    void start() override;
+    void stop() override;
+
+private:
+    // Smoothed throughput + elapsed/ETA tracking for one transfer. Accessed only
+    // under the owning transfer's mutex. The clock starts lazily on the first
+    // sample (first byte activity); a long gap (pause/idle) is treated as a
+    // discontinuity so it doesn't register as a throughput dip.
+    struct RateTracker {
+        using clock = std::chrono::steady_clock;
+        clock::time_point start{};      ///< first byte activity (transfer went live)
+        clock::time_point mark{};       ///< last rate-sample instant
+        uint64_t          mark_bytes = 0;
+        double            rate_bps   = 0.0;  ///< EWMA of recent throughput
+
+        void sample(uint64_t bytes, clock::time_point now) {
+            constexpr int64_t kMinMs = 250, kMaxMs = 2000;
+            constexpr double  kAlpha = 0.4;
+            if (start == clock::time_point{}) { start = mark = now; mark_bytes = bytes; return; }
+            const int64_t dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - mark).count();
+            if (dt < kMinMs) return;                              // too soon: hold the prior rate
+            if (dt > kMaxMs) { mark = now; mark_bytes = bytes; return; }  // gap: reset, don't pollute
+            const double inst = static_cast<double>(bytes - mark_bytes) * 1000.0 / static_cast<double>(dt);
+            rate_bps = rate_bps <= 0.0 ? inst : kAlpha * inst + (1.0 - kAlpha) * rate_bps;
+            mark = now; mark_bytes = bytes;
+        }
+
+        void fill(Progress& p, uint64_t bytes, uint64_t total, clock::time_point now) const {
+            if (start == clock::time_point{}) return;            // not live yet
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
+            p.elapsed = ms;
+            p.transfer_rate_bps = rate_bps;
+            if (ms.count() > 0)
+                p.average_rate_bps = static_cast<double>(bytes) * 1000.0 / static_cast<double>(ms.count());
+            if (rate_bps > 1.0 && total > bytes)
+                p.estimated_time_remaining = std::chrono::milliseconds(
+                    static_cast<int64_t>(static_cast<double>(total - bytes) / rate_bps * 1000.0));
+        }
+    };
+
+    // ── Per-transfer state (held via shared_ptr so workers/handlers keep it
+    //    alive past map removal) ──────────────────────────────────────────────
+    struct Outgoing {
+        uint64_t                 id = 0;
+        PeerId                   peer;
+        std::string              name;
+        std::string              root;          ///< local source path/dir
+        bool                     is_directory = false;
+        std::vector<FileEntry>   files;         ///< relative_path + size
+        std::vector<std::string> sources;       ///< absolute source path per file
+        uint64_t                 total_bytes = 0;
+
+        std::mutex               mtx;
+        std::condition_variable  cv;
+        size_t                   cur_file = 0;
+        uint64_t                 cur_offset = 0;
+        uint64_t                 bytes_done = 0;
+        uint64_t                 acked = 0;
+        uint32_t                 files_done = 0;
+        Status                   status = Status::Pending;
+        bool                     worker_active = false;
+        bool                     finished = false;
+        rats_sha256_context_t         hash{};
+        std::chrono::steady_clock::time_point last_activity{};
+        RateTracker              rate;
+    };
+
+    struct IncomingFile {
+        std::string relative_path;
+        uint64_t    size = 0;
+        std::string final_path;
+        std::string temp_path;
+        uint64_t    enqueued = 0;   ///< reactor: bytes handed to the disk writer
+        uint64_t    received = 0;   ///< writer: bytes actually written to disk
+        bool        temp_created = false;
+        bool        finalized = false;
+    };
+
+    // A unit of disk work queued by the reactor for the writer pool. A pure data
+    // job carries chunk bytes; a file-end job carries the sender's SHA-256 so the
+    // writer can verify + finalize once all of the file's data is on disk.
+    struct WriteJob {
+        uint32_t fidx = 0;
+        uint64_t offset = 0;
+        Bytes    data;                   ///< chunk bytes (empty for a file-end job)
+        bool     is_file_end = false;
+        uint8_t  sha[RATS_SHA256_HASH_SIZE]{};
+    };
+
+    struct Incoming {
+        uint64_t                   id = 0;
+        PeerId                     peer;
+        std::string                name;
+        bool                       is_directory = false;
+        std::string                dest_root;
+        std::vector<IncomingFile>  files;
+
+        std::mutex                 mtx;
+        size_t                     recv_file = 0;   ///< reactor cursor: file currently accepting chunks
+        uint64_t                   bytes_done = 0;  ///< writer: total bytes on disk (drives acks/progress)
+        uint64_t                   last_ack = 0;
+        uint32_t                   files_done = 0;
+        Status                     status = Status::Pending;
+        bool                       finished = false;
+        std::chrono::steady_clock::time_point last_activity{};
+        RateTracker                rate;
+
+        // ── async disk writer (all fields below the queue are writer-thread only) ─
+        std::queue<WriteJob>       wq;              ///< pending disk jobs (guarded by mtx)
+        uint64_t                   queued_bytes = 0;///< bytes sitting in wq (backpressure)
+        bool                       scheduled = false;///< queued in / owned by the writer pool
+        FileStream                 out;             ///< currently open temp file
+        size_t                     out_idx = SIZE_MAX;
+        int                        hashing_file = -1;///< which file `hash` currently covers
+        rats_sha256_context_t           hash{};
+
+        ~Incoming();  ///< closes `out` and reclaims any un-finalized temp files
+    };
+
+    // ── message handling (reactor thread) ─────────────────────────────────────
+    void on_message(const Peer& peer, ByteView payload);
+    void handle_offer(const PeerId& from, uint64_t id, bool is_dir, uint64_t total,
+                      std::string name, std::vector<FileEntry> files);
+    void handle_chunk(const PeerId& from, uint64_t id, uint32_t fidx, uint64_t offset,
+                      ByteView data);
+    void handle_file_end(const PeerId& from, uint64_t id, uint32_t fidx, const uint8_t* sha);
+
+    // ── sending ──────────────────────────────────────────────────────────────
+    uint64_t start_send(std::shared_ptr<Outgoing> t);
+    void     queue_send(uint64_t id);
+    void     worker_loop();
+    void     run_send(const std::shared_ptr<Outgoing>& t);
+
+    // ── receiving ────────────────────────────────────────────────────────────
+    // The reactor thread only validates + copies a chunk into the transfer's write
+    // queue; a disk-writer thread does the blocking write, hashing and finalize off
+    // the reactor. `schedule_writer` hands a transfer to the pool (call with the
+    // transfer's mutex NOT held — pool lock is always taken after the transfer's).
+    void schedule_writer(const std::shared_ptr<Incoming>& t);
+    void disk_worker_loop();
+    void drain_writes(const std::shared_ptr<Incoming>& t);
+    void process_data(const std::shared_ptr<Incoming>& t, WriteJob& job);
+    void process_file_end(const std::shared_ptr<Incoming>& t, WriteJob& job);
+
+    // ── lifecycle helpers ─────────────────────────────────────────────────────
+    void maintenance_loop();
+    void finish_outgoing(const std::shared_ptr<Outgoing>& t, bool success);
+    void finish_incoming(const std::shared_ptr<Incoming>& t, bool success, const std::string& error);
+    void emit_progress(const std::shared_ptr<Outgoing>& t);
+    void emit_progress(const std::shared_ptr<Incoming>& t);
+
+    std::shared_ptr<Outgoing> find_outgoing(uint64_t id) const;
+    std::shared_ptr<Incoming> find_incoming(const PeerId& peer, uint64_t id) const;
+
+    void send_to(const PeerId& peer, const Bytes& msg) {
+        if (network_) network_->send(peer, MessageType::FileChunk, ByteView(msg));
+    }
+    void send_simple(const PeerId& peer, uint8_t op, uint64_t id);
+    void send_complete(const PeerId& peer, uint64_t id, bool ok);
+
+    PeerNetwork*          network_ = nullptr;
+    Config                config_;
+    std::atomic<uint64_t> next_id_{1};
+    std::atomic<bool>     running_{false};
+
+    OfferHandler    offer_handler_;
+    ProgressHandler progress_handler_;
+    CompleteHandler complete_handler_;
+
+    mutable std::mutex mutex_;  ///< guards the two maps below
+    std::unordered_map<uint64_t, std::shared_ptr<Outgoing>> outgoing_;
+    std::unordered_map<PeerId, std::unordered_map<uint64_t, std::shared_ptr<Incoming>>,
+                       PeerId::Hash> incoming_;
+
+    // send-side worker pool + send queue
+    std::vector<std::thread>  workers_;
+    std::mutex                queue_mutex_;
+    std::condition_variable   queue_cv_;
+    std::queue<uint64_t>      send_queue_;
+
+    // receive-side disk-writer pool + ready queue. A transfer is pushed here when it
+    // has pending write jobs; its `scheduled` flag keeps it single-owner so exactly
+    // one worker drains a given transfer at a time (preserving chunk order).
+    std::vector<std::thread>              disk_workers_;
+    std::mutex                            disk_mutex_;
+    std::condition_variable               disk_cv_;
+    std::queue<std::shared_ptr<Incoming>> disk_ready_;
+
+    // maintenance (idle timeout / purge)
+    std::thread               maintenance_thread_;
+    std::mutex                maintenance_mutex_;
+    std::condition_variable   maintenance_cv_;
+
+    mutable std::mutex stats_mutex_;
+    Stats              stats_;
+};
+
+} // namespace librats

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
-#include "crypto/sha1.h"
+#include "librats/crypto/sha1.h"
 #include <string>
 #include <vector>
 

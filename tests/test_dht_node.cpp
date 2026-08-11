@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include "dht/node.h"
-#include "dht/transport.h"
-#include "dht/krpc.h"
+#include "librats/dht/node.h"
+#include "librats/dht/transport.h"
+#include "librats/dht/krpc.h"
 
 #include <algorithm>
 #include <chrono>

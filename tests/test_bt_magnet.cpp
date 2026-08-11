@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/magnet_uri.h"
+#include "librats/bittorrent/magnet_uri.h"
 
 using namespace librats::bittorrent;
 

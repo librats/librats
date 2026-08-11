@@ -129,27 +129,27 @@ WARN_LOGFILE           =
 #---------------------------------------------------------------------------
 
 INPUT                  = docs/mainpage.md \
-                         src/node/node.h \
-                         src/node/config.h \
-                         src/node/node_context.h \
-                         src/node/peer_network.h \
-                         src/core/event_bus.h \
-                         src/core/service_registry.h \
-                         src/core/address.h \
-                         src/peer/peer.h \
-                         src/peer/peer_id.h \
-                         src/peer/peer_info.h \
-                         src/wire/frame.h \
-                         src/subsystems/pubsub.h \
-                         src/subsystems/message_json.h \
-                         src/subsystems/file_transfer.h \
-                         src/subsystems/ping_service.h \
-                         src/subsystems/dht_discovery.h \
-                         src/subsystems/mdns_discovery.h \
-                         src/subsystems/port_mapping_service.h \
-                         src/subsystems/reconnection.h \
-                         src/nat/port_mapping.h \
-                         src/bindings/rats.h
+                         src/librats/node/node.h \
+                         src/librats/node/config.h \
+                         src/librats/node/node_context.h \
+                         src/librats/node/peer_network.h \
+                         src/librats/core/event_bus.h \
+                         src/librats/core/service_registry.h \
+                         src/librats/core/address.h \
+                         src/librats/peer/peer.h \
+                         src/librats/peer/peer_id.h \
+                         src/librats/peer/peer_info.h \
+                         src/librats/wire/frame.h \
+                         src/librats/subsystems/pubsub.h \
+                         src/librats/subsystems/message_json.h \
+                         src/librats/subsystems/file_transfer.h \
+                         src/librats/subsystems/ping_service.h \
+                         src/librats/subsystems/dht_discovery.h \
+                         src/librats/subsystems/mdns_discovery.h \
+                         src/librats/subsystems/port_mapping_service.h \
+                         src/librats/subsystems/reconnection.h \
+                         src/librats/nat/port_mapping.h \
+                         src/librats/bindings/rats.h
 INPUT_ENCODING         = UTF-8
 INPUT_FILE_ENCODING    = 
 FILE_PATTERNS          = *.c \

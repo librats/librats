@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "dht/node_entry.h"
+#include "librats/dht/node_entry.h"
 
 using namespace librats::dht;
 

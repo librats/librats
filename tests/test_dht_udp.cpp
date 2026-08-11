@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
-#include "dht/node.h"
-#include "dht/udp_transport.h"
-#include "dht/dht_runner.h"
-#include "core/socket.h"
+#include "librats/dht/node.h"
+#include "librats/dht/udp_transport.h"
+#include "librats/dht/dht_runner.h"
+#include "librats/core/socket.h"
 
 #include <atomic>
 #include <chrono>

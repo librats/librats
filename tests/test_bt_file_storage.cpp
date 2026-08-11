@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <limits>
 
-#include "bittorrent/file_storage.h"
+#include "librats/bittorrent/file_storage.h"
 
 using namespace librats::bittorrent;
 

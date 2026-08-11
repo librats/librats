@@ -2,7 +2,7 @@
 Callback type definitions for the librats Python bindings.
 
 The ``*Type`` names are the raw ``ctypes`` CFUNCTYPE prototypes that match the
-typedefs in the C ABI (``src/bindings/rats.h``). Every C callback takes an
+typedefs in the C ABI (``src/librats/bindings/rats.h``). Every C callback takes an
 opaque ``void* user`` as its first argument. Binary payloads arrive as a
 ``void*`` + ``size_t`` length pair (declared ``c_void_p`` + ``c_size_t``);
 string-ish arguments (peer ids, topics, type names, JSON text) arrive as

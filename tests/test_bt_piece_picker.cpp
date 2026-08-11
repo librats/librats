@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/piece_picker.h"
-#include "bittorrent/types.h"
+#include "librats/bittorrent/piece_picker.h"
+#include "librats/bittorrent/types.h"
 
 #include <algorithm>
 #include <set>

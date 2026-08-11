@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "core/socket.h"  // init_socket_library (winsock needs WSAStartup before resolving)
-#include "dht/dht.h"
-#include "util/network_utils.h"
+#include "librats/core/socket.h"  // init_socket_library (winsock needs WSAStartup before resolving)
+#include "librats/dht/dht.h"
+#include "librats/util/network_utils.h"
 
 using namespace librats;
 

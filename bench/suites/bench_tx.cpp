@@ -29,8 +29,8 @@
 #include "baseline/legacy_buffers.h"
 #include "support/net_mock.h"
 
-#include "core/chained_send_buffer.h"
-#include "wire/frame.h"
+#include "librats/core/chained_send_buffer.h"
+#include "librats/wire/frame.h"
 
 #include <algorithm>
 #include <chrono>

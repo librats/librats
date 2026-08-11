@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "subsystems/file_transfer.h"
-#include "util/fs.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/file_transfer.h"
+#include "librats/util/fs.h"
 
 #include <algorithm>
 #include <atomic>

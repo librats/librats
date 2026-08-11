@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 
-#include "subsystems/bittorrent.h"
-#include "bittorrent/client.h"
-#include "bittorrent/torrent_info.h"
-#include "bittorrent/bencode.h"
-#include "crypto/sha1.h"
+#include "librats/subsystems/bittorrent.h"
+#include "librats/bittorrent/client.h"
+#include "librats/bittorrent/torrent_info.h"
+#include "librats/bittorrent/bencode.h"
+#include "librats/crypto/sha1.h"
 
 #include <chrono>
 #include <filesystem>

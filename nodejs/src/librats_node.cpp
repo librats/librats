@@ -18,7 +18,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "bindings/rats.h"
+#include <librats/bindings/rats.h>
 
 using namespace Napi;
 

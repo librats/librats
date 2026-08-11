@@ -1,5 +1,5 @@
 """
-High-level :class:`RatsClient` over the librats C ABI (``src/bindings/rats.h``).
+High-level :class:`RatsClient` over the librats C ABI (``src/librats/bindings/rats.h``).
 
 A :class:`RatsClient` wraps a single ``rats_t`` node. The lifecycle mirrors the
 C contract:

@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "subsystems/mdns_discovery.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/mdns_discovery.h"
 
 #include <chrono>
 #include <memory>

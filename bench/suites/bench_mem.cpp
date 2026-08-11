@@ -21,7 +21,7 @@
 
 #include "framework/bench.h"
 #include "support/json_data.h"
-#include "util/json.h"
+#include "librats/util/json.h"
 // "stable" baseline: json.{h,cpp} from the previous commit (HEAD~1, fc81b94) under
 // namespace librats_stable, so the last commit's effect on heap footprint and
 // allocation count is visible side-by-side with the current librats::Json.

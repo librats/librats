@@ -15,7 +15,7 @@
 // Header-only (src/dht/id.h) and self-timing — it predates framework/bench.h and
 // brings its own loop.
 
-#include "dht/id.h"
+#include "librats/dht/id.h"
 
 #include <algorithm>
 #include <array>

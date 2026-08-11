@@ -276,7 +276,7 @@
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="basic-code">#include "node/node.h"
+                            <pre><code id="basic-code">#include &lt;librats/node/node.h&gt;
 #include &lt;iostream&gt;
 #include &lt;thread&gt;
 #include &lt;chrono&gt;
@@ -368,8 +368,8 @@ if __name__ == "__main__":
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="protocol-code">#include "node/node.h"
-#include "subsystems/dht_discovery.h"
+                            <pre><code id="protocol-code">#include &lt;librats/node/node.h&gt;
+#include &lt;librats/subsystems/dht_discovery.h&gt;
 #include &lt;iostream&gt;
 #include &lt;thread&gt;
 #include &lt;chrono&gt;
@@ -413,8 +413,8 @@ int main() {
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="chat-code">#include "node/node.h"
-#include "subsystems/message_json.h"
+                            <pre><code id="chat-code">#include &lt;librats/node/node.h&gt;
+#include &lt;librats/subsystems/message_json.h&gt;
 #include &lt;iostream&gt;
 #include &lt;string&gt;
 
@@ -460,9 +460,9 @@ int main() {
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="gossipsub-code">#include "node/node.h"
-#include "subsystems/pubsub.h"
-#include "subsystems/dht_discovery.h"
+                            <pre><code id="gossipsub-code">#include &lt;librats/node/node.h&gt;
+#include &lt;librats/subsystems/pubsub.h&gt;
+#include &lt;librats/subsystems/dht_discovery.h&gt;
 #include &lt;iostream&gt;
 
 using namespace librats;
@@ -502,8 +502,8 @@ int main() {
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="files-code">#include "node/node.h"
-#include "subsystems/file_transfer.h"
+                            <pre><code id="files-code">#include &lt;librats/node/node.h&gt;
+#include &lt;librats/subsystems/file_transfer.h&gt;
 #include &lt;iostream&gt;
 
 using namespace librats;
@@ -516,23 +516,23 @@ int main() {
     auto* files = node.add_subsystem(std::make_unique&lt;FileTransfer&gt;("./downloads"));
 
     files-&gt;on_progress([](const FileTransfer::Progress& p) {
-        std::cout &lt;&lt; "\ud83d\udcc1 Transfer " &lt;&lt; p.id
+        std::cout &lt;&lt; "📁 Transfer " &lt;&lt; p.id
                   &lt;&lt; ": " &lt;&lt; (int)p.percent() &lt;&lt; "% complete"
                   &lt;&lt; " (" &lt;&lt; (p.transfer_rate_bps / 1024) &lt;&lt; " KB/s)" &lt;&lt; std::endl;
     });
 
     files-&gt;on_complete([](uint64_t id, bool success, const std::string& path) {
         if (success) {
-            std::cout &lt;&lt; "\u2705 Transfer completed: " &lt;&lt; path &lt;&lt; std::endl;
+            std::cout &lt;&lt; "✅ Transfer completed: " &lt;&lt; path &lt;&lt; std::endl;
         } else {
-            std::cout &lt;&lt; "\u274c Transfer failed: " &lt;&lt; path &lt;&lt; std::endl;
+            std::cout &lt;&lt; "❌ Transfer failed: " &lt;&lt; path &lt;&lt; std::endl;
         }
     });
 
     // Auto-accept incoming offers into ./downloads. Per-chunk CRC32 and a
     // whole-file SHA-256 are verified before each file is moved into place.
     files-&gt;on_offer([&](const FileTransfer::Offer& offer) {
-        std::cout &lt;&lt; "\ud83d\udce5 Incoming: " &lt;&lt; offer.name
+        std::cout &lt;&lt; "📥 Incoming: " &lt;&lt; offer.name
                   &lt;&lt; " from " &lt;&lt; offer.from.short_hex() &lt;&lt; std::endl;
         files-&gt;accept(offer.from, offer.id, "./downloads/" + offer.name);
     });

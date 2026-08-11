@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "dht/persistence.h"
+#include "librats/dht/persistence.h"
 
 #include <algorithm>
 #include <cstdio>

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
-#include "crypto/crc32.h"
+#include "librats/crypto/crc32.h"
 #include <string>
 #include <vector>
 

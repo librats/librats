@@ -24,13 +24,13 @@
 // identity and persists its known-peer list across restarts. LAN peers appear in
 // a second or two (mDNS); WAN peers take a minute or two (DHT bootstrap).
 
-#include "node/node.h"
-#include "subsystems/dht_discovery.h"
-#include "subsystems/mdns_discovery.h"
-#include "subsystems/peer_exchange.h"
-#include "subsystems/reconnection.h"
-#include "subsystems/ping_service.h"
-#include "subsystems/pubsub.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/dht_discovery.h>
+#include <librats/subsystems/mdns_discovery.h>
+#include <librats/subsystems/peer_exchange.h>
+#include <librats/subsystems/reconnection.h>
+#include <librats/subsystems/ping_service.h>
+#include <librats/subsystems/pubsub.h>
 
 #include <iostream>
 #include <string>

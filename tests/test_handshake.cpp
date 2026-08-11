@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
-#include "peer/peer_id.h"
-#include "security/identity.h"
-#include "security/noise_security.h"
-#include "security/plaintext_security.h"
+#include "librats/peer/peer_id.h"
+#include "librats/security/identity.h"
+#include "librats/security/noise_security.h"
+#include "librats/security/plaintext_security.h"
 
 #include <memory>
 #include <string>

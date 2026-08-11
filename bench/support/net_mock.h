@@ -25,7 +25,7 @@
 //  Every call is counted. That is where the "syscalls" column comes from.
 // ─────────────────────────────────────────────────────────────────────────────
 
-#include "core/bytes.h"
+#include "librats/core/bytes.h"
 
 #include <algorithm>
 #include <cstddef>

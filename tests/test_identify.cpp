@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
-#include "node/identify.h"
-#include "node/node.h"
-#include "core/address.h"
-#include "peer/peer.h"
+#include "librats/node/identify.h"
+#include "librats/node/node.h"
+#include "librats/core/address.h"
+#include "librats/peer/peer.h"
 
 #include <algorithm>
 #include <chrono>

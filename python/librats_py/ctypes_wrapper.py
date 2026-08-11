@@ -1,5 +1,5 @@
 """
-Low-level ctypes wrapper for the librats C ABI (``src/bindings/rats.h``).
+Low-level ctypes wrapper for the librats C ABI (``src/librats/bindings/rats.h``).
 
 This module declares the shared-library handle and the argtypes/restypes for
 every C function the high-level API uses. Heap-allocated strings returned by the

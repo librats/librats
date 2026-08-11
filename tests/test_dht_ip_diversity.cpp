@@ -8,11 +8,11 @@
 // LAN or test topology behaves exactly as before.
 
 #include <gtest/gtest.h>
-#include "dht/routing_table.h"
-#include "dht/find_peers.h"
-#include "dht/rpc_manager.h"
-#include "dht/transport.h"
-#include "dht/krpc.h"
+#include "librats/dht/routing_table.h"
+#include "librats/dht/find_peers.h"
+#include "librats/dht/rpc_manager.h"
+#include "librats/dht/transport.h"
+#include "librats/dht/krpc.h"
 
 #include <random>
 #include <string>

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "core/io_poller.h"
-#include "core/socket.h"
+#include "librats/core/io_poller.h"
+#include "librats/core/socket.h"
 
 #include <thread>
 #include <chrono>

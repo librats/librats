@@ -69,7 +69,7 @@ straight from a compiler if you prefer:
 g++ -std=c++17 -O3 -DNDEBUG -Isrc -Ibench \
     bench/suites/bench_rx.cpp bench/baseline/legacy_buffers.cpp \
     bench/framework/alloc_track.cpp \
-    src/core/receive_buffer.cpp src/wire/frame.cpp -o bench_rx   # + -lws2_32 on Windows
+    src/librats/core/receive_buffer.cpp src/librats/wire/frame.cpp -o bench_rx   # + -lws2_32 on Windows
 ```
 
 ## The harness — `framework/bench.h`
@@ -161,7 +161,7 @@ machinery is still leaving on the table.
 
 ## The DHT suite — `bench_dht`
 
-librats' keyspace primitives (`src/dht/id.h`) against the equivalent libtorrent
+librats' keyspace primitives (`src/librats/dht/id.h`) against the equivalent libtorrent
 algorithms. Real libtorrent can't be linked here (`reference/` drags in Boost.Asio
 and the whole session machinery), so the reference side is a standalone re-port of
 `reference/kademlia/node_id.cpp` + `sha1_hash.hpp`, kept in libtorrent's *native*

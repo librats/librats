@@ -3,7 +3,7 @@ package com.librats;
 import android.util.Log;
 
 /**
- * High-level Java wrapper over the librats C ABI ({@code src/bindings/rats.h}).
+ * High-level Java wrapper over the librats C ABI ({@code src/librats/bindings/rats.h}).
  *
  * <p>A {@code RatsClient} wraps a native {@code rats_t} node. The model is
  * peer-id-centric: peers are identified by 64-char lowercase hex ids, messages
@@ -31,7 +31,7 @@ public class RatsClient {
         }
     }
 
-    // rats_error_t values (must match src/bindings/rats.h).
+    // rats_error_t values (must match src/librats/bindings/rats.h).
     public static final int OK = 0;
     public static final int ERR_INVALID_ARG = 1;
     public static final int ERR_NOT_STARTED = 2;

@@ -13,7 +13,7 @@
 // Type a line in either terminal; it is broadcast on the "chat" channel to every
 // connected peer. Ctrl-D (EOF) quits.
 
-#include "node/node.h"
+#include <librats/node/node.h>
 
 #include <iostream>
 #include <string>

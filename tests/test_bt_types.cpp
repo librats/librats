@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/types.h"
+#include "librats/bittorrent/types.h"
 
 #include <array>
 #include <string>

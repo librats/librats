@@ -5,8 +5,8 @@
 
 #include <gtest/gtest.h>
 #include <cstring>
-#include "crypto/sha256.h"
-#include "crypto/sha512.h"
+#include "librats/crypto/sha256.h"
+#include "librats/crypto/sha512.h"
 
 class SHA256Test : public ::testing::Test {
 protected:

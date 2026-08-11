@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "dht/storage.h"
-#include "dht/dos_blocker.h"
+#include "librats/dht/storage.h"
+#include "librats/dht/dos_blocker.h"
 
 #include <chrono>
 

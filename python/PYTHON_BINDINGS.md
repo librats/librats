@@ -1,7 +1,7 @@
 # librats Python Bindings — Technical Notes
 
 Technical details of the Python bindings, which target the librats C ABI
-(`src/bindings/rats.h`) via `ctypes`.
+(`src/librats/bindings/rats.h`) via `ctypes`.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Technical details of the Python bindings, which target the librats C ABI
 │  callbacks.py (CFUNCTYPE prototypes + Pythonic aliases)      │
 │  ctypes_wrapper.py (CDLL + argtypes/restypes, RatsConfig)    │
 ├─────────────────────────────────────────────────────────────┤
-│         librats shared library — C ABI: src/bindings/rats.h  │
+│         librats shared library — C ABI: src/librats/bindings/rats.h  │
 │              (rats.dll / librats.so / librats.dylib)         │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -127,9 +127,9 @@ name via the OS loader. Names: `rats.dll`/`librats.dll`, `librats.dylib`,
 
 `build.py --build-native` runs CMake with `-DRATS_SHARED_LIBRARY=ON`
 (tests/examples off), then copies the shared library next to the package. CMake
-compiles the full `LIBRARY_SOURCES` set, including `src/bindings/rats.cpp` (gated
+compiles the full `LIBRARY_SOURCES` set, including `src/librats/bindings/rats.cpp` (gated
 by `RATS_BINDINGS`, default ON), and links `ws2_32`/`iphlpapi`/`bcrypt` on
-Windows and `pthread` elsewhere — include paths `src/`, `src/crypto/`, and the
+Windows and `pthread` elsewhere — include paths `src/`, `src/librats/crypto/`, and the
 generated `version.h` directory.
 
 `build.py --compile-direct` prints a CMake-free recipe that mirrors

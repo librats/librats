@@ -1,11 +1,11 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "subsystems/bittorrent.h"
-#include "subsystems/dht_discovery.h"
-#include "bittorrent/bt_client.h"
-#include "core/address.h"
-#include "util/fs.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/bittorrent.h"
+#include "librats/subsystems/dht_discovery.h"
+#include "librats/bittorrent/bt_client.h"
+#include "librats/core/address.h"
+#include "librats/util/fs.h"
 
 #include <chrono>
 #include <memory>

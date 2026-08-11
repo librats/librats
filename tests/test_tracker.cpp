@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "bittorrent/tracker.h"
-#include "bittorrent/bittorrent.h"
+#include "librats/bittorrent/tracker.h"
+#include "librats/bittorrent/bittorrent.h"
 #include <thread>
 #include <chrono>
 

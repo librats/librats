@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "subsystems/pubsub.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/pubsub.h"
 
 #include <algorithm>
 #include <atomic>

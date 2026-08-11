@@ -147,7 +147,7 @@ Things to notice, because they are true everywhere in librats:
 
 ### 4.1 Core primitives
 
-`src/core/` is the foundation — small, dependency-free building blocks:
+`src/librats/core/` is the foundation — small, dependency-free building blocks:
 
 | Piece | Role |
 |-------|------|
@@ -171,7 +171,7 @@ This is the *shared-nothing* model. Because a connection lives behind a single
 thread, the hot data path — read, decrypt, parse, encrypt, write — never contends
 on a lock.
 
-**`Connection` (`src/transport/connection.{h,cpp}`)** is a per-peer state machine:
+**`Connection` (`src/librats/transport/connection.{h,cpp}`)** is a per-peer state machine:
 
 ```
    Connecting ──▶ Handshaking ──▶ Established ──▶ Closing ──▶ Closed
@@ -189,7 +189,7 @@ The connection reports everything through a `ConnectionDelegate` (which `Node`
 implements) and asks its reactor to arm/disarm write-interest — it never touches
 the poller directly.
 
-**`Reactor` (`src/transport/reactor.{h,cpp}`)** runs one thread driving an
+**`Reactor` (`src/librats/transport/reactor.{h,cpp}`)** runs one thread driving an
 `IOPoller`. Other threads interact with it *only* through:
 
 - `post(task)` — enqueue a closure and wake the loop (from any thread);
@@ -199,7 +199,7 @@ the poller directly.
 The single synchronization point is the **MPSC task queue** plus a wakeup pipe to
 break the `poll()` wait. There are no other locks on the data path.
 
-**`ReactorPool` (`src/transport/reactor_pool.h`)** owns N reactors
+**`ReactorPool` (`src/librats/transport/reactor_pool.h`)** owns N reactors
 (`NodeConfig::reactor_threads`, default **1** — which is plenty for thousands of
 peers). Larger pools shard *outbound* connections round-robin across cores; each
 connection is pinned to its reactor for life, so nothing on the data path changes
@@ -216,7 +216,7 @@ as the pool grows. Reactor 0 is the acceptor for inbound connections.
 
 ### 4.3 The wire protocol
 
-The wire is **two levels** (`src/wire/frame.h`). Separating them keeps encryption
+The wire is **two levels** (`src/librats/wire/frame.h`). Separating them keeps encryption
 clean.
 
 **Level 1 — the outer block.** Everything on the wire is a length-prefixed frame:
@@ -260,7 +260,7 @@ here:
 | `Typed` (7) | `MessageJson` |
 | `Pex` (8) | `PeerExchange` |
 
-**`MessageRouter` (`src/wire/message_router.h`)** does the dispatch. Non-`App`
+**`MessageRouter` (`src/librats/wire/message_router.h`)** does the dispatch. Non-`App`
 frames go to the handler registered for their `MessageType`. `App` frames are
 dispatched by their **channel**: the channel *name* is hashed (FNV-1a) to a stable
 16-bit id, so the same name maps to the same id on every node with no shared
@@ -322,7 +322,7 @@ There's a subtle problem a raw TCP socket can't solve: when a peer *dials in*, t
 socket only tells you its *source* endpoint — its IP plus an ephemeral, OS-chosen
 port. That's not the port it *listens* on, so you can't dial it back.
 
-librats fixes this with the **identify** exchange (`src/node/identify.{h,cpp}`).
+librats fixes this with the **identify** exchange (`src/librats/node/identify.{h,cpp}`).
 Right after the handshake, each side sends a `Control` message carrying:
 
 - its **`listen_port`** and self-advertised dialable **`addresses`**, and
@@ -335,7 +335,7 @@ bounds-checked: a hostile or malformed payload yields nothing, never misbehavior
 
 ### 4.6 The Node facade
 
-**`Node` (`src/node/node.{h,cpp}`)** is the public entry point, and it is
+**`Node` (`src/librats/node/node.{h,cpp}`)** is the public entry point, and it is
 deliberately *thin*. It owns the moving parts and wires them together, but the
 logic lives in the layers, not here. Concretely, `Node`:
 
@@ -352,7 +352,7 @@ surface stays the same. That restraint is the whole point.
 
 ### 4.7 The peer directory
 
-**`PeerTable` (`src/peer/peer_table.h`)** maps `PeerId → route + metadata`. It is
+**`PeerTable` (`src/librats/peer/peer_table.h`)** maps `PeerId → route + metadata`. It is
 the *only* shared peer structure, and it is deliberately kept **off the per-byte
 data path**: it's touched on connect/disconnect and on explicit by-id lookups
 (`send`-by-id, `peers()`), never per frame. So it's read-mostly and guarded by a
@@ -363,7 +363,7 @@ each other at the same time (a cross-connect), both compute the *same* winner fr
 a symmetric rule over their ids (`prefer_outbound`), so both converge on a single
 link and the loser is torn down.
 
-**`Peer` (`src/peer/peer.h`)** is the lightweight handle passed to your callbacks.
+**`Peer` (`src/librats/peer/peer.h`)** is the lightweight handle passed to your callbacks.
 It carries the peer's `id` *and* its `route` (which reactor + which connection), so
 `peer.send(...)` reaches the right reactor directly with **no table lookup on the
 reply path**. `peer.info()` consults the directory only when you actually ask for
@@ -374,7 +374,7 @@ metadata.
 ## 5. The subsystem contract
 
 A subsystem reaches the rest of the node through exactly **three** narrow
-interfaces, bundled into a `NodeContext` (`src/node/node_context.h`) it receives at
+interfaces, bundled into a `NodeContext` (`src/librats/node/node_context.h`) it receives at
 `attach()`:
 
 ```cpp
@@ -393,13 +393,13 @@ struct NodeContext {
 | announce a fact others may react to (e.g. the network changed) | `ctx.events` |
 | call a specific capability on a sibling module (and get a value back) | `ctx.services` |
 
-**`PeerNetwork` (`src/node/peer_network.h`)** — the *entire* contract a subsystem
+**`PeerNetwork` (`src/librats/node/peer_network.h`)** — the *entire* contract a subsystem
 has with the network: `send` / `broadcast` / `connect`, `on(MessageType, handler)`,
 `peers()`, `connected_peers()`, and the `on_peer_connected` / `on_peer_disconnected`
 / `on_dial_failed` hooks. This is also exactly what you **mock in tests** — a
 subsystem is tested against a fake `PeerNetwork`, with no real sockets.
 
-**`EventBus` (`src/core/event_bus.h`)** — typed, fire-and-forget pub/sub. A
+**`EventBus` (`src/librats/core/event_bus.h`)** — typed, fire-and-forget pub/sub. A
 publisher emits a value; every subscriber for that type runs. The publisher
 neither knows nor names its subscribers (which is what stops modules from grabbing
 references to each other):
@@ -410,7 +410,7 @@ ctx.events.on<NetworkChanged>([](const NetworkChanged& e){ /* re-announce */ });
 ctx.events.emit(NetworkChanged{addrs});   // all subscribers run
 ```
 
-**`ServiceRegistry` (`src/core/service_registry.h`)** — the targeted, *with a
+**`ServiceRegistry` (`src/librats/core/service_registry.h`)** — the targeted, *with a
 return value* half. A module registers itself under a narrow capability
 *interface*; another module resolves that interface and calls it directly, yet
 never depends on the concrete type. `get<I>()` returns `nullptr` when no provider
@@ -461,7 +461,7 @@ Two of these illustrate the `ServiceRegistry` pattern nicely: `DhtDiscovery`
 of running its own. Disable `DhtDiscovery` and BitTorrent simply falls back; no
 code changes, because the dependency is by interface and may be `nullptr`.
 
-The only node-level event today is **`NetworkChanged`** (`src/node/host_events.h`),
+The only node-level event today is **`NetworkChanged`** (`src/librats/node/host_events.h`),
 emitted (debounced) by the optional `NetworkMonitor` when the host's interfaces or
 routes change — Wi-Fi↔cellular, VPN up/down, dock, wake-from-sleep. Long-lived
 subsystems subscribe to it to renew port mappings and re-announce a public
@@ -534,7 +534,7 @@ Two details that bite people:
 
 ## 9. Language bindings
 
-Everything non-C++ is built on one C ABI: **`src/bindings/rats.{h,cpp}`**.
+Everything non-C++ is built on one C ABI: **`src/librats/bindings/rats.{h,cpp}`**.
 
 - A `rats_t` is an opaque pointer wrapping a C++ `Node`.
 - **Subsystems are opt-in via `rats_enable_*()`** calls made *before*
@@ -562,20 +562,20 @@ The directory tree mirrors the layers in this document:
 
 | Directory | Contents |
 |-----------|----------|
-| `src/core` | sockets, buffers, `IOPoller`, MPSC/timer queues, `EventBus`, `ServiceRegistry` |
-| `src/wire` | two-level framing + `MessageRouter` |
-| `src/transport` | `ReactorPool`, `Reactor`, `Connection` state machine |
-| `src/security` | `Identity`, `Handshaker`/`Session`, Noise & plaintext providers |
-| `src/peer` | self-certifying `PeerId`, `PeerTable`, `Peer` handle |
-| `src/node` | the `Node` facade, `NodeContext`, `PeerNetwork`, identify, host events |
-| `src/subsystems` | the opt-in plugins |
-| `src/dht` | Kademlia + KRPC (bencode shared with BitTorrent) |
-| `src/mdns` | multicast DNS |
-| `src/nat` | STUN, UPnP, NAT-PMP |
-| `src/crypto` | hand-rolled curve25519 / chacha / poly1305 / blake2 / sha + the Noise framework |
-| `src/bittorrent` | BitTorrent (gated by `RATS_SEARCH_FEATURES`) |
-| `src/storage` | distributed KV store (gated by `RATS_STORAGE`) |
-| `src/bindings` | the C ABI all FFI bindings build on |
+| `src/librats/core` | sockets, buffers, `IOPoller`, MPSC/timer queues, `EventBus`, `ServiceRegistry` |
+| `src/librats/wire` | two-level framing + `MessageRouter` |
+| `src/librats/transport` | `ReactorPool`, `Reactor`, `Connection` state machine |
+| `src/librats/security` | `Identity`, `Handshaker`/`Session`, Noise & plaintext providers |
+| `src/librats/peer` | self-certifying `PeerId`, `PeerTable`, `Peer` handle |
+| `src/librats/node` | the `Node` facade, `NodeContext`, `PeerNetwork`, identify, host events |
+| `src/librats/subsystems` | the opt-in plugins |
+| `src/librats/dht` | Kademlia + KRPC (bencode shared with BitTorrent) |
+| `src/librats/mdns` | multicast DNS |
+| `src/librats/nat` | STUN, UPnP, NAT-PMP |
+| `src/librats/crypto` | hand-rolled curve25519 / chacha / poly1305 / blake2 / sha + the Noise framework |
+| `src/librats/bittorrent` | BitTorrent (gated by `RATS_SEARCH_FEATURES`) |
+| `src/librats/storage` | distributed KV store (gated by `RATS_STORAGE`) |
+| `src/librats/bindings` | the C ABI all FFI bindings build on |
 | `tests/` | GoogleTest suites — one `test_*.cpp` per area |
 
 ---
@@ -585,7 +585,7 @@ The directory tree mirrors the layers in this document:
 The architecture is at its best when you extend it the way it expects. To add a
 capability, **write a `Subsystem`** — don't touch `Node`:
 
-1. **Create `src/subsystems/your_thing.{h,cpp}`** with a class deriving from
+1. **Create `src/librats/subsystems/your_thing.{h,cpp}`** with a class deriving from
    `Subsystem` (implement `attach` / `start` / `stop`).
 2. **If it needs its own peer traffic, add a `MessageType`** to the enum in
    `wire/frame.h` and claim it in `attach()` with
@@ -600,7 +600,7 @@ capability, **write a `Subsystem`** — don't touch `Node`:
    appropriate `TEST_SOURCES` block in `CMakeLists.txt` (there is no glob). Test
    against a mock `PeerNetwork` — no real sockets needed.
 6. **If it should be reachable from other languages**, surface it through the C ABI
-   (`src/bindings/rats.{h,cpp}`) as a `rats_enable_*` and keep the wrappers in sync.
+   (`src/librats/bindings/rats.{h,cpp}`) as a `rats_enable_*` and keep the wrappers in sync.
 
 What **not** to do: don't widen `Node`'s public surface, don't make a subsystem
 hold a `Node&` or become its `friend`, and don't add locks to the per-connection

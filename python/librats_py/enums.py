@@ -1,7 +1,7 @@
 """
 Enumerations and constants for librats Python bindings.
 
-These mirror the enums declared in the C ABI (``src/bindings/rats.h``).
+These mirror the enums declared in the C ABI (``src/librats/bindings/rats.h``).
 """
 
 from enum import IntEnum

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "bindings/rats.h"
+#include "librats/bindings/rats.h"
 
 #include <atomic>
 #include <chrono>

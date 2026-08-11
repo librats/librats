@@ -6,11 +6,11 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include <vector>
-#include "crypto/noise.h"
+#include "librats/crypto/noise.h"
 
 extern "C" {
-#include "crypto/chachapoly.h"
-#include "crypto/hkdf.h"
+#include "librats/crypto/chachapoly.h"
+#include "librats/crypto/hkdf.h"
 }
 
 using namespace librats;

@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include "bittorrent/disk_io.h"
-#include "util/fs.h"
-#include "crypto/sha1.h"
+#include "librats/bittorrent/disk_io.h"
+#include "librats/util/fs.h"
+#include "librats/crypto/sha1.h"
 #include <thread>
 #include <chrono>
 #include <atomic>

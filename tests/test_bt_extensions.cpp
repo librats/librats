@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/extensions.h"
+#include "librats/bittorrent/extensions.h"
 
 using namespace librats::bittorrent;
 using librats::Bytes;

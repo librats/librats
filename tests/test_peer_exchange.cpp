@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "subsystems/peer_exchange.h"
-#include "wire/frame.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/peer_exchange.h"
+#include "librats/wire/frame.h"
 
 #include <chrono>
 #include <memory>

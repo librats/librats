@@ -48,12 +48,12 @@ vcpkg_install_copyright(
 librats is licensed under the MIT license. It additionally embeds adapted
 third-party sources that carry their own notices, reproduced below:
 
-  * src/crypto/curve25519.*        curve25519-donna       BSD-3-Clause
-  * src/crypto/poly1305.*          poly1305-donna         MIT
-  * src/crypto/{chacha,sha256,sha512,blake2*}.*
-                                   noise-c                MIT
-  * 3rdparty/android/ifaddrs-*     ifaddrs-android        BSD-2-Clause AND
-                                   (Android API < 24)     BSD-1-Clause
+  * src/librats/crypto/curve25519.*   curve25519-donna       BSD-3-Clause
+  * src/librats/crypto/poly1305.*     poly1305-donna         MIT
+  * src/librats/crypto/{chacha,sha256,sha512,blake2*}.*
+                                      noise-c                MIT
+  * 3rdparty/android/ifaddrs-*        ifaddrs-android        BSD-2-Clause AND
+                                      (Android API < 24)     BSD-1-Clause
 ]]
     FILE_LIST
         "${SOURCE_PATH}/LICENSE"

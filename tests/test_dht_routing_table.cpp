@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "dht/routing_table.h"
+#include "librats/dht/routing_table.h"
 
 #include <algorithm>
 #include <random>

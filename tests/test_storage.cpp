@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include "storage/storage.h"
-#include "node/node.h"
-#include "util/fs.h"
+#include "librats/storage/storage.h"
+#include "librats/node/node.h"
+#include "librats/util/fs.h"
 #include <algorithm>
 #include <chrono>
 #include <memory>

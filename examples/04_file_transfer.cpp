@@ -15,9 +15,9 @@
 //   ./04_file_transfer 9001 127.0.0.1 9000 ./some-file.bin
 // Both sides print progress; the process exits once the transfer completes.
 
-#include "node/node.h"
-#include "subsystems/file_transfer.h"
-#include "util/fs.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/file_transfer.h>
+#include <librats/util/fs.h>
 
 #include <atomic>
 #include <chrono>

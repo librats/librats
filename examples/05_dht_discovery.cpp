@@ -14,8 +14,8 @@
 // converge. A shared, non-guessable key namespaces your app's swarm; passing a
 // data_dir persists the identity and DHT routing table across restarts.
 
-#include "node/node.h"
-#include "subsystems/dht_discovery.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/dht_discovery.h>
 
 #include <chrono>
 #include <iostream>

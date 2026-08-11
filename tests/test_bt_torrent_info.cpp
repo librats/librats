@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/torrent_info.h"
-#include "bittorrent/bencode.h"
-#include "crypto/sha1.h"
+#include "librats/bittorrent/torrent_info.h"
+#include "librats/bittorrent/bencode.h"
+#include "librats/crypto/sha1.h"
 
 #include <string>
 

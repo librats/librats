@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "subsystems/dht_discovery.h"
-#include "nat/stun.h"
-#include "core/socket.h"
-#include "util/fs.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/dht_discovery.h"
+#include "librats/nat/stun.h"
+#include "librats/core/socket.h"
+#include "librats/util/fs.h"
 
 #include <atomic>
 #include <chrono>

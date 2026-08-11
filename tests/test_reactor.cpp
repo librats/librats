@@ -1,12 +1,12 @@
 #include <gtest/gtest.h>
 
-#include "transport/reactor.h"
-#include "transport/connection.h"
-#include "wire/frame.h"
-#include "security/identity.h"
-#include "security/noise_security.h"
-#include "security/plaintext_security.h"
-#include "core/socket.h"
+#include "librats/transport/reactor.h"
+#include "librats/transport/connection.h"
+#include "librats/wire/frame.h"
+#include "librats/security/identity.h"
+#include "librats/security/noise_security.h"
+#include "librats/security/plaintext_security.h"
+#include "librats/core/socket.h"
 
 #include <atomic>
 #include <chrono>

@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
-#include "core/event_bus.h"
-#include "core/service_registry.h"
-#include "node/node.h"
-#include "node/host_events.h"
+#include "librats/core/event_bus.h"
+#include "librats/core/service_registry.h"
+#include "librats/node/node.h"
+#include "librats/node/host_events.h"
 
 #include <atomic>
 #include <string>

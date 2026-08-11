@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/byte_io.h"
+#include "librats/bittorrent/byte_io.h"
 
 using namespace librats::bittorrent;
 

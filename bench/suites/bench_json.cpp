@@ -13,7 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include "framework/bench.h"
-#include "util/json.h"
+#include "librats/util/json.h"
 // "stable" baseline: the json.{h,cpp} from the previous commit (HEAD~1, fc81b94),
 // dropped in under namespace librats_stable so it links side-by-side with the
 // current librats::Json. Lets us see whether the latest commit actually moved

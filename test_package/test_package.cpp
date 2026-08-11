@@ -12,17 +12,17 @@
  * started, which is enough to force the linker to resolve their symbols.
  */
 
-#include "node/node.h"
-#include "subsystems/dht_discovery.h"
-#include "subsystems/file_transfer.h"
-#include "subsystems/mdns_discovery.h"
-#include "subsystems/message_json.h"
-#include "subsystems/peer_exchange.h"
-#include "subsystems/ping_service.h"
-#include "subsystems/port_mapping_service.h"
-#include "subsystems/pubsub.h"
-#include "subsystems/reconnection.h"
-#include "util/json.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/dht_discovery.h>
+#include <librats/subsystems/file_transfer.h>
+#include <librats/subsystems/mdns_discovery.h>
+#include <librats/subsystems/message_json.h>
+#include <librats/subsystems/peer_exchange.h>
+#include <librats/subsystems/ping_service.h>
+#include <librats/subsystems/port_mapping_service.h>
+#include <librats/subsystems/pubsub.h>
+#include <librats/subsystems/reconnection.h>
+#include <librats/util/json.h>
 
 #include <cstdio>
 #include <memory>

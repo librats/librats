@@ -1,7 +1,7 @@
 # LibRats Android Library
 
 Android JNI bindings for LibRats, a C++ peer-to-peer networking library. This
-module wraps the canonical LibRats C ABI (`src/bindings/rats.h`) in a JNI bridge
+module wraps the canonical LibRats C ABI (`src/librats/bindings/rats.h`) in a JNI bridge
 (`librats_jni.cpp`) and a high-level Java API (`com.librats.RatsClient`).
 
 ## Model
@@ -36,7 +36,7 @@ A `RatsClient` wraps a native node. The model is peer-id-centric:
 android/
 ├── src/main/
 │   ├── cpp/
-│   │   ├── librats_jni.cpp    # JNI bridge to src/bindings/rats.h
+│   │   ├── librats_jni.cpp    # JNI bridge to src/librats/bindings/rats.h
 │   │   └── CMakeLists.txt     # builds core + JNI
 │   ├── java/com/librats/
 │   │   ├── RatsClient.java        # main API

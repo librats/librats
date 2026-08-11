@@ -3,7 +3,7 @@
 ## Overview
 
 This module provides JNI bindings for the LibRats C++ peer-to-peer networking
-library, wrapping the canonical C ABI (`src/bindings/rats.h`). Android apps can:
+library, wrapping the canonical C ABI (`src/librats/bindings/rats.h`). Android apps can:
 
 - Dial peers and accept inbound connections
 - Send/receive raw-byte messages on named channels
@@ -121,7 +121,7 @@ public class P2PService {
 
 The native build pulls in the repository-root `CMakeLists.txt` with
 `RATS_BINDINGS ON`, compiling the core `rats` library plus the C ABI
-(`src/bindings/rats.cpp`) and the generated `version.h`, then links the JNI
+(`src/librats/bindings/rats.cpp`) and the generated `version.h`, then links the JNI
 bridge (`librats_jni.so`) against it.
 
 Supported ABIs: arm64-v8a, armeabi-v7a, x86_64, x86.

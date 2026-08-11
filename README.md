@@ -114,7 +114,7 @@ The examples below use the C++ `Node` API. The equivalent C API (`rats_*`) is sh
 ### 1. Basic P2P connection
 
 ```cpp
-#include "node/node.h"
+#include <librats/node/node.h>
 #include <iostream>
 
 using namespace librats;
@@ -179,8 +179,8 @@ Two nodes whose `protocol` id differs cannot complete a handshake — a cheap, c
 Attach the `MessageJson` subsystem and reach it through `node.json()`.
 
 ```cpp
-#include "node/node.h"
-#include "subsystems/message_json.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/message_json.h>
 
 Node node(NodeConfig{/*listen_port=*/8080});
 node.add_subsystem(std::make_unique<MessageJson>());
@@ -200,8 +200,8 @@ node.json()->send(some_peer_id, "chat", librats::Json{{"text", "private hi"}});
 ### 4. GossipSub publish-subscribe
 
 ```cpp
-#include "node/node.h"
-#include "subsystems/pubsub.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/pubsub.h>
 
 Node node(NodeConfig{8080});
 auto* pubsub = node.add_subsystem(std::make_unique<PubSub>());
@@ -221,8 +221,8 @@ std::cout << "subscribers in 'news': " << pubsub->peers_for_topic("news").size()
 ### 5. File and directory transfer
 
 ```cpp
-#include "node/node.h"
-#include "subsystems/file_transfer.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/file_transfer.h>
 
 Node node(NodeConfig{8080});
 auto* files = node.add_subsystem(std::make_unique<FileTransfer>("./downloads"));  // temp dir
@@ -269,8 +269,8 @@ node.start();
 Attach `PortMappingService` to forward the listen port automatically on startup. Both UPnP IGD and NAT-PMP are attempted in parallel; whichever the router supports wins. The mapping is refreshed automatically and removed on `stop()`.
 
 ```cpp
-#include "node/node.h"
-#include "subsystems/port_mapping_service.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/port_mapping_service.h>
 
 Node node(NodeConfig{8080});
 auto* portmap = node.add_subsystem(std::make_unique<PortMappingService>());
@@ -284,10 +284,10 @@ if (auto pub = portmap->mapped_public_address())
 ### 8. Peer discovery (DHT + mDNS) and reconnection
 
 ```cpp
-#include "node/node.h"
-#include "subsystems/dht_discovery.h"
-#include "subsystems/mdns_discovery.h"
-#include "subsystems/reconnection.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/dht_discovery.h>
+#include <librats/subsystems/mdns_discovery.h>
+#include <librats/subsystems/reconnection.h>
 
 NodeConfig config;
 config.listen_port = 8080;
@@ -315,7 +315,7 @@ reconnect->add(Address{"203.0.113.7", 8080});   // keep this target connected
 ### 9. Liveness (RTT probing)
 
 ```cpp
-#include "subsystems/ping_service.h"
+#include <librats/subsystems/ping_service.h>
 
 auto* ping = node.add_subsystem(std::make_unique<PingService>());
 node.start();
@@ -327,7 +327,7 @@ if (auto rtt = ping->last_rtt(peer_id))
 ### 10. Distributed storage (requires `RATS_STORAGE`)
 
 ```cpp
-#include "storage/storage.h"
+#include <librats/storage/storage.h>
 
 auto* storage = node.add_subsystem(std::make_unique<StorageManager>());
 node.start();
@@ -426,7 +426,7 @@ Each subsystem is attached with `node.add_subsystem(std::make_unique<T>(...))` *
 The canonical opaque-pointer C ABI — the foundation for every language binding. A `rats_t` wraps a `Node`. Fallible calls return `rats_error_t` (`RATS_OK == 0`); pure getters return their value directly. Subsystems are opt-in: enable each with the matching `rats_enable_*()` **before** `rats_start()`. Strings returned by the library are heap-allocated — free them with `rats_string_free()`.
 
 ```c
-#include "bindings/rats.h"
+#include <librats/bindings/rats.h>
 #include <stdio.h>
 
 static void on_connected(void* user, const char* peer_id_hex) {
@@ -494,7 +494,7 @@ Key entry points: `rats_create` / `rats_create_config` / `rats_config_default` /
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-The source tree mirrors these layers: `src/core`, `src/util`, `src/wire`, `src/transport`, `src/peer`, `src/security`, `src/node`, `src/subsystems`, `src/dht`, `src/mdns`, `src/nat`, `src/crypto`, `src/bittorrent`, `src/storage`, `src/bindings`.
+The source tree mirrors these layers: `src/librats/core`, `src/librats/util`, `src/librats/wire`, `src/librats/transport`, `src/librats/peer`, `src/librats/security`, `src/librats/node`, `src/librats/subsystems`, `src/librats/dht`, `src/librats/mdns`, `src/librats/nat`, `src/librats/crypto`, `src/librats/bittorrent`, `src/librats/storage`, `src/librats/bindings`.
 
 ## Frequently Asked Questions (FAQ)
 
@@ -681,7 +681,7 @@ add_subdirectory(external/librats)
 
 add_executable(my_p2p_app main.cpp)
 target_link_libraries(my_p2p_app PRIVATE rats)
-# Include directories are propagated automatically (use #include "node/node.h").
+# Include directories are propagated automatically (use #include <librats/node/node.h>).
 ```
 
 #### Required System Libraries
@@ -756,8 +756,8 @@ See [`examples/README.md`](examples/README.md) for the full list and per-example
 ### Minimal chat
 
 ```cpp
-#include "node/node.h"
-#include "subsystems/message_json.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/message_json.h>
 #include <iostream>
 
 using namespace librats;
@@ -861,7 +861,7 @@ librats also embeds a few adapted third-party cryptographic and platform-compati
 ## 🙏 Acknowledgments
 
 - **libtorrent**: a huge source of inspiration for librats' DHT and BitTorrent stacks. Many algorithmic ideas and improvements — the traversal/lookup algorithm, the ordered-bucket routing table, IP-diversity admission and other hardening details — are borrowed from its battle-tested design. Big thanks to the libtorrent team for their outstanding work.
-- **[noise-c](https://github.com/rweather/noise-c)** by Rhys Weatherley / Southern Storm Software: the reference librats' Noise Protocol implementation was written against. The ChaCha20, SHA-256/512 and BLAKE2b/BLAKE2s primitives in `src/crypto/` are derived from it (MIT), as are — through it — [curve25519-donna](https://github.com/agl/curve25519-donna) by Adam Langley (BSD-3-Clause) and [poly1305-donna](https://github.com/floodyberry/poly1305-donna) by Andrew Moon (MIT). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for provenance and the full notices.
+- **[noise-c](https://github.com/rweather/noise-c)** by Rhys Weatherley / Southern Storm Software: the reference librats' Noise Protocol implementation was written against. The ChaCha20, SHA-256/512 and BLAKE2b/BLAKE2s primitives in `src/librats/crypto/` are derived from it (MIT), as are — through it — [curve25519-donna](https://github.com/agl/curve25519-donna) by Adam Langley (BSD-3-Clause) and [poly1305-donna](https://github.com/floodyberry/poly1305-donna) by Andrew Moon (MIT). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for provenance and the full notices.
 - **nlohmann/json**: inspiration for the API surface of librats' own self-contained `librats::Json` type
 - **Contributors**: everyone who has helped make librats better
 

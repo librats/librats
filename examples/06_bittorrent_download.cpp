@@ -12,10 +12,10 @@
 // It prints download/upload rates and peer counts once a second until the
 // process is interrupted.
 
-#include "node/node.h"
-#include "subsystems/dht_discovery.h"
-#include "subsystems/bittorrent.h"
-#include "util/fs.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/dht_discovery.h>
+#include <librats/subsystems/bittorrent.h>
+#include <librats/util/fs.h>
 
 #include <chrono>
 #include <iostream>

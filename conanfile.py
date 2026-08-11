@@ -100,7 +100,10 @@ class LibratsConan(ConanFile):
         self.cpp_info.set_property("cmake_file_name", "rats")
         self.cpp_info.set_property("cmake_target_name", "rats::rats")
         self.cpp_info.libs = ["rats"]
-        self.cpp_info.includedirs = ["include/librats", "include/librats/crypto"]
+        # One root: headers spell their own path in full ("librats/node/node.h"),
+        # so include/ alone is enough and nothing generic lands on the consumer's
+        # include path. Mirrors INSTALL_INTERFACE in CMakeLists.txt.
+        self.cpp_info.includedirs = ["include"]
 
         if self.options.search_features:
             self.cpp_info.defines.append("RATS_SEARCH_FEATURES")
@@ -108,7 +111,7 @@ class LibratsConan(ConanFile):
             self.cpp_info.defines.append("RATS_STORAGE")
 
         # Consumers of the Windows DLL need __declspec(dllimport) on the public
-        # classes (see src/util/rats_export.h). CMakeDeps generates its own config
+        # classes (see src/librats/util/rats_export.h). CMakeDeps generates its own config
         # from this method and never reads the project's ratsConfig.cmake, so the
         # INTERFACE define set in CMakeLists.txt does not reach Conan consumers —
         # it has to be repeated here. Keep both sides in sync.

@@ -128,24 +128,24 @@ endif()
 # from the main tree, so what is measured is optimized identically to whatever it
 # is being compared against — independent of how the parent tree was configured.
 
-set(JSON_UNDER_TEST ${LIBRATS_ROOT}/src/util/json.cpp)
+set(JSON_UNDER_TEST ${LIBRATS_ROOT}/src/librats/util/json.cpp)
 set(IO_UNDER_TEST
-    ${LIBRATS_ROOT}/src/core/receive_buffer.cpp
-    ${LIBRATS_ROOT}/src/core/chained_send_buffer.cpp
-    ${LIBRATS_ROOT}/src/wire/frame.cpp                   # needs htonl -> ws2_32
+    ${LIBRATS_ROOT}/src/librats/core/receive_buffer.cpp
+    ${LIBRATS_ROOT}/src/librats/core/chained_send_buffer.cpp
+    ${LIBRATS_ROOT}/src/librats/wire/frame.cpp                   # needs htonl -> ws2_32
 )
 
 # Crypto primitives librats ported from noise-c (reference2/). Compiled straight
 # in so they are optimized identically to the reference they are measured against.
 set(CRYPTO_UNDER_TEST
-    ${LIBRATS_ROOT}/src/crypto/sha256.c
-    ${LIBRATS_ROOT}/src/crypto/sha512.c
-    ${LIBRATS_ROOT}/src/crypto/blake2b.c
-    ${LIBRATS_ROOT}/src/crypto/blake2s.c
-    ${LIBRATS_ROOT}/src/crypto/chacha.c
-    ${LIBRATS_ROOT}/src/crypto/poly1305.c
-    ${LIBRATS_ROOT}/src/crypto/curve25519.c
-    ${LIBRATS_ROOT}/src/crypto/chachapoly.c
+    ${LIBRATS_ROOT}/src/librats/crypto/sha256.c
+    ${LIBRATS_ROOT}/src/librats/crypto/sha512.c
+    ${LIBRATS_ROOT}/src/librats/crypto/blake2b.c
+    ${LIBRATS_ROOT}/src/librats/crypto/blake2s.c
+    ${LIBRATS_ROOT}/src/librats/crypto/chacha.c
+    ${LIBRATS_ROOT}/src/librats/crypto/poly1305.c
+    ${LIBRATS_ROOT}/src/librats/crypto/curve25519.c
+    ${LIBRATS_ROOT}/src/librats/crypto/chachapoly.c
 )
 # The noise-c reference primitives, each symbol-isolated behind nc_* (baseline/).
 set(NOISEC_REF
@@ -203,7 +203,7 @@ add_bench(bench_tx
 )
 
 # DHT: librats' keyspace primitives vs a standalone re-port of libtorrent's.
-# Header-only (src/dht/id.h); brings its own timing loop.
+# Header-only (src/librats/dht/id.h); brings its own timing loop.
 add_bench(bench_dht
     SOURCES suites/bench_dht.cpp
 )

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/peer_list.h"
+#include "librats/bittorrent/peer_list.h"
 
 #include <algorithm>
 

@@ -20,9 +20,9 @@ reconnection — is an opt-in librats::Subsystem you attach with
 `add_subsystem()` **before** `start()`. You pay only for what you attach.
 
 ```cpp
-#include "node/node.h"
-#include "subsystems/dht_discovery.h"
-#include "subsystems/message_json.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/dht_discovery.h>
+#include <librats/subsystems/message_json.h>
 
 using namespace librats;
 

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "util/logger.h"
+#include "librats/util/logger.h"
 
 #include <cstdio>
 #include <fstream>

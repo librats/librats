@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "dht/id.h"
+#include "librats/dht/id.h"
 
 #include <type_traits>
 #include <unordered_set>

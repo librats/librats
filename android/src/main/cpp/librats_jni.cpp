@@ -16,7 +16,7 @@
 #include <unordered_map>
 #include <android/log.h>
 
-#include "bindings/rats.h"
+#include <librats/bindings/rats.h>
 
 #define LOG_TAG "LibRatsJNI"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)

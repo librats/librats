@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/peer_connection.h"
-#include "bittorrent/reactor.h"
-#include "bittorrent/types.h"
-#include "core/socket.h"
+#include "librats/bittorrent/peer_connection.h"
+#include "librats/bittorrent/reactor.h"
+#include "librats/bittorrent/types.h"
+#include "librats/core/socket.h"
 
 #include <functional>
 

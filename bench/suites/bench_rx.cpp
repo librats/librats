@@ -26,8 +26,8 @@
 #include "baseline/legacy_buffers.h"
 #include "support/net_mock.h"
 
-#include "core/receive_buffer.h"
-#include "wire/frame.h"
+#include "librats/core/receive_buffer.h"
+#include "librats/wire/frame.h"
 
 #include <algorithm>
 #include <chrono>

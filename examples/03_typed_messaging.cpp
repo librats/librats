@@ -12,9 +12,9 @@
 // Each line you type is sent as a {"text": "..."} payload of type "chat" to all
 // connected peers.
 
-#include "node/node.h"
-#include "subsystems/message_json.h"
-#include "util/json.h"
+#include <librats/node/node.h>
+#include <librats/subsystems/message_json.h>
+#include <librats/util/json.h>
 
 #include <iostream>
 #include <string>

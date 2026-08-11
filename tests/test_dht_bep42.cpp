@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include "core/ip_address.h"
-#include "dht/bep42.h"
-#include "dht/id.h"
+#include "librats/core/ip_address.h"
+#include "librats/dht/bep42.h"
+#include "librats/dht/id.h"
 
 #include <random>
 

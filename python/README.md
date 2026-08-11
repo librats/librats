@@ -1,7 +1,7 @@
 # librats Python Bindings
 
 Python bindings for the **librats** peer-to-peer networking library. They target
-the librats C ABI (`src/bindings/rats.h`) via `ctypes` and expose a high-level
+the librats C ABI (`src/librats/bindings/rats.h`) via `ctypes` and expose a high-level
 `RatsClient` for P2P messaging, pub/sub, typed JSON messaging, file transfer,
 discovery (DHT / mDNS), NAT port mapping, ping/RTT and automatic reconnection.
 

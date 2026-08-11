@@ -1,12 +1,12 @@
 #include <gtest/gtest.h>
 
-#include "bittorrent/tracker.h"
-#include "bittorrent/byte_io.h"
-#include "bittorrent/bencode.h"
-#include "bittorrent/client.h"
-#include "bittorrent/torrent_info.h"
-#include "crypto/sha1.h"
-#include "core/socket.h"
+#include "librats/bittorrent/tracker.h"
+#include "librats/bittorrent/byte_io.h"
+#include "librats/bittorrent/bencode.h"
+#include "librats/bittorrent/client.h"
+#include "librats/bittorrent/torrent_info.h"
+#include "librats/crypto/sha1.h"
+#include "librats/core/socket.h"
 
 #include <atomic>
 #include <cstdio>

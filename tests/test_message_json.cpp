@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "subsystems/message_json.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/message_json.h"
 
 #include <atomic>
 #include <chrono>

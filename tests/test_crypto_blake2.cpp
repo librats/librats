@@ -5,8 +5,8 @@
 
 #include <gtest/gtest.h>
 #include <cstring>
-#include "crypto/blake2s.h"
-#include "crypto/blake2b.h"
+#include "librats/crypto/blake2s.h"
+#include "librats/crypto/blake2b.h"
 
 class BLAKE2sTest : public ::testing::Test {
 protected:

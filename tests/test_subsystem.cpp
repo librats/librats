@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "node/node.h"
-#include "subsystems/ping_service.h"
-#include "subsystems/port_mapping_service.h"
+#include "librats/node/node.h"
+#include "librats/subsystems/ping_service.h"
+#include "librats/subsystems/port_mapping_service.h"
 
 #include <chrono>
 #include <memory>
