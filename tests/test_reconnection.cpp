@@ -233,7 +233,16 @@ TEST(ReconnectionServiceTest, RemoveStopsReconnect) {
     Node server(listening_config());
     Node client(dialing_config());
 
-    auto reconnect = std::make_unique<ReconnectionService>(fast_reconnect());
+    // persist_discovered is deliberately OFF here. A peer becomes visible in the
+    // node's peer table (peer_count()) BEFORE the on_peer_connected callbacks run,
+    // so the wait below can return while this subsystem's on_connected is still
+    // pending on the reactor thread. With auto-persist on, that late event legally
+    // re-learns the address we just removed (documented in reconnection.h) and the
+    // target comes back — a race, not the behaviour under test. Off, remove() is
+    // the only thing that decides whether the address stays a target.
+    auto cfg = fast_reconnect();
+    cfg.persist_discovered = false;
+    auto reconnect = std::make_unique<ReconnectionService>(cfg);
     ReconnectionService* svc = reconnect.get();
     client.add_subsystem(std::move(reconnect));
 
