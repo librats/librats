@@ -7,10 +7,12 @@
 #include <thread>
 #include <chrono>
 #ifndef _WIN32
-    #include <fcntl.h>    // for O_NONBLOCK
-    #include <errno.h>    // for errno
-    #include <sys/uio.h>  // for iovec (send_vectored)
-    #include <limits.h>   // for IOV_MAX (send_vectored)
+    #include <fcntl.h>          // for O_NONBLOCK
+    #include <errno.h>          // for errno
+    #include <sys/uio.h>        // for iovec (send_vectored)
+    #include <limits.h>         // for IOV_MAX (send_vectored)
+    #include <netinet/in.h>     // for IPPROTO_TCP (set_tcp_nodelay)
+    #include <netinet/tcp.h>    // for TCP_NODELAY
     // macOS/BSD have no MSG_NOSIGNAL; they suppress SIGPIPE with the SO_NOSIGPIPE
     // socket option instead, which suppress_sigpipe() sets on every TCP socket we
     // send on — so sending with no flag is the right fallback there.
@@ -1080,6 +1082,16 @@ bool set_socket_buffer_sizes(socket_t socket, int recv_bytes, int send_bytes) {
         ok = false;
     }
     return ok;
+}
+
+bool set_tcp_nodelay(socket_t socket) {
+    const int on = 1;
+    if (setsockopt(socket, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&on), sizeof(on)) != 0) {
+        LOG_SOCKET_DEBUG("Could not disable Nagle on socket " << socket);
+        return false;
+    }
+    return true;
 }
 
 std::ptrdiff_t send_udp_to(socket_t socket, const void* data, size_t len,

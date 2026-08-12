@@ -40,8 +40,14 @@ public:
     virtual uint16_t            listen_port() const = 0;     ///< our advertised TCP port
     virtual const std::string&  protocol() const = 0;        ///< app protocol id (e.g. "librats/1.0"); namespaces discovery
     virtual void                connect(const Address& address) = 0;  ///< dial a discovered peer
-    virtual void                send(const PeerId& to, MessageType type, ByteView payload) = 0;
-    virtual void                broadcast(MessageType type, ByteView payload) = 0;
+    /// Send to one peer. @return whether that peer's send queue still has room;
+    /// false means "stop and wait for on_peer_writable" — the message is queued
+    /// either way, but continuing past this is what gets a peer dropped as a slow
+    /// consumer. Also false if the peer is not connected.
+    virtual bool                send(const PeerId& to, MessageType type, ByteView payload) = 0;
+    /// Send to every connected peer. @return whether *every* one of them still
+    /// has room, so a subsystem that fans out can pause on the slowest.
+    virtual bool                broadcast(MessageType type, ByteView payload) = 0;
     virtual std::vector<PeerId>  connected_peers() const = 0;
     virtual std::vector<PeerInfo> peers() const = 0;  ///< snapshot incl. dialable addresses
     virtual void                on(MessageType type, MessageHandler handler) = 0;
@@ -55,6 +61,11 @@ public:
     // There is no on_peer_disconnected for a connection that never came up, so this
     // is the only signal a redial policy gets that an in-flight dial has resolved.
     virtual void                on_dial_failed(DialFailedHandler handler) = 0;
+    /// A peer whose send queue had filled up has drained back under its mark, so
+    /// sending to it may resume. The counterpart of send() returning false; a
+    /// subsystem that never checks that return never needs this either. Runs on a
+    /// reactor thread. Default: not offered (nothing subscribes).
+    virtual void                on_peer_writable(PeerEventHandler /*handler*/) {}
 };
 
 struct NodeContext;  // node/node_context.h — bundles network + events + services

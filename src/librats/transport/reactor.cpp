@@ -211,6 +211,12 @@ void Reactor::run() {
         // comparison this is when nothing is due. Before process_pending_close(),
         // so a stream that dies here is torn down in the same turn.
         if (mux_) mux_->tick();
+        // Everything queued by send() during this turn goes to the wire here, in
+        // one write per connection rather than one per frame. Deliberately after
+        // the mux tick — a handler it dispatched may well have sent something —
+        // and before the close pass, so a connection that dies on the write is
+        // torn down in the same turn.
+        flush_dirty();
         process_pending_close();
         // The mux batches its datagrams; the ones it collected inside a readable
         // event or a tick have already gone out, but an application send reaches a
@@ -223,6 +229,7 @@ void Reactor::run() {
     // sends flush and explicit closes settle, then tear everything down. (post()
     // may still race in after this; such tasks are dropped — see post().)
     drain_tasks(task_batch);
+    flush_dirty();               // in-flight sends leave before the door closes
     process_pending_close();
     shutdown_connections();
     if (mux_) mux_->shutdown();   // after the connections, so no Link outlives it
@@ -339,7 +346,13 @@ Connection* Reactor::adopt(std::unique_ptr<Link> link, ConnRole role, ConnId id)
     if (resolve_dial(id)) return nullptr;
 
     const socket_t fd = link->fd();
-    if (is_valid_socket(fd)) set_socket_nonblocking(fd);
+    if (is_valid_socket(fd)) {
+        set_socket_nonblocking(fd);
+        // Only a TCP link has a socket of its own, so this reaches exactly the
+        // sockets Nagle applies to. Safe to do here and nowhere else because the
+        // send queue now aggregates on our side — see set_tcp_nodelay().
+        set_tcp_nodelay(fd);
+    }
 
     auto conn = std::make_unique<Connection>(id, std::move(link), role, *this, delegate_);
     Connection* raw = conn.get();
@@ -373,6 +386,20 @@ Connection* Reactor::adopt(std::unique_ptr<Link> link, ConnRole role, ConnId id)
 
 void Reactor::mark_for_close(ConnId id, CloseReason reason) {
     pending_close_.emplace(id, reason);  // first reason wins
+}
+
+void Reactor::flush_dirty() {
+    if (dirty_.empty()) return;
+    // Swapped out first: a flush can close a connection, and a close can queue
+    // further work — none of which should extend the batch being walked.
+    std::vector<ConnId> batch;
+    batch.swap(dirty_);
+    for (const ConnId id : batch) {
+        Connection* conn = find(id);
+        if (!conn) continue;                                   // gone since it booked
+        if (conn->state() != ConnState::Established) continue;  // closing; nothing to owe
+        if (!conn->flush_pending()) mark_for_close(id, conn->close_reason());
+    }
 }
 
 void Reactor::process_pending_close() {

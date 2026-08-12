@@ -55,6 +55,27 @@ std::vector<Address> PeerTable::add_addresses(const PeerId& id, PeerRoute route,
     return added;
 }
 
+std::optional<PeerTable::Destination> PeerTable::destination(const PeerId& id) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    auto it = peers_.find(id);
+    if (it == peers_.end()) return std::nullopt;
+    return Destination{it->second.route, it->second.writable, it->second.owed};
+}
+
+bool PeerTable::all_writable() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    for (const auto& [id, entry] : peers_)
+        if (!entry.writable) return false;
+    return true;
+}
+
+void PeerTable::set_writable(const PeerId& id, PeerRoute route, bool writable) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = peers_.find(id);
+    if (it == peers_.end() || it->second.route != route) return;
+    it->second.writable = writable;
+}
+
 void PeerTable::set_supported_transports(const PeerId& id, PeerRoute route, uint8_t mask) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = peers_.find(id);

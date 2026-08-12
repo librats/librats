@@ -1842,6 +1842,80 @@ TEST(UdpMuxTest, DataToSendBringsTheNextWakeupForward) {
 
 // ── End to end, through a Node ──────────────────────────────────────────────
 
+// ── Backpressure: an application can tell it is outrunning the link ─────────
+//
+// Without this the only thing that ever tells a sender it is going too fast is
+// the disconnection — the send queue fills silently, crosses the high-water mark
+// and the peer is dropped as a slow consumer, with nothing the application could
+// have checked beforehand. So send() answers "is there room?" and, once there is
+// again, on_peer_writable says so.
+//
+// The marks are driven from the config here rather than the default 8 MiB, which
+// is what makes this deterministic instead of a race: send() weighs the queue
+// *before* it flushes, so a single message larger than the low-water mark takes
+// the queue over it on the spot, whatever the link does afterwards.
+TEST(TransportUdpTest, AnApplicationThatHeedsBackpressureKeepsItsPeer) {
+    NodeConfig server_cfg = base_config();
+    NodeConfig client_cfg = base_config();
+    client_cfg.enable_listen = false;
+    // A deliberately small queue: 256 KiB before the peer would be dropped as a
+    // slow consumer, so 64 KiB before send() starts saying "no room". Moving four
+    // megabytes through it is only possible if the signal works.
+    client_cfg.send_queue_limit = 256 * 1024;
+
+    Node server(server_cfg), client(client_cfg);
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    std::atomic<size_t> got{0};
+    server.on("bulk", [&](Peer, ByteView payload) { got += payload.size(); });
+
+    std::atomic<int> openings{0};
+    client.on_peer_writable([&](const Peer&) { ++openings; });
+
+    std::atomic<int> lost{0};
+    client.on_peer_disconnected([&](const PeerId&) { ++lost; });
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+
+    const PeerId peer = client.peers().front().id;
+    EXPECT_TRUE(client.peer_writable(peer)) << "an idle peer reported no room";
+    EXPECT_FALSE(client.peer_writable(PeerId{})) << "a peer that is not there has no room";
+
+    // Offer far more than the queue can hold, but stop whenever told to and wait
+    // for the opening. This is the whole contract, and it is what an application
+    // could not do at all before: without the answer there is nothing to wait on
+    // and the only outcome is the disconnection.
+    constexpr size_t kChunk = 32 * 1024;
+    constexpr size_t kTotal = 4 * 1024 * 1024;
+    const std::string chunk(kChunk, 'b');
+
+    int  seen   = 0;
+    bool paused = false;
+    for (size_t offered = 0; offered < kTotal; offered += kChunk) {
+        if (!client.send(peer, "bulk", ByteView(chunk))) {
+            paused = true;
+            ASSERT_TRUE(wait_for([&] { return openings.load() > seen || lost.load() > 0; }))
+                << "the queue filled and never reported draining — a sender doing "
+                   "the right thing would wait forever";
+            seen = openings.load();
+        }
+        ASSERT_EQ(lost.load(), 0) << "the peer was dropped despite the sender pausing "
+                                     "every time it was asked to";
+    }
+
+    EXPECT_TRUE(paused) << "the queue never filled, so this proved nothing — raise "
+                           "the offered volume or lower send_queue_limit";
+    ASSERT_TRUE(wait_for([&] { return got.load() == kTotal; }, 30s))
+        << "backpressure dropped data it should only have delayed (" << got.load()
+        << " of " << kTotal << " B)";
+    EXPECT_EQ(lost.load(), 0);
+
+    client.stop();
+    server.stop();
+}
+
 TEST(TransportUdpTest, TwoNodesConnectOverUdp) {
     NodeConfig server_cfg = base_config();
     server_cfg.enable_tcp = false;              // UDP is the only way in

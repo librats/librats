@@ -262,6 +262,24 @@ int send_udp_data(socket_t socket, const std::vector<uint8_t>& data, const Addre
 bool set_socket_buffer_sizes(socket_t socket, int recv_bytes, int send_bytes);
 
 /**
+ * Turn Nagle's algorithm off on a TCP socket (TCP_NODELAY).
+ *
+ * Nagle holds a small write back until the last one is acknowledged, so that
+ * several of them can be coalesced into one segment. That is the kernel doing —
+ * late, and with no knowledge of what is coming — the batching a sender is
+ * better placed to do itself. With the send queue aggregating whole batches of
+ * frames into one write (see Connection::send), the coalescing has already
+ * happened by the time the kernel sees the bytes, and all Nagle can still add is
+ * the delay.
+ *
+ * Order matters: switching this on *without* that aggregation is a large step
+ * backwards, because then Nagle is the only thing merging small frames at all.
+ *
+ * @return true if the option was accepted.
+ */
+bool set_tcp_nodelay(socket_t socket);
+
+/**
  * Send one datagram straight from a raw buffer — no std::vector, no resolution.
  *
  * The allocation-free form of send_udp_data(), for engines that emit a packet per

@@ -66,6 +66,14 @@ public:
     virtual void on_frame(Connection& conn, const Frame& frame) = 0;
     virtual void on_closed(Connection& conn, CloseReason reason) = 0;
 
+    /// The send queue crossed its low-water mark: `writable` is false when it
+    /// filled past the mark (send() will now answer "no room") and true when it
+    /// has drained back under, so a sender that was told to stop may start again.
+    /// Runs on the reactor thread — from inside send() for the first, from inside
+    /// the flush that emptied the queue for the second — so a handler must not
+    /// block. Default: ignore.
+    virtual void on_writable_changed(Connection& /*conn*/, bool /*writable*/) {}
+
     /// An outbound dial died before there was ever a Connection to report it on —
     /// an unresolvable host, no route, no socket. Without this a dial policy that
     /// reserved the ConnId (see Reactor::connect) would wait out a timeout for an
@@ -79,6 +87,19 @@ public:
     /// High-water mark for the memory held by the send queue; exceeding it closes the
     /// connection with CloseReason::SlowConsumer.
     static constexpr size_t kDefaultSendHighWater = 8 * 1024 * 1024;
+
+    /// Where send() starts answering "no room". A quarter of the hard limit, so a
+    /// caller that heeds the answer never comes near the point where the
+    /// connection is dropped, and one that ignores it is no worse off than before
+    /// this mark existed. This is the whole difference between a transport that
+    /// can be used correctly and one that merely disconnects you.
+    static constexpr size_t kDefaultSendLowWater = kDefaultSendHighWater / 4;
+
+    /// Queued bytes past which send() stops holding the batch back and writes
+    /// immediately. Aggregating below this is what turns a burst of small frames
+    /// into one system call; above it there is already enough to fill a write, so
+    /// waiting would only cost memory and delay.
+    static constexpr size_t kCoalesceLimit = 64 * 1024;
 
     Connection(ConnId id, std::unique_ptr<Link> link, ConnRole role,
                Reactor& reactor, ConnectionDelegate& delegate);
@@ -102,11 +123,34 @@ public:
     bool          is_secure() const noexcept { return session_ && session_->is_secure(); }
 
     /// Queue an application frame for the peer. No-op unless Established.
-    void send(FrameHeader header, ByteView payload);
+    ///
+    /// @return whether there is still room for more. False means the queue is
+    ///         past its low-water mark — this frame is queued like any other,
+    ///         nothing is dropped, but the caller should stop and wait for
+    ///         ConnectionDelegate::on_writable rather than keep piling on until
+    ///         the connection is dropped as a slow consumer.
+    bool send(FrameHeader header, ByteView payload);
+
+    /// Whether the send queue currently has room (see send()).
+    bool writable() const noexcept { return !over_low_water_; }
+
+    /// Resize the send queue's marks. `high` is where the connection is dropped
+    /// as a slow consumer; the low-water mark send() reports against is derived
+    /// from it, so the two can never be set inconsistently. Called once, right
+    /// after the handshake, when the node's config asks for something other than
+    /// the default.
+    void set_send_high_water(size_t high) noexcept {
+        send_high_water_ = high;
+        send_low_water_  = high / 4;
+    }
+
+    /// Write out what send() queued during this reactor turn. Called by the
+    /// Reactor at the end of the turn; false ⇒ the connection must be torn down.
+    bool flush_pending();
 
     /// Convenience: send raw bytes on an application channel.
-    void send(uint16_t channel, ByteView payload) {
-        send(FrameHeader{MessageType::App, 0, channel}, payload);
+    bool send(uint16_t channel, ByteView payload) {
+        return send(FrameHeader{MessageType::App, 0, channel}, payload);
     }
 
     // — reactor-driven I/O callbacks. Return false to request teardown. —
@@ -186,7 +230,16 @@ private:
     size_t            rx_need_ = 0;
     ChainedSendBuffer tx_;
     bool              want_write_ = false;
+    /// A flush is already booked for the end of this reactor turn, so further
+    /// frames only need to join the queue rather than book another one.
+    bool              flush_queued_ = false;
+    /// The queue went past its low-water mark and the caller has been told to
+    /// stop; cleared, with a notification, once it drains back under.
+    bool              over_low_water_ = false;
+    /// Inside the on_writable callback — see flush().
+    bool              in_writable_ = false;
     size_t            send_high_water_ = kDefaultSendHighWater;
+    size_t            send_low_water_  = kDefaultSendLowWater;
     TimerId           establish_timer_ = kInvalidTimerId;  ///< connect+handshake deadline
     std::string       dial_host_;                          ///< address we dialed (outbound)
     uint16_t          dial_port_ = 0;

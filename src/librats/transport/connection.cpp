@@ -48,8 +48,8 @@ uint8_t Connection::reactor_index() const noexcept { return reactor_.index(); }
 
 // ── Outbound application frames ─────────────────────────────────────────────
 
-void Connection::send(FrameHeader header, ByteView payload) {
-    if (state_ != ConnState::Established) return;  // frames only flow post-handshake
+bool Connection::send(FrameHeader header, ByteView payload) {
+    if (state_ != ConnState::Established) return false;  // frames only flow post-handshake
 
     Bytes inner;
     framer::encode_message(inner, header, payload);
@@ -58,7 +58,7 @@ void Connection::send(FrameHeader header, ByteView payload) {
     if (!session_->encrypt(inner, cipher)) {
         LOG_ERROR("connection", "Peer " << remote_id_.short_hex() << " encrypt failed");
         reactor_.close(id_, CloseReason::ProtocolError);
-        return;
+        return false;
     }
 
     queue_block(std::move(cipher));
@@ -72,10 +72,42 @@ void Connection::send(FrameHeader header, ByteView payload) {
         close_reason_ = CloseReason::SlowConsumer;
         state_ = ConnState::Closing;
         reactor_.close(id_, CloseReason::SlowConsumer);
-        return;
+        return false;
     }
-    // Write-through: try to send now rather than waiting for a PollOut event.
-    if (!flush()) reactor_.close(id_, close_reason_);
+
+    // The queue has grown past what a caller should keep adding to. Everything
+    // still goes out — nothing is dropped here — but the answer to "may I send
+    // more?" becomes no, and stays no until the queue drains back under the mark
+    // and on_writable says so. Without this an application has no way at all to
+    // tell that it is outrunning the link, and the only thing that eventually
+    // tells it is the disconnection above.
+    if (!over_low_water_ && tx_.allocated() > send_low_water_) {
+        over_low_water_ = true;
+        delegate_.on_writable_changed(*this, false);
+    }
+
+    // Aggregate rather than write through. Several frames produced in one batch
+    // of reactor tasks belong in ONE write, and flushing on each of them costs a
+    // system call per frame — measured at roughly ten times the throughput on
+    // small messages, on both transports. The flush happens at the end of the
+    // reactor turn (Reactor::flush_dirty), which is still the same turn: nothing
+    // waits on a timer and no latency is added.
+    //
+    // Past a point, though, waiting buys nothing: a backlog this size already
+    // fills a write, and letting it grow further would only hold memory and
+    // delay the bytes. So a large queue goes out at once, exactly as before.
+    if (tx_.size() >= kCoalesceLimit) {
+        if (!flush()) reactor_.close(id_, close_reason_);
+    } else if (!flush_queued_) {
+        flush_queued_ = true;
+        reactor_.mark_dirty(id_);
+    }
+    return !over_low_water_;
+}
+
+bool Connection::flush_pending() {
+    flush_queued_ = false;
+    return flush();
 }
 
 void Connection::queue_block(Bytes body) {
@@ -278,6 +310,17 @@ bool Connection::flush() {
 
     if (tx_.empty()) disarm_write();
     else             arm_write();
+
+    // Drained back under the mark: whoever was told to stop can start again. The
+    // re-entrancy guard is what keeps a handler that answers by sending from
+    // recursing through flush() — it may queue, and the next drain reports the
+    // next opening, but it cannot nest.
+    if (over_low_water_ && !in_writable_ && tx_.allocated() <= send_low_water_) {
+        over_low_water_ = false;
+        in_writable_    = true;
+        delegate_.on_writable_changed(*this, true);
+        in_writable_    = false;
+    }
     return true;
 }
 

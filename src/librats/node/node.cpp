@@ -323,31 +323,51 @@ std::optional<Peer> Node::peer(const PeerId& id) {
 
 // ── Application messaging ────────────────────────────────────────────────────
 
-void Node::send(const PeerId& to, std::string_view channel, ByteView payload) {
-    auto route = peers_.route(to);
-    if (!route) return;
-    route_send(*route, FrameHeader{MessageType::App, 0, MessageRouter::channel_id(channel)},
-               payload.to_bytes());
+bool Node::send(const PeerId& to, std::string_view channel, ByteView payload) {
+    // Route and writability in one lookup. The answer is the queue's state as of
+    // now rather than after this message lands — the send itself is handed to the
+    // owning reactor and completes there — which is all a backpressure hint can
+    // ever be, and is enough: it is the *previous* messages that filled the queue.
+    auto dest = peers_.destination(to);
+    if (!dest) return false;
+    // Charged before the hand-off and discharged by the reactor task, so a caller
+    // in a tight loop is answered on what it has actually offered rather than on
+    // what the reactor has managed to look at so far.
+    const size_t in_transit =
+        dest->owed->fetch_add(payload.size(), std::memory_order_relaxed) + payload.size();
+    route_send(dest->route, FrameHeader{MessageType::App, 0, MessageRouter::channel_id(channel)},
+               payload.to_bytes(), dest->owed);
+    return dest->writable && in_transit <= send_low_water();
 }
 
-void Node::broadcast(std::string_view channel, ByteView payload) {
+bool Node::peer_writable(const PeerId& id) const {
+    const auto dest = peers_.destination(id);
+    return dest && dest->writable;
+}
+
+bool Node::broadcast(std::string_view channel, ByteView payload) {
     auto data = std::make_shared<const Bytes>(payload.to_bytes());
     FrameHeader header{MessageType::App, 0, MessageRouter::channel_id(channel)};
     reactors_->for_each([&](Reactor& r) { r.broadcast(header, data); });
+    return peers_.all_writable();
 }
 
 // ── PeerNetwork (subsystems) ─────────────────────────────────────────────────
 
-void Node::send(const PeerId& to, MessageType type, ByteView payload) {
-    auto route = peers_.route(to);
-    if (!route) return;
-    route_send(*route, FrameHeader{type, 0, 0}, payload.to_bytes());
+bool Node::send(const PeerId& to, MessageType type, ByteView payload) {
+    auto dest = peers_.destination(to);
+    if (!dest) return false;
+    const size_t in_transit =
+        dest->owed->fetch_add(payload.size(), std::memory_order_relaxed) + payload.size();
+    route_send(dest->route, FrameHeader{type, 0, 0}, payload.to_bytes(), dest->owed);
+    return dest->writable && in_transit <= send_low_water();
 }
 
-void Node::broadcast(MessageType type, ByteView payload) {
+bool Node::broadcast(MessageType type, ByteView payload) {
     auto data = std::make_shared<const Bytes>(payload.to_bytes());
     FrameHeader header{type, 0, 0};
     reactors_->for_each([&](Reactor& r) { r.broadcast(header, data); });
+    return peers_.all_writable();
 }
 
 std::vector<PeerId> Node::connected_peers() const {
@@ -358,13 +378,24 @@ std::vector<PeerId> Node::connected_peers() const {
 
 // ── Routed send/close (used by Node and Peer) ───────────────────────────────
 
-void Node::route_send(PeerRoute route, FrameHeader header, Bytes payload) {
+void Node::route_send(PeerRoute route, FrameHeader header, Bytes payload,
+                      std::shared_ptr<std::atomic<size_t>> owed) {
     Reactor& reactor = reactors_->by_index(route.reactor);
     ConnId conn = route.conn;
     auto data = std::make_shared<Bytes>(std::move(payload));
-    reactor.execute([&reactor, conn, header, data] {
+    const size_t weight = data->size();
+    reactor.execute([&reactor, conn, header, data, owed, weight] {
         if (auto* c = reactor.find(conn)) c->send(header, ByteView(*data));
+        // Discharged whether or not the connection was still there: the counter
+        // measures what is in transit to the reactor, and this one has arrived.
+        if (owed) owed->fetch_sub(weight, std::memory_order_relaxed);
     });
+}
+
+size_t Node::send_low_water() const noexcept {
+    const size_t limit = config_.send_queue_limit != 0 ? config_.send_queue_limit
+                                                       : Connection::kDefaultSendHighWater;
+    return limit / 4;
 }
 
 void Node::route_close(PeerRoute route) {
@@ -382,6 +413,8 @@ bool Node::admit_inbound() {
 }
 
 void Node::on_established(Connection& conn) {
+    if (config_.send_queue_limit != 0) conn.set_send_high_water(config_.send_queue_limit);
+
     // Settle the dial race first: this attempt won its target, so any sibling
     // attempt over the other transport is redundant and gets closed. Done before
     // the checks below so a self-connection or a rejected duplicate still counts
@@ -486,6 +519,21 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     if (!peers_.remove(id, route)) return;
     LOG_INFO("node", "Peer " << id.short_hex() << " disconnected (" << to_string(reason) << ")");
     for (auto& cb : peer_disconnected_) cb(id);
+}
+
+void Node::on_writable_changed(Connection& conn, bool writable) {
+    // Only an established peer has a table entry to record this against; a
+    // connection still handshaking cannot be sent to anyway.
+    if (conn.remote_id().is_zero()) return;
+    const PeerRoute route{conn.reactor_index(), conn.id()};
+    peers_.set_writable(conn.remote_id(), route, writable);
+
+    // Only the opening is worth waking anyone for. "You have filled up" is
+    // already answered by send() returning false at the moment it happens, so an
+    // event for it would tell the caller what it has just been told.
+    if (!writable) return;
+    Peer handle = make_peer(conn.remote_id(), route);
+    for (auto& cb : peer_writable_) cb(handle);
 }
 
 void Node::on_dial_aborted(uint8_t reactor_index, ConnId id,

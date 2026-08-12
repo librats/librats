@@ -164,9 +164,29 @@ public:
     /// @param to      destination peer id
     /// @param channel application channel name (interned to a 16-bit id)
     /// @param payload message bytes (copied)
-    void send(const PeerId& to, std::string_view channel, ByteView payload);
+    /// @return whether that peer's queue still has room. <b>False means stop</b>:
+    ///         this message is queued like any other, but the queue is past its
+    ///         low-water mark, and an application that keeps going regardless
+    ///         will eventually have the peer dropped as a slow consumer. Wait for
+    ///         on_peer_writable instead. Also false if the peer is not connected.
+    bool send(const PeerId& to, std::string_view channel, ByteView payload);
     /// Send raw bytes on a named channel to every connected peer.
-    void broadcast(std::string_view channel, ByteView payload);
+    /// @return whether *every* one of them still has room — a fan-out can only
+    ///         usefully be paced by its slowest recipient.
+    ///
+    /// Coarser than send(): the answer is the reactors' view as they last left
+    /// it and does not count what this call has just handed over, because a
+    /// broadcast is dispatched per reactor rather than per peer. Good enough to
+    /// pace a periodic fan-out; when precise backpressure matters — a file
+    /// transfer, a large stream — address peers individually with send().
+    bool broadcast(std::string_view channel, ByteView payload);
+
+    /// Whether a peer's send queue currently has room — the same answer send()
+    /// returns, without sending anything. False for a peer that is not connected.
+    /// Note that the answer describes the queue as the reactor last left it: a
+    /// message handed over a moment ago may not be counted yet, which is why the
+    /// signal to stop is the *return of send()* rather than a poll before it.
+    bool peer_writable(const PeerId& id) const;
 
     // — events (register before start(); invoked on a reactor thread). Multiple
     //   listeners are supported, so subsystems and the app can both subscribe. —
@@ -176,6 +196,11 @@ public:
     void on_peer_disconnected(PeerNetwork::PeerDisconnectHandler cb) override { peer_disconnected_.push_back(std::move(cb)); }
     /// Subscribe to failed-outbound-dial events. The handler runs on a reactor thread.
     void on_dial_failed(PeerNetwork::DialFailedHandler cb) override { dial_failed_.push_back(std::move(cb)); }
+    /// Subscribe to "this peer can be written to again" — fired when a peer whose
+    /// send queue had filled past its mark has drained back under it. The other
+    /// half of send() returning false; an application that never checks that
+    /// return never needs this. The handler runs on a reactor thread.
+    void on_peer_writable(PeerNetwork::PeerEventHandler cb) override { peer_writable_.push_back(std::move(cb)); }
     /// Register a handler for inbound messages on a named channel. Additive:
     /// multiple handlers may coexist. The handler runs on a reactor thread.
     void on(std::string_view channel, MessageRouter::Handler cb) { router_.on_channel(channel, std::move(cb)); }
@@ -193,8 +218,8 @@ public:
     MessageJson* json() noexcept;
 
     // — PeerNetwork (for subsystems) —
-    void                send(const PeerId& to, MessageType type, ByteView payload) override;
-    void                broadcast(MessageType type, ByteView payload) override;
+    bool                send(const PeerId& to, MessageType type, ByteView payload) override;
+    bool                broadcast(MessageType type, ByteView payload) override;
     std::vector<PeerId> connected_peers() const override;
     void                on(MessageType type, PeerNetwork::MessageHandler cb) override { router_.on_type(type, std::move(cb)); }
 
@@ -206,6 +231,7 @@ private:
     void on_established(Connection& conn) override;
     void on_frame(Connection& conn, const Frame& frame) override;
     void on_closed(Connection& conn, CloseReason reason) override;
+    void on_writable_changed(Connection& conn, bool writable) override;
     void on_dial_aborted(uint8_t reactor_index, ConnId id,
                          const std::string& host, uint16_t port) override;
 
@@ -216,7 +242,12 @@ private:
     void report_dial_failed(const std::string& host, uint16_t port);
 
     Peer make_peer(const PeerId& id, PeerRoute route) { return Peer(id, route, *this); }
-    void route_send(PeerRoute route, FrameHeader header, Bytes payload);
+    void route_send(PeerRoute route, FrameHeader header, Bytes payload,
+                    std::shared_ptr<std::atomic<size_t>> owed = nullptr);
+    /// Bytes a peer may have queued (in the connection) or in transit to its
+    /// reactor before send() starts answering "no room". Derived from the same
+    /// config knob that sets the hard limit, so the two cannot drift apart.
+    size_t send_low_water() const noexcept;
     void route_close(PeerRoute route);
 
     // — identify: how peers learn each other's dialable addresses (reactor thread) —
@@ -263,6 +294,7 @@ private:
     std::vector<PeerNetwork::PeerEventHandler>      peer_connected_;
     std::vector<PeerNetwork::PeerDisconnectHandler> peer_disconnected_;
     std::vector<PeerNetwork::DialFailedHandler>     dial_failed_;
+    std::vector<PeerNetwork::PeerEventHandler>      peer_writable_;
 
     // Our own addresses as peers observe us (their reported IP + our listen port).
     mutable std::mutex   observed_mutex_;

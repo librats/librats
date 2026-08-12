@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <shared_mutex>
 #include <unordered_map>
@@ -77,6 +78,27 @@ public:
     /// only while `route` is still the peer's live route. Write lock.
     void set_supported_transports(const PeerId& id, PeerRoute route, uint8_t mask);
 
+    /// A peer's live route together with whether its send queue has room, in one
+    /// lookup — the send path needs both and should not pay for two.
+    struct Destination {
+        PeerRoute route;
+        bool      writable = true;
+        /// The peer's in-transit counter (see Entry::owed). Shared, not copied,
+        /// so the caller charges the same counter the reactor task discharges.
+        std::shared_ptr<std::atomic<size_t>> owed;
+    };
+    std::optional<Destination> destination(const PeerId& id) const;
+
+    /// Whether every connected peer's send queue has room — what broadcast()
+    /// answers, since "may I send more?" to a fan-out is only usefully answered
+    /// by its slowest recipient.
+    bool all_writable() const;
+
+    /// Record that a peer's send queue filled up or drained. Applies only while
+    /// `route` is still the peer's live route. Write lock, but only ever taken
+    /// when the mark is actually crossed, which is rare.
+    void set_writable(const PeerId& id, PeerRoute route, bool writable);
+
     /// Upper bound on stored addresses per peer — caps memory and stops a peer
     /// from flooding us with bogus addresses via the identify/PEX path.
     static constexpr size_t kMaxAddressesPerPeer = 32;
@@ -95,6 +117,20 @@ private:
     struct Entry {
         PeerInfo  info;
         PeerRoute route;
+        /// Whether this peer's send queue has room. Maintained by the reactor as
+        /// the queue crosses its low-water mark, read by send() so a caller on
+        /// any thread gets an answer without having to reach into a connection it
+        /// does not own. Advisory by nature — it is a snapshot of a queue that is
+        /// draining as it is read, which is exactly what a backpressure hint is.
+        bool      writable = true;
+        /// Bytes handed to the owning reactor by send() that it has not taken up
+        /// yet. The queue itself lives on the reactor thread and `writable` above
+        /// only ever reports what the reactor has already seen — so a caller in a
+        /// tight loop could hand over megabytes before a single one of them was
+        /// counted. This is that backlog, incremented by the caller and decremented
+        /// by the reactor task, so the answer covers both halves.
+        std::shared_ptr<std::atomic<size_t>> owed =
+            std::make_shared<std::atomic<size_t>>(0);
     };
 
     mutable std::shared_mutex mutex_;

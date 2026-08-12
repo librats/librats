@@ -52,6 +52,17 @@ struct RATS_API NodeConfig {
     /// connection. 0 disables the fallback: only the preferred transport is tried.
     uint32_t transport_fallback_ms = 1200;
 
+    /// Bytes a peer's send queue may hold before the peer is dropped as a slow
+    /// consumer. 0 uses the library default (8 MiB).
+    ///
+    /// A quarter of this is the mark at which send() starts answering "no room"
+    /// and on_peer_writable is what says the room is back — so lowering it makes
+    /// an application feel backpressure sooner, and raising it lets a bursty one
+    /// buffer more before anything is said. The two move together on purpose:
+    /// a warning that arrives at the same moment as the disconnection is no
+    /// warning at all.
+    size_t send_queue_limit = 0;
+
     /// Interface to bind the listener to. The address family is derived from it:
     ///   - ""  or "::"      → dual-stack wildcard: reachable over both IPv6 and IPv4
     ///                        (IPv4-mapped) on all interfaces. This is the default.

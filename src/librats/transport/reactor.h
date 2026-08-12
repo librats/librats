@@ -115,6 +115,12 @@ public:
     /// Adjust poll interest for a socket. Called by TcpLink; reactor thread.
     void set_interest(socket_t sock, uint32_t events);
 
+    /// Book a flush for the end of this turn: `id` has frames queued that have
+    /// not been written yet. Called by Connection::send, which aggregates rather
+    /// than writing through — see the note there. Reactor thread; each connection
+    /// books at most one flush per turn.
+    void mark_dirty(ConnId id) { dirty_.push_back(id); }
+
     /// The security provider used to mint per-connection handshakers.
     SecurityProvider& security() noexcept { return security_; }
 
@@ -143,6 +149,7 @@ private:
     bool resolve_dial(ConnId id);
     void mark_for_close(ConnId id, CloseReason reason);
     void process_pending_close();
+    void flush_dirty();          ///< write out what send() queued this turn
     void remove(ConnId id, CloseReason reason);
     void shutdown_connections();
 
@@ -180,6 +187,9 @@ private:
     std::unordered_map<ConnId, std::unique_ptr<Connection>> conns_;
     std::unordered_map<socket_t, ConnId>                    fd_to_conn_;
     std::unordered_map<ConnId, CloseReason>                 pending_close_;
+    /// Connections with frames queued but not yet written this turn. Holds ids,
+    /// not pointers, so a connection torn down in between is simply not found.
+    std::vector<ConnId>                                     dirty_;
     /// Dials cancelled before their connect task ran (see connect()/close()).
     std::unordered_set<ConnId>                              cancelled_dials_;
     /// Highest ConnId that has already been adopted or abandoned; anything at or
