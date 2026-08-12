@@ -129,8 +129,22 @@ rats_t rats_create_config(const rats_config_t* cfg) {
         if (cfg->protocol)         config.protocol         = cfg->protocol;
         config.max_peers = cfg->max_peers;
 
-        config.enable_tcp = cfg->enable_tcp != 0;
-        config.enable_udp = cfg->enable_udp != 0;
+        // Neither transport enabled is not a configuration anyone means — it is a
+        // node that can neither dial nor accept, and it fails *silently*: with
+        // enable_listen set, start() refuses; without it, the node comes up and
+        // then simply never connects to anything. And it is precisely what the
+        // commonest way of filling this struct in C produces, because zeroed
+        // memory reads as "both off":
+        //
+        //     rats_config_t cfg = {0};      // or a partial designated initialiser
+        //     cfg.listen_port = 9000;
+        //
+        // That worked before these two fields existed, so treating 0/0 as "both"
+        // is what keeps it working. Anyone who really wants one transport says so
+        // by enabling the other.
+        const bool any_transport = cfg->enable_tcp != 0 || cfg->enable_udp != 0;
+        config.enable_tcp = any_transport ? (cfg->enable_tcp != 0) : true;
+        config.enable_udp = any_transport ? (cfg->enable_udp != 0) : true;
         config.preferred_transport = (cfg->preferred_transport == RATS_TRANSPORT_TCP)
                                          ? TransportKind::Tcp
                                          : TransportKind::Udp;
