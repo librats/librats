@@ -27,8 +27,10 @@ bench/
 │   ├── bench_poller.cpp  readiness notifications: how many, and what each costs
 │   ├── bench_dht.cpp     keyspace primitives vs libtorrent's
 │   ├── bench_crypto.cpp  Noise primitives vs the noise-c reference
-│   └── bench_transport.cpp  TCP vs the reliable-UDP stream, two live Nodes
-│                            (loopback, or between two hosts over a real path)
+│   ├── bench_transport.cpp  TCP vs the reliable-UDP stream, two live Nodes
+│   │                        (loopback, or between two hosts over a real path)
+│   └── bench_path.cpp    the datagram transport against a modelled path —
+│                         delay, drop-tail queue and loss, in virtual time
 └── CMakeLists.txt
 ```
 
@@ -59,6 +61,7 @@ cmake --build bench/build
 ./bench/build/bin/bench_transport # two live Nodes on loopback; takes ~1 min
 ./bench/build/bin/bench_transport --serve            # …or the same suite between
 ./bench/build/bin/bench_transport --connect HOST:PORT #   two hosts, over a real path
+./bench/build/bin/bench_path      # congestion control against a modelled path; <1 s
 ```
 
 Benchmarks are always compiled `-O3 -DNDEBUG`, whatever the parent tree is
@@ -219,6 +222,51 @@ and the whole session machinery), so the reference side is a standalone re-port 
 `reference/kademlia/node_id.cpp` + `sha1_hash.hpp`, kept in libtorrent's *native*
 representation (a 160-bit id as 5×uint32) so the comparison isn't rigged. It brings
 its own timing loop rather than using `framework/bench.h`.
+
+## The path suite — `bench_path`
+
+`bench_transport` measures the two wires over paths that are far too good to
+exercise the half of the datagram transport that exists for bad ones. Loopback
+has no delay, no queue and no loss; a LAN has a round trip of tens of
+microseconds. On both, slow start reaches its ceiling inside the first
+millisecond, the pacer's budget exceeds a whole window, nothing is retransmitted
+and the congestion window is never reduced — so every figure they produce is a
+floor on *cost* and says nothing about *behaviour*.
+
+`tools/badnet.sh` covers part of the rest by putting netem in the way, and it is
+the right tool for "does this still work when the network is hostile". It is the
+wrong tool for "did this change make it worse": netem is random, two runs of the
+same binary differ by more than most regressions do, and a verdict needs many
+runs to resolve even a large effect.
+
+So this suite uses no network at all. `UdpStream` never reads the clock itself —
+every entry point takes `now` — which makes the congestion controller a pure
+function of its inputs and lets it run in virtual time against a model of the
+thing that actually pushes back: a drop-tail queue, a serialiser at the link
+rate, and a propagation delay. Three experiments:
+
+| | what it answers |
+|---|---|
+| `bulk` | utilisation on paths of different rate, delay and buffer depth — plus the retransmissions and window reductions that say *how* it got there. A low utilisation with **few** reductions is a sender that never found the path; a low one with **many** is a sender that keeps losing it, and the two want opposite fixes. |
+| `idle` | what the congestion window is worth after nobody has validated it for ten seconds, and what the burst that follows costs. The shape of most peer-to-peer traffic: silence, a burst, silence. |
+| `loss` | one path with loss taken from 0 % to 30 % in both directions. The throughput curve is not the point — Reno's answer to loss is well known — the point is where it turns into a cliff and whether the connection survives it at all. |
+| `memory` | what one connected pair actually holds, through the allocator rather than resident-set size. `bench_transport` reports resident bytes per *node*, most of which is the mux's fixed batch staging; this is the part that scales with peers. |
+| `tail` | request/response, where the packet that goes missing is the last one and has nothing behind it to reveal the loss. A latency distribution, because the median is untouched by definition and the whole effect is in the tail. |
+
+The memory rows deserve a word on method. Counting goes through the global
+`operator new` hook (`framework/alloc_track.h`) rather than RSS, because RSS
+moves in page-sized steps, carries allocator slack, and does not come back when a
+buffer is freed — none of which is true of a per-stream figure you want to
+multiply by a thousand peers. The suite's own scratch buffers are allocated
+outside the measured region for the same reason: a benchmark that charges itself
+to the subject is measuring the wrong thing.
+
+It runs in well under a second and is deterministic by construction: same build,
+same numbers, every time. That is the point — it makes small regressions visible,
+which no real path does. The cost of that is the usual one for a model: no
+reordering, no ack compression, no competing traffic, no variable delay. These
+are not predictions about a real network. They are a comparison between builds,
+and are only useful read that way.
 
 ## The transport suite — `bench_transport`
 
