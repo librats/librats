@@ -887,6 +887,48 @@ TEST(UdpStreamTest, ALostTailIsProbedRatherThanTimedOut) {
     EXPECT_EQ(pair.initiator->cwnd(), cwnd_before) << "the window moved on a probe";
 }
 
+TEST(UdpStreamTest, AProbeNamesTheHolesBehindItSoALostBurstStillCostsTheWindow) {
+    TimedPair pair(40ms);
+
+    for (int round = 0; round < 6; ++round)
+        ASSERT_GT(pair.transfer(rudp::kMaxPayload * 20), 0u) << "round " << round;
+    pair.hops(6);
+    ASSERT_EQ(pair.initiator->bytes_in_flight(), 0u);
+
+    const uint32_t cwnd_before = pair.initiator->cwnd();
+    const uint32_t cuts_before = pair.initiator->window_reductions();
+    ASSERT_GT(cwnd_before, UdpStream::kInitialCwnd * 2) << "the warm-up never grew the window";
+
+    // A whole burst lost at the tail — the shape a queue that has just overflowed
+    // actually produces. Nothing gets through, so as in the single-packet case the
+    // receiver has no duplicate acknowledgement to send and no hole to name, and
+    // only a probe can break the silence. Unlike that case, though, this one IS
+    // congestion, and the probe must lead to the stream admitting it.
+    constexpr size_t kLost = 8;
+    const std::string tail(rudp::kMaxPayload * kLost, 't');
+    pair.net.drop_next(kLost);
+    ASSERT_EQ(write_all_at(*pair.initiator, tail, pair.now), tail.size());
+
+    // Generous, because the point here is not the exact timing: probing the wrong
+    // end recovers one packet per probe and takes several times this.
+    const auto deadline = pair.now + 8 * UdpStream::kMinRto;
+    std::string received;
+    while (pair.now < deadline && received.size() < tail.size()) {
+        pair.hop();
+        received += drain(*pair.responder);
+    }
+
+    EXPECT_EQ(received, tail)
+        << "a lost burst at the tail was not repaired — probing the front of the "
+           "queue recovers one packet at a time, because that acknowledgement names "
+           "no hole and resets the probe budget before the timeout can escalate";
+    EXPECT_GT(pair.initiator->window_reductions(), cuts_before)
+        << "eight packets were lost and the window was never reduced: the probe "
+           "answered every silence and the stream never noticed the congestion";
+    EXPECT_LT(pair.initiator->cwnd(), cwnd_before)
+        << "the window came out of a total loss no smaller than it went in";
+}
+
 TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
     Pair pair;
 

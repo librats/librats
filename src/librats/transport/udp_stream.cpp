@@ -853,28 +853,48 @@ void UdpStream::on_rto(Clock::time_point now) {
         return;
     }
 
-    // A timeout is the stronger signal and always collapses the window, even
-    // mid-recovery — but it also restarts the episode, so the selective acks that
-    // come back as the pipe refills do not each take another halving out of a
-    // window that is already down to one packet. (on_loss reads flight_bytes_, so
-    // it has to run before the accounting below is undone.)
-    // Tail loss probe, before any of the above is believed. The peer has gone
-    // quiet, which on a stream whose last packet was lost is indistinguishable
+    // Tail loss probe, before any of the collapse below is believed. The peer has
+    // gone quiet, which on a stream whose last packet was lost is indistinguishable
     // from a peer that is merely slow — and the two call for opposite responses.
-    // So ask first: re-send what it has not acknowledged, change nothing else,
+    // So ask first: re-send something it has not acknowledged, change nothing else,
     // and let the answer decide. A probe that was unnecessary costs one packet;
     // the collapse below, taken wrongly, costs the whole window.
     //
     // Deliberately not for a dial: a Syn has its own, tighter attempt budget that
     // the transport race depends on (see kSynMaxAttempts).
     if (state_ == State::Connected && tail_probes_ < kMaxTailProbes) {
+        // The LAST unacknowledged packet, not the first (RFC 8985 §7.2). This is
+        // the whole mechanism, not a detail of it: the probe's acknowledgement has
+        // to land *past* every hole in front of it, so the receiver holds it out of
+        // order and the selective ack that comes back names all of them at once —
+        // which is what lets one round trip repair a whole lost burst.
+        //
+        // Probing the front instead produces an acknowledgement that advances the
+        // cumulative number by exactly one and names nothing. Each probe would then
+        // recover a single packet, and because that acknowledgement is new data it
+        // resets tail_probes_ — so the escalation below is never reached, the rest
+        // of the burst stays counted in flight with the window shut behind it, and
+        // grow_window() walks the window *up* through what is in fact a total loss.
+        // For a single lost packet the two are the same packet and the difference
+        // does not show; for a lost burst it is the difference between repairing in
+        // one round trip and crawling out one packet per probe.
+        OutPacket* probe = oldest;
+        for (auto it = sent_.rbegin(); it != sent_.rend(); ++it) {
+            if (!it->acked) { probe = &*it; break; }
+        }
+
         ++tail_probes_;
-        transmit(*oldest, now);
+        transmit(*probe, now);
         ++retransmits_;
         rto_deadline_ = now + loss_timeout();   // backed off, still capped by the RTO
         return;
     }
 
+    // A timeout is the stronger signal and always collapses the window, even
+    // mid-recovery — but it also restarts the episode, so the selective acks that
+    // come back as the pipe refills do not each take another halving out of a
+    // window that is already down to one packet. (on_loss reads flight_bytes_, so
+    // it has to run before the accounting below is undone.)
     on_loss(true);
     in_recovery_ = true;
     recover_seq_ = next_seq_ - 1;
