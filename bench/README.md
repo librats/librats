@@ -28,6 +28,7 @@ bench/
 │   ├── bench_dht.cpp     keyspace primitives vs libtorrent's
 │   ├── bench_crypto.cpp  Noise primitives vs the noise-c reference
 │   └── bench_transport.cpp  TCP vs the reliable-UDP stream, two live Nodes
+│                            (loopback, or between two hosts over a real path)
 └── CMakeLists.txt
 ```
 
@@ -56,6 +57,8 @@ cmake -S bench -B bench/build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build bench/build
 ./bench/build/bin/bench_rx        # …or bench_tx, bench_json, bench_dht, …
 ./bench/build/bin/bench_transport # two live Nodes on loopback; takes ~1 min
+./bench/build/bin/bench_transport --serve            # …or the same suite between
+./bench/build/bin/bench_transport --connect HOST:PORT #   two hosts, over a real path
 ```
 
 Benchmarks are always compiled `-O3 -DNDEBUG`, whatever the parent tree is
@@ -273,8 +276,59 @@ Three of these exist mainly because they can fail:
 so a figure covers sender *and* receiver — the honest number for a P2P node,
 which is usually both. Loopback has no loss, no reordering and a near-zero RTT,
 so congestion control, retransmission and the selective-ack path are all measured
-at their cheapest: **every UDP figure is a floor on cost, not a ceiling.** Loss
-behaviour needs a lossy path (`netem`) and is deliberately out of scope.
+at their cheapest: **every UDP figure is a floor on cost, not a ceiling.**
+
+### The same suite over a real path
+
+Loopback is the only way to get a controlled A/B of two transports, and it is
+also the one path on which most of what the datagram stack exists for is
+invisible: no propagation delay for an ack to hide behind, no MTU, no loss for
+the SACK path to repair, no reordering, no middlebox. Slow start never ends and
+the RTO never fires.
+
+So the same binary is also the remote end of itself. Run it on the far host and
+measure from the near one:
+
+```bash
+# on the remote host — stays up, prints the port to dial
+./bench/build/bin/bench_transport --serve [--port 9977] [--transport tcp|udp|both]
+
+# on this host — measures, prints the same tables, exits
+./bench/build/bin/bench_transport --connect HOST:PORT [--bulk-mb 64] [--rtt 500]
+```
+
+Both ends must pass the same `--protocol` (it is bound into the Noise handshake,
+so a mismatch cannot complete one at all), and the responder must be reachable on
+that port over every wire being measured — a wire that never comes up is reported
+as such and the table drops to one column instead of comparing against zeros.
+`--help` lists the sizing flags (`--frame-kb`, `--credit-kb`, `--small`,
+`--small-credit`, `--rtt-bytes`, `--dials`, `--bind`).
+
+| experiment | what changes when the path is real |
+|---|---|
+| `dial`     | counts **round trips**, not node setup. The note under `bench_dial()` stops being theoretical here: folding the initiator's first Noise message into the Syn is worth one whole RTT of every dial |
+| `rtt`      | `min` is the path, `median − min` is what this stack adds, and `p99` is queueing — a p99 ~20 ms above the median is `UdpStream::kDelayedAck` on the critical path |
+| `bulk`     | **both directions**, because real links are asymmetric: upload (we send) and download (the remote pushes on request), each with its own CPU-per-GB |
+| `small`    | per-message cost where a per-packet round trip is not free |
+
+Both ends run the same four channels: `echo` (returned verbatim), `data`, `ack`
+(cumulative `[u64 bytes][u64 msgs]` from whoever is receiving `data`), and `ctl`
+(`flush`, `push <bytes> <frame> <credit>`). The acks do two jobs at once — they
+pace the sender, so neither wire is ever measured while it is being dropped as a
+slow consumer (see `burst` above), and they are how the sender knows the bytes
+*landed* rather than merely left. Channels share one ordered stream, so a `flush`
+sent after the last data frame is delivered after it and the closing ack is exact.
+
+Two things to keep in mind reading a remote run. CPU is still whole-process, but
+here a process is **one** node, so the per-gigabyte figures are per-node and the
+upload (sender) and download (receiver) rows are directly comparable. And on a
+very fast path the TCP rows carry an extra artifact: the ack stream is small
+messages, which without `TCP_NODELAY` meets Nagle and paces the sender late —
+`--credit-kb` is the runway that absorbs it, and on any link whose
+bandwidth-delay product fits inside the credit window it does not arise.
+
+Loss behaviour on a *synthetic* lossy path (`netem`) is still out of scope; this
+mode measures whatever loss the real path actually has.
 
 ## The crypto suite — `bench_crypto`
 
