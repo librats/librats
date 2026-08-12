@@ -2079,6 +2079,45 @@ TEST(TransportUdpTest, CarriesABulkTransfer) {
     server.stop();
 }
 
+// The mux is one socket in one address family, and a dial outside it can never
+// be carried. That has to be settled before the Syn goes out: the kernel refuses
+// each such datagram individually and says nothing a stream can act on, so an
+// attempt allowed to start looks exactly like a peer that has not answered yet
+// and costs the full give-up. Here the client's socket is IPv4 and the target is
+// IPv6, so the datagram attempt must be abandoned outright and TCP must carry the
+// connection — well inside the fallback delay, which is the proof that nothing
+// waited on a timer.
+TEST(TransportUdpTest, ADialOutsideTheMuxFamilyGoesStraightToTcp) {
+    NodeConfig server_cfg = base_config();
+    server_cfg.bind_address = "::1";             // IPv6 listener, both transports
+
+    Node server(server_cfg);
+    if (!server.start()) GTEST_SKIP() << "host has no IPv6 loopback";
+
+    NodeConfig client_cfg = base_config();       // binds 127.0.0.1 → IPv4 mux
+    client_cfg.enable_listen         = false;
+    client_cfg.preferred_transport   = TransportKind::Udp;
+    client_cfg.transport_fallback_ms = 5000;     // long enough that waiting it out would show
+    Node client(client_cfg);
+    ASSERT_TRUE(client.start());
+
+    const auto started = std::chrono::steady_clock::now();
+    client.connect("::1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }))
+        << "an IPv6 target was never reached at all";
+
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_LT(elapsed, 2s) << "the unreachable datagram attempt was waited out "
+                              "instead of being abandoned at once";
+
+    const auto peers = client.peers();
+    ASSERT_EQ(peers.size(), 1u);
+    EXPECT_EQ(peers[0].transport, TransportKind::Tcp);
+
+    client.stop();
+    server.stop();
+}
+
 // A peer that only speaks TCP is still reachable: the UDP attempt fails and the
 // dialer brings the other transport in without the caller doing anything.
 TEST(TransportUdpTest, FallsBackToTcpWhenTheServerHasNoUdp) {

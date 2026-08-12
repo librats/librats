@@ -30,6 +30,17 @@ NodeConfig listening_config() {
 }
 NodeConfig dialing_config() { NodeConfig c = listening_config(); c.enable_listen = false; return c; }
 
+/// Dials over TCP alone.
+///
+/// A refused port answers a TCP connect with an immediate RST, so a dial to one
+/// fails through the transport's own failure path inside a round trip. With the
+/// datagram transport racing alongside, the same dial cannot fail that way:
+/// nothing answers a Syn sent to a dead port, and a dial reports failure only
+/// once every transport in the race has given up — so the verdict is held back
+/// for the retransmissions, and a test written against the failure path would
+/// silently end up measuring the timeout that covers for it instead.
+NodeConfig tcp_dialing_config() { NodeConfig c = dialing_config(); c.enable_udp = false; return c; }
+
 ReconnectionService::Config fast_reconnect() {
     ReconnectionService::Config c;
     c.tick = 100ms;
@@ -270,8 +281,12 @@ TEST(ReconnectionServiceTest, RemoveStopsReconnect) {
 }
 
 // With max_attempts set, a target that never connects is given up on and dropped.
+// Attempts are counted from *reported* dial failures, and the target is dropped
+// once they run out. TCP only, so a refused port takes exactly that path: see
+// GivesUpWhenDialsHangPastTheTimeout for the case where no failure is reported
+// at all, which is a different mechanism and needs its own test.
 TEST(ReconnectionServiceTest, GivesUpAfterMaxAttempts) {
-    Node client(dialing_config());
+    Node client(tcp_dialing_config());
 
     auto cfg = fast_reconnect();
     cfg.max_attempts = 3;
@@ -286,6 +301,38 @@ TEST(ReconnectionServiceTest, GivesUpAfterMaxAttempts) {
 
     EXPECT_TRUE(wait_for([&] { return svc->target_count() == 0; }, 10s))
         << "service did not give up after max_attempts";
+
+    client.stop();
+}
+
+// The other way a target runs out of attempts: a dial that neither connects nor
+// reports a failure. Nothing answers a datagram sent to a dead port — the port
+// unreachable the kernel gets back is never read from the error queue — so the
+// dial hangs until the transport's own give-up, far past dial_timeout. That
+// timeout is what has to end the attempt, and it is the only thing standing
+// between a stalled dial and a target that is retried forever.
+//
+// Worth its own test precisely because it covers for the path above: were
+// reported failures to stop arriving entirely, this backstop would carry
+// GivesUpAfterMaxAttempts to a pass and the loss would go unnoticed.
+TEST(ReconnectionServiceTest, GivesUpWhenDialsHangPastTheTimeout) {
+    NodeConfig client_cfg = dialing_config();
+    client_cfg.enable_tcp = false;   // datagrams alone: nothing will answer, nothing will refuse
+    Node client(client_cfg);
+
+    auto cfg = fast_reconnect();
+    cfg.max_attempts = 2;
+    cfg.dial_timeout = 300ms;        // comfortably under the transport's own give-up
+    auto reconnect = std::make_unique<ReconnectionService>(cfg);
+    ReconnectionService* svc = reconnect.get();
+    client.add_subsystem(std::move(reconnect));
+    ASSERT_TRUE(client.start());
+
+    svc->add(*Address::parse("127.0.0.1:1"));
+    EXPECT_EQ(svc->target_count(), 1u);
+
+    EXPECT_TRUE(wait_for([&] { return svc->target_count() == 0; }, 10s))
+        << "service kept a target whose dials never reported a failure";
 
     client.stop();
 }

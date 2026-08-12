@@ -192,6 +192,11 @@ public:
 
     socket_t socket() const noexcept { return socket_; }
 
+    /// The address family this mux's one socket is bound in. A dial to anything
+    /// outside it cannot be carried at all (see family_can_reach), so the reactor
+    /// asks before opening a stream rather than after the Syn has run out.
+    AddressFamily family() const noexcept { return family_; }
+
     /// Drain the socket and route what arrives. Returns true if it stopped at
     /// kMaxDatagramsPerRead with more possibly pending.
     bool on_readable();

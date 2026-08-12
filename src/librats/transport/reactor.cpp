@@ -12,16 +12,25 @@ namespace librats {
 namespace {
 
 /// Turn a dial target into the numeric endpoint the datagram transport needs.
-/// A literal is used as-is; a hostname goes through the resolver, preferring IPv6
-/// exactly as tcp_connect_start() does, so both transports reach the same host.
-std::optional<Address> resolve_dial_target(const std::string& host, int port) {
+/// A literal is used as-is; a hostname is resolved in the order this socket can
+/// actually use.
+///
+/// The order matters as much as the result. One mux socket serves every peer and
+/// is bound in one family, which the default configuration makes IPv4 — so asking
+/// for AAAA first, as TCP can afford to, would keep handing back addresses this
+/// socket cannot send to while the same host advertises a perfectly dialable A
+/// record. Answering with a reachable address is the whole job here.
+std::optional<Address> resolve_dial_target(const std::string& host, int port,
+                                           AddressFamily af) {
     if (auto ip = IpAddress::parse(host))
         return Address{*ip, static_cast<uint16_t>(port)};
 
-    for (const std::string& text : {network_utils::resolve_hostname_v6(host),
-                                    network_utils::resolve_hostname(host)}) {
-        if (text.empty()) continue;
-        if (auto ip = IpAddress::parse(text))
+    if (af != AddressFamily::IPv4) {
+        if (auto ip = IpAddress::parse(network_utils::resolve_hostname_v6(host)))
+            return Address{*ip, static_cast<uint16_t>(port)};
+    }
+    if (af != AddressFamily::IPv6) {
+        if (auto ip = IpAddress::parse(network_utils::resolve_hostname(host)))
             return Address{*ip, static_cast<uint16_t>(port)};
     }
     return std::nullopt;
@@ -100,9 +109,22 @@ ConnId Reactor::connect(std::string host, int port, TransportKind kind) {
 
 void Reactor::start_dial(ConnId id, const std::string& host, int port, TransportKind kind) {
     if (kind == TransportKind::Udp) {
-        const auto target = resolve_dial_target(host, port);
+        const auto target = resolve_dial_target(host, port, mux_->family());
         if (!target) {
             LOG_DEBUG("reactor", "Cannot resolve " << host << " for a UDP dial");
+            abort_dial(id, host, port);
+            return;
+        }
+        // The one mux socket cannot leave its own address family, and that is
+        // knowable here rather than after the fact. Saying so now costs nothing —
+        // the dialer brings the other transport in at once. Opening the stream
+        // anyway would spend the Syn's whole give-up on datagrams the kernel
+        // refuses one by one, and refusals at that layer are per-packet and
+        // silent: a dial that never had a chance would be indistinguishable from
+        // a peer that is merely slow to answer.
+        if (!family_can_reach(mux_->family(), target->ip.is_v6())) {
+            LOG_DEBUG("reactor", "Datagram socket cannot reach " << target->to_string()
+                      << "; leaving " << host << ":" << port << " to the other transport");
             abort_dial(id, host, port);
             return;
         }

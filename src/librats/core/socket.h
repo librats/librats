@@ -52,6 +52,28 @@ enum class AddressFamily {
     DualStack   // IPv6 socket with IPv4 support (default)
 };
 
+/**
+ * Whether a socket bound with `af` can send to an address of the given family
+ * at all.
+ *
+ * A socket cannot leave its own family: sendto() with a sockaddr of the wrong
+ * one is refused outright. On a datagram socket that refusal arrives per packet
+ * and says nothing about the destination, so a caller that does not ask this
+ * first cannot tell "unreachable" from "not answering yet" — it only finds out
+ * once the retransmissions run out.
+ *
+ * This is the exact inverse of the sockaddr build_udp_dest_addr() produces, and
+ * lives next to the family it switches on so the two cannot drift apart.
+ */
+constexpr bool family_can_reach(AddressFamily af, bool dest_is_v6) noexcept {
+    switch (af) {
+        case AddressFamily::IPv4:      return !dest_is_v6;
+        case AddressFamily::IPv6:      return dest_is_v6;   // V6ONLY: no mapped IPv4
+        case AddressFamily::DualStack: return true;         // IPv4 goes out as ::ffff:a.b.c.d
+    }
+    return false;
+}
+
 // Socket Library Initialization
 /**
  * Initialize the socket library
