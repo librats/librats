@@ -33,10 +33,16 @@
  *     increase; multiplicative decrease on loss. Flow control is separate and
  *     absolute — the receiver advertises, in packets, how much more it will
  *     buffer, and the sender never exceeds it.
- *   - No Nagle. Frames are already batched by the connection's send queue (one
- *     flush gathers the whole backlog into this one call), so delaying a partial
- *     packet would buy nothing and cost a round trip on every request/response
- *     exchange.
+ *   - No Nagle: a partial packet goes out rather than waiting for company, which
+ *     is what keeps a request/response exchange from paying a round trip per
+ *     turn. What stands in for it is write() itself — it tops up the tail packet
+ *     while it has room, so consecutive small frames share one datagram anyway,
+ *     and UdpMux then hands the socket a whole batch of them per syscall.
+ *     Note the limit of that: Connection::send() flushes write-through, one
+ *     frame at a time, so the packing only catches what a single call carries
+ *     rather than everything a reactor turn produced. Measured, that is most of
+ *     the per-message cost on both transports — see the note above bench_small()
+ *     in bench/suites/bench_transport.cpp.
  *
  * ── Ownership and threading ──────────────────────────────────────────────────
  * A stream is owned by the UdpMux and touched only by the reactor thread that

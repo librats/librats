@@ -409,20 +409,36 @@ BulkResult bench_bulk(TransportKind kind, size_t total_bytes, size_t frame_size,
 // Per-message costs rather than per-byte ones: framing, encryption, one trip
 // through the send queue, and one packet on the wire.
 //
-// This is the row where the two wires diverge most, and not for the reason one
-// would guess. UdpStream deliberately has no Nagle (udp_stream.h: "Frames are
-// already batched by the connection's send queue, so delaying a partial packet
-// would buy nothing and cost a round trip"). The TCP side has no matching
-// decision: TCP_NODELAY is never set anywhere in the library, so the kernel's
-// Nagle stays on. With a window of small messages outstanding — exactly what
-// this experiment creates — that is the classic Nagle / delayed-ACK interaction,
-// and it costs far more than the user-space stack's whole per-packet overhead.
+// This is the row where the two wires diverge most, and the reason is NOT the
+// one it looks like. Nagle is the obvious suspect — the library never sets
+// TCP_NODELAY, and a window of small messages outstanding is exactly the shape
+// that triggers it — and this comment used to say so. It is wrong. Setting
+// TCP_NODELAY makes this row *worse*, measured, three runs of each build:
 //
-// So the gap here is not "the datagram transport is faster". It is a missing
-// setsockopt on the TCP path, measured. A strict ping-pong (the rtt row above)
-// never has unacknowledged small data outstanding, so Nagle cannot trigger
-// there — which is why the two rows disagree so sharply, and why they have to be
-// read together.
+//     as built             TCP  50-72 k msg/s (16-22 us)   UDP 282-379 k msg/s
+//     + TCP_NODELAY        TCP  19-20 k msg/s (57 us)      UDP 314-379 k
+//     + deferred flush     TCP 592-656 k      (3.0-3.3 us) UDP 767-786 k
+//     + both               TCP 733-906 k      (2.6-2.8 us) UDP 790-797 k
+//
+// Two measurements say why. The kernel's own segment counter (/proc/net/snmp)
+// puts 200 k messages into 14'284 segments with Nagle on and 264'340 with it
+// off, so Nagle is currently the ONLY thing coalescing small frames — turning it
+// off just buys the receiver a wakeup per message. And strace counts 20'086
+// sendmsg calls for 20'000 messages in BOTH builds: the syscall is paid per
+// frame either way, because Connection::send() flushes write-through.
+//
+// So the real gap is that every frame costs its own trip into the kernel, and
+// the datagram side partly escapes it on its own: UdpStream::write() tops up the
+// tail packet, so consecutive small frames share one 1200-byte datagram, and
+// UdpMux hands the socket kUdpBatchMax of them per syscall. The TCP path has
+// neither and leans entirely on Nagle to do that batching for it. Deferring the
+// flush to the end of a reactor turn brings the two wires to ~1.1-1.3x of each
+// other, which is what Link promises — and only THEN is TCP_NODELAY worth
+// setting, for a further ~30%.
+//
+// The rtt row above can show none of this: a strict ping-pong has one frame in
+// flight, so there is nothing to coalesce and nothing to batch. The two rows
+// have to be read together.
 
 struct SmallResult { double msgs_per_s = 0, cpu_us_per_msg = 0; };
 
@@ -1318,17 +1334,19 @@ int connect_and_measure(const Options& o) {
                 "   converges when the path, not the stack, is the bottleneck — raise --bulk-mb\n"
                 "   until it stops changing before reading the two wires against each other.\n"
                 "   The upload figure is timed to the final ack, so it includes one closing round\n"
-                "   trip: the larger the transfer, the smaller that share. On a very fast path the\n"
-                "   TCP rows carry one extra artifact — the ack stream is small messages, which\n"
-                "   without TCP_NODELAY meets Nagle and paces the sender late. --credit-kb is the\n"
-                "   runway that absorbs it, and on any link slow enough for its bandwidth-delay\n"
-                "   product to fit inside the credit window it does not arise at all.)\n");
+                "   trip: the larger the transfer, the smaller that share. On a very fast path\n"
+                "   both wires carry one extra artifact — the ack stream is small messages, and\n"
+                "   every frame currently costs its own write (see the note above bench_small),\n"
+                "   so a narrow credit window paces the sender late. --credit-kb is the runway\n"
+                "   that absorbs it, and on any link slow enough for its bandwidth-delay product\n"
+                "   to fit inside the credit window it does not arise at all.)\n");
 
     table.head("small — many small frames, message-paced");
     table.line("messages", tcp.small_msgs_s, udp.small_msgs_s, "msg/s", false, "%10.0f");
-    std::printf("  (as on loopback, read this next to rtt: the TCP path never sets TCP_NODELAY,\n"
-                "   so a window of small messages meets Nagle, and on a path with a real RTT that\n"
-                "   costs far more than it does on loopback.)\n");
+    std::printf("  (as on loopback, read this next to rtt. The gap is not Nagle — it is one\n"
+                "   syscall per frame on both wires (Connection::send flushes write-through),\n"
+                "   which the datagram side partly escapes by packing and batching. See the\n"
+                "   note above bench_small().)\n");
 
     std::printf("\nconfiguration: bulk %.0f MiB in %.0f KiB frames, %.0f KiB credit; "
                 "rtt %d x %zu B; small %d x %zu B, %d in flight; %d dials\n",
@@ -1526,10 +1544,11 @@ int run_loopback_suite() {
         header("small — 200k x 256 B, 512 messages in flight");
         row("messages",   tcp.msgs_per_s,     udp.msgs_per_s,     "msg/s", false, "%10.0f");
         row("CPU per msg", tcp.cpu_us_per_msg, udp.cpu_us_per_msg, "us",   true, "%8.3f");
-        std::printf("  (this gap is NOT the datagram stack being fast — it is Nagle. UdpStream\n"
-                    "   disables it by design; the TCP path never sets TCP_NODELAY, so a window of\n"
-                    "   small messages hits the classic Nagle/delayed-ACK interaction. The rtt row\n"
-                    "   above cannot trigger it (nothing outstanding), which is why they disagree.)\n");
+        std::printf("  (this gap is NOT the datagram stack being fast, and it is NOT Nagle —\n"
+                    "   setting TCP_NODELAY makes this row 3.2x worse, measured. Connection::send()\n"
+                    "   flushes write-through, so every frame costs its own syscall on both wires;\n"
+                    "   the datagram side only partly escapes that, by packing frames into one\n"
+                    "   datagram and batching datagrams per send. See the note above bench_small().)\n");
     }
 
     // ── idle ────────────────────────────────────────────────────────────────

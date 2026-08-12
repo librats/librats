@@ -263,11 +263,18 @@ Three of these exist mainly because they can fail:
   can therefore survive on one wire and lose its peer on the other, with no
   writable/backpressure callback through which it could have known. The row
   reports where that line sits.
-* **`small`** — the large gap this shows is *not* the datagram stack being fast.
-  `UdpStream` disables Nagle by design; the TCP path never sets `TCP_NODELAY`, so
-  a window of small messages hits the classic Nagle/delayed-ACK interaction. Read
-  it together with `rtt`, which cannot trigger Nagle (nothing outstanding) and so
-  shows the two wires at parity.
+* **`small`** — the large gap this shows is *not* the datagram stack being fast,
+  and it is *not* Nagle either. Setting `TCP_NODELAY` makes this row **3.2x
+  worse**, measured; the kernel's segment counter shows Nagle is currently the
+  only thing coalescing small frames (200 k messages in 14'284 segments with it
+  on, 264'340 with it off), and `strace` counts one `sendmsg` per frame in both
+  builds. The real cost is that `Connection::send()` flushes write-through, so
+  every frame makes its own trip into the kernel on either wire — the datagram
+  side only partly escapes it, by topping up the tail packet in
+  `UdpStream::write()` and batching `kUdpBatchMax` datagrams per syscall.
+  Deferring the flush to the end of a reactor turn brings the two wires to
+  ~1.1–1.3x of each other. Read it together with `rtt`, which has one frame in
+  flight and so can show none of this.
 * **`fallback`** — `identify` already tells a node which transports a peer
   accepts. A re-dial that costs the same as a cold one means that knowledge never
   reaches the dial.
@@ -322,10 +329,11 @@ sent after the last data frame is delivered after it and the closing ack is exac
 Two things to keep in mind reading a remote run. CPU is still whole-process, but
 here a process is **one** node, so the per-gigabyte figures are per-node and the
 upload (sender) and download (receiver) rows are directly comparable. And on a
-very fast path the TCP rows carry an extra artifact: the ack stream is small
-messages, which without `TCP_NODELAY` meets Nagle and paces the sender late —
-`--credit-kb` is the runway that absorbs it, and on any link whose
-bandwidth-delay product fits inside the credit window it does not arise.
+very fast path both wires carry an extra artifact: the ack stream is small
+messages, and every frame currently costs its own write (see `small` above), so
+a narrow credit window paces the sender late — `--credit-kb` is the runway that
+absorbs it, and on any link whose bandwidth-delay product fits inside the credit
+window it does not arise.
 
 Loss behaviour on a *synthetic* lossy path (`netem`) is still out of scope; this
 mode measures whatever loss the real path actually has.
