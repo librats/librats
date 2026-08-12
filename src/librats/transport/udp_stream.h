@@ -37,12 +37,18 @@
  *     is what keeps a request/response exchange from paying a round trip per
  *     turn. What stands in for it is write() itself — it tops up the tail packet
  *     while it has room, so consecutive small frames share one datagram anyway,
- *     and UdpMux then hands the socket a whole batch of them per syscall.
- *     Note the limit of that: Connection::send() flushes write-through, one
- *     frame at a time, so the packing only catches what a single call carries
- *     rather than everything a reactor turn produced. Measured, that is most of
- *     the per-message cost on both transports — see the note above bench_small()
- *     in bench/suites/bench_transport.cpp.
+ *     and UdpMux then hands the socket a whole batch of them per syscall. The
+ *     packing catches everything a reactor turn produced, because Connection
+ *     aggregates a turn's frames and writes them once rather than flushing each
+ *     — which is where most of the per-message cost used to go.
+ *   - Paced: the window says how much may be outstanding, not how fast it may
+ *     leave, so transmissions are metered at `gain * cwnd / srtt` rather than
+ *     released in a burst. HyStart++ ends slow start on a rising round trip
+ *     instead of on a loss, and a window nobody has validated for a round trip
+ *     is given back (RFC 2861) rather than believed.
+ *   - A tail loss is probed, not timed out: the last packet of a burst has
+ *     nothing behind it to produce duplicate acknowledgements, so silence is
+ *     answered with a question (RFC 8985) before it is treated as congestion.
  *
  * ── Ownership and threading ──────────────────────────────────────────────────
  * A stream is owned by the UdpMux and touched only by the reactor thread that
@@ -209,6 +215,27 @@ public:
     /// Rounds the cautious phase lasts before the exit is believed.
     static constexpr int kHyCssRounds = 5;
 
+    // ── Tail loss probe (RFC 8985 / RFC 9002 §6.2) ──────────────────────────
+    //
+    // A loss is normally noticed by what arrives *after* it: duplicate
+    // acknowledgements, or a selective ack naming the hole. Neither exists when
+    // the packet that went missing was the last one — the receiver has nothing
+    // further to acknowledge and simply falls silent. Left to the retransmission
+    // timeout, that costs kMinRto (100 ms) *and* collapses the congestion window
+    // to one packet, on a stream where nothing is actually congested.
+    //
+    // For request/response traffic — which is most of what a peer-to-peer node
+    // does — the tail is not an edge case, it is every message. So the first one
+    // or two expiries are treated as a question rather than a verdict: re-send
+    // the packet the peer has gone quiet on, leave the window alone, and only
+    // escalate to the real timeout if the silence persists.
+    static constexpr int kMaxTailProbes = 2;
+    /// Floor for the probe timer. Well under kMinRto — that floor exists to keep
+    /// a *timeout* from firing spuriously, and a spurious timeout is expensive
+    /// where a spurious probe costs one packet — but still above the delayed
+    /// acknowledgement it must not race.
+    static constexpr std::chrono::milliseconds kMinProbeTimeout{30};
+
     /// Idle gap after which an ack is sent purely to prove we are still here.
     static constexpr std::chrono::seconds kKeepAlive{10};
     /// Silence from the peer that ends the stream. Comfortably more than four
@@ -307,6 +334,8 @@ public:
     size_t   bytes_in_flight() const noexcept { return flight_bytes_; }
     size_t   queued_bytes()  const noexcept { return queued_bytes_; }
     uint32_t retransmits()   const noexcept { return retransmits_; }
+    /// Tail probes sent since the last acknowledgement (diagnostics, tests).
+    int      tail_probes()   const noexcept { return tail_probes_; }
     /// Times the congestion window has been reduced. One per loss *episode* is the
     /// invariant that keeps a single lost packet from walking the window to the
     /// floor over the many acks that report it — see enter_recovery().
@@ -410,6 +439,15 @@ private:
 
     // — timing / congestion —
     void on_rto(Clock::time_point now);
+    /// How long to wait before asking whether the tail got through. A round trip
+    /// plus what the peer may sit on an acknowledgement for, doubled per
+    /// consecutive unanswered probe.
+    Clock::duration probe_timeout() const noexcept;
+    /// What the one loss-detection timer should be set to right now: the probe
+    /// interval while there are probes left to spend, the retransmission timeout
+    /// once there are not. One timer, two meanings — which is how RFC 9002 models
+    /// it too, and why arming it in one place keeps the two from disagreeing.
+    Clock::duration loss_timeout() const noexcept;
     void sample_rtt(Clock::duration rtt);
     void enter_recovery();
     void on_loss(bool timeout);
@@ -454,6 +492,10 @@ private:
     int                   dup_acks_     = 0;
     uint32_t              retransmits_  = 0;
     uint32_t              window_reductions_ = 0;
+    /// Consecutive tail probes sent with nothing acknowledged in between. Reset by
+    /// any acknowledgement that covers new data, so it counts a single episode of
+    /// silence rather than the life of the stream.
+    int                   tail_probes_  = 0;
 
     // Loss episodes. A window is reduced once per episode, not once per ack that
     // happens to repair something — several acks arrive per round trip, and each

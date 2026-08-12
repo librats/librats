@@ -143,8 +143,9 @@ void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
         pkt.in_flight  = true;
         flight_bytes_ += pkt.size();
     }
-    // RFC 6298 (5.1): something is outstanding, so the timer has to be running.
-    if (rto_deadline_ == kNoDeadline) rto_deadline_ = now + rto_;
+    // RFC 6298 (5.1): something is outstanding, so the timer has to be running —
+    // set to whichever of the probe and the timeout comes first (see loss_timeout).
+    if (rto_deadline_ == kNoDeadline) rto_deadline_ = now + loss_timeout();
 
     pkt.sends++;
     pkt.sent_at     = now;
@@ -303,6 +304,12 @@ void UdpStream::restart_after_idle(Clock::time_point now) {
 
     cwnd_ = halvings >= 32 ? kInitialCwnd
                            : (std::max)(cwnd_ >> halvings, kInitialCwnd);
+
+    // Consume the silence that was just paid for. Without this the *same* elapsed
+    // time is re-read on every tick and halves an already-halved window again, so
+    // a window would decay per tick rather than per timeout — far faster than
+    // intended, and enough to undo a healthy window during an ordinary lull.
+    last_data_send_ += Clock::duration(rto_ * static_cast<Clock::rep>(halvings));
 
     // The bucket describes a rate that no longer applies either. Zeroing it (and
     // the clock behind it) means the stream releases the one packet an empty pipe
@@ -545,6 +552,7 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
 
     if (newly_acked > 0) {
         dup_acks_      = 0;
+        tail_probes_   = 0;   // the peer answered; this silence is over
         last_ack_recv_ = p.ack;
         grow_window(newly_acked);
         // After the window moves, not before: the round-trip rise HyStart++ acts
@@ -587,7 +595,7 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     // carrying no payload — a byte count would leave the timer running on the
     // deadline the *handshake* set, which is neither the one the first data packet
     // deserves nor one anything else will correct.
-    if (retired > 0) rto_deadline_ = sent_.empty() ? kNoDeadline : now + rto_;
+    if (retired > 0) rto_deadline_ = sent_.empty() ? kNoDeadline : now + loss_timeout();
 }
 
 void UdpStream::handle_retry(const rudp::Packet& p, Clock::time_point now) {
@@ -795,6 +803,37 @@ void UdpStream::on_loss(bool timeout) {
     }
 }
 
+UdpStream::Clock::duration UdpStream::probe_timeout() const noexcept {
+    if (!have_rtt_) return kInitialRto;
+
+    // RFC 9002's PTO: a round trip, the variance allowance, and the time the peer
+    // is entitled to hold an acknowledgement back for. The last term is what stops
+    // the probe racing our own delayed-ack rule and calling a slow peer a lost one.
+    const auto granularity = std::chrono::duration_cast<Clock::duration>(kMinProbeTimeout) / 8;
+    auto pto = srtt_ + (std::max)(4 * rttvar_, granularity)
+                     + std::chrono::duration_cast<Clock::duration>(kDelayedAck);
+
+    // Doubled per consecutive probe: if the first went unanswered the path is
+    // worse than the estimate said, and asking again at the same spacing would
+    // just be asking twice.
+    for (int i = 0; i < tail_probes_ && pto < std::chrono::duration_cast<Clock::duration>(kMaxRto); ++i)
+        pto *= 2;
+
+    return clamp_duration(pto, kMinProbeTimeout, kMaxRto);
+}
+
+UdpStream::Clock::duration UdpStream::loss_timeout() const noexcept {
+    if (state_ != State::Connected || tail_probes_ >= kMaxTailProbes) return rto_;
+
+    // Never later than the timeout it stands in front of. A probe exists to ask
+    // the question *sooner* and more cheaply than the retransmission timeout would
+    // — on a path whose round trip is long enough that the probe interval exceeds
+    // the timeout, waiting for the probe would be pure added delay. Capped, the
+    // worst case is that it fires exactly when the timeout would have, and the
+    // stream still keeps its window instead of collapsing it.
+    return (std::min)(probe_timeout(), rto_);
+}
+
 void UdpStream::on_rto(Clock::time_point now) {
     // Find the oldest packet the peer has not confirmed. A selectively acknowledged
     // one at the front would mean the peer already has it, so it is not what the
@@ -819,6 +858,23 @@ void UdpStream::on_rto(Clock::time_point now) {
     // come back as the pipe refills do not each take another halving out of a
     // window that is already down to one packet. (on_loss reads flight_bytes_, so
     // it has to run before the accounting below is undone.)
+    // Tail loss probe, before any of the above is believed. The peer has gone
+    // quiet, which on a stream whose last packet was lost is indistinguishable
+    // from a peer that is merely slow — and the two call for opposite responses.
+    // So ask first: re-send what it has not acknowledged, change nothing else,
+    // and let the answer decide. A probe that was unnecessary costs one packet;
+    // the collapse below, taken wrongly, costs the whole window.
+    //
+    // Deliberately not for a dial: a Syn has its own, tighter attempt budget that
+    // the transport race depends on (see kSynMaxAttempts).
+    if (state_ == State::Connected && tail_probes_ < kMaxTailProbes) {
+        ++tail_probes_;
+        transmit(*oldest, now);
+        ++retransmits_;
+        rto_deadline_ = now + loss_timeout();   // backed off, still capped by the RTO
+        return;
+    }
+
     on_loss(true);
     in_recovery_ = true;
     recover_seq_ = next_seq_ - 1;

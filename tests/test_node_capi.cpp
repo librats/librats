@@ -46,6 +46,36 @@ void collect_cb(void* user, const char*, const void* data, size_t len) {
 } // namespace
 
 // Drive two nodes entirely through the C ABI: connect, send on a channel, echo.
+// A zeroed config is the commonest way of filling a struct in C, and it must not
+// produce a node with no transport at all — which is what "0 = disabled" on the
+// two enable_* fields would otherwise mean. The failure that guards against is a
+// quiet one: the node starts, reports no error, and never connects to anything.
+TEST(NodeCApiTest, AZeroedConfigStillGetsBothTransports) {
+    rats_config_t cfg;
+    std::memset(&cfg, 0, sizeof(cfg));   // exactly `rats_config_t cfg = {0};`
+    cfg.enable_listen = 1;
+
+    rats_t node = rats_create_config(&cfg);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(rats_start(node), RATS_OK) << "a zeroed config left the node with no "
+                                            "transport to listen on";
+    EXPECT_EQ(rats_transports(node),
+              RATS_TRANSPORT_MASK_TCP | RATS_TRANSPORT_MASK_UDP);
+    rats_stop(node);
+    rats_destroy(node);
+
+    // Asking for one transport still means one — the rule only rescues "neither".
+    std::memset(&cfg, 0, sizeof(cfg));
+    cfg.enable_listen = 1;
+    cfg.enable_tcp    = 1;
+    node = rats_create_config(&cfg);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(rats_start(node), RATS_OK);
+    EXPECT_EQ(rats_transports(node), RATS_TRANSPORT_MASK_TCP);
+    rats_stop(node);
+    rats_destroy(node);
+}
+
 TEST(NodeCApiTest, ConnectSendAndEcho) {
     rats_t server = rats_create(0);  // listening, ephemeral
     rats_t client = rats_create_ex(0, /*enable_listen=*/0, "127.0.0.1", RATS_SECURITY_NOISE);

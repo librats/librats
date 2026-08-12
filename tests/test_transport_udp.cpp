@@ -846,6 +846,47 @@ TEST(UdpStreamTest, SlowStartEndsOnARisingRoundTripWithoutALoss) {
     EXPECT_EQ(pair.initiator->retransmits(), 0u) << "nothing should have been lost";
 }
 
+TEST(UdpStreamTest, ALostTailIsProbedRatherThanTimedOut) {
+    TimedPair pair(40ms);
+
+    // Warm up so there is a window worth protecting, and so the round-trip
+    // estimate the probe timer is derived from is real.
+    for (int round = 0; round < 6; ++round)
+        ASSERT_GT(pair.transfer(rudp::kMaxPayload * 20), 0u) << "round " << round;
+    pair.hops(6);
+    ASSERT_EQ(pair.initiator->bytes_in_flight(), 0u);
+
+    const uint32_t cwnd_before = pair.initiator->cwnd();
+    const uint32_t cuts_before = pair.initiator->window_reductions();
+    ASSERT_GT(cwnd_before, UdpStream::kInitialCwnd * 2) << "the warm-up never grew the window";
+
+    // A single small message whose one packet is lost. This is the case nothing
+    // else can see: the receiver has everything before it, so it sends no
+    // duplicate acknowledgements and names no hole — it simply has nothing to say.
+    const std::string tail(64, 't');
+    pair.net.drop_next(1);
+    ASSERT_EQ(write_all_at(*pair.initiator, tail, pair.now), tail.size());
+
+    // Give it well under a retransmission timeout to recover. Without the probe
+    // the only thing that could rescue this is the RTO, which cannot fire before
+    // kMinRto and would collapse the window when it did.
+    const auto deadline = pair.now + UdpStream::kMinRto;
+    std::string received;
+    while (pair.now < deadline && received.size() < tail.size()) {
+        pair.hop();
+        received += drain(*pair.responder);
+    }
+
+    EXPECT_EQ(received, tail)
+        << "a lost tail packet was not recovered inside a retransmission timeout — "
+           "which is the whole point of probing for it";
+    EXPECT_GE(pair.initiator->tail_probes(), 1) << "nothing probed";
+    EXPECT_EQ(pair.initiator->window_reductions(), cuts_before)
+        << "the probe was treated as congestion and cost the window, which is what "
+           "it exists to avoid";
+    EXPECT_EQ(pair.initiator->cwnd(), cwnd_before) << "the window moved on a probe";
+}
+
 TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
     Pair pair;
 

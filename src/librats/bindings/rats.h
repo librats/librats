@@ -91,6 +91,10 @@ typedef struct {
      * advertised address is dialable either way. */
     int              enable_tcp;              /* accept and dial over TCP (default 1) */
     int              enable_udp;              /* accept and dial over UDP (default 1) */
+    /* Both zero means "both enabled", not "neither": a node with no transport can
+     * neither dial nor accept, so nobody asks for one on purpose — while zeroed
+     * memory (rats_config_t cfg = {0};) asks for it by accident. Prefer
+     * rats_config_default() and change what you need. */
     rats_transport_t preferred_transport;     /* tried first when dialing (default UDP) */
     uint32_t         transport_fallback_ms;   /* delay before racing the other transport;
                                                * 0 = never fall back (default 1200) */
