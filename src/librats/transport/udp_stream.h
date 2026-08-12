@@ -156,6 +156,59 @@ public:
     /// LAN) whose RTT is too small to space anything out.
     static constexpr std::chrono::milliseconds kMinRepairSpacing{10};
 
+    // ── Pacing ──────────────────────────────────────────────────────────────
+    //
+    // A congestion window is permission to have N bytes *outstanding*, not
+    // permission to put them on the wire back to back. Emitting a whole window
+    // at line rate is what turns a queue that was merely full into a queue that
+    // dropped a hundred packets at once — and it happens even when the window is
+    // well under what the path can hold, because the burst arrives faster than
+    // the bottleneck can drain it. So transmissions are released at the rate the
+    // window implies rather than as fast as the loop can produce them.
+    //
+    // The rate is `gain * cwnd / srtt`. The gain is above 1 on purpose: slow
+    // start has to deliver a *doubling* window within one round trip, so pacing
+    // it at exactly cwnd/srtt would hold growth back by a factor of two, and in
+    // congestion avoidance a little headroom keeps an ack-clocked sender from
+    // being throttled by its own estimate. These are the gains RFC 9002 (7.7)
+    // recommends and Linux uses.
+    static constexpr uint32_t kPaceGainSlowStartNum = 2;
+    static constexpr uint32_t kPaceGainSlowStartDen = 1;
+    static constexpr uint32_t kPaceGainSteadyNum    = 5;   ///< 1.25x
+    static constexpr uint32_t kPaceGainSteadyDen    = 4;
+
+    /// Burst the pacer tolerates, expressed as time rather than packets: it is
+    /// what accrues at the current rate over one wake-up of the reactor. Below
+    /// this there is nothing to gain — the timer cannot space packets finer than
+    /// it can wake — and pacing every packet against a 1 ms clock would cap a
+    /// stream at one packet per millisecond. Above it the smoothing is thrown
+    /// away. So the pacer does not remove bursts, it bounds them to one clock
+    /// tick's worth of data, which is what the queue can absorb.
+    static constexpr std::chrono::milliseconds kPaceQuantum{1};
+    /// Floor for that burst. Two packets is the classic allowance (a delayed ack
+    /// releases two at a time), and it keeps a stream on a very slow path from
+    /// pacing itself below one packet per round trip.
+    static constexpr size_t kPaceMinBurst = 2 * rudp::kMaxPayload;
+
+    // ── HyStart++ (RFC 9406): leaving slow start before the loss ─────────────
+    //
+    // Slow start doubles the window every round trip and, left alone, stops only
+    // when something is dropped — which means it always overshoots the path by
+    // roughly a factor of two and pays for the discovery with a lost window.
+    // HyStart++ watches the *minimum* round-trip time per round instead: a queue
+    // building in front of the bottleneck raises it well before it overflows.
+    // When it rises past a threshold the sender leaves exponential growth for a
+    // cautious phase (CSS), and if the rise turns out to be noise it goes back.
+    static constexpr std::chrono::milliseconds kHyMinRttThresh{4};
+    static constexpr std::chrono::milliseconds kHyMaxRttThresh{16};
+    /// Round-trip samples a round needs before its minimum is worth comparing.
+    static constexpr int kHyRttSamples = 8;
+    /// Growth divisor in the cautious phase: a quarter of slow start, so the
+    /// window still probes upward but cannot double while the verdict is out.
+    static constexpr uint32_t kHyCssGrowthDivisor = 4;
+    /// Rounds the cautious phase lasts before the exit is believed.
+    static constexpr int kHyCssRounds = 5;
+
     /// Idle gap after which an ack is sent purely to prove we are still here.
     static constexpr std::chrono::seconds kKeepAlive{10};
     /// Silence from the peer that ends the stream. Comfortably more than four
@@ -247,6 +300,10 @@ public:
 
     // — diagnostics (tests, logging) —
     uint32_t cwnd()          const noexcept { return cwnd_; }
+    /// Where slow start stops. Starts at the ceiling and comes down either when
+    /// HyStart++ sees the round-trip time rise or when something is lost — which
+    /// of the two happened is the whole question F2 asks.
+    uint32_t ssthresh()      const noexcept { return ssthresh_; }
     size_t   bytes_in_flight() const noexcept { return flight_bytes_; }
     size_t   queued_bytes()  const noexcept { return queued_bytes_; }
     uint32_t retransmits()   const noexcept { return retransmits_; }
@@ -309,9 +366,38 @@ private:
     void pump(Clock::time_point now);
     void retransmit_lost(Clock::time_point now);
     bool can_transmit() const noexcept;
+    /// Everything can_transmit() checks *except* the pacer: the state machine,
+    /// the peer's window and our own. Split out because pump() has to tell "the
+    /// pacer is holding this back" — which a timer resolves — from "a window is",
+    /// which only an acknowledgement can.
+    bool window_allows() const noexcept;
     bool cwnd_allows(size_t bytes) const noexcept;
     void fill_common(rudp::Packet& p) const;
     uint16_t advertised_window() const noexcept;
+
+    // — pacing —
+    /// The window the pacer meters against: cwnd scaled by the phase's gain.
+    /// Zero means "not pacing" (no round-trip estimate yet, so no rate to pace at).
+    uint64_t pace_window() const noexcept;
+    /// Bytes the pacer may release over `dt` at the current rate.
+    uint64_t pace_bytes_over(Clock::duration dt) const noexcept;
+    /// Hand the token bucket whatever has accrued since it was last topped up.
+    void     pace_accrue(Clock::time_point now);
+    /// Whether `bytes` may go out now. Always true when nothing is in flight —
+    /// a lone probe, a zero-window persist and the first packet after an idle
+    /// period must never be held back by a rate derived from an empty pipe.
+    bool     pace_allows(size_t bytes) const noexcept;
+    /// How long until `bytes` could be released. Zero when they can go now.
+    Clock::duration pace_wait(size_t bytes) const noexcept;
+
+    // — window validation after an idle period (RFC 2861) —
+    void restart_after_idle(Clock::time_point now);
+
+    // — HyStart++ (RFC 9406) —
+    void hystart_reset();
+    void hystart_sample(Clock::duration rtt);
+    void hystart_on_ack(uint32_t ack);
+    bool in_slow_start() const noexcept { return cwnd_ < ssthresh_; }
 
     // — inbound —
     void handle_ack(const rudp::Packet& p, Clock::time_point now);
@@ -382,6 +468,38 @@ private:
     /// so retransmit_lost() has work to do. Purely a hint that keeps it from
     /// scanning the whole queue on every acknowledgement of a healthy transfer.
     bool                  have_lost_    = false;
+
+    // — pacing —
+    /// Bytes the pacer will currently let through, and when the bucket was last
+    /// topped up. Kept in bytes rather than packets so a partly filled tail
+    /// packet costs what it actually weighs.
+    uint64_t              pace_tokens_  = 0;
+    Clock::time_point     pace_last_{};
+    /// When the pacer expects to have enough for the packet it is holding back
+    /// (epoch = it is holding nothing). This is a deadline like any other: the
+    /// mux wakes the stream on it, and pump() re-arms or clears it.
+    Clock::time_point     pace_due_{};
+    /// When data — not a bare acknowledgement — last went out. The keep-alive
+    /// writes last_send_ every ten seconds, so it cannot answer "has this stream
+    /// been sending?", which is exactly what the idle-restart rule needs to know.
+    Clock::time_point     last_data_send_{};
+
+    // — HyStart++ —
+    /// Cautious phase: slow start has seen the round-trip time rise and is
+    /// probing gently until the rise is confirmed or withdrawn.
+    bool                  css_          = false;
+    int                   css_rounds_   = 0;
+    Clock::duration       css_baseline_rtt_{};
+    /// Lowest round-trip time seen in this round and in the one before it. The
+    /// *minimum* is what matters: a queue building in front of the bottleneck
+    /// lifts even the luckiest packet's round trip, where an average would just
+    /// as easily be moved by one straggler.
+    Clock::duration       round_min_rtt_{};
+    Clock::duration       prev_round_min_rtt_{};
+    int                   round_samples_ = 0;
+    /// Highest sequence number outstanding when this round began; the round ends
+    /// when the cumulative acknowledgement reaches it.
+    uint32_t              round_end_    = 0;
 
     // — receive side —
     ReceiveBuffer                             inbox_;    ///< in-order bytes awaiting read()

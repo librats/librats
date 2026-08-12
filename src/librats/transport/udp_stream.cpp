@@ -28,6 +28,14 @@ UdpStream::UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_i
     : host_(host), remote_(remote), recv_id_(recv_id), send_id_(send_id), role_(role),
       state_(role == ConnRole::Outbound ? State::SynSent : State::Connected),
       last_recv_(now), last_send_(now) {
+    pace_last_      = now;
+    pace_tokens_    = kPaceMinBurst;   // nothing to pace against until the first RTT sample
+    // Seeded rather than left at the epoch: a sentinel there would collide with a
+    // clock whose zero is a real instant, which is exactly what a test driving
+    // virtual time hands us.
+    last_data_send_ = now;
+    hystart_reset();
+
     if (role_ != ConnRole::Outbound) return;
 
     // The dial itself is just the first packet of the stream: a Syn occupies a
@@ -119,6 +127,15 @@ void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
 
     host_.send_datagram(remote_, start, hdr + pkt.size());
 
+    // Everything that reaches the wire is metered, retransmissions included: a
+    // repair loads the bottleneck exactly as new data does, and a pacer that
+    // ignored repairs would let a recovering stream burst precisely when the path
+    // has just proved it cannot take one. Only *new* data is gated by the pacer
+    // though (see can_transmit) — holding a retransmission back would stall the
+    // recovery the timeout just started.
+    const uint64_t on_wire = hdr + pkt.size();
+    pace_tokens_ = pace_tokens_ > on_wire ? pace_tokens_ - on_wire : 0;
+
     // These bytes are on the path now. A retransmission of a packet that was never
     // given up on adds nothing — it is the same bytes travelling again, not more of
     // them — which is why this is a transition rather than an addition.
@@ -130,8 +147,11 @@ void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
     if (rto_deadline_ == kNoDeadline) rto_deadline_ = now + rto_;
 
     pkt.sends++;
-    pkt.sent_at = now;
-    last_send_  = now;
+    pkt.sent_at     = now;
+    last_send_      = now;
+    // Data, not a bare acknowledgement — this is the clock the idle-restart rule
+    // reads, and the keep-alive must not be allowed to keep resetting it.
+    last_data_send_ = now;
 
     // Every packet carries the ack field, so sending one settles whatever
     // acknowledgement was owed — the delayed-ack timer exists precisely to give
@@ -169,13 +189,127 @@ bool UdpStream::cwnd_allows(size_t bytes) const noexcept {
     return flight_bytes_ + bytes <= cwnd_;
 }
 
-bool UdpStream::can_transmit() const noexcept {
+bool UdpStream::window_allows() const noexcept {
     if (state_ != State::Connected) return false;   // nothing may overtake the Syn
     if (unsent_.empty()) return false;
     if (sent_.empty()) return true;
     if (sent_.size() >= peer_window_) return false;
     if (sent_.size() >= rudp::kMaxWindowPackets) return false;
     return cwnd_allows(unsent_.front().size());
+}
+
+bool UdpStream::can_transmit() const noexcept {
+    if (!window_allows()) return false;
+    return pace_allows(unsent_.front().size());
+}
+
+// ── Pacing ──────────────────────────────────────────────────────────────────
+
+uint64_t UdpStream::pace_window() const noexcept {
+    // No round-trip estimate, no rate: there is nothing to derive a pace from,
+    // and the window at that point is four packets, which cannot hurt anyone.
+    if (!have_rtt_ || srtt_ <= Clock::duration::zero()) return 0;
+
+    // The cautious phase grows at a quarter of slow start, so it does not need
+    // slow start's doubling headroom.
+    const bool doubling = in_slow_start() && !css_;
+    const uint32_t num = doubling ? kPaceGainSlowStartNum : kPaceGainSteadyNum;
+    const uint32_t den = doubling ? kPaceGainSlowStartDen : kPaceGainSteadyDen;
+    return static_cast<uint64_t>(cwnd_) * num / den;
+}
+
+uint64_t UdpStream::pace_bytes_over(Clock::duration dt) const noexcept {
+    const uint64_t window = pace_window();
+    if (window == 0 || dt <= Clock::duration::zero()) return 0;
+
+    // window * dt / srtt. The caller clamps dt to a second and a window is at
+    // most ~1.2 MB, so the product stays four orders of magnitude inside 64 bits.
+    const auto dt_ns   = std::chrono::duration_cast<std::chrono::nanoseconds>(dt).count();
+    const auto srtt_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(srtt_).count();
+    if (srtt_ns <= 0) return 0;
+    return window * static_cast<uint64_t>(dt_ns) / static_cast<uint64_t>(srtt_ns);
+}
+
+void UdpStream::pace_accrue(Clock::time_point now) {
+    auto dt = now - pace_last_;
+    if (dt < Clock::duration::zero()) dt = Clock::duration::zero();
+    // The bucket is capped a few lines below, so integrating over a long silence
+    // buys nothing — and the clamp is what keeps the multiplication finite.
+    const auto cap = std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1));
+    if (dt > cap) dt = cap;
+    pace_last_ = now;
+
+    if (pace_window() == 0) {
+        // Not pacing yet. Keep the bucket at the floor rather than at zero, so
+        // the first packet after the first round-trip sample is not held back by
+        // an empty bucket the stream never had a chance to fill.
+        pace_tokens_ = kPaceMinBurst;
+        return;
+    }
+
+    pace_tokens_ += pace_bytes_over(dt);
+    const uint64_t burst = (std::max)(static_cast<uint64_t>(kPaceMinBurst),
+                                      pace_bytes_over(kPaceQuantum));
+    if (pace_tokens_ > burst) pace_tokens_ = burst;
+}
+
+bool UdpStream::pace_allows(size_t bytes) const noexcept {
+    if (pace_window() == 0) return true;   // no estimate to pace against
+    // Never hold back a stream with an empty pipe. That covers the zero-window
+    // persist probe, the lone packet a recovering stream is allowed, and the
+    // first packet after an idle period — none of which can congest anything,
+    // and all of which would deadlock if a rate derived from an empty pipe were
+    // allowed to refuse them.
+    if (flight_bytes_ == 0) return true;
+    return pace_tokens_ >= bytes;
+}
+
+UdpStream::Clock::duration UdpStream::pace_wait(size_t bytes) const noexcept {
+    const uint64_t window = pace_window();
+    if (window == 0 || pace_tokens_ >= bytes) return Clock::duration::zero();
+
+    const uint64_t deficit = static_cast<uint64_t>(bytes) - pace_tokens_;
+    const auto     srtt_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(srtt_).count();
+    if (srtt_ns <= 0) return Clock::duration::zero();
+
+    // The inverse of pace_bytes_over(): how long this many bytes take to accrue.
+    const uint64_t wait_ns = deficit * static_cast<uint64_t>(srtt_ns) / window;
+    return std::chrono::duration_cast<Clock::duration>(std::chrono::nanoseconds(wait_ns));
+}
+
+void UdpStream::restart_after_idle(Clock::time_point now) {
+    // Only with the pipe genuinely empty. While anything is outstanding the
+    // window describes a path we are actively measuring, and is not stale.
+    if (flight_bytes_ != 0) return;
+    if (cwnd_ <= kInitialCwnd) return;   // nothing to give back
+
+    const auto idle = now - last_data_send_;
+    if (idle < rto_) return;
+
+    // RFC 2861. A congestion window is a measurement, and one nobody has
+    // validated for a round trip is a guess about a path we stopped watching. The
+    // shape of P2P traffic makes this the common case rather than the corner one
+    // — silence, a burst of gossip, silence — and without this the burst goes out
+    // at a rate justified by what the path looked like ten seconds ago.
+    //
+    // Halve once per timeout of silence, down to the window a fresh stream would
+    // start with. ssthresh is deliberately untouched: it records where this path
+    // congested, and going quiet does not make that wrong — keeping it is what
+    // lets the stream climb back in slow start instead of re-running the whole
+    // discovery from scratch.
+    const auto rto_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(rto_).count();
+    const auto idle_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(idle).count();
+    const uint64_t halvings = rto_ns > 0 ? static_cast<uint64_t>(idle_ns / rto_ns) : 32;
+
+    cwnd_ = halvings >= 32 ? kInitialCwnd
+                           : (std::max)(cwnd_ >> halvings, kInitialCwnd);
+
+    // The bucket describes a rate that no longer applies either. Zeroing it (and
+    // the clock behind it) means the stream releases the one packet an empty pipe
+    // always allows and then paces the rest at the restarted rate, instead of
+    // spending a burst allowance earned while it was silent.
+    pace_tokens_ = 0;
+    pace_last_   = now;
 }
 
 void UdpStream::retransmit_lost(Clock::time_point now) {
@@ -201,6 +335,11 @@ void UdpStream::retransmit_lost(Clock::time_point now) {
 }
 
 void UdpStream::pump(Clock::time_point now) {
+    // A window that has gone unused for a round trip is stale before anything
+    // else here reads it, so this comes first.
+    restart_after_idle(now);
+    pace_accrue(now);
+
     // Repairs first: what the peer is missing blocks everything queued behind it,
     // so spending the window on new data before the hole is filled would only grow
     // the peer's reorder buffer.
@@ -213,6 +352,17 @@ void UdpStream::pump(Clock::time_point now) {
 
         sent_.push_back(std::move(pkt));
         transmit(sent_.back(), now);   // this is what puts it in flight
+    }
+
+    // If the loop stopped and every window would still have allowed the next
+    // packet, the pacer is the only thing holding it — and a pacer is released by
+    // time, not by an acknowledgement, so it needs a deadline of its own. When a
+    // window is what stopped us there is deliberately no timer: the ack that
+    // opens it is what wakes the stream, and arming one here would spin.
+    pace_due_ = Clock::time_point{};
+    if (window_allows()) {
+        const auto wait = pace_wait(unsent_.front().size());
+        if (wait > Clock::duration::zero()) pace_due_ = now + wait;
     }
 }
 
@@ -397,6 +547,9 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
         dup_acks_      = 0;
         last_ack_recv_ = p.ack;
         grow_window(newly_acked);
+        // After the window moves, not before: the round-trip rise HyStart++ acts
+        // on is only meaningful against the window that produced it.
+        hystart_on_ack(p.ack);
         // Progress means the path is alive: drop back to the estimated RTO,
         // undoing any doubling a previous timeout applied.
         if (have_rtt_) rto_ = clamp_duration(srtt_ + 4 * rttvar_, kMinRto, kMaxRto);
@@ -597,6 +750,8 @@ size_t UdpStream::read(uint8_t* into, size_t len) {
 void UdpStream::sample_rtt(Clock::duration rtt) {
     if (rtt < Clock::duration::zero()) return;
 
+    hystart_sample(rtt);
+
     if (!have_rtt_) {
         srtt_     = rtt;
         rttvar_   = rtt / 2;
@@ -622,6 +777,11 @@ void UdpStream::enter_recovery() {
 
 void UdpStream::on_loss(bool timeout) {
     ++window_reductions_;
+    // A loss settles the question the cautious phase was asking, and settles it
+    // the expensive way. Whatever slow start is entered from here starts its
+    // round-trip comparison afresh rather than against a queue that has since
+    // drained.
+    css_ = false;
     if (timeout) {
         // A timeout says the path is congested enough to have dropped everything
         // in flight: back down to one packet and re-probe from there.
@@ -688,9 +848,81 @@ void UdpStream::on_rto(Clock::time_point now) {
     retransmit_lost(now);
 }
 
+void UdpStream::hystart_reset() {
+    css_                = false;
+    css_rounds_         = 0;
+    css_baseline_rtt_   = Clock::duration::max();
+    round_min_rtt_      = Clock::duration::max();
+    prev_round_min_rtt_ = Clock::duration::max();
+    round_samples_      = 0;
+    round_end_          = next_seq_ - 1;
+}
+
+void UdpStream::hystart_sample(Clock::duration rtt) {
+    // The *minimum* of the round, not the average: a queue building in front of
+    // the bottleneck lifts even the luckiest packet's round trip, where an
+    // average moves just as readily for one straggler that had nothing to do
+    // with congestion.
+    if (rtt < round_min_rtt_) round_min_rtt_ = rtt;
+    ++round_samples_;
+}
+
+void UdpStream::hystart_on_ack(uint32_t ack) {
+    // Only slow start is in question. Congestion avoidance has already found its
+    // ceiling and climbs a packet per round trip, which no queue signal improves.
+    if (!in_slow_start()) { css_ = false; return; }
+
+    // Entry: this round's best round trip has risen clear of the previous round's
+    // by more than the threshold, which means a queue is forming ahead of us.
+    // Leave doubling for the cautious phase rather than exiting outright — one
+    // round's rise may be noise, and CSS is how that gets settled without
+    // throwing the remaining growth away.
+    if (!css_ && round_samples_ >= kHyRttSamples &&
+        prev_round_min_rtt_ != Clock::duration::max() &&
+        round_min_rtt_ != Clock::duration::max()) {
+        const auto thresh = clamp_duration(prev_round_min_rtt_ / 8,
+                                           kHyMinRttThresh, kHyMaxRttThresh);
+        if (round_min_rtt_ >= prev_round_min_rtt_ + thresh) {
+            css_              = true;
+            css_rounds_       = 0;
+            css_baseline_rtt_ = round_min_rtt_;
+        }
+    }
+
+    if (!rudp::seq_le(round_end_, ack)) return;   // the round is still running
+
+    const auto ended_min = round_min_rtt_;
+    prev_round_min_rtt_  = ended_min;
+    round_min_rtt_       = Clock::duration::max();
+    round_samples_       = 0;
+    round_end_           = next_seq_ - 1;
+
+    if (!css_) return;
+
+    // The rise did not hold — it was one round's noise. Take the caution back and
+    // let slow start carry on, which is the whole reason CSS exists.
+    if (ended_min != Clock::duration::max() && ended_min < css_baseline_rtt_) {
+        css_ = false;
+        return;
+    }
+
+    // It held long enough to believe. Stop doubling *here*, at a window the path
+    // demonstrably carries — this is the point of the exercise: the ceiling is
+    // found without having had to lose a window to find it.
+    if (++css_rounds_ >= kHyCssRounds) {
+        ssthresh_ = cwnd_;
+        css_      = false;
+    }
+}
+
 void UdpStream::grow_window(size_t acked_bytes) {
     if (cwnd_ < ssthresh_) {
-        cwnd_ += static_cast<uint32_t>((std::min)(acked_bytes, size_t{rudp::kMaxPayload} * 2));
+        uint32_t inc = static_cast<uint32_t>((std::min)(acked_bytes, size_t{rudp::kMaxPayload} * 2));
+        // The cautious phase probes at a quarter of slow start: still upward, so a
+        // spurious signal costs almost nothing, but no longer doubling while it is
+        // being decided whether the round-trip rise was a real queue.
+        if (css_) inc /= kHyCssGrowthDivisor;
+        cwnd_ += inc;
     } else {
         // Additive increase: one packet per window, spread over the acks that
         // make up that window.
@@ -716,6 +948,11 @@ std::optional<Clock::time_point> UdpStream::next_deadline() const noexcept {
     if (need_ack_) due = (std::min)(due, ack_due_);
 
     if (rto_deadline_ != kNoDeadline) due = (std::min)(due, rto_deadline_);
+
+    // A packet the pacer is holding back. Unlike everything else here this one is
+    // released by the clock alone — no acknowledgement is coming to free it — so
+    // without this deadline a paced stream would sit until the keep-alive.
+    if (pace_due_ != kNoDeadline) due = (std::min)(due, pace_due_);
 
     // Keep-alive: says we are still here, and keeps a NAT's mapping for this port
     // open. Only meaningful once the stream is up — a Syn in flight is covered by
@@ -771,6 +1008,8 @@ void UdpStream::die(CloseReason reason) {
     flight_bytes_ = 0;
     queued_bytes_ = 0;
     rto_deadline_ = kNoDeadline;
+    pace_due_     = kNoDeadline;
+    pace_tokens_  = 0;
     have_lost_    = false;
     raise(PollErr);
 }

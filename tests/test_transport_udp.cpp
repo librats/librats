@@ -55,11 +55,18 @@ public:
     /// Deliver everything queued. `reverse` hands the batch over backwards, which
     /// is the cheapest way to make a receiver see a gap.
     void deliver(bool reverse = false) {
+        deliver_at(std::chrono::steady_clock::now(), reverse);
+    }
+
+    /// Deliver everything queued, stamping arrival at `now` rather than at the
+    /// wall clock. This is what lets a test drive the parts of the stream that
+    /// are functions of time — the pacer, the idle-restart rule, HyStart++ —
+    /// without sleeping and without depending on how fast the machine is.
+    void deliver_at(std::chrono::steady_clock::time_point now, bool reverse = false) {
         std::deque<Datagram> batch;
         batch.swap(queue_);
         if (reverse) std::reverse(batch.begin(), batch.end());
 
-        const auto now = std::chrono::steady_clock::now();
         for (const Datagram& d : batch) {
             auto it = endpoints_.find(d.to);
             if (it == endpoints_.end()) continue;
@@ -148,6 +155,12 @@ size_t write_all(UdpStream& s, const std::string& data) {
     return s.write(&slice, 1, std::chrono::steady_clock::now());
 }
 
+size_t write_all_at(UdpStream& s, const std::string& data,
+                    std::chrono::steady_clock::time_point now) {
+    const ByteView slice(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+    return s.write(&slice, 1, now);
+}
+
 const Address kAlice{"127.0.0.1", 4001};
 const Address kBob{"127.0.0.1", 4002};
 
@@ -169,6 +182,60 @@ struct Pair {
         net.attach(kBob, responder.get());
         net.attach(kAlice, initiator.get());
         net.settle(*initiator, *responder);
+    }
+};
+
+/// A connected pair on a *virtual* clock and a path with a real round trip.
+///
+/// The Pair above settles instantly, which is all most tests need — but it also
+/// means every round trip it measures is near zero, so anything derived from the
+/// round-trip estimate (the pacing rate, the retransmission timeout, HyStart++'s
+/// comparison between rounds) is degenerate there. This drives time by hand
+/// instead: each hop advances half a round trip and hands over what is in
+/// flight, so both ends measure exactly `rtt` and a test can make the path
+/// slower simply by assigning to it.
+struct TimedPair {
+    using Clock = std::chrono::steady_clock;
+
+    FakeNet                    net;
+    std::unique_ptr<UdpStream> initiator;
+    std::unique_ptr<UdpStream> responder;
+    Clock::time_point          now{};
+    Clock::duration            rtt;
+
+    explicit TimedPair(Clock::duration round_trip = 40ms) : rtt(round_trip) {
+        constexpr uint32_t kBase = 0x11223344;
+        initiator = std::make_unique<UdpStream>(net, kBob, kBase, kBase + 1,
+                                                ConnRole::Outbound, now);
+        responder = std::make_unique<UdpStream>(net, kAlice, kBase + 1, kBase,
+                                                ConnRole::Inbound, now);
+        net.attach(kBob, responder.get());
+        net.attach(kAlice, initiator.get());
+        hops(4);   // the Syn, its acknowledgement, and the first round-trip sample
+    }
+
+    /// Half a round trip: advance the clock and deliver whatever is on the wire.
+    void hop() {
+        now += rtt / 2;
+        net.deliver_at(now);
+        initiator->tick(now);
+        responder->tick(now);
+    }
+    void hops(int n) { for (int i = 0; i < n; ++i) hop(); }
+
+    /// Offer `bytes` and run the path until every one of them has arrived, so the
+    /// pipe is empty again when this returns. Draining matters: a test that left
+    /// a backlog behind would be measuring the leftovers rather than what it
+    /// meant to.
+    size_t transfer(size_t bytes, int max_hops = 2000) {
+        const std::string payload(bytes, 'x');
+        const size_t offered = write_all_at(*initiator, payload, now);
+        size_t got = 0;
+        for (int i = 0; i < max_hops && got < offered; ++i) {
+            hop();
+            got += drain(*responder).size();
+        }
+        return got;
     }
 };
 
@@ -693,6 +760,92 @@ TEST(UdpStreamTest, ReducesTheWindowOnceForOneLossEpisode) {
 // request while a response streams back — that is the ordinary shape of traffic
 // rather than a corner case, so a sender would spend the whole connection with
 // its window pinned near the floor and every small message duplicated.
+TEST(UdpStreamTest, AWindowIsReleasedOverTimeRatherThanAllAtOnce) {
+    TimedPair pair(40ms);
+    ASSERT_TRUE(pair.initiator->connected());
+
+    // Grow the window so there is something worth pacing. Each round drains
+    // completely, so what is measured below starts from an empty pipe.
+    for (int round = 0; round < 8; ++round)
+        ASSERT_GT(pair.transfer(rudp::kMaxPayload * 40), 0u) << "round " << round;
+
+    const size_t window_pkts = pair.initiator->cwnd() / rudp::kMaxPayload;
+    ASSERT_GT(window_pkts, 16u) << "the warm-up never grew the window";
+
+    // Offer far more than the window in one call. The window alone would let
+    // `window_pkts` go out this instant; the pacer should release roughly one
+    // millisecond's worth — at a 40 ms round trip that is a twentieth of it.
+    const size_t before = pair.net.sent();
+    const std::string payload(rudp::kMaxPayload * 400, 'p');
+    ASSERT_GT(write_all_at(*pair.initiator, payload, pair.now), 0u);
+
+    const size_t burst = pair.net.sent() - before;
+    EXPECT_GT(burst, 0u) << "the pacer stalled a stream with an empty pipe";
+    EXPECT_LT(burst, window_pkts / 2)
+        << "the whole window went out at once (" << burst << " of " << window_pkts
+        << " packets) — this is the burst that overruns a drop-tail queue";
+
+    // And it is only a delay, not a cap: time passing releases the rest.
+    pair.hops(2);
+    EXPECT_GT(pair.net.sent(), before + burst) << "the pacer never let go";
+}
+
+TEST(UdpStreamTest, AWindowThatWentUnusedIsGivenBack) {
+    TimedPair pair(40ms);
+
+    for (int round = 0; round < 8; ++round)
+        ASSERT_GT(pair.transfer(rudp::kMaxPayload * 40), 0u) << "round " << round;
+    // The last bytes have arrived, but the acknowledgements for them are still on
+    // their way back — a couple of hops to let the sender's pipe actually empty.
+    pair.hops(6);
+    ASSERT_EQ(pair.initiator->bytes_in_flight(), 0u) << "the transfer never drained";
+    ASSERT_GT(pair.initiator->cwnd(), UdpStream::kInitialCwnd * 4)
+        << "the warm-up never grew the window";
+
+    // Thirty seconds of application silence — comfortably more than the
+    // retransmission timeout, comfortably less than the idle timeout that would
+    // end the stream. Nothing is outstanding, so nothing is retransmitted; the
+    // stream simply stops learning anything about the path.
+    for (int i = 0; i < 30; ++i) {
+        pair.now += 1s;
+        pair.initiator->tick(pair.now);
+        pair.responder->tick(pair.now);
+        pair.net.deliver_at(pair.now);
+    }
+    ASSERT_FALSE(pair.initiator->dead()) << "the idle timeout fired too early";
+
+    EXPECT_EQ(pair.initiator->cwnd(), UdpStream::kInitialCwnd)
+        << "a window nobody validated for thirty seconds was still believed; the "
+           "next burst would go out on what the path looked like back then";
+
+    // Given back, not taken away: the stream still sends.
+    const std::string payload(rudp::kMaxPayload * 4, 'r');
+    EXPECT_GT(write_all_at(*pair.initiator, payload, pair.now), 0u);
+    pair.hops(6);
+    EXPECT_EQ(drain(*pair.responder).size(), payload.size());
+}
+
+TEST(UdpStreamTest, SlowStartEndsOnARisingRoundTripWithoutALoss) {
+    TimedPair pair(20ms);
+
+    // A steady path: slow start doubles away, and nothing has told it to stop.
+    for (int round = 0; round < 6; ++round) pair.transfer(rudp::kMaxPayload * 40);
+    ASSERT_EQ(pair.initiator->ssthresh(), UdpStream::kMaxCwnd)
+        << "slow start ended before the path gave any reason to";
+
+    // The path starts queueing — the round trip quadruples. No packet is lost;
+    // the only signal is that everything now takes longer to come back.
+    pair.rtt = 80ms;
+    for (int round = 0; round < 14; ++round) pair.transfer(rudp::kMaxPayload * 40);
+
+    EXPECT_LT(pair.initiator->ssthresh(), UdpStream::kMaxCwnd)
+        << "slow start kept doubling into a queue that was visibly building";
+    EXPECT_EQ(pair.initiator->window_reductions(), 0u)
+        << "the exit from slow start cost a loss — which is exactly what watching "
+           "the round-trip time is supposed to avoid";
+    EXPECT_EQ(pair.initiator->retransmits(), 0u) << "nothing should have been lost";
+}
+
 TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
     Pair pair;
 
