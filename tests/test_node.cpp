@@ -77,8 +77,13 @@ TEST(NodeTest, ConnectAndEchoMessage) {
     ASSERT_TRUE(client.start());
 
     client.connect("127.0.0.1", server.listen_port());
-    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }))
-        << "peers: client=" << client.peer_count() << " server=" << server.peer_count();
+    // The peer table is populated just before on_peer_connected fires, so waiting
+    // on peer_count() alone can observe the table while the callback is pending.
+    ASSERT_TRUE(wait_for([&] {
+        return client.peer_count() == 1 && server.peer_count() == 1 &&
+               server_peers.load() == 1 && client_peers.load() == 1;
+    })) << "peers: client=" << client.peer_count() << " server=" << server.peer_count()
+        << " callbacks: client=" << client_peers.load() << " server=" << server_peers.load();
 
     EXPECT_EQ(server_peers.load(), 1);
     EXPECT_EQ(client_peers.load(), 1);
