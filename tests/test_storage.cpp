@@ -548,6 +548,7 @@ NodeConfig storage_node_config(bool listen) {
     c.bind_address = "127.0.0.1";
     c.security = NodeConfig::Security::Noise;
     c.enable_listen = listen;
+    c.protocol = librats_test::test_protocol();
     return c;
 }
 

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_paths.h"
 
 #include "librats/node/identify.h"
 #include "librats/node/node.h"
@@ -142,6 +143,7 @@ NodeConfig listening_config() {
     NodeConfig c;
     c.bind_address = "127.0.0.1";   // IPv4-only → remote_ip is deterministically 127.0.0.1
     c.security = NodeConfig::Security::Noise;
+    c.protocol = librats_test::test_protocol();
     return c;
 }
 

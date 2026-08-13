@@ -132,34 +132,50 @@ bool Node::open_listeners() {
         socket_t tcp  = RATS_INVALID_SOCKET;
         uint16_t port = config_.listen_port;
 
-        // Bind the datagram socket first: when the port is ours to choose it is
-        // the one that reports which ephemeral port it landed on, and the TCP
-        // listener then has to match it.
+        // Bind the stream socket first: when the port is ours to choose it is the
+        // one that reports which ephemeral port it landed on, and the datagram
+        // socket then has to match it.
+        //
+        // Which of the two picks matters, and it has to be this one. The kernel
+        // only ever hands out a port that is free for the protocol it is
+        // allocating for, so whichever binds second is the one that can be
+        // refused — and the two are not equally crowded. Both draw from the same
+        // ephemeral range, but every outbound TCP connection on the host holds a
+        // source port in it, and goes on holding it through TIME_WAIT after it
+        // closes; a busy machine keeps tens of thousands there, and nearly
+        // nothing competes for the UDP half of the same range. Letting UDP pick
+        // and then demanding TCP match it is a bet against that crowd, and under
+        // load it loses often enough to fail a node's start outright.
+        if (listen_tcp) {
+            tcp = create_tcp_server(port, 128, config_.bind_address, family);
+            if (!is_valid_socket(tcp)) {
+                LOG_ERROR("node", "Failed to listen on "
+                          << config_.bind_address << ":" << port);
+                return false;
+            }
+            if (port == 0) port = static_cast<uint16_t>(get_bound_port(tcp));
+        }
+
         if (listen_udp) {
             udp = create_udp_socket(port, config_.bind_address, family);
             if (is_valid_socket(udp)) {
-                port = static_cast<uint16_t>(get_bound_port(udp));
+                if (port == 0) port = static_cast<uint16_t>(get_bound_port(udp));
             } else if (listen_tcp) {
+                // Only worth retrying when the clash is with a port we picked
+                // ourselves; an explicitly configured one will clash every time.
+                if (config_.listen_port == 0 && attempt + 1 < kBindAttempts) {
+                    close_socket(tcp);
+                    continue;
+                }
+                // Out of attempts, or a port that was not ours to move: the node
+                // still has a working transport, so it runs on that one rather
+                // than refusing to start.
                 LOG_WARN("node", "UDP port " << port << " unavailable; this node runs TCP-only");
             } else {
                 LOG_ERROR("node", "Failed to listen on UDP "
                           << config_.bind_address << ":" << port);
                 return false;
             }
-        }
-
-        if (listen_tcp) {
-            tcp = create_tcp_server(port, 128, config_.bind_address, family);
-            if (!is_valid_socket(tcp)) {
-                if (is_valid_socket(udp)) close_socket(udp);
-                // Only worth retrying when the clash is with a port we picked
-                // ourselves; an explicitly configured one will clash every time.
-                if (config_.listen_port == 0 && listen_udp && attempt + 1 < kBindAttempts) continue;
-                LOG_ERROR("node", "Failed to listen on "
-                          << config_.bind_address << ":" << port);
-                return false;
-            }
-            if (port == 0) port = static_cast<uint16_t>(get_bound_port(tcp));
         }
 
         listen_socket_ = tcp;
@@ -176,7 +192,8 @@ bool Node::open_listeners() {
         return true;
     }
 
-    LOG_ERROR("node", "Could not find a port free for both transports");
+    // Not reachable: the last attempt does not retry, it settles for the
+    // transport it has. Kept so the function still has a value on every path.
     return false;
 }
 

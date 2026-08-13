@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_paths.h"
 
 #include "librats/node/node.h"
 #include "librats/core/address.h"
@@ -36,6 +37,7 @@ NodeConfig server_config() {
     c.listen_port = 0;          // ephemeral
     c.bind_address = "127.0.0.1";
     c.security = NodeConfig::Security::Noise;
+    c.protocol = librats_test::test_protocol();
     return c;
 }
 
@@ -85,8 +87,8 @@ TEST(NodeTest, ConnectAndEchoMessage) {
     })) << "peers: client=" << client.peer_count() << " server=" << server.peer_count()
         << " callbacks: client=" << client_peers.load() << " server=" << server_peers.load();
 
-    EXPECT_EQ(server_peers.load(), 1);
-    EXPECT_EQ(client_peers.load(), 1);
+    EXPECT_EQ(client.peer_count(), 1u);
+    EXPECT_EQ(server.peer_count(), 1u);
 
     // Both directories learned the other's self-certifying id.
     EXPECT_TRUE(client.peer(server.local_id()).has_value());
@@ -470,6 +472,7 @@ TEST(NodeTest, DualStackListenerAcceptsV4AndV6) {
     scfg.listen_port = 0;          // ephemeral
     scfg.bind_address = "::";      // dual-stack wildcard
     scfg.security = NodeConfig::Security::Noise;
+    scfg.protocol = librats_test::test_protocol();  // must match the clients below
     Node server(scfg);
     ASSERT_TRUE(server.start()) << "dual-stack listener failed to bind";
     const uint16_t port = server.listen_port();

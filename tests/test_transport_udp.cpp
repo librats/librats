@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_paths.h"
 
 #include "librats/core/socket.h"
 #include "librats/node/node.h"
@@ -244,6 +245,7 @@ NodeConfig base_config() {
     c.listen_port  = 0;
     c.bind_address = "127.0.0.1";
     c.security     = NodeConfig::Security::Noise;
+    c.protocol = librats_test::test_protocol();
     return c;
 }
 

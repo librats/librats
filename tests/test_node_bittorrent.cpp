@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_paths.h"
 
 #include "librats/node/node.h"
 #include "librats/subsystems/bittorrent.h"
@@ -23,6 +24,7 @@ NodeConfig bare_node_config() {
     c.enable_listen = false;          // no inbound peer socket needed
     c.enable_network_monitor = false; // no monitor thread in tests
     c.security = NodeConfig::Security::Plaintext;
+    c.protocol = librats_test::test_protocol();
     return c;
 }
 

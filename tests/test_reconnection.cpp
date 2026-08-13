@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_paths.h"
 
 #include "librats/node/node.h"
 #include "librats/subsystems/reconnection.h"
@@ -26,7 +27,7 @@ bool wait_for(Pred pred, std::chrono::milliseconds timeout = 15s) {
 }
 
 NodeConfig listening_config() {
-    NodeConfig c; c.bind_address = "127.0.0.1"; c.security = NodeConfig::Security::Noise; return c;
+    NodeConfig c; c.bind_address = "127.0.0.1"; c.security = NodeConfig::Security::Noise; c.protocol = librats_test::test_protocol(); return c;
 }
 NodeConfig dialing_config() { NodeConfig c = listening_config(); c.enable_listen = false; return c; }
 

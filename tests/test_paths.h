@@ -40,4 +40,23 @@ inline std::string scratch_name(const std::string& prefix) {
     return prefix + "_" + current_test_tag();
 }
 
+/// A NodeConfig::protocol private to the running case.
+///
+/// The same sharing problem as the scratch names, one layer down. Cases run
+/// concurrently as separate processes on one loopback, and a node's UDP port is
+/// reusable the instant its owner exits — no TIME_WAIT, no RST to say the old
+/// owner is gone. So a client from one case can dial the port its server used to
+/// hold and reach a node belonging to a different case entirely. With every case
+/// on the stock protocol that stray dial completes a handshake and lands as a
+/// real extra peer, which is what turns an exact `peer_count() == 1` somewhere
+/// unrelated into a rare, unreproducible failure.
+///
+/// The protocol id is bound into the handshake prologue precisely so that nodes
+/// which should not be talking cannot: giving each case its own makes the stray
+/// dial fail where it belongs, on the handshake. Deterministic for the same
+/// reason scratch_name() is — the tag identifies the case, not the run.
+inline std::string test_protocol() {
+    return "librats-test/" + current_test_tag();
+}
+
 } // namespace librats_test
