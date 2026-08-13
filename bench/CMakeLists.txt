@@ -39,6 +39,22 @@ endif()
 
 set(LIBRATS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
+# librats/util/rats_export.h includes the generated librats/util/features.h, so
+# every source compiled straight in here needs it on the include path. The parent
+# tree's copy lives in its binary dir and this is a standalone project that never
+# configures it, so generate our own: all three switches OFF, which is exactly
+# what the suites want — they measure core/, wire/ and util/ code that no feature
+# flag touches, and a static-linked bench must not see RATS_IMPORT_DLL.
+set(RATS_SEARCH_FEATURES OFF)
+set(RATS_STORAGE OFF)
+set(RATS_IMPORT_DLL OFF)
+set(LIBRATS_GENERATED_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+configure_file(
+    ${LIBRATS_ROOT}/src/librats/util/features.h.in
+    ${LIBRATS_GENERATED_INCLUDE}/librats/util/features.h
+    @ONLY
+)
+
 # ── add_bench(<name> SOURCES ... [DEFS ...] [INCLUDES ...] [WIN_LIBS ...]
 #                                 [STATIC_RUNTIME]) ─────────────────────────────
 #
@@ -52,6 +68,7 @@ function(add_bench name)
     add_executable(${name} ${A_SOURCES})
     target_include_directories(${name} PRIVATE
         ${LIBRATS_ROOT}/src            # the code under test
+        ${LIBRATS_GENERATED_INCLUDE}   # generated librats/util/features.h
         ${CMAKE_CURRENT_SOURCE_DIR}    # framework/ support/ baseline/
         ${A_INCLUDES}
     )
