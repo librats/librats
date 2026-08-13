@@ -105,18 +105,14 @@ class LibratsConan(ConanFile):
         # include path. Mirrors INSTALL_INTERFACE in CMakeLists.txt.
         self.cpp_info.includedirs = ["include"]
 
-        if self.options.search_features:
-            self.cpp_info.defines.append("RATS_SEARCH_FEATURES")
-        if self.options.storage:
-            self.cpp_info.defines.append("RATS_STORAGE")
-
-        # Consumers of the Windows DLL need __declspec(dllimport) on the public
-        # classes (see src/librats/util/rats_export.h). CMakeDeps generates its own config
-        # from this method and never reads the project's ratsConfig.cmake, so the
-        # INTERFACE define set in CMakeLists.txt does not reach Conan consumers —
-        # it has to be repeated here. Keep both sides in sync.
-        if self.options.shared and self.settings.os == "Windows":
-            self.cpp_info.defines.append("RATS_IMPORT_DLL")
+        # No defines are repeated here on purpose. RATS_SEARCH_FEATURES,
+        # RATS_STORAGE and — for the Windows DLL — RATS_IMPORT_DLL are baked into
+        # the installed librats/util/features.h by the build itself, so the headers
+        # describe the package they came from and cannot disagree with it. That
+        # matters for Conan specifically: CMakeDeps generates its own config from
+        # this method and never reads the project's ratsConfig.cmake, so anything
+        # declared only in CMakeLists.txt would otherwise have to be mirrored here
+        # and kept in sync by hand.
 
         if self.settings.os in ("Linux", "FreeBSD"):
             self.cpp_info.system_libs = ["pthread"]

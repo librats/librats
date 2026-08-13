@@ -118,6 +118,23 @@ configure_file(
     @ONLY
 )
 
+# Configure features.h from template — records how this build was configured, so
+# the installed headers describe themselves instead of relying on the consumer's
+# build system to repeat the flags. Must come after the RATS_SEARCH_FEATURES /
+# RATS_STORAGE options and the shared/static resolution above.
+#
+# `#cmakedefine RATS_IMPORT_DLL` reads a variable of that name: a consumer of the
+# shared build needs __declspec(dllimport) on the public classes, a consumer of
+# the static build must NOT have it (it would look for __imp_ symbols that are not
+# there). The library's own sources get RATS_EXPORT_DLL PRIVATE, which
+# rats_export.h tests first, so dllexport still wins while compiling librats.
+set(RATS_IMPORT_DLL ${RATS_SHARED_LIBRARY})
+configure_file(
+    ${PROJECT_SOURCE_DIR}/src/librats/util/features.h.in
+    ${PROJECT_BINARY_DIR}/src/librats/util/features.h
+    @ONLY
+)
+
 # Configure version.rc from template
 if(WIN32)
     configure_file(
@@ -170,6 +187,7 @@ set(LIBRARY_SOURCES
     src/librats/util/version.cpp
     src/librats/util/rats_export.h
     ${PROJECT_BINARY_DIR}/src/librats/util/version.h
+    ${PROJECT_BINARY_DIR}/src/librats/util/features.h
 
 # wire/ — length-prefixed frame format + type-routed dispatch
     src/librats/wire/frame.h
@@ -386,9 +404,11 @@ if(RATS_SHARED_LIBRARY)
     # PRIVATE: dllexport while compiling the library itself.
     # INTERFACE: dllimport for anyone linking the shared library. This rides the
     # exported target (install(EXPORT) writes it into ratsTargets.cmake), which
-    # covers find_package and vcpkg. Conan builds its own config from
-    # conanfile.py's package_info() and ignores ratsConfig.cmake, so the same
-    # define is declared there too — keep the two in sync.
+    # covers find_package and vcpkg. It is belt-and-braces: the generated
+    # librats/util/features.h defines RATS_IMPORT_DLL too, which is what reaches
+    # consumers that never read the CMake target (vcpkg's MSBuild integration, a
+    # hand-rolled -I build). Both derive from RATS_SHARED_LIBRARY and the header
+    # guards with #ifndef, so they cannot disagree or redefine.
     target_compile_definitions(rats
         PRIVATE   RATS_EXPORT_DLL
         INTERFACE RATS_IMPORT_DLL
@@ -741,9 +761,15 @@ if(RATS_INSTALL)
             PATTERN "*.h"
             PATTERN "*.hpp"
     )
-    # Mirrors its in-tree location (src/librats/util/version.h): sources include it
-    # as "librats/util/version.h", so it must land under librats/util/.
-    install(FILES ${PROJECT_BINARY_DIR}/src/librats/util/version.h
+    # Generated headers mirror their in-tree location (src/librats/util/<name>.h):
+    # sources include them as "librats/util/<name>.h", so they must land under
+    # librats/util/. features.h is what makes the installed tree self-describing —
+    # without it a consumer that does not go through the exported CMake target
+    # (vcpkg's MSBuild integration, a hand-rolled -I build) reads the headers with
+    # RATS_SEARCH_FEATURES unset even when the library was built with it.
+    install(FILES
+        ${PROJECT_BINARY_DIR}/src/librats/util/version.h
+        ${PROJECT_BINARY_DIR}/src/librats/util/features.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/librats/util
     )
 

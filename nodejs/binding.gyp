@@ -15,7 +15,7 @@
         # ../src in dev.
         "native-src/src",
         "../src",
-        # Generated headers (version.h) produced by the CMake build into
+        # Generated headers (version.h, features.h) produced by the CMake build into
         # build-native/src/. Mirrors PROJECT_BINARY_DIR/src in CMakeLists.txt.
         "build-native/src"
       ],

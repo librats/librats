@@ -76,7 +76,13 @@ public:
     // Spider mode (rats-search) — DHT-wide infohash crawling.
     // Delegates to the active DHT (the shared node DHT). No-op before start()
     // or when no DHT is shared.
+    //
+    // Guarded to match dht.h, which declares SpiderAnnounceCallback behind the
+    // same macro: the whole subsystem needs RATS_SEARCH_FEATURES to link, but the
+    // header must still *parse* without it (IDE indexers, a consumer probing the
+    // installed tree) rather than fail on an undeclared type.
     //=========================================================================
+#ifdef RATS_SEARCH_FEATURES
     void   set_spider_mode(bool enable);
     bool   is_spider_mode() const;
     void   set_spider_announce_callback(SpiderAnnounceCallback callback);
@@ -86,6 +92,7 @@ public:
     size_t spider_pool_size() const;
     size_t spider_visited_count() const;
     void   clear_spider_state();
+#endif
 
     //=========================================================================
     // Metadata-only fetch (BEP 9). Adds a temporary metadata-only magnet torrent,
