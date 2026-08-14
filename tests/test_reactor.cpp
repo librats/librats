@@ -8,6 +8,7 @@
 #include "librats/security/plaintext_security.h"
 #include "librats/core/socket.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -15,6 +16,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
 
 using namespace librats;
 using namespace std::chrono_literals;
@@ -69,6 +74,32 @@ public:
     PeerId                   remote_id_;
     std::vector<std::string> received_;
 };
+
+/// Raise the soft descriptor limit towards `wanted` and report what is available.
+///
+/// A single-process client+server test burns TWO descriptors per connection (the
+/// dialled socket and the accepted one), so a 1000-connection run needs ~2000 —
+/// well past the 1024 soft limit a login session commonly carries. Past the limit
+/// socket()/accept() simply fail with EMFILE, which surfaces only as connections
+/// that never establish, i.e. as a wait timeout with no visible error. Ask for
+/// exactly what the test needs (not the hard limit: macOS caps the real ceiling at
+/// kern.maxfilesperproc regardless of what RLIMIT_NOFILE claims).
+size_t raise_fd_limit(size_t wanted) {
+#ifdef _WIN32
+    return wanted;  // Windows sockets are not charged against a per-process fd limit
+#else
+    rlimit rl{};
+    if (::getrlimit(RLIMIT_NOFILE, &rl) != 0) return wanted;  // unknown: let the test run
+    if (rl.rlim_cur < static_cast<rlim_t>(wanted)) {
+        rlimit want = rl;
+        want.rlim_cur = (rl.rlim_max == RLIM_INFINITY)
+                            ? static_cast<rlim_t>(wanted)
+                            : (std::min)(rl.rlim_max, static_cast<rlim_t>(wanted));
+        if (::setrlimit(RLIMIT_NOFILE, &want) == 0) rl = want;
+    }
+    return rl.rlim_cur == RLIM_INFINITY ? wanted : static_cast<size_t>(rl.rlim_cur);
+#endif
+}
 
 std::pair<socket_t, int> make_server() {
     socket_t s = create_tcp_server(0, 1024, "127.0.0.1", AddressFamily::IPv4);
@@ -199,6 +230,15 @@ TEST_F(ReactorTest, EchoesManyFramesInOrder) {
 // Scale check: 1000 concurrent connections, each gets one echoed frame.
 TEST_F(ReactorTest, Sustains1000Connections) {
     constexpr int kConns = 1000;
+
+    // 2 fds per connection, plus slack for the listener, two epolls and two Notifiers.
+    constexpr size_t kNeededFds = 2 * kConns + 64;
+    const size_t fd_limit = raise_fd_limit(kNeededFds);
+    if (fd_limit < kNeededFds)
+        GTEST_SKIP() << kConns << " connections need " << kNeededFds
+                     << " descriptors; the hard limit allows only " << fd_limit
+                     << " (raise `ulimit -n`)";
+
     auto [server_sock, port] = make_server();
 
     Identity sid = Identity::generate(), cid = Identity::generate();
