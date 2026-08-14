@@ -77,9 +77,32 @@ public:
         }
     }
 
-    /// Run the pair to a standstill: deliver, tick, repeat until nothing moves.
-    void settle(UdpStream& a, UdpStream& b, int rounds = 32) {
-        for (int i = 0; i < rounds && !queue_.empty(); ++i) {
+    /// Run the pair to a standstill: deliver, tick, repeat until neither side has
+    /// anything left in flight or waiting to go out.
+    ///
+    /// An empty queue is NOT a standstill. The sender is paced against the real
+    /// clock — it releases roughly cwnd/srtt of data per unit of wall time — so a
+    /// round that delivered everything and got nothing back has not finished the
+    /// transfer, it has hit the pacer, and the only thing that moves it on is time
+    /// actually passing. Stopping there instead ends the loop mid-transfer, and
+    /// how far it got becomes a function of how loaded the machine is: a busy box
+    /// inflates the round-trip sample the pace rate is derived from, so the same
+    /// loop delivers a fraction of what it does on an idle one. Waiting on
+    /// flushed() and letting the clock move is what makes the outcome the same in
+    /// both. `stalls` bounds the waiting so a test that drops packets for good
+    /// still returns promptly rather than sitting out a transfer that can never
+    /// complete.
+    void settle(UdpStream& a, UdpStream& b, int rounds = 32, int stalls = 400) {
+        int stalled = 0;
+        for (int i = 0; i < rounds;) {
+            if (queue_.empty() && a.flushed() && b.flushed()) return;
+            if (queue_.empty()) {
+                if (++stalled > stalls) return;
+                std::this_thread::sleep_for(500us);
+            } else {
+                stalled = 0;
+                ++i;
+            }
             deliver();
             const auto now = std::chrono::steady_clock::now();
             a.tick(now);
@@ -979,7 +1002,21 @@ TEST(UdpStreamTest, FillsAWindowLargerThanTheOldCeiling) {
     ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
 
     size_t peak = 0;
-    for (int round = 0; round < 256 && pair.net.queued() > 0; ++round) {
+    // An empty queue means the pacer is holding the next burst, not that the
+    // transfer is over — and the pace rate comes off a wall-clock round-trip
+    // sample, so on a loaded machine it collapses and this loop would stop with
+    // the window barely off the floor. Run until the sender has genuinely nothing
+    // left, giving the clock the chance to move whenever the pacer is what is in
+    // the way, and bound the waiting so the test cannot hang.
+    for (int round = 0, stalled = 0; round < 256 && stalled < 400;) {
+        if (pair.net.queued() == 0) {
+            if (pair.initiator->flushed()) break;
+            ++stalled;
+            std::this_thread::sleep_for(500us);
+        } else {
+            stalled = 0;
+            ++round;
+        }
         pair.net.deliver();
         peak = (std::max)(peak, pair.initiator->bytes_in_flight());
         const auto now = std::chrono::steady_clock::now();
