@@ -509,17 +509,30 @@ TEST_F(StunTest, BindingRequestWithExistingSocket) {
 }
 
 TEST_F(StunTest, BindingRequestTimeout) {
-    // Connect to a port that's not listening
+    // Send to a port that answers nothing — and own that silence rather than assume
+    // it. A hardcoded "surely nobody is there" port used to stand here, picked from
+    // inside the ephemeral range, which is precisely where the kernel places the
+    // mock server of a case running beside this one under `ctest -j`. Land on it and
+    // the request is answered, so the one thing this test asserts — that a request
+    // with no answer times out — quietly becomes untrue. Holding the port open here
+    // means no other socket can be given it, and this one never replies.
+    socket_t black_hole = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(black_hole));
+    const int port = get_bound_port(black_hole);
+    ASSERT_GT(port, 0);
+
     StunClientConfig config;
     config.rto_ms = 50;
     config.max_retransmissions = 1;
     config.total_timeout_ms = 200;
-    
+
     StunClient client(config);
-    auto result = client.binding_request("127.0.0.1", 59999, 200);
-    
+    auto result = client.binding_request("127.0.0.1", port, 200);
+
     EXPECT_FALSE(result.success);
     EXPECT_TRUE(result.error.has_value());
+
+    close_socket(black_hole);
 }
 
 // ============================================================================
