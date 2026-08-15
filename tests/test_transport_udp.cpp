@@ -1179,23 +1179,36 @@ TEST(UdpStreamTest, AClosedReceiveWindowStopsTheSenderAndResumesOnRead) {
     ASSERT_GT(payload.size(), kWindowBytes) << "the transfer cannot fill a window";
     ASSERT_EQ(write_all_at(*pair.initiator, payload, pair.now), payload.size());
 
-    // Phase one: run the path with the receiver never reading a byte.
-    const auto stall_ends = pair.now + 3s;
-    pump(pair, [&] { return pair.now >= stall_ends; }, 4s);
+    // Phase one: run the path with the receiver never reading a byte, for longer
+    // than a stream is allowed to go without hearing from its peer at all.
+    // Simulated time is what makes that affordable, and the length is the point
+    // twice over: the liveness check below says nothing over a stall shorter than
+    // the idle timeout, and a sender that leaks past a closed window leaks slowly
+    // — over a few seconds that looks exactly like a sender that stopped.
+    const auto stall_ends = pair.now + UdpStream::kIdleTimeout + 5s;
+    pump(pair, [&] { return pair.now >= stall_ends; }, UdpStream::kIdleTimeout + 10s, 5ms);
 
     // The stall is the point: the sender still owes data it cannot send.
     EXPECT_GT(pair.initiator->queued_bytes(), 0u)
         << "the sender handed over everything despite a closed window";
-    // Neither side may treat a stopped peer as a dead one. The sender probes a
-    // zero window with a single packet on the retransmission timeout, and the
-    // receiver acknowledges each probe — so the attempt counter never builds up
-    // and nothing here is on a path to being declared gone.
+    // Neither side may treat a stopped peer as a dead one. A sender held by a
+    // closed window sends nothing at all, so there is no retransmission to count
+    // against it — what carries both sides past the idle timeout is the keep-alive,
+    // and that is the only thing holding this stream up for the stall above.
     EXPECT_FALSE(pair.initiator->dead()) << "a full receiver was mistaken for a lost one";
     EXPECT_FALSE(pair.responder->dead());
 
     const std::string first = drain(*pair.responder);
     EXPECT_LT(first.size(), payload.size()) << "flow control never stopped the sender";
     EXPECT_GT(first.size(), kWindowBytes / 2) << "the sender stopped far short of the window";
+    // And it is the advertised window that stopped it — not the send queue running
+    // dry much later. This is the whole promise: what the receiver spends on a peer
+    // is what the receiver said it would spend, so admitting one more packet every
+    // time the pipe drains (which a peer holding data it will not read does keep
+    // acknowledging) is not a probe, it is the bound quietly going away.
+    EXPECT_LE(first.size(), kWindowBytes)
+        << "the receiver buffered " << first.size() << " bytes against a window of "
+        << kWindowBytes;
 
     // Phase two: the buffer has just been drained, so the window is open again and
     // the transfer has to pick itself back up with no help from the test.
@@ -1211,19 +1224,12 @@ TEST(UdpStreamTest, AClosedReceiveWindowStopsTheSenderAndResumesOnRead) {
 
 // A window that re-opens has to be announced, with nothing to announce it on.
 //
-// The test above lets the sender find out for itself: a stopped sender still probes,
-// and the acknowledgement of a probe carries the current window, so the transfer
-// recovers whether or not the receiver ever volunteers anything. That hides the
-// contract this test pins down. While the window is zero there is, by construction,
-// no traffic for an acknowledgement to ride on — so if draining the buffer does not
-// make the receiver speak up by itself, the only thing left to restart the transfer
-// is whatever the peer happens to probe with, at whatever interval its retransmission
-// timeout has backed off to. read() records that the window re-opened; the point here
-// is that the record is acted on.
-//
-// It also matters ahead of any tightening of flow control: a receiver that starts
-// *refusing* data past the window it advertised (as TCP does) has no probe to answer,
-// and this ack becomes the only way out of a zero window at all.
+// This is the only way out of a zero window there is. A sender held by one sends
+// nothing — not a probe, not a byte — so there is, by construction, no traffic for
+// an acknowledgement to ride on and nothing the receiver can wait for. If draining
+// the buffer does not make it speak up unprompted, the transfer does not resume at
+// all until the keep-alive happens to carry the news, ten seconds later. read()
+// records that the window re-opened; the point here is that the record is acted on.
 TEST(UdpStreamTest, AReopenedWindowIsAnnouncedWithoutPeerTraffic) {
     Pair pair;
 
@@ -1259,6 +1265,221 @@ TEST(UdpStreamTest, AReopenedWindowIsAnnouncedWithoutPeerTraffic) {
     rudp::Packet update;
     ASSERT_TRUE(pair.net.peek_last(update));
     EXPECT_GT(update.window, 0) << "the update carried the same closed window";
+}
+
+// ...and announced more than once, because nothing retransmits it.
+//
+// The update rides on a bare acknowledgement, which no part of this transport ever
+// re-sends: it is repaired by the next one, and on a stopped stream there is no next
+// one. So a single dropped datagram would leave a sender that has data to send and a
+// receiver with room to take it both sitting until the keep-alive — ten seconds of
+// silence bought by one lost packet, on a path that is otherwise fine. The receiver
+// volunteering it again is what turns that into a round trip.
+TEST(UdpStreamTest, ALostWindowUpdateIsAnnouncedAgain) {
+    Pair pair;
+
+    // Fill the receive buffer by hand, as above: the receiver's own behaviour once
+    // it is full is the whole subject.
+    const Bytes body(rudp::kMaxPayload, 'x');
+    for (uint32_t i = 0; i < rudp::kMaxWindowPackets; ++i) {
+        rudp::Packet p;
+        p.type    = rudp::PacketType::Data;
+        p.conn_id = pair.responder->recv_id();
+        p.seq     = 2 + i;   // the Syn took sequence number 1
+        p.ack     = 0;
+        p.window  = rudp::kMaxWindowPackets;
+        p.payload = ByteView(body);
+        pair.responder->on_packet(p, pair.now);
+    }
+    rudp::Packet closed;
+    ASSERT_TRUE(pair.net.peek_last(closed));
+    ASSERT_EQ(closed.window, 0) << "the receive buffer never actually filled";
+
+    // Drain it, and lose exactly the datagram that says so.
+    EXPECT_GT(drain(*pair.responder).size(), 0u);
+    pair.net.drop_next(1);
+    const size_t before = pair.net.dropped();
+    pair.responder->tick(pair.now);
+    ASSERT_GT(pair.net.dropped(), before) << "there was no update to lose";
+
+    // Nothing else happens on this path: the peer is stopped, and the only packet
+    // that could restart it has just been thrown away. What follows has to be the
+    // receiver's own doing.
+    const auto   opened_at = pair.now;
+    rudp::Packet update;
+    const bool   told = pump(pair, [&] {
+        return pair.net.peek_last(update) && update.window > 0;
+    }, 2s);
+
+    ASSERT_TRUE(told) << "a lost window update was never repeated; the transfer would "
+                         "have waited out a keep-alive";
+    EXPECT_LT(pair.now - opened_at, UdpStream::kKeepAlive)
+        << "the repeat was the keep-alive rather than an announcement of its own";
+}
+
+// ...and the repeats stop the moment the peer proves it heard.
+//
+// Volunteering an update is only worth anything while the peer is stopped: it has
+// no traffic for one to ride on, and no way to ask. A packet from it says both
+// conditions are over — so the remaining repeats have nobody to inform, and going
+// on with them spends acknowledgements on a conversation that has already resumed.
+//
+// The proof has to be a *sequenced* packet, which is why this is not simply "any
+// traffic". A sender stuck on a window it believes is closed still keep-alives, and
+// those are bare acknowledgements: reading one as an answer would call off exactly
+// the repeats it is waiting for, which is the case the whole mechanism exists for.
+TEST(UdpStreamTest, WindowAnnouncementsStopOnceThePeerSpeaksAgain) {
+    Pair pair;
+
+    const Bytes body(rudp::kMaxPayload, 'x');
+    const auto  deliver_data = [&](uint32_t seq) {
+        rudp::Packet p;
+        p.type    = rudp::PacketType::Data;
+        p.conn_id = pair.responder->recv_id();
+        p.seq     = seq;
+        p.ack     = 0;
+        p.window  = rudp::kMaxWindowPackets;
+        p.payload = ByteView(body);
+        pair.responder->on_packet(p, pair.now);
+    };
+
+    // Fill the receive buffer, so that draining it re-opens a window that really
+    // was closed — nothing is announced otherwise.
+    for (uint32_t i = 0; i < rudp::kMaxWindowPackets; ++i) deliver_data(2 + i);  // Syn took 1
+    rudp::Packet closed;
+    ASSERT_TRUE(pair.net.peek_last(closed));
+    ASSERT_EQ(closed.window, 0) << "the receive buffer never actually filled";
+
+    EXPECT_GT(drain(*pair.responder).size(), 0u);
+    pair.responder->tick(pair.now);   // the first announcement, sent at once
+    rudp::Packet update;
+    ASSERT_TRUE(pair.net.peek_last(update));
+    ASSERT_GT(update.window, 0) << "the window was never announced in the first place";
+
+    // The peer answers with a packet of its own: it is plainly no longer stopped.
+    deliver_data(2 + rudp::kMaxWindowPackets);
+
+    // That packet owes an acknowledgement of its own, which is not what is being
+    // counted here — let it go out first, and count from after it.
+    const auto answered_at = pair.now + UdpStream::kDelayedAck + 100ms;
+    pump(pair, [&] { return pair.now >= answered_at; }, 1s);
+    const size_t settled = pair.net.sent();
+
+    // Long enough for every remaining announcement to have come due (they are
+    // spaced by the retransmission timeout, which nothing here has moved off its
+    // initial value), and comfortably short of the keep-alive, which would produce
+    // one legitimately.
+    const auto quiet_until = pair.now + UdpStream::kMaxWindowAnnounces * UdpStream::kInitialRto;
+    ASSERT_LT(quiet_until - pair.now, UdpStream::kKeepAlive) << "the window covers a keep-alive";
+    pump(pair, [&] { return pair.now >= quiet_until; }, 10s);
+
+    EXPECT_EQ(pair.net.sent(), settled)
+        << "the receiver went on announcing a window to a peer that had already answered";
+}
+
+// The other half of that rule, and the one it exists for: a keep-alive is not an
+// answer.
+//
+// A sender stopped on a window it believes is closed still says something every ten
+// seconds — it has to, or the peer's idle timer would end a stream that is merely
+// blocked. What it says is a bare acknowledgement, which is precisely the shape of
+// "I am here and I have heard nothing". Reading it as proof would call off the
+// repeats meant for that very sender, and the two would then wait on each other
+// until one of them timed out.
+TEST(UdpStreamTest, AKeepAliveIsNotAnAnswerToAWindowAnnouncement) {
+    Pair pair;
+
+    // Fill the receive buffer, as above, so that draining it re-opens a window that
+    // really was closed.
+    const Bytes body(rudp::kMaxPayload, 'x');
+    for (uint32_t i = 0; i < rudp::kMaxWindowPackets; ++i) {
+        rudp::Packet p;
+        p.type    = rudp::PacketType::Data;
+        p.conn_id = pair.responder->recv_id();
+        p.seq     = 2 + i;   // the Syn took sequence number 1
+        p.ack     = 0;
+        p.window  = rudp::kMaxWindowPackets;
+        p.payload = ByteView(body);
+        pair.responder->on_packet(p, pair.now);
+    }
+    rudp::Packet closed;
+    ASSERT_TRUE(pair.net.peek_last(closed));
+    ASSERT_EQ(closed.window, 0) << "the receive buffer never actually filled";
+
+    EXPECT_GT(drain(*pair.responder).size(), 0u);
+    pair.responder->tick(pair.now);   // the first announcement, sent at once
+    rudp::Packet update;
+    ASSERT_TRUE(pair.net.peek_last(update));
+    ASSERT_GT(update.window, 0) << "the window was never announced in the first place";
+
+    // The stopped sender's keep-alive: a bare acknowledgement, occupying no
+    // sequence number and telling the receiver nothing it did not already know.
+    rudp::Packet keep_alive;
+    keep_alive.type    = rudp::PacketType::Ack;
+    keep_alive.conn_id = pair.responder->recv_id();
+    keep_alive.seq     = 2 + rudp::kMaxWindowPackets;
+    keep_alive.ack     = 0;
+    keep_alive.window  = rudp::kMaxWindowPackets;
+    pair.responder->on_packet(keep_alive, pair.now);
+
+    // Nothing else on this stream is due inside the interval below — no delayed
+    // ack is owed, the keep-alive of our own is ten seconds out — so a packet
+    // appearing here can only be the repeat.
+    const size_t before = pair.net.sent();
+    const auto   next_due = pair.now + UdpStream::kInitialRto + 100ms;
+    pump(pair, [&] { return pair.now >= next_due; }, 2s);
+
+    EXPECT_GT(pair.net.sent(), before)
+        << "a keep-alive was taken as proof the peer had heard, and the announcement "
+           "the peer is waiting for was called off";
+}
+
+// A window from the past does not stop a sender the receiver has made room for.
+//
+// Nothing on the wire is ordered by arrival: a path may duplicate a datagram or
+// deliver two out of order, and an acknowledgement from when the receiver was full
+// then lands after the one saying it is empty. Latching that stale zero costs more
+// than it used to — there is no probe to discover the mistake with (see
+// window_allows), and the receiver has already said its piece and will not repeat
+// itself, so the stream sits until the next keep-alive. The cumulative
+// acknowledgement is what dates the two apart.
+TEST(UdpStreamTest, AStaleWindowUpdateDoesNotStopTheSender) {
+    Pair pair;
+
+    // A short transfer run right through: nothing left in flight, nothing queued,
+    // and a receiver that has read every byte and owes nobody anything.
+    const std::string first(50000, 'a');
+    ASSERT_EQ(write_all_at(*pair.initiator, first, pair.now), first.size());
+    size_t got = 0;
+    ASSERT_TRUE(pump(pair, [&] { got += drain(*pair.responder).size();
+                                 return got >= first.size(); }, 10s));
+    ASSERT_TRUE(pump(pair, [&] { drain(*pair.responder);
+                                 return pair.initiator->flushed(); }, 5s));
+
+    // One datagram from the past. Its acknowledgement is far behind what the peer
+    // has really confirmed, which is exactly what makes it recognisable.
+    rudp::Packet stale;
+    stale.type    = rudp::PacketType::Ack;
+    stale.conn_id = pair.initiator->recv_id();
+    stale.seq     = 1;
+    stale.ack     = 0;
+    stale.window  = 0;
+    pair.initiator->on_packet(stale, pair.now);
+
+    // The application writes again. The receiver's buffer is empty and it has
+    // nothing to announce, so nothing is coming to correct a sender that believed
+    // the stale zero — the write simply never leaves.
+    const std::string second(20000, 'b');
+    ASSERT_EQ(write_all_at(*pair.initiator, second, pair.now), second.size());
+
+    const auto  wrote_at = pair.now;
+    std::string received;
+    ASSERT_TRUE(pump(pair, [&] { received += drain(*pair.responder);
+                                 return received.size() >= second.size(); }, 30s))
+        << "a window from the past stopped the sender for good";
+    EXPECT_EQ(received, second);
+    EXPECT_LT(pair.now - wrote_at, UdpStream::kKeepAlive)
+        << "the transfer waited out a keep-alive to undo a window from the past";
 }
 
 // A hole is repaired from what the selective ack names, not from a timeout.

@@ -236,6 +236,15 @@ public:
     /// acknowledgement it must not race.
     static constexpr std::chrono::milliseconds kMinProbeTimeout{30};
 
+    /// Times a re-opened receive window is announced before the matter is left to
+    /// the keep-alive. A window update rides on a bare acknowledgement, and nothing
+    /// retransmits one — while the sender it is meant for is stopped and produces
+    /// no traffic for a second copy to ride on. So a single dropped update would
+    /// cost that sender a full keep-alive interval of silence over one lost packet.
+    /// Repeating it on the retransmission timeout makes the common recovery a round
+    /// trip instead, and the keep-alive remains the backstop behind these.
+    static constexpr int kMaxWindowAnnounces = 4;
+
     /// Idle gap after which an ack is sent purely to prove we are still here.
     static constexpr std::chrono::seconds kKeepAlive{10};
     /// Silence from the peer that ends the stream. Comfortably more than four
@@ -413,8 +422,10 @@ private:
     /// Hand the token bucket whatever has accrued since it was last topped up.
     void     pace_accrue(Clock::time_point now);
     /// Whether `bytes` may go out now. Always true when nothing is in flight —
-    /// a lone probe, a zero-window persist and the first packet after an idle
-    /// period must never be held back by a rate derived from an empty pipe.
+    /// the lone packet a recovering stream is allowed and the first packet after
+    /// an idle period must never be held back by a rate derived from an empty
+    /// pipe. A receiver's zero window is not this check's business: it stops the
+    /// packet earlier, in window_allows().
     bool     pace_allows(size_t bytes) const noexcept;
     /// How long until `bytes` could be released. Zero when they can go now.
     Clock::duration pace_wait(size_t bytes) const noexcept;
@@ -488,6 +499,10 @@ private:
     uint32_t              cwnd_         = kInitialCwnd;
     uint32_t              ssthresh_     = kMaxCwnd;
     uint16_t              peer_window_  = rudp::kMaxWindowPackets;
+    /// The cumulative acknowledgement `peer_window_` came in on. What orders two
+    /// windows in time: a peer's ack never moves backwards, so a packet carrying
+    /// one that has is a packet from the past, and the window on it with it.
+    uint32_t              window_ack_   = 0;
     uint32_t              last_ack_recv_ = 0;
     int                   dup_acks_     = 0;
     uint32_t              retransmits_  = 0;
@@ -549,6 +564,12 @@ private:
     uint32_t                                  recv_next_ = 1;  ///< next sequence number expected
     bool                                      need_ack_  = false;
     int                                       unacked_packets_ = 0;
+    /// Announcements left of a receive window that has just re-opened, and when the
+    /// next one is due (the epoch = at once). Zero means there is nothing to
+    /// announce, which is what arms this: the peer is stopped and sends nothing for
+    /// an update to ride on, so this is the only clock either side has for it.
+    int                                       window_announces_ = 0;
+    Clock::time_point                         window_due_{};
     /// Cached selective-ack bitmap, rebuilt only when the reorder buffer or the
     /// expected sequence number moves. Every outgoing packet carries this field,
     /// so deriving it from 32 hash lookups per *packet* — during loss recovery,

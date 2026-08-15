@@ -183,9 +183,11 @@ void UdpStream::send_control(rudp::PacketType type, Clock::time_point now) {
 
 bool UdpStream::cwnd_allows(size_t bytes) const noexcept {
     // Always allow one packet out when the path is idle. This keeps a stream from
-    // deadlocking when the window shrinks below a single packet, and doubles as the
-    // zero-window probe: the lone in-flight packet is retransmitted on the RTO until
-    // the peer opens up again, which is exactly what a persist timer does.
+    // deadlocking when the congestion window shrinks below a single packet — a
+    // window is an estimate of what the path will carry, and an estimate that has
+    // collapsed to nothing still has to be able to take a sample. It says nothing
+    // about the *receiver's* window, which is not an estimate at all and is
+    // enforced ahead of this, in window_allows().
     if (flight_bytes_ == 0) return true;
     return flight_bytes_ + bytes <= cwnd_;
 }
@@ -193,6 +195,23 @@ bool UdpStream::cwnd_allows(size_t bytes) const noexcept {
 bool UdpStream::window_allows() const noexcept {
     if (state_ != State::Connected) return false;   // nothing may overtake the Syn
     if (unsent_.empty()) return false;
+
+    // A receiver that advertises zero has said it will buffer nothing more, and
+    // that is absolute: it is the only bound on the memory one peer can make
+    // another spend on it, so an empty pipe is no licence to send anyway. It would
+    // not stay a single probe if it were — the packet is ordinary in-order data,
+    // the peer acknowledges it and holds it, the pipe empties, and the next one
+    // follows on its heels. What looks like a persist probe is then a steady
+    // trickle that fills the receiver far past the window it advertised, bounded
+    // in the end by the sender's own queue rather than by anything the receiver
+    // said.
+    //
+    // Nothing is needed from this side to get going again: a receiver whose reader
+    // drains a full buffer announces the re-opened window at once and unprompted
+    // (see read(), and UdpStreamLink::read for the wake-up that carries it), and
+    // its keep-alive carries the window if that announcement is lost.
+    if (peer_window_ == 0) return false;
+
     if (sent_.empty()) return true;
     if (sent_.size() >= peer_window_) return false;
     if (sent_.size() >= rudp::kMaxWindowPackets) return false;
@@ -256,11 +275,10 @@ void UdpStream::pace_accrue(Clock::time_point now) {
 
 bool UdpStream::pace_allows(size_t bytes) const noexcept {
     if (pace_window() == 0) return true;   // no estimate to pace against
-    // Never hold back a stream with an empty pipe. That covers the zero-window
-    // persist probe, the lone packet a recovering stream is allowed, and the
-    // first packet after an idle period — none of which can congest anything,
-    // and all of which would deadlock if a rate derived from an empty pipe were
-    // allowed to refuse them.
+    // Never hold back a stream with an empty pipe. That covers the lone packet a
+    // recovering stream is allowed and the first packet after an idle period —
+    // neither of which can congest anything, and both of which would deadlock if a
+    // rate derived from an empty pipe were allowed to refuse them.
     if (flight_bytes_ == 0) return true;
     return pace_tokens_ >= bytes;
 }
@@ -445,8 +463,6 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
         return;
     }
 
-    peer_window_ = p.window;
-
     bool ack_now = (p.type == rudp::PacketType::Syn || p.type == rudp::PacketType::Fin);
 
     handle_ack(p, now);
@@ -462,6 +478,12 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
 
     if (p.type == rudp::PacketType::Syn || p.type == rudp::PacketType::Data ||
         p.type == rudp::PacketType::Fin) {
+        // The peer is sending again, so it is not stopped on a window we re-opened
+        // and there is nothing left to announce. A bare acknowledgement deliberately
+        // does not count: a sender stuck on a stale zero window still keep-alives,
+        // and taking that as proof would call off the very repeats meant for it.
+        window_announces_ = 0;
+
         const uint32_t before = recv_next_;
         handle_sequenced(p);
         // A packet that did not fill the gap it was expected to means the peer is
@@ -492,6 +514,30 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     // An ack past the highest sequence number we have ever assigned is nonsense;
     // honouring it would retire packets that were never sent.
     if (rudp::seq_less(next_seq_ - 1, p.ack)) return;
+
+    // What the receiver will still buffer — taken only from a packet that is not
+    // from the past. A path that duplicates or reorders a datagram hands back a
+    // window from before the one we are already acting on, and latching that would
+    // stop a sender the receiver has since made room for. With no probe left to
+    // discover the mistake (see window_allows) the stream would then sit until the
+    // peer's next keep-alive, ten seconds of silence bought by one stale packet.
+    //
+    // The cumulative acknowledgement is what dates them: it never moves backwards
+    // at the peer, so one that has moved backwards arrived out of order. Only
+    // *strictly* older is refused — a retransmission carries a header built when it
+    // was sent, so its window is current even though the packet is not, and TCP's
+    // stricter reading of this (SND.WL1) would throw that away. Two packets sharing
+    // an ack are genuinely indistinguishable here, which is what the receiver's
+    // repeated announcement covers from the other end (see read()).
+    //
+    // Deliberately below the check above rather than in on_packet(): a forged or
+    // corrupt ack from the future must not be allowed to set the mark, or every
+    // legitimate update after it would look stale and the window would freeze for
+    // the life of the stream.
+    if (!rudp::seq_less(p.ack, window_ack_)) {
+        peer_window_ = p.window;
+        window_ack_  = p.ack;
+    }
 
     size_t newly_acked = 0;
     size_t retired     = 0;   ///< packets the cumulative ack removed from the queue
@@ -749,7 +795,19 @@ size_t UdpStream::read(uint8_t* into, size_t len) {
     // deadline attached, which the next tick() sends outright rather than holding
     // for company (see there). Leaving ack_due_ unset is the *signal*, not an
     // omission: everything else that owes an ack has a packet of its own to wait for.
-    if (before == 0 && advertised_window() > 0) need_ack_ = true;
+    //
+    // And again after that, a few times, if the peer stays quiet. Nothing
+    // retransmits a bare acknowledgement, and the sender this one is for is stopped
+    // — so were it dropped, the only thing left to restart the transfer would be
+    // the keep-alive ten seconds out. The repeats also cover the one case the
+    // sender cannot: two packets carrying the same acknowledgement and different
+    // windows, which it has no way to tell apart (see handle_ack). Cleared as soon
+    // as the peer sends anything sequenced, which is proof it heard us.
+    if (before == 0 && advertised_window() > 0) {
+        need_ack_         = true;
+        window_announces_ = kMaxWindowAnnounces;
+        window_due_       = kNoDeadline;   // the first one goes at once
+    }
     return n;
 }
 
@@ -1023,6 +1081,10 @@ std::optional<Clock::time_point> UdpStream::next_deadline() const noexcept {
     // that the earliest possible deadline, which is exactly what it means.
     if (need_ack_) due = (std::min)(due, ack_due_);
 
+    // A re-opened window still waiting to be heard back on. Same convention as the
+    // owed ack above — the count is what arms this, so the epoch means "at once".
+    if (window_announces_ > 0) due = (std::min)(due, window_due_);
+
     if (rto_deadline_ != kNoDeadline) due = (std::min)(due, rto_deadline_);
 
     // A packet the pacer is holding back. Unlike everything else here this one is
@@ -1059,8 +1121,23 @@ void UdpStream::tick(Clock::time_point now) {
     // no deadline to wait out: the peer is stopped on a window of zero and will send
     // nothing for an acknowledgement to ride on, so an ack sent from here is the
     // only thing that can tell it to start again.
+    // A window we re-opened that the peer has not answered. It is stopped, so it
+    // will not produce a packet for the update to ride on however long we wait —
+    // the announcement has to be volunteered, and volunteered again if it is lost.
+    if (window_announces_ > 0 && now >= window_due_) {
+        need_ack_ = true;
+        ack_due_  = kNoDeadline;   // at once, for the same reason read() leaves it so
+    }
+
     if (need_ack_ && (ack_due_ == kNoDeadline || now >= ack_due_)) {
         send_control(rudp::PacketType::Ack, now);
+        // That one carried the window. Space the rest by the retransmission
+        // timeout: it is this side's own estimate of how long an answer would take
+        // to come back, and asking again sooner would only ask twice.
+        if (window_announces_ > 0) {
+            --window_announces_;
+            window_due_ = now + rto_;
+        }
     } else if (state_ == State::Connected && now - last_send_ >= kKeepAlive) {
         // Say something now and then: it keeps the peer's idle timer from firing
         // and, just as importantly, keeps a NAT's mapping for this port alive.
@@ -1087,6 +1164,7 @@ void UdpStream::die(CloseReason reason) {
     pace_due_     = kNoDeadline;
     pace_tokens_  = 0;
     have_lost_    = false;
+    window_announces_ = 0;   // nobody is waiting on a window this stream will never serve
     raise(PollErr);
 }
 
