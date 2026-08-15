@@ -313,12 +313,16 @@ void Reactor::dispatch_events(ConnId id, uint32_t events) {
     if (conn->state() == ConnState::Closing || conn->state() == ConnState::Closed) return;
     // Condemned earlier this turn, just not torn down yet — process_pending_close()
     // runs at the end of the turn, so events polled alongside the one that closed it
-    // would otherwise still be delivered. Beyond being work on bytes that are about
-    // to be dropped, it would let the connection change state *after* the decision
-    // to close it was taken against the state it had: cancel_dial() spares a
-    // connection that has established, and a handshake finishing here would land on
-    // the wrong side of a check that has already run. The map is empty on every
-    // turn that closes nothing, which is nearly all of them.
+    // would otherwise still be delivered, and the connection could change state
+    // *after* the decision to close it was taken against the state it had.
+    //
+    // Which is not merely wasted work on bytes about to be dropped. cancel_dial()
+    // spares an attempt that has established; let one finish its handshake here,
+    // just after that check found it still handshaking, and it reaches the peer
+    // table as a duplicate and supersedes the sibling that beat it — while itself
+    // still standing condemned. Both are then gone at the end of the turn and the
+    // peer is lost, which is the very failure the cancel/close split exists to
+    // prevent. The map is empty on every turn that closes nothing, nearly all of them.
     if (!pending_close_.empty() && pending_close_.count(id)) return;
 
     bool keep = true;

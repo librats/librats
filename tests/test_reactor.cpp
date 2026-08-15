@@ -285,3 +285,87 @@ TEST_F(ReactorTest, Sustains1000Connections) {
     server.stop();
     EXPECT_TRUE(wait_for([&] { return collect.closed_.load() == kConns; }));
 }
+
+// ── cancel_dial: where a dial stops being this node's alone to end ───────────
+//
+// A racing dial has to be cancellable, but only for as long as it is still a dial.
+// The line is Established, and it is not an arbitrary one: we dial, so we are the
+// Noise XX initiator, and an initiator reaches Established while still composing
+// the third message. An attempt still handshaking here has therefore not sent it
+// and cannot exist at the far end — dropping it is invisible over there. One that
+// has established is a link both ends can see, and killing it unilaterally is how
+// two nodes end up each tearing down the other's choice (see node/dialer.h).
+
+// A server that accepts and then says nothing at all: the TCP connection comes up,
+// the Noise handshake cannot. That is what pins the attempt in Handshaking for as
+// long as the test needs, with no timing assumption at all.
+TEST_F(ReactorTest, CancelDialDropsAnAttemptThatIsStillOnlyAnAttempt) {
+    auto [silent_server, port] = make_server();
+
+    Identity cid = Identity::generate();
+    NoiseSecurity csec(cid);
+    CollectDelegate collect;
+    Reactor client(0, collect, csec);
+    client.start();
+
+    const ConnId id = client.connect("127.0.0.1", port);
+    ASSERT_NE(id, kInvalidConnId);
+    ASSERT_TRUE(wait_for([&] { return client.connection_count() == 1; }))
+        << "the attempt never started";
+
+    client.cancel_dial(id, CloseReason::DialSuperseded);
+
+    ASSERT_TRUE(wait_for([&] { return collect.closed_.load() == 1; }, 5s))
+        << "a cancelled attempt outlived its race";
+    EXPECT_EQ(collect.established_.load(), 0);
+    EXPECT_EQ(client.connection_count(), 0u);
+
+    client.stop();
+    close_socket(silent_server);
+}
+
+// The other half of the same rule, and the one this exists for: an attempt that
+// won its own handshake before the cancellation reached it is no longer a dial,
+// and cancel_dial() must leave it completely alone — still established, still
+// carrying traffic. Deciding its fate is PeerTable::add's job, from a rule the far
+// end applies to the same pair and reaches the same answer on.
+TEST_F(ReactorTest, CancelDialSparesAnAttemptThatAlreadyEstablished) {
+    auto [server_sock, port] = make_server();
+
+    Identity sid = Identity::generate(), cid = Identity::generate();
+    NoiseSecurity ssec(sid), csec(cid);
+
+    EchoDelegate echo;
+    Reactor server(0, echo, ssec);
+    server.listen(server_sock);
+    server.start();
+
+    CollectDelegate collect;
+    Reactor client(1, collect, csec);
+    client.start();
+
+    const ConnId id = client.connect("127.0.0.1", port);
+    ASSERT_NE(id, kInvalidConnId);
+    ASSERT_TRUE(wait_for([&] { return collect.established_.load() == 1; }))
+        << "client never established";
+
+    client.cancel_dial(id, CloseReason::DialSuperseded);
+
+    // Not merely "still in the map": the link has to still work, because the peer
+    // table may well decide this is the one to keep.
+    const std::string msg = "spared";
+    client.execute([&, id] { if (auto* c = client.find(id)) c->send(0, ByteView(msg)); });
+    ASSERT_TRUE(wait_for([&] { return collect.frames_.load() >= 1; }, 5s))
+        << "the spared connection stopped carrying traffic";
+    EXPECT_EQ(collect.closed_.load(), 0) << "an established link was torn down by the dial race";
+    EXPECT_EQ(client.connection_count(), 1u);
+
+    // close() is unconditional, and stays that way — sparing is cancel_dial's rule,
+    // not a property of the connection.
+    client.close(id, CloseReason::LocalClose);
+    EXPECT_TRUE(wait_for([&] { return collect.closed_.load() == 1; }, 5s))
+        << "close() no longer closes an established connection";
+
+    client.stop();
+    server.stop();
+}

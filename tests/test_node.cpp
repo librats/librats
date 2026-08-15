@@ -385,6 +385,50 @@ TEST(NodeTest, DuplicateDialsDedupToOnePeer) {
     server.stop();
 }
 
+// Two nodes dialing each other at the same instant, each racing both transports,
+// leave several live links between the same pair. Each end then resolves that on
+// its own, from what it alone can see — and the whole design rests on them landing
+// on the SAME link. If they did not, each would tear down the link the other kept
+// and the peer would be lost entirely, which is the failure this checks for.
+//
+// The check is exact rather than approximate: between two nodes a link is named by
+// who dialed it and over which wire, so two ends have kept one link if and only if
+// they disagree about its direction and agree about its transport.
+TEST(NodeTest, SimultaneousCrossConnectConvergesOnOneLinkAtBothEnds) {
+    NodeConfig cfg = server_config();
+    // Both dials race their fallback transport in immediately, so the rounds cover
+    // links that differ by wire as well as by who dialed them.
+    cfg.transport_fallback_ms = 1;
+
+    for (int round = 0; round < 5; ++round) {
+        Node a(cfg), b(cfg);
+        ASSERT_TRUE(a.start()) << "round " << round;
+        ASSERT_TRUE(b.start()) << "round " << round;
+
+        const uint16_t port_a = a.listen_port(), port_b = b.listen_port();
+        a.connect("127.0.0.1", port_b);
+        b.connect("127.0.0.1", port_a);
+
+        ASSERT_TRUE(wait_for([&] { return a.peer_count() == 1 && b.peer_count() == 1; }))
+            << "round " << round << ": a=" << a.peer_count() << " b=" << b.peer_count();
+        // Losers are torn down after the survivor is registered, so a settled state
+        // is only meaningful once whatever was in flight has surfaced.
+        std::this_thread::sleep_for(500ms);
+
+        ASSERT_EQ(a.peer_count(), 1u) << "round " << round << ": a lost the peer";
+        ASSERT_EQ(b.peer_count(), 1u) << "round " << round << ": b lost the peer";
+
+        const PeerInfo link_a = a.peers().front(), link_b = b.peers().front();
+        EXPECT_EQ(link_a.transport, link_b.transport)
+            << "round " << round << ": the two ends kept links on different wires";
+        EXPECT_NE(link_a.direction, link_b.direction)
+            << "round " << round << ": the two ends each kept the link they dialed";
+
+        a.stop();
+        b.stop();
+    }
+}
+
 // One Node instance can be started, stopped, and started again — sockets rebind
 // and threads relaunch cleanly across cycles.
 TEST(NodeTest, RestartCycles) {

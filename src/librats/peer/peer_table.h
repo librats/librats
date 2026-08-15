@@ -52,10 +52,17 @@ public:
     };
 
     /// Register a connection for a peer, resolving duplicates deterministically.
-    /// On a duplicate, connections with opposite roles are a simultaneous
-    /// cross-connect: `prefer_outbound` (which BOTH peers compute identically from
-    /// a symmetric rule over their ids) picks the surviving link so both converge
-    /// on the same one. Same-role duplicates are reconnects, so the newcomer wins.
+    /// Both ends resolve the same pair of connections independently, so each rule
+    /// reads only what looks identical from either side — never arrival order:
+    ///   - opposite roles ⇒ a simultaneous cross-connect. `prefer_outbound` (which
+    ///     BOTH peers compute identically from a symmetric rule over their ids)
+    ///     picks the surviving link, so both converge on the same one.
+    ///   - same role, different transports ⇒ a dial race whose attempts both got
+    ///     through; the datagram link wins at both ends.
+    ///   - same role and transport ⇒ a reconnect, so the newcomer wins.
+    /// Taken together these are a total order, mirrored at the two ends, which is
+    /// what makes the verdict independent of the order connections arrive in. See
+    /// peer_table.cpp for why each rule is the one it is.
     /// The loser's route is returned in `close`. Write lock.
     AddOutcome add(const PeerInfo& info, PeerRoute route, bool prefer_outbound);
 
