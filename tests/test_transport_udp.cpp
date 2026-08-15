@@ -2236,6 +2236,44 @@ TEST(TransportUdpTest, RacingAttemptsLeaveExactlyOnePeer) {
     server.stop();
 }
 
+// The same race, with the two attempts on different reactor threads. UDP is pinned
+// to the mux's reactor while TCP round-robins, so the supersede crosses a thread
+// boundary: the winner's close for the sibling is a task the other reactor runs
+// whenever it gets to it, which may well be after that sibling has finished its own
+// handshake. Nothing about the outcome may depend on which side gets there first.
+TEST(TransportUdpTest, RacingAttemptsAcrossReactorsLeaveExactlyOnePeer) {
+    NodeConfig client_cfg            = base_config();
+    client_cfg.enable_listen         = false;
+    client_cfg.transport_fallback_ms = 1;   // race both from the very start
+    client_cfg.reactor_threads       = 2;
+
+    Node client(client_cfg);
+    ASSERT_TRUE(client.start());
+
+    // The round-robin starts at reactor 0, which is the mux's reactor too, so a
+    // pool's *first* dial puts both attempts on one thread and only the next one
+    // splits them. Walking it with a second server rather than a second dial to the
+    // same one keeps the peer table's duplicate resolution out of the picture.
+    std::vector<std::unique_ptr<Node>> servers;
+    for (size_t i = 0; i < 2; ++i) {
+        servers.push_back(std::make_unique<Node>(base_config()));
+        ASSERT_TRUE(servers.back()->start());
+        client.connect("127.0.0.1", servers.back()->listen_port());
+        ASSERT_TRUE(wait_for([&] { return client.peer_count() == i + 1; }))
+            << "dial " << i << " never produced a peer";
+    }
+
+    // Let the losing attempts finish whatever they were doing before asserting that
+    // none of them took a winner down with it.
+    std::this_thread::sleep_for(1s);
+    EXPECT_EQ(client.peer_count(), 2u) << "a superseded attempt took its winner down";
+    for (const auto& server : servers)
+        EXPECT_EQ(server->peer_count(), 1u) << "a server was left without its peer";
+
+    client.stop();
+    for (auto& server : servers) server->stop();
+}
+
 // Both transports bind the same port, so one advertised address is dialable
 // either way — and identify tells the peer which of them are actually open.
 TEST(TransportUdpTest, BothTransportsShareOnePort) {
