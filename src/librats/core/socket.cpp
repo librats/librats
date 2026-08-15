@@ -845,13 +845,25 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
     }
 #endif
 
-    // Set socket option to reuse address
-    int opt = 1;
-    if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR,
-                   (char*)&opt, sizeof(opt)) == RATS_SOCKET_ERROR) {
-        LOG_SOCKET_ERROR("Failed to set " << af_label << " UDP socket options");
-        close_socket(udp_socket);
-        return RATS_INVALID_SOCKET;
+    // Reuse the address — but only when a specific port was asked for, where the
+    // point is to rebind a port our own previous run may still be lingering on.
+    //
+    // Never when the kernel is choosing the port for us. SO_REUSEADDR on a datagram
+    // socket does not only relax rebinding, it takes the port out of the set the
+    // auto-bind must avoid: asked for port 0, the kernel may hand back a port
+    // another socket here already holds, as long as that one set the option too —
+    // and every UDP socket in this library does. Two sockets then share a port and
+    // the kernel picks one of them per datagram, so a node's dial-only socket can
+    // quietly land on the port a listener next to it is serving and start eating
+    // its traffic. Rare, and untraceable from either end when it happens.
+    if (port != 0) {
+        int opt = 1;
+        if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR,
+                       (char*)&opt, sizeof(opt)) == RATS_SOCKET_ERROR) {
+            LOG_SOCKET_ERROR("Failed to set " << af_label << " UDP socket options");
+            close_socket(udp_socket);
+            return RATS_INVALID_SOCKET;
+        }
     }
 
     // For IPv6/DualStack sockets, configure IPV6_V6ONLY
