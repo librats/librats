@@ -13,7 +13,7 @@
  *
  *   t = 0                start the preferred transport
  *   t = fallback_delay   if it has not established yet, start the other one too
- *   first to establish   wins; every other attempt for this target is closed
+ *   first to establish   wins; attempts still in flight for this target are cancelled
  *   all attempts failed  report the dial as failed, exactly once
  *
  * Racing rather than falling back sequentially matters: on a UDP-hostile network
@@ -38,9 +38,19 @@
  *     anyone lives, so it is not allowed to set the dial order for someone else.
  *
  * Cancelling the loser is the reason Reactor::connect hands back a ConnId
- * synchronously — without it the redundant attempt would complete, and the peer
- * table's duplicate resolution (which cannot tell a raced sibling from a genuine
- * reconnect) might well keep the wrong one.
+ * synchronously — without it every race would cost a second connection that has to
+ * be taken down after the fact.
+ *
+ * ── What this decides, and what it must not ─────────────────────────────────
+ * The race decides which transport this node *dials on*, and nothing more. It is
+ * settled by timing, here — and the peer never saw a race at all, only connections
+ * arriving. So a verdict reached here is one the other end cannot reproduce: if it
+ * also decided which link lives, it could just as well keep the one this end
+ * dropped, and then each end has torn down the other's choice and the peer is gone.
+ *
+ * Hence cancel_dial() rather than close(): an attempt that has already finished its
+ * handshake is left alone and handed on as an ordinary duplicate, for PeerTable::add
+ * to resolve from what both ends see alike (see peer_table.cpp).
  *
  * Threading: dial() is called from any thread; the attempt callbacks arrive on
  * reactor threads. One mutex guards the (small) bookkeeping; nothing on the data

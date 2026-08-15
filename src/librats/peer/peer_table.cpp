@@ -20,14 +20,29 @@ PeerTable::AddOutcome PeerTable::add(const PeerInfo& info, PeerRoute route,
         return {AddResult::Updated, std::nullopt};
     }
 
-    // A different connection already serves this peer. Opposite roles ⇒ both sides
-    // dialed each other at once (cross-connect): keep the link both peers agree on
-    // via prefer_outbound. Same roles ⇒ a reconnect / repeated dial: the newcomer
-    // is freshest and wins. Either way exactly one survives; the loser is closed.
+    // A different connection already serves this peer, and exactly one may survive.
+    // Both ends resolve the same pair, so every rule here must read something that
+    // looks identical from either side. Timing does not qualify — "whichever arrived
+    // first" gets a different answer at each end, and two ends that each keep the
+    // link the other just dropped are left with no link at all.
+    //
+    //   opposite roles     ⇒ cross-connect: keep the link started by the smaller id
+    //                        (prefer_outbound, opposite at each end by construction).
+    //   different wires    ⇒ a dial race whose attempts both got through. Both ends
+    //                        see the transports, and there is a right answer: the
+    //                        datagram link (one socket, one NAT mapping, a source
+    //                        port that can be dialed back — see dialer.h). "Is it
+    //                        UDP" ranks the pair only because there are exactly two
+    //                        wires; a third would need an explicit order, or the two
+    //                        ends could rank the same pair differently.
+    //   same role and wire ⇒ a reconnect, not a simultaneous pair: the old link is
+    //                        stale or already dead, so the newcomer is the live one.
     bool keep_new = true;
     if (cur.info.direction != info.direction) {
         const ConnRole survivor = prefer_outbound ? ConnRole::Outbound : ConnRole::Inbound;
         keep_new = (info.direction == survivor);
+    } else if (cur.info.transport != info.transport) {
+        keep_new = (info.transport == TransportKind::Udp);
     }
 
     if (keep_new) {

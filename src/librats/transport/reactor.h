@@ -91,14 +91,21 @@ public:
     /// Begin a non-blocking outbound connection over `kind` (thread-safe).
     ///
     /// Returns the ConnId the connection *will* have, reserved synchronously so a
-    /// caller can cancel the attempt with close() before it has even started —
-    /// which is what lets the node race a UDP dial against a TCP one and drop the
+    /// caller can cancel the attempt with cancel_dial() before it has even started
+    /// — which is what lets the node race a UDP dial against a TCP one and drop the
     /// loser cleanly. kInvalidConnId if the transport is unavailable here.
     ConnId connect(std::string host, int port, TransportKind kind = TransportKind::Tcp);
 
     /// Close a connection by id (thread-safe; deferred to the reactor thread).
     /// Valid for an id whose dial has not started yet — it is cancelled instead.
     void close(ConnId id, CloseReason reason);
+
+    /// Drop a dial that lost its race — but only while it is still a dial. Once an
+    /// attempt has established it is not an attempt any more, it is one of possibly
+    /// several links to a peer, and which of those survives is the peer table's
+    /// call, made identically at both ends. The check happens here because this is
+    /// the one thread that can read the connection's state without racing it.
+    void cancel_dial(ConnId id, CloseReason reason);
 
     /// Send a frame to every Established connection on this reactor. Thread-safe:
     /// the iteration runs on the reactor thread. The payload is shared across
@@ -147,6 +154,9 @@ private:
     void abort_dial(ConnId id, const std::string& host, int port);
     Connection* adopt(std::unique_ptr<Link> link, ConnRole role, ConnId id);
     bool resolve_dial(ConnId id);
+    /// Body of close()/cancel_dial(); `spare_established` makes it a no-op for a
+    /// connection that has already finished its handshake.
+    void close_conn(ConnId id, CloseReason reason, bool spare_established);
     void mark_for_close(ConnId id, CloseReason reason);
     void process_pending_close();
     void flush_dirty();          ///< write out what send() queued this turn

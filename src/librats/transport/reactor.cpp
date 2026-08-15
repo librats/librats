@@ -153,8 +153,24 @@ void Reactor::abort_dial(ConnId id, const std::string& host, int port) {
 }
 
 void Reactor::close(ConnId id, CloseReason reason) {
-    execute([this, id, reason] {
-        if (conns_.count(id)) { mark_for_close(id, reason); return; }
+    close_conn(id, reason, /*spare_established=*/false);
+}
+
+void Reactor::cancel_dial(ConnId id, CloseReason reason) {
+    close_conn(id, reason, /*spare_established=*/true);
+}
+
+void Reactor::close_conn(ConnId id, CloseReason reason, bool spare_established) {
+    execute([this, id, reason, spare_established] {
+        auto it = conns_.find(id);
+        if (it != conns_.end()) {
+            // It got there first: the dial it was is over, and what it left behind
+            // is a connection to a peer. Whether that one or another link survives
+            // is decided by the peer table on both ends alike — see peer_table.cpp.
+            if (spare_established && it->second->state() == ConnState::Established) return;
+            mark_for_close(id, reason);
+            return;
+        }
         // Not adopted yet: its connect task is still queued behind this one. Leave
         // a note so adopt() drops it on arrival. Ids at or below the watermark have
         // already come and gone, so they need no slot (and cannot leak one).
@@ -295,6 +311,15 @@ void Reactor::dispatch_events(ConnId id, uint32_t events) {
     Connection* conn = find(id);
     if (!conn) return;
     if (conn->state() == ConnState::Closing || conn->state() == ConnState::Closed) return;
+    // Condemned earlier this turn, just not torn down yet — process_pending_close()
+    // runs at the end of the turn, so events polled alongside the one that closed it
+    // would otherwise still be delivered. Beyond being work on bytes that are about
+    // to be dropped, it would let the connection change state *after* the decision
+    // to close it was taken against the state it had: cancel_dial() spares a
+    // connection that has established, and a handshake finishing here would land on
+    // the wrong side of a check that has already run. The map is empty on every
+    // turn that closes nothing, which is nearly all of them.
+    if (!pending_close_.empty() && pending_close_.count(id)) return;
 
     bool keep = true;
     if (events & (PollErr | PollHup)) {

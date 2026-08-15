@@ -845,17 +845,16 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
     }
 #endif
 
-    // Reuse the address — but only when a specific port was asked for, where the
-    // point is to rebind a port our own previous run may still be lingering on.
+    // Reuse the address — but only for a port we asked for by number, where the
+    // point is to rebind a port a previous run may still be lingering on.
     //
-    // Never when the kernel is choosing the port for us. SO_REUSEADDR on a datagram
-    // socket does not only relax rebinding, it takes the port out of the set the
-    // auto-bind must avoid: asked for port 0, the kernel may hand back a port
-    // another socket here already holds, as long as that one set the option too —
-    // and every UDP socket in this library does. Two sockets then share a port and
-    // the kernel picks one of them per datagram, so a node's dial-only socket can
-    // quietly land on the port a listener next to it is serving and start eating
-    // its traffic. Rare, and untraceable from either end when it happens.
+    // Never when the kernel is choosing the port. On a datagram socket the option
+    // does not merely relax rebinding, it takes the port out of the set an auto-bind
+    // must avoid: asked for port 0, the kernel may return a port another socket
+    // already holds, provided that one set the option too — and every UDP socket
+    // here did. The two then share the port and the kernel picks one of them per
+    // datagram, so a dial-only socket can land on the port a listener beside it is
+    // serving and start eating its traffic. Rare, and invisible from either end.
     if (port != 0) {
         int opt = 1;
         if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR,

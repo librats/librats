@@ -204,10 +204,17 @@ void Dialer::on_established(PeerRoute route) {
         target->routes.clear();
     }
 
-    // Outside the lock: close() posts to a reactor, and on this thread it may run
-    // the teardown — and therefore on_closed() — straight away.
+    // Outside the lock: cancel_dial() posts to a reactor, and on this thread it may
+    // run the teardown — and therefore on_closed() — straight away.
+    //
+    // cancel_dial rather than close: a sibling that has finished its own handshake
+    // in the meantime is no longer this race's to end. Ending it anyway would be
+    // one end deciding, alone, which of two links to a peer lives — and the other
+    // end, which never saw this race, can just as easily decide the other way, so
+    // both links die and the peer is lost. Left alone, it reaches the peer table as
+    // an ordinary duplicate and is resolved there, the same way at both ends.
     for (const PeerRoute& other : superseded)
-        reactors_.by_index(other.reactor).close(other.conn, CloseReason::DialSuperseded);
+        reactors_.by_index(other.reactor).cancel_dial(other.conn, CloseReason::DialSuperseded);
 }
 
 void Dialer::on_closed(PeerRoute route) {

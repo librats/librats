@@ -433,7 +433,9 @@ void Node::on_established(Connection& conn) {
     if (config_.send_queue_limit != 0) conn.set_send_high_water(config_.send_queue_limit);
 
     // Settle the dial race first: this attempt won its target, so any sibling
-    // attempt over the other transport is redundant and gets closed. Done before
+    // attempt over the other transport is redundant and gets cancelled — unless it
+    // has established too, in which case it arrives here as an ordinary duplicate
+    // and the peer table decides between them (see dialer.h). Done before
     // the checks below so a self-connection or a rejected duplicate still counts
     // as "this dial resolved" rather than leaving the race running.
     if (conn.role() == ConnRole::Outbound)
