@@ -412,11 +412,13 @@ TEST(NodeTest, SimultaneousCrossConnectConvergesOnOneLinkAtBothEnds) {
         ASSERT_TRUE(wait_for([&] { return a.peer_count() == 1 && b.peer_count() == 1; }))
             << "round " << round << ": a=" << a.peer_count() << " b=" << b.peer_count();
         // Losers are torn down after the survivor is registered, so a settled state
-        // is only meaningful once whatever was in flight has surfaced.
-        std::this_thread::sleep_for(500ms);
-
-        ASSERT_EQ(a.peer_count(), 1u) << "round " << round << ": a lost the peer";
-        ASSERT_EQ(b.peer_count(), 1u) << "round " << round << ": b lost the peer";
+        // is only meaningful once whatever was in flight has surfaced. Watching for
+        // the count to leave 1 costs the same as sleeping through the window when
+        // nothing happens, and catches the collapse the moment it does — which is
+        // also what keeps five rounds of it affordable.
+        ASSERT_FALSE(wait_for([&] { return a.peer_count() != 1 || b.peer_count() != 1; }, 250ms))
+            << "round " << round << ": the ends tore each other's link down (a="
+            << a.peer_count() << " b=" << b.peer_count() << ")";
 
         const PeerInfo link_a = a.peers().front(), link_b = b.peers().front();
         EXPECT_EQ(link_a.transport, link_b.transport)

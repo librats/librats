@@ -137,8 +137,12 @@ TEST(DialerTest, ReportsFailureExactlyOncePerTarget) {
     EXPECT_GE(h.attempts_ended_.load(), 2) << "the fallback transport was never raced";
 
     // Nothing may arrive late: the second attempt resolving must not report again.
-    std::this_thread::sleep_for(1s);
-    EXPECT_EQ(h.failures_.load(), 1);
+    // Both attempts have already ended by now (checked above), so this is watching
+    // for a duplicate report rather than waiting for anything to happen — it costs
+    // the window only when the test passes, and ends at the duplicate when it does
+    // not.
+    EXPECT_FALSE(wait_for([&] { return h.failures_.load() != 1; }, 300ms))
+        << "the target was reported failed " << h.failures_.load() << " times";
     EXPECT_EQ(h.dialer().in_flight(), 0u) << "attempt bookkeeping leaked";
 }
 
@@ -154,8 +158,8 @@ TEST(DialerTest, FailsImmediatelyWhenNoTransportIsEnabled) {
 
     EXPECT_EQ(h.failures_.load(), 1) << "a dial with no transport must still resolve";
     EXPECT_EQ(h.dialer().in_flight(), 0u);
-    std::this_thread::sleep_for(300ms);
-    EXPECT_EQ(h.attempts_ended_.load(), 0) << "something was dialed anyway";
+    EXPECT_FALSE(wait_for([&] { return h.attempts_ended_.load() != 0; }, 300ms))
+        << "something was dialed anyway";
 }
 
 // A zero fallback delay means "the preferred transport or nothing": the other one
@@ -166,8 +170,8 @@ TEST(DialerTest, ZeroFallbackDelayTriesOnlyThePreferredTransport) {
     h.dial("127.0.0.1", dead_port());
 
     ASSERT_TRUE(wait_for([&] { return h.failures_.load() == 1; }, 5s));
-    std::this_thread::sleep_for(500ms);
-    EXPECT_EQ(h.attempts_ended_.load(), 1) << "the fallback ran despite being disabled";
+    EXPECT_FALSE(wait_for([&] { return h.attempts_ended_.load() != 1; }, 300ms))
+        << "the fallback ran despite being disabled";
     EXPECT_EQ(h.failures_.load(), 1);
 }
 
@@ -287,6 +291,51 @@ TEST(DialerTest, RemembersOnlyWhatAPeerActuallySaid) {
     h.dialer().stop();
     h.dialer().start();
     EXPECT_EQ(h.dialer().known_transports("10.0.0.1", 4321), PeerTransportTcp);
+}
+
+// The cache is a cache, not a directory: a node meets far more addresses than it
+// will ever redial — DHT and PEX hand it thousands — so it has a ceiling, and
+// reaching it must cost the entry least likely to be wanted. Evicting the newest
+// instead would throw away what was just learned about a peer still being talked
+// to, and keep something from an hour ago that will never be dialed again; not
+// evicting at all would make every address ever seen permanent.
+TEST(DialerTest, AFullTransportsCacheEvictsTheOldestEntry) {
+    DialerHarness h(policy_for(TransportKind::Udp, 200ms), /*with_udp=*/false);
+    Dialer&       d = h.dialer();
+
+    // Distinct addresses rather than distinct ports: the port is part of the key,
+    // and reusing one host would not exercise a cache keyed by both.
+    const auto host_at = [](size_t i) {
+        return "10.1." + std::to_string(i / 256) + "." + std::to_string(i % 256);
+    };
+
+    // Fill it exactly to the ceiling, oldest first.
+    for (size_t i = 0; i < Dialer::kMaxRemembered; ++i)
+        d.remember(host_at(i), 5000, PeerTransportUdp);
+    EXPECT_EQ(d.known_transports(host_at(0), 5000), PeerTransportUdp)
+        << "the cache started dropping entries before it was full";
+
+    // One past it. The newcomer has to be there, and paying for it must cost
+    // exactly one entry — the first one learned.
+    d.remember("10.9.9.9", 4000, PeerTransportTcp);
+    EXPECT_EQ(d.known_transports("10.9.9.9", 4000), PeerTransportTcp)
+        << "the entry that overflowed the cache was the one dropped";
+
+    size_t survivors = 0;
+    for (size_t i = 0; i < Dialer::kMaxRemembered; ++i)
+        if (d.known_transports(host_at(i), 5000) == PeerTransportUdp) ++survivors;
+    EXPECT_EQ(survivors, Dialer::kMaxRemembered - 1)
+        << "a full cache did not make room for exactly one entry";
+    EXPECT_EQ(d.known_transports(host_at(0), 5000), PeerTransportNone)
+        << "the oldest entry outlived a newer one";
+
+    // Re-learning an address already held is an update, not an insertion, so it
+    // must not cost a neighbour — otherwise a peer re-identifying on a live
+    // connection would slowly empty the cache around it.
+    d.remember(host_at(1), 5000, PeerTransportTcp);
+    EXPECT_EQ(d.known_transports(host_at(1), 5000), PeerTransportTcp);
+    EXPECT_EQ(d.known_transports(host_at(2), 5000), PeerTransportUdp)
+        << "updating an entry evicted another one";
 }
 
 // stop() drops every attempt, and start() must leave the dialer usable again —

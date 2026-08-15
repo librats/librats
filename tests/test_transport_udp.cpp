@@ -113,11 +113,10 @@ public:
     /// Deliver only what is addressed to `only`, leaving the other direction
     /// queued. Lets a test hold one side's packet genuinely in flight — neither
     /// lost nor arrived — while the other side keeps talking.
-    void deliver_to(const Address& only) {
+    void deliver_to(const Address& only, std::chrono::steady_clock::time_point now) {
         std::deque<Datagram> batch;
         batch.swap(queue_);
 
-        const auto now = std::chrono::steady_clock::now();
         for (const Datagram& d : batch) {
             if (d.to != only) { queue_.push_back(d); continue; }
             auto it = endpoints_.find(d.to);
@@ -194,20 +193,56 @@ struct Pair {
     std::unique_ptr<UdpStream> initiator;
     std::unique_ptr<UdpStream> responder;
 
+    /// The simulated "now" that pump() drives this pair with. Deliberately taken
+    /// *after* the handshake has settled, so it is never behind a timestamp the
+    /// two streams already recorded.
+    std::chrono::steady_clock::time_point now;
+
     Pair() {
-        const auto now = std::chrono::steady_clock::now();
+        const auto start = std::chrono::steady_clock::now();
         // Alice dials Bob. The id pairing mirrors the mux: the dialer keeps
         // `base` and sends under `base + 1`; the responder is the mirror image.
         constexpr uint32_t kBase = 0x11223344;
         initiator = std::make_unique<UdpStream>(net, kBob, kBase, kBase + 1,
-                                                ConnRole::Outbound, now);
+                                                ConnRole::Outbound, start);
         responder = std::make_unique<UdpStream>(net, kAlice, kBase + 1, kBase,
-                                                ConnRole::Inbound, now);
+                                                ConnRole::Inbound, start);
         net.attach(kBob, responder.get());
         net.attach(kAlice, initiator.get());
         net.settle(*initiator, *responder);
+        now = std::chrono::steady_clock::now();
     }
 };
+
+/// Drive `pair` on an injected clock until `until` holds, advancing its simulated
+/// clock by `step` each round.
+///
+/// UdpStream reads no clock of its own: every deadline it has — the retransmission
+/// timeout, the pacer, the delayed ack, the keep-alive — is a function of the
+/// timestamp it is handed. So simulated time buys a timer-driven test exactly what
+/// slept-through time does, at no wall-clock cost, and it is the more faithful of
+/// the two: real sleeps overshoot on a loaded machine, which moves the round-trip
+/// estimate all of those deadlines derive from, and the same loop then covers a
+/// different amount of ground on every run.
+///
+/// `until` runs once per round, after the wire has been handed over — which is
+/// where a test that has to read does it, whether to collect what arrived or to
+/// keep the receive window open. False if `budget` of simulated time ran out
+/// first, so a test that stops converging fails instead of spinning.
+template <typename Pred>
+bool pump(Pair& pair, Pred until,
+          std::chrono::steady_clock::duration budget = std::chrono::seconds(60),
+          std::chrono::steady_clock::duration step   = std::chrono::milliseconds(1)) {
+    const auto limit = pair.now + budget;
+    for (;;) {
+        pair.net.deliver_at(pair.now);
+        pair.initiator->tick(pair.now);
+        pair.responder->tick(pair.now);
+        if (until()) return true;
+        if (pair.now >= limit) return false;
+        pair.now += step;
+    }
+}
 
 /// A connected pair on a *virtual* clock and a path with a real round trip.
 ///
@@ -656,20 +691,17 @@ TEST(UdpStreamTest, RetransmitsWhatTheNetworkDrops) {
     for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<char>((i * 7) & 0xFF);
 
     pair.net.set_drop_every(3);  // lose a third of everything, in both directions
-    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+    ASSERT_EQ(write_all_at(*pair.initiator, payload, pair.now), payload.size());
 
-    // Retransmission is timer-driven, so this one test has to let real time pass.
+    // Retransmission is timer-driven, so this one has to let time pass — simulated
+    // time, which is the only kind the stream knows about (see pump()).
     std::string received;
-    const auto deadline = std::chrono::steady_clock::now() + 20s;
-    while (received.size() < payload.size() && std::chrono::steady_clock::now() < deadline) {
-        pair.net.deliver();
-        const auto now = std::chrono::steady_clock::now();
-        pair.initiator->tick(now);
-        pair.responder->tick(now);
+    const bool  done = pump(pair, [&] {
         received += drain(*pair.responder);
-        if (pair.net.queued() == 0) std::this_thread::sleep_for(5ms);
-    }
+        return received.size() >= payload.size();
+    });
 
+    ASSERT_TRUE(done) << "a third of the packets lost was never repaired";
     EXPECT_GT(pair.net.dropped(), 0u) << "the test never actually dropped anything";
     EXPECT_EQ(received, payload);
 }
@@ -688,18 +720,12 @@ TEST(UdpStreamTest, ATimeoutReleasesTheWindowItGaveUpOn) {
     Pair pair;
 
     const std::string payload(rudp::kMaxPayload * 200, 'x');
-    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+    ASSERT_EQ(write_all_at(*pair.initiator, payload, pair.now), payload.size());
 
     // A path that swallows everything, held long enough for the timeout to fire.
     pair.net.drop_next(1000 * 1000);
-    const auto blackout_until = std::chrono::steady_clock::now() + 400ms;
-    while (std::chrono::steady_clock::now() < blackout_until) {
-        const auto now = std::chrono::steady_clock::now();
-        pair.net.deliver();
-        pair.initiator->tick(now);
-        pair.responder->tick(now);
-        std::this_thread::sleep_for(1ms);
-    }
+    const auto blackout_ends = pair.now + 400ms;
+    pump(pair, [&] { return pair.now >= blackout_ends; }, 1s);
     ASSERT_GT(pair.initiator->retransmits(), 0u) << "the timeout never fired";
 
     // The invariant the whole thing turns on: whatever the sender still counts as
@@ -710,16 +736,12 @@ TEST(UdpStreamTest, ATimeoutReleasesTheWindowItGaveUpOn) {
     pair.net.drop_next(0);  // the path comes back
 
     std::string received;
-    const auto deadline = std::chrono::steady_clock::now() + 20s;
-    while (received.size() < payload.size() && std::chrono::steady_clock::now() < deadline) {
-        const auto now = std::chrono::steady_clock::now();
-        pair.net.deliver();
-        pair.initiator->tick(now);
-        pair.responder->tick(now);
+    const bool  done = pump(pair, [&] {
         received += drain(*pair.responder);
-        std::this_thread::sleep_for(1ms);
-    }
+        return received.size() >= payload.size();
+    });
 
+    ASSERT_TRUE(done) << "the transfer never recovered from the outage";
     EXPECT_EQ(received, payload) << "the transfer never recovered from the outage";
     EXPECT_GT(pair.initiator->cwnd(), UdpStream::kMinCwnd)
         << "the window never grew back after the outage";
@@ -954,14 +976,22 @@ TEST(UdpStreamTest, AProbeNamesTheHolesBehindItSoALostBurstStillCostsTheWindow) 
         << "the window came out of a total loss no smaller than it went in";
 }
 
+// The whole point is that nothing here fires a *timer*, so the clock is injected
+// rather than left to run: settling this by hand on the wall clock takes a
+// hundred-odd sub-millisecond sleeps, which on a busy machine can overshoot the
+// retransmission timeout — and the test would then be reporting a stall in its own
+// pacing loop as a duplicate-ack bug.
 TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
     Pair pair;
 
     // One exchange the peer really does acknowledge, so the sender has a "highest
     // ack seen" for a later one to look like a repeat of.
-    ASSERT_GT(write_all(*pair.initiator, std::string(100, 'A')), 0u);
-    pair.net.settle(*pair.initiator, *pair.responder);
-    ASSERT_EQ(drain(*pair.responder).size(), 100u);
+    ASSERT_GT(write_all_at(*pair.initiator, std::string(100, 'A'), pair.now), 0u);
+    std::string first;
+    ASSERT_TRUE(pump(pair, [&] {
+        first += drain(*pair.responder);
+        return first.size() == 100 && pair.initiator->flushed();
+    }, 2s)) << "the first exchange never completed";
 
     const uint32_t cwnd_before = pair.initiator->cwnd();
     ASSERT_EQ(pair.initiator->retransmits(), 0u);
@@ -969,14 +999,14 @@ TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
 
     // Our next packet stays in flight: queued on the path, neither delivered nor
     // dropped, exactly as a packet mid-flight on a real link.
-    ASSERT_GT(write_all(*pair.initiator, std::string(100, 'B')), 0u);
+    ASSERT_GT(write_all_at(*pair.initiator, std::string(100, 'B'), pair.now), 0u);
 
     // Meanwhile the peer sends traffic of its own. Every one of these carries the
     // same cumulative ack, because 'B' has not reached it yet — and well past the
     // three that the duplicate-ack rule treats as a loss.
     for (int i = 0; i < 6; ++i) {
-        ASSERT_GT(write_all(*pair.responder, std::string(200, 'x')), 0u);
-        pair.net.deliver_to(kAlice);  // responder → initiator only
+        ASSERT_GT(write_all_at(*pair.responder, std::string(200, 'x'), pair.now), 0u);
+        pair.net.deliver_to(kAlice, pair.now);  // responder → initiator only
     }
 
     EXPECT_EQ(pair.initiator->retransmits(), 0u)
@@ -987,8 +1017,12 @@ TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
 
     // Nothing was actually lost, so the stream still owes nothing once the held
     // packet finally lands.
-    pair.net.settle(*pair.initiator, *pair.responder);
-    EXPECT_EQ(drain(*pair.responder), std::string(100, 'B'));
+    std::string rest;
+    EXPECT_TRUE(pump(pair, [&] {
+        rest += drain(*pair.responder);
+        return rest.size() == 100 && pair.initiator->flushed();
+    }, 2s));
+    EXPECT_EQ(rest, std::string(100, 'B'));
 }
 
 TEST(UdpStreamTest, FillsAWindowLargerThanTheOldCeiling) {
@@ -1082,21 +1116,43 @@ TEST(UdpStreamTest, ResetKillsTheStream) {
     EXPECT_EQ(pair.responder->close_reason(), CloseReason::PeerReset);
 }
 
+// Nothing answers a Syn on a network that swallows datagrams, so the only thing
+// that can end the attempt is the Syn budget running out. The transport race is
+// built on that happening promptly (see node/dialer.h), which makes *how long* it
+// takes as much the subject here as the fact that it happens — so the clock is
+// injected rather than waited out: the stream reads no clock of its own, and the
+// budget is then pinned exactly, at no wall-clock cost and with no dependence on
+// how loaded the machine is.
 TEST(UdpStreamTest, UnansweredDialGivesUp) {
     FakeNet    net;
-    const auto now = std::chrono::steady_clock::now();
-    UdpStream  dialer(net, kBob, 100, 101, ConnRole::Outbound, now);
+    const auto start = std::chrono::steady_clock::now();
+    UdpStream  dialer(net, kBob, 100, 101, ConnRole::Outbound, start);
     // Nothing is attached at kBob: the Syn goes nowhere, exactly as it would on a
     // network that blocks UDP.
 
-    const auto deadline = std::chrono::steady_clock::now() + 20s;
-    while (!dialer.dead() && std::chrono::steady_clock::now() < deadline) {
-        dialer.tick(std::chrono::steady_clock::now());
-        std::this_thread::sleep_for(10ms);
+    // A bound on the *simulated* elapsed time, generous enough that a budget which
+    // stopped expiring shows up as a failure rather than a hang.
+    auto       now = start;
+    const auto limit = start + 60s;
+    while (!dialer.dead() && now < limit) {
+        now += 10ms;
+        dialer.tick(now);
     }
 
     ASSERT_TRUE(dialer.dead()) << "a dial into the void never gave up";
     EXPECT_EQ(dialer.close_reason(), CloseReason::ConnectFailed);
+
+    // The Syn is transmitted its full budget of times and no more: one fewer and a
+    // lossy path would be mistaken for a blocked one, one more and the race waits
+    // longer than the fallback was sized for.
+    EXPECT_EQ(net.sent(), static_cast<size_t>(UdpStream::kSynMaxAttempts))
+        << "the dial did not spend exactly its Syn budget";
+
+    // And it spends them on a doubling timeout, so the cost of a blocked path is
+    // bounded and known — that bound is what the dialer's fallback is sized against.
+    const auto waited = now - start;
+    EXPECT_GE(waited, UdpStream::kInitialRto) << "the dial gave up before its first retry";
+    EXPECT_LE(waited, 10s) << "an unanswered dial held the transport race far too long";
 }
 
 // Flow control is separate from congestion control and absolute: the receiver says
@@ -1121,17 +1177,11 @@ TEST(UdpStreamTest, AClosedReceiveWindowStopsTheSenderAndResumesOnRead) {
     for (size_t i = 0; i < payload.size(); ++i)
         payload[i] = static_cast<char>((i * 13 + 7) & 0xFF);
     ASSERT_GT(payload.size(), kWindowBytes) << "the transfer cannot fill a window";
-    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+    ASSERT_EQ(write_all_at(*pair.initiator, payload, pair.now), payload.size());
 
     // Phase one: run the path with the receiver never reading a byte.
-    const auto stall_until = std::chrono::steady_clock::now() + 3s;
-    while (std::chrono::steady_clock::now() < stall_until) {
-        pair.net.deliver();
-        const auto now = std::chrono::steady_clock::now();
-        pair.initiator->tick(now);
-        pair.responder->tick(now);
-        if (pair.net.queued() == 0) std::this_thread::sleep_for(1ms);
-    }
+    const auto stall_ends = pair.now + 3s;
+    pump(pair, [&] { return pair.now >= stall_ends; }, 4s);
 
     // The stall is the point: the sender still owes data it cannot send.
     EXPECT_GT(pair.initiator->queued_bytes(), 0u)
@@ -1150,16 +1200,12 @@ TEST(UdpStreamTest, AClosedReceiveWindowStopsTheSenderAndResumesOnRead) {
     // Phase two: the buffer has just been drained, so the window is open again and
     // the transfer has to pick itself back up with no help from the test.
     std::string received = first;
-    const auto  deadline = std::chrono::steady_clock::now() + 20s;
-    while (received.size() < payload.size() && std::chrono::steady_clock::now() < deadline) {
-        pair.net.deliver();
-        const auto now = std::chrono::steady_clock::now();
-        pair.initiator->tick(now);
-        pair.responder->tick(now);
+    const bool  done     = pump(pair, [&] {
         received += drain(*pair.responder);
-        if (pair.net.queued() == 0) std::this_thread::sleep_for(1ms);
-    }
+        return received.size() >= payload.size();
+    });
 
+    ASSERT_TRUE(done) << "the transfer never resumed after the window reopened";
     EXPECT_EQ(received, payload) << "the transfer never resumed after the window reopened";
 }
 
@@ -2190,6 +2236,12 @@ TEST(TransportUdpTest, PrefersUdpWhenBothAreAvailable) {
     Node server(base_config());
     NodeConfig client_cfg = base_config();
     client_cfg.enable_listen = false;
+    // A shortened fallback delay is what gives the assertion below its teeth: the
+    // wait after the dial has to outlast the moment the second transport would have
+    // been brought in, or "no TCP attempt appeared" only means "not yet". Still two
+    // orders of magnitude above the millisecond a loopback handshake takes, so the
+    // preferred transport is in no danger of losing its own race.
+    client_cfg.transport_fallback_ms = 300;
 
     Node client(client_cfg);
     ASSERT_TRUE(server.start());
@@ -2199,8 +2251,12 @@ TEST(TransportUdpTest, PrefersUdpWhenBothAreAvailable) {
     client.connect("127.0.0.1", server.listen_port());
     ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
 
-    // Give a racing TCP attempt every chance to show up before asserting it did not.
-    std::this_thread::sleep_for(500ms);
+    // Several fallback delays' worth of chances for a racing TCP attempt to show up
+    // before asserting that it did not. Watching for the duplicate rather than
+    // sleeping through the window costs the same when it never comes, and says when
+    // it did when it does.
+    EXPECT_FALSE(wait_for([&] { return client.peer_count() != 1; }, 500ms))
+        << "the fallback transport was raced despite the preferred one winning";
     const auto peers = client.peers();
     ASSERT_EQ(peers.size(), 1u);
     EXPECT_EQ(peers[0].transport, TransportKind::Udp);
@@ -2227,10 +2283,14 @@ TEST(TransportUdpTest, RacingAttemptsLeaveExactlyOnePeer) {
     ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
 
     // Let the losing attempt finish whatever it was doing before asserting that it
-    // did not survive it.
-    std::this_thread::sleep_for(1s);
-    EXPECT_EQ(client.peer_count(), 1u) << "a superseded attempt was kept";
-    EXPECT_EQ(server.peer_count(), 1u) << "the server kept a duplicate of the same peer";
+    // did not survive it. Watching for the duplicate rather than sleeping through
+    // the window costs the same when none appears, and pins the moment it did when
+    // one does — a handshake on loopback settles in a millisecond or two, so this
+    // is two orders of magnitude more room than a late arrival needs.
+    EXPECT_FALSE(wait_for([&] { return client.peer_count() != 1 || server.peer_count() != 1; },
+                          400ms))
+        << "a superseded attempt survived: client=" << client.peer_count()
+        << " server=" << server.peer_count();
 
     client.stop();
     server.stop();
@@ -2264,9 +2324,11 @@ TEST(TransportUdpTest, RacingAttemptsAcrossReactorsLeaveExactlyOnePeer) {
     }
 
     // Let the losing attempts finish whatever they were doing before asserting that
-    // none of them took a winner down with it.
-    std::this_thread::sleep_for(1s);
-    EXPECT_EQ(client.peer_count(), 2u) << "a superseded attempt took its winner down";
+    // none of them took a winner down with it — and watch for that happening rather
+    // than sleeping past it, so a cross-thread supersede that closes the wrong
+    // connection is caught where it happens.
+    EXPECT_FALSE(wait_for([&] { return client.peer_count() != 2; }, 400ms))
+        << "a superseded attempt took its winner down (peers=" << client.peer_count() << ")";
     for (const auto& server : servers)
         EXPECT_EQ(server->peer_count(), 1u) << "a server was left without its peer";
 
