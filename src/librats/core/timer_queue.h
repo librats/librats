@@ -75,6 +75,15 @@ public:
         }
     }
 
+    /// Drop every pending timer, tombstones included. For an owner being torn
+    /// down that may be started again: nothing scheduled by one run should still
+    /// be due in the next. Ids keep counting up, so a handle held across the gap
+    /// can never come to name a timer of the new run.
+    void clear() {
+        heap_.clear();
+        cancelled_.clear();
+    }
+
     bool empty() const { return heap_.empty(); }
 
 private:

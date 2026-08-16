@@ -271,6 +271,42 @@ void Reactor::run() {
     process_pending_close();
     shutdown_connections();
     if (mux_) mux_->shutdown();   // after the connections, so no Link outlives it
+
+    // Timers outlive the loop that scheduled them unless the heap goes with it,
+    // and schedule_maintenance() re-arms itself: an entry left behind would start
+    // a second self-perpetuating chain on the next run(), so N restarts would cost
+    // N+1 sweeps per interval and N+1 timed wake-ups, for as long as the node
+    // lives. Whatever else is still pending — establish deadlines, backoffs —
+    // belongs to connections that no longer exist.
+    timers_.clear();
+
+    // Hand back the sockets this loop registered above. A registration belongs to a
+    // descriptor, and a stopped reactor can be started again on freshly opened ones
+    // — which the kernel is free to hand the very same descriptor numbers, and on
+    // the BSDs, which allocate the lowest free one, very nearly always does. The
+    // backends that keep a registration table of their own (kqueue, poll, IOCP)
+    // would then refuse to add a descriptor they believe is already watched, while
+    // the kernel forgot it the moment it was closed — leaving a restarted node
+    // polling nothing at all: no accepts, no datagrams, every dial to it timing out.
+    // epoll drops a closed descriptor by itself, which is why this only ever showed
+    // on macOS.
+    //
+    // The listen sockets themselves are the node's to close, and it does so after
+    // joining this thread — so they are still open here, which is exactly when a
+    // registration can still be withdrawn cleanly.
+    poller_->remove(wakeup_.fd());
+    if (is_valid_socket(server_socket_)) {
+        poller_->remove(server_socket_);
+        // Forgotten as well as unwatched: the next run() must not re-add a
+        // descriptor the node closed in between, which by then may name something
+        // else entirely. listen() hands over the new one before every start.
+        server_socket_ = RATS_INVALID_SOCKET;
+    }
+    if (mux_) {
+        poller_->remove(mux_->socket());
+        mux_.reset();
+    }
+
     LOG_INFO("reactor", "Reactor " << static_cast<int>(index_) << " stopped");
 }
 

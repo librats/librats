@@ -7,6 +7,7 @@
 #include "librats/security/noise_security.h"
 #include "librats/security/plaintext_security.h"
 #include "librats/core/socket.h"
+#include "librats/core/timer_queue.h"
 
 #include <algorithm>
 #include <atomic>
@@ -368,4 +369,70 @@ TEST_F(ReactorTest, CancelDialSparesAnAttemptThatAlreadyEstablished) {
 
     client.stop();
     server.stop();
+}
+
+// A stopped reactor can be started again, and what it gives up on the way out is
+// what makes that safe. The listen sockets are the node's to close and it closes
+// them after joining this thread, so every descriptor the loop registered is dead
+// by the next start — and the kernel is free to hand that same number to something
+// else. The TCP listener is handed over afresh by listen() before every start; the
+// datagram socket is not, since only listen_udp() ever replaces the mux and the
+// node skips that call whenever the UDP rebind failed ("this node runs TCP-only").
+// A mux held across the gap would leave the reactor polling, recvfrom()-ing and
+// sending on a socket it does not own, and still offering UDP dials it can no
+// longer carry.
+TEST_F(ReactorTest, StopForgetsTheDatagramSocket) {
+    socket_t udp = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(udp));
+
+    Identity id = Identity::generate();
+    PlaintextSecurity sec(id);
+    CollectDelegate collect;
+    Reactor reactor(0, collect, sec);
+    reactor.listen_udp(udp, AddressFamily::IPv4);
+    ASSERT_TRUE(reactor.has_udp());
+
+    reactor.start();
+    reactor.stop();
+    close_socket(udp);   // as the node does, after the join
+
+    EXPECT_FALSE(reactor.has_udp())
+        << "the reactor kept a mux wrapped around a closed descriptor";
+    EXPECT_EQ(reactor.connect("127.0.0.1", 9, TransportKind::Udp), kInvalidConnId)
+        << "a UDP dial was accepted with no datagram socket left to carry it";
+
+    // The restart is what the forgetting is for: this loop must come up without
+    // that socket rather than re-registering the one it handed back.
+    reactor.start();
+    EXPECT_FALSE(reactor.has_udp());
+    reactor.stop();
+}
+
+// The same rule one level down. A timer outlives the loop that scheduled it unless
+// the queue goes with it, and the reactor's maintenance sweep re-arms itself from
+// its own callback: an entry surviving a stop would start a second, endless chain
+// on the next start — N restarts, N+1 sweeps and N+1 timed wake-ups per interval,
+// for as long as the node lives.
+TEST(TimerQueueTest, ClearDropsEverythingPending) {
+    TimerQueue timers;
+    int fired = 0;
+
+    timers.schedule(0ms, [&] { fired++; });
+    const TimerId cancelled = timers.schedule(0ms, [&] { fired++; });
+    timers.cancel(cancelled);
+    ASSERT_FALSE(timers.empty());
+
+    timers.clear();
+
+    EXPECT_TRUE(timers.empty());
+    EXPECT_EQ(timers.next_timeout_ms(50), 50);  // nothing due, so nothing to wake for
+    timers.run_due();
+    EXPECT_EQ(fired, 0) << "a timer survived the queue it was scheduled on";
+
+    // Ids keep counting up across a clear, so no handle from before it can come to
+    // name a timer scheduled after — including the tombstone left by that cancel().
+    const TimerId fresh = timers.schedule(0ms, [&] { fired++; });
+    EXPECT_NE(fresh, cancelled);
+    timers.run_due();
+    EXPECT_EQ(fired, 1) << "a stale tombstone swallowed a newly scheduled timer";
 }
