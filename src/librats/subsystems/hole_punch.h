@@ -129,6 +129,9 @@ public:
         std::chrono::milliseconds round_timeout{6000};
 
         /// How long after giving up before the same target may be punched again.
+        /// Only a rendezvous WE opened ever ends in one: a round we merely answered
+        /// timing out says nothing about the target, and calling it off there would
+        /// silently drop the retries the initiator is already sending.
         std::chrono::milliseconds cooldown{60000};
 
         /// Concurrent punch sessions. Bounds both memory and how many dial bursts

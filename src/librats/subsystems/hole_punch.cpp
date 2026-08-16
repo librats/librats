@@ -481,9 +481,17 @@ void HolePunch::service_sessions() {
             // retries: a responder has no idea whether the other side is still
             // trying, and two ends retrying independently would drift apart from the
             // one thing that makes a punch work — starting together.
-            if (!it->second.initiator || ++it->second.attempt >= config_.attempts) {
+            const bool initiator = it->second.initiator;
+            if (!initiator || ++it->second.attempt >= config_.attempts) {
                 LOG_DEBUG("punch", "Giving up on " << target.short_hex() << " for now");
-                begin_cooldown(target);
+                // Cooldown is the INITIATOR's verdict on a target and nobody else's.
+                // A responder round ending means only that the Sync never came — the
+                // initiator is very likely mid-retry at that exact moment (its round
+                // started a relay hop earlier than ours, so its deadline expires
+                // first). Calling the target off here would drop the retries it is
+                // about to send, and block this node's own later punch to it, for
+                // the whole cooldown. So a responder just forgets the round.
+                if (initiator) begin_cooldown(target);
                 it = sessions_.erase(it);
                 continue;
             }

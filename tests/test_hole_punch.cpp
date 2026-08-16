@@ -54,6 +54,12 @@ Bytes relay_envelope(const PeerId& dst, const Bytes& inner) {
 
 Bytes sync_body() { return Bytes{1}; }  // inner kind = Sync, no payload
 
+// An opening Connect naming one endpoint in TEST-NET-1 — a well-formed rendezvous
+// pointing somewhere nothing can answer from, which is what a real punch that does
+// not land looks like from the responder's side.
+// [kind=Connect][role=opening][count=1][ip_len=4][192.0.2.1][port=9]
+Bytes unreachable_connect() { return Bytes{0, 0, 1, 4, 192, 0, 2, 1, 0, 9}; }
+
 // Every node in a punch scenario needs a UDP link to its relay before it knows any
 // external endpoint of its own — that is where the observation comes from.
 bool knows_own_endpoint(Node& node) {
@@ -140,6 +146,139 @@ TEST(HolePunchE2E, SimultaneousPunchesFromBothEndsStillConnect) {
     // resolved identically at both ends (see peer_table.cpp).
     EXPECT_TRUE(wait_for([&] { return a.peer_count() == 2 && b.peer_count() == 2; }, 3s))
         << "a=" << a.peer_count() << " b=" << b.peer_count();
+
+    a.stop();
+    b.stop();
+    hub.stop();
+}
+
+// A punch that does not land is retried: one lost Syn burst is the expected case,
+// not a verdict on the target. `attempts` rounds go out, each a fresh rendezvous,
+// and only then is the target called off for `cooldown`.
+//
+// The target here runs no HolePunch at all, so it answers nothing and every round
+// runs to its full timeout — which makes the hub's forward count an exact census of
+// the rounds the initiator opened.
+TEST(HolePunchE2E, InitiatorRetriesARendezvousThatWentUnanswered) {
+    HolePunch::Config impatient;
+    impatient.attempts      = 3;
+    impatient.round_timeout = 250ms;
+    impatient.tick          = 50ms;
+
+    Node hub(listening_config());
+    Node a(listening_config());
+    Node silent(listening_config());   // deliberately no HolePunch subsystem
+
+    auto* relay   = hub.add_subsystem(std::make_unique<HolePunch>());
+    auto* punch_a = a.add_subsystem(std::make_unique<HolePunch>(impatient));
+
+    ASSERT_TRUE(hub.start());
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(silent.start());
+
+    a.connect("127.0.0.1", hub.listen_port());
+    silent.connect("127.0.0.1", hub.listen_port());
+    ASSERT_TRUE(wait_for([&] { return hub.peer_count() == 2 && knows_own_endpoint(a); }));
+
+    ASSERT_TRUE(punch_a->punch(silent.local_id())) << "punch was refused";
+
+    // Three rendezvous rounds, not one: the retry is the whole point of this test.
+    ASSERT_TRUE(wait_for([&] { return relay->relayed() >= 3u; }, 5s))
+        << "the initiator opened only " << relay->relayed() << " round(s)";
+
+    // And then it stops — `attempts` is a cap, not a floor.
+    ASSERT_TRUE(wait_for([&] { return punch_a->active_sessions() == 0u; }, 5s))
+        << "the session never gave up";
+    std::this_thread::sleep_for(300ms);
+    EXPECT_EQ(relay->relayed(), 3u) << "the initiator kept retrying past its attempt cap";
+
+    // Having exhausted its attempts, the initiator holds the target in cooldown.
+    EXPECT_FALSE(punch_a->punch(silent.local_id())) << "a given-up target was not in cooldown";
+
+    a.stop();
+    silent.stop();
+    hub.stop();
+}
+
+// Regression: the responder must NOT put the initiator into cooldown when its own
+// round times out. Its round started a relay hop later than the initiator's, so it
+// expires at almost exactly the moment the initiator retries — and a cooldown here
+// would silently swallow that retry (and every one after it) for a full minute.
+//
+// The rendezvous is injected by hand so the responder is driven through a round
+// that cannot possibly succeed: a well-formed Connect naming an address nothing
+// answers from, and no Sync ever following it.
+TEST(HolePunchE2E, ResponderRoundTimingOutDoesNotBlockTheInitiatorsRetry) {
+    HolePunch::Config quick;
+    quick.round_timeout = 300ms;
+    quick.tick          = 50ms;
+
+    Node hub(listening_config());
+    Node a(listening_config());
+    Node b(listening_config());
+
+    hub.add_subsystem(std::make_unique<HolePunch>());
+    a.add_subsystem(std::make_unique<HolePunch>());
+    auto* punch_b = b.add_subsystem(std::make_unique<HolePunch>(quick));
+
+    ASSERT_TRUE(hub.start());
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(b.start());
+
+    a.connect("127.0.0.1", hub.listen_port());
+    b.connect("127.0.0.1", hub.listen_port());
+    ASSERT_TRUE(wait_for([&] { return hub.peer_count() == 2 && knows_own_endpoint(b); }));
+
+    const Bytes rendezvous = relay_envelope(b.local_id(), unreachable_connect());
+
+    a.send(hub.local_id(), MessageType::Punch, ByteView(rendezvous));
+    ASSERT_TRUE(wait_for([&] { return punch_b->active_sessions() == 1u; }, 5s))
+        << "the responder never took up the rendezvous";
+    ASSERT_TRUE(wait_for([&] { return punch_b->active_sessions() == 0u; }, 5s))
+        << "the responder's round never timed out";
+
+    // The initiator tries again, exactly as service_sessions() does. Before the fix
+    // this was dropped by a cooldown the responder had just imposed on it.
+    a.send(hub.local_id(), MessageType::Punch, ByteView(rendezvous));
+    EXPECT_TRUE(wait_for([&] { return punch_b->active_sessions() == 1u; }, 3s))
+        << "the responder ignored the retry — it put the initiator in cooldown";
+
+    a.stop();
+    b.stop();
+    hub.stop();
+}
+
+// The same bug seen from the other side: answering somebody else's failed round
+// must not cost this node its own right to punch that peer.
+TEST(HolePunchE2E, ResponderRoundTimingOutDoesNotBlockOurOwnPunch) {
+    HolePunch::Config quick;
+    quick.round_timeout = 300ms;
+    quick.tick          = 50ms;
+
+    Node hub(listening_config());
+    Node a(listening_config());
+    Node b(listening_config());
+
+    hub.add_subsystem(std::make_unique<HolePunch>());
+    a.add_subsystem(std::make_unique<HolePunch>());
+    auto* punch_b = b.add_subsystem(std::make_unique<HolePunch>(quick));
+
+    ASSERT_TRUE(hub.start());
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(b.start());
+
+    a.connect("127.0.0.1", hub.listen_port());
+    b.connect("127.0.0.1", hub.listen_port());
+    ASSERT_TRUE(wait_for([&] { return hub.peer_count() == 2 && knows_own_endpoint(b); }));
+
+    a.send(hub.local_id(), MessageType::Punch,
+           ByteView(relay_envelope(b.local_id(), unreachable_connect())));
+    ASSERT_TRUE(wait_for([&] { return punch_b->active_sessions() == 1u; }, 5s));
+    ASSERT_TRUE(wait_for([&] { return punch_b->active_sessions() == 0u; }, 5s))
+        << "the responder's round never timed out";
+
+    EXPECT_TRUE(punch_b->punch(a.local_id()))
+        << "answering a failed round left the peer in cooldown for us too";
 
     a.stop();
     b.stop();
