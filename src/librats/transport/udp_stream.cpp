@@ -985,9 +985,9 @@ void UdpStream::on_rto(Clock::time_point now) {
 void UdpStream::hystart_reset() {
     css_                = false;
     css_rounds_         = 0;
-    css_baseline_rtt_   = Clock::duration::max();
-    round_min_rtt_      = Clock::duration::max();
-    prev_round_min_rtt_ = Clock::duration::max();
+    css_baseline_rtt_   = (Clock::duration::max)();
+    round_min_rtt_      = (Clock::duration::max)();
+    prev_round_min_rtt_ = (Clock::duration::max)();
     round_samples_      = 0;
     round_end_          = next_seq_ - 1;
 }
@@ -1012,8 +1012,8 @@ void UdpStream::hystart_on_ack(uint32_t ack) {
     // round's rise may be noise, and CSS is how that gets settled without
     // throwing the remaining growth away.
     if (!css_ && round_samples_ >= kHyRttSamples &&
-        prev_round_min_rtt_ != Clock::duration::max() &&
-        round_min_rtt_ != Clock::duration::max()) {
+        prev_round_min_rtt_ != (Clock::duration::max)() &&
+        round_min_rtt_ != (Clock::duration::max)()) {
         const auto thresh = clamp_duration(prev_round_min_rtt_ / 8,
                                            kHyMinRttThresh, kHyMaxRttThresh);
         if (round_min_rtt_ >= prev_round_min_rtt_ + thresh) {
@@ -1027,7 +1027,7 @@ void UdpStream::hystart_on_ack(uint32_t ack) {
 
     const auto ended_min = round_min_rtt_;
     prev_round_min_rtt_  = ended_min;
-    round_min_rtt_       = Clock::duration::max();
+    round_min_rtt_       = (Clock::duration::max)();
     round_samples_       = 0;
     round_end_           = next_seq_ - 1;
 
@@ -1035,7 +1035,7 @@ void UdpStream::hystart_on_ack(uint32_t ack) {
 
     // The rise did not hold — it was one round's noise. Take the caution back and
     // let slow start carry on, which is the whole reason CSS exists.
-    if (ended_min != Clock::duration::max() && ended_min < css_baseline_rtt_) {
+    if (ended_min != (Clock::duration::max)() && ended_min < css_baseline_rtt_) {
         css_ = false;
         return;
     }
