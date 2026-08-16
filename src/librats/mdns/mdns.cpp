@@ -93,7 +93,9 @@ void MdnsClient::stop() {
     shutdown_immediate();
 
     // Wait for threads to finish. They must be gone before the socket is closed:
-    // they poll it with a timeout, so closing it first would race with their reads.
+    // the receiver is waiting on it, so closing it first would race with that wait.
+    // shutdown_immediate() has already signalled the wakeup pipe, so the wait is
+    // over as soon as the scheduler gets to it rather than at the next timeout.
     if (receiver_thread_.joinable()) {
         receiver_thread_.join();
     }
@@ -126,8 +128,11 @@ void MdnsClient::shutdown_immediate() {
     discovering_.store(false);
     running_.store(false);
     
-    // Notify all waiting threads to wake up immediately
+    // Notify all waiting threads to wake up immediately. The announcer and querier
+    // sleep on the condition variable; the receiver is parked in a select() on the
+    // multicast socket and only the wakeup pipe can break that.
     shutdown_cv_.notify_all();
+    receiver_wakeup_.signal();
 }
 
 bool MdnsClient::is_running() const {
@@ -428,15 +433,26 @@ void MdnsClient::close_multicast_socket() {
 void MdnsClient::receiver_loop() {
     LOG_MDNS_DEBUG("mDNS receiver loop started");
 
-    // Poll with a short timeout instead of blocking forever: stop() must be able to
-    // wind this loop down and join it *before* the socket is closed. Closing an fd out
-    // from under a blocked recvfrom() races with it — the number can be handed to
-    // another thread's socket()/open() the moment it is freed.
-    constexpr int kReceiveTimeoutMs = 100;
+    // stop() must be able to wind this loop down and join it *before* the socket is
+    // closed — closing an fd out from under a blocked recvfrom() races with it, since
+    // the number can be handed to another thread's socket()/open() the moment it is
+    // freed. The wakeup pipe is what makes that possible without polling: the wait
+    // watches it alongside the multicast socket, and shutdown_immediate() signals it.
+    //
+    // Waiting on a timeout instead would cost a wakeup per interval for the entire
+    // life of the process. On an idle node that is the *only* work being done, and it
+    // is paid per MdnsClient — measured at ~0.1 % of a core each with a 100 ms poll.
+    const socket_t interrupt_fd = receiver_wakeup_.fd();
+
+    // Only if the pipe could not be created: then there is nothing to interrupt the
+    // wait, so fall back to polling rather than to a blocking receive that stop()
+    // could not get out of.
+    constexpr int kFallbackTimeoutMs = 100;
+    const int receive_timeout_ms = is_valid_socket(interrupt_fd) ? -1 : kFallbackTimeoutMs;
 
     // A single failed receive is not fatal (a signal, a transient ICMP error), but a
     // socket that is genuinely dead fails instantly every time — without a bound the
-    // poll above degenerates into a busy spin that never ends. Give up after a short
+    // loop below degenerates into a busy spin that never ends. Give up after a short
     // run of back-to-back failures; the old blocking loop bailed on the first one.
     constexpr int kMaxConsecutiveErrors = 10;
     int consecutive_errors = 0;
@@ -445,7 +461,7 @@ void MdnsClient::receiver_loop() {
         Address sender;
         bool receive_failed = false;
         std::vector<uint8_t> packet = librats::receive_udp_data(
-            multicast_socket_, 4096, sender, kReceiveTimeoutMs, RATS_INVALID_SOCKET, &receive_failed);
+            multicast_socket_, 4096, sender, receive_timeout_ms, interrupt_fd, &receive_failed);
 
         if (receive_failed) {
             if (++consecutive_errors >= kMaxConsecutiveErrors) {
@@ -461,7 +477,11 @@ void MdnsClient::receiver_loop() {
         consecutive_errors = 0;
 
         if (packet.empty()) {
-            continue;  // timeout — re-check running_
+            // Either the wait was interrupted or (in the degraded fallback) it timed
+            // out. Consume the wakeup byte — an unread one keeps the pipe readable and
+            // would turn the next wait into a spin — then re-check running_.
+            receiver_wakeup_.drain();
+            continue;
         }
 
         std::string sender_ip = sender.ip.to_string();

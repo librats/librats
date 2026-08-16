@@ -2,6 +2,7 @@
 #include "librats/mdns/mdns.h"
 #include "librats/util/logger.h"
 #include "librats/core/socket.h"  // Add socket header for init/cleanup functions
+#include <algorithm>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -132,4 +133,42 @@ TEST_F(MdnsTest, MdnsTxtRecords) {
     mdns.stop();
     
     std::cout << "=== mDNS TXT Records Test Completed ===" << std::endl << std::endl;
+}
+
+// The receiver waits on the multicast socket with no timeout, so the only thing that
+// can end that wait is stop() signalling the wakeup pipe. This pins that: if the pipe
+// ever stops being wired up, the loop falls back to waiting out a poll interval and
+// stop() starts costing up to that interval instead of the round trip through a
+// loopback datagram.
+//
+// It is a latency assertion rather than a CPU one because the cost being avoided —
+// one wakeup per interval on an idle process — is too small to measure reliably in a
+// unit test, while the shutdown latency it also causes is not: with a 100 ms poll the
+// wait ends at a uniformly random point inside the interval, so ten stops landing
+// under 50 ms each has a ~1-in-1000 chance. Measured here, it is about 1 ms.
+TEST_F(MdnsTest, StopDoesNotWaitOutAPollInterval) {
+    constexpr int    kCycles       = 10;
+    constexpr double kMaxStopMs    = 50.0;
+
+    double worst_ms = 0.0;
+    for (int i = 0; i < kCycles; ++i) {
+        MdnsClient mdns("stop-latency-test", 8100);
+        ASSERT_TRUE(mdns.start()) << "cycle " << i;
+
+        // Give the receiver time to reach its wait; stopping before it parks would
+        // measure nothing.
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+        const auto before = std::chrono::steady_clock::now();
+        mdns.stop();
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - before).count();
+
+        EXPECT_FALSE(mdns.is_running()) << "cycle " << i;
+        worst_ms = std::max(worst_ms, ms);
+    }
+
+    EXPECT_LT(worst_ms, kMaxStopMs)
+        << "slowest stop() took " << worst_ms << " ms over " << kCycles
+        << " cycles — the receiver is waiting out a timeout instead of being woken";
 }

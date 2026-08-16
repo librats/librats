@@ -1,6 +1,7 @@
 #pragma once
 
 #include "librats/core/socket.h"
+#include "librats/core/wakeup_pipe.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -170,7 +171,13 @@ private:
     std::thread receiver_thread_;
     std::thread announcer_thread_;
     std::thread querier_thread_;
-    
+
+    /// Lets stop() interrupt the receiver's blocking wait. Without it the loop
+    /// would have to poll the multicast socket on a timeout just to notice that
+    /// running_ went false, which costs a wakeup per interval forever — on a
+    /// client that is otherwise completely idle, that is the only work it does.
+    WakeupPipe receiver_wakeup_;
+
     // Conditional variables for immediate shutdown
     std::condition_variable shutdown_cv_;
     std::mutex shutdown_mutex_;
