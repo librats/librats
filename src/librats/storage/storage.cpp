@@ -314,7 +314,12 @@ void StorageManager::shutdown() {
     }
 
     // Final save
-    if (config_.persist_to_disk && dirty_) {
+    bool needs_save;
+    {
+        std::lock_guard<std::mutex> lock(persistence_mutex_);
+        needs_save = dirty_;
+    }
+    if (config_.persist_to_disk && needs_save) {
         save();
     }
 
@@ -705,7 +710,12 @@ bool StorageManager::save() {
     bool result = write_data_file();
 
     if (result) {
-        dirty_ = false;
+        // dirty_ belongs to persistence_mutex_, not storage_mutex_ — the persistence
+        // thread reads it under that lock. Same order as load() (storage → persistence).
+        {
+            std::lock_guard<std::mutex> dirty_lock(persistence_mutex_);
+            dirty_ = false;
+        }
         LOG_STORAGE_DEBUG("Saved " << entries_.size() << " entries to disk");
     }
 

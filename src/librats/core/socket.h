@@ -416,11 +416,20 @@ size_t send_udp_batch(socket_t socket, const UdpBatchSlot* slots, size_t count,
  * @param interrupt_fd Optional second socket to watch; when it becomes readable the
  *                     call returns immediately with an empty vector (used to wake a
  *                     blocking receive on shutdown). RATS_INVALID_SOCKET disables it.
+ * @param error_out Optional output flag distinguishing the reasons an empty vector can
+ *                  mean: set to true only when select()/recvfrom() failed hard (a dead
+ *                  socket, e.g. EBADF), false for a timeout, an interrupt or an empty
+ *                  datagram. A polling loop needs this to tell "nothing arrived" from
+ *                  "this socket will never deliver again" instead of spinning forever.
+ *                  Errors that concern a signal or one destination rather than the
+ *                  socket (EINTR, ECONNREFUSED / WSAECONNRESET, WSAENETRESET) count as
+ *                  "nothing arrived" — same classification as recv_udp_from().
  * @return Received data, empty vector on timeout, error or interrupt
  */
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Address& sender_peer,
                                       int timeout_ms = -1,
-                                      socket_t interrupt_fd = RATS_INVALID_SOCKET);
+                                      socket_t interrupt_fd = RATS_INVALID_SOCKET,
+                                      bool* error_out = nullptr);
 
 // Common Socket Functions
 /**

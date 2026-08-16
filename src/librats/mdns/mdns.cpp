@@ -91,11 +91,9 @@ void MdnsClient::stop() {
     
     // Trigger immediate shutdown of all background threads
     shutdown_immediate();
-    
-    // Close socket to break receiver loop
-    close_multicast_socket();
-    
-    // Wait for threads to finish
+
+    // Wait for threads to finish. They must be gone before the socket is closed:
+    // they poll it with a timeout, so closing it first would race with their reads.
     if (receiver_thread_.joinable()) {
         receiver_thread_.join();
     }
@@ -107,6 +105,9 @@ void MdnsClient::stop() {
     if (querier_thread_.joinable()) {
         querier_thread_.join();
     }
+
+    // Now that nothing else touches it, close the socket
+    close_multicast_socket();
     
     // Clear discovered services
     {
@@ -426,40 +427,53 @@ void MdnsClient::close_multicast_socket() {
 
 void MdnsClient::receiver_loop() {
     LOG_MDNS_DEBUG("mDNS receiver loop started");
-    
-    std::vector<uint8_t> buffer(4096);
-    sockaddr_in sender_addr{};
-    socklen_t addr_len = sizeof(sender_addr);
-    
+
+    // Poll with a short timeout instead of blocking forever: stop() must be able to
+    // wind this loop down and join it *before* the socket is closed. Closing an fd out
+    // from under a blocked recvfrom() races with it — the number can be handed to
+    // another thread's socket()/open() the moment it is freed.
+    constexpr int kReceiveTimeoutMs = 100;
+
+    // A single failed receive is not fatal (a signal, a transient ICMP error), but a
+    // socket that is genuinely dead fails instantly every time — without a bound the
+    // poll above degenerates into a busy spin that never ends. Give up after a short
+    // run of back-to-back failures; the old blocking loop bailed on the first one.
+    constexpr int kMaxConsecutiveErrors = 10;
+    int consecutive_errors = 0;
+
     while (running_.load()) {
-        if (!librats::is_valid_socket(multicast_socket_)) {
-            break;
-        }
-        
-        int received = recvfrom(multicast_socket_, reinterpret_cast<char*>(buffer.data()), 
-                                static_cast<int>(buffer.size()), 0, reinterpret_cast<sockaddr*>(&sender_addr), &addr_len);
-        
-        if (received <= 0) {
-            if (running_.load()) {
-                LOG_MDNS_ERROR("Failed to receive multicast packet");
+        Address sender;
+        bool receive_failed = false;
+        std::vector<uint8_t> packet = librats::receive_udp_data(
+            multicast_socket_, 4096, sender, kReceiveTimeoutMs, RATS_INVALID_SOCKET, &receive_failed);
+
+        if (receive_failed) {
+            if (++consecutive_errors >= kMaxConsecutiveErrors) {
+                if (running_.load()) {
+                    LOG_MDNS_ERROR("mDNS receive failed " << consecutive_errors
+                                   << " times in a row, stopping receiver loop");
+                }
+                break;
             }
-            break;
-        }
-        
-        // Get sender IP address
-        char sender_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, INET_ADDRSTRLEN);
-        
-        // Ignore packets from ourselves
-        if (std::string(sender_ip) == local_ip_address_) {
             continue;
         }
-        
-        // Process the received packet
-        std::vector<uint8_t> packet(buffer.begin(), buffer.begin() + received);
-        handle_received_packet(packet, std::string(sender_ip));
+
+        consecutive_errors = 0;
+
+        if (packet.empty()) {
+            continue;  // timeout — re-check running_
+        }
+
+        std::string sender_ip = sender.ip.to_string();
+
+        // Ignore packets from ourselves
+        if (sender_ip == local_ip_address_) {
+            continue;
+        }
+
+        handle_received_packet(packet, sender_ip);
     }
-    
+
     LOG_MDNS_DEBUG("mDNS receiver loop ended");
 }
 

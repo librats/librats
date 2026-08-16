@@ -423,12 +423,14 @@ public:
     
     void stop() {
         running_ = false;
+        // Join before closing: run() polls the socket with a 100 ms timeout, so it exits
+        // on its own. Closing the fd underneath it would race with its recvfrom().
+        if (server_thread_.joinable()) {
+            server_thread_.join();
+        }
         if (is_valid_socket(socket_)) {
             close_socket(socket_);
             socket_ = RATS_INVALID_SOCKET;
-        }
-        if (server_thread_.joinable()) {
-            server_thread_.join();
         }
     }
     

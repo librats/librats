@@ -47,8 +47,10 @@ public:
 
     void stop() {
         running_ = false;
-        if (is_valid_socket(socket_)) { close_socket(socket_); socket_ = RATS_INVALID_SOCKET; }
+        // Join first — run() polls with a 100 ms timeout and exits on its own. Closing
+        // the fd while it sits in recvfrom() would race with it.
         if (thread_.joinable()) thread_.join();
+        if (is_valid_socket(socket_)) { close_socket(socket_); socket_ = RATS_INVALID_SOCKET; }
     }
 
     uint16_t port() const { return static_cast<uint16_t>(port_); }

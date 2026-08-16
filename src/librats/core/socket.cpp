@@ -1265,7 +1265,9 @@ size_t send_udp_batch(socket_t socket, const UdpBatchSlot* slots, size_t count, 
 }
 
 std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Address& sender_peer,
-                                      int timeout_ms, socket_t interrupt_fd) {
+                                      int timeout_ms, socket_t interrupt_fd, bool* error_out) {
+    if (error_out) *error_out = false;
+
     // Handle timeout (and optional interrupt socket) using select. When no interrupt
     // fd is supplied this path is identical to the plain timeout behavior.
     const bool have_interrupt = is_valid_socket(interrupt_fd);
@@ -1293,7 +1295,17 @@ std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Addre
             // deliberately not logged (it would spam every idle cycle, e.g. the DHT runner).
             return {};
         } else if (result < 0) {
-            LOG_SOCKET_ERROR("Select error while waiting for UDP data");
+            const int error = get_last_socket_error();
+#ifndef _WIN32
+            // A signal cut the wait short — nothing is wrong with the socket. select()
+            // is never restarted by SA_RESTART, so a host process with a periodic timer
+            // signal (a sampling profiler, say) can hit this on every poll; reporting it
+            // as an error would let a caller that counts consecutive failures give up on
+            // a perfectly healthy socket. Report "no data" and let it poll again.
+            if (error == EINTR) { return {}; }
+#endif
+            LOG_SOCKET_ERROR("Select error while waiting for UDP data: " << socket_error_string(error));
+            if (error_out) *error_out = true;
             return {};
         }
         // Prefer real data: if a datagram arrived alongside a wakeup, read it now rather
@@ -1317,10 +1329,26 @@ std::vector<uint8_t> receive_udp_data(socket_t socket, size_t buffer_size, Addre
         int error = get_last_socket_error();
 #ifdef _WIN32
         if (error == WSAEWOULDBLOCK) { return {}; }
+        // Windows reports an ICMP port-unreachable for a *previous* datagram as an error
+        // on the next recvfrom(). It concerns one destination, not the socket, so it is
+        // not a reason to declare the receive path broken. Same classification as
+        // recv_udp_from().
+        if (error == WSAECONNRESET || error == WSAENETRESET) {
+            LOG_SOCKET_DEBUG("Transient UDP receive error: " << socket_error_string(error));
+            return {};
+        }
 #else
         if (error == EAGAIN || error == EWOULDBLOCK) { return {}; }
+        // EINTR is a signal, ECONNREFUSED an asynchronous ICMP unreachable for one
+        // destination — neither says anything about the socket itself. Same
+        // classification as recv_udp_from().
+        if (error == EINTR || error == ECONNREFUSED) {
+            LOG_SOCKET_DEBUG("Transient UDP receive error: " << socket_error_string(error));
+            return {};
+        }
 #endif
         LOG_SOCKET_DEBUG("Failed to receive UDP data: " << socket_error_string(error));
+        if (error_out) *error_out = true;
         return {};
     }
 

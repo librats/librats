@@ -357,8 +357,10 @@ void TrackerAnnouncer::announce(const TrackerRequest& req, PeerCallback on_peers
                     poster_([on_peers, peers = resp.peers, interval] { on_peers(peers, interval); });
                 }
                 --inflight_;
+                // Notify while still holding the lock: once inflight_ hits zero a waiting
+                // stop() may return and the announcer be destroyed, taking drain_cv_ with it.
+                drain_cv_.notify_all();
             }
-            drain_cv_.notify_all();
         }).detach();
     }
 }
