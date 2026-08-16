@@ -241,6 +241,9 @@ set(LIBRARY_SOURCES
     src/librats/node/identify.cpp
     src/librats/node/dialer.h
     src/librats/node/dialer.cpp
+    src/librats/node/dial_service.h
+    src/librats/node/nat_status.h
+    src/librats/node/nat_status.cpp
 
 # subsystems/ — opt-in plugins attached to a Node
     src/librats/subsystems/ping_service.h
@@ -262,6 +265,8 @@ set(LIBRARY_SOURCES
     src/librats/subsystems/peer_exchange.cpp
     src/librats/subsystems/port_mapping_service.h
     src/librats/subsystems/port_mapping_service.cpp
+    src/librats/subsystems/hole_punch.h
+    src/librats/subsystems/hole_punch.cpp
 
 # dht/ — Kademlia DHT + KRPC (bencode is shared with bittorrent, always built)
     src/librats/dht/dht.h
@@ -656,6 +661,8 @@ if(RATS_BUILD_TESTS)
         tests/test_filexfer.cpp
         tests/test_dht_discovery.cpp
         tests/test_reconnection.cpp
+        tests/test_nat_status.cpp
+        tests/test_hole_punch.cpp
         tests/test_logging.cpp
     )
 

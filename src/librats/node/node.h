@@ -49,7 +49,9 @@
 #include "librats/security/identity.h"
 #include "librats/security/handshaker.h"  // SecurityProvider
 #include "librats/node/config.h"
+#include "librats/node/dial_service.h"
 #include "librats/node/dialer.h"
+#include "librats/node/nat_status.h"
 #include "librats/node/node_context.h"    // NodeContext, EventBus, ServiceRegistry
 #include "librats/peer/peer.h"
 #include "librats/node/peer_network.h"
@@ -72,7 +74,7 @@ namespace librats {
 class NetworkMonitor;  // util/network_monitor.h — owned via unique_ptr, included in node.cpp
 class MessageJson;     // subsystems/message_json.h — reached via json() (json.h stays out of node.h)
 
-class RATS_API Node final : public ConnectionDelegate, public PeerNetwork {
+class RATS_API Node final : public ConnectionDelegate, public PeerNetwork, public DialService {
 public:
     /// Construct a node from its configuration (see NodeConfig). This only loads
     /// the identity and prepares the layers; no socket is opened until start().
@@ -149,6 +151,17 @@ public:
     /// IP paired with our listen port. De-duplicated and bounded; populated as
     /// peers send their identify message. Useful for NAT awareness / advertising.
     std::vector<Address> observed_addresses() const;
+
+    /// What the mesh has shown about our own side of the NAT, from the endpoints
+    /// datagram peers report observing our shared UDP socket at (see nat_status.h).
+    /// Also published in services() as ExternalAddressService, which is how a
+    /// NAT-traversal subsystem reaches it.
+    const NatStatus& nat_status() const noexcept { return nat_status_; }
+
+    // — DialService: dial one endpoint over one wire, bypassing the transport race
+    //   (see node/dial_service.h; used by hole punching) —
+    bool dial_direct(const Address& addr, TransportKind kind,
+                     const DialProfile& profile) override;
 
     // — peer admission limit (0 = unlimited; guards inbound, not our own dials) —
     size_t max_peers() const noexcept { return max_peers_.load(std::memory_order_relaxed); }
@@ -256,6 +269,9 @@ private:
     std::vector<Address> advertised_addresses() const;              ///< our dialable addrs (sent in identify)
     void                 rebuild_advertised_addresses(const std::vector<std::string>& local_ips);
     void                 record_observed_address(const Address& addr);
+    /// Whether `addr` is an endpoint this node holds itself — i.e. a peer reporting
+    /// it saw us there saw no NAT in between. Compares against the advertised set.
+    bool                 is_own_endpoint(const Address& addr) const;
 
     void start_network_monitor();   ///< spin up the monitor + maintenance thread
     void stop_network_monitor();    ///< stop the monitor, drain + join maintenance
@@ -299,6 +315,12 @@ private:
     // Our own addresses as peers observe us (their reported IP + our listen port).
     mutable std::mutex   observed_mutex_;
     std::vector<Address> observed_addresses_;
+
+    // The datagram half of the same knowledge, which is a different thing: what a
+    // peer sees on a UDP link is our NAT's mapping of the one shared socket, port
+    // included, and several peers' views of it are what say whether that mapping is
+    // stable enough to punch through. Published as ExternalAddressService.
+    NatStatus            nat_status_;
 
     // The dialable addresses we advertise to peers in identify. Derived from local
     // interfaces (and, in future, promoted observed addresses). Rebuilt once at

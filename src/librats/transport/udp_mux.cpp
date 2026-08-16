@@ -461,7 +461,7 @@ bool UdpMux::allocate_ids(uint32_t& recv_id, uint32_t& send_id) {
     return false;  // 32 collisions in a 4-billion space: the map is implausibly full
 }
 
-std::unique_ptr<Link> UdpMux::connect(const Address& remote) {
+std::unique_ptr<Link> UdpMux::connect(const Address& remote, DialProfile profile) {
     uint32_t recv_id = 0, send_id = 0;
     if (!allocate_ids(recv_id, send_id)) {
         LOG_WARN("udp", "Could not allocate a connection id for " << remote.to_string());
@@ -469,7 +469,7 @@ std::unique_ptr<Link> UdpMux::connect(const Address& remote) {
     }
 
     auto stream = std::make_unique<UdpStream>(*this, remote, recv_id, send_id,
-                                              ConnRole::Outbound, Clock::now());
+                                              ConnRole::Outbound, Clock::now(), profile);
     UdpStream* raw = stream.get();
     const auto inserted = streams_.emplace(recv_id, Entry{std::move(stream)});
     arm(recv_id, inserted.first->second);  // the Syn's retransmission timeout

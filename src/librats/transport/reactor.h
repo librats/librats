@@ -94,7 +94,11 @@ public:
     /// caller can cancel the attempt with cancel_dial() before it has even started
     /// — which is what lets the node race a UDP dial against a TCP one and drop the
     /// loser cleanly. kInvalidConnId if the transport is unavailable here.
-    ConnId connect(std::string host, int port, TransportKind kind = TransportKind::Tcp);
+    ///
+    /// `profile` shapes how hard a datagram dial retries its Syn (see DialProfile);
+    /// it has no meaning for TCP, where the kernel owns the connect retries.
+    ConnId connect(std::string host, int port, TransportKind kind = TransportKind::Tcp,
+                   DialProfile profile = {});
 
     /// Close a connection by id (thread-safe; deferred to the reactor thread).
     /// Valid for an id whose dial has not started yet — it is cancelled instead.
@@ -150,7 +154,8 @@ private:
     void dispatch_events(ConnId id, uint32_t events);
     void do_accept();
     void schedule_maintenance();
-    void start_dial(ConnId id, const std::string& host, int port, TransportKind kind);
+    void start_dial(ConnId id, const std::string& host, int port, TransportKind kind,
+                    DialProfile profile);
     void abort_dial(ConnId id, const std::string& host, int port);
     Connection* adopt(std::unique_ptr<Link> link, ConnRole role, ConnId id);
     bool resolve_dial(ConnId id);

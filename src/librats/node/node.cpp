@@ -87,6 +87,14 @@ Node::Node(NodeConfig config)
                                        [this](const std::string& host, uint16_t port) {
                                            report_dial_failed(host, port);
                                        });
+
+    // Published here rather than in start(): a subsystem resolves what it needs
+    // during attach(), which runs before start(), and both of these are node state
+    // that exists from construction. Neither extends Node's public surface — they
+    // are narrow capabilities a module asks for by interface (see
+    // node/dial_service.h, node/nat_status.h).
+    services_.provide<DialService>(this);
+    services_.provide<ExternalAddressService>(&nat_status_);
 }
 
 Node::~Node() {
@@ -308,6 +316,10 @@ void Node::maintenance_loop() {
         LOG_INFO("node", "Network change: " << addresses.size()
                  << " local address(es); notifying subsystems");
         rebuild_advertised_addresses(addresses);  // keep identify's advertised set fresh
+        // Every external endpoint we learned was a mapping made by the path that
+        // just changed underneath us. Holding on to it would aim a punch at a port
+        // that no longer exists; peers re-report as their links come back.
+        nat_status_.reset();
         events_.emit(NetworkChanged{std::move(addresses)});
     }
 }
@@ -320,6 +332,20 @@ void Node::connect(const std::string& host, uint16_t port) {
     // The dialer owns the transport choice: preferred first, the other raced in
     // after the fallback delay, loser dropped. See node/dialer.h.
     dialer_->dial(host, port);
+}
+
+bool Node::dial_direct(const Address& addr, TransportKind kind, const DialProfile& profile) {
+    if (!addr.is_valid()) return false;
+    if (kind == TransportKind::Udp && !reactors_->has_udp()) return false;
+    if (kind == TransportKind::Tcp && !config_.enable_tcp)   return false;
+
+    // Straight to the reactor, deliberately around the Dialer: this dial is not a
+    // race and must not become one (see node/dial_service.h). The Dialer is left
+    // unaware of it, which is exactly right — its bookkeeping is keyed by
+    // (reactor, conn) and simply does not match, so the connection's later
+    // established/closed reports are no-ops there rather than corrections.
+    const ConnId id = reactors_->pick(kind).connect(addr.ip.to_string(), addr.port, kind, profile);
+    return id != kInvalidConnId;
 }
 
 void Node::report_dial_failed(const std::string& host, uint16_t port) {
@@ -536,6 +562,10 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     // under its route, so removing it is a no-op and must NOT surface a disconnect
     // for a peer that is still connected over the surviving link.
     if (!peers_.remove(id, route)) return;
+    // What this peer told us about our external endpoint went with it: the mapping
+    // it observed may well have been made for its link alone, and keeping it would
+    // let a long-gone peer keep voting on how our NAT behaves.
+    nat_status_.forget(id);
     LOG_INFO("node", "Peer " << id.short_hex() << " disconnected (" << to_string(reason) << ")");
     for (auto& cb : peer_disconnected_) cb(id);
 }
@@ -579,8 +609,20 @@ void Node::send_identify(Connection& conn) {
     // is a property of the node, not of the address — say it once, here.
     msg.transports  = transports_;
     const IpAddress seen_ip = conn.remote_ip();
-    if (!seen_ip.is_any())
-        msg.observed = Address{seen_ip, 0};  // port is the peer's ephemeral; IP is what matters
+    if (!seen_ip.is_any()) {
+        // The port we saw the peer at is worth reporting on exactly one of the two
+        // wires. On TCP it is an ephemeral port its OS picked for this one outbound
+        // socket and tells the peer nothing it can use. On a datagram link every
+        // peer shares ONE socket, so that port is what the peer's NAT mapped that
+        // socket to — the port a third party has to aim at to reach it, and the
+        // only thing a hole punch can be pointed at. So: report it there, and only
+        // there. A zero port keeps the old meaning ("IP only"), which is what an
+        // older peer already expects and what TCP still sends.
+        uint16_t seen_port = 0;
+        if (conn.transport() == TransportKind::Udp)
+            if (const auto endpoint = conn.remote_endpoint()) seen_port = endpoint->port;
+        msg.observed = Address{seen_ip, seen_port};
+    }
 
     const Bytes payload = msg.encode();
     conn.send(FrameHeader{MessageType::Control, 0, 0}, ByteView(payload));
@@ -629,9 +671,30 @@ void Node::handle_identify(Connection& conn, const Frame& frame) {
     }
 
     // Learn our own public address: pair the IP the peer saw us at with OUR listen
-    // port (its observed port is our ephemeral source port, not dialable).
-    if (msg->observed && listen_port_ != 0 && !msg->observed->ip.is_any())
-        record_observed_address(Address{msg->observed->ip, listen_port_});
+    // port, since on TCP its observed port is our ephemeral source port and is not
+    // dialable.
+    if (msg->observed && !msg->observed->ip.is_any()) {
+        if (listen_port_ != 0)
+            record_observed_address(Address{msg->observed->ip, listen_port_});
+
+        // A datagram peer reports the port as well, and there it is not ephemeral:
+        // it is what a NAT mapped our one shared socket to. That endpoint — not the
+        // listen port, which a NAT is under no obligation to preserve — is what a
+        // third peer would have to aim at, so it is kept apart from the address set
+        // above and classified across peers (see node/nat_status.h).
+        if (conn.transport() == TransportKind::Udp && msg->observed->port != 0)
+            nat_status_.record_udp_observation(conn.remote_id(), *msg->observed,
+                                               is_own_endpoint(*msg->observed));
+    }
+}
+
+bool Node::is_own_endpoint(const Address& addr) const {
+    std::lock_guard<std::mutex> lock(advertised_mutex_);
+    // The advertised set is every local interface IP paired with our listen port —
+    // so a match means the peer reached us without anything rewriting the endpoint
+    // on the way, i.e. there is no NAT between us.
+    return std::find(advertised_addresses_.begin(), advertised_addresses_.end(), addr) !=
+           advertised_addresses_.end();
 }
 
 std::vector<Address> Node::advertised_addresses() const {

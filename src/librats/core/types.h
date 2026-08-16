@@ -35,6 +35,28 @@ enum class TransportKind {
     Udp,  ///< Reliable ordered stream over the shared UDP socket (NAT-friendly).
 };
 
+/// How hard an outbound datagram dial tries before it is called failed.
+///
+/// The default is the ordinary dial: three Syns at a doubling 500 ms timeout, so a
+/// path that swallows UDP gives up in about three and a half seconds and the dialer
+/// falls back to TCP promptly.
+///
+/// A hole punch wants the opposite shape. There the FIRST Syn is expected to die on
+/// the peer's NAT — its job is to open our own mapping and filter — and what
+/// actually connects is a later one, sent after the peer's Syn has crossed ours. So
+/// a punch trades the long patient tail for a dense burst: more attempts, closer
+/// together, no backoff. Everything else about the stream is unchanged; this only
+/// governs the Syn, and once a stream is connected its timeout comes from measured
+/// round trips as usual.
+struct DialProfile {
+    int      syn_attempts = 3;      ///< transmissions of the Syn before the dial fails
+    uint32_t syn_rto_ms   = 500;    ///< interval before the first retransmission
+    bool     syn_backoff  = true;   ///< double the interval after each attempt
+
+    /// The punch shape: eight probes 200 ms apart, ~1.6 s of dense punching.
+    static DialProfile punch() noexcept { return DialProfile{8, 200, false}; }
+};
+
 /// Connection lifecycle. A connection moves strictly forward through these.
 enum class ConnState {
     Connecting,   ///< Outbound transport connect in flight (TCP connect / UDP SYN).

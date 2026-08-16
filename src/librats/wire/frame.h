@@ -45,6 +45,7 @@ enum class MessageType : uint8_t {
     Storage   = 6,  ///< distributed key-value store (StorageManager)
     Typed     = 7,  ///< typed JSON message exchange (MessageJson)
     Pex       = 8,  ///< peer exchange — gossip of known peer addresses (PeerExchange)
+    Punch     = 9,  ///< NAT hole-punch rendezvous, relayed peer→peer (HolePunch)
 };
 
 /// Fixed header of an inner message.

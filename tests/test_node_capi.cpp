@@ -457,3 +457,48 @@ TEST(NodeCApiTest, BroadcastRawAndTyped) {
     rats_stop(client); rats_stop(server);
     rats_destroy(client); rats_destroy(server);
 }
+
+// Hole punching through the C ABI: the whole capability has to be reachable from a
+// binding, not just from C++ — enable it, ask about the NAT, and punch.
+TEST(NodeCApiTest, HolePunchIsReachableFromTheCApi) {
+    rats_t hub = rats_create_ex(0, /*enable_listen=*/1, "127.0.0.1", RATS_SECURITY_NOISE);
+    rats_t a   = rats_create_ex(0, 1, "127.0.0.1", RATS_SECURITY_NOISE);
+    rats_t b   = rats_create_ex(0, 1, "127.0.0.1", RATS_SECURITY_NOISE);
+
+    // Before enabling there is nothing to punch with.
+    EXPECT_EQ(rats_punch_peer(a, "00"), RATS_ERR_NOT_ENABLED);
+
+    ASSERT_EQ(rats_enable_hole_punch(hub, /*serve_as_relay=*/1), RATS_OK);
+    ASSERT_EQ(rats_enable_hole_punch(a, 0), RATS_OK);
+    ASSERT_EQ(rats_enable_hole_punch(b, 0), RATS_OK);
+    EXPECT_EQ(rats_enable_hole_punch(a, 0), RATS_OK);  // idempotent
+
+    ASSERT_EQ(rats_start(hub), RATS_OK);
+    ASSERT_EQ(rats_start(a), RATS_OK);
+    ASSERT_EQ(rats_start(b), RATS_OK);
+    EXPECT_EQ(rats_enable_hole_punch(a, 0), RATS_ERR_ALREADY_STARTED);
+
+    rats_connect(a, "127.0.0.1", rats_listen_port(hub));
+    rats_connect(b, "127.0.0.1", rats_listen_port(hub));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(hub) == 2; }));
+
+    // With no NAT between them the mesh reports an open path — and, either way, an
+    // external endpoint has been learned, which is what a punch needs.
+    ASSERT_TRUE(wait_for([&] { return rats_nat_mapping(a) == RATS_NAT_OPEN; }))
+        << "the node never classified its own path";
+
+    char* b_id = rats_local_id(b);
+    ASSERT_NE(b_id, nullptr);
+    EXPECT_EQ(rats_punch_peer(a, b_id), RATS_OK);
+    EXPECT_EQ(rats_punch_peer(a, "not-a-peer-id"), RATS_ERR_INVALID_ARG);
+
+    EXPECT_TRUE(wait_for([&] { return rats_peer_count(a) == 2 && rats_peer_count(b) == 2; }, 15s))
+        << "the punch never produced a direct link";
+
+    // And a punch to somebody already connected is declined rather than started.
+    EXPECT_EQ(rats_punch_peer(a, b_id), RATS_ERR_NO_SUCH_PEER);
+    rats_string_free(b_id);
+
+    rats_stop(a); rats_stop(b); rats_stop(hub);
+    rats_destroy(a); rats_destroy(b); rats_destroy(hub);
+}

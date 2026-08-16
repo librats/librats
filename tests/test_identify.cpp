@@ -208,3 +208,69 @@ TEST(IdentifyE2E, LearnsOwnObservedAddress) {
     server.stop();
     client.stop();
 }
+
+// On a DATAGRAM link the source port a peer sees is not ephemeral: every UDP peer
+// shares one socket, so it is that socket's mapping — the port a third party would
+// have to aim at, and the only thing a hole punch can be pointed at. Identify
+// carries it, and the node keeps it apart from the listen-port-derived addresses.
+TEST(IdentifyE2E, DatagramPeersReportTheObservedPortToo) {
+    NodeConfig cfg = listening_config();
+    cfg.preferred_transport = TransportKind::Udp;
+
+    Node server(cfg);
+    Node client(cfg);
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+    ASSERT_TRUE(wait_for([&] {
+        const auto peers = client.peers();
+        return !peers.empty() && peers[0].transport == TransportKind::Udp;
+    })) << "the link did not come up over the datagram transport";
+
+    // With no NAT between them the mapping is the identity, so each side is
+    // observed at exactly the port it listens on — which is also what tells the
+    // node there is nothing in the path to punch through.
+    const Address client_endpoint{"127.0.0.1", client.listen_port()};
+    ASSERT_TRUE(wait_for([&] {
+        const auto endpoints = client.nat_status().external_udp_endpoints();
+        return std::find(endpoints.begin(), endpoints.end(), client_endpoint) != endpoints.end();
+    })) << "the client never learned the endpoint its datagram socket is seen at";
+    EXPECT_EQ(client.nat_status().udp_mapping(), NatMapping::Open);
+
+    server.stop();
+    client.stop();
+}
+
+// The same port over TCP is an ephemeral one the peer's OS picked for that one
+// socket. Reporting it would teach the peer an endpoint that is gone the moment the
+// connection is, so a TCP-only pair learns no datagram endpoint at all.
+TEST(IdentifyE2E, TcpPeersReportNoObservedPort) {
+    NodeConfig cfg = listening_config();
+    cfg.enable_udp = false;   // TCP is the only wire either of them has
+
+    Node server(cfg);
+    Node client(cfg);
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+
+    // Give identify time to have arrived — the observed-address path below fires
+    // from the same message, so once it is there the datagram half has had its
+    // chance too.
+    const Address client_self{"127.0.0.1", client.listen_port()};
+    ASSERT_TRUE(wait_for([&] {
+        const auto obs = client.observed_addresses();
+        return std::find(obs.begin(), obs.end(), client_self) != obs.end();
+    }));
+
+    EXPECT_TRUE(client.nat_status().external_udp_endpoints().empty())
+        << "a TCP source port was mistaken for a datagram mapping";
+    EXPECT_EQ(client.nat_status().udp_mapping(), NatMapping::Unknown);
+
+    server.stop();
+    client.stop();
+}

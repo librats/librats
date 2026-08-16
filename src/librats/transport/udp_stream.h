@@ -251,8 +251,11 @@ public:
     /// keep-alive intervals, so only real loss of contact trips it.
     static constexpr std::chrono::seconds kIdleTimeout{45};
 
+    /// @param profile How hard an OUTBOUND dial tries (see DialProfile). Ignored
+    ///        for an inbound stream, which never sends a Syn. The default is the
+    ///        ordinary dial; a hole punch passes DialProfile::punch().
     UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_id, uint32_t send_id,
-              ConnRole role, Clock::time_point now);
+              ConnRole role, Clock::time_point now, DialProfile profile = {});
 
     UdpStream(const UdpStream&) = delete;
     UdpStream& operator=(const UdpStream&) = delete;
@@ -583,6 +586,12 @@ private:
     Clock::duration   rttvar_{};
     bool              have_rtt_ = false;
     Clock::duration   rto_ = kInitialRto;
+    // How the dial (and only the dial) is retried — see DialProfile. Kept as plain
+    // members rather than a stored profile so the SynSent path costs no indirection,
+    // and clamped in the constructor so a caller cannot ask for zero attempts or an
+    // interval outside what the timer can honour.
+    int               syn_attempts_ = kSynMaxAttempts;
+    bool              syn_backoff_  = true;
     Clock::time_point last_recv_;
     Clock::time_point last_send_;
     /// When an owed acknowledgement must go out. The epoch means "no deadline",

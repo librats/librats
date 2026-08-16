@@ -165,7 +165,7 @@ TEST_F(MdnsTest, StopDoesNotWaitOutAPollInterval) {
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - before).count();
 
         EXPECT_FALSE(mdns.is_running()) << "cycle " << i;
-        worst_ms = std::max(worst_ms, ms);
+        worst_ms = (std::max)(worst_ms, ms);
     }
 
     EXPECT_LT(worst_ms, kMaxStopMs)

@@ -1155,6 +1155,140 @@ TEST(UdpStreamTest, UnansweredDialGivesUp) {
     EXPECT_LE(waited, 10s) << "an unanswered dial held the transport race far too long";
 }
 
+// ── The dial's retry shape (DialProfile) ────────────────────────────────────
+//
+// The ordinary dial above is patient and sparse: three Syns spread over seconds,
+// sized so a UDP-blocked path is recognised quickly. A hole punch needs the exact
+// opposite and can ask for it — see the tests below for why the difference is not
+// cosmetic.
+
+/// A NAT in front of Bob: inbound datagrams are dropped except during a window,
+/// which is what a peer's own outbound burst opens on the far side. Only Bob is
+/// gated; his replies come back freely, exactly as a filter works.
+class GatedNet final : public FakeNet {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    explicit GatedNet(Clock::time_point now) : now_(now) {}
+
+    void set_now(Clock::time_point now) { now_ = now; }
+    void open_between(Clock::time_point from, Clock::time_point to) { from_ = from; to_ = to; }
+
+    void send_datagram(const Address& to, const uint8_t* data, size_t len) override {
+        if (to == kBob) {
+            ++toward_bob_;
+            if (now_ < from_ || now_ >= to_) return;  // the filter has nothing open
+        }
+        FakeNet::send_datagram(to, data, len);
+    }
+
+    /// Datagrams aimed at Bob, whether or not the filter let them through — i.e.
+    /// how many probes the dial actually spent.
+    size_t probes() const { return toward_bob_; }
+
+private:
+    Clock::time_point now_;
+    Clock::time_point from_{(Clock::time_point::max)()};
+    Clock::time_point to_{(Clock::time_point::max)()};
+    size_t            toward_bob_ = 0;
+};
+
+/// Dial into `net` with `profile` and run the clock until the stream resolves.
+/// Returns the simulated time it took.
+std::chrono::steady_clock::duration run_dial(GatedNet& net, UdpStream& dialer,
+                                             UdpStream* responder,
+                                             std::chrono::steady_clock::time_point start,
+                                             std::chrono::steady_clock::duration budget = 8s) {
+    auto now = start;
+    while (!dialer.dead() && !dialer.connected() && now - start < budget) {
+        now += 10ms;
+        net.set_now(now);
+        net.deliver_at(now);
+        dialer.tick(now);
+        if (responder) responder->tick(now);
+    }
+    return now - start;
+}
+
+// The punch profile trades the long patient tail for a dense burst: more probes,
+// evenly spaced, all of them inside a window a NAT might plausibly hold open.
+TEST(UdpStreamTest, ThePunchProfileSpendsMoreProbesAndDoesNotBackOff) {
+    const auto start = std::chrono::steady_clock::now();
+    GatedNet   net(start);   // never opened: the dial spends its whole budget
+    UdpStream  dialer(net, kBob, 100, 101, ConnRole::Outbound, start, DialProfile::punch());
+
+    const auto waited = run_dial(net, dialer, nullptr, start);
+
+    ASSERT_TRUE(dialer.dead());
+    EXPECT_EQ(dialer.close_reason(), CloseReason::ConnectFailed);
+    EXPECT_EQ(net.probes(), 8u) << "the punch profile did not spend its probe budget";
+
+    // Eight probes 200 ms apart with no backoff: the last one goes out at ~1.4 s.
+    // A profile that quietly kept the doubling would run past four seconds here,
+    // which is the failure this bound is here to catch.
+    EXPECT_GE(waited, 1400ms) << "the probes were spent faster than the profile asked";
+    EXPECT_LE(waited, 2s)     << "the punch dial backed off when it was told not to";
+}
+
+// Why density is the whole point. A punch lands only while BOTH sides are probing,
+// and that overlap is short — the peer's burst is finite and its filter closes
+// again after it. A dial whose probes are seconds apart can miss such a window
+// entirely; one that probes every 200 ms cannot miss a window wider than that.
+TEST(UdpStreamTest, ADenseDialCrossesAShortWindowThatASpacedOneMisses) {
+    // 550–750 ms after the dial starts: after the default profile's 500 ms probe
+    // and long before its next one at ~1.5 s.
+    constexpr auto kOpensAt  = 550ms;
+    constexpr auto kClosesAt = 750ms;
+    constexpr uint32_t kBase = 0x2A2A2A2A;
+
+    {   // The ordinary dial: nothing of its is in the air while the filter is open.
+        const auto start = std::chrono::steady_clock::now();
+        GatedNet   net(start);
+        net.open_between(start + kOpensAt, start + kClosesAt);
+
+        UdpStream dialer(net, kBob, kBase, kBase + 1, ConnRole::Outbound, start);
+        UdpStream responder(net, kAlice, kBase + 1, kBase, ConnRole::Inbound, start);
+        net.attach(kBob, &responder);
+        net.attach(kAlice, &dialer);
+
+        run_dial(net, dialer, &responder, start);
+        EXPECT_TRUE(dialer.dead()) << "the spaced dial should have missed the window";
+        EXPECT_FALSE(dialer.connected());
+    }
+
+    {   // The punch profile: probes at 0, 200, 400, 600 … — 600 ms lands inside it.
+        const auto start = std::chrono::steady_clock::now();
+        GatedNet   net(start);
+        net.open_between(start + kOpensAt, start + kClosesAt);
+
+        UdpStream dialer(net, kBob, kBase, kBase + 1, ConnRole::Outbound, start,
+                         DialProfile::punch());
+        UdpStream responder(net, kAlice, kBase + 1, kBase, ConnRole::Inbound, start);
+        net.attach(kBob, &responder);
+        net.attach(kAlice, &dialer);
+
+        run_dial(net, dialer, &responder, start);
+        EXPECT_TRUE(dialer.connected()) << "the punch dial missed a window wider than its spacing";
+        EXPECT_FALSE(dialer.dead());
+    }
+}
+
+// A profile is a request, not an instruction: zero attempts would be a dial that
+// dies on its first timeout having never retried, and an interval outside what the
+// timer can honour would either spin or stall past the establish deadline.
+TEST(UdpStreamTest, AnAbsurdDialProfileIsClampedRatherThanObeyed) {
+    const auto start = std::chrono::steady_clock::now();
+    GatedNet   net(start);
+    UdpStream  dialer(net, kBob, 100, 101, ConnRole::Outbound, start,
+                      DialProfile{/*syn_attempts=*/0, /*syn_rto_ms=*/1, /*syn_backoff=*/false});
+
+    const auto waited = run_dial(net, dialer, nullptr, start);
+
+    ASSERT_TRUE(dialer.dead());
+    EXPECT_GE(net.probes(), 1u) << "a dial that never sent anything at all";
+    EXPECT_GE(waited, UdpStream::kMinRto) << "the retry interval was not clamped upward";
+}
+
 // Flow control is separate from congestion control and absolute: the receiver says
 // how much more it will buffer, and the sender does not exceed it whatever the
 // congestion window would allow. Without it a peer that stops reading decides how

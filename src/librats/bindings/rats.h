@@ -174,6 +174,36 @@ RATS_API rats_error_t rats_enable_mdns(rats_t node);
  *  Pass non-zero to enable each backend; both run in parallel. */
 RATS_API rats_error_t rats_enable_port_mapping(rats_t node, int enable_upnp, int enable_natpmp);
 
+/** UDP hole punching: reach a peer that no port forwarding made reachable, by
+ *  arranging with a peer both sides already have that the two dial each other at
+ *  the same moment. Call before start(); both punching nodes must have it enabled,
+ *  and so must the node that carries the rendezvous between them.
+ *
+ *  `serve_as_relay` (non-zero) also carries other peers' rendezvous — a few dozen
+ *  forwarded bytes per punch, only ever to peers this node already holds. A mesh in
+ *  which nobody relays cannot punch at all. */
+RATS_API rats_error_t rats_enable_hole_punch(rats_t node, int serve_as_relay);
+
+/** Try to reach `peer_id_hex` by punching. Non-blocking: success arrives as an
+ *  ordinary peer-connected callback. RATS_OK if a rendezvous was started;
+ *  RATS_ERR_NOT_ENABLED if hole punching is off; RATS_ERR_NO_SUCH_PEER if there is
+ *  nothing to do or nothing to try with — the peer is already connected, a punch to
+ *  it is already running, or this node does not yet know an external endpoint of
+ *  its own to advertise (it needs at least one datagram peer first). */
+RATS_API rats_error_t rats_punch_peer(rats_t node, const char* peer_id_hex);
+
+/** What the mesh has shown about this node's own NAT, from the endpoints datagram
+ *  peers report seeing its shared UDP socket at. One of the RATS_NAT_* values;
+ *  RATS_NAT_ENDPOINT_DEPENDENT means punching cannot work from here. */
+RATS_API int rats_nat_mapping(rats_t node);
+
+enum {
+    RATS_NAT_UNKNOWN              = 0,  /* not enough independent observations yet */
+    RATS_NAT_OPEN                 = 1,  /* no NAT in the path */
+    RATS_NAT_ENDPOINT_INDEPENDENT = 2,  /* one external port for every peer — punchable */
+    RATS_NAT_ENDPOINT_DEPENDENT   = 3   /* a fresh mapping per peer (symmetric) — not punchable */
+};
+
 /* — peer enumeration — */
 
 /** Hex ids of currently-connected peers. Writes the count to *count and returns a

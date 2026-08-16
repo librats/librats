@@ -221,7 +221,9 @@ public:
 
     /// Open an outbound stream to `remote`, ready to be adopted as a connection.
     /// Returns nullptr only if no free connection id could be found.
-    std::unique_ptr<Link> connect(const Address& remote);
+    /// @param profile how hard the dial's Syn is retried — a hole punch wants a
+    ///        denser burst than an ordinary dial does (see DialProfile).
+    std::unique_ptr<Link> connect(const Address& remote, DialProfile profile = {});
 
     /// Called when the Link that owned `stream` is destroyed. The stream either
     /// goes away at once or lingers until it has flushed what it owes.

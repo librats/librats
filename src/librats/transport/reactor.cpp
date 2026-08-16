@@ -91,7 +91,7 @@ void Reactor::execute(Task task) {
     else                     post(std::move(task));
 }
 
-ConnId Reactor::connect(std::string host, int port, TransportKind kind) {
+ConnId Reactor::connect(std::string host, int port, TransportKind kind, DialProfile profile) {
     if (kind == TransportKind::Udp && !mux_) {
         LOG_DEBUG("reactor", "Reactor " << static_cast<int>(index_)
                   << " has no datagram transport; refusing UDP dial to " << host << ":" << port);
@@ -103,11 +103,14 @@ ConnId Reactor::connect(std::string host, int port, TransportKind kind) {
     // run — which is what makes racing one transport against the other cancellable
     // instead of a matter of luck.
     const ConnId id = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
-    post([this, host = std::move(host), port, kind, id] { start_dial(id, host, port, kind); });
+    post([this, host = std::move(host), port, kind, profile, id] {
+        start_dial(id, host, port, kind, profile);
+    });
     return id;
 }
 
-void Reactor::start_dial(ConnId id, const std::string& host, int port, TransportKind kind) {
+void Reactor::start_dial(ConnId id, const std::string& host, int port, TransportKind kind,
+                         DialProfile profile) {
     if (kind == TransportKind::Udp) {
         const auto target = resolve_dial_target(host, port, mux_->family());
         if (!target) {
@@ -128,7 +131,7 @@ void Reactor::start_dial(ConnId id, const std::string& host, int port, Transport
             abort_dial(id, host, port);
             return;
         }
-        std::unique_ptr<Link> link = mux_->connect(*target);
+        std::unique_ptr<Link> link = mux_->connect(*target, profile);
         if (!link) { abort_dial(id, host, port); return; }
 
         Connection* conn = adopt(std::move(link), ConnRole::Outbound, id);

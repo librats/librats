@@ -5,6 +5,7 @@
 #include "librats/subsystems/dht_discovery.h"
 #include "librats/subsystems/mdns_discovery.h"
 #include "librats/subsystems/port_mapping_service.h"
+#include "librats/subsystems/hole_punch.h"
 #include "librats/subsystems/pubsub.h"
 #include "librats/subsystems/message_json.h"
 #include "librats/subsystems/file_transfer.h"
@@ -40,6 +41,7 @@ struct RatsHandle {
     FileTransfer*        files     = nullptr;
     PingService*         ping      = nullptr;
     ReconnectionService* reconnect = nullptr;
+    HolePunch*           punch     = nullptr;
 #ifdef RATS_SEARCH_FEATURES
     Bittorrent*          bittorrent = nullptr;
 #endif
@@ -284,6 +286,40 @@ rats_error_t rats_enable_port_mapping(rats_t node, int enable_upnp, int enable_n
     h->node->add_subsystem(std::make_unique<PortMappingService>(config));
     h->portmap_enabled = true;
     return RATS_OK;
+}
+
+rats_error_t rats_enable_hole_punch(rats_t node, int serve_as_relay) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (!h->punch) {
+        HolePunch::Config config;
+        config.enable_relay = serve_as_relay != 0;
+        h->punch = h->node->add_subsystem(std::make_unique<HolePunch>(config));
+    }
+    return RATS_OK;
+}
+
+rats_error_t rats_punch_peer(rats_t node, const char* peer_id_hex) {
+    if (!peer_id_hex) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->punch) return RATS_ERR_NOT_ENABLED;
+    auto id = PeerId::from_hex(peer_id_hex);
+    if (!id) return RATS_ERR_INVALID_ARG;
+    // Every reason a punch is declined is "there is nothing to do or nothing to try
+    // with" — already connected, already punching, in cooldown, or no external
+    // endpoint learned yet. None of them is an error the caller can act on
+    // differently, so they collapse into one answer.
+    return h->punch->punch(*id) ? RATS_OK : RATS_ERR_NO_SUCH_PEER;
+}
+
+int rats_nat_mapping(rats_t node) {
+    switch (node_of(node)->nat_status().udp_mapping()) {
+        case NatMapping::Open:                return RATS_NAT_OPEN;
+        case NatMapping::EndpointIndependent: return RATS_NAT_ENDPOINT_INDEPENDENT;
+        case NatMapping::EndpointDependent:   return RATS_NAT_ENDPOINT_DEPENDENT;
+        case NatMapping::Unknown:             break;
+    }
+    return RATS_NAT_UNKNOWN;
 }
 
 /* — peer enumeration — */

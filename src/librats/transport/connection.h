@@ -193,6 +193,15 @@ public:
     /// to learn the dialable address of an *inbound* peer. Unspecified on error.
     IpAddress          remote_ip() const;
 
+    /// The peer's source endpoint as the link sees it, port included.
+    ///
+    /// The port is meaningless on TCP (an ephemeral one the peer's OS picked for an
+    /// outbound socket) but is NOT on a datagram link: there every peer shares one
+    /// socket, so what a NAT rewrote the source port to is exactly the port a third
+    /// party would have to aim at to reach this peer. That is what identify carries
+    /// on to it, and what a hole punch is aimed at. nullopt if the link cannot say.
+    std::optional<Address> remote_endpoint() const { return link_->remote_endpoint(); }
+
     /// Tell the link the connection is going away, so a transport that owes the
     /// peer a goodbye (or a last flush) can arrange it. Called by the Reactor
     /// during teardown, before the Connection is destroyed.

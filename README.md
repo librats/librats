@@ -78,6 +78,8 @@ Projects and companies building on librats:
 
 ### **NAT Traversal**
 - **Automatic port forwarding**: built-in **UPnP IGD** and **NAT-PMP** — the `PortMappingService` asks the router to forward the listen port on startup (both backends run in parallel; whichever the router supports wins), so peers behind a NAT can accept inbound connections with zero manual configuration. Mappings are refreshed automatically and removed on `stop()`.
+- **UDP hole punching**: when no port forwarding is possible, `HolePunch` reaches a peer behind a NAT by arranging — through a peer both sides already have — that the two dial each other at the same instant, so each side's outbound packet opens the mapping the other's needs. The rendezvous is timed from the round trip itself (no clock synchronisation), and the node learns the external endpoint to advertise from its own mesh rather than from a STUN server
+- **NAT awareness**: several peers' independent views of the node's shared UDP socket say whether its mapping is stable enough to punch through at all (endpoint-independent) or per-destination (symmetric, where punching cannot work) — see `node.nat_status()`
 - **STUN**: public-IP discovery used by the DHT (BEP-42 node-id derivation and external-address reporting)
 
 ### **Distributed Storage** (optional, requires `RATS_STORAGE`)
@@ -304,6 +306,32 @@ if (auto pub = portmap->mapped_public_address())
     std::cout << "public: " << pub->first << ":" << pub->second << "\n";
 ```
 
+Where the router forwards nothing — carrier-grade NAT, a locked-down office network, a router with UPnP off — `HolePunch` is the other half. Two peers that cannot be dialed can still reach each other if they dial *at the same moment*: each side's outbound packet opens the mapping the other side's needs. The moment is agreed through a peer both already have, and timed from that relayed round trip rather than from any clock.
+
+```cpp
+#include <librats/node/node.h>
+#include <librats/subsystems/hole_punch.h>
+
+Node node(config);
+auto* punch = node.add_subsystem(std::make_unique<HolePunch>());
+node.start();
+
+// ... once connected to at least one datagram peer (that is where the node
+// learns the external endpoint to advertise) ...
+
+// What the mesh says about our own side of the NAT.
+switch (node.nat_status().udp_mapping()) {
+    case NatMapping::Open:                break;  // directly dialable; no punch needed
+    case NatMapping::EndpointIndependent: break;  // punchable
+    case NatMapping::EndpointDependent:   break;  // symmetric NAT — a relay is the only way
+    case NatMapping::Unknown:             break;  // not enough independent observations yet
+}
+
+punch->punch(peer_id);   // non-blocking; success arrives as an ordinary peer-connected event
+```
+
+Every node involved must have the subsystem attached — including the one carrying the rendezvous, which forwards a few dozen bytes per punch and only ever to peers it already holds. The C ABI mirrors this as `rats_enable_hole_punch()` / `rats_punch_peer()` / `rats_nat_mapping()`.
+
 ### 8. Peer discovery (DHT + mDNS) and reconnection
 
 ```cpp
@@ -441,6 +469,7 @@ Each subsystem is attached with `node.add_subsystem(std::make_unique<T>(...))` *
 | `PingService` | `subsystems/ping_service.h` | Periodic liveness ping/pong + `last_rtt(id)` |
 | `ReconnectionService` | `subsystems/reconnection.h` | Auto-reconnect with exponential backoff; persistent targets |
 | `PortMappingService` | `subsystems/port_mapping_service.h` | UPnP IGD + NAT-PMP automatic port forwarding |
+| `HolePunch` | `subsystems/hole_punch.h` | UDP hole punching: two NATed peers dial each other at the same instant, arranged through a peer they share |
 | `PeerExchange` | `subsystems/peer_exchange.h` | PEX: gossip known peer addresses to grow the mesh |
 | `StorageManager` | `storage/storage.h` | Distributed key-value store (requires `RATS_STORAGE`) |
 

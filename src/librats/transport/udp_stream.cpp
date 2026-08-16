@@ -24,7 +24,8 @@ Clock::duration clamp_duration(Clock::duration v, A lo, B hi) {
 } // namespace
 
 UdpStream::UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_id,
-                     uint32_t send_id, ConnRole role, Clock::time_point now)
+                     uint32_t send_id, ConnRole role, Clock::time_point now,
+                     DialProfile profile)
     : host_(host), remote_(remote), recv_id_(recv_id), send_id_(send_id), role_(role),
       state_(role == ConnRole::Outbound ? State::SynSent : State::Connected),
       last_recv_(now), last_send_(now) {
@@ -37,6 +38,14 @@ UdpStream::UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_i
     hystart_reset();
 
     if (role_ != ConnRole::Outbound) return;
+
+    // The dial's own retry shape (see DialProfile). Clamped rather than trusted:
+    // zero attempts would be a stream that dies on its first timeout with nothing
+    // ever sent twice, and an interval outside the RTO bounds would either spin the
+    // timer or stall the dial past the establish deadline above it.
+    syn_attempts_ = (std::max)(1, profile.syn_attempts);
+    syn_backoff_  = profile.syn_backoff;
+    rto_ = clamp_duration(std::chrono::milliseconds(profile.syn_rto_ms), kMinRto, kMaxRto);
 
     // The dial itself is just the first packet of the stream: a Syn occupies a
     // sequence number like any other, so the ordinary retransmission machinery
@@ -905,7 +914,7 @@ void UdpStream::on_rto(Clock::time_point now) {
         return;
     }
 
-    const int cap = (state_ == State::SynSent) ? kSynMaxAttempts : kMaxRetransmits;
+    const int cap = (state_ == State::SynSent) ? syn_attempts_ : kMaxRetransmits;
     if (oldest->sends >= cap) {
         die(state_ == State::SynSent ? CloseReason::ConnectFailed : CloseReason::PeerReset);
         return;
@@ -976,7 +985,14 @@ void UdpStream::on_rto(Clock::time_point now) {
     // Exponential backoff, so a path that is down is probed ever more cheaply
     // instead of being hammered. The deadline is set from it before anything goes
     // out, so the retransmissions below do not each restart the timer.
-    rto_          = clamp_duration(rto_ * 2, kMinRto, kMaxRto);
+    //
+    // A punching dial is the one case that opts out (see DialProfile): there the
+    // peer's NAT is expected to swallow the early Syns, so backing off would spread
+    // the few attempts we get across seconds and leave the window in which both
+    // sides are actually probing barely covered. Only the dial can ask for this —
+    // an established stream always backs off.
+    if (syn_backoff_ || state_ != State::SynSent)
+        rto_ = clamp_duration(rto_ * 2, kMinRto, kMaxRto);
     rto_deadline_ = now + rto_;
 
     retransmit_lost(now);
