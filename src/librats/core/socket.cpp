@@ -437,7 +437,8 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
 
     socket_t server_socket = socket(family, SOCK_STREAM, 0);
     if (server_socket == RATS_INVALID_SOCKET) {
-        LOG_SOCKET_ERROR("Failed to create " << af_label << " server socket");
+        LOG_SOCKET_ERROR("Failed to create " << af_label << " server socket (error: "
+                         << socket_error_string(get_last_socket_error()) << ")");
         return RATS_INVALID_SOCKET;
     }
 
@@ -445,7 +446,8 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
     int opt = 1;
     if (setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR,
                    (char*)&opt, sizeof(opt)) == RATS_SOCKET_ERROR) {
-        LOG_SOCKET_ERROR("Failed to set " << af_label << " socket options");
+        LOG_SOCKET_ERROR("Failed to set " << af_label << " socket options (error: "
+                         << socket_error_string(get_last_socket_error()) << ")");
         close_socket(server_socket);
         return RATS_INVALID_SOCKET;
     }
@@ -456,7 +458,8 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
         if (setsockopt(server_socket, IPPROTO_IPV6, IPV6_V6ONLY,
                        (char*)&ipv6_only, sizeof(ipv6_only)) == RATS_SOCKET_ERROR) {
             if (af == AddressFamily::DualStack) {
-                LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
+                LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only (error: "
+                                << socket_error_string(get_last_socket_error()) << ")");
             }
         }
     }
@@ -480,7 +483,8 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
 
         if (bind(server_socket, reinterpret_cast<sockaddr*>(&server_addr),
                  sizeof(server_addr)) == RATS_SOCKET_ERROR) {
-            LOG_SOCKET_ERROR("Failed to bind " << af_label << " server socket to port " << port);
+            LOG_SOCKET_ERROR("Failed to bind " << af_label << " server socket to port " << port
+                             << " (error: " << socket_error_string(get_last_socket_error()) << ")");
             close_socket(server_socket);
             return RATS_INVALID_SOCKET;
         }
@@ -502,14 +506,16 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
 
         if (bind(server_socket, reinterpret_cast<sockaddr*>(&server_addr),
                  sizeof(server_addr)) == RATS_SOCKET_ERROR) {
-            LOG_SOCKET_ERROR("Failed to bind " << af_label << " server socket to port " << port);
+            LOG_SOCKET_ERROR("Failed to bind " << af_label << " server socket to port " << port
+                             << " (error: " << socket_error_string(get_last_socket_error()) << ")");
             close_socket(server_socket);
             return RATS_INVALID_SOCKET;
         }
     }
 
     if (listen(server_socket, backlog) == RATS_SOCKET_ERROR) {
-        LOG_SOCKET_ERROR("Failed to listen on " << af_label << " server socket");
+        LOG_SOCKET_ERROR("Failed to listen on " << af_label << " server socket (error: "
+                         << socket_error_string(get_last_socket_error()) << ")");
         close_socket(server_socket);
         return RATS_INVALID_SOCKET;
     }
@@ -859,7 +865,8 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
         int opt = 1;
         if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR,
                        (char*)&opt, sizeof(opt)) == RATS_SOCKET_ERROR) {
-            LOG_SOCKET_ERROR("Failed to set " << af_label << " UDP socket options");
+            LOG_SOCKET_ERROR("Failed to set " << af_label << " UDP socket options (error: "
+                             << socket_error_string(get_last_socket_error()) << ")");
             close_socket(udp_socket);
             return RATS_INVALID_SOCKET;
         }
@@ -871,7 +878,8 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
         if (setsockopt(udp_socket, IPPROTO_IPV6, IPV6_V6ONLY,
                        (char*)&ipv6_only, sizeof(ipv6_only)) == RATS_SOCKET_ERROR) {
             if (af == AddressFamily::DualStack) {
-                LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only");
+                LOG_SOCKET_WARN("Failed to disable IPv6-only mode, will be IPv6 only (error: "
+                                << socket_error_string(get_last_socket_error()) << ")");
             }
         }
     }
@@ -1402,18 +1410,21 @@ bool set_socket_nonblocking(socket_t socket) {
 #ifdef _WIN32
     unsigned long mode = 1;
     if (ioctlsocket(socket, FIONBIO, &mode) != 0) {
-        LOG_SOCKET_ERROR("Failed to set socket to non-blocking mode");
+        LOG_SOCKET_ERROR("Failed to set socket to non-blocking mode (error: "
+                         << socket_error_string(get_last_socket_error()) << ")");
         return false;
     }
 #else
     int flags = fcntl(socket, F_GETFL, 0);
     if (flags == -1) {
-        LOG_SOCKET_ERROR("Failed to get socket flags");
+        LOG_SOCKET_ERROR("Failed to get socket flags (error: "
+                         << socket_error_string(get_last_socket_error()) << ")");
         return false;
     }
 
     if (fcntl(socket, F_SETFL, flags | O_NONBLOCK) == -1) {
-        LOG_SOCKET_ERROR("Failed to set socket to non-blocking mode");
+        LOG_SOCKET_ERROR("Failed to set socket to non-blocking mode (error: "
+                         << socket_error_string(get_last_socket_error()) << ")");
         return false;
     }
 #endif
@@ -1426,18 +1437,21 @@ bool set_socket_blocking(socket_t socket) {
 #ifdef _WIN32
     unsigned long mode = 0;
     if (ioctlsocket(socket, FIONBIO, &mode) != 0) {
-        LOG_SOCKET_ERROR("Failed to set socket to blocking mode");
+        LOG_SOCKET_ERROR("Failed to set socket to blocking mode (error: "
+                         << socket_error_string(get_last_socket_error()) << ")");
         return false;
     }
 #else
     int flags = fcntl(socket, F_GETFL, 0);
     if (flags == -1) {
-        LOG_SOCKET_ERROR("Failed to get socket flags");
+        LOG_SOCKET_ERROR("Failed to get socket flags (error: "
+                         << socket_error_string(get_last_socket_error()) << ")");
         return false;
     }
 
     if (fcntl(socket, F_SETFL, flags & ~O_NONBLOCK) == -1) {
-        LOG_SOCKET_ERROR("Failed to set socket to blocking mode");
+        LOG_SOCKET_ERROR("Failed to set socket to blocking mode (error: "
+                         << socket_error_string(get_last_socket_error()) << ")");
         return false;
     }
 #endif
