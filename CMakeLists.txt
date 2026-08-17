@@ -267,6 +267,7 @@ set(LIBRARY_SOURCES
     src/librats/subsystems/port_mapping_service.cpp
     src/librats/subsystems/hole_punch.h
     src/librats/subsystems/hole_punch.cpp
+    src/librats/subsystems/hole_punch_service.h
 
 # dht/ — Kademlia DHT + KRPC (bencode is shared with bittorrent, always built)
     src/librats/dht/dht.h

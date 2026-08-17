@@ -1,5 +1,6 @@
 #include "librats/subsystems/peer_exchange.h"
 #include "librats/node/node_context.h"
+#include "librats/subsystems/hole_punch_service.h"
 #include "librats/util/logger.h"
 #include "librats/util/network_utils.h"
 
@@ -32,14 +33,30 @@ PeerExchange::PeerExchange(Config config) : config_(std::move(config)) {}
 PeerExchange::~PeerExchange() { stop(); }
 
 void PeerExchange::attach(NodeContext& ctx) {
-    network_ = &ctx.network;
+    network_  = &ctx.network;
+    services_ = &ctx.services;   // both references outlive every subsystem
     network_->on(MessageType::Pex,
                          [this](const Peer& peer, ByteView payload) { handle(peer, payload); });
     network_->on_peer_connected([this](const Peer& peer) { on_connected(peer); });
+    network_->on_dial_failed([this](const Address& addr) { on_dial_failed(addr); });
 }
 
-void PeerExchange::start() { running_.store(true); }
-void PeerExchange::stop()  { running_.store(false); }
+void PeerExchange::start() {
+    // Resolved here rather than in attach(): HolePunch may be attached after us, and
+    // every attach() runs before any start(). Stored before running_ goes true, so a
+    // dial failure arriving on a reactor thread never sees a half-initialised state.
+    punch_.store(config_.punch_on_dial_failure && services_
+                     ? services_->get<HolePunchService>()
+                     : nullptr);
+    running_.store(true);
+}
+
+void PeerExchange::stop() {
+    running_.store(false);
+    punch_.store(nullptr);
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_dials_.clear();
+}
 
 // ── Outgoing request (on connect) ────────────────────────────────────────────
 
@@ -120,6 +137,10 @@ void PeerExchange::handle_response(ByteView body) {
     std::unordered_set<PeerId, PeerId::Hash> connected;
     for (const PeerId& id : network_->connected_peers()) connected.insert(id);
 
+    // Already at the size the application asked for: read the response no further.
+    // The sample is a snapshot anyway — when a peer drops, the next connect asks again.
+    if (config_.peer_target && connected.size() >= config_.peer_target) return;
+
     size_t dialed = 0;
     for (uint16_t i = 0; i < count; ++i) {
         if (dialed >= config_.max_addresses_per_response) break;  // bound receiver work
@@ -144,9 +165,51 @@ void PeerExchange::handle_response(ByteView body) {
         if (!should_dial(addr)) continue;                             // cooldown / dedup
 
         LOG_DEBUG("pex", "Discovered peer " << id->short_hex() << " at " << addr.to_string() << "; dialing");
+        remember_dial(addr, *id);   // before connect(): the verdict is asynchronous
         network_->connect(addr);
         ++dialed;
     }
+}
+
+// ── Punch fallback ───────────────────────────────────────────────────────────
+
+void PeerExchange::on_dial_failed(const Address& address) {
+    if (!running_.load()) return;
+    HolePunchService* punch = punch_.load();
+    if (!punch) return;   // no HolePunch attached, or the fallback is off
+
+    PeerId target;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = pending_dials_.find(address);
+        // Not one of ours (ReconnectionService and the app dial too), or too old to
+        // still be attributable to a peer id.
+        if (it == pending_dials_.end()) return;
+        const auto age = std::chrono::steady_clock::now() - it->second.started;
+        target = it->second.id;
+        pending_dials_.erase(it);
+        if (age > config_.punch_window) return;
+    }
+
+    LOG_DEBUG("pex", "Peer " << target.short_hex() << " would not dial at "
+              << address.to_string() << "; asking for a hole punch");
+    punch->punch(target);
+}
+
+void PeerExchange::remember_dial(const Address& addr, const PeerId& id) {
+    if (!config_.punch_on_dial_failure) return;
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // A dial that neither failed nor was reported leaves its entry behind, so the
+    // window is also what bounds the map in steady state; the cap is the backstop.
+    for (auto it = pending_dials_.begin(); it != pending_dials_.end();) {
+        if (now - it->second.started > config_.punch_window) it = pending_dials_.erase(it);
+        else ++it;
+    }
+    if (pending_dials_.size() >= config_.max_pending_dials) return;  // best-effort
+
+    pending_dials_[addr] = PendingDial{id, now};
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

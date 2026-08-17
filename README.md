@@ -332,6 +332,13 @@ punch->punch(peer_id);   // non-blocking; success arrives as an ordinary peer-co
 
 Every node involved must have the subsystem attached — including the one carrying the rendezvous, which forwards a few dozen bytes per punch and only ever to peers it already holds. The C ABI mirrors this as `rats_enable_hole_punch()` / `rats_punch_peer()` / `rats_nat_mapping()`.
 
+Calling `punch()` by hand assumes you know *which* peer is unreachable — which is the discovery half of the problem, not the traversal half. Attach `PeerExchange` alongside and it answers that on its own: PEX learns peers as an id *plus* an address, and when that address will not dial (exactly what a NATed peer looks like) it hands the id to `HolePunchService`, the capability `HolePunch` publishes. Nothing to wire up — attach both and unreachable peers start getting punched:
+
+```cpp
+node.add_subsystem(std::make_unique<HolePunch>());     // provides HolePunchService
+node.add_subsystem(std::make_unique<PeerExchange>());  // resolves it, if present
+```
+
 ### 8. Peer discovery (DHT + mDNS) and reconnection
 
 ```cpp

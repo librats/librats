@@ -136,6 +136,11 @@ void HolePunch::attach(NodeContext& ctx) {
     dialer_   = ctx.services.get<DialService>();
     external_ = ctx.services.get<ExternalAddressService>();
 
+    // Offer punching to sibling modules. Registered even without a dialer: punch()
+    // answers false on its own then, which is exactly what a caller expects from a
+    // node that can only relay.
+    ctx.services.provide<HolePunchService>(this);
+
     network_->on(MessageType::Punch,
                  [this](const Peer& peer, ByteView payload) { handle(peer, payload); });
 

@@ -2,12 +2,16 @@
 #include "test_paths.h"
 
 #include "librats/node/node.h"
+#include "librats/node/node_context.h"
+#include "librats/subsystems/hole_punch_service.h"
 #include "librats/subsystems/peer_exchange.h"
 #include "librats/wire/frame.h"
 
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 using namespace librats;
 using namespace std::chrono_literals;
@@ -36,6 +40,30 @@ bool has_dialable_address(Node& node, const PeerId& id) {
     auto p = node.peer(id);
     return p && p->info() && !p->info()->addresses.empty();
 }
+
+// Stands in for HolePunch: records who PEX asked to punch, without needing a NAT,
+// a relay or a second reachable node.
+class RecordingPunch final : public Subsystem, public HolePunchService {
+public:
+    void attach(NodeContext& ctx) override { ctx.services.provide<HolePunchService>(this); }
+    void start() override {}
+    void stop() override {}
+
+    bool punch(const PeerId& target) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        targets_.push_back(target);
+        return true;
+    }
+
+    std::vector<PeerId> targets() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return targets_;
+    }
+
+private:
+    mutable std::mutex  mutex_;
+    std::vector<PeerId> targets_;
+};
 
 } // namespace
 
@@ -73,6 +101,44 @@ TEST(PexE2E, DiscoversPeerThroughCommonNode) {
     a.stop();
     b.stop();
     hub.stop();
+}
+
+// A peer learned through PEX whose advertised address will not dial (the NAT case)
+// must be handed to HolePunch rather than written off.
+TEST(PexE2E, PunchesPeerThatWillNotDial) {
+    // TCP only: a refused connect resolves the dial at once, where a datagram dial to
+    // a dead port would sit out its retries first.
+    NodeConfig tcp_only = listening_config();
+    tcp_only.enable_udp = false;
+    tcp_only.preferred_transport = TransportKind::Tcp;
+
+    Node server(tcp_only);
+    Node client(tcp_only);
+
+    server.add_subsystem(std::make_unique<PeerExchange>());
+    auto* punch = server.add_subsystem(std::make_unique<RecordingPunch>());
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return server.peer_count() == 1; }));
+
+    // One entry: an id nobody has, at an address nothing listens on.
+    const Bytes ghost_id(PeerId::kSize, 0xAB);
+    Bytes response = {0x01, 0x01,          // version, response
+                      0x00, 0x01,          // count = 1
+                      0x04, 127, 0, 0, 1,  // ip_len, 127.0.0.1
+                      0x00, 0x01};         // port 1
+    response.insert(response.end(), ghost_id.begin(), ghost_id.end());
+    client.send(server.local_id(), MessageType::Pex, ByteView(response));
+
+    ASSERT_TRUE(wait_for([&] { return !punch->targets().empty(); }))
+        << "PEX never asked for a punch after the discovered peer refused to dial";
+    EXPECT_EQ(punch->targets().front(), PeerId::from_bytes(ByteView(ghost_id)).value());
+
+    client.stop();
+    server.stop();
 }
 
 // A garbage PEX frame must be ignored, never crash or drop the connection.

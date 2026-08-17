@@ -94,6 +94,7 @@
 #include "librats/node/peer_network.h"
 #include "librats/peer/peer.h"
 #include "librats/peer/peer_id.h"
+#include "librats/subsystems/hole_punch_service.h"
 
 #include <atomic>
 #include <chrono>
@@ -108,7 +109,9 @@ namespace librats {
 
 class DialService;
 
-class RATS_API HolePunch final : public Subsystem {
+/// Published as HolePunchService, so a module that discovers a peer it cannot dial
+/// (PeerExchange) can hand the id over without depending on this class.
+class RATS_API HolePunch final : public Subsystem, public HolePunchService {
 public:
     struct Config {
         /// Peers asked to carry one punch's rendezvous. More than one because we
@@ -176,7 +179,7 @@ public:
     /// is already running, when it is still in cooldown, or when this node has
     /// nothing punchable to advertise (see nat_status.h).
     /// @return whether a session was actually started.
-    bool punch(const PeerId& target);
+    bool punch(const PeerId& target) override;
 
     /// Sessions currently in flight (diagnostics and tests).
     size_t active_sessions() const;
