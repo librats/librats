@@ -63,12 +63,10 @@ bool Connection::send(FrameHeader header, ByteView payload) {
 
     queue_block(std::move(cipher));
 
-    // Watch the memory the queue actually holds, not just the bytes still owed to the
-    // socket: a partially sent chunk keeps its whole allocation, so allocated() is
-    // what a peer that stops reading can make us carry.
-    if (tx_.allocated() > send_high_water_) {
+    const size_t backlog_now = backlog();
+    if (backlog_now > send_high_water_) {
         LOG_WARN("connection", "Peer " << remote_id_.short_hex() << " over send high-water ("
-                 << tx_.allocated() << " B); closing as slow consumer");
+                 << backlog_now << " B); closing as slow consumer");
         close_reason_ = CloseReason::SlowConsumer;
         state_ = ConnState::Closing;
         reactor_.close(id_, CloseReason::SlowConsumer);
@@ -81,7 +79,7 @@ bool Connection::send(FrameHeader header, ByteView payload) {
     // and on_writable says so. Without this an application has no way at all to
     // tell that it is outrunning the link, and the only thing that eventually
     // tells it is the disconnection above.
-    if (!over_low_water_ && tx_.allocated() > send_low_water_) {
+    if (!over_low_water_ && backlog_now > send_low_water_) {
         over_low_water_ = true;
         delegate_.on_writable_changed(*this, false);
     }
@@ -315,7 +313,7 @@ bool Connection::flush() {
     // re-entrancy guard is what keeps a handler that answers by sending from
     // recursing through flush() — it may queue, and the next drain reports the
     // next opening, but it cannot nest.
-    if (over_low_water_ && !in_writable_ && tx_.allocated() <= send_low_water_) {
+    if (over_low_water_ && !in_writable_ && backlog() <= send_low_water_) {
         over_low_water_ = false;
         in_writable_    = true;
         delegate_.on_writable_changed(*this, true);

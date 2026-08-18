@@ -37,6 +37,7 @@
 #include "librats/core/socket.h"
 #include "librats/transport/link.h"
 
+#include <atomic>
 #include <memory>
 
 namespace librats {
@@ -133,6 +134,28 @@ public:
 
     /// Whether the send queue currently has room (see send()).
     bool writable() const noexcept { return !over_low_water_; }
+
+    /// Adopt the peer's in-transit counter: bytes a caller has handed to this
+    /// reactor that have not reached send() yet (see PeerTable::Entry::owed).
+    ///
+    /// They are as much of the backlog as the queue itself — held in the reactor's
+    /// task queue rather than in tx_, and on their way here — so the marks below
+    /// weigh them together with what is queued. Without that the two halves would
+    /// answer separately: a caller told "no room" because its charge crossed the
+    /// mark would be waiting for an opening from a queue that never crossed
+    /// anything, and so would never be told the room came back.
+    void set_in_transit(std::shared_ptr<const std::atomic<size_t>> owed) noexcept {
+        in_transit_ = std::move(owed);
+    }
+
+    /// What this connection is carrying: queued here plus still on its way.
+    size_t backlog() const noexcept {
+        // Watch the memory the queue actually holds, not just the bytes still owed
+        // to the socket: a partially sent chunk keeps its whole allocation, so
+        // allocated() is what a peer that stops reading can make us carry.
+        return tx_.allocated() +
+               (in_transit_ ? in_transit_->load(std::memory_order_relaxed) : 0);
+    }
 
     /// Resize the send queue's marks. `high` is where the connection is dropped
     /// as a slow consumer; the low-water mark send() reports against is derived
@@ -247,6 +270,9 @@ private:
     bool              over_low_water_ = false;
     /// Inside the on_writable callback — see flush().
     bool              in_writable_ = false;
+    /// Charged by send() callers on any thread, discharged by the reactor task
+    /// just before the frame reaches send() — see set_in_transit().
+    std::shared_ptr<const std::atomic<size_t>> in_transit_;
     size_t            send_high_water_ = kDefaultSendHighWater;
     size_t            send_low_water_  = kDefaultSendLowWater;
     TimerId           establish_timer_ = kInvalidTimerId;  ///< connect+handshake deadline

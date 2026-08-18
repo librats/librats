@@ -428,10 +428,14 @@ void Node::route_send(PeerRoute route, FrameHeader header, Bytes payload,
     auto data = std::make_shared<Bytes>(std::move(payload));
     const size_t weight = data->size();
     reactor.execute([&reactor, conn, header, data, owed, weight] {
-        if (auto* c = reactor.find(conn)) c->send(header, ByteView(*data));
-        // Discharged whether or not the connection was still there: the counter
-        // measures what is in transit to the reactor, and this one has arrived.
+        // Discharged whether or not the connection is still there, and *before*
+        // the frame is queued rather than after: from here on these bytes are
+        // counted by the send queue instead, and the connection weighs both
+        // together (Connection::backlog). Discharging afterwards would leave a
+        // window where they were counted twice — and, worse, one where they were
+        // counted by neither, which is what an opening must never be reported on.
         if (owed) owed->fetch_sub(weight, std::memory_order_relaxed);
+        if (auto* c = reactor.find(conn)) c->send(header, ByteView(*data));
     });
 }
 
@@ -510,6 +514,14 @@ void Node::on_established(Connection& conn) {
     // route, so it neither evicts the survivor nor fires a spurious disconnect.
     if (outcome.close)
         reactors_->by_index(outcome.close->reactor).close(outcome.close->conn, CloseReason::DuplicateConn);
+
+    // Hand the peer's in-transit counter to the connection that now carries its
+    // traffic, so the send queue's marks weigh what callers have offered as well
+    // as what is already queued — the two halves of one backlog, and the reason a
+    // caller told "no room" is always the one told when the room comes back. The
+    // route check keeps the loser of a race off the survivor's counter.
+    if (const auto dest = peers_.destination(conn.remote_id()); dest && dest->route == route)
+        conn.set_in_transit(dest->owed);
 
     // Fire "connected" only on the 0→1 transition. A reconnect/duplicate that
     // merely swapped the live route keeps the peer connected from the app's view.

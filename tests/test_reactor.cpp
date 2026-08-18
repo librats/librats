@@ -76,6 +76,22 @@ public:
     std::vector<std::string> received_;
 };
 
+/// Client-side delegate that also records every low-water crossing it is told
+/// about, in order.
+class WritabilityDelegate : public CollectDelegate {
+public:
+    void on_writable_changed(Connection&, bool writable) override {
+        std::lock_guard<std::mutex> lock(writable_mutex_);
+        crossings_.push_back(writable);
+    }
+    std::vector<bool> crossings() {
+        std::lock_guard<std::mutex> lock(writable_mutex_);
+        return crossings_;
+    }
+    std::mutex        writable_mutex_;
+    std::vector<bool> crossings_;
+};
+
 /// Raise the soft descriptor limit towards `wanted` and report what is available.
 ///
 /// A single-process client+server test burns TWO descriptors per connection (the
@@ -223,6 +239,85 @@ TEST_F(ReactorTest, EchoesManyFramesInOrder) {
     std::lock_guard<std::mutex> lock(collect.mutex_);
     ASSERT_EQ(collect.received_.size(), static_cast<size_t>(kCount));
     for (int i = 0; i < kCount; ++i) EXPECT_EQ(collect.received_[i], std::to_string(i));
+
+    client.stop();
+    server.stop();
+}
+
+// The two halves of one backlog: what a connection has queued, and what a caller
+// on another thread has already handed to this reactor but that has not reached
+// send() yet (Node charges that to the peer's in-transit counter before it posts
+// the task, and discharges it in the task just before the frame is queued).
+//
+// They have to be weighed together, because send()'s answer is given from the
+// counter — a caller in a tight loop can be several messages ahead of the reactor,
+// and telling it "there is room" on a queue that has not seen those messages yet
+// is how a peer gets dropped as a slow consumer without warning. The other
+// direction is worse: if the connection weighed only its own queue, a caller
+// stopped by the charge alone would be waiting for an opening from a queue that
+// never crossed anything, and would wait for ever. So the charge must both raise
+// the mark and, when it drains, report the opening.
+TEST_F(ReactorTest, WeighsInTransitBytesWithTheSendQueue) {
+    auto [server_sock, port] = make_server();
+
+    Identity sid = Identity::generate(), cid = Identity::generate();
+    PlaintextSecurity ssec(sid), csec(cid);
+
+    EchoDelegate echo;
+    Reactor server(0, echo, ssec);
+    server.listen(server_sock);
+    server.start();
+
+    WritabilityDelegate collect;
+    Reactor client(1, collect, csec);
+    client.start();
+
+    client.connect("127.0.0.1", port);
+    ASSERT_TRUE(wait_for([&] { return collect.established_.load() == 1; }));
+    const ConnId conn = collect.last_conn_id_.load();
+
+    auto in_transit = std::make_shared<std::atomic<size_t>>(0);
+    constexpr size_t kHigh = 64 * 1024;   // ⇒ a 16 KiB low-water mark
+    constexpr size_t kLow  = kHigh / 4;
+
+    client.execute([&, conn] {
+        auto* c = client.find(conn);
+        ASSERT_NE(c, nullptr);
+        c->set_send_high_water(kHigh);
+        c->set_in_transit(in_transit);
+        EXPECT_TRUE(c->writable()) << "an idle connection reported no room";
+    });
+
+    // A charge that has not reached send() yet, and one tiny frame behind it. The
+    // frame alone is nowhere near the mark; the charge is what takes the backlog
+    // over it, and the connection must say so.
+    std::atomic<bool> stopped{false};
+    client.execute([&, conn] {
+        auto* c = client.find(conn);
+        ASSERT_NE(c, nullptr);
+        in_transit->store(2 * kLow, std::memory_order_relaxed);
+        stopped = !c->send(0, ByteView(std::string("tiny")));
+    });
+    ASSERT_TRUE(wait_for([&] { return !collect.crossings().empty(); }))
+        << "the in-transit charge crossed the mark and nothing was reported";
+    EXPECT_TRUE(stopped.load()) << "send() offered more room than the backlog had";
+    EXPECT_EQ(collect.crossings().front(), false);
+
+    // The charged bytes arrive: discharged, then queued — which is the order the
+    // reactor task uses, so they are never counted twice and never uncounted. The
+    // queue drains them within the turn, so the backlog is back under the mark and
+    // the opening is owed to whoever was stopped above.
+    const std::string arrived(2 * kLow, 'x');
+    client.execute([&, conn] {
+        auto* c = client.find(conn);
+        ASSERT_NE(c, nullptr);
+        in_transit->store(0, std::memory_order_relaxed);
+        c->send(0, ByteView(arrived));
+    });
+    ASSERT_TRUE(wait_for([&] { return collect.crossings().size() >= 2; }))
+        << "the backlog drained and the opening was never reported — a sender that "
+           "stopped when it was told to would wait for ever";
+    EXPECT_EQ(collect.crossings()[1], true);
 
     client.stop();
     server.stop();
