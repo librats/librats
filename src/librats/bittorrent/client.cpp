@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <mutex>
 #include <utility>
 
 namespace librats::bittorrent {
@@ -31,10 +32,22 @@ void Client::start() {
 
 void Client::stop() {
     if (!opened_) return;
+    // Disarm the DHT callbacks BEFORE the reactor goes away: the shared DHT keeps
+    // running after us (node teardown is reverse-attach order) and a get_peers reply
+    // for a torrent we are about to drop would otherwise post to a destroyed reactor.
+    {
+        std::lock_guard<std::mutex> lock(dht_guard_->mutex);
+        dht_guard_->alive = false;
+    }
     reactor_.stop();  // join the loop thread first so nothing touches state concurrently
     opened_ = false;
     if (reap_timer_ != kInvalidTimerId) { reactor_.cancel(reap_timer_); reap_timer_ = kInvalidTimerId; }
-    for (auto& [hash, t] : torrents_) t->stop();
+    for (auto& [hash, t] : torrents_) {
+        // Drop the traversal too: nothing consumes its result any more, and it would
+        // keep hammering the DHT for a torrent that no longer exists.
+        if (dht_) dht_->cancel_search(hash);
+        t->stop();
+    }
     torrents_.clear();
     connections_.clear();
     // Reclaim any outbound sockets still mid-connect (their completion lambda will
@@ -42,6 +55,10 @@ void Client::stop() {
     for (socket_t s : pending_connects_) { reactor_.remove(s); close_socket(s); }
     pending_connects_.clear();
     if (is_valid_socket(listener_)) { reactor_.remove(listener_); close_socket(listener_); listener_ = RATS_INVALID_SOCKET; }
+    // Fresh token, so a Client that is start()ed again gets DHT peers delivered.
+    // Safe to swap unsynchronised: the reactor thread is joined and the old token is
+    // kept alive by whatever callbacks still hold it.
+    dht_guard_ = std::make_shared<DhtCallbackGuard>();
 }
 
 void Client::open_listener() {
@@ -141,7 +158,13 @@ void Client::find_peers_via_dht(const InfoHash& info_hash,
     // a use-after-free of peer_list_ (same H10 hazard fixed in connect_peer). Removal
     // happens only on the reactor thread, so a torrent present here stays alive for
     // the whole callback.
-    dht_->find_peers(info_hash, [this, info_hash, on_peer](const std::vector<Address>& peers, const InfoHash&) {
+    // The guard covers the *other* half of that hazard: the whole Client may be gone
+    // by the time the reply lands, since the shared DHT is torn down after us. Held
+    // for the post() only — the work itself still runs on the reactor.
+    dht_->find_peers(info_hash, [this, guard = dht_guard_, info_hash, on_peer](const std::vector<Address>& peers,
+                                                                              const InfoHash&) {
+        std::lock_guard<std::mutex> lock(guard->mutex);
+        if (!guard->alive) return;  // Client stopped/destroyed — its reactor is gone
         reactor_.post([this, info_hash, peers, on_peer] {
             if (torrents_.find(info_hash) == torrents_.end()) return;  // torrent gone
             for (const Address& a : peers) on_peer(a.ip.to_string(), a.port);
@@ -265,6 +288,9 @@ void Client::remove_torrent_impl(const InfoHash& info_hash) {
     for (auto& pc : connections_)
         if (!pc->closed() && pc->info_hash() == info_hash) pc->close("torrent removed");
     torrents_.erase(it);
+    // Stop the DHT traversal started for this torrent: its result has no consumer
+    // left, and letting it run keeps a lookup alive for a hash we no longer hold.
+    if (dht_) dht_->cancel_search(info_hash);
     // File deletion is not yet implemented; the torrent's data is left on disk.
 }
 

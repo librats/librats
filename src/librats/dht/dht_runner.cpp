@@ -21,25 +21,36 @@ DhtRunner::~DhtRunner() {
     stop();
 }
 
-void DhtRunner::start() {
+void DhtRunner::start(std::function<void()> on_loop_entry) {
     if (running_.exchange(true)) return;
-    thread_ = std::thread([this] { loop(); });
+    thread_ = std::thread([this, on_loop_entry = std::move(on_loop_entry)] {
+        if (on_loop_entry) on_loop_entry();
+        loop();
+    });
 }
 
 void DhtRunner::stop() {
-    if (!running_.exchange(false)) return;
+    // Flip the flag under the queue mutex, so post() can never slip a task past a
+    // concurrent stop() and leave it queued to a loop that is already gone.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!running_.exchange(false)) return;
+    }
     wakeup_.signal();  // wake the loop now instead of waiting out the recv timeout
     if (thread_.joinable()) thread_.join();
 }
 
-void DhtRunner::post(std::function<void()> task) {
+bool DhtRunner::post(std::function<void()> task) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Refuse once stopped: no one is left to drain the queue.
+        if (!running_.load()) return false;
         tasks_.push_back(std::move(task));
     }
     // The task is queued before we signal, so whenever a wakeup byte exists the task is
     // already visible to drain_tasks() — the loop can never block past a pending task.
     wakeup_.signal();
+    return true;
 }
 
 void DhtRunner::set_periodic(std::chrono::milliseconds interval, std::function<void()> fn) {

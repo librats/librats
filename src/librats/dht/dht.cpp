@@ -11,6 +11,7 @@
 #include <atomic>
 #include <future>
 #include <random>
+#include <shared_mutex>
 #include <utility>
 
 namespace librats {
@@ -28,6 +29,11 @@ bool write_routing_table(const std::string& path, const std::string& data_dir,
         create_directories(data_dir.c_str());
     return dht::save_routing_table(path, self, contacts);
 }
+
+// Marks a DHT loop thread with the Impl it belongs to (null on every other thread).
+// Planted from *inside* the thread at start(), so it needs no synchronisation to read
+// and nothing to clear: it dies with the thread it lives on.
+thread_local const void* tls_loop_owner = nullptr;
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -48,13 +54,50 @@ struct DhtClient::Impl {
     std::unique_ptr<dht::Node>         node;
     std::unique_ptr<dht::DhtRunner>    runner;
 
-    // Run `f` on the loop thread and return its result (used by getters).
+    /// Guards the *existence* of the engine trio above, which start()/stop() create and
+    /// destroy while other threads are calling in. `running` alone cannot do that job: a
+    /// caller that reads it as true can be descheduled and resume after stop() has already
+    /// freed the runner, so the very next `runner->post()` touches a dead object (and a
+    /// getter blocked on its promise would never be woken). start()/stop() take it
+    /// exclusively for the whole teardown; every public call takes it shared for its whole
+    /// duration — via lock_lifetime(), never directly. Teardown therefore cannot begin
+    /// while a call is in flight, which is what lets on_loop() below assume the loop
+    /// thread is alive and will answer it.
+    mutable std::shared_mutex lifetime;
+
+    /// True when the caller is our own runner's loop thread — see lock_lifetime(). Reads
+    /// the marker start() planted on that thread rather than anything hanging off
+    /// `runner`, which is precisely what stop() destroys underneath a caller that has
+    /// not taken `lifetime` yet.
+    bool on_loop_thread() const { return tls_loop_owner == this; }
+
+    /// `lifetime` held shared for the caller's whole call — except on the loop thread,
+    /// where it is deliberately *not* taken. A user callback runs there (peer discovery,
+    /// the periodic autosave) and may legitimately call back into the facade; since
+    /// stop() takes the lock exclusively and only then joins that very thread, waiting
+    /// for it here would deadlock the two against each other forever. Skipping it is
+    /// safe for exactly the same reason: if we are executing on the loop, the loop is
+    /// alive, so stop() cannot have got past its join() to the resets below it.
+    std::shared_lock<std::shared_mutex> lock_lifetime() const {
+        if (on_loop_thread()) return {};
+        return std::shared_lock<std::shared_mutex>(lifetime);
+    }
+
+    // Run `f` on the loop thread and return its result (used by getters). Safe to block on
+    // the promise: callers hold `lifetime` shared, so stop() cannot have started and the
+    // loop thread is still there to run the task.
     template <class F>
     auto on_loop(F&& f) -> decltype(f()) {
+        // Already on the loop: run it here. Posting would be waiting on ourselves, and
+        // `f` touches the same lock-free Node the loop would have touched for us. Only
+        // this round-trip path runs inline — the commands below stay post()s, so a
+        // callback can never re-enter the Node from inside one of the Node's own
+        // callbacks (cancel_lookup erasing the very traversal that is calling us).
+        if (on_loop_thread()) return f();
         using R = decltype(f());
         std::promise<R> p;
         auto fut = p.get_future();
-        runner->post([&] { p.set_value(f()); });
+        runner->post([&] { p.set_value(f()); });  // cannot fail: `lifetime` is held shared
         return fut.get();
     }
 
@@ -81,6 +124,7 @@ DhtClient::DhtClient(int port, const std::string& bind_address,
 DhtClient::~DhtClient() { stop(); }
 
 bool DhtClient::start() {
+    std::unique_lock<std::shared_mutex> lock(impl_->lifetime);
     if (impl_->running.load()) return true;
 
     const int requested_port = impl_->port;
@@ -116,8 +160,9 @@ bool DhtClient::start() {
 
     // Periodically persist the warm contact set so a crash doesn't lose it (we otherwise
     // only save on a clean stop()). Runs on the loop thread, so it reads the lock-free
-    // Node directly — no on_loop() round-trip (which would deadlock from this thread).
-    // Only when a data dir is configured, to avoid littering the CWD.
+    // Node directly — no on_loop() round-trip and no lock needed (see lock_lifetime()):
+    // stop() joins the loop before it resets the node, so the node is alive for as long
+    // as this can run. Only when a data dir is configured, to avoid littering the CWD.
     if (!impl_->data_directory.empty() && impl_->data_directory != ".") {
         impl_->runner->set_periodic(kAutosaveInterval, [this] {
             if (!impl_->node) return;
@@ -128,7 +173,9 @@ bool DhtClient::start() {
         });
     }
 
-    impl_->runner->start();
+    // Mark the loop thread before anything runs on it, so a callback that calls back
+    // into the facade is recognised from its very first invocation.
+    impl_->runner->start([impl = impl_.get()] { tls_loop_owner = impl; });
     impl_->running.store(true);
     LOG_INFO("dht", "started, node " << dht::short_hex(impl_->self) << ", "
                     << (impl_->ipv6 ? "IPv6" : "IPv4") << " on port " << impl_->port);
@@ -136,16 +183,23 @@ bool DhtClient::start() {
 }
 
 void DhtClient::stop() {
+    // Exclusive for the whole teardown: no public call may be mid-flight while the trio
+    // below is destroyed, and none may start until it is done. See Impl::lifetime. This
+    // one method still may not be called *from* the loop thread — it joins that thread,
+    // so it would be waiting on itself no matter how the lock behaved.
+    std::unique_lock<std::shared_mutex> lock(impl_->lifetime);
     if (!impl_->running.exchange(false)) return;
     LOG_INFO("dht", "stopping");
     if (impl_->runner) impl_->runner->stop();  // join the loop thread first
 
     // Single-threaded again: persist (only when a data dir is configured, to avoid
-    // littering) directly from the idle node.
+    // littering) directly from the idle node. Written inline rather than through
+    // save_routing_table(), which would take `lifetime` a second time and deadlock.
     if (impl_->node && !impl_->data_directory.empty()) {
-        const std::size_t n = impl_->node->routing_table().good_contacts().size();
-        save_routing_table();
-        LOG_INFO("dht", "saved " << n << " contact(s) to disk");
+        const auto contacts = impl_->node->routing_table().good_contacts();
+        write_routing_table(routing_table_file_path(), impl_->data_directory,
+                            impl_->node->self(), contacts);
+        LOG_INFO("dht", "saved " << contacts.size() << " contact(s) to disk");
     }
 
     impl_->runner.reset();
@@ -159,10 +213,12 @@ void DhtClient::shutdown_immediate() { stop(); }
 bool DhtClient::is_running() const { return impl_->running.load(); }
 
 uint16_t DhtClient::get_port() const {
+    const auto lock = impl_->lock_lifetime();
     return impl_->transport ? impl_->transport->port() : 0;
 }
 
 bool DhtClient::bootstrap(const std::vector<HostEndpoint>& bootstrap_nodes) {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) {
         LOG_WARN("dht", "bootstrap ignored — client not running");
         return false;
@@ -186,6 +242,7 @@ bool DhtClient::bootstrap(const std::vector<HostEndpoint>& bootstrap_nodes) {
 }
 
 bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback callback) {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return false;
     // A user callback runs on the loop thread, so a throw would take the whole DHT
     // down — isolate it here.
@@ -214,6 +271,7 @@ bool DhtClient::find_peers(const InfoHash& info_hash, PeerDiscoveryCallback call
 }
 
 bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port, PeerDiscoveryCallback callback) {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return false;
     const uint16_t dht_port = impl_->transport->port();
     const uint16_t announce_port = port == 0 ? dht_port : port;
@@ -245,16 +303,19 @@ bool DhtClient::announce_peer(const InfoHash& info_hash, uint16_t port, PeerDisc
 }
 
 void DhtClient::cancel_search(const InfoHash& info_hash) {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return;
     impl_->runner->post([this, info_hash] { impl_->node->cancel_lookup(info_hash); });
 }
 
 NodeId DhtClient::get_node_id() const {
+    const auto lock = impl_->lock_lifetime();
     if (impl_->running.load()) return impl_->on_loop([this] { return impl_->node->self(); });
     return impl_->self;
 }
 
 void DhtClient::set_external_ip(const std::string& ip_str) {
+    const auto lock = impl_->lock_lifetime();
     // STUN and the public API hand us a textual IP — parse once here, then the engine
     // works purely in numeric IpAddress terms (no repeated re-parsing per BEP 42 step).
     const auto ip = IpAddress::parse(ip_str);
@@ -280,6 +341,7 @@ void DhtClient::set_external_ip(const std::string& ip_str) {
 }
 
 std::string DhtClient::get_external_address() const {
+    const auto lock = impl_->lock_lifetime();
     if (impl_->running.load())
         return impl_->on_loop([this] { return impl_->node->external_address().to_string(); });
     return impl_->external_address;
@@ -294,27 +356,32 @@ std::vector<HostEndpoint> DhtClient::get_default_bootstrap_nodes() {
 }
 
 size_t DhtClient::get_routing_table_size() const {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return 0;
     return impl_->on_loop([this] { return impl_->node->routing_table().size(); });
 }
 
 
 bool DhtClient::is_search_active(const InfoHash& info_hash) const {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return false;
     return impl_->on_loop([this, info_hash] { return impl_->node->lookup_active(info_hash, false); });
 }
 
 bool DhtClient::is_announce_active(const InfoHash& info_hash) const {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return false;
     return impl_->on_loop([this, info_hash] { return impl_->node->lookup_active(info_hash, true); });
 }
 
 size_t DhtClient::get_active_searches_count() const {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return 0;
     return impl_->on_loop([this] { return impl_->node->lookup_count(false); });
 }
 
 size_t DhtClient::get_active_announces_count() const {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return 0;
     return impl_->on_loop([this] { return impl_->node->lookup_count(true); });
 }
@@ -335,6 +402,7 @@ std::string DhtClient::routing_table_file_path() const {
 }
 
 bool DhtClient::save_routing_table() {
+    const auto lock = impl_->lock_lifetime();
     NodeId self = impl_->self;
     std::vector<dht::NodeEntry> contacts;
     if (impl_->running.load() && impl_->node) {
@@ -351,6 +419,7 @@ bool DhtClient::save_routing_table() {
 }
 
 bool DhtClient::load_routing_table() {
+    const auto lock = impl_->lock_lifetime();
     NodeId loaded = impl_->self;
     std::vector<dht::NodeEntry> contacts;
     if (!dht::load_routing_table(routing_table_file_path(), loaded, contacts)) return false;
@@ -365,33 +434,42 @@ void DhtClient::set_data_directory(const std::string& directory) { impl_->data_d
 
 #ifdef RATS_SEARCH_FEATURES
 void DhtClient::set_spider_mode(bool enable) {
+    const auto lock = impl_->lock_lifetime();
     if (impl_->running.load()) impl_->node->set_spider_mode(enable);  // atomic flag, loop-safe
 }
 bool DhtClient::is_spider_mode() const {
+    const auto lock = impl_->lock_lifetime();
     return impl_->running.load() && impl_->node->is_spider_mode();  // atomic read, loop-safe
 }
 void DhtClient::set_spider_announce_callback(SpiderAnnounceCallback callback) {
+    const auto lock = impl_->lock_lifetime();
     if (impl_->running.load())
         impl_->runner->post([this, callback]() mutable { impl_->node->set_spider_announce_callback(std::move(callback)); });
 }
 void DhtClient::set_spider_ignore(bool ignore) {
+    const auto lock = impl_->lock_lifetime();
     if (impl_->running.load()) impl_->node->set_spider_ignore(ignore);  // atomic
 }
 bool DhtClient::is_spider_ignoring() const {
+    const auto lock = impl_->lock_lifetime();
     return impl_->running.load() && impl_->node->is_spider_ignoring();
 }
 void DhtClient::spider_walk() {
+    const auto lock = impl_->lock_lifetime();
     if (impl_->running.load()) impl_->runner->post([this] { impl_->node->spider_walk(Impl::now()); });
 }
 size_t DhtClient::get_spider_pool_size() const {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return 0;
     return impl_->on_loop([this] { return impl_->node->spider_pool_size(); });
 }
 size_t DhtClient::get_spider_visited_count() const {
+    const auto lock = impl_->lock_lifetime();
     if (!impl_->running.load()) return 0;
     return impl_->on_loop([this] { return impl_->node->spider_visited_count(); });
 }
 void DhtClient::clear_spider_state() {
+    const auto lock = impl_->lock_lifetime();
     if (impl_->running.load()) impl_->runner->post([this] { impl_->node->clear_spider_state(); });
 }
 #endif // RATS_SEARCH_FEATURES

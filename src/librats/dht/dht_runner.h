@@ -34,11 +34,16 @@ public:
     DhtRunner(const DhtRunner&) = delete;
     DhtRunner& operator=(const DhtRunner&) = delete;
 
-    void start();
+    // `on_loop_entry`, if given, runs on the loop thread before anything else does —
+    // the hook for marking that thread as such (see DhtClient), so even the very first
+    // callback it runs is already recognisable.
+    void start(std::function<void()> on_loop_entry = {});
     void stop();
 
     // Run `task` on the loop thread. The only safe way to touch the Node from outside.
-    void post(std::function<void()> task);
+    // Returns false (dropping the task) once the runner is stopped: nothing would ever
+    // run it, so a caller must not be left believing it was queued.
+    bool post(std::function<void()> task);
 
     // Register a callback invoked on the loop thread every `interval` (e.g. persisting
     // the routing table). The first invocation is one interval after start(), never at
