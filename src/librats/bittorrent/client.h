@@ -32,6 +32,7 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <type_traits>
 #include <unordered_set>
@@ -193,6 +194,20 @@ private:
     TimerId       reap_timer_   = kInvalidTimerId;
 
     DhtClient*    dht_ = nullptr;   ///< external, non-owning
+
+    /// Keeps DHT callbacks from touching a torn-down Client. A get_peers traversal
+    /// runs for seconds, and the shared DHT is stopped *after* us (node teardown is
+    /// reverse-attach order), so a reply can land once our reactor is gone and this
+    /// object destroyed — dereferencing it then is a use-after-free that hangs the
+    /// DHT loop thread inside Reactor::post, and with it the DHT's own join(). Every
+    /// callback we hand to the DHT captures this token by shared_ptr and does its
+    /// work under `mutex` with `alive` checked; stop() clears the flag under the same
+    /// mutex, so a callback either completes before teardown or does nothing at all.
+    struct DhtCallbackGuard {
+        std::mutex mutex;
+        bool       alive = true;
+    };
+    std::shared_ptr<DhtCallbackGuard> dht_guard_ = std::make_shared<DhtCallbackGuard>();
 
     std::map<InfoHash, std::unique_ptr<Torrent>>      torrents_;
     std::vector<std::unique_ptr<PeerConnection>>      connections_;

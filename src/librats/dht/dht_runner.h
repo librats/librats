@@ -38,7 +38,9 @@ public:
     void stop();
 
     // Run `task` on the loop thread. The only safe way to touch the Node from outside.
-    void post(std::function<void()> task);
+    // Returns false (dropping the task) once the runner is stopped — a caller waiting
+    // on a result the task was supposed to produce must not block on it.
+    bool post(std::function<void()> task);
 
     // Register a callback invoked on the loop thread every `interval` (e.g. persisting
     // the routing table). The first invocation is one interval after start(), never at

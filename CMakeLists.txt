@@ -623,6 +623,7 @@ if(RATS_BUILD_TESTS)
         tests/test_dht_node.cpp
         tests/test_dht_persistence_v2.cpp
         tests/test_dht_udp.cpp
+        tests/test_dht_runner_shutdown.cpp
         tests/test_os.cpp
         tests/test_fs.cpp
         tests/test_json.cpp

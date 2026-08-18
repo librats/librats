@@ -27,19 +27,34 @@ void DhtRunner::start() {
 }
 
 void DhtRunner::stop() {
-    if (!running_.exchange(false)) return;
-    wakeup_.signal();  // wake the loop now instead of waiting out the recv timeout
-    if (thread_.joinable()) thread_.join();
-}
-
-void DhtRunner::post(std::function<void()> task) {
+    // Flip the flag under the queue mutex so post() can never slip a task past a
+    // concurrent stop() and see it queued to a loop that is already gone.
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!running_.exchange(false)) return;
+    }
+    wakeup_.signal();  // wake the loop now instead of waiting out the recv timeout
+    if (thread_.joinable()) thread_.join();
+    // Run whatever the loop did not get to before it exited. Callers that marshal a
+    // *result* back (DhtClient's getters, via on_loop) block on a promise the task
+    // fulfils, so an abandoned task would leave them waiting forever. The loop thread
+    // is joined, so this thread is now the node's only user — running them here is as
+    // single-threaded as the rest of the teardown path.
+    drain_tasks();
+}
+
+bool DhtRunner::post(std::function<void()> task) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Refuse once stopped: nothing would ever run the task, and a caller waiting
+        // on its result would block forever.
+        if (!running_.load()) return false;
         tasks_.push_back(std::move(task));
     }
     // The task is queued before we signal, so whenever a wakeup byte exists the task is
     // already visible to drain_tasks() — the loop can never block past a pending task.
     wakeup_.signal();
+    return true;
 }
 
 void DhtRunner::set_periodic(std::chrono::milliseconds interval, std::function<void()> fn) {

@@ -49,12 +49,19 @@ struct DhtClient::Impl {
     std::unique_ptr<dht::DhtRunner>    runner;
 
     // Run `f` on the loop thread and return its result (used by getters).
+    //
+    // Every caller checks `running` first, but a concurrent stop() can land between
+    // that check and this post — so take post()'s answer rather than assuming the
+    // loop is still there: waiting on a promise no one will ever fulfil hangs the
+    // calling thread forever (a UI stats poll racing shutdown, say). A stopped runner
+    // yields the default-constructed result instead, which is what the pre-start
+    // branches of those same getters already return.
     template <class F>
     auto on_loop(F&& f) -> decltype(f()) {
         using R = decltype(f());
         std::promise<R> p;
         auto fut = p.get_future();
-        runner->post([&] { p.set_value(f()); });
+        if (!runner->post([&] { p.set_value(f()); })) return R{};
         return fut.get();
     }
 
