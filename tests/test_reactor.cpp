@@ -292,12 +292,19 @@ TEST_F(ReactorTest, WeighsInTransitBytesWithTheSendQueue) {
     // frame alone is nowhere near the mark; the charge is what takes the backlog
     // over it, and the connection must say so.
     std::atomic<bool> stopped{false};
+    // Set last, so waiting on it publishes `stopped` too. The crossing is NOT a
+    // usable signal here: the delegate is called from *inside* send(), so a waiter
+    // woken by it can read `stopped` before send() has even returned — and it is
+    // woken at exactly that moment, since crossings() hands the lock straight over.
+    std::atomic<bool> answered{false};
     client.execute([&, conn] {
         auto* c = client.find(conn);
         ASSERT_NE(c, nullptr);
         in_transit->store(2 * kLow, std::memory_order_relaxed);
         stopped = !c->send(0, ByteView(std::string("tiny")));
+        answered = true;
     });
+    ASSERT_TRUE(wait_for([&] { return answered.load(); })) << "the send never ran";
     ASSERT_TRUE(wait_for([&] { return !collect.crossings().empty(); }))
         << "the in-transit charge crossed the mark and nothing was reported";
     EXPECT_TRUE(stopped.load()) << "send() offered more room than the backlog had";
