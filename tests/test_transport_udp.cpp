@@ -2601,7 +2601,9 @@ TEST(TransportUdpTest, PrefersUdpWhenBothAreAvailable) {
     Node client(client_cfg);
     ASSERT_TRUE(server.start());
     ASSERT_TRUE(client.start());
-    EXPECT_EQ(server.transports(), PeerTransportTcp | PeerTransportUdp);
+    // Fatal on purpose: without a UDP listener every assertion below fails as a
+    // consequence, and the run should name the cause rather than the fallout.
+    ASSERT_EQ(server.transports(), PeerTransportTcp | PeerTransportUdp);
 
     client.connect("127.0.0.1", server.listen_port());
     ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));

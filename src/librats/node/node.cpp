@@ -106,10 +106,13 @@ Node::~Node() {
 MessageJson* Node::json() noexcept { return subsystem<MessageJson>(); }
 
 bool Node::open_listeners() {
-    // Attempts at finding a port that is free for BOTH transports, when the
-    // choice is ours. A clash is unlikely (TCP and UDP have separate port spaces)
-    // but it is not impossible, and silently landing on mismatched ports would
-    // make every address this node advertises half-wrong.
+    // Attempts at finding a port that is free for BOTH transports. A clash
+    // between the two is unlikely (TCP and UDP have separate port spaces) but it
+    // is not impossible, and silently landing on mismatched ports would make
+    // every address this node advertises half-wrong. The same attempts cover a
+    // configured port that some other process already holds: attempt N tries
+    // listen_port + N, so one squatter on the default port does not leave the
+    // host without a node.
     constexpr int kBindAttempts = 5;
 
     const AddressFamily family = family_for_bind(config_.bind_address);
@@ -138,7 +141,12 @@ bool Node::open_listeners() {
     for (int attempt = 0; attempt < kBindAttempts; ++attempt) {
         socket_t udp  = RATS_INVALID_SOCKET;
         socket_t tcp  = RATS_INVALID_SOCKET;
-        uint16_t port = config_.listen_port;
+
+        // Walk upward from the configured port; an ephemeral one is re-requested
+        // as 0 each time, since the kernel picks a different port on its own.
+        const int candidate = config_.listen_port == 0 ? 0 : config_.listen_port + attempt;
+        if (candidate > 65535) break;
+        uint16_t port = static_cast<uint16_t>(candidate);
 
         // Bind the stream socket first: when the port is ours to choose it is the
         // one that reports which ephemeral port it landed on, and the datagram
@@ -157,6 +165,16 @@ bool Node::open_listeners() {
         if (listen_tcp) {
             tcp = create_tcp_server(port, 128, config_.bind_address, family);
             if (!is_valid_socket(tcp)) {
+                // A port that is taken, or that Windows keeps reserved, is the
+                // bind failure another port can answer. Every other one — no
+                // permission for a privileged port, a bind address that is not on
+                // this host, IPv6 switched off — fails identically on all 65535 of
+                // them, and walking the range would only bury the real error under
+                // four more copies of it.
+                if (last_error_was_port_unavailable() && attempt + 1 < kBindAttempts) {
+                    LOG_WARN("node", "TCP port " << port << " is unavailable, trying another");
+                    continue;
+                }
                 LOG_ERROR("node", "Failed to listen on "
                           << config_.bind_address << ":" << port);
                 return false;
@@ -169,21 +187,36 @@ bool Node::open_listeners() {
             if (is_valid_socket(udp)) {
                 if (port == 0) port = static_cast<uint16_t>(get_bound_port(udp));
             } else if (listen_tcp) {
-                // Only worth retrying when the clash is with a port we picked
-                // ourselves; an explicitly configured one will clash every time.
-                if (config_.listen_port == 0 && attempt + 1 < kBindAttempts) {
+                // Worth another attempt only for a port another port would fix,
+                // and only while the next attempt would actually move: both the
+                // ephemeral case and the configured one land on a different port
+                // next time round. Windows makes this path the common one — its
+                // reserved ranges differ between TCP and UDP, so a port the stream
+                // socket was handed can be refused to the datagram one.
+                if (last_error_was_port_unavailable() && attempt + 1 < kBindAttempts) {
                     close_socket(tcp);
                     continue;
                 }
-                // Out of attempts, or a port that was not ours to move: the node
+                // Out of attempts, or a failure no other port would fix: the node
                 // still has a working transport, so it runs on that one rather
                 // than refusing to start.
                 LOG_WARN("node", "UDP port " << port << " unavailable; this node runs TCP-only");
             } else {
+                // UDP-only node: nothing to fall back to, so an unavailable port
+                // is walked past exactly as it is for TCP above.
+                if (last_error_was_port_unavailable() && attempt + 1 < kBindAttempts) {
+                    LOG_WARN("node", "UDP port " << port << " is unavailable, trying another");
+                    continue;
+                }
                 LOG_ERROR("node", "Failed to listen on UDP "
                           << config_.bind_address << ":" << port);
                 return false;
             }
+        }
+
+        if (config_.listen_port != 0 && port != config_.listen_port) {
+            LOG_WARN("node", "Configured port " << config_.listen_port
+                     << " was unavailable; listening on " << port << " instead");
         }
 
         listen_socket_ = tcp;
@@ -200,8 +233,10 @@ bool Node::open_listeners() {
         return true;
     }
 
-    // Not reachable: the last attempt does not retry, it settles for the
-    // transport it has. Kept so the function still has a value on every path.
+    // Reached only by running the port range off its end; the last attempt does
+    // not retry, it settles for the transport it has.
+    LOG_ERROR("node", "No free port found from " << config_.listen_port
+              << " upward for " << config_.bind_address);
     return false;
 }
 

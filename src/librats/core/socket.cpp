@@ -65,6 +65,46 @@ static std::string socket_error_string(int error) {
 #endif
 }
 
+static void set_last_socket_error(int error) {
+#ifdef _WIN32
+    WSASetLastError(error);
+#else
+    errno = error;
+#endif
+}
+
+/*
+ * Put a failing socket back in the caller's hands with the error that actually
+ * caused it. close_socket() is a syscall like any other and overwrites errno on
+ * its way out, so a factory that cleans up before returning would otherwise hand
+ * the caller the close()'s error — or a stale success.
+ */
+static socket_t fail_socket(socket_t socket, int error) {
+    close_socket(socket);
+    set_last_socket_error(error);
+    return RATS_INVALID_SOCKET;
+}
+
+bool last_error_was_port_unavailable() {
+#ifdef _WIN32
+    /*
+     * WSAEACCES from a bind is not "denied" in the POSIX sense: it is how
+     * Windows reports a port inside a reserved range — the blocks Hyper-V,
+     * WinNAT and WSL2 carve out of the ephemeral range, or a port another
+     * process holds with SO_EXCLUSIVEADDRUSE. Like a clash, it is answered by
+     * moving to another port, and it has to be, because the TCP and UDP
+     * exclusion ranges are separate: a stream socket lands on a port the
+     * matching datagram bind is then refused.
+     */
+    const int error = get_last_socket_error();
+    return error == WSAEADDRINUSE || error == WSAEACCES;
+#else
+    // No POSIX counterpart worth adding: EACCES there means a privileged port,
+    // which the next few ports up would be refused for just the same.
+    return get_last_socket_error() == EADDRINUSE;
+#endif
+}
+
 void suppress_sigpipe(socket_t socket) {
 #ifdef SO_NOSIGPIPE
     int on = 1;
@@ -483,10 +523,10 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
 
         if (bind(server_socket, reinterpret_cast<sockaddr*>(&server_addr),
                  sizeof(server_addr)) == RATS_SOCKET_ERROR) {
+            const int error = get_last_socket_error();
             LOG_SOCKET_ERROR("Failed to bind " << af_label << " server socket to port " << port
-                             << " (error: " << socket_error_string(get_last_socket_error()) << ")");
-            close_socket(server_socket);
-            return RATS_INVALID_SOCKET;
+                             << " (error: " << socket_error_string(error) << ")");
+            return fail_socket(server_socket, error);
         }
     } else {
         sockaddr_in6 server_addr;
@@ -506,10 +546,10 @@ socket_t create_tcp_server(int port, int backlog, const std::string& bind_addres
 
         if (bind(server_socket, reinterpret_cast<sockaddr*>(&server_addr),
                  sizeof(server_addr)) == RATS_SOCKET_ERROR) {
+            const int error = get_last_socket_error();
             LOG_SOCKET_ERROR("Failed to bind " << af_label << " server socket to port " << port
-                             << " (error: " << socket_error_string(get_last_socket_error()) << ")");
-            close_socket(server_socket);
-            return RATS_INVALID_SOCKET;
+                             << " (error: " << socket_error_string(error) << ")");
+            return fail_socket(server_socket, error);
         }
     }
 
@@ -902,10 +942,10 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
         }
 
         if (bind(udp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == RATS_SOCKET_ERROR) {
+            const int error = get_last_socket_error();
             LOG_SOCKET_ERROR("Failed to bind " << af_label << " UDP socket to port " << port
-                             << " (error: " << socket_error_string(get_last_socket_error()) << ")");
-            close_socket(udp_socket);
-            return RATS_INVALID_SOCKET;
+                             << " (error: " << socket_error_string(error) << ")");
+            return fail_socket(udp_socket, error);
         }
     } else {
         sockaddr_in6 addr;
@@ -924,10 +964,10 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
         }
 
         if (bind(udp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == RATS_SOCKET_ERROR) {
+            const int error = get_last_socket_error();
             LOG_SOCKET_ERROR("Failed to bind " << af_label << " UDP socket to port " << port
-                             << " (error: " << socket_error_string(get_last_socket_error()) << ")");
-            close_socket(udp_socket);
-            return RATS_INVALID_SOCKET;
+                             << " (error: " << socket_error_string(error) << ")");
+            return fail_socket(udp_socket, error);
         }
     }
 

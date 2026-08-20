@@ -477,4 +477,20 @@ bool connect_with_timeout(socket_t socket, struct sockaddr* addr, socklen_t addr
  */
 int get_bound_port(socket_t socket);
 
+/**
+ * Whether the last socket call in this thread failed because that particular
+ * port cannot be had — it is taken (EADDRINUSE / WSAEADDRINUSE), or on Windows
+ * it falls in a reserved range (WSAEACCES).
+ *
+ * Meant for the one caller that has to tell those apart from every other bind
+ * failure: they are the only ones worth answering by moving to another port,
+ * since the rest — a privileged port, a bind address not on this host, IPv6
+ * switched off — fail identically on all 65535 of them. The socket factories
+ * above preserve the failing errno across their own cleanup, so this still
+ * reports the bind error and not the close() that followed it.
+ *
+ * @return true if another port would plausibly work
+ */
+bool last_error_was_port_unavailable();
+
 } // namespace librats

@@ -290,6 +290,36 @@ TEST(NodeTest, StopReleasesListenPort) {
     second.stop();
 }
 
+// A configured port somebody else already holds is walked past, not fatal: the
+// node starts on one of the next few ports instead of leaving the host without
+// a node. Only a clash gets this treatment — see RobustAgainstBadInputs, where
+// an un-bindable address still fails start().
+TEST(NodeTest, TakenPortWalksToNextFreePort) {
+    Node squatter(server_config());           // ephemeral
+    ASSERT_TRUE(squatter.start());
+    const uint16_t taken = squatter.listen_port();
+    ASSERT_GT(taken, 0);
+
+    NodeConfig c = server_config();
+    c.listen_port = taken;                    // occupied by the node above
+    Node node(c);
+    ASSERT_TRUE(node.start()) << "a taken port should not fail start()";
+#ifndef _WIN32
+    // Windows is exempt from the rest: create_tcp_server() sets SO_REUSEADDR,
+    // which there lets a bind succeed on a port another socket of the same user
+    // is already listening on. bind() never reports EADDRINUSE, so there is no
+    // clash for open_listeners() to walk past and the node stays on the taken
+    // port. Starting at all — which is what this test is really about — still
+    // holds, and is asserted above for every platform.
+    EXPECT_NE(node.listen_port(), taken);
+    EXPECT_GT(node.listen_port(), taken);
+    EXPECT_LE(node.listen_port(), taken + 4); // kBindAttempts - 1 steps up
+#endif
+
+    node.stop();
+    squatter.stop();
+}
+
 // A multi-megabyte payload round-trips byte-exact, under both security modes.
 // Exercises frame chunking + reassembly across recv boundaries (and per-frame
 // AEAD when encrypted). Parameterized over Noise / Plaintext.
