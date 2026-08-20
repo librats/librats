@@ -148,20 +148,45 @@ bool Node::open_listeners() {
         if (candidate > 65535) break;
         uint16_t port = static_cast<uint16_t>(candidate);
 
-        // Bind the stream socket first: when the port is ours to choose it is the
-        // one that reports which ephemeral port it landed on, and the datagram
-        // socket then has to match it.
+        // Which socket names the port, and which one has to accept the name.
         //
-        // Which of the two picks matters, and it has to be this one. The kernel
-        // only ever hands out a port that is free for the protocol it is
-        // allocating for, so whichever binds second is the one that can be
-        // refused — and the two are not equally crowded. Both draw from the same
-        // ephemeral range, but every outbound TCP connection on the host holds a
-        // source port in it, and goes on holding it through TIME_WAIT after it
-        // closes; a busy machine keeps tens of thousands there, and nearly
-        // nothing competes for the UDP half of the same range. Letting UDP pick
-        // and then demanding TCP match it is a bet against that crowd, and under
-        // load it loses often enough to fail a node's start outright.
+        // Whichever binds second is the one that can be refused: the kernel only
+        // ever hands out a port that is free for the protocol it is allocating
+        // for, and the two protocols have separate port spaces. So the order is a
+        // choice of which refusal to face, and the sides are not symmetric.
+        //
+        // The stream socket names it first, because the scarcity is on its side.
+        // Both draw from the same ephemeral range, but every outbound TCP
+        // connection on the host holds a source port in it, and goes on holding
+        // it through TIME_WAIT after it closes; a busy machine keeps tens of
+        // thousands there, and nearly nothing competes for the UDP half of the
+        // same range. Letting UDP name the port and then demanding TCP match it
+        // is a bet against that crowd, and under load it loses often enough to
+        // fail a node's start outright.
+        //
+        // That reasoning is about a port being *taken*, though, and on Windows
+        // the usual refusal is a port being *reserved* — the blocks Hyper-V,
+        // WinNAT and WSL2 carve out of the ephemeral range, which are not the
+        // same blocks for the two protocols. Against a reservation, retrying the
+        // same way barely moves: Windows hands out ephemeral ports in ascending
+        // order while a reserved block is contiguous and can be hundreds wide, so
+        // each retry lands one port further into the same hole. A retry therefore
+        // swaps the roles rather than repeating them — an ephemeral bind on the
+        // refused side steps clear of that side's reservations in one move, since
+        // the kernel never allocates out of them. Only worth doing when the port
+        // is ours to choose, and never on the last attempt, so running out of
+        // attempts still ends on the conservative order.
+        const bool udp_names_port = listen_tcp && listen_udp && port == 0
+                                    && attempt % 2 == 1 && attempt + 1 < kBindAttempts;
+        if (udp_names_port) {
+            udp = create_udp_socket(0, config_.bind_address, family);
+            // Failing on a port the kernel picked itself is not a failure another
+            // port would fix, so there is nothing to walk to: leave the datagram
+            // socket to the usual path below and let TCP name the port after all.
+            if (is_valid_socket(udp))
+                port = static_cast<uint16_t>(get_bound_port(udp));
+        }
+
         if (listen_tcp) {
             tcp = create_tcp_server(port, 128, config_.bind_address, family);
             if (!is_valid_socket(tcp)) {
@@ -171,7 +196,10 @@ bool Node::open_listeners() {
                 // this host, IPv6 switched off — fails identically on all 65535 of
                 // them, and walking the range would only bury the real error under
                 // four more copies of it.
-                if (last_error_was_port_unavailable() && attempt + 1 < kBindAttempts) {
+                const bool retry = last_error_was_port_unavailable()
+                                   && attempt + 1 < kBindAttempts;
+                if (is_valid_socket(udp)) close_socket(udp);
+                if (retry) {
                     LOG_WARN("node", "TCP port " << port << " is unavailable, trying another");
                     continue;
                 }
@@ -182,7 +210,8 @@ bool Node::open_listeners() {
             if (port == 0) port = static_cast<uint16_t>(get_bound_port(tcp));
         }
 
-        if (listen_udp) {
+        // Skipped when the datagram socket already has the port: it named it.
+        if (listen_udp && !is_valid_socket(udp)) {
             udp = create_udp_socket(port, config_.bind_address, family);
             if (is_valid_socket(udp)) {
                 if (port == 0) port = static_cast<uint16_t>(get_bound_port(udp));
