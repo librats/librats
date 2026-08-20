@@ -77,7 +77,7 @@ Projects and companies building on librats:
 - **Plaintext option**: select `Security::Plaintext` for local debugging or trusted networks
 
 ### **NAT Traversal**
-- **Automatic port forwarding**: built-in **UPnP IGD** and **NAT-PMP** — the `PortMappingService` asks the router to forward the listen port on startup (both backends run in parallel; whichever the router supports wins), so peers behind a NAT can accept inbound connections with zero manual configuration. Mappings are refreshed automatically and removed on `stop()`.
+- **Automatic port forwarding**: built-in **UPnP IGD** and **NAT-PMP** — the `PortMappingService` asks the router to forward the listen port (for TCP *and* UDP, which share it) on startup (both backends run in parallel; whichever the router supports wins), so peers behind a NAT can accept inbound connections with zero manual configuration. Mappings are refreshed automatically and removed on `stop()`.
 - **UDP hole punching**: when no port forwarding is possible, `HolePunch` reaches a peer behind a NAT by arranging — through a peer both sides already have — that the two dial each other at the same instant, so each side's outbound packet opens the mapping the other's needs. The rendezvous is timed from the round trip itself (no clock synchronisation), and the node learns the external endpoint to advertise from its own mesh rather than from a STUN server
 - **NAT awareness**: several peers' independent views of the node's shared UDP socket say whether its mapping is stable enough to punch through at all (endpoint-independent) or per-destination (symmetric, where punching cannot work) — see `node.nat_status()`
 - **STUN**: public-IP discovery used by the DHT (BEP-42 node-id derivation and external-address reporting)
@@ -291,7 +291,9 @@ node.start();
 
 ### 7. NAT traversal (UPnP / NAT-PMP)
 
-Attach `PortMappingService` to forward the listen port automatically on startup. Both UPnP IGD and NAT-PMP are attempted in parallel; whichever the router supports wins. The mapping is refreshed automatically and removed on `stop()`.
+Attach `PortMappingService` to forward the listen port automatically on startup. Both UPnP IGD and NAT-PMP are attempted in parallel; whichever the router supports wins. The mappings are refreshed automatically and removed on `stop()`.
+
+The port is forwarded under **both protocols the node is listening on** — TCP *and* UDP, since both transports share one port. UDP matters most: it is the dialer's first choice, so a TCP-only mapping would leave inbound peers on the TCP fallback. A node configured with only one transport gets only that one mapped.
 
 ```cpp
 #include <librats/node/node.h>
@@ -302,8 +304,11 @@ auto* portmap = node.add_subsystem(std::make_unique<PortMappingService>());
 node.start();
 
 // Public endpoint as seen from outside the NAT (if a mapping succeeded).
-if (auto pub = portmap->mapped_public_address())
-    std::cout << "public: " << pub->first << ":" << pub->second << "\n";
+// Each protocol is mapped independently; a router may accept one and refuse the other.
+if (auto pub = portmap->mapped_public_address(PortMapProtocol::TCP))
+    std::cout << "public tcp: " << pub->first << ":" << pub->second << "\n";
+if (auto pub = portmap->mapped_public_address(PortMapProtocol::UDP))
+    std::cout << "public udp: " << pub->first << ":" << pub->second << "\n";
 ```
 
 Where the router forwards nothing — carrier-grade NAT, a locked-down office network, a router with UPnP off — `HolePunch` is the other half. Two peers that cannot be dialed can still reach each other if they dial *at the same moment*: each side's outbound packet opens the mapping the other side's needs. The moment is agreed through a peer both already have, and timed from that relayed round trip rather than from any clock.

@@ -99,13 +99,38 @@ TEST(SubsystemTest, PortMappingIdleStartStop) {
 
     // Environment-independent: a router may or may not answer on the test host.
     // If a public mapping WAS recorded, it must be internally consistent; if not,
-    // nullopt is fine. Either way the query must be safe to call.
-    if (auto pub = raw->mapped_public_address()) {
-        EXPECT_FALSE(pub->first.empty());
-        EXPECT_NE(pub->second, 0);
+    // nullopt is fine. Either way both queries must be safe to call.
+    for (PortMapProtocol proto : {PortMapProtocol::TCP, PortMapProtocol::UDP}) {
+        if (auto pub = raw->mapped_public_address(proto)) {
+            EXPECT_FALSE(pub->first.empty());
+            EXPECT_NE(pub->second, 0);
+        }
     }
     node.stop();
-    SUCCEED();
+
+    // stop() removed whatever mappings existed, so no public address may survive it
+    // — otherwise a NetworkChanged restart would keep handing out the old LAN's.
+    EXPECT_FALSE(raw->mapped_public_address(PortMapProtocol::TCP).has_value());
+    EXPECT_FALSE(raw->mapped_public_address(PortMapProtocol::UDP).has_value());
+}
+
+// The service maps the listen port under every protocol the node actually serves,
+// and nothing else: with the datagram transport off, no UDP mapping is ever asked
+// for, so no UDP public address can be recorded however the local router behaves.
+TEST(SubsystemTest, PortMappingSkipsDisabledTransport) {
+    NodeConfig cfg = listening_config();
+    cfg.enable_udp = false;
+    Node node(cfg);
+    auto mapper = std::make_unique<PortMappingService>();
+    PortMappingService* raw = mapper.get();
+    node.add_subsystem(std::move(mapper));
+
+    ASSERT_TRUE(node.start());
+    EXPECT_EQ(node.transports(), PeerTransportTcp);
+    std::this_thread::sleep_for(150ms);
+
+    EXPECT_FALSE(raw->mapped_public_address(PortMapProtocol::UDP).has_value());
+    node.stop();
 }
 
 // Disabling both backends must make start() a no-op (no threads, no mapping).

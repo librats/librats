@@ -117,7 +117,7 @@ public:
     /// Transports this node is actually running, as a PeerTransports bitmask.
     /// May be narrower than the config asked for — a UDP socket that could not be
     /// bound leaves the node TCP-only rather than failing to start.
-    uint8_t       transports() const noexcept { return transports_; }
+    uint8_t       transports() const noexcept override { return transports_; }
 
     /// Application protocol identity bound into the handshake (see NodeConfig).
     const std::string& protocol() const noexcept override { return config_.protocol; }

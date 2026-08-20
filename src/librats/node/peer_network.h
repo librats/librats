@@ -37,7 +37,13 @@ public:
     using DialFailedHandler      = std::function<void(const Address&)>;
 
     virtual const PeerId&       local_id() const = 0;
-    virtual uint16_t            listen_port() const = 0;     ///< our advertised TCP port
+    virtual uint16_t            listen_port() const = 0;     ///< our advertised listen port (shared by both transports)
+    /// Which transports that port actually accepts, as a PeerTransports bitmask —
+    /// the same value identify reports to peers. A subsystem that has to make the
+    /// port reachable from outside (PortMappingService) needs to know which
+    /// protocols to ask the router for. Default: TCP only, which is all a mock that
+    /// merely moves messages has to claim.
+    virtual uint8_t             transports() const { return PeerTransportTcp; }
     virtual const std::string&  protocol() const = 0;        ///< app protocol id (e.g. "librats/1.0"); namespaces discovery
     virtual void                connect(const Address& address) = 0;  ///< dial a discovered peer
     /// Send to one peer. @return whether that peer's send queue still has room;

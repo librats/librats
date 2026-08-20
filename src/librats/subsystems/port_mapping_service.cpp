@@ -6,6 +6,8 @@
 #include "librats/util/network_utils.h"
 #include "librats/util/logger.h"
 
+#include <vector>
+
 namespace librats {
 
 PortMappingService::PortMappingService(PortMappingConfig config) : config_(config) {}
@@ -35,7 +37,20 @@ void PortMappingService::start() {
 
     const uint16_t port = network_ ? network_->listen_port() : 0;
     if (port == 0) {
-        LOG_WARN("portmap", "Skipping port mapping: node has no TCP listen port");
+        LOG_WARN("portmap", "Skipping port mapping: node has no listen port");
+        return;
+    }
+
+    // One port, mapped under each protocol actually listening on it. Asking for a
+    // protocol the node does not serve would install a mapping pointing at nothing,
+    // so the node's own transports bitmask — the same one identify advertises — is
+    // what decides.
+    const uint8_t transports = network_->transports();
+    std::vector<PortMapProtocol> protocols;
+    if (transports & PeerTransportTcp) protocols.push_back(PortMapProtocol::TCP);
+    if (transports & PeerTransportUdp) protocols.push_back(PortMapProtocol::UDP);
+    if (protocols.empty()) {
+        LOG_WARN("portmap", "Skipping port mapping: node reports no running transport");
         return;
     }
 
@@ -44,17 +59,25 @@ void PortMappingService::start() {
     std::unique_ptr<UpnpClient>   upnp;
     std::unique_ptr<NatPmpClient> natpmp;
 
+    // external_port 0 means "same as internal" in both backends, which is what the
+    // UDP mapping needs: peers learn our datagram endpoint from the port the NAT
+    // rewrites our outbound traffic to (nat_status.h), and only a port-preserving
+    // mapping makes that the same port the router forwards inbound. (A router that
+    // rejects the port with a conflict makes UPnP fall back to a random one — still
+    // dialable through mapped_public_address(), just no longer the observed one.)
     if (config_.enable_upnp) {
         upnp = std::make_unique<UpnpClient>();
         upnp->set_lease_duration(config_.lease_duration_seconds);
         upnp->set_callback(callback);
-        upnp->add_mapping(PortMapProtocol::TCP, port, /*external_port=*/0, "rats");
+        for (PortMapProtocol proto : protocols)
+            upnp->add_mapping(proto, port, /*external_port=*/0, "rats");
     }
     if (config_.enable_natpmp) {
         natpmp = std::make_unique<NatPmpClient>();
         natpmp->set_lease_duration(config_.lease_duration_seconds);
         natpmp->set_callback(callback);
-        natpmp->add_mapping(PortMapProtocol::TCP, port);
+        for (PortMapProtocol proto : protocols)
+            natpmp->add_mapping(proto, port, /*external_port=*/0);
     }
 
     {
@@ -68,7 +91,12 @@ void PortMappingService::start() {
         if (natpmp_) natpmp_->start();
     }
 
-    LOG_INFO("portmap", "Started automatic port forwarding for TCP port " << port
+    std::string proto_list;
+    for (PortMapProtocol proto : protocols) {
+        if (!proto_list.empty()) proto_list += "+";
+        proto_list += to_string(proto);
+    }
+    LOG_INFO("portmap", "Started automatic port forwarding for " << proto_list << " port " << port
              << " (upnp=" << config_.enable_upnp << " natpmp=" << config_.enable_natpmp
              << " lease=" << config_.lease_duration_seconds << "s)");
 }
@@ -88,6 +116,21 @@ void PortMappingService::stop() {
     if (upnp || natpmp) LOG_INFO("portmap", "Removing port mappings and stopping backends");
     if (upnp)   upnp->stop();
     if (natpmp) natpmp->stop();
+
+    // The backends have just torn their mappings down, so whatever public endpoint
+    // they had established no longer exists. Forget it — NetworkChanged restarts us
+    // through here, and reporting the pre-change mapping afterwards would hand out
+    // an address that now points at a different LAN.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        mapped_external_ip_.clear();
+        mapped_external_tcp_port_ = 0;
+        mapped_external_udp_port_ = 0;
+    }
+}
+
+uint16_t& PortMappingService::external_port_slot(PortMapProtocol protocol) {
+    return protocol == PortMapProtocol::TCP ? mapped_external_tcp_port_ : mapped_external_udp_port_;
 }
 
 void PortMappingService::handle_result(const PortMapResult& result) {
@@ -102,9 +145,14 @@ void PortMappingService::handle_result(const PortMapResult& result) {
     bool warn_double_nat = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (result.success && !ip_is_private && result.protocol == PortMapProtocol::TCP) {
+        // Only successes are recorded, and a failure never clears an earlier one:
+        // the two backends run in parallel against the same router, so a NAT-PMP
+        // refusal routinely arrives after UPnP has already mapped the very same
+        // port. Each protocol keeps its own slot — a router may take one and
+        // refuse the other.
+        if (result.success && !ip_is_private) {
             if (!result.external_ip.empty()) mapped_external_ip_ = result.external_ip;
-            mapped_external_tcp_port_ = result.external_port;
+            external_port_slot(result.protocol) = result.external_port;
         } else if (result.success && ip_is_private && !double_nat_warned_) {
             double_nat_warned_ = true;
             warn_double_nat = true;
@@ -132,10 +180,13 @@ void PortMappingService::handle_result(const PortMapResult& result) {
     if (user_cb) user_cb(result);
 }
 
-std::optional<std::pair<std::string, uint16_t>> PortMappingService::mapped_public_address() const {
+std::optional<std::pair<std::string, uint16_t>>
+PortMappingService::mapped_public_address(PortMapProtocol protocol) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (mapped_external_tcp_port_ == 0 || mapped_external_ip_.empty()) return std::nullopt;
-    return std::make_pair(mapped_external_ip_, mapped_external_tcp_port_);
+    const uint16_t port = protocol == PortMapProtocol::TCP ? mapped_external_tcp_port_
+                                                           : mapped_external_udp_port_;
+    if (port == 0 || mapped_external_ip_.empty()) return std::nullopt;
+    return std::make_pair(mapped_external_ip_, port);
 }
 
 } // namespace librats
