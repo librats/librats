@@ -157,10 +157,10 @@ const criticalFiles = [
     { path: path.join(nodejsRoot, 'scripts', 'build-librats.js'), desc: 'Build script' },
     { path: path.join(nodejsRoot, 'scripts', 'postinstall.js'), desc: 'Post-install script' },
     { path: path.join(nativeSrcDir, 'CMakeLists.txt'), desc: 'CMake configuration (copied)' },
-    { path: path.join(nativeSrcDir, 'src', 'node', 'node.cpp'), desc: 'Librats node core (copied)' },
-    { path: path.join(nativeSrcDir, 'src', 'node', 'node.h'), desc: 'Librats node header (copied)' },
-    { path: path.join(nativeSrcDir, 'src', 'bindings', 'rats.cpp'), desc: 'Librats C ABI (copied)' },
-    { path: path.join(nativeSrcDir, 'src', 'bindings', 'rats.h'), desc: 'Librats C ABI header (copied)' },
+    { path: path.join(nativeSrcDir, 'src', 'librats', 'node', 'node.cpp'), desc: 'Librats node core (copied)' },
+    { path: path.join(nativeSrcDir, 'src', 'librats', 'node', 'node.h'), desc: 'Librats node header (copied)' },
+    { path: path.join(nativeSrcDir, 'src', 'librats', 'bindings', 'rats.cpp'), desc: 'Librats C ABI (copied)' },
+    { path: path.join(nativeSrcDir, 'src', 'librats', 'bindings', 'rats.h'), desc: 'Librats C ABI header (copied)' },
 ];
 
 let allFilesPresent = true;
