@@ -861,27 +861,29 @@ There is no central `config.json`: configuration is supplied programmatically vi
 
 ## 🚀 Benchmark Performance
 
-librats is **engineered for resource efficiency**, making it ideal for **low-power devices**, **edge computing**, and **embedded systems** where memory and CPU are precious.
+librats is **engineered for resource efficiency**, which makes it a good fit for
+**low-power devices**, **edge computing** and **embedded systems** where memory
+and CPU are the scarce things.
 
-### Performance Comparison vs libp2p (JavaScript)
+### vs js-libp2p
 
-**Test Environment**: AMD Ryzen 7 5700U, 16GB RAM
+**Environment**: Intel Core Ultra 7 265KF (16 cores), 36 GB RAM, Linux, GCC 15.2
+`-O3`, Node.js v24.18.0, js-libp2p 3.3.8. Both sides run **TCP + Noise_XX** over
+loopback, 3 runs per cell, median reported.
 
-| Metric | librats (C++17) | libp2p (JavaScript) | **Improvement** |
-|--------|-----------------|---------------------|-----------------|
-| **Startup Memory** | ~1.6 MB | ~50-80 MB | **31-50x less** |
-| **Memory per Peer** | ~80 KB | ~4-6 MB | **50-75x less** |
-| **Peak Memory (100 peers)** | ~9.4 MB | 400-600 MB | **42-64x less** |
-| **CPU Usage (idle)** | 0-1% | 15-25% | **15-25x less** |
-| **CPU Usage (peak)** | 1-2% | 80-100% | **5-16x less** |
-
-### Network Traffic (DHT Discovery)
-
-| Metric | Traffic |
-|--------|---------|
-| **DHT Discovery (idle)** | ~350-450 bytes/sec |
-
-DHT discovery uses minimal bandwidth — only **350-450 bytes per second** during continuous peer discovery — making librats ideal for bandwidth-constrained environments and mobile devices.
+| Metric | librats (JS) | js-libp2p (JS) | librats advantage |
+|--------|-----------------|----------------|-------------------|
+| **Memory, node started** | **5.0 MB** | 110.9 MB | **22x less** |
+| **Memory per connected peer** | **8.1 KB** | 475.1 KB | **59x less** |
+| **Memory, 100 peers** | **5.8 MB** | 158.4 MB | **27x less** |
+| **Cold start** | **21 ms** | 188 ms | **9x faster** |
+| **Connection setup** | **1 746 /s** | 317 /s | **5.5x faster** |
+| **CPU per handshake** | **1.61 ms** | 9.19 ms | **5.7x less** |
+| **Small messages (256 B)** | **863 517 msg/s** | 92 711 msg/s | **9.3x faster** |
+| **CPU per small message** | **2.27 µs** | 23.38 µs | **10x less** |
+| **Bulk throughput (64 KiB)** | 600 MB/s | **603 MB/s** | *parity* |
+| **CPU per GB** | **3.27 s/GB** | 4.68 s/GB | **1.4x less** |
+| **Runtime dependencies** | **none** |  139 npm packages, 66 MB | — |
 
 ## Why Choose librats?
 
