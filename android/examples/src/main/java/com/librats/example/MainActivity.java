@@ -14,19 +14,27 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-import com.librats.RatsClient;
-import com.librats.MessageCallback;
+import com.librats.LogLevel;
+import com.librats.RatsException;
+import com.librats.RatsNode;
 
 import java.nio.charset.StandardCharsets;
 
+/**
+ * Minimal librats chat: start a node, dial a peer, broadcast on a channel.
+ *
+ * <p>Note the ordering — every callback and every {@code enable*} happens while
+ * the node is still stopped, and callbacks arrive on a reactor thread, so each
+ * one hops to the UI thread before touching a view.</p>
+ */
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "LibRatsExample";
     private static final int PERMISSION_REQUEST_CODE = 1;
 
-    // Application channel used by this demo for plain chat messages.
+    /** Application channel this demo uses for chat messages. */
     private static final String CHAT_CHANNEL = "chat";
 
-    private RatsClient ratsClient;
+    private RatsNode node;
     private TextView statusText;
     private TextView messagesText;
     private EditText hostInput;
@@ -43,7 +51,7 @@ public class MainActivity extends AppCompatActivity {
 
         initViews();
         checkPermissions();
-        setupRatsClient();
+        setupNode();
     }
 
     private void initViews() {
@@ -75,125 +83,98 @@ public class MainActivity extends AppCompatActivity {
             Manifest.permission.CHANGE_WIFI_MULTICAST_STATE
         };
 
-        boolean allGranted = true;
         for (String permission : permissions) {
             if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
-                allGranted = false;
-                break;
+                ActivityCompat.requestPermissions(this, permissions, PERMISSION_REQUEST_CODE);
+                return;
             }
-        }
-
-        if (!allGranted) {
-            ActivityCompat.requestPermissions(this, permissions, PERMISSION_REQUEST_CODE);
         }
     }
 
-    private void setupRatsClient() {
+    private void setupNode() {
         try {
-            // Process-global logging configuration.
-            RatsClient.setLogLevel(RatsClient.LOG_INFO);
+            RatsNode.setLogLevel(LogLevel.INFO);
 
-            // Create a listening node on port 8080.
-            ratsClient = new RatsClient(8080);
+            // dataDir keeps the node's identity stable across app restarts.
+            node = new RatsNode(new RatsNode.Config()
+                    .listenPort(8080)
+                    .dataDir(getFilesDir().getAbsolutePath()));
 
-            // Register peer + message callbacks BEFORE start().
-            ratsClient.setConnectionCallback(peerId -> runOnUiThread(() -> {
-                appendMessage("Connected to peer: " + peerId);
+            // Everything below runs while the node is still stopped.
+            node.onPeerConnected(peerId -> runOnUiThread(() -> {
+                appendMessage("+ peer " + peerId);
                 updateUI();
             }));
 
-            ratsClient.setDisconnectCallback(peerId -> runOnUiThread(() -> {
-                appendMessage("Disconnected from peer: " + peerId);
+            node.onPeerDisconnected(peerId -> runOnUiThread(() -> {
+                appendMessage("- peer " + peerId);
                 updateUI();
             }));
 
-            ratsClient.on(CHAT_CHANNEL, new MessageCallback() {
-                @Override
-                public void onMessage(String peerId, byte[] data) {
-                    final String message = new String(data, StandardCharsets.UTF_8);
-                    runOnUiThread(() -> appendMessage("Message from " + peerId + ": " + message));
-                }
+            node.on(CHAT_CHANNEL, (peerId, data) -> {
+                String message = new String(data, StandardCharsets.UTF_8);
+                runOnUiThread(() -> appendMessage(peerId.substring(0, 16) + "…: " + message));
             });
 
-            // Optionally enable discovery (must be before start()).
-            ratsClient.enableMdns();
+            node.enableMdns();   // find peers on the same Wi-Fi
 
-            appendMessage("LibRats node created");
-            appendMessage("Version: " + RatsClient.getVersionString());
-
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to create RatsClient", e);
-            appendMessage("Error: " + e.getMessage());
+            appendMessage("librats " + RatsNode.version() + " ready");
+        } catch (RatsException e) {
+            Log.e(TAG, "Failed to create the node", e);
+            appendMessage("error: " + e.getMessage());
         }
     }
 
     private void onStartClicked(View view) {
-        if (ratsClient == null) return;
-
+        if (node == null) return;
         try {
-            int result = ratsClient.start();
-            if (result == RatsClient.OK) {
-                appendMessage("Node started on port " + ratsClient.getListenPort());
-                appendMessage("Our peer id: " + ratsClient.getLocalId());
-                updateUI();
-            } else {
-                appendMessage("Failed to start: " + RatsClient.errorString(result));
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error starting node", e);
-            appendMessage("Error starting node: " + e.getMessage());
+            node.start();
+            appendMessage("started on port " + node.listenPort() + " (" + node.transports() + ")");
+            appendMessage("our peer id: " + node.localId());
+            updateUI();
+        } catch (RatsException e) {
+            Log.e(TAG, "Error starting the node", e);
+            appendMessage("error: " + e.getMessage());
         }
     }
 
     private void onConnectClicked(View view) {
-        if (ratsClient == null) return;
+        if (node == null) return;
 
         String host = hostInput.getText().toString().trim();
         String portStr = portInput.getText().toString().trim();
-
         if (host.isEmpty() || portStr.isEmpty()) {
-            Toast.makeText(this, "Please enter host and port", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Enter a host and port", Toast.LENGTH_SHORT).show();
             return;
         }
 
         try {
-            int port = Integer.parseInt(portStr);
-            int result = ratsClient.connect(host, port);
-            if (result == RatsClient.OK) {
-                appendMessage("Connecting to " + host + ":" + port);
-            } else {
-                appendMessage("Failed to connect: " + RatsClient.errorString(result));
-            }
+            node.connect(host, Integer.parseInt(portStr));
+            appendMessage("dialing " + host + ":" + portStr + "…");
         } catch (NumberFormatException e) {
             Toast.makeText(this, "Invalid port number", Toast.LENGTH_SHORT).show();
-        } catch (Exception e) {
-            Log.e(TAG, "Error connecting", e);
-            appendMessage("Error connecting: " + e.getMessage());
+        } catch (RatsException e) {
+            Log.e(TAG, "Error dialing", e);
+            appendMessage("error: " + e.getMessage());
         }
     }
 
     private void onSendClicked(View view) {
-        if (ratsClient == null) return;
+        if (node == null) return;
 
         String message = messageInput.getText().toString().trim();
         if (message.isEmpty()) {
-            Toast.makeText(this, "Please enter a message", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Enter a message", Toast.LENGTH_SHORT).show();
             return;
         }
 
         try {
-            // Broadcast the message on our chat channel to every connected peer.
-            byte[] payload = message.getBytes(StandardCharsets.UTF_8);
-            int result = ratsClient.broadcast(CHAT_CHANNEL, payload);
-            if (result == RatsClient.OK) {
-                appendMessage("Sent: " + message);
-                messageInput.setText("");
-            } else {
-                appendMessage("Failed to send: " + RatsClient.errorString(result));
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error sending message", e);
-            appendMessage("Error sending message: " + e.getMessage());
+            node.broadcast(CHAT_CHANNEL, message.getBytes(StandardCharsets.UTF_8));
+            appendMessage("me: " + message);
+            messageInput.setText("");
+        } catch (RatsException e) {
+            Log.e(TAG, "Error sending", e);
+            appendMessage("error: " + e.getMessage());
         }
     }
 
@@ -209,8 +190,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateUI() {
-        if (ratsClient == null) {
-            statusText.setText("Status: Not initialized");
+        if (node == null) {
+            statusText.setText("Status: not initialized");
             startButton.setEnabled(false);
             connectButton.setEnabled(false);
             sendButton.setEnabled(false);
@@ -218,44 +199,35 @@ public class MainActivity extends AppCompatActivity {
         }
 
         try {
-            int peerCount = ratsClient.getPeerCount();
+            long peerCount = node.peerCount();
             statusText.setText("Status: " + peerCount + " peers connected");
-
             startButton.setEnabled(true);
             connectButton.setEnabled(true);
             sendButton.setEnabled(peerCount > 0);
-        } catch (Exception e) {
-            statusText.setText("Status: Error");
-            Log.e(TAG, "Error updating UI", e);
+        } catch (RatsException e) {
+            statusText.setText("Status: error");
+            Log.e(TAG, "Error updating the UI", e);
         }
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (ratsClient != null) {
-            try {
-                ratsClient.stop();
-                ratsClient.destroy();
-            } catch (Exception e) {
-                Log.e(TAG, "Error destroying client", e);
-            }
+        if (node != null) {
+            node.close();   // stops the node and releases the native resources
+            node = null;
         }
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == PERMISSION_REQUEST_CODE) {
-            boolean allGranted = true;
-            for (int result : grantResults) {
-                if (result != PackageManager.PERMISSION_GRANTED) {
-                    allGranted = false;
-                    break;
-                }
-            }
-            if (!allGranted) {
-                Toast.makeText(this, "Network permissions are required for LibRats", Toast.LENGTH_LONG).show();
+        if (requestCode != PERMISSION_REQUEST_CODE) return;
+        for (int result : grantResults) {
+            if (result != PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(this, "Network permissions are required for librats",
+                        Toast.LENGTH_LONG).show();
+                return;
             }
         }
     }

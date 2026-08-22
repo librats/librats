@@ -1,203 +1,227 @@
-const {
-  RatsClient,
-  Security,
-  LogLevel,
-  getVersionString,
-  getVersion,
-  getGitDescribe,
-  getAbi,
-  constants,
-} = require('../lib/index');
+/**
+ * Test suite for the librats Node.js bindings.
+ *
+ * The contract under test: subsystems and callbacks are registered BEFORE
+ * start(), pure getters are properties, and every fallible call throws on a
+ * non-OK result rather than returning a code.
+ */
+
 const assert = require('assert');
 const { describe, it, beforeEach, afterEach } = require('node:test');
 
-/**
- * Test suite for the Node.js librats bindings (new C ABI).
- *
- * Subsystems and callbacks are registered BEFORE start(). Native calls throw on
- * a non-OK result.
- */
-describe('LibRats Node.js Bindings', { timeout: 10_000 }, function () {
+const {
+  RatsNode,
+  Security,
+  Transport,
+  TransportMask,
+  NatMapping,
+  LogLevel,
+  version,
+  versionInfo,
+  gitDescribe,
+  abi,
+} = require('../lib/index');
 
-  describe('Library info', function () {
+describe('librats Node.js bindings', { timeout: 10_000 }, function () {
+
+  describe('library info', function () {
     it('returns a version string', function () {
-      const version = getVersionString();
-      assert(typeof version === 'string');
-      assert(version.length > 0);
+      assert(typeof version() === 'string');
+      assert(version().length > 0);
     });
 
     it('returns version components', function () {
-      const v = getVersion();
-      assert(typeof v.major === 'number');
-      assert(typeof v.minor === 'number');
-      assert(typeof v.patch === 'number');
-      assert(typeof v.build === 'number');
+      const v = versionInfo();
+      for (const key of ['major', 'minor', 'patch', 'build']) {
+        assert(typeof v[key] === 'number', `${key} should be a number`);
+      }
     });
 
     it('returns git describe and abi', function () {
-      assert(typeof getGitDescribe() === 'string');
-      assert(typeof getAbi() === 'number');
+      assert(typeof gitDescribe() === 'string');
+      assert(typeof abi() === 'number');
     });
   });
 
-  describe('Constants', function () {
-    it('exposes security selectors', function () {
+  describe('enums', function () {
+    it('mirrors the C ABI values', function () {
       assert.strictEqual(Security.NOISE, 0);
       assert.strictEqual(Security.PLAINTEXT, 1);
-      assert.strictEqual(constants.SECURITY.NOISE, 0);
-    });
-
-    it('exposes log levels', function () {
+      assert.strictEqual(Transport.TCP, 0);
+      assert.strictEqual(Transport.UDP, 1);
+      assert.strictEqual(TransportMask.TCP, 0x1);
+      assert.strictEqual(TransportMask.UDP, 0x2);
+      assert.strictEqual(NatMapping.UNKNOWN, 0);
+      assert.strictEqual(NatMapping.ENDPOINT_DEPENDENT, 3);
       assert.strictEqual(LogLevel.DEBUG, 0);
       assert.strictEqual(LogLevel.ERROR, 3);
     });
-
-    it('exposes error codes', function () {
-      assert.strictEqual(constants.ERRORS.OK, 0);
-      assert(typeof constants.ERRORS.ALREADY_STARTED === 'number');
-    });
   });
 
-  describe('RatsClient lifecycle', function () {
-    let client1, client2;
+  describe('lifecycle', function () {
+    let a, b;
 
     beforeEach(function () {
-      client1 = new RatsClient(18080);
-      client2 = new RatsClient({ listenPort: 18081, security: Security.NOISE });
+      a = new RatsNode(18080);
+      b = new RatsNode({ listenPort: 18081, security: Security.NOISE });
     });
 
     afterEach(function () {
-      if (client1) client1.stop();
-      if (client2) client2.stop();
+      a.destroy();
+      b.destroy();
     });
 
-    it('creates instances from a port and a config', function () {
-      assert(client1 instanceof RatsClient);
-      assert(client2 instanceof RatsClient);
+    it('creates a node from a port and from a config', function () {
+      assert(a instanceof RatsNode);
+      assert(b instanceof RatsNode);
     });
 
-    it('starts and exposes a peer id', function () {
-      client1.start();
-      const peerId = client1.getOurPeerId();
-      assert(typeof peerId === 'string');
-      assert(peerId.length === 64);
-      assert(client1.getListenPort() > 0);
+    it('exposes an identity once started', function () {
+      a.start();
+      assert.strictEqual(a.localId.length, 64);
+      assert(a.listenPort > 0);
+      assert(typeof a.protocol === 'string');
     });
 
-    it('exposes protocol identity', function () {
-      client1.start();
-      assert(typeof client1.getProtocol() === 'string');
+    it('reports the transports it actually runs', function () {
+      assert.strictEqual(a.transports, 0, 'no transport before start');
+      a.start();
+      assert(a.transports & (TransportMask.TCP | TransportMask.UDP));
     });
 
     it('reports peer count and ids', function () {
-      client1.start();
-      assert.strictEqual(client1.getPeerCount(), 0);
-      assert(Array.isArray(client1.getPeerIds()));
+      a.start();
+      assert.strictEqual(a.peerCount, 0);
+      assert.deepStrictEqual(a.peerIds, []);
     });
 
-    it('handles max peers', function () {
-      client1.setMaxPeers(50);
-      assert.strictEqual(client1.getMaxPeers(), 50);
+    it('has a settable peer cap', function () {
+      a.maxPeers = 50;
+      assert.strictEqual(a.maxPeers, 50);
     });
 
     it('rejects enabling a subsystem after start', function () {
-      client1.start();
-      assert.throws(() => client1.enablePubsub());
+      a.start();
+      assert.throws(() => a.enablePubsub(), /ALREADY_STARTED/);
+    });
+
+    it('makes a destroyed node inert rather than unsafe', function () {
+      const doomed = new RatsNode(0);
+      doomed.destroy();
+      doomed.destroy(); // idempotent
+      assert.throws(() => doomed.listenPort, /destroyed/);
     });
   });
 
-  describe('Subsystem setup (before start)', function () {
-    let client;
+  describe('subsystem setup (before start)', function () {
+    let node;
 
-    beforeEach(function () {
-      client = new RatsClient(18082);
-    });
+    beforeEach(function () { node = new RatsNode(18082); });
+    afterEach(function () { node.destroy(); });
 
-    afterEach(function () {
-      client.stop();
-    });
-
-    it('enables discovery and NAT subsystems', function () {
-      client.enableDht(0, 'test-app');
-      client.enableMdns();
-      client.enablePortMapping(true, true);
-      client.start();
+    it('enables discovery and NAT traversal', function () {
+      node.enableDht(0, 'test-app');
+      node.enableMdns();
+      node.enablePortMapping(true, true);
+      node.enableHolePunch(true);
+      node.start();
+      assert.strictEqual(node.natMapping, NatMapping.UNKNOWN);
     });
 
     it('enables pub/sub and subscribes', function () {
-      client.enablePubsub();
-      client.subscribe('test-topic', () => {});
-      client.start();
-      client.publish('test-topic', 'hello');
+      node.enablePubsub();
+      node.subscribe('test-topic', () => {});
+      node.start();
+      node.publish('test-topic', 'hello');
     });
 
     it('enables JSON messaging', function () {
-      client.enableJson();
-      client.onJson('greeting', () => {});
-      client.start();
+      node.enableJson();
+      node.onJson('greeting', () => {});
+      node.start();
     });
 
     it('enables ping and reconnect', function () {
-      client.enablePing();
-      client.enableReconnect();
-      client.start();
-      assert.strictEqual(client.getPeerRttMs('0'.repeat(64)), -1);
+      node.enablePing();
+      node.enableReconnect();
+      node.start();
+      assert.strictEqual(node.peerRttMs('0'.repeat(64)), -1);
     });
 
     it('enables file transfer and registers callbacks', function () {
-      client.enableFileTransfer();
-      client.onFileOffer(() => {});
-      client.onFileProgress(() => {});
-      client.onFileComplete(() => {});
-      client.start();
+      node.enableFileTransfer();
+      node.onFileOffer(() => {});
+      node.onFileProgress(() => {});
+      node.onFileComplete(() => {});
+      node.start();
+    });
+
+    it('reports nothing for an unconnected peer', function () {
+      node.start();
+      assert.strictEqual(node.peerTransport('0'.repeat(64)), null);
+      assert.strictEqual(node.peerTransports('0'.repeat(64)), null);
     });
   });
 
-  describe('Peer-to-peer messaging', function () {
-    let client1, client2;
+  describe('peer-to-peer messaging', function () {
+    let a, b;
 
     beforeEach(function () {
-      client1 = new RatsClient(18090);
-      client2 = new RatsClient(18091);
+      a = new RatsNode(18090);
+      b = new RatsNode(18091);
     });
 
     afterEach(function () {
-      client1.stop();
-      client2.stop();
+      a.destroy();
+      b.destroy();
     });
 
     it('delivers a raw channel message', function (t, done) {
-      client2.on('chat', (peerId, data) => {
-        assert(typeof peerId === 'string');
+      b.on('chat', (peerId, data) => {
+        assert.strictEqual(peerId.length, 64);
         assert(Buffer.isBuffer(data));
-        assert.strictEqual(data.toString('utf8'), 'hello from client1');
+        assert.strictEqual(data.toString('utf8'), 'hello from a');
         done();
       });
-      client1.onPeerConnected((peerId) => {
-        setTimeout(() => client1.send(peerId, 'chat', 'hello from client1'), 50);
+      a.onPeerConnected((peerId) => {
+        setTimeout(() => a.send(peerId, 'chat', 'hello from a'), 50);
       });
 
-      client1.start();
-      client2.start();
-      setTimeout(() => client1.connect('127.0.0.1', 18091), 100);
+      a.start();
+      b.start();
+      setTimeout(() => a.connect('127.0.0.1', 18091), 100);
+    });
+
+    it('delivers a typed JSON message as a parsed value', function (t, done) {
+      a.enableJson();
+      b.enableJson();
+      b.onJson('greeting', (peerId, value) => {
+        assert.deepStrictEqual(value, { hello: 'world', n: 42 });
+        done();
+      });
+      a.onPeerConnected((peerId) => {
+        setTimeout(() => a.sendJson(peerId, 'greeting', { hello: 'world', n: 42 }), 50);
+      });
+
+      a.start();
+      b.start();
+      setTimeout(() => a.connect('127.0.0.1', 18091), 100);
     });
   });
 
-  describe('Error handling', function () {
+  describe('argument validation', function () {
     it('rejects an out-of-range port', function () {
-      assert.throws(() => new RatsClient(-1));
+      assert.throws(() => new RatsNode(-1), RangeError);
     });
   });
 });
 
 // Direct execution: minimal smoke test.
 if (require.main === module) {
-  console.log('Running librats Node.js binding smoke test...');
-  console.log(`Version: ${getVersionString()}`);
-  const client = new RatsClient(18099);
-  client.start();
-  console.log(`Peer ID: ${client.getOurPeerId()}`);
-  console.log(`Listen port: ${client.getListenPort()}`);
-  client.stop();
+  console.log(`librats ${version()} (${gitDescribe()})`);
+  const node = new RatsNode(18099);
+  node.start();
+  console.log(`peer id ${node.localId} on port ${node.listenPort}`);
+  node.destroy();
   console.log('OK');
 }

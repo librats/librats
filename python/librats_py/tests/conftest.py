@@ -1,66 +1,55 @@
 """
-Pytest configuration for librats tests.
+Pytest configuration for the librats Python bindings.
+
+The suites here need the native shared library; when it cannot be imported they
+are skipped rather than failed, so a source checkout without a build still runs
+the pure-Python tests.
 """
 
-import pytest
-import sys
 import os
+import sys
 
-# Add the parent directory to the path so we can import librats_py
+import pytest
+
+# Make the package importable straight from a source checkout.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from librats_py import RatsClient
+    from librats_py import RatsNode
     LIBRATS_AVAILABLE = True
 except ImportError:
+    RatsNode = None
     LIBRATS_AVAILABLE = False
 
 
 def pytest_configure(config):
-    """Configure pytest."""
-    config.addinivalue_line(
-        "markers", "integration: mark test as an integration test"
-    )
-    config.addinivalue_line(
-        "markers", "slow: mark test as slow running"
-    )
+    config.addinivalue_line("markers", "integration: mark test as an integration test")
+    config.addinivalue_line("markers", "slow: mark test as slow running")
 
 
 def pytest_collection_modifyitems(config, items):
-    """Modify test collection."""
-    if not LIBRATS_AVAILABLE:
-        skip_native = pytest.mark.skip(reason="librats native library not available")
-        for item in items:
-            if "test_client" in item.nodeid or "test_integration" in item.nodeid:
-                item.add_marker(skip_native)
+    if LIBRATS_AVAILABLE:
+        return
+    skip_native = pytest.mark.skip(reason="librats native library not available")
+    for item in items:
+        if "test_client" in item.nodeid or "test_integration" in item.nodeid:
+            item.add_marker(skip_native)
 
 
 @pytest.fixture
-def rats_client():
-    """Fixture providing a RatsClient instance."""
+def rats_node():
+    """An unstarted node on an ephemeral port, released after the test."""
     if not LIBRATS_AVAILABLE:
         pytest.skip("librats native library not available")
-    
-    client = RatsClient(0)
-    yield client
+    node = RatsNode(0)
     try:
-        client.stop()
-    except:
-        pass
-
-
-@pytest.fixture
-def started_rats_client():
-    """Fixture providing a started RatsClient instance."""
-    if not LIBRATS_AVAILABLE:
-        pytest.skip("librats native library not available")
-    
-    client = RatsClient(0)
-    try:
-        client.start()
-        yield client
+        yield node
     finally:
-        try:
-            client.stop()
-        except:
-            pass
+        node.destroy()
+
+
+@pytest.fixture
+def started_rats_node(rats_node):
+    """The same node, already started."""
+    rats_node.start()
+    return rats_node

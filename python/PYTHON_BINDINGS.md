@@ -10,7 +10,7 @@ Technical details of the Python bindings, which target the librats C ABI
 │                     Python Application                       │
 ├─────────────────────────────────────────────────────────────┤
 │                      librats_py package                      │
-│  core.py (RatsClient)   exceptions.py   enums.py             │
+│  core.py (RatsNode)   exceptions.py   enums.py             │
 │  callbacks.py (CFUNCTYPE prototypes + Pythonic aliases)      │
 │  ctypes_wrapper.py (CDLL + argtypes/restypes, RatsConfig)    │
 ├─────────────────────────────────────────────────────────────┤
@@ -23,10 +23,10 @@ Technical details of the Python bindings, which target the librats C ABI
 
 | File | Role |
 | --- | --- |
-| `core.py` | `RatsClient` — the high-level node wrapper |
+| `core.py` | `RatsNode` — the high-level node wrapper, plus the process-global helpers (`version`, `set_log_level`, …) |
 | `ctypes_wrapper.py` | `CDLL` load, `RatsConfig` struct, all argtypes/restypes, `take_string` helper |
 | `callbacks.py` | Raw `CFUNCTYPE` prototypes mirroring `rats.h` + Pythonic type aliases |
-| `enums.py` | `RatsError`/`Security`/`LogLevel`/`FileTransferStatus`, `VersionInfo` |
+| `enums.py` | `RatsError`/`Security`/`Transport`/`TransportMask`/`NatMapping`/`LogLevel`/`FileTransferStatus`, `VersionInfo` |
 | `exceptions.py` | Exception hierarchy + `check_error` |
 | `examples/`, `tests/` | Demos and tests |
 
@@ -78,7 +78,7 @@ self._c_callbacks["on:chat"] = c_cb   # keep the CFUNCTYPE object alive
 
 ### Keeping callbacks alive
 
-Every `CFUNCTYPE` object is stored in `RatsClient._c_callbacks` for the node's
+Every `CFUNCTYPE` object is stored in `RatsNode._c_callbacks` for the node's
 lifetime. If a wrapper were garbage-collected while C still held the pointer,
 the next invocation on the reactor thread would crash. JSON `on_json` handlers
 are additive, so each registration uses a unique key (`json:<type>:<id>`);
@@ -96,8 +96,12 @@ Register callbacks and call `enable_*` **before** `start()`:
 * `enable_*` after `start()` → `RATS_ERR_ALREADY_STARTED` → `RatsAlreadyStartedError`.
 * subsystem op before its `enable_*` → `RATS_ERR_NOT_ENABLED` → `RatsNotEnabledError`.
 
-`set_max_peers` / `add_reconnect` / `remove_reconnect` may be called before or
-after start.
+The `max_peers` property and `add_reconnect` / `remove_reconnect` may be used
+before or after start.
+
+`destroy()` releases the handle early. Because the C ABI does not null-check its
+handle, every method reads it through the private `_h` property, which raises
+rather than handing NULL to C.
 
 ## Error / exception mapping
 
@@ -153,11 +157,15 @@ python -m pytest librats_py/tests/test_integration.py   # needs native library
    `callbacks.py` and a trampoline that keeps the object alive in
    `_c_callbacks`.
 
-## Removed features
+## What the C ABI does not expose
 
-ICE/STUN/TURN, encryption enable/keys, configuration load/save, granular logging
-(colours/timestamps/rotation/retention/console), historical peers, statistics
-JSON (connection/gossipsub/file-transfer) and automatic-discovery toggles are
-not part of the new C ABI and have no Python surface. See the README migration
-table for replacements (`enable_port_mapping`, the `security`/`data_dir`
-constructor args, `enable_dht`/`enable_mdns`, `enable_reconnect`).
+The C ABI is deliberately narrower than the C++ core: ICE/STUN/TURN, runtime
+encryption toggles and key introspection, configuration load/save, granular
+logging controls (colours, timestamps, rotation, retention), historical peers and
+statistics JSON have no C entry points, so they have no Python surface either.
+Their replacements are `enable_port_mapping` / `enable_hole_punch`, the
+`security` and `data_dir` constructor arguments, `enable_dht` / `enable_mdns`,
+`enable_reconnect`, and `set_log_level` / `set_log_file`.
+
+BitTorrent (`rats_enable_bittorrent`, `rats_bt_*`) exists in the C ABI but is not
+wrapped here; it is only functional in a build with `RATS_SEARCH_FEATURES`.

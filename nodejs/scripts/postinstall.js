@@ -43,9 +43,9 @@ if (!process.env.CI && !process.env.npm_config_global) {
   console.log('  npm run verify\n');
   console.log('Quick start:');
   console.log('```javascript');
-  console.log("const { RatsClient } = require('librats');");
-  console.log('const client = new RatsClient(8080);');
-  console.log('client.start();');
+  console.log("const { RatsNode } = require('librats');");
+  console.log('const node = new RatsNode(8080);');
+  console.log('node.start();');
   console.log('```\n');
   console.log('Documentation: https://github.com/librats/librats/tree/main/nodejs\n');
 }

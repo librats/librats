@@ -1,8 +1,10 @@
 """
-High-level :class:`RatsClient` over the librats C ABI (``src/librats/bindings/rats.h``).
+High-level :class:`RatsNode` over the librats C ABI (``src/librats/bindings/rats.h``).
 
-A :class:`RatsClient` wraps a single ``rats_t`` node. The lifecycle mirrors the
-C contract:
+A :class:`RatsNode` wraps a single ``rats_t`` node. On its own it is secure
+transport plus raw messaging on named channels; discovery, pub/sub, JSON
+messaging, file transfer, NAT traversal, ping and reconnection are opt-in
+subsystems. The lifecycle mirrors the C contract:
 
 * Register callbacks and enable subsystems **before** :meth:`start`.
   Enabling a subsystem after start raises :class:`RatsAlreadyStartedError`;
@@ -21,9 +23,9 @@ from typing import Any, Dict, List, Optional
 from ctypes import byref, c_size_t, c_int, string_at
 
 from .ctypes_wrapper import get_librats, take_string, RatsConfig
-from .enums import (RatsError as ErrorCode, Security, Transport, TransportMask,
+from .enums import (RatsError as ErrorCode, Security, Transport, NatMapping,
                     LogLevel, VersionInfo)
-from .exceptions import RatsError, RatsConnectionError, check_error
+from .exceptions import RatsError, check_error
 from .callbacks import (
     PeerCallback, MessageCallback, TopicCallback, JsonCallback,
     FileOfferCallback, FileProgressCallback, FileCompleteCallback,
@@ -37,8 +39,15 @@ def _b(s: Optional[str]) -> Optional[bytes]:
     return s.encode('utf-8') if s is not None else None
 
 
-class RatsClient:
-    """Pythonic wrapper around a librats node (``rats_t``)."""
+class RatsNode:
+    """Pythonic wrapper around a librats node (``rats_t``).
+
+    Use it as a context manager to guarantee the node is stopped::
+
+        with RatsNode(8080) as node:
+            node.start()
+            ...
+    """
 
     def __init__(
         self,
@@ -98,7 +107,7 @@ class RatsClient:
 
         self._handle = self._lib.lib.rats_create_config(byref(cfg))
         if not self._handle:
-            raise RatsError("Failed to create RatsClient node")
+            raise RatsError("Failed to create RatsNode node")
 
         self._running = False
         self._lock = threading.Lock()
@@ -122,12 +131,23 @@ class RatsClient:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.stop()
+        self.destroy()
         return False
+
+    @property
+    def _h(self):
+        """The native handle, refusing to hand out one that has been released.
+
+        The C ABI does not null-check its handle, so a call after destroy() would
+        be a segfault rather than an exception. Every method goes through here.
+        """
+        if self._handle is None:
+            raise RatsError("node has been destroyed", ErrorCode.INVALID_ARG)
+        return self._handle
 
     def start(self) -> None:
         """Start the node. Raises on bind failure or if already started."""
-        check_error(self._lib.lib.rats_start(self._handle), "Starting node")
+        check_error(self._lib.lib.rats_start(self._h), "Starting node")
         self._running = True
 
     def stop(self) -> None:
@@ -141,7 +161,12 @@ class RatsClient:
         return self._running
 
     def destroy(self) -> None:
-        """Explicitly destroy the node (otherwise destroyed on GC)."""
+        """Release the native node now rather than at GC time. Idempotent.
+
+        The instance is inert afterwards; the C ABI does not null-check its
+        handle, so every method refuses to run without one.
+        """
+        self.stop()
         self._finalizer()
         self._handle = None
 
@@ -151,10 +176,7 @@ class RatsClient:
     @property
     def listen_port(self) -> int:
         """The actual port the node is listening on."""
-        return self._lib.lib.rats_listen_port(self._handle)
-
-    def get_listen_port(self) -> int:
-        return self.listen_port
+        return self._lib.lib.rats_listen_port(self._h)
 
     @property
     def transports(self) -> int:
@@ -163,11 +185,11 @@ class RatsClient:
         May be narrower than requested: a UDP socket that could not be bound
         leaves the node TCP-only rather than failing to start.
         """
-        return self._lib.lib.rats_transports(self._handle)
+        return self._lib.lib.rats_transports(self._h)
 
     def peer_transport(self, peer_id: str) -> Optional[Transport]:
         """Which transport a connected peer's link runs on, or ``None``."""
-        result = self._lib.lib.rats_peer_transport(self._handle, _b(peer_id))
+        result = self._lib.lib.rats_peer_transport(self._h, _b(peer_id))
         return None if result < 0 else Transport(result)
 
     def peer_transports(self, peer_id: str) -> Optional[int]:
@@ -176,21 +198,18 @@ class RatsClient:
         0 means the peer did not say (an older build) — "no information", not
         "no transports".
         """
-        result = self._lib.lib.rats_peer_transports(self._handle, _b(peer_id))
+        result = self._lib.lib.rats_peer_transports(self._h, _b(peer_id))
         return None if result < 0 else result
 
     @property
     def local_id(self) -> str:
         """Our self-certifying peer id (64-char lowercase hex)."""
-        return take_string(self._lib, self._lib.lib.rats_local_id(self._handle))
-
-    def get_local_id(self) -> str:
-        return self.local_id
+        return take_string(self._lib, self._lib.lib.rats_local_id(self._h))
 
     @property
     def protocol(self) -> str:
         """Application protocol id bound into the handshake (e.g. ``"librats/1.0"``)."""
-        return take_string(self._lib, self._lib.lib.rats_protocol(self._handle))
+        return take_string(self._lib, self._lib.lib.rats_protocol(self._h))
 
     # ------------------------------------------------------------------ #
     # Connections / peers
@@ -198,28 +217,28 @@ class RatsClient:
     def connect(self, host: str, port: int) -> None:
         """Dial a peer at ``host:port`` (best-effort; queued)."""
         check_error(
-            self._lib.lib.rats_connect(self._handle, _b(host), port),
+            self._lib.lib.rats_connect(self._h, _b(host), port),
             f"Connecting to {host}:{port}")
 
+    @property
     def peer_count(self) -> int:
         """Number of currently-connected peers."""
-        return self._lib.lib.rats_peer_count(self._handle)
+        return self._lib.lib.rats_peer_count(self._h)
 
-    def get_peer_count(self) -> int:
-        return self.peer_count()
+    @property
+    def max_peers(self) -> int:
+        """Established-peer cap (0 = unlimited). Settable before or after start."""
+        return self._lib.lib.rats_max_peers(self._h)
 
-    def set_max_peers(self, max_peers: int) -> None:
-        """Set the established-peer cap (0 = unlimited)."""
-        self._lib.lib.rats_set_max_peers(self._handle, max_peers)
+    @max_peers.setter
+    def max_peers(self, value: int) -> None:
+        self._lib.lib.rats_set_max_peers(self._h, value)
 
-    def get_max_peers(self) -> int:
-        """Get the established-peer cap."""
-        return self._lib.lib.rats_max_peers(self._handle)
-
+    @property
     def peer_ids(self) -> List[str]:
         """Hex ids of currently-connected peers."""
         count = c_size_t()
-        arr = self._lib.lib.rats_peer_ids(self._handle, byref(count))
+        arr = self._lib.lib.rats_peer_ids(self._h, byref(count))
         if not arr or count.value == 0:
             return []
         try:
@@ -232,23 +251,20 @@ class RatsClient:
         finally:
             self._lib.lib.rats_free_peer_ids(arr, count.value)
 
-    def get_peer_ids(self) -> List[str]:
-        return self.peer_ids()
-
     # ------------------------------------------------------------------ #
     # Raw channel messaging
     # ------------------------------------------------------------------ #
     def send(self, peer_id: str, channel: str, data: bytes) -> None:
         """Send raw ``data`` on a named ``channel`` to one peer."""
         check_error(
-            self._lib.lib.rats_send(self._handle, _b(peer_id), _b(channel),
+            self._lib.lib.rats_send(self._h, _b(peer_id), _b(channel),
                                     data, len(data)),
             f"Sending on channel {channel} to {peer_id}")
 
     def broadcast(self, channel: str, data: bytes) -> None:
         """Broadcast raw ``data`` on a named ``channel`` to all peers."""
         check_error(
-            self._lib.lib.rats_broadcast(self._handle, _b(channel), data, len(data)),
+            self._lib.lib.rats_broadcast(self._h, _b(channel), data, len(data)),
             f"Broadcasting on channel {channel}")
 
     def on(self, channel: str, callback: MessageCallback) -> None:
@@ -266,7 +282,7 @@ class RatsClient:
         c_cb = MessageCallbackType(trampoline)
         self._c_callbacks[f"on:{channel}"] = c_cb
         check_error(
-            self._lib.lib.rats_on(self._handle, _b(channel), c_cb, None),
+            self._lib.lib.rats_on(self._h, _b(channel), c_cb, None),
             f"Registering channel handler {channel}")
 
     # ------------------------------------------------------------------ #
@@ -289,7 +305,7 @@ class RatsClient:
         c_cb = PeerCallbackType(trampoline)
         self._c_callbacks[f"peer:{slot}"] = c_cb
         check_error(
-            getattr(self._lib.lib, c_func_name)(self._handle, c_cb, None),
+            getattr(self._lib.lib, c_func_name)(self._h, c_cb, None),
             f"Registering peer {slot} handler")
 
     # ------------------------------------------------------------------ #
@@ -298,27 +314,72 @@ class RatsClient:
     def enable_dht(self, dht_port: int = 0, discovery_key: Optional[str] = None) -> None:
         """Enable DHT discovery. ``dht_port`` 0 = ephemeral."""
         check_error(
-            self._lib.lib.rats_enable_dht(self._handle, dht_port, _b(discovery_key)),
+            self._lib.lib.rats_enable_dht(self._h, dht_port, _b(discovery_key)),
             "Enabling DHT")
 
     def enable_mdns(self) -> None:
         """Enable local-network mDNS discovery."""
-        check_error(self._lib.lib.rats_enable_mdns(self._handle), "Enabling mDNS")
+        check_error(self._lib.lib.rats_enable_mdns(self._h), "Enabling mDNS")
 
     def enable_port_mapping(self, enable_upnp: bool = True,
                             enable_natpmp: bool = True) -> None:
         """Enable automatic NAT port forwarding (UPnP IGD + NAT-PMP)."""
         check_error(
             self._lib.lib.rats_enable_port_mapping(
-                self._handle, 1 if enable_upnp else 0, 1 if enable_natpmp else 0),
+                self._h, 1 if enable_upnp else 0, 1 if enable_natpmp else 0),
             "Enabling port mapping")
+
+    # ------------------------------------------------------------------ #
+    # NAT traversal (hole punching)
+    # ------------------------------------------------------------------ #
+    def enable_hole_punch(self, serve_as_relay: bool = True) -> None:
+        """Enable UDP hole punching. Call before start().
+
+        Reaches a peer that no port forwarding made reachable, by arranging with
+        a peer both sides already have that the two dial each other at the same
+        moment. Both punching nodes must have it enabled, and so must the node
+        that carries the rendezvous between them.
+
+        Args:
+            serve_as_relay: Also carry other peers' rendezvous — a few dozen
+                forwarded bytes per punch, only ever to peers this node already
+                holds. A mesh in which nobody relays cannot punch at all.
+        """
+        check_error(
+            self._lib.lib.rats_enable_hole_punch(self._h,
+                                                 1 if serve_as_relay else 0),
+            "Enabling hole punching")
+
+    def punch_peer(self, peer_id: str) -> None:
+        """Try to reach ``peer_id`` by punching. Non-blocking.
+
+        Success arrives as an ordinary peer-connected callback. Raises
+        :class:`RatsNoSuchPeerError` when there is nothing to do or nothing to
+        try with — the peer is already connected, a punch to it is already
+        running, or this node does not yet know an external endpoint of its own
+        to advertise (it needs at least one datagram peer first).
+        """
+        check_error(
+            self._lib.lib.rats_punch_peer(self._h, _b(peer_id)),
+            f"Punching to {peer_id}")
+
+    @property
+    def nat_mapping(self) -> NatMapping:
+        """What the mesh has shown about this node's own NAT.
+
+        :attr:`NatMapping.ENDPOINT_DEPENDENT` means punching cannot work from
+        here; :attr:`NatMapping.UNKNOWN` means not enough peers have reported an
+        observation yet.
+        """
+        return NatMapping(self._lib.lib.rats_nat_mapping(self._h))
+
 
     # ------------------------------------------------------------------ #
     # Pub/sub (GossipSub)
     # ------------------------------------------------------------------ #
     def enable_pubsub(self) -> None:
         """Enable the pub/sub (GossipSub) subsystem. Call before start()."""
-        check_error(self._lib.lib.rats_enable_pubsub(self._handle), "Enabling pubsub")
+        check_error(self._lib.lib.rats_enable_pubsub(self._h), "Enabling pubsub")
 
     def subscribe(self, topic: str, callback: TopicCallback) -> None:
         """Subscribe to ``topic``; ``callback(peer_id, topic, data: bytes)``."""
@@ -333,20 +394,20 @@ class RatsClient:
         c_cb = TopicCallbackType(trampoline)
         self._c_callbacks[f"sub:{topic}"] = c_cb
         check_error(
-            self._lib.lib.rats_subscribe(self._handle, _b(topic), c_cb, None),
+            self._lib.lib.rats_subscribe(self._h, _b(topic), c_cb, None),
             f"Subscribing to {topic}")
 
     def unsubscribe(self, topic: str) -> None:
         """Unsubscribe from ``topic``."""
         check_error(
-            self._lib.lib.rats_unsubscribe(self._handle, _b(topic)),
+            self._lib.lib.rats_unsubscribe(self._h, _b(topic)),
             f"Unsubscribing from {topic}")
         self._c_callbacks.pop(f"sub:{topic}", None)
 
     def publish(self, topic: str, data: bytes) -> None:
         """Publish raw ``data`` to ``topic``."""
         check_error(
-            self._lib.lib.rats_publish(self._handle, _b(topic), data, len(data)),
+            self._lib.lib.rats_publish(self._h, _b(topic), data, len(data)),
             f"Publishing to {topic}")
 
     # ------------------------------------------------------------------ #
@@ -354,7 +415,7 @@ class RatsClient:
     # ------------------------------------------------------------------ #
     def enable_json(self) -> None:
         """Enable the typed JSON messaging subsystem. Call before start()."""
-        check_error(self._lib.lib.rats_enable_json(self._handle), "Enabling JSON")
+        check_error(self._lib.lib.rats_enable_json(self._h), "Enabling JSON")
 
     def on_json(self, type_name: str, callback: JsonCallback) -> None:
         """Register a handler for JSON messages of ``type_name``.
@@ -371,7 +432,7 @@ class RatsClient:
     def off_json(self, type_name: str) -> None:
         """Remove JSON handlers for ``type_name``."""
         check_error(
-            self._lib.lib.rats_off_json(self._handle, _b(type_name)),
+            self._lib.lib.rats_off_json(self._h, _b(type_name)),
             f"Removing JSON handler {type_name}")
         # Drop any retained trampolines for this type.
         for key in [k for k in self._c_callbacks
@@ -394,14 +455,14 @@ class RatsClient:
         key = f"json:{type_name}:{id(callback)}"
         self._c_callbacks[key] = c_cb
         check_error(
-            getattr(self._lib.lib, c_func_name)(self._handle, _b(type_name), c_cb, None),
+            getattr(self._lib.lib, c_func_name)(self._h, _b(type_name), c_cb, None),
             f"Registering JSON handler {type_name}")
 
     def send_json(self, peer_id: str, type_name: str, payload: Any) -> None:
         """Send a typed JSON message to one peer. ``payload`` is JSON-encoded."""
         text = payload if isinstance(payload, str) else json.dumps(payload)
         check_error(
-            self._lib.lib.rats_send_json(self._handle, _b(peer_id),
+            self._lib.lib.rats_send_json(self._h, _b(peer_id),
                                          _b(type_name), _b(text)),
             f"Sending JSON {type_name} to {peer_id}")
 
@@ -409,7 +470,7 @@ class RatsClient:
         """Broadcast a typed JSON message to all peers."""
         text = payload if isinstance(payload, str) else json.dumps(payload)
         check_error(
-            self._lib.lib.rats_broadcast_json(self._handle, _b(type_name), _b(text)),
+            self._lib.lib.rats_broadcast_json(self._h, _b(type_name), _b(text)),
             f"Broadcasting JSON {type_name}")
 
     # ------------------------------------------------------------------ #
@@ -418,7 +479,7 @@ class RatsClient:
     def enable_file_transfer(self, temp_dir: Optional[str] = None) -> None:
         """Enable the file-transfer subsystem. ``temp_dir`` holds partials."""
         check_error(
-            self._lib.lib.rats_enable_file_transfer(self._handle, _b(temp_dir)),
+            self._lib.lib.rats_enable_file_transfer(self._h, _b(temp_dir)),
             "Enabling file transfer")
 
     def on_file_offer(self, callback: FileOfferCallback) -> None:
@@ -437,7 +498,7 @@ class RatsClient:
         c_cb = FileOfferCallbackType(trampoline)
         self._c_callbacks["file:offer"] = c_cb
         check_error(
-            self._lib.lib.rats_on_file_offer(self._handle, c_cb, None),
+            self._lib.lib.rats_on_file_offer(self._h, c_cb, None),
             "Registering file offer handler")
 
     def on_file_progress(self, callback: FileProgressCallback) -> None:
@@ -455,7 +516,7 @@ class RatsClient:
         c_cb = FileProgressCallbackType(trampoline)
         self._c_callbacks["file:progress"] = c_cb
         check_error(
-            self._lib.lib.rats_on_file_progress(self._handle, c_cb, None),
+            self._lib.lib.rats_on_file_progress(self._h, c_cb, None),
             "Registering file progress handler")
 
     def on_file_complete(self, callback: FileCompleteCallback) -> None:
@@ -469,12 +530,12 @@ class RatsClient:
         c_cb = FileCompleteCallbackType(trampoline)
         self._c_callbacks["file:complete"] = c_cb
         check_error(
-            self._lib.lib.rats_on_file_complete(self._handle, c_cb, None),
+            self._lib.lib.rats_on_file_complete(self._h, c_cb, None),
             "Registering file complete handler")
 
     def send_file(self, peer_id: str, path: str) -> int:
         """Offer a file to ``peer_id``. Returns the transfer id (0 on failure)."""
-        transfer_id = self._lib.lib.rats_send_file(self._handle, _b(peer_id), _b(path))
+        transfer_id = self._lib.lib.rats_send_file(self._h, _b(peer_id), _b(path))
         if transfer_id == 0:
             raise RatsError(f"Failed to send file {path} to {peer_id}",
                             ErrorCode.NO_SUCH_PEER)
@@ -483,7 +544,7 @@ class RatsClient:
     def send_directory(self, peer_id: str, dir_path: str) -> int:
         """Offer a directory tree to ``peer_id``. Returns the transfer id."""
         transfer_id = self._lib.lib.rats_send_directory(
-            self._handle, _b(peer_id), _b(dir_path))
+            self._h, _b(peer_id), _b(dir_path))
         if transfer_id == 0:
             raise RatsError(f"Failed to send directory {dir_path} to {peer_id}",
                             ErrorCode.NO_SUCH_PEER)
@@ -492,32 +553,32 @@ class RatsClient:
     def accept_file(self, peer_id: str, transfer_id: int, dest_path: str) -> None:
         """Accept an offered transfer, writing to ``dest_path``."""
         check_error(
-            self._lib.lib.rats_accept_file(self._handle, _b(peer_id),
+            self._lib.lib.rats_accept_file(self._h, _b(peer_id),
                                            transfer_id, _b(dest_path)),
             f"Accepting transfer {transfer_id}")
 
     def reject_file(self, peer_id: str, transfer_id: int) -> None:
         """Reject an offered transfer."""
         check_error(
-            self._lib.lib.rats_reject_file(self._handle, _b(peer_id), transfer_id),
+            self._lib.lib.rats_reject_file(self._h, _b(peer_id), transfer_id),
             f"Rejecting transfer {transfer_id}")
 
     def cancel_file(self, peer_id: str, transfer_id: int) -> None:
         """Cancel a live transfer (either side)."""
         check_error(
-            self._lib.lib.rats_cancel_file(self._handle, _b(peer_id), transfer_id),
+            self._lib.lib.rats_cancel_file(self._h, _b(peer_id), transfer_id),
             f"Cancelling transfer {transfer_id}")
 
     def pause_file(self, peer_id: str, transfer_id: int) -> None:
         """Pause a live transfer."""
         check_error(
-            self._lib.lib.rats_pause_file(self._handle, _b(peer_id), transfer_id),
+            self._lib.lib.rats_pause_file(self._h, _b(peer_id), transfer_id),
             f"Pausing transfer {transfer_id}")
 
     def resume_file(self, peer_id: str, transfer_id: int) -> None:
         """Resume a paused transfer."""
         check_error(
-            self._lib.lib.rats_resume_file(self._handle, _b(peer_id), transfer_id),
+            self._lib.lib.rats_resume_file(self._h, _b(peer_id), transfer_id),
             f"Resuming transfer {transfer_id}")
 
     # ------------------------------------------------------------------ #
@@ -525,78 +586,76 @@ class RatsClient:
     # ------------------------------------------------------------------ #
     def enable_ping(self) -> None:
         """Enable periodic ping/pong RTT probing. Call before start()."""
-        check_error(self._lib.lib.rats_enable_ping(self._handle), "Enabling ping")
+        check_error(self._lib.lib.rats_enable_ping(self._h), "Enabling ping")
 
     def peer_rtt_ms(self, peer_id: str) -> int:
         """Last measured RTT to a peer in ms, or -1 if unknown."""
-        return int(self._lib.lib.rats_peer_rtt_ms(self._handle, _b(peer_id)))
+        return int(self._lib.lib.rats_peer_rtt_ms(self._h, _b(peer_id)))
 
     # ------------------------------------------------------------------ #
     # Automatic reconnection
     # ------------------------------------------------------------------ #
     def enable_reconnect(self) -> None:
         """Enable the reconnection subsystem. Call before start()."""
-        check_error(self._lib.lib.rats_enable_reconnect(self._handle),
+        check_error(self._lib.lib.rats_enable_reconnect(self._h),
                     "Enabling reconnect")
 
     def add_reconnect(self, host: str, port: int) -> None:
         """Keep ``host:port`` connected (re-dialed on drop)."""
         check_error(
-            self._lib.lib.rats_add_reconnect(self._handle, _b(host), port),
+            self._lib.lib.rats_add_reconnect(self._h, _b(host), port),
             f"Adding reconnect target {host}:{port}")
 
     def remove_reconnect(self, host: str, port: int) -> None:
         """Stop reconnecting to ``host:port``."""
         check_error(
-            self._lib.lib.rats_remove_reconnect(self._handle, _b(host), port),
+            self._lib.lib.rats_remove_reconnect(self._h, _b(host), port),
             f"Removing reconnect target {host}:{port}")
 
-    # ------------------------------------------------------------------ #
-    # Logging (process-global)
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def set_log_level(level: LogLevel) -> None:
-        """Set the process-global log verbosity."""
-        get_librats().lib.rats_set_log_level(int(level))
 
-    @staticmethod
-    def set_log_file(path: Optional[str]) -> None:
-        """Mirror logs to ``path`` (``None``/"" disables file logging)."""
-        get_librats().lib.rats_set_log_file(_b(path))
+# ---------------------------------------------------------------------- #
+# Process-global helpers. These need no node, so they are plain functions
+# rather than static methods hanging off RatsNode.
+# ---------------------------------------------------------------------- #
+def set_log_level(level: LogLevel) -> None:
+    """Set the process-global log verbosity."""
+    get_librats().lib.rats_set_log_level(int(level))
 
-    # ------------------------------------------------------------------ #
-    # Library info (process-global)
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def get_version_string() -> str:
-        """Library version string, e.g. ``"1.2.3"`` (static; not freed)."""
-        ptr = get_librats().lib.rats_version_string()
-        return ptr.decode('utf-8') if ptr else ""
 
-    @staticmethod
-    def get_version() -> VersionInfo:
-        """Detailed library version components."""
-        lib = get_librats()
-        major, minor, patch, build = c_int(), c_int(), c_int(), c_int()
-        lib.lib.rats_version(byref(major), byref(minor), byref(patch), byref(build))
-        return VersionInfo(major.value, minor.value, patch.value, build.value)
+def set_log_file(path: Optional[str]) -> None:
+    """Mirror logs to ``path`` (``None``/"" disables file logging)."""
+    get_librats().lib.rats_set_log_file(_b(path))
 
-    @staticmethod
-    def get_git_describe() -> str:
-        """Git describe of the build (static; not freed)."""
-        ptr = get_librats().lib.rats_git_describe()
-        return ptr.decode('utf-8') if ptr else ""
 
-    @staticmethod
-    def get_abi() -> int:
-        """Packed ABI id ``(major<<16)|(minor<<8)|patch``."""
-        return get_librats().lib.rats_abi()
+def version() -> str:
+    """Library version string, e.g. ``"1.2.3"``."""
+    ptr = get_librats().lib.rats_version_string()
+    return ptr.decode('utf-8') if ptr else ""
 
-    @staticmethod
-    def error_str(error_code: int) -> str:
-        """Static human-readable name for a ``rats_error_t`` code."""
-        ptr = get_librats().lib.rats_error_str(int(error_code))
-        return ptr.decode('utf-8') if ptr else ""
+
+def version_info() -> VersionInfo:
+    """Library version components."""
+    lib = get_librats()
+    major, minor, patch, build = c_int(), c_int(), c_int(), c_int()
+    lib.lib.rats_version(byref(major), byref(minor), byref(patch), byref(build))
+    return VersionInfo(major.value, minor.value, patch.value, build.value)
+
+
+def git_describe() -> str:
+    """Git describe of the build, e.g. ``"v1.2.3-4-gabcdef"``."""
+    ptr = get_librats().lib.rats_git_describe()
+    return ptr.decode('utf-8') if ptr else ""
+
+
+def abi() -> int:
+    """Packed ABI id ``(major << 16) | (minor << 8) | patch``."""
+    return get_librats().lib.rats_abi()
+
+
+def error_str(error_code: int) -> str:
+    """Static human-readable name for a ``rats_error_t`` code."""
+    ptr = get_librats().lib.rats_error_str(int(error_code))
+    return ptr.decode('utf-8') if ptr else ""
 
 
 def _report(exc: Exception, where: str) -> None:

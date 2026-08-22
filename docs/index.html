@@ -329,14 +329,14 @@ int main() {
                                     <i class="fas fa-copy"></i>
                                 </button>
                             </div>
-                            <pre><code id="python-code">from librats_py import RatsClient
+                            <pre><code id="python-code">from librats_py import RatsNode
 import time
 
 def main():
     CHANNEL = "chat"
 
     # Context manager starts/stops the node. Register callbacks before start().
-    with RatsClient(8080) as client:
+    with RatsNode(8080) as client:
         client.on_peer_connected(lambda pid: print(f"✅ New peer connected: {pid}"))
 
         def on_message(peer_id, data):

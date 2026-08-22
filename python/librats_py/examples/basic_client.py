@@ -1,56 +1,61 @@
 #!/usr/bin/env python3
 """
-Basic librats client example.
+Basic node: peer events and raw-channel messaging.
 
-Demonstrates peer-to-peer messaging over a named channel using the new C ABI.
-Callbacks and subsystems must be registered/enabled before ``start()``.
+Everything a node does beyond secure transport is opt-in, and every enable and
+every callback goes in BEFORE start().
+
+    python basic_client.py <listen_port>
 """
 
 import sys
-from librats_py import RatsClient, RatsError, LogLevel
+
+from librats_py import RatsNode, RatsError, LogLevel, TransportMask, set_log_level
+
+CHANNEL = "chat"
+
+COMMANDS = """
+commands:
+  connect <host> <port>  dial a peer
+  send <peer_id> <msg>   send on the 'chat' channel to one peer
+  broadcast <msg>        send on 'chat' to every peer
+  peers                  list connected peers
+  quit                   exit
+"""
 
 
-def main():
+def describe(mask: int) -> str:
+    names = [n for n, bit in (("tcp", TransportMask.TCP), ("udp", TransportMask.UDP))
+             if mask & bit]
+    return "+".join(names) or "none"
+
+
+def main() -> None:
     if len(sys.argv) != 2:
-        print("Usage: python basic_client.py <listen_port>")
-        print("Example: python basic_client.py 8080")
-        sys.exit(1)
-
+        sys.exit("usage: python basic_client.py <listen_port>")
     try:
         listen_port = int(sys.argv[1])
     except ValueError:
-        print("Error: Port must be a number")
-        sys.exit(1)
+        sys.exit("port must be a number")
 
-    RatsClient.set_log_level(LogLevel.INFO)
+    set_log_level(LogLevel.INFO)
 
-    CHANNEL = "chat"
+    with RatsNode(listen_port) as node:
+        # All of this happens before start().
+        node.on_peer_connected(lambda peer: print(f"+ {peer}"))
+        node.on_peer_disconnected(lambda peer: print(f"- {peer}"))
 
-    with RatsClient(listen_port) as client:
-        print(f"Starting librats client on port {listen_port}")
-
-        # Register callbacks BEFORE start().
-        client.on_peer_connected(lambda pid: print(f"+ Peer connected: {pid}"))
-        client.on_peer_disconnected(lambda pid: print(f"- Peer disconnected: {pid}"))
-
-        def on_chat(peer_id, data):
+        def on_chat(peer_id: str, data: bytes) -> None:
             print(f"\n[{peer_id[:16]}…] {data.decode('utf-8', 'replace')}")
             print("librats> ", end="", flush=True)
 
-        client.on(CHANNEL, on_chat)
+        node.on(CHANNEL, on_chat)
 
-        client.start()
-        print("Client started.")
-        print(f"Local peer id: {client.local_id}")
-        print(f"Listening on port: {client.listen_port}")
-
-        print("\nCommands:")
-        print("  connect <host> <port>  - dial a peer")
-        print("  send <peer_id> <msg>   - send on the 'chat' channel to a peer")
-        print("  broadcast <msg>        - broadcast on 'chat' to all peers")
-        print("  peers                  - list connected peers")
-        print("  quit                   - exit")
-        print()
+        node.start()
+        print(f"peer id      {node.local_id}")
+        print(f"listening on {node.listen_port}")
+        print(f"transports   {describe(node.transports)}")
+        print(COMMANDS)
 
         while True:
             try:
@@ -59,32 +64,26 @@ def main():
                 break
             if not parts:
                 continue
-            cmd = parts[0].lower()
+            cmd, *args = parts
 
             try:
                 if cmd in ("quit", "exit"):
                     break
-                elif cmd == "connect" and len(parts) == 3:
-                    client.connect(parts[1], int(parts[2]))
-                    print(f"Dialing {parts[1]}:{parts[2]}…")
-                elif cmd == "send" and len(parts) >= 3:
-                    client.send(parts[1], CHANNEL, " ".join(parts[2:]).encode())
-                    print("Sent.")
-                elif cmd == "broadcast" and len(parts) >= 2:
-                    client.broadcast(CHANNEL, " ".join(parts[1:]).encode())
-                    print("Broadcasted.")
+                elif cmd == "connect" and len(args) == 2:
+                    node.connect(args[0], int(args[1]))
+                    print(f"dialing {args[0]}:{args[1]}…")
+                elif cmd == "send" and len(args) >= 2:
+                    node.send(args[0], CHANNEL, " ".join(args[1:]).encode())
+                elif cmd == "broadcast" and args:
+                    node.broadcast(CHANNEL, " ".join(args).encode())
                 elif cmd == "peers":
-                    ids = client.peer_ids()
-                    print(f"Connected peers ({len(ids)}):")
-                    for pid in ids:
-                        rtt = ""
-                        print(f"  - {pid}{rtt}")
+                    print("\n".join(node.peer_ids) or "(none)")
                 else:
-                    print(f"Unknown/invalid command: {' '.join(parts)}")
-            except RatsError as e:
-                print(f"Error: {e}")
+                    print(f"unknown command: {' '.join(parts)}")
+            except RatsError as exc:
+                print(f"error: {exc}")
 
-        print("\nShutting down…")
+    print("\nstopped")
 
 
 if __name__ == "__main__":

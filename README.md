@@ -92,9 +92,9 @@ Projects and companies building on librats:
 ### **Multi-Language Support**
 - **Native C++17**: core implementation with the full feature set
 - **C API** (`bindings/rats.h`): clean opaque-pointer C ABI — the foundation for all FFI bindings
-- **Node.js**: native addon with async/await and TypeScript definitions ([npm package](https://www.npmjs.com/package/librats))
-- **Java/Android**: JNI wrapper with a high-level Java API
-- **Python**: ctypes-based package with asyncio support
+- **Node.js**: N-API native addon (`RatsNode`) with TypeScript definitions ([npm package](https://www.npmjs.com/package/librats))
+- **Java/Android**: JNI wrapper with a high-level Java API (`com.librats.RatsNode`)
+- **Python**: ctypes package with a Pythonic `RatsNode`
 
 ## 🚀 Quick Start
 
@@ -619,8 +619,8 @@ node.start();   // discovery uses a hash derived from your protocol identity
 | **C/C++** | Native Library | ✅ **Fully Supported** | Core implementation with the full feature set |
 | **Android (NDK)** | Native C++ | ✅ **Fully Supported** | Android NDK integration with JNI bindings |
 | **Android (Java)** | JNI Wrapper | ✅ **Fully Supported** | High-level Java API for Android apps |
-| **Node.js** | Native Addon | ✅ **Fully Supported** | async/await support ([npm](https://www.npmjs.com/package/librats)) |
-| **Python** | C Extension | ✅ **Fully Supported** | CPython extension with asyncio integration |
+| **Node.js** | N-API Addon | ✅ **Fully Supported** | `RatsNode` + TypeScript definitions ([npm](https://www.npmjs.com/package/librats)) |
+| **Python** | ctypes Package | ✅ **Fully Supported** | `RatsNode` with context-manager lifecycle |
 | **Rust** | FFI Bindings | 📋 **Planned** | Safe bindings with tokio async support |
 | **Go** | CGO Bindings | 📋 **Future** | CGO wrapper for Go applications |
 | **C#/.NET** | P/Invoke | 📋 **Future** | .NET bindings for Windows/Linux/macOS |

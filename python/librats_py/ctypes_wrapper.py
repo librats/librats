@@ -121,11 +121,23 @@ class LibratsCtypes:
 
     def __init__(self):
         lib_path = find_librats_library()
+        # Python 3.8+ on Windows no longer searches PATH when resolving a DLL's
+        # own dependencies, so a librats.dll sitting next to its runtime DLLs
+        # would still fail to load. Register its directory explicitly.
+        dll_dir = None
+        if platform.system().lower() == 'windows' and os.path.isabs(lib_path):
+            try:
+                dll_dir = os.add_dll_directory(os.path.dirname(lib_path))
+            except (AttributeError, OSError):
+                dll_dir = None
         try:
             self.lib = CDLL(lib_path)
         except OSError as e:
             raise LibratsNotFoundError(
                 f"Failed to load librats library at {lib_path}: {e}")
+        finally:
+            if dll_dir is not None:
+                dll_dir.close()
         self._setup_signatures()
 
     def _setup_signatures(self):
@@ -147,9 +159,6 @@ class LibratsCtypes:
 
         lib.rats_create.argtypes = [c_uint16]
         lib.rats_create.restype = c_void_p
-
-        lib.rats_create_ex.argtypes = [c_uint16, c_int, c_char_p, c_int]
-        lib.rats_create_ex.restype = c_void_p
 
         lib.rats_destroy.argtypes = [c_void_p]
         lib.rats_destroy.restype = None
@@ -217,6 +226,16 @@ class LibratsCtypes:
 
         lib.rats_enable_port_mapping.argtypes = [c_void_p, c_int, c_int]
         lib.rats_enable_port_mapping.restype = c_int
+
+        # --- NAT traversal (hole punching) ---
+        lib.rats_enable_hole_punch.argtypes = [c_void_p, c_int]
+        lib.rats_enable_hole_punch.restype = c_int
+
+        lib.rats_punch_peer.argtypes = [c_void_p, c_char_p]
+        lib.rats_punch_peer.restype = c_int
+
+        lib.rats_nat_mapping.argtypes = [c_void_p]
+        lib.rats_nat_mapping.restype = c_int
 
         # --- peer enumeration ---
         lib.rats_peer_ids.argtypes = [c_void_p, POINTER(c_size_t)]

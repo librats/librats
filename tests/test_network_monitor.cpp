@@ -1,12 +1,12 @@
 /**
  * @file test_network_monitor.cpp
- * @brief Unit tests for NetworkMonitor and RatsClient network-change detection.
+ * @brief Unit tests for NetworkMonitor and Node network-change detection.
  *
  * Like the port-mapping tests, these do not depend on the test host actually
  * changing its network configuration. A real IP/interface change cannot be
  * forced in CI, so the focus is the lifecycle contract: the monitor starts,
  * tears down promptly without hanging or crashing, never fires the callback
- * when the address set is unchanged, and the RatsClient integration can be
+ * when the address set is unchanged, and the Node integration can be
  * toggled before and during a run.
  */
 

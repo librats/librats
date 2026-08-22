@@ -24,11 +24,17 @@
 -keep public class com.librats.** { *; }
 
 # Native methods are resolved by name from librats_jni.cpp.
--keepclasseswithmembernames class com.librats.RatsClient {
+-keepclasseswithmembernames class com.librats.RatsNode {
     native <methods>;
 }
 
-# Callback interfaces and their methods are invoked from native code via
-# GetMethodID (onConnected/onDisconnected/onMessage/onTopicMessage/
-# onJsonMessage/onFileOffer/onFileProgress/onFileComplete) — keep their names.
+# Callback interfaces are invoked from native code via GetMethodID (onPeer /
+# onMessage / onTopicMessage / onJsonMessage / onFileOffer / onFileProgress /
+# onFileComplete), so their method names must survive obfuscation.
 -keep interface com.librats.*Callback { *; }
+
+# FileTransferStatus.fromValue(int) is called from native code via
+# GetStaticMethodID to build the value handed to FileProgressCallback.
+-keep class com.librats.FileTransferStatus {
+    public static com.librats.FileTransferStatus fromValue(int);
+}

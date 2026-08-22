@@ -9,14 +9,12 @@ string-ish arguments (peer ids, topics, type names, JSON text) arrive as
 ``c_char_p``.
 
 The matching ``*Callback`` aliases describe the Pythonic signatures exposed by
-:class:`~librats_py.core.RatsClient`, after the wrappers in ``core.py`` decode
+:class:`~librats_py.core.RatsNode`, after the wrappers in ``core.py`` decode
 hex ids and copy payload bytes.
 """
 
 from typing import Any, Callable, Optional
-from ctypes import (
-    CFUNCTYPE, c_void_p, c_char_p, c_size_t, c_int, c_uint64, c_int64,
-)
+from ctypes import CFUNCTYPE, c_void_p, c_char_p, c_size_t, c_int, c_uint64
 
 # --- Raw C callback prototypes (must mirror rats.h exactly) ---
 

@@ -10,7 +10,7 @@ import json
 import sys
 from datetime import datetime
 
-from librats_py import RatsClient, RatsError, LogLevel
+from librats_py import RatsNode, RatsError, LogLevel, set_log_level
 
 
 class GossipSubChat:
@@ -18,13 +18,13 @@ class GossipSubChat:
         self.listen_port = listen_port
         self.username = username
         self.topic = topic
-        self.client = RatsClient(listen_port)
+        self.node = RatsNode(listen_port)
 
         # Enable + subscribe BEFORE start().
-        self.client.on_peer_connected(lambda pid: self._print(f"+ {pid[:16]}… joined"))
-        self.client.on_peer_disconnected(lambda pid: self._print(f"- {pid[:16]}… left"))
-        self.client.enable_pubsub()
-        self.client.subscribe(topic, self.on_topic_message)
+        self.node.on_peer_connected(lambda pid: self._print(f"+ {pid[:16]}… joined"))
+        self.node.on_peer_disconnected(lambda pid: self._print(f"- {pid[:16]}… left"))
+        self.node.enable_pubsub()
+        self.node.subscribe(topic, self.on_topic_message)
 
     def _print(self, line):
         print(f"\n{line}")
@@ -41,9 +41,9 @@ class GossipSubChat:
         self._print(f"{peer_id[:16]}…: {data!r}")
 
     def start(self):
-        self.client.start()
+        self.node.start()
         print(f"GossipSub chat on port {self.listen_port}")
-        print(f"Local peer id: {self.client.local_id}")
+        print(f"Local peer id: {self.node.local_id}")
         print(f"Username: {self.username}   Topic: {self.topic}")
         self._publish('join', '')
 
@@ -52,7 +52,7 @@ class GossipSubChat:
             self._publish('leave', '')
         except RatsError:
             pass
-        self.client.stop()
+        self.node.stop()
 
     def _publish(self, kind, content):
         payload = {
@@ -61,7 +61,7 @@ class GossipSubChat:
             'content': content,
             'timestamp': datetime.now().isoformat(),
         }
-        self.client.publish(self.topic, json.dumps(payload).encode('utf-8'))
+        self.node.publish(self.topic, json.dumps(payload).encode('utf-8'))
 
     def run(self):
         print("\nCommands: connect <host> <port> | peers | quit | <message>\n")
@@ -78,10 +78,10 @@ class GossipSubChat:
                 if cmd in ("quit", "exit"):
                     break
                 elif cmd == "connect" and len(parts) == 3:
-                    self.client.connect(parts[1], int(parts[2]))
+                    self.node.connect(parts[1], int(parts[2]))
                     print(f"Dialing {parts[1]}:{parts[2]}…")
                 elif cmd == "peers":
-                    for pid in self.client.peer_ids():
+                    for pid in self.node.peer_ids:
                         print(f"  - {pid}")
                 else:
                     self._publish('chat', line)
@@ -104,7 +104,7 @@ def main():
         print("Error: Username cannot be empty")
         sys.exit(1)
 
-    RatsClient.set_log_level(LogLevel.INFO)
+    set_log_level(LogLevel.INFO)
     chat = GossipSubChat(listen_port, username, topic)
     try:
         chat.start()

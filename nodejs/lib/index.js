@@ -1,13 +1,18 @@
 /**
- * LibRats Node.js bindings.
+ * librats — Node.js bindings.
  *
- * High-performance peer-to-peer networking: secure transport (Noise XX),
- * DHT/mDNS discovery, raw-channel messaging, pub/sub (GossipSub), typed JSON
- * messaging, file transfer, RTT probing and automatic reconnection.
+ * A `RatsNode` is one librats node: secure transport (Noise XX over TCP or the
+ * library's reliable stream over UDP), a self-certifying peer id, and raw
+ * messaging on named channels. Everything else — DHT/mDNS discovery, pub/sub,
+ * typed JSON messaging, file transfer, NAT port mapping, hole punching, RTT
+ * probing, automatic reconnection — is an opt-in subsystem.
  *
- * Subsystems are explicit and opt-in: call the matching `enable*()` BEFORE
- * `start()`. Callbacks must also be registered before `start()`. Native calls
- * throw an Error (message "librats: <CODE>") on a non-OK result.
+ * Ordering: enable subsystems and register callbacks BEFORE `start()`. Enabling
+ * after start throws `ALREADY_STARTED`; using a subsystem before its enable
+ * throws `NOT_ENABLED`. Callbacks fire on a librats reactor thread and are
+ * marshalled onto the JS thread — keep them non-blocking anyway.
+ *
+ * Failures throw an `Error` whose message is `librats: <CODE>`.
  */
 
 'use strict';
@@ -42,14 +47,14 @@ if (!addon) {
   );
 }
 
-/** Transport security selector (see rats_security_t). */
+/** Transport security selector (`rats_security_t`). */
 const Security = Object.freeze({
   NOISE: 0,     // Noise XX, encrypted + authenticated (default)
   PLAINTEXT: 1, // unencrypted, ids exchanged in the clear
 });
 
 /**
- * Which wire a peer connection runs on (see rats_transport_t). Both carry the
+ * Which wire a peer connection runs on (`rats_transport_t`). Both carry the
  * identical protocol and the identical encrypted handshake; they differ only in
  * how the ordered, reliable byte stream underneath is obtained.
  */
@@ -58,13 +63,24 @@ const Transport = Object.freeze({
   UDP: 1, // reliable stream over the shared UDP socket
 });
 
-/** Bitmask of transports, as reported by peer/node transport queries. */
+/** Bitmask flags used by `node.transports` and `node.peerTransports()`. */
 const TransportMask = Object.freeze({
   TCP: 0x1,
   UDP: 0x2,
 });
 
-/** Global log levels (see rats_log_level_t). */
+/**
+ * What the mesh has shown about this node's own NAT, from the endpoints
+ * datagram peers report seeing its shared UDP socket at.
+ */
+const NatMapping = Object.freeze({
+  UNKNOWN: 0,               // not enough independent observations yet
+  OPEN: 1,                  // no NAT in the path
+  ENDPOINT_INDEPENDENT: 2,  // one external port for every peer — punchable
+  ENDPOINT_DEPENDENT: 3,    // a fresh mapping per peer (symmetric) — not punchable
+});
+
+/** Process-global log levels (`rats_log_level_t`). */
 const LogLevel = Object.freeze({
   DEBUG: 0,
   INFO: 1,
@@ -75,58 +91,92 @@ const LogLevel = Object.freeze({
 /**
  * A librats node.
  *
- * Construct with a listen port (`new RatsClient(8080)`) or a config object
- * (`new RatsClient({ listenPort, security, dataDir, ... })`). The instance is a
- * thin wrapper over the native handle; every method maps to a `rats_*` C call.
+ * ```js
+ * const { RatsNode } = require('librats');
+ * const node = new RatsNode({ listenPort: 8080, dataDir: './state' });
+ * node.onPeerConnected(id => console.log('peer', id));
+ * node.on('chat', (id, data) => console.log(id, data.toString()));
+ * node.enableDht();
+ * node.start();
+ * ```
  */
-class RatsClient {
+class RatsNode {
   /**
-   * @param {number|object} [portOrConfig] - listen port (0 = ephemeral) or a
-   *   config object: { listenPort, enableListen, bindAddress, security,
-   *   dataDir, protocol, maxPeers, enableTcp, enableUdp, preferredTransport,
-   *   transportFallbackMs }.
-   *
-   *   Both transports are enabled by default and bind the same port. A dial
-   *   tries `preferredTransport` (UDP: one socket and one NAT mapping for every
-   *   peer) and races the other after `transportFallbackMs`.
+   * @param {number|RatsNodeConfig} [portOrConfig=0] listen port (0 = ephemeral)
+   *   or a config object. Both transports are enabled by default and bind the
+   *   same port; a dial tries `preferredTransport` (UDP — one socket and one NAT
+   *   mapping for every peer) and races the other after `transportFallbackMs`.
    */
   constructor(portOrConfig = 0) {
-    this._native = new addon.RatsClient(portOrConfig);
+    this._native = new addon.RatsNode(portOrConfig);
   }
 
-  // ---- lifecycle / core ----
+  // ---- lifecycle ----
 
-  /** Start the node. Throws on bind failure or if already started. */
+  /** Bring the node up: bind the listener and start enabled subsystems. */
   start() { this._native.start(); }
 
-  /** Stop the node. Safe to call repeatedly. */
+  /** Tear the node down and close all connections. Idempotent. */
   stop() { this._native.stop(); }
 
-  /** @returns {number} the actual listen port (resolved if 0 was requested). */
-  getListenPort() { return this._native.getListenPort(); }
+  /**
+   * Release the native node. The instance is inert afterwards — further calls
+   * throw. Optional: an unreachable node is freed by the GC anyway.
+   */
+  destroy() { this._native.destroy(); }
 
-  /** @returns {string|null} our self-certifying peer id (64-char hex). */
-  getOurPeerId() { return this._native.getOurPeerId(); }
+  // ---- identity / info ----
 
-  /** @returns {string|null} the application protocol id bound in the handshake (e.g. "librats/1.0"). */
-  getProtocol() { return this._native.getProtocol(); }
+  /** @type {number} the bound listen port (resolved when 0 was requested). */
+  get listenPort() { return this._native.listenPort(); }
+
+  /** @type {string|null} our self-certifying peer id (64-char lowercase hex). */
+  get localId() { return this._native.localId(); }
+
+  /** @type {string|null} the app protocol bound into the handshake, e.g. "librats/1.0". */
+  get protocol() { return this._native.protocol(); }
+
+  /**
+   * @type {number} transports actually running, as a {@link TransportMask}
+   * bitmask. May be narrower than the config asked for — a UDP socket that could
+   * not be bound leaves the node TCP-only rather than failing to start. 0 before
+   * `start()` and after `stop()`.
+   */
+  get transports() { return this._native.transports(); }
 
   // ---- connections ----
 
-  /** Dial a peer. Throws on invalid argument. @param {string} host @param {number} port */
+  /**
+   * Dial a peer. Non-blocking: success surfaces as `onPeerConnected`.
+   * @param {string} host @param {number} port
+   */
   connect(host, port) { this._native.connect(host, port); }
 
-  /** @returns {number} count of currently-connected peers. */
-  getPeerCount() { return this._native.getPeerCount(); }
+  /** @type {number} count of currently-connected peers. */
+  get peerCount() { return this._native.peerCount(); }
 
-  /** @returns {string[]} hex ids of currently-connected peers. */
-  getPeerIds() { return this._native.getPeerIds(); }
+  /** @type {string[]} hex ids of currently-connected peers. */
+  get peerIds() { return this._native.peerIds(); }
 
-  /** Cap on established peers (0 = unlimited). May be set before or after start. */
-  setMaxPeers(maxPeers) { this._native.setMaxPeers(maxPeers); }
+  /** @type {number} cap on established peers (0 = unlimited). Settable at any time. */
+  get maxPeers() { return this._native.maxPeers(); }
+  set maxPeers(n) { this._native.setMaxPeers(n); }
 
-  /** @returns {number} the established-peer cap (0 = unlimited). */
-  getMaxPeers() { return this._native.getMaxPeers(); }
+  /**
+   * Which wire a connected peer's link runs on.
+   * @param {string} peerId
+   * @returns {number|null} a {@link Transport} value, or null if not connected.
+   */
+  peerTransport(peerId) { return this._native.peerTransport(peerId); }
+
+  /**
+   * Transports a connected peer advertised in its identify message.
+   * @param {string} peerId
+   * @returns {number|null} a {@link TransportMask} bitmask, or null if not
+   *   connected. 0 means the peer did not say (an older build) — "no
+   *   information", not "no transports".
+   */
+  peerTransports(peerId) { return this._native.peerTransports(peerId); }
 
   // ---- raw channel messaging ----
 
@@ -143,39 +193,65 @@ class RatsClient {
   broadcast(channel, data) { this._native.broadcast(channel, data); }
 
   /**
-   * Register a handler for a named channel. Register before start().
+   * Register a handler for a named channel. Additive; register before `start()`.
    * @param {string} channel
-   * @param {(peerId: string, data: Buffer) => void} callback
+   * @param {(peerId: string, data: Buffer) => void} handler
    */
-  on(channel, callback) { this._native.on(channel, callback); }
+  on(channel, handler) { this._native.on(channel, handler); }
 
-  // ---- peer events ----
+  // ---- peer events (register before start) ----
 
-  /** @param {(peerId: string) => void} callback fired when a peer connects. Register before start(). */
-  onPeerConnected(callback) { this._native.onPeerConnected(callback); }
+  /** @param {(peerId: string) => void} handler fired when a peer connects. */
+  onPeerConnected(handler) { this._native.onPeerConnected(handler); }
 
-  /** @param {(peerId: string) => void} callback fired when a peer disconnects. Register before start(). */
-  onPeerDisconnected(callback) { this._native.onPeerDisconnected(callback); }
+  /** @param {(peerId: string) => void} handler fired when a peer disconnects. */
+  onPeerDisconnected(handler) { this._native.onPeerDisconnected(handler); }
 
-  // ---- discovery / NAT (enable before start) ----
+  // ---- discovery (enable before start) ----
 
   /**
-   * Enable DHT discovery.
+   * Enable DHT discovery: announce on and search a key on the mainline DHT,
+   * dialing what it finds.
    * @param {number} [dhtPort=0] 0 = ephemeral
-   * @param {string} [discoveryKey] app namespace (default if omitted)
+   * @param {string} [discoveryKey] app namespace; defaults to the node's protocol
    */
   enableDht(dhtPort = 0, discoveryKey) { this._native.enableDht(dhtPort, discoveryKey); }
 
   /** Enable local-network mDNS discovery. */
   enableMdns() { this._native.enableMdns(); }
 
+  // ---- NAT traversal (enable before start) ----
+
   /**
    * Enable automatic NAT port forwarding for the listen port.
-   * @param {boolean} [enableUpnp=true] @param {boolean} [enableNatpmp=true]
+   * @param {boolean} [enableUpnp=true] UPnP IGD backend
+   * @param {boolean} [enableNatpmp=true] NAT-PMP backend
    */
   enablePortMapping(enableUpnp = true, enableNatpmp = true) {
     this._native.enablePortMapping(enableUpnp, enableNatpmp);
   }
+
+  /**
+   * Enable UDP hole punching: reach a peer no port forwarding made reachable by
+   * arranging with a peer both sides already have that the two dial each other
+   * at the same moment.
+   * @param {boolean} [serveAsRelay=true] also carry other peers' rendezvous — a
+   *   few dozen forwarded bytes per punch, only ever to peers this node already
+   *   holds. A mesh in which nobody relays cannot punch at all.
+   */
+  enableHolePunch(serveAsRelay = true) { this._native.enableHolePunch(serveAsRelay); }
+
+  /**
+   * Try to reach a peer by punching. Non-blocking: success arrives as an
+   * ordinary `onPeerConnected`. Throws `NO_SUCH_PEER` when there is nothing to
+   * do or nothing to try with — already connected, a punch already running, or
+   * this node does not yet know an external endpoint of its own.
+   * @param {string} peerId
+   */
+  punchPeer(peerId) { this._native.punchPeer(peerId); }
+
+  /** @type {number} a {@link NatMapping} value describing this node's own NAT. */
+  get natMapping() { return this._native.natMapping(); }
 
   // ---- pub/sub (enable before start) ----
 
@@ -183,11 +259,11 @@ class RatsClient {
   enablePubsub() { this._native.enablePubsub(); }
 
   /**
-   * Subscribe to a topic. Subscribe before start().
+   * Subscribe to a topic. Subscribe before `start()`.
    * @param {string} topic
-   * @param {(peerId: string, topic: string, data: Buffer) => void} callback
+   * @param {(peerId: string, topic: string, data: Buffer) => void} handler
    */
-  subscribe(topic, callback) { this._native.subscribe(topic, callback); }
+  subscribe(topic, handler) { this._native.subscribe(topic, handler); }
 
   /** Unsubscribe from a topic. @param {string} topic */
   unsubscribe(topic) { this._native.unsubscribe(topic); }
@@ -195,55 +271,59 @@ class RatsClient {
   /** Publish raw bytes on a topic. @param {string} topic @param {string|Buffer} data */
   publish(topic, data) { this._native.publish(topic, data); }
 
-  // ---- typed JSON (enable before start) ----
+  // ---- typed JSON messaging (enable before start) ----
 
-  /** Enable the JSON-messaging subsystem. */
+  /** Enable the typed-JSON messaging subsystem. */
   enableJson() { this._native.enableJson(); }
 
   /**
    * Register an additive handler for JSON messages of `type`.
    * @param {string} type
-   * @param {(peerId: string, json: string) => void} callback
+   * @param {(peerId: string, value: any) => void} handler receives the parsed value
    */
-  onJson(type, callback) { this._native.onJson(type, callback); }
+  onJson(type, handler) { this._native.onJson(type, wrapJson(handler)); }
 
-  /** Like onJson but the handler is removed after it fires once. */
-  onceJson(type, callback) { this._native.onceJson(type, callback); }
+  /** Like {@link onJson}, but the handler is removed after it fires once. */
+  onceJson(type, handler) { this._native.onceJson(type, wrapJson(handler)); }
 
-  /** Remove handlers for a JSON message type. @param {string} type */
+  /** Remove the handlers for a JSON message type. @param {string} type */
   offJson(type) { this._native.offJson(type); }
 
   /**
    * Send a typed JSON message to one peer.
-   * @param {string} peerId @param {string} type @param {string} json valid JSON text
+   * @param {string} peerId @param {string} type
+   * @param {any} value serialized with `JSON.stringify` unless already a string
    */
-  sendJson(peerId, type, json) { this._native.sendJson(peerId, type, json); }
+  sendJson(peerId, type, value) { this._native.sendJson(peerId, type, toJsonText(value)); }
 
-  /** Broadcast a typed JSON message. @param {string} type @param {string} json valid JSON text */
-  broadcastJson(type, json) { this._native.broadcastJson(type, json); }
+  /** Broadcast a typed JSON message. @param {string} type @param {any} value */
+  broadcastJson(type, value) { this._native.broadcastJson(type, toJsonText(value)); }
 
   // ---- file transfer (enable + register callbacks before start) ----
 
-  /** Enable the file-transfer subsystem. @param {string} [tempDir] in-progress download dir */
+  /**
+   * Enable the file-transfer subsystem.
+   * @param {string} [tempDir] directory for in-progress downloads (default ".")
+   */
   enableFileTransfer(tempDir) { this._native.enableFileTransfer(tempDir); }
 
   /**
-   * Fired for every incoming transfer offer. Respond with acceptFile()/rejectFile().
-   * @param {(peerId: string, transferId: number, name: string, size: number, isDirectory: boolean) => void} callback
+   * Fired for every incoming offer. Respond with {@link acceptFile} / {@link rejectFile}.
+   * @param {(peerId: string, transferId: number, name: string, size: number, isDirectory: boolean) => void} handler
    */
-  onFileOffer(callback) { this._native.onFileOffer(callback); }
+  onFileOffer(handler) { this._native.onFileOffer(handler); }
 
   /**
    * Fired periodically with transfer progress. `status` is the numeric transfer state.
-   * @param {(transferId: number, peerId: string, bytesTransferred: number, totalBytes: number, status: number) => void} callback
+   * @param {(transferId: number, peerId: string, bytesTransferred: number, totalBytes: number, status: number) => void} handler
    */
-  onFileProgress(callback) { this._native.onFileProgress(callback); }
+  onFileProgress(handler) { this._native.onFileProgress(handler); }
 
   /**
-   * Fired when a transfer finishes. `path` is the final on-disk path on success.
-   * @param {(transferId: number, success: boolean, path: string) => void} callback
+   * Fired when a transfer finishes; `path` is the final on-disk path on success.
+   * @param {(transferId: number, success: boolean, path: string) => void} handler
    */
-  onFileComplete(callback) { this._native.onFileComplete(callback); }
+  onFileComplete(handler) { this._native.onFileComplete(handler); }
 
   /** Offer a file to a peer. @returns {number} transfer id (0 on failure). */
   sendFile(peerId, filePath) { return this._native.sendFile(peerId, filePath); }
@@ -266,49 +346,73 @@ class RatsClient {
   /** Cancel a live transfer (either side). */
   cancelFile(peerId, transferId) { this._native.cancelFile(peerId, transferId); }
 
-  /** Pause a live transfer. */
+  /** Pause a live transfer (either side). */
   pauseFile(peerId, transferId) { this._native.pauseFile(peerId, transferId); }
 
-  /** Resume a paused transfer. */
+  /** Resume a paused transfer (either side). */
   resumeFile(peerId, transferId) { this._native.resumeFile(peerId, transferId); }
 
-  // ---- ping / reconnect (enable before start) ----
+  // ---- liveness / reconnection (enable before start) ----
 
   /** Enable periodic ping/pong RTT probing of every peer. */
   enablePing() { this._native.enablePing(); }
 
-  /** @returns {number} last RTT to a peer in ms, or -1 if unknown. */
-  getPeerRttMs(peerId) { return this._native.getPeerRttMs(peerId); }
+  /**
+   * @param {string} peerId
+   * @returns {number} last measured RTT in ms, or -1 if unknown (ping not
+   *   enabled, or no pong received yet).
+   */
+  peerRttMs(peerId) { return this._native.peerRttMs(peerId); }
 
-  /** Enable the reconnection subsystem (re-dials dropped peers with backoff). */
+  /** Enable the reconnection subsystem: re-dials dropped peers with backoff. */
   enableReconnect() { this._native.enableReconnect(); }
 
-  /** Add an address to keep connected. @param {string} host @param {number} port */
+  /** Add an address to keep connected (re-dialed on drop). @param {string} host @param {number} port */
   addReconnect(host, port) { this._native.addReconnect(host, port); }
 
   /** Stop reconnecting to an address and drop it from the store. */
   removeReconnect(host, port) { this._native.removeReconnect(host, port); }
 }
 
+// JSON messaging is "a named type carrying a JSON document". The C ABI speaks
+// JSON text; JS speaks values, so the conversion lives here rather than in every
+// caller. A string is passed through — it is either already JSON text or a JSON
+// string the peer will parse back to a string either way.
+function toJsonText(value) {
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+function wrapJson(handler) {
+  return (peerId, json) => {
+    let value;
+    try {
+      value = JSON.parse(json);
+    } catch (err) {
+      value = json; // hand over the raw text rather than dropping the message
+    }
+    handler(peerId, value);
+  };
+}
+
 module.exports = {
-  RatsClient,
+  RatsNode,
+
+  // Enums
   Security,
   Transport,
   TransportMask,
+  NatMapping,
   LogLevel,
 
   // Library info
-  getVersionString: addon.getVersionString,
-  getVersion: addon.getVersion,
-  getGitDescribe: addon.getGitDescribe,
-  getAbi: addon.getAbi,
+  version: addon.getVersionString,
+  versionInfo: addon.getVersion,
+  gitDescribe: addon.getGitDescribe,
+  abi: addon.getAbi,
 
-  // Global logging
+  // Process-global logging
   setLogLevel: addon.setLogLevel,
   setLogFile: addon.setLogFile,
-
-  // Native constant tables (SECURITY, LOG_LEVELS, ERRORS)
-  constants: addon.constants,
 };
 
 if (process.env.LIBRATS_DEBUG) {

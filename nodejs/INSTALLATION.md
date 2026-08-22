@@ -136,13 +136,13 @@ npm test
 # In a test directory
 npm init -y
 npm install /path/to/librats/nodejs
-node -e "const {RatsClient} = require('librats'); console.log('Success!');"
+node -e "const {RatsNode} = require('librats'); console.log('Success!');"
 ```
 
 ### Testing from npm (after publishing)
 ```bash
 npm install librats
-node -e "const {RatsClient} = require('librats'); console.log('Success!');"
+node -e "const {RatsNode} = require('librats'); console.log('Success!');"
 ```
 
 ## Publishing the Package

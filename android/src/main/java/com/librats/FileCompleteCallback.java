@@ -1,18 +1,16 @@
 package com.librats;
 
 /**
- * Callback invoked when a transfer finishes (successfully or not).
+ * Notified when a transfer terminates, successfully or not.
  *
- * <p>Register with {@link RatsClient#setFileCompleteCallback} before
- * {@link RatsClient#start()}. Requires the file-transfer subsystem
- * ({@link RatsClient#enableFileTransfer(String)}). Fires on an internal reactor
- * thread.</p>
+ * <p>Register with {@link RatsNode#onFileComplete(FileCompleteCallback)} before
+ * {@link RatsNode#start()}; requires {@link RatsNode#enableFileTransfer(String)}.
+ * Fires on an internal reactor thread.</p>
  */
+@FunctionalInterface
 public interface FileCompleteCallback {
     /**
-     * Called when a transfer terminates.
-     *
-     * @param transferId unique transfer identifier
+     * @param transferId transfer identifier
      * @param success    true if the transfer completed successfully
      * @param path       final path of the transferred file/directory (may be null)
      */

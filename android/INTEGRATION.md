@@ -47,36 +47,38 @@ dependencies {
 ## Usage Example
 
 ```java
-import com.librats.RatsClient;
+import com.librats.RatsNode;
 import java.nio.charset.StandardCharsets;
 
 public class P2PService {
-    private RatsClient client;
+    private RatsNode node;
 
-    public void initializeP2P() {
-        client = new RatsClient(8080); // listen on 8080
+    public void initializeP2P(File dataDir) {
+        node = new RatsNode(new RatsNode.Config()
+                .listenPort(8080)
+                .dataDir(dataDir.getAbsolutePath()));   // stable identity across restarts
 
-        // Register callbacks and enable subsystems BEFORE start().
-        client.setConnectionCallback(peerId -> Log.d("P2P", "connected: " + peerId));
-        client.on("chat", (peerId, data) ->
+        // Callbacks and enables all go in before start().
+        node.onPeerConnected(peerId -> Log.d("P2P", "+ " + peerId));
+        node.on("chat", (peerId, data) ->
                 Log.d("P2P", peerId + ": " + new String(data, StandardCharsets.UTF_8)));
-        client.enableMdns();
+        node.enableMdns();
 
-        client.start();
+        node.start();
     }
 
     public void connectToPeer(String host, int port) {
-        client.connect(host, port);
+        node.connect(host, port);
     }
 
     public void broadcast(String message) {
-        client.broadcast("chat", message.getBytes(StandardCharsets.UTF_8));
+        node.broadcast("chat", message.getBytes(StandardCharsets.UTF_8));
     }
 
     public void cleanup() {
-        if (client != null) {
-            client.stop();
-            client.destroy();
+        if (node != null) {
+            node.close();   // stops the node and releases the native resources
+            node = null;
         }
     }
 }
@@ -101,20 +103,23 @@ public class P2PService {
 ## Key Concepts
 
 - **Peer-id-centric.** Peers are 64-char lowercase hex ids (no socket handles).
-  `ConnectionCallback` / `DisconnectCallback` deliver a peer-id `String`.
 - **Opt-in subsystems.** Call the matching `enable*()` and register callbacks
-  **before** `start()`. Enabling after start returns `ERR_ALREADY_STARTED`;
-  using a subsystem before enabling returns `ERR_NOT_ENABLED`.
-- **Error model.** Fallible methods return a `rats_error_t` code
-  (`RatsClient.OK == 0`); `RatsClient.errorString(code)` gives a name.
+  **before** `start()`. Enabling after start throws with
+  `ErrorCode.ALREADY_STARTED`; using a subsystem before enabling throws with
+  `ErrorCode.NOT_ENABLED`.
+- **Error model.** Fallible methods throw `RatsException`, which carries the
+  underlying `ErrorCode`; getters return their value.
+- **Ownership.** `RatsNode` is `AutoCloseable`: `close()` stops the node and
+  releases the native resources. The finalizer is only a safety net.
 
 ### Callback Interfaces
 
-- `ConnectionCallback` — `onConnected(String peerId)`
-- `DisconnectCallback` — `onDisconnected(String peerId)`
+All are `@FunctionalInterface`, so a lambda works anywhere one is expected.
+
+- `PeerCallback` — `onPeer(String peerId)` (both connect and disconnect)
 - `MessageCallback` — `onMessage(String peerId, byte[] data)` (channel bytes)
-- `TopicMessageCallback` — `onTopicMessage(String peerId, String topic, byte[] data)`
-- `JsonMessageCallback` — `onJsonMessage(String peerId, String json)`
+- `TopicCallback` — `onTopicMessage(String peerId, String topic, byte[] data)`
+- `JsonCallback` — `onJsonMessage(String peerId, String json)`
 - `FileOfferCallback` / `FileProgressCallback` / `FileCompleteCallback`
 
 ## Building
@@ -136,22 +141,23 @@ Supported ABIs: arm64-v8a, armeabi-v7a, x86_64, x86.
 
 - Callbacks run on an internal reactor thread; do not block in them.
 - Use `runOnUiThread()` for UI updates.
-- Call `destroy()` to release native resources.
+- Call `close()` (or use try-with-resources) to release native resources.
 
-## Removed from the previous binding
+## What the C ABI does not expose
 
-ICE/STUN/TURN and connection strategies, encryption enable/keys, configuration
-load/save (use `Config.dataDir`), granular logging controls, historical peers,
-statistics JSON, and automatic-discovery toggles have been removed. Use
-`enableDht` / `enableMdns` for discovery and `setLogLevel` / `setLogFile` for
-logging.
+ICE/STUN/TURN and connection strategies, runtime encryption toggles and key
+inspection, configuration load/save, granular logging controls, historical peers
+and statistics JSON have no C entry points and therefore no Java surface. Use
+`enablePortMapping` / `enableHolePunch` for NAT traversal, `Config.security(…)`
+and `Config.dataDir(…)` for security and persistence, `enableDht` / `enableMdns`
+for discovery, and `setLogLevel` / `setLogFile` for logging.
 
 ## Troubleshooting
 
 - Build: ensure NDK and CMake are installed and the repository root is reachable
   from the module so core sources compile.
 - Runtime: grant the required permissions; raise verbosity with
-  `RatsClient.setLogLevel(RatsClient.LOG_DEBUG)`; check native logs with
+  `RatsNode.setLogLevel(LogLevel.DEBUG)`; check native logs with
   `adb logcat -s LibRatsJNI`.
 - Network: verify peers are reachable and ports are open.
 

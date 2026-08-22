@@ -1,8 +1,8 @@
 """
-Integration tests for the librats Python bindings (new C ABI).
+Integration tests for the librats Python bindings: two live nodes over loopback.
 
-Require the librats shared library to be built and importable. Not run as part
-of this change.
+They need the librats shared library built and loadable; the whole module skips
+itself when it is not.
 """
 
 import os
@@ -14,7 +14,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from librats_py import RatsClient, RatsError, Security
+    from librats_py import RatsNode
     LIBRATS_AVAILABLE = True
 except ImportError as e:
     print(f"Warning: Could not import librats_py: {e}")
@@ -24,27 +24,24 @@ except ImportError as e:
 @unittest.skipIf(not LIBRATS_AVAILABLE, "librats_py not available")
 class TestIntegration(unittest.TestCase):
     def setUp(self):
-        self.clients = []
+        self.nodes = []
         self.messages = []
         self.connections = []
         self.lock = threading.Lock()
 
     def tearDown(self):
-        for c in self.clients:
-            try:
-                c.stop()
-            except Exception:
-                pass
-        self.clients.clear()
+        for node in self.nodes:
+            node.destroy()
+        self.nodes.clear()
 
-    def make_client(self, port=0, **kw):
-        c = RatsClient(port, **kw)
-        self.clients.append(c)
-        return c
+    def make_node(self, port=0, **kw):
+        node = RatsNode(port, **kw)
+        self.nodes.append(node)
+        return node
 
-    def test_two_clients_channel_message(self):
-        a = self.make_client(0)
-        b = self.make_client(0)
+    def test_two_nodes_channel_message(self):
+        a = self.make_node(0)
+        b = self.make_node(0)
 
         a.on_peer_connected(lambda pid: self.connections.append(("a", pid)))
 
@@ -61,8 +58,8 @@ class TestIntegration(unittest.TestCase):
         b.connect("127.0.0.1", a.listen_port)
         time.sleep(1.0)
 
-        self.assertGreater(a.peer_count(), 0)
-        self.assertGreater(b.peer_count(), 0)
+        self.assertGreater(a.peer_count, 0)
+        self.assertGreater(b.peer_count, 0)
 
         b.broadcast("chat", b"hello from b")
         time.sleep(0.5)
@@ -71,8 +68,8 @@ class TestIntegration(unittest.TestCase):
             self.assertTrue(any(d == b"hello from b" for _, d in self.messages))
 
     def test_pubsub(self):
-        a = self.make_client(0)
-        b = self.make_client(0)
+        a = self.make_node(0)
+        b = self.make_node(0)
 
         received = []
         a.enable_pubsub()
@@ -91,8 +88,8 @@ class TestIntegration(unittest.TestCase):
         self.assertTrue(any(d == b"broadcast payload" for d in received))
 
     def test_typed_json(self):
-        a = self.make_client(0)
-        b = self.make_client(0)
+        a = self.make_node(0)
+        b = self.make_node(0)
 
         got = []
         a.enable_json()
@@ -111,8 +108,8 @@ class TestIntegration(unittest.TestCase):
 
     def test_file_transfer(self):
         import tempfile
-        a = self.make_client(0)
-        b = self.make_client(0)
+        a = self.make_node(0)
+        b = self.make_node(0)
 
         a.enable_file_transfer()
         b.enable_file_transfer()

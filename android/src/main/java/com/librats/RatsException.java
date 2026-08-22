@@ -1,61 +1,36 @@
 package com.librats;
 
 /**
- * Exception thrown by {@link RatsClient} for failed native operations.
+ * Thrown by {@link RatsNode} when a native operation fails.
  *
- * <p>The {@link #getErrorCode()} mirrors the C ABI {@code rats_error_t} enum
- * (see {@code src/librats/bindings/rats.h}). {@link RatsClient#OK} (0) is success; any
- * other value is an error.</p>
+ * <p>{@link #errorCode()} is the C ABI's {@code rats_error_t} as an
+ * {@link ErrorCode}. The common ones are worth catching by value:
+ * {@link ErrorCode#ALREADY_STARTED} (an {@code enable*} after
+ * {@link RatsNode#start()}), {@link ErrorCode#NOT_ENABLED} (a subsystem used
+ * before its {@code enable*}) and {@link ErrorCode#NO_SUCH_PEER}.</p>
  */
 public class RatsException extends RuntimeException {
-    private final int errorCode;
+    private static final long serialVersionUID = 1L;
+
+    private final ErrorCode errorCode;
 
     public RatsException(String message) {
         super(message);
-        this.errorCode = RatsClient.ERR_INTERNAL;
-    }
-
-    public RatsException(int errorCode) {
-        super(getErrorMessage(errorCode));
-        this.errorCode = errorCode;
-    }
-
-    public RatsException(String message, int errorCode) {
-        super(message);
-        this.errorCode = errorCode;
+        this.errorCode = ErrorCode.INTERNAL;
     }
 
     public RatsException(String message, Throwable cause) {
         super(message, cause);
-        this.errorCode = RatsClient.ERR_INTERNAL;
+        this.errorCode = ErrorCode.INTERNAL;
     }
 
-    /** @return the underlying {@code rats_error_t} code. */
-    public int getErrorCode() {
+    public RatsException(ErrorCode errorCode, String operation) {
+        super(operation + " failed: " + errorCode.message());
+        this.errorCode = errorCode;
+    }
+
+    /** @return the underlying {@code rats_error_t}. */
+    public ErrorCode errorCode() {
         return errorCode;
-    }
-
-    /** Human-readable name for a {@code rats_error_t} value. */
-    public static String getErrorMessage(int errorCode) {
-        switch (errorCode) {
-            case RatsClient.OK:
-                return "OK";
-            case RatsClient.ERR_INVALID_ARG:
-                return "Invalid argument";
-            case RatsClient.ERR_NOT_STARTED:
-                return "Node not started";
-            case RatsClient.ERR_ALREADY_STARTED:
-                return "Node already started";
-            case RatsClient.ERR_NOT_ENABLED:
-                return "Subsystem not enabled";
-            case RatsClient.ERR_NO_SUCH_PEER:
-                return "No such peer or transfer";
-            case RatsClient.ERR_BIND:
-                return "Listen/bind failed";
-            case RatsClient.ERR_INTERNAL:
-                return "Internal error";
-            default:
-                return "Unknown error (" + errorCode + ")";
-        }
     }
 }

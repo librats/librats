@@ -1,132 +1,147 @@
-# librats Python Bindings
+# librats — Python bindings
 
-Python bindings for the **librats** peer-to-peer networking library. They target
-the librats C ABI (`src/librats/bindings/rats.h`) via `ctypes` and expose a high-level
-`RatsClient` for P2P messaging, pub/sub, typed JSON messaging, file transfer,
-discovery (DHT / mDNS), NAT port mapping, ping/RTT and automatic reconnection.
+Python bindings for [librats](../README.md), a C++17 peer-to-peer networking
+library. They drive the C ABI (`src/librats/bindings/rats.h`) through `ctypes`
+and expose a high-level `RatsNode`.
 
-> **Migrating from the old bindings?** The C ABI was rewritten. See
-> [Migration](#migration-from-the-old-api) for the old → new mapping and the
-> features that were removed.
+## The model
 
-## Prerequisites
+A `RatsNode` is one librats node. On its own it gives you secure transport
+(Noise XX over TCP **or** the library's reliable stream over UDP, both on the
+same port), a self-certifying peer id, manual dialing, and raw messaging on named
+channels — nothing else. Discovery (DHT/mDNS), pub/sub, typed JSON messaging,
+file transfer, NAT port mapping, hole punching, RTT probing and reconnection are
+**opt-in subsystems**: you pay only for what you turn on.
 
-1. Build the librats C shared library first (see main README / build script).
-2. Python 3.7+.
+Two rules follow from that:
+
+- **Enable subsystems and register callbacks before `start()`.** Enabling after
+  start raises `RatsAlreadyStartedError`; using a subsystem before its enable
+  raises `RatsNotEnabledError`.
+- **Callbacks fire on an internal reactor thread.** Keep them short and
+  non-blocking. An exception raised inside one is logged, never propagated into C.
+
+Fallible calls raise a `RatsError` subclass; pure getters are properties. Peer
+ids are 64-character lowercase hex strings.
 
 ## Installing
 
-```bash
-cd python
-pip install -e .              # development install
-# or: pip install -e ".[dev]" # with test/lint tooling
-```
-
-Build the native library and copy it next to the package:
+Python 3.7+. The bindings need the librats **shared** library.
 
 ```bash
 cd python
-python build.py --build-native    # CMake: -DRATS_SHARED_LIBRARY=ON
+pip install -e .                  # development install
+python build.py --build-native    # CMake -DRATS_SHARED_LIBRARY=ON, copied next to the package
 ```
 
-## Core concepts
-
-* A `RatsClient` wraps a single librats node (`rats_t`).
-* **Register callbacks and enable subsystems _before_ `start()`.** Enabling a
-  subsystem after start raises `RatsAlreadyStartedError`; using a subsystem
-  before enabling it raises `RatsNotEnabledError`.
-* Peer ids are 64-character lowercase hex strings.
-* Callbacks fire on an internal reactor thread — keep them short and
-  non-blocking. Exceptions raised inside a callback are logged, not propagated
-  into C.
-* Transport security defaults to **Noise XX** (encrypted + authenticated).
+The loader looks next to the package, in `../build` (`build/lib`, `build/bin`),
+the system library paths, and `LD_LIBRARY_PATH` / `PATH`. Names are
+`rats.dll`/`librats.dll` (Windows), `librats.dylib` (macOS), `librats.so` (Linux).
 
 ## Quick start
 
-### Basic messaging (named channel, raw bytes)
-
 ```python
-from librats_py import RatsClient
+from librats_py import RatsNode
 
-with RatsClient(listen_port=8080) as client:
-    client.on_peer_connected(lambda pid: print("connected:", pid))
-    client.on("chat", lambda peer_id, data: print(peer_id, data.decode()))
+with RatsNode(8080, data_dir="./state") as node:
+    # Everything below happens before start().
+    node.on_peer_connected(lambda peer: print("+", peer))
+    node.on("chat", lambda peer, data: print(peer, data.decode()))
+    node.enable_dht()          # find peers on the mainline DHT
+    node.enable_mdns()         # …and on the local network
 
-    client.start()
-    print("local id:", client.local_id)
+    node.start()
+    print("local id:", node.local_id, "port:", node.listen_port)
 
-    client.connect("192.168.1.100", 8081)
-    client.broadcast("chat", b"Hello, P2P world!")
+    node.connect("192.168.1.100", 8081)
+    node.broadcast("chat", b"Hello, P2P world!")
     input("Press Enter to exit...")
 ```
 
 ### Configured node
 
 ```python
-from librats_py import RatsClient, Security
+from librats_py import RatsNode, Security, Transport
 
-client = RatsClient(
+node = RatsNode(
     listen_port=8080,
     security=Security.NOISE,        # or Security.PLAINTEXT
     data_dir="./state",             # persistent identity + subsystem state
     protocol="myapp/1.0",           # handshake app id; peers must match
     max_peers=50,
+    preferred_transport=Transport.UDP,
+    transport_fallback_ms=1200,     # 0 disables the TCP fallback race
 )
 ```
 
 ### Pub/sub (GossipSub)
 
 ```python
-with RatsClient(8080) as client:
-    client.enable_pubsub()                                   # before start()
-    client.subscribe("room", lambda pid, topic, data: print(topic, data))
-    client.start()
-    client.publish("room", b"Hello everyone!")
+with RatsNode(8080) as node:
+    node.enable_pubsub()
+    node.subscribe("room", lambda peer, topic, data: print(topic, data))
+    node.start()
+    node.publish("room", b"Hello everyone!")
 ```
 
 ### Typed JSON messaging
 
+Payloads are JSON-encoded on the way out and parsed on the way in.
+
 ```python
-with RatsClient(8080) as client:
-    client.enable_json()                                     # before start()
-    client.on_json("greeting", lambda pid, payload: print(pid, payload))
-    client.start()
-    client.broadcast_json("greeting", {"hi": "there"})
+with RatsNode(8080) as node:
+    node.enable_json()
+    node.on_json("greeting", lambda peer, payload: print(peer, payload["hi"]))
+    node.start()
+    node.broadcast_json("greeting", {"hi": "there"})
 ```
 
 ### File transfer (push model)
 
 ```python
-with RatsClient(8080) as client:
-    client.enable_file_transfer(temp_dir="./downloads")      # before start()
+with RatsNode(8080) as node:
+    node.enable_file_transfer(temp_dir="./tmp")   # in-progress downloads live here
 
-    def on_offer(peer_id, transfer_id, name, size, is_dir):
-        client.accept_file(peer_id, transfer_id, f"./downloads/{name}")
+    node.on_file_offer(lambda peer, tid, name, size, is_dir:
+                       node.accept_file(peer, tid, f"./downloads/{name}"))
+    node.on_file_progress(lambda tid, peer, done, total, status:
+                          print(tid, done, total, status))
+    node.on_file_complete(lambda tid, ok, path: print(tid, ok, path))
+    node.start()
 
-    client.on_file_offer(on_offer)
-    client.on_file_progress(lambda tid, pid, done, total, status:
-                            print(tid, done, total, status))
-    client.on_file_complete(lambda tid, ok, path: print(tid, ok, path))
-    client.start()
-
-    # Sender side:
-    transfer_id = client.send_file(peer_id, "/path/to/file.txt")
-    # transfer_id = client.send_directory(peer_id, "/path/to/dir")
+    transfer_id = node.send_file(peer_id, "/path/to/file.txt")   # 0 on failure
+    # transfer_id = node.send_directory(peer_id, "/path/to/dir")
 ```
 
-### Discovery, NAT, ping, reconnect
+### NAT traversal
+
+Port forwarding is the easy path; hole punching covers the networks where it
+fails. Punching needs peers that relay the rendezvous — a mesh in which nobody
+relays cannot punch at all.
 
 ```python
-with RatsClient(8080) as client:
-    client.enable_dht(dht_port=0, discovery_key="myapp")     # before start()
-    client.enable_mdns()
-    client.enable_port_mapping(enable_upnp=True, enable_natpmp=True)
-    client.enable_ping()
-    client.enable_reconnect()
-    client.start()
+from librats_py import NatMapping
 
-    client.add_reconnect("192.168.1.100", 8081)
-    rtt = client.peer_rtt_ms(some_peer_id)                   # -1 if unknown
+with RatsNode(8080) as node:
+    node.enable_port_mapping()          # UPnP IGD + NAT-PMP
+    node.enable_hole_punch()            # relays other peers' rendezvous by default
+    node.start()
+
+    node.punch_peer(peer_id)            # success arrives as on_peer_connected
+    if node.nat_mapping is NatMapping.ENDPOINT_DEPENDENT:
+        print("symmetric NAT — punching cannot work from here")
+```
+
+### Liveness and reconnection
+
+```python
+with RatsNode(8080) as node:
+    node.enable_ping()
+    node.enable_reconnect()
+    node.start()
+
+    node.add_reconnect("192.168.1.100", 8081)
+    rtt = node.peer_rtt_ms(peer_id)     # -1 if unknown
 ```
 
 ## API reference
@@ -134,83 +149,81 @@ with RatsClient(8080) as client:
 ### Construction
 
 ```python
-RatsClient(listen_port=0, *, enable_listen=True, bind_address=None,
-           security=Security.NOISE, data_dir=None,
-           protocol=None, max_peers=0)
+RatsNode(listen_port=0, *, enable_listen=True, bind_address=None,
+         security=Security.NOISE, data_dir=None, protocol=None, max_peers=0,
+         enable_tcp=True, enable_udp=True,
+         preferred_transport=Transport.UDP, transport_fallback_ms=1200)
 ```
 
-### Lifecycle / identity
+### Lifecycle
 
-| Method / property | Description |
+`start()` · `stop()` · `destroy()` · `is_running() -> bool` · context manager
+(`with RatsNode(...) as node:` releases the node on exit)
+
+### Properties
+
+| Property | Description |
 | --- | --- |
-| `start()` / `stop()` | Start / stop the node |
-| `is_running() -> bool` | Whether started |
-| `destroy()` | Explicitly destroy (else on GC) |
-| `local_id -> str` | Our 64-hex peer id |
-| `listen_port -> int` | Actual listen port |
-| `protocol -> str` | Handshake app id (e.g. `"librats/1.0"`) |
+| `local_id -> str` | our 64-hex self-certifying peer id |
+| `listen_port -> int` | the bound port (resolved when 0 was requested) |
+| `protocol -> str` | handshake app id, e.g. `"librats/1.0"` |
+| `transports -> int` | `TransportMask` bitmask of what is actually running |
+| `peer_count -> int` | currently-connected peers |
+| `peer_ids -> list[str]` | their hex ids |
+| `max_peers -> int` | established-peer cap (0 = unlimited); settable |
+| `nat_mapping -> NatMapping` | what the mesh has shown about our own NAT |
 
-### Connections / peers
+### Connections
 
-`connect(host, port)`, `peer_count() -> int`, `peer_ids() -> list[str]`,
-`set_max_peers(n)`, `get_max_peers() -> int`.
+`connect(host, port)` · `peer_transport(peer_id) -> Transport | None` ·
+`peer_transports(peer_id) -> int | None`
 
-### Raw messaging
+### Raw channel messaging
 
-`send(peer_id, channel, data: bytes)`, `broadcast(channel, data: bytes)`,
-`on(channel, cb)` where `cb(peer_id: str, data: bytes)`.
+`send(peer_id, channel, data: bytes)` · `broadcast(channel, data: bytes)` ·
+`on(channel, cb)` where `cb(peer_id: str, data: bytes)`
 
 ### Peer events
 
-`on_peer_connected(cb)`, `on_peer_disconnected(cb)` where `cb(peer_id: str)`.
+`on_peer_connected(cb)` · `on_peer_disconnected(cb)` where `cb(peer_id: str)`
 
-### Pub/sub
+### Subsystems (enable before start)
 
-`enable_pubsub()`, `subscribe(topic, cb)` (`cb(peer_id, topic, data: bytes)`),
-`unsubscribe(topic)`, `publish(topic, data: bytes)`.
+| Subsystem | Enable | Then |
+| --- | --- | --- |
+| DHT discovery | `enable_dht(dht_port=0, discovery_key=None)` | — |
+| mDNS discovery | `enable_mdns()` | — |
+| NAT port mapping | `enable_port_mapping(enable_upnp=True, enable_natpmp=True)` | — |
+| Hole punching | `enable_hole_punch(serve_as_relay=True)` | `punch_peer(peer_id)`, `nat_mapping` |
+| Pub/sub | `enable_pubsub()` | `subscribe(topic, cb)`, `unsubscribe(topic)`, `publish(topic, data)` |
+| Typed JSON | `enable_json()` | `on_json(type, cb)`, `once_json(type, cb)`, `off_json(type)`, `send_json(peer, type, payload)`, `broadcast_json(type, payload)` |
+| File transfer | `enable_file_transfer(temp_dir=None)` | `on_file_offer/on_file_progress/on_file_complete`, `send_file`, `send_directory`, `accept_file`, `reject_file`, `cancel_file`, `pause_file`, `resume_file` |
+| Liveness | `enable_ping()` | `peer_rtt_ms(peer_id)` — ms, or -1 if unknown |
+| Reconnection | `enable_reconnect()` | `add_reconnect(host, port)`, `remove_reconnect(host, port)` |
 
-### Typed JSON
-
-`enable_json()`, `on_json(type, cb)`, `once_json(type, cb)`, `off_json(type)`
-(`cb(peer_id, payload)`), `send_json(peer_id, type, payload)`,
-`broadcast_json(type, payload)`. Payloads are JSON-encoded (dict/list/etc).
-
-### File transfer
-
-`enable_file_transfer(temp_dir=None)`, `on_file_offer(cb)`,
-`on_file_progress(cb)`, `on_file_complete(cb)`, `send_file(peer_id, path) -> int`,
-`send_directory(peer_id, dir_path) -> int`,
-`accept_file(peer_id, transfer_id, dest_path)`,
-`reject_file(peer_id, transfer_id)`, `cancel_file(...)`, `pause_file(...)`,
-`resume_file(...)`.
-
-Callback signatures:
+File-transfer callback signatures:
 
 * offer: `(peer_id, transfer_id, name, size, is_directory)`
 * progress: `(transfer_id, peer_id, bytes_transferred, total_bytes, status)`
   where `status` is a `FileTransferStatus`
 * complete: `(transfer_id, success, path)`
 
-### Discovery / NAT / liveness / reconnect
+### Module-level helpers
 
-`enable_dht(dht_port=0, discovery_key=None)`, `enable_mdns()`,
-`enable_port_mapping(enable_upnp=True, enable_natpmp=True)`, `enable_ping()`,
-`peer_rtt_ms(peer_id) -> int`, `enable_reconnect()`,
-`add_reconnect(host, port)`, `remove_reconnect(host, port)`.
-
-### Logging / info (static)
-
-`RatsClient.set_log_level(LogLevel)`, `RatsClient.set_log_file(path|None)`,
-`RatsClient.get_version_string()`, `RatsClient.get_version() -> VersionInfo`,
-`RatsClient.get_git_describe()`, `RatsClient.get_abi() -> int`,
-`RatsClient.error_str(code) -> str`.
+These need no node: `set_log_level(LogLevel)`, `set_log_file(path | None)`,
+`version() -> str`, `version_info() -> VersionInfo`, `git_describe() -> str`,
+`abi() -> int`, `error_str(code) -> str`.
 
 ### Enums
 
 * `Security` — `NOISE`, `PLAINTEXT`
+* `Transport` — `TCP`, `UDP`
+* `TransportMask` — `TCP` (0x1), `UDP` (0x2)
+* `NatMapping` — `UNKNOWN`, `OPEN`, `ENDPOINT_INDEPENDENT`, `ENDPOINT_DEPENDENT`
 * `LogLevel` — `DEBUG`, `INFO`, `WARN`, `ERROR`
 * `FileTransferStatus` — `PENDING`, `ACTIVE`, `PAUSED`, `COMPLETED`, `FAILED`, `CANCELLED`
-* `ErrorCode` (`rats_error_t`) — `OK`, `INVALID_ARG`, `NOT_STARTED`, `ALREADY_STARTED`, `NOT_ENABLED`, `NO_SUCH_PEER`, `BIND`, `INTERNAL`
+* `ErrorCode` (`rats_error_t`) — `OK`, `INVALID_ARG`, `NOT_STARTED`,
+  `ALREADY_STARTED`, `NOT_ENABLED`, `NO_SUCH_PEER`, `BIND`, `INTERNAL`
 
 ### Exceptions
 
@@ -234,47 +247,8 @@ pip install -e ".[dev]"
 python -m pytest librats_py/tests/
 ```
 
-Integration tests require the native shared library to be built and importable.
-
-## Migration from the old API
-
-| Old binding | New binding |
-| --- | --- |
-| `set_connection_callback` / `set_disconnect_callback` | `on_peer_connected` / `on_peer_disconnected` |
-| `send_string` / `broadcast_string` / `send_binary` / `broadcast_binary` | `send(peer, channel, bytes)` / `broadcast(channel, bytes)` + `on(channel, cb)` |
-| `send_json` / `broadcast_json` + `set_json_callback` | `enable_json` + `send_json(peer, type, payload)` / `broadcast_json(type, payload)` + `on_json` |
-| `subscribe_to_topic` / `publish_to_topic` + topic callbacks | `enable_pubsub` + `subscribe(topic, cb)` / `publish(topic, bytes)` |
-| `send_file` / `accept_file_transfer` (string ids) | `enable_file_transfer` + `send_file`/`send_directory` (returns int id) + `on_file_offer/progress/complete` |
-| `start_dht_discovery` | `enable_dht` (before start) |
-| `start_mdns_discovery` | `enable_mdns` (before start) |
-| `get_our_peer_id` | `local_id` |
-| `get_peer_count` / `get_peer_ids` | `peer_count` / `peer_ids` |
-| `set_max_peers` / `get_max_peers` | same names |
-| `set_log_level(name_str)` | `set_log_level(LogLevel)` |
-
-### Removed features
-
-The following no longer exist in the C ABI and were dropped from the Python API:
-
-* **ICE / STUN / TURN** NAT traversal — use `enable_port_mapping` (UPnP/NAT-PMP).
-* **Encryption enable/keys** — security is fixed at construction via the
-  `security` parameter (`Security.NOISE` / `Security.PLAINTEXT`).
-* **Configuration load/save** — use the `data_dir` constructor argument for
-  persistent identity and subsystem state.
-* **Granular logging** (colours, timestamps, rotation, retention, per-node
-  console toggles) — only `set_log_level` / `set_log_file` remain.
-* **Historical peers** and **automatic-discovery toggles** — use
-  `enable_reconnect` / `add_reconnect` and `enable_dht` / `enable_mdns`.
-* **Statistics JSON** (connection / gossipsub / file-transfer) — removed.
-
-## Library loading
-
-The bindings search for the shared library next to the package, in `../build`
-(and `build/lib`, `build/bin`), system library paths, and `LD_LIBRARY_PATH` /
-`PATH`. Platform names: `rats.dll`/`librats.dll` (Windows),
-`librats.dylib` (macOS), `librats.so` (Linux). `python build.py --build-native`
-copies the freshly built library next to the package automatically.
+The suites skip themselves when the native shared library cannot be loaded.
 
 ## License
 
-MIT — see the LICENSE file.
+MIT — see [LICENSE](../LICENSE).

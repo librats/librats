@@ -40,9 +40,22 @@ class Transport(IntEnum):
 
 
 class TransportMask(IntEnum):
-    """Bitmask returned by :meth:`RatsClient.transports` and friends."""
+    """Bitmask flags used by :attr:`RatsNode.transports` and friends."""
     TCP = 0x1
     UDP = 0x2
+
+
+class NatMapping(IntEnum):
+    """``RATS_NAT_*`` — what the mesh has shown about this node's own NAT.
+
+    Derived from the endpoints datagram peers report observing this node's
+    shared UDP socket at: two peers agreeing means one external port for every
+    peer (punchable), two disagreeing means a fresh mapping per peer.
+    """
+    UNKNOWN = 0               # not enough independent observations yet
+    OPEN = 1                  # no NAT in the path
+    ENDPOINT_INDEPENDENT = 2  # one external port for every peer — punchable
+    ENDPOINT_DEPENDENT = 3    # a fresh mapping per peer (symmetric) — not punchable
 
 
 class LogLevel(IntEnum):
