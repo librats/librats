@@ -15,6 +15,11 @@
 //   --no-dht               disable DHT peer discovery (IPv4 + IPv6)
 //   --no-mdns              disable mDNS (local-network) discovery
 //   --no-upnp              disable UPnP / NAT-PMP port mapping
+//   --no-punch             disable UDP hole punching
+//   --no-relay             disable relayed circuits (the rung below punching)
+//   --serve-relay          also CARRY other peers' circuits. Off by default: unlike a
+//                          hole-punch rendezvous this spends real bandwidth on somebody
+//                          else's traffic, so it is opted into rather than assumed
 //   --no-pex               disable peer exchange (PEX)
 //   --no-reconnect         disable auto-reconnection (persists targets under --data)
 //   --no-ping              disable liveness ping
@@ -32,6 +37,8 @@
 #include "librats/subsystems/file_transfer.h"
 #include "librats/subsystems/ping_service.h"
 #include "librats/subsystems/port_mapping_service.h"
+#include "librats/subsystems/hole_punch.h"
+#include "librats/subsystems/relay.h"
 #include "librats/subsystems/peer_exchange.h"
 #include "librats/subsystems/reconnection.h"
 #include "librats/core/address.h"
@@ -65,6 +72,8 @@ struct Subsystems {
     PingService*          ping      = nullptr;
     ReconnectionService*  reconnect = nullptr;
     DhtDiscovery*         dht       = nullptr;
+    HolePunch*            punch     = nullptr;
+    Relay*                relay     = nullptr;
 #ifdef RATS_SEARCH_FEATURES
     Bittorrent*           bittorrent = nullptr;
 #endif
@@ -126,6 +135,8 @@ void print_help() {
         "  /reconnect <host> <port>   add an auto-reconnect target\n"
         "  /rmreconnect <host> <port> remove an auto-reconnect target\n"
         "  /dhtfind <hash|key>        find peers via DHT (40-hex infohash, or a key string)\n"
+        "  /punch <peer_id>           reach a NATed peer by hole punching (full hex id)\n"
+        "  /relay <peer_id>           reach a peer through a third node (full hex id)\n"
 #ifdef RATS_SEARCH_FEATURES
         "  /magnet <uri>              add a magnet link (downloads into ./downloads)\n"
         "  /torrent <file>            add a .torrent file\n"
@@ -153,7 +164,8 @@ bool peer_at(Node& node, size_t index, PeerId& out) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: " << argv[0] << " <listen_port> [--bind addr] [--data dir]"
-                     " [--connect host port] [--no-dht] [--no-mdns] [--no-upnp] [--no-pex]"
+                     " [--connect host port] [--no-dht] [--no-mdns] [--no-upnp]"
+                     " [--no-punch] [--no-relay] [--serve-relay] [--no-pex]"
                      " [--no-reconnect] [--no-ping]"
 #ifdef RATS_SEARCH_FEATURES
                      " [--no-bittorrent] [--bt-port port]"
@@ -174,7 +186,10 @@ int main(int argc, char** argv) {
 
     // Every module is on by default; --no-* turns one off. ("enable all modules")
     bool use_dht = true, use_mdns = true, use_upnp = true, use_pex = true,
-         use_reconnect = true, use_ping = true;
+         use_reconnect = true, use_ping = true, use_punch = true, use_relay = true;
+    // Carrying other peers' circuits is the one thing here that spends this node's
+    // bandwidth on somebody else's traffic, so it is the one thing not on by default.
+    bool serve_relay = false;
 #ifdef RATS_SEARCH_FEATURES
     bool use_bittorrent = true;
     uint16_t bt_port = 6881;
@@ -195,6 +210,9 @@ int main(int argc, char** argv) {
         else if (arg == "--no-dht")       use_dht = false;
         else if (arg == "--no-mdns")      use_mdns = false;
         else if (arg == "--no-upnp")      use_upnp = false;
+        else if (arg == "--no-punch")     use_punch = false;
+        else if (arg == "--no-relay")     use_relay = false;
+        else if (arg == "--serve-relay")  serve_relay = true;
         else if (arg == "--no-pex")       use_pex = false;
         else if (arg == "--no-reconnect") use_reconnect = false;
         else if (arg == "--no-ping")      use_ping = false;
@@ -235,6 +253,25 @@ int main(int argc, char** argv) {
         node.add_subsystem(std::make_unique<MdnsDiscovery>());
     if (use_upnp)
         node.add_subsystem(std::make_unique<PortMappingService>());
+    // The rest of the connectivity ladder, in the order it is climbed: a punch for the
+    // peers port mapping cannot reach, a relayed circuit for the peers a punch cannot
+    // reach either. Attach order between these two does not matter -- each resolves the
+    // other through the ServiceRegistry in start(), by which point every attach() has
+    // run -- and with both on the ladder runs itself: PEX hands an undialable peer to
+    // HolePunch, HolePunch hands a hopeless one to Relay, and a circuit that comes up
+    // asks for a punch to replace itself with a direct link.
+    if (use_punch) {
+        auto punch = std::make_unique<HolePunch>();
+        sub.punch = punch.get();
+        node.add_subsystem(std::move(punch));
+    }
+    if (use_relay) {
+        Relay::Config rlc;
+        rlc.serve = serve_relay;
+        auto relay = std::make_unique<Relay>(rlc);
+        sub.relay = relay.get();
+        node.add_subsystem(std::move(relay));
+    }
     if (use_pex)
         node.add_subsystem(std::make_unique<PeerExchange>());
     if (use_ping) {
@@ -305,11 +342,16 @@ int main(int argc, char** argv) {
     }
     std::cout << "node " << node.local_id().short_hex() << " listening on port " << node.listen_port()
               << " (dht=" << use_dht << " mdns=" << use_mdns << " upnp=" << use_upnp
+              << " punch=" << use_punch
+              << " relay=" << use_relay << (use_relay && serve_relay ? " (serving)" : "")
               << " pex=" << use_pex << " reconnect=" << use_reconnect << " ping=" << use_ping
 #ifdef RATS_SEARCH_FEATURES
               << " bittorrent=" << use_bittorrent
 #endif
               << ")\n"
+              // Full, not short_hex: /punch and /relay take a whole id, and this is
+              // the only place one can be copied from.
+              << "peer id: " << node.local_id().to_hex() << "\n"
               << "type /help for commands\n";
 
     for (const Address& a : dial_at_start) {
@@ -392,6 +434,25 @@ int main(int argc, char** argv) {
                 std::cout << "[dht] " << peers.size() << " peer(s) for " << info_hash_hex(h) << ":\n";
                 for (const Address& a : peers) std::cout << "    " << a.to_string() << "\n";
             });
+        }
+        else if (cmd == "/punch" && args.size() >= 2) {
+            if (!sub.punch) { std::cout << "hole punching not enabled (--no-punch)\n"; continue; }
+            const auto id = PeerId::from_hex(args[1]);
+            if (!id) { std::cout << "not a peer id: " << args[1] << "\n"; continue; }
+            // False is routine rather than an error: already connected, already trying,
+            // in cooldown, or nothing punchable to advertise yet. With Relay attached
+            // the hopeless cases are handed on from inside punch() anyway.
+            std::cout << (sub.punch->punch(*id) ? "punching ...\n"
+                                                : "nothing to do (see the log for why)\n");
+        }
+        else if (cmd == "/relay" && args.size() >= 2) {
+            if (!sub.relay) { std::cout << "relaying not enabled (--no-relay)\n"; continue; }
+            const auto id = PeerId::from_hex(args[1]);
+            if (!id) { std::cout << "not a peer id: " << args[1] << "\n"; continue; }
+            std::cout << (sub.relay->connect_via_relay(*id)
+                              ? "looking for a relay ...\n"
+                              : "nothing to do (connected, already trying, in cooldown,"
+                                " or no peer could carry it)\n");
         }
 #ifdef RATS_SEARCH_FEATURES
         else if (cmd == "/magnet" && args.size() >= 2) {
