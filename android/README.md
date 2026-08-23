@@ -165,14 +165,23 @@ node.enableDht();                     // mainline DHT, ephemeral port
 node.enableMdns();                    // same Wi-Fi
 node.enablePortMapping();             // UPnP IGD + NAT-PMP
 node.enableHolePunch();               // and relay other peers' rendezvous
+node.enableRelay();                   // last resort, for the pairs a punch cannot reach
 
 node.start();
 
 node.punchPeer(peerId);               // success arrives as onPeerConnected
 if (node.natMapping() == NatMapping.ENDPOINT_DEPENDENT) {
-    // symmetric NAT — punching cannot work from here
+    // symmetric NAT — punching cannot work from here, but a relay still can
 }
 ```
+
+`enableRelay()` routes the connection itself through a node both ends already reach,
+which is the only way through a symmetric NAT. It stays encrypted end to end — the
+relay moves ciphertext — and the peer behaves like any other, except that
+`peerTransport(peerId)` reports `Transport.RELAY`. With both enabled the ladder runs
+itself: a punch that cannot work falls back to a relay, and a relayed peer keeps
+trying to become a direct one. Pass `true` to also carry OTHER peers' connections,
+which spends real bandwidth and is therefore off by default.
 
 ### Liveness and reconnection
 

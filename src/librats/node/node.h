@@ -48,6 +48,7 @@
 #include "librats/peer/peer_info.h"
 #include "librats/security/identity.h"
 #include "librats/security/handshaker.h"  // SecurityProvider
+#include "librats/node/circuit_service.h"
 #include "librats/node/config.h"
 #include "librats/node/dial_service.h"
 #include "librats/node/dialer.h"
@@ -74,7 +75,10 @@ namespace librats {
 class NetworkMonitor;  // util/network_monitor.h — owned via unique_ptr, included in node.cpp
 class MessageJson;     // subsystems/message_json.h — reached via json() (json.h stays out of node.h)
 
-class RATS_API Node final : public ConnectionDelegate, public PeerNetwork, public DialService {
+class RATS_API Node final : public ConnectionDelegate,
+                            public PeerNetwork,
+                            public DialService,
+                            public CircuitService {
 public:
     /// Construct a node from its configuration (see NodeConfig). This only loads
     /// the identity and prepares the layers; no socket is opened until start().
@@ -162,6 +166,13 @@ public:
     //   (see node/dial_service.h; used by hole punching) —
     bool dial_direct(const Address& addr, TransportKind kind,
                      const DialProfile& profile) override;
+
+    // — CircuitService: make a relayed byte stream an ordinary peer connection
+    //   (see node/circuit_service.h; used by the relay module) —
+    std::optional<PeerRoute> adopt_circuit(const PeerId& carrier, std::unique_ptr<Link> link,
+                                           ConnRole role, bool connected) override;
+    void                     wake_circuit(PeerRoute route, uint32_t events) override;
+    void                     close_circuit(PeerRoute route, CloseReason reason) override;
 
     // — peer admission limit (0 = unlimited; guards inbound, not our own dials) —
     size_t max_peers() const noexcept { return max_peers_.load(std::memory_order_relaxed); }

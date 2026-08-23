@@ -79,6 +79,7 @@ Projects and companies building on librats:
 ### **NAT Traversal**
 - **Automatic port forwarding**: built-in **UPnP IGD** and **NAT-PMP** — the `PortMappingService` asks the router to forward the listen port (for TCP *and* UDP, which share it) on startup (both backends run in parallel; whichever the router supports wins), so peers behind a NAT can accept inbound connections with zero manual configuration. Mappings are refreshed automatically and removed on `stop()`.
 - **UDP hole punching**: when no port forwarding is possible, `HolePunch` reaches a peer behind a NAT by arranging — through a peer both sides already have — that the two dial each other at the same instant, so each side's outbound packet opens the mapping the other's needs. The rendezvous is timed from the round trip itself (no clock synchronisation), and the node learns the external endpoint to advertise from its own mesh rather than from a STUN server
+- **Relaying**: for the pairs a punch cannot reach — a symmetric NAT, a network that drops UDP and blocks inbound TCP — `Relay` carries the connection itself through a node both ends already reach. It is a *byte stream* that is relayed, so the Noise handshake still runs end to end and the relay moves ciphertext it cannot read; a circuit that comes up then tries to upgrade itself to a direct link, and the swap costs the application nothing
 - **NAT awareness**: several peers' independent views of the node's shared UDP socket say whether its mapping is stable enough to punch through at all (endpoint-independent) or per-destination (symmetric, where punching cannot work) — see `node.nat_status()`
 - **STUN**: public-IP discovery used by the DHT (BEP-42 node-id derivation and external-address reporting)
 
@@ -344,6 +345,24 @@ node.add_subsystem(std::make_unique<HolePunch>());     // provides HolePunchServ
 node.add_subsystem(std::make_unique<PeerExchange>());  // resolves it, if present
 ```
 
+Some pairs cannot be punched at all: a symmetric NAT gives a fresh mapping per destination, so no endpoint either side can advertise is the one the other's packets would arrive on. `Relay` is the last rung — it routes the connection itself through a node both ends already reach.
+
+The relayed thing is a **byte stream**, not a message, so it becomes an ordinary `Connection`: the Noise handshake runs **end to end** and the relay moves ciphertext it cannot read, cannot forge and cannot replay. Every subsystem — pub/sub, file transfer, PEX — works over a relayed peer without a line of its own, and `PeerInfo::transport` is the only thing that says the path is not direct.
+
+```cpp
+#include <librats/subsystems/relay.h>
+
+Relay::Config relay_config;
+relay_config.serve = true;   // ALSO carry other peers' connections — off by default
+
+node.add_subsystem(std::make_unique<Relay>(relay_config));  // provides RelayService
+node.add_subsystem(std::make_unique<HolePunch>());          // escalates to it on failure
+```
+
+Attach both and the ladder runs itself: a punch that cannot work hands the target to `RelayService`, and a circuit that comes up asks `HolePunchService` to try again — now that the two ends are peers they can arrange a punch over the very circuit carrying them. If it lands, the peer table prefers the direct link at *both* ends and swaps the route with no disconnect event, so the application never sees the seam.
+
+Serving as a relay is opt-in because, unlike a hole-punch rendezvous, it spends real bandwidth on somebody else's traffic. A serving node is protected by an end-to-end credit window that bounds what one circuit can make it hold, by forwarding only between peers it already holds (it never dials and never resolves an address, so it cannot become an open reflector), by refusing to chain circuits, and by per-circuit byte and duration caps. The C ABI mirrors this as `rats_enable_relay()` / `rats_connect_via_relay()`.
+
 ### 8. Peer discovery (DHT + mDNS) and reconnection
 
 ```cpp
@@ -482,6 +501,7 @@ Each subsystem is attached with `node.add_subsystem(std::make_unique<T>(...))` *
 | `ReconnectionService` | `subsystems/reconnection.h` | Auto-reconnect with exponential backoff; persistent targets |
 | `PortMappingService` | `subsystems/port_mapping_service.h` | UPnP IGD + NAT-PMP automatic port forwarding |
 | `HolePunch` | `subsystems/hole_punch.h` | UDP hole punching: two NATed peers dial each other at the same instant, arranged through a peer they share |
+| `Relay` | `subsystems/relay.h` | Last-resort connectivity: the connection itself is carried through a peer both ends reach, still encrypted end to end |
 | `PeerExchange` | `subsystems/peer_exchange.h` | PEX: gossip known peer addresses to grow the mesh |
 | `StorageManager` | `storage/storage.h` | Distributed key-value store (requires `RATS_STORAGE`) |
 

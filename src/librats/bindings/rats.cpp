@@ -6,6 +6,7 @@
 #include "librats/subsystems/mdns_discovery.h"
 #include "librats/subsystems/port_mapping_service.h"
 #include "librats/subsystems/hole_punch.h"
+#include "librats/subsystems/relay.h"
 #include "librats/subsystems/pubsub.h"
 #include "librats/subsystems/message_json.h"
 #include "librats/subsystems/file_transfer.h"
@@ -42,6 +43,7 @@ struct RatsHandle {
     PingService*         ping      = nullptr;
     ReconnectionService* reconnect = nullptr;
     HolePunch*           punch     = nullptr;
+    Relay*               relay     = nullptr;
 #ifdef RATS_SEARCH_FEATURES
     Bittorrent*          bittorrent = nullptr;
 #endif
@@ -299,6 +301,29 @@ rats_error_t rats_enable_hole_punch(rats_t node, int serve_as_relay) {
     return RATS_OK;
 }
 
+rats_error_t rats_enable_relay(rats_t node, int serve_as_relay) {
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    if (!h->relay) {
+        Relay::Config config;
+        config.serve = serve_as_relay != 0;
+        h->relay = h->node->add_subsystem(std::make_unique<Relay>(config));
+    }
+    return RATS_OK;
+}
+
+rats_error_t rats_connect_via_relay(rats_t node, const char* peer_id_hex) {
+    if (!peer_id_hex) return RATS_ERR_INVALID_ARG;
+    auto* h = as_handle(node);
+    if (!h->relay) return RATS_ERR_NOT_ENABLED;
+    auto id = PeerId::from_hex(peer_id_hex);
+    if (!id) return RATS_ERR_INVALID_ARG;
+    // As with punching, every reason an attempt is declined is "nothing to do or
+    // nothing to try with" — already connected, already trying, in cooldown, or no
+    // peer that could carry it — and none of them is separately actionable.
+    return h->relay->connect_via_relay(*id) ? RATS_OK : RATS_ERR_NO_SUCH_PEER;
+}
+
 rats_error_t rats_punch_peer(rats_t node, const char* peer_id_hex) {
     if (!peer_id_hex) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
@@ -338,9 +363,15 @@ int rats_peer_transport(rats_t node, const char* peer_id_hex) {
     if (!peer_id_hex) return -1;
     auto id = PeerId::from_hex(peer_id_hex);
     if (!id) return -1;
-    for (const PeerInfo& info : node_of(node)->peers())
-        if (info.id == *id)
-            return info.transport == TransportKind::Udp ? RATS_TRANSPORT_UDP : RATS_TRANSPORT_TCP;
+    for (const PeerInfo& info : node_of(node)->peers()) {
+        if (info.id != *id) continue;
+        switch (info.transport) {
+            case TransportKind::Udp:   return RATS_TRANSPORT_UDP;
+            case TransportKind::Relay: return RATS_TRANSPORT_RELAY;
+            case TransportKind::Tcp:   break;
+        }
+        return RATS_TRANSPORT_TCP;
+    }
     return -1;
 }
 

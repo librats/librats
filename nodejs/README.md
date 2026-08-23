@@ -112,11 +112,19 @@ fails. Both are opt-in, and punching needs peers that relay the rendezvous.
 ```javascript
 node.enablePortMapping();     // UPnP IGD + NAT-PMP
 node.enableHolePunch(true);   // true = also relay other peers' rendezvous
+node.enableRelay(false);      // last resort; true = also carry others' connections
 node.start();
 
 node.punchPeer(peerId);       // success arrives as onPeerConnected
 console.log(node.natMapping); // NatMapping.ENDPOINT_INDEPENDENT ⇒ punchable
 ```
+
+A symmetric NAT cannot be punched at all, and that is what `enableRelay` is for: the
+connection itself is routed through a node both ends already reach. It stays
+encrypted end to end — the relay moves ciphertext — and the peer behaves like any
+other, except that `peerTransport(peerId)` reports `Transport.RELAY`. With both
+enabled the ladder runs itself: a punch that cannot work falls back to a relay, and
+a relayed peer keeps trying to become a direct one.
 
 ## API
 
@@ -170,6 +178,7 @@ new RatsNode(config)   // full config
 | mDNS discovery | `enableMdns()` | — |
 | NAT port mapping | `enablePortMapping(upnp?, natpmp?)` | — |
 | Hole punching | `enableHolePunch(serveAsRelay?)` | `punchPeer(peerId)`, `natMapping` |
+| Relaying | `enableRelay(serveAsRelay?)` | `connectViaRelay(peerId)` |
 | Pub/sub | `enablePubsub()` | `subscribe(topic, cb)`, `unsubscribe(topic)`, `publish(topic, data)` |
 | Typed JSON | `enableJson()` | `onJson(type, cb)`, `onceJson(type, cb)`, `offJson(type)`, `sendJson(peerId, type, value)`, `broadcastJson(type, value)` |
 | File transfer | `enableFileTransfer(tempDir?)` | `onFileOffer/onFileProgress/onFileComplete`, `sendFile`, `sendDirectory`, `acceptFile`, `rejectFile`, `cancelFile`, `pauseFile`, `resumeFile` |

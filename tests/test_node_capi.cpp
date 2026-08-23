@@ -502,3 +502,46 @@ TEST(NodeCApiTest, HolePunchIsReachableFromTheCApi) {
     rats_stop(a); rats_stop(b); rats_stop(hub);
     rats_destroy(a); rats_destroy(b); rats_destroy(hub);
 }
+
+// Relaying through the C ABI, for the same reason: a binding has to be able to reach
+// the last rung of the ladder too. The peer it produces is ordinary except for one
+// thing, and that one thing is what the C API has to be able to report.
+TEST(NodeCApiTest, RelayingIsReachableFromTheCApi) {
+    rats_t hub = rats_create_ex(0, /*enable_listen=*/1, "127.0.0.1", RATS_SECURITY_NOISE);
+    rats_t a   = rats_create_ex(0, 1, "127.0.0.1", RATS_SECURITY_NOISE);
+    rats_t b   = rats_create_ex(0, 1, "127.0.0.1", RATS_SECURITY_NOISE);
+
+    // Before enabling there is nothing to relay through.
+    EXPECT_EQ(rats_connect_via_relay(a, "00"), RATS_ERR_NOT_ENABLED);
+
+    ASSERT_EQ(rats_enable_relay(hub, /*serve_as_relay=*/1), RATS_OK);
+    ASSERT_EQ(rats_enable_relay(a, 0), RATS_OK);
+    ASSERT_EQ(rats_enable_relay(b, 0), RATS_OK);
+    EXPECT_EQ(rats_enable_relay(a, 0), RATS_OK);  // idempotent
+
+    ASSERT_EQ(rats_start(hub), RATS_OK);
+    ASSERT_EQ(rats_start(a), RATS_OK);
+    ASSERT_EQ(rats_start(b), RATS_OK);
+    EXPECT_EQ(rats_enable_relay(a, 0), RATS_ERR_ALREADY_STARTED);
+
+    rats_connect(a, "127.0.0.1", rats_listen_port(hub));
+    rats_connect(b, "127.0.0.1", rats_listen_port(hub));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(hub) == 2; }));
+
+    char* b_id = rats_local_id(b);
+    ASSERT_NE(b_id, nullptr);
+    EXPECT_EQ(rats_connect_via_relay(a, "not-a-peer-id"), RATS_ERR_INVALID_ARG);
+    EXPECT_EQ(rats_connect_via_relay(a, b_id), RATS_OK);
+
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(a) == 2 && rats_peer_count(b) == 2; }, 20s))
+        << "the relay never produced a connection";
+    // The one thing that distinguishes it from any other peer.
+    EXPECT_EQ(rats_peer_transport(a, b_id), RATS_TRANSPORT_RELAY);
+
+    // And a second attempt to somebody already connected is declined, not started.
+    EXPECT_EQ(rats_connect_via_relay(a, b_id), RATS_ERR_NO_SUCH_PEER);
+    rats_string_free(b_id);
+
+    rats_stop(a); rats_stop(b); rats_stop(hub);
+    rats_destroy(a); rats_destroy(b); rats_destroy(hub);
+}

@@ -31,12 +31,15 @@ class Security(IntEnum):
 class Transport(IntEnum):
     """``rats_transport_t`` — which wire a peer connection runs on.
 
-    Both carry the identical protocol and the identical encrypted handshake;
-    they differ only in how the ordered, reliable byte stream underneath is
-    obtained.
+    TCP and UDP carry the identical protocol and the identical encrypted
+    handshake; they differ only in how the ordered, reliable byte stream
+    underneath is obtained. RELAY is that same stream one hop further away,
+    carried inside another peer's connection; it is never dialed, so it has no
+    bit in :class:`TransportMask`.
     """
-    TCP = 0  # one kernel socket per peer
-    UDP = 1  # reliable stream over the shared UDP socket
+    TCP = 0    # one kernel socket per peer
+    UDP = 1    # reliable stream over the shared UDP socket
+    RELAY = 2  # carried through a third node (see enable_relay)
 
 
 class TransportMask(IntEnum):

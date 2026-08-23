@@ -45,8 +45,12 @@ typedef enum {
  * the identical encrypted handshake; they differ only in how the ordered,
  * reliable byte stream underneath is obtained. */
 typedef enum {
-    RATS_TRANSPORT_TCP = 0,  /* one kernel socket per peer */
-    RATS_TRANSPORT_UDP = 1   /* reliable stream over the shared UDP socket */
+    RATS_TRANSPORT_TCP   = 0,  /* one kernel socket per peer */
+    RATS_TRANSPORT_UDP   = 1,  /* reliable stream over the shared UDP socket */
+    /* Carried inside another peer's connection (see rats_enable_relay). Reported
+       by rats_peer_transport(); never a value to put in preferred_transport,
+       which chooses what a DIAL tries and a relay is never dialed. */
+    RATS_TRANSPORT_RELAY = 2
 } rats_transport_t;
 
 /* Bitmask of transports (see rats_transports / rats_peer_transports). */
@@ -191,6 +195,30 @@ RATS_API rats_error_t rats_enable_hole_punch(rats_t node, int serve_as_relay);
  *  it is already running, or this node does not yet know an external endpoint of
  *  its own to advertise (it needs at least one datagram peer first). */
 RATS_API rats_error_t rats_punch_peer(rats_t node, const char* peer_id_hex);
+
+/** Relaying: reach a peer that neither port forwarding nor hole punching could
+ *  make reachable, by routing the connection through a node both ends are already
+ *  connected to. Call before start(). The peer that comes out is ordinary in every
+ *  way — the same end-to-end encryption, the same channels — except that its bytes
+ *  take a detour, which rats_peer_transport() reports as RATS_TRANSPORT_RELAY.
+ *
+ *  `serve_as_relay` (non-zero) also carries OTHER peers' connections. Unlike a
+ *  hole-punch rendezvous, that spends real bandwidth on somebody else's traffic, so
+ *  it is off by default and opted into here; a mesh in which nobody serves cannot
+ *  relay at all. A serving node forwards only between peers it already holds, never
+ *  chains circuits, and caps each one by bytes, duration and count. */
+RATS_API rats_error_t rats_enable_relay(rats_t node, int serve_as_relay);
+
+/** Try to reach `peer_id_hex` through a relay. Non-blocking: success arrives as an
+ *  ordinary peer-connected callback. RATS_OK if an attempt was started;
+ *  RATS_ERR_NOT_ENABLED if relaying is off; RATS_ERR_NO_SUCH_PEER if there is
+ *  nothing to do or nothing to try with — the peer is already connected, an attempt
+ *  is already running, it is in cooldown, or this node has no peer that could carry
+ *  the connection.
+ *
+ *  Usually there is no need to call this: with hole punching enabled too, a punch
+ *  that cannot work hands the target over by itself. */
+RATS_API rats_error_t rats_connect_via_relay(rats_t node, const char* peer_id_hex);
 
 /** What the mesh has shown about this node's own NAT, from the endpoints datagram
  *  peers report seeing its shared UDP socket at. One of the RATS_NAT_* values;

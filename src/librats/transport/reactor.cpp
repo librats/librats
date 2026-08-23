@@ -150,6 +150,27 @@ void Reactor::start_dial(ConnId id, const std::string& host, int port, Transport
     conn->set_dial_address(host, static_cast<uint16_t>(port));
 }
 
+void Reactor::adopt_link(ConnId id, std::unique_ptr<Link> link, ConnRole role, bool connected) {
+    // A unique_ptr cannot be captured by a std::function, which is what the task
+    // queue holds — so the link travels in a shared holder it is moved out of on
+    // arrival. If the task is never run (a reactor stopped under us), the holder
+    // dies with it and takes the link with it, which is the right outcome.
+    auto holder = std::make_shared<std::unique_ptr<Link>>(std::move(link));
+    execute([this, id, holder, role, connected] {
+        Connection* conn = adopt(std::move(*holder), role, id);
+        if (!conn) return;
+        // Already-connected links skip the Connecting state entirely, exactly as an
+        // accepted socket does; the rest wait for the PollOut that wake() will bring
+        // once the far end answers.
+        if (connected) conn->start_handshake();
+    });
+}
+
+void Reactor::wake(ConnId id, uint32_t events) {
+    if (events == 0) return;
+    execute([this, id, events] { dispatch_events(id, events); });
+}
+
 void Reactor::abort_dial(ConnId id, const std::string& host, int port) {
     resolve_dial(id);  // the id is spent either way; release any cancellation slot
     delegate_.on_dial_aborted(index_, id, host, static_cast<uint16_t>(port));
@@ -243,6 +264,21 @@ void Reactor::run() {
         if (mux_) timeout = mux_->next_timeout_ms(timeout);
         const int n = poller_->wait(events, kMaxEvents, timeout);
 
+        // Empty the wakeup pipe BEFORE taking the task snapshot, never after.
+        //
+        // post() pushes a task and then writes a byte, and those two arrive here as
+        // two separate facts. Draining last would let a byte written *while this
+        // turn was running its tasks* be thrown away along with the ones that
+        // brought us here — and the task it belonged to was pushed after the
+        // snapshot, so it does not run either. It would then sit in the queue with
+        // nothing left to announce it, until the next poll timeout woke the loop
+        // for some other reason: up to kMaxPollMs of latency, at random.
+        //
+        // Draining first inverts that. A byte written any time after this line is
+        // still in the pipe when the loop comes back round, so wait() returns at
+        // once — whether or not its task made this turn's snapshot. The cost is one
+        // recv per turn, which is nothing against the work a turn does.
+        drain_wakeup();
         drain_tasks(task_batch);                         // connect/close/send-arm
         for (int i = 0; i < n; ++i) handle_event(events[i]);
         timers_.run_due();
@@ -325,7 +361,9 @@ void Reactor::drain_wakeup() {
 void Reactor::handle_event(const PollResult& ev) {
     const socket_t fd = ev.fd;
 
-    if (fd == wakeup_.fd()) { drain_wakeup(); return; }
+    // Already emptied at the top of the turn — see run(). Nothing to do but
+    // recognise it, so it is not mistaken for a connection's socket.
+    if (fd == wakeup_.fd()) return;
     if (fd == server_socket_) { if (ev.events & PollIn) do_accept(); return; }
     if (mux_ && fd == mux_->socket()) {
         // Any event, not just PollIn. An error on a datagram socket belongs to one
@@ -479,16 +517,26 @@ void Reactor::mark_for_close(ConnId id, CloseReason reason) {
 }
 
 void Reactor::flush_dirty() {
-    if (dirty_.empty()) return;
     // Swapped out first: a flush can close a connection, and a close can queue
     // further work — none of which should extend the batch being walked.
+    //
+    // Looped, because a flush can also *book another one*: writing a relayed
+    // circuit hands its bytes to the connection carrying it (see
+    // transport/relay_link.h), which books its own flush from inside this one. A
+    // single pass would leave those bytes queued until the next turn of the loop —
+    // i.e. behind a poll wait — adding tens of milliseconds to every hop of a
+    // relayed path. The bound is a backstop against a pathological chain, not an
+    // expected limit: honest work needs two passes at most.
     std::vector<ConnId> batch;
-    batch.swap(dirty_);
-    for (const ConnId id : batch) {
-        Connection* conn = find(id);
-        if (!conn) continue;                                   // gone since it booked
-        if (conn->state() != ConnState::Established) continue;  // closing; nothing to owe
-        if (!conn->flush_pending()) mark_for_close(id, conn->close_reason());
+    for (int pass = 0; pass < kMaxFlushPasses && !dirty_.empty(); ++pass) {
+        batch.clear();
+        batch.swap(dirty_);
+        for (const ConnId id : batch) {
+            Connection* conn = find(id);
+            if (!conn) continue;                                   // gone since it booked
+            if (conn->state() != ConnState::Established) continue;  // closing; nothing to owe
+            if (!conn->flush_pending()) mark_for_close(id, conn->close_reason());
+        }
     }
 }
 

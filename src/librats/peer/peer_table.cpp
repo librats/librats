@@ -5,6 +5,30 @@
 
 namespace librats {
 
+namespace {
+
+/// How much a transport is worth when two connections to the same peer have to be
+/// ranked. Both ends see the same pair of transports and apply the same order, so
+/// they converge on the same survivor without exchanging a word.
+///
+///   Udp   — one socket, one NAT mapping, a source port that can be dialed back
+///           (see dialer.h). The best link there is.
+///   Tcp   — a direct link all the same, just a less useful one to a NAT.
+///   Relay — not a direct link at all: every byte costs a third node bandwidth and
+///           a round trip. Ranked last here for completeness; in practice a relayed
+///           link is settled before this by the rule in add(), which lets ANY direct
+///           link beat it regardless of role.
+int transport_rank(TransportKind t) noexcept {
+    switch (t) {
+        case TransportKind::Udp:   return 2;
+        case TransportKind::Tcp:   return 1;
+        case TransportKind::Relay: return 0;
+    }
+    return 0;
+}
+
+} // namespace
+
 PeerTable::AddOutcome PeerTable::add(const PeerInfo& info, PeerRoute route,
                                              bool prefer_outbound) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -26,23 +50,32 @@ PeerTable::AddOutcome PeerTable::add(const PeerInfo& info, PeerRoute route,
     // first" gets a different answer at each end, and two ends that each keep the
     // link the other just dropped are left with no link at all.
     //
+    //   one relayed, one not ⇒ not a race at all but an upgrade (or a late relay
+    //                        arriving under a direct link): the direct one wins,
+    //                        whatever the roles. Ranked FIRST, ahead of the role
+    //                        rule, because a relayed link that won on role would
+    //                        keep costing a third node bandwidth for the life of a
+    //                        peer we can reach ourselves. Both ends see the same
+    //                        pair of transports, so both reach this same verdict.
     //   opposite roles     ⇒ cross-connect: keep the link started by the smaller id
     //                        (prefer_outbound, opposite at each end by construction).
     //   different wires    ⇒ a dial race whose attempts both got through. Both ends
-    //                        see the transports, and there is a right answer: the
-    //                        datagram link (one socket, one NAT mapping, a source
-    //                        port that can be dialed back — see dialer.h). "Is it
-    //                        UDP" ranks the pair only because there are exactly two
-    //                        wires; a third would need an explicit order, or the two
-    //                        ends could rank the same pair differently.
+    //                        see the transports and rank them by the same explicit
+    //                        order (transport_rank above), so neither can rank the
+    //                        same pair differently.
     //   same role and wire ⇒ a reconnect, not a simultaneous pair: the old link is
     //                        stale or already dead, so the newcomer is the live one.
+    const bool cur_relayed = cur.info.transport == TransportKind::Relay;
+    const bool new_relayed = info.transport == TransportKind::Relay;
+
     bool keep_new = true;
-    if (cur.info.direction != info.direction) {
+    if (cur_relayed != new_relayed) {
+        keep_new = !new_relayed;
+    } else if (cur.info.direction != info.direction) {
         const ConnRole survivor = prefer_outbound ? ConnRole::Outbound : ConnRole::Inbound;
         keep_new = (info.direction == survivor);
     } else if (cur.info.transport != info.transport) {
-        keep_new = (info.transport == TransportKind::Udp);
+        keep_new = transport_rank(info.transport) > transport_rank(cur.info.transport);
     }
 
     if (keep_new) {

@@ -420,6 +420,45 @@ public class RatsNode implements AutoCloseable {
         check(nativePunchPeer(ptr(), peerId), "punch to " + peerId);
     }
 
+    /**
+     * Enables relaying: reaching a peer that neither port forwarding nor hole
+     * punching could make reachable, by routing the connection through a node both
+     * ends are already connected to. Call before start.
+     *
+     * <p>The peer that comes out is ordinary in every way — the same end-to-end
+     * encryption, the same channels — except that {@link #peerTransport(String)}
+     * reports it as {@link Transport#RELAY}.</p>
+     *
+     * @param serveAsRelay also carry OTHER peers' connections. Unlike a hole-punch
+     *                     rendezvous this spends real bandwidth on somebody else's
+     *                     traffic, so it is off by default; a mesh in which nobody
+     *                     serves cannot relay at all.
+     */
+    public void enableRelay(boolean serveAsRelay) {
+        check(nativeEnableRelay(ptr(), serveAsRelay), "enable relaying");
+    }
+
+    /** Enables relaying without carrying other peers' connections. */
+    public void enableRelay() {
+        enableRelay(false);
+    }
+
+    /**
+     * Tries to reach a peer through a relay. Non-blocking: success arrives as an
+     * ordinary {@link #onPeerConnected(PeerCallback)}. Usually unnecessary: with
+     * hole punching enabled too, a punch that cannot work hands the target over by
+     * itself.
+     *
+     * @throws RatsException with {@link ErrorCode#NOT_ENABLED} if relaying is off,
+     *         or {@link ErrorCode#NO_SUCH_PEER} when there is nothing to do or
+     *         nothing to try with — the peer is already connected, an attempt is
+     *         already running, it is in cooldown, or this node has no peer that
+     *         could carry the connection
+     */
+    public void connectViaRelay(String peerId) {
+        check(nativeConnectViaRelay(ptr(), peerId), "relay to " + peerId);
+    }
+
     /** @return what the mesh has shown about this node's own NAT. */
     public NatMapping natMapping() {
         return NatMapping.fromValue(nativeNatMapping(ptr()));
@@ -675,6 +714,8 @@ public class RatsNode implements AutoCloseable {
     private native int nativeEnablePortMapping(long ptr, boolean enableUpnp, boolean enableNatpmp);
     private native int nativeEnableHolePunch(long ptr, boolean serveAsRelay);
     private native int nativePunchPeer(long ptr, String peerId);
+    private native int nativeEnableRelay(long ptr, boolean serveAsRelay);
+    private native int nativeConnectViaRelay(long ptr, String peerId);
     private native int nativeNatMapping(long ptr);
 
     private native int nativeEnablePubsub(long ptr);

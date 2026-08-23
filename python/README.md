@@ -125,12 +125,21 @@ from librats_py import NatMapping
 with RatsNode(8080) as node:
     node.enable_port_mapping()          # UPnP IGD + NAT-PMP
     node.enable_hole_punch()            # relays other peers' rendezvous by default
+    node.enable_relay()                 # last resort, for pairs a punch cannot reach
     node.start()
 
     node.punch_peer(peer_id)            # success arrives as on_peer_connected
     if node.nat_mapping is NatMapping.ENDPOINT_DEPENDENT:
-        print("symmetric NAT — punching cannot work from here")
+        print("symmetric NAT — punching cannot work, but a relay still can")
 ```
+
+`enable_relay()` routes the connection itself through a node both ends already
+reach, which is the only way through a symmetric NAT. It stays encrypted end to
+end — the relay moves ciphertext — and the peer behaves like any other, except
+that :meth:`peer_transport` reports ``Transport.RELAY``. With both enabled the
+ladder runs itself: a punch that cannot work falls back to a relay, and a relayed
+peer keeps trying to become a direct one. Pass ``serve_as_relay=True`` to also
+carry OTHER peers' connections, which spends real bandwidth and is off by default.
 
 ### Liveness and reconnection
 
@@ -195,6 +204,7 @@ RatsNode(listen_port=0, *, enable_listen=True, bind_address=None,
 | mDNS discovery | `enable_mdns()` | — |
 | NAT port mapping | `enable_port_mapping(enable_upnp=True, enable_natpmp=True)` | — |
 | Hole punching | `enable_hole_punch(serve_as_relay=True)` | `punch_peer(peer_id)`, `nat_mapping` |
+| Relaying | `enable_relay(serve_as_relay=False)` | `connect_via_relay(peer_id)` |
 | Pub/sub | `enable_pubsub()` | `subscribe(topic, cb)`, `unsubscribe(topic)`, `publish(topic, data)` |
 | Typed JSON | `enable_json()` | `on_json(type, cb)`, `once_json(type, cb)`, `off_json(type)`, `send_json(peer, type, payload)`, `broadcast_json(type, payload)` |
 | File transfer | `enable_file_transfer(temp_dir=None)` | `on_file_offer/on_file_progress/on_file_complete`, `send_file`, `send_directory`, `accept_file`, `reject_file`, `cancel_file`, `pause_file`, `resume_file` |

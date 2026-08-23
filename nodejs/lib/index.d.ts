@@ -19,15 +19,18 @@ declare module 'librats' {
   };
 
   /**
-   * Which wire a peer connection runs on. Both carry the identical protocol and
-   * the identical encrypted handshake; they differ only in how the ordered,
-   * reliable byte stream underneath is obtained.
+   * Which wire a peer connection runs on. TCP and UDP carry the identical protocol
+   * and the identical encrypted handshake, and differ only in how the ordered,
+   * reliable byte stream underneath is obtained; RELAY is that same stream one hop
+   * further away, out of another peer's connection rather than out of a socket.
    */
   export const Transport: {
     /** One kernel socket per peer. */
     readonly TCP: 0;
     /** Reliable stream over the shared UDP socket. */
     readonly UDP: 1;
+    /** Carried through a third node (see `enableRelay`). */
+    readonly RELAY: 2;
   };
 
   /** Bitmask flags used by `node.transports` and `node.peerTransports()`. */
@@ -57,7 +60,10 @@ declare module 'librats' {
   };
 
   export type SecurityValue = 0 | 1;
+  /** A wire a dial can choose: TCP or UDP. A relay is never dialed. */
   export type TransportValue = 0 | 1;
+  /** What a connected peer's link actually runs on, relays included. */
+  export type PeerTransportValue = TransportValue | 2;
   export type NatMappingValue = 0 | 1 | 2 | 3;
   export type LogLevelValue = 0 | 1 | 2 | 3;
 
@@ -165,7 +171,7 @@ declare module 'librats' {
     /** Cap on established peers (0 = unlimited). Settable at any time. */
     maxPeers: number;
     /** Which wire a connected peer's link runs on, or `null` if not connected. */
-    peerTransport(peerId: string): TransportValue | null;
+    peerTransport(peerId: string): PeerTransportValue | null;
     /**
      * Transports a connected peer advertised, as a `TransportMask` bitmask, or
      * `null` if not connected. 0 means the peer did not say (an older build).
@@ -207,6 +213,17 @@ declare module 'librats' {
      * ordinary `onPeerConnected`.
      */
     punchPeer(peerId: string): void;
+    /**
+     * Enable relaying: reach a peer nothing else could, through a node both ends
+     * are already connected to. `serveAsRelay` (default `false`) also carries
+     * OTHER peers' connections, which spends real bandwidth.
+     */
+    enableRelay(serveAsRelay?: boolean): void;
+    /**
+     * Try to reach a peer through a relay. Non-blocking: success arrives as an
+     * ordinary `onPeerConnected`.
+     */
+    connectViaRelay(peerId: string): void;
     /** A `NatMapping` value describing this node's own NAT. */
     readonly natMapping: NatMappingValue;
 

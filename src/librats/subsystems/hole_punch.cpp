@@ -1,6 +1,7 @@
 #include "librats/subsystems/hole_punch.h"
 #include "librats/node/dial_service.h"
 #include "librats/node/node_context.h"
+#include "librats/peer/peer_info.h"
 #include "librats/util/logger.h"
 
 #include <algorithm>
@@ -135,6 +136,7 @@ void HolePunch::attach(NodeContext& ctx) {
     // does not know its own external one simply cannot punch — it can still relay.
     dialer_   = ctx.services.get<DialService>();
     external_ = ctx.services.get<ExternalAddressService>();
+    services_ = &ctx.services;
 
     // Offer punching to sibling modules. Registered even without a dialer: punch()
     // answers false on its own then, which is exactly what a caller expects from a
@@ -151,17 +153,30 @@ void HolePunch::attach(NodeContext& ctx) {
     // reconciles sessions against the peer set, so this is the fast path, not the
     // only one.
     network_->on_peer_connected([this](const Peer& peer) {
+        // A relayed link is not what a punch was for — it is the fallback the punch
+        // is trying to make unnecessary, and a punch may well have been started
+        // BECAUSE it came up (see subsystems/relay.h). Retiring the session here
+        // would call the upgrade off the moment it began.
+        const auto info = peer.info();
+        if (info && info->transport == TransportKind::Relay) return;
         std::lock_guard<std::mutex> lock(mutex_);
         sessions_.erase(peer.id());
     });
 }
 
 void HolePunch::start() {
+    // Resolved here rather than in attach(): Relay may be attached after us, and
+    // every attach() runs before any start(). Stored before running_ goes true, so
+    // an escalation on a reactor thread never sees a half-initialised state.
+    if (config_.relay_on_failure && services_)
+        relay_.store(services_->get<RelayService>());
+
     if (running_.exchange(true)) return;
     worker_ = std::thread([this] { loop(); });
 }
 
 void HolePunch::stop() {
+    relay_.store(nullptr);
     if (!running_.exchange(false)) return;
     cv_.notify_all();
     if (worker_.joinable()) worker_.join();
@@ -178,14 +193,20 @@ bool HolePunch::punch(const PeerId& target) {
     if (target == network_->local_id()) return false;
 
     // Already reachable the ordinary way. Checked before any state is created so a
-    // caller can punch() freely on discovery without having to check first.
-    for (const PeerId& id : network_->connected_peers())
+    // caller can punch() freely on discovery without having to check first. A
+    // RELAYED peer is deliberately not "already reachable": punching it is how the
+    // circuit gets replaced by a direct link (see subsystems/relay.h).
+    for (const PeerId& id : directly_connected())
         if (id == target) return false;
 
     if (config_.skip_when_endpoint_dependent && external_ &&
         external_->udp_mapping() == NatMapping::EndpointDependent) {
         LOG_DEBUG("punch", "Not punching to " << target.short_hex()
                   << ": our own mapping is per-destination (symmetric NAT)");
+        // Nothing about this will improve with time or retries: no endpoint we can
+        // advertise is the one the target's packets would arrive on. This is
+        // exactly the case a relayed path exists for.
+        escalate_to_relay(target);
         return false;
     }
 
@@ -193,6 +214,7 @@ bool HolePunch::punch(const PeerId& target) {
     if (addresses.empty()) {
         LOG_DEBUG("punch", "Not punching to " << target.short_hex()
                   << ": no external datagram endpoint to advertise yet");
+        escalate_to_relay(target);
         return false;
     }
 
@@ -210,8 +232,11 @@ bool HolePunch::punch(const PeerId& target) {
     }
 
     if (!send_connect(target, /*opening=*/true, nullptr)) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        sessions_.erase(target);   // nobody could carry it; nothing is in flight
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sessions_.erase(target);   // nobody could carry it; nothing is in flight
+        }
+        escalate_to_relay(target);
         return false;
     }
     LOG_DEBUG("punch", "Punch rendezvous started with " << target.short_hex());
@@ -461,10 +486,12 @@ void HolePunch::service_sessions() {
 
     // Connected peers first, without the lock: a session whose target is now a peer
     // succeeded, however it got there (our burst, or theirs arriving as inbound).
-    std::vector<PeerId> connected = network_->connected_peers();
+    // Direct links only — a relayed one is what a punch is trying to replace.
+    std::vector<PeerId> connected = directly_connected();
 
     struct Retry { PeerId target; PeerId via; bool have_via; };
     std::vector<Retry> retry;
+    std::vector<PeerId> exhausted;   ///< targets to hand on to the relay, once unlocked
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -496,7 +523,10 @@ void HolePunch::service_sessions() {
                 // first). Calling the target off here would drop the retries it is
                 // about to send, and block this node's own later punch to it, for
                 // the whole cooldown. So a responder just forgets the round.
-                if (initiator) begin_cooldown(target);
+                if (initiator) {
+                    begin_cooldown(target);
+                    exhausted.push_back(target);
+                }
                 it = sessions_.erase(it);
                 continue;
             }
@@ -510,9 +540,32 @@ void HolePunch::service_sessions() {
 
     for (const Retry& r : retry) {
         if (send_connect(r.target, /*opening=*/true, r.have_via ? &r.via : nullptr)) continue;
-        std::lock_guard<std::mutex> lock(mutex_);
-        sessions_.erase(r.target);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            sessions_.erase(r.target);
+        }
+        exhausted.push_back(r.target);
     }
+
+    // The rungs above this one are spent: no address we can advertise got through.
+    // Handing the target on is the difference between a peer that is unreachable
+    // and one that is merely expensive to reach.
+    for (const PeerId& target : exhausted) escalate_to_relay(target);
+}
+
+void HolePunch::escalate_to_relay(const PeerId& target) {
+    RelayService* relay = relay_.load();
+    if (!relay) return;   // no Relay attached, or the fallback is off
+    if (relay->connect_via_relay(target))
+        LOG_DEBUG("punch", "Punching to " << target.short_hex()
+                  << " is not going to work; looking for a relay instead");
+}
+
+std::vector<PeerId> HolePunch::directly_connected() const {
+    std::vector<PeerId> ids;
+    for (const PeerInfo& info : network_->peers())
+        if (info.transport != TransportKind::Relay) ids.push_back(info.id);
+    return ids;
 }
 
 bool HolePunch::in_cooldown(const PeerId& target) const {

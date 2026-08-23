@@ -59,8 +59,9 @@ const Security = Object.freeze({
  * how the ordered, reliable byte stream underneath is obtained.
  */
 const Transport = Object.freeze({
-  TCP: 0, // one kernel socket per peer
-  UDP: 1, // reliable stream over the shared UDP socket
+  TCP: 0,   // one kernel socket per peer
+  UDP: 1,   // reliable stream over the shared UDP socket
+  RELAY: 2, // carried through a third node (see enableRelay)
 });
 
 /** Bitmask flags used by `node.transports` and `node.peerTransports()`. */
@@ -249,6 +250,29 @@ class RatsNode {
    * @param {string} peerId
    */
   punchPeer(peerId) { this._native.punchPeer(peerId); }
+
+  /**
+   * Enable relaying: reach a peer that neither port forwarding nor hole punching
+   * could make reachable, by routing the connection through a node both ends are
+   * already connected to. The peer that comes out is ordinary in every way — the
+   * same end-to-end encryption, the same channels — except that `peerTransport()`
+   * reports it as `Transport.RELAY`.
+   * @param {boolean} [serveAsRelay=false] also carry OTHER peers' connections.
+   *   Unlike a hole-punch rendezvous this spends real bandwidth on somebody else's
+   *   traffic, so it is off by default; a mesh in which nobody serves cannot relay.
+   */
+  enableRelay(serveAsRelay = false) { this._native.enableRelay(serveAsRelay); }
+
+  /**
+   * Try to reach a peer through a relay. Non-blocking: success arrives as an
+   * ordinary `onPeerConnected`. Throws `NO_SUCH_PEER` when there is nothing to do
+   * or nothing to try with — already connected, an attempt already running, in
+   * cooldown, or no peer that could carry the connection. Usually unnecessary:
+   * with hole punching enabled too, a punch that cannot work hands the target over
+   * by itself.
+   * @param {string} peerId
+   */
+  connectViaRelay(peerId) { this._native.connectViaRelay(peerId); }
 
   /** @type {number} a {@link NatMapping} value describing this node's own NAT. */
   get natMapping() { return this._native.natMapping(); }

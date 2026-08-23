@@ -95,6 +95,7 @@
 #include "librats/peer/peer.h"
 #include "librats/peer/peer_id.h"
 #include "librats/subsystems/hole_punch_service.h"
+#include "librats/subsystems/relay_service.h"
 
 #include <atomic>
 #include <chrono>
@@ -108,6 +109,7 @@
 namespace librats {
 
 class DialService;
+class ServiceRegistry;
 
 /// Published as HolePunchService, so a module that discovers a peer it cannot dial
 /// (PeerExchange) can hand the id over without depending on this class.
@@ -163,6 +165,12 @@ public:
 
         /// Session bookkeeping cadence — retries, timeouts, cooldown expiry.
         std::chrono::milliseconds tick{250};
+
+        /// When a punch cannot be attempted at all, or has been given up on, hand
+        /// the target to RelayService — the next rung down the ladder (see
+        /// subsystems/relay.h). Costs nothing when no Relay is attached: the
+        /// service simply does not resolve.
+        bool relay_on_failure = true;
     };
 
     HolePunch();
@@ -235,6 +243,15 @@ private:
     void service_sessions();
 
     // — helpers —
+    /// Hand `target` to the relay module, if one is attached and the fallback is
+    /// on. Called when a punch is impossible or has run out of attempts — the
+    /// point at which a relayed path stops being the worse option and becomes the
+    /// only one. Caller must NOT hold the mutex.
+    void                 escalate_to_relay(const PeerId& target);
+    /// Peers reachable over a DIRECT link. A relayed peer is deliberately not one:
+    /// a punch to it is an upgrade in progress, and counting the circuit as success
+    /// would retire the session before it had done anything.
+    std::vector<PeerId>  directly_connected() const;
     std::vector<Address> own_punch_addresses() const;
     bool                 relay_budget_ok(const PeerId& from);
     bool                 in_cooldown(const PeerId& target) const;   ///< caller holds mutex_
@@ -244,6 +261,11 @@ private:
     PeerNetwork*           network_  = nullptr;
     DialService*           dialer_   = nullptr;
     ExternalAddressService* external_ = nullptr;
+    ServiceRegistry*       services_ = nullptr;
+    /// Resolved in start(), not attach(): Relay may be attached after us, and every
+    /// attach() runs before any start(). Atomic because it is read from reactor
+    /// threads and the worker alike.
+    std::atomic<RelayService*> relay_{nullptr};
 
     std::atomic<bool>     running_{false};
     std::atomic<uint64_t> punches_started_{0};

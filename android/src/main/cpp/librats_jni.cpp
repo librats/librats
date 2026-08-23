@@ -499,6 +499,17 @@ Java_com_librats_RatsNode_nativePunchPeer(JNIEnv* env, jobject, jlong ptr, jstri
 }
 
 JNIEXPORT jint JNICALL
+Java_com_librats_RatsNode_nativeEnableRelay(JNIEnv*, jobject, jlong ptr, jboolean serve) {
+    return rats_enable_relay(node_of(ptr), serve ? 1 : 0);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsNode_nativeConnectViaRelay(JNIEnv* env, jobject, jlong ptr, jstring peer_id) {
+    std::string pid = toCString(env, peer_id);
+    return rats_connect_via_relay(node_of(ptr), pid.c_str());
+}
+
+JNIEXPORT jint JNICALL
 Java_com_librats_RatsNode_nativeNatMapping(JNIEnv*, jobject, jlong ptr) {
     return rats_nat_mapping(node_of(ptr));
 }

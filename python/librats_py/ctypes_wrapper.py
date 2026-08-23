@@ -234,6 +234,13 @@ class LibratsCtypes:
         lib.rats_punch_peer.argtypes = [c_void_p, c_char_p]
         lib.rats_punch_peer.restype = c_int
 
+        # --- NAT traversal (relaying) ---
+        lib.rats_enable_relay.argtypes = [c_void_p, c_int]
+        lib.rats_enable_relay.restype = c_int
+
+        lib.rats_connect_via_relay.argtypes = [c_void_p, c_char_p]
+        lib.rats_connect_via_relay.restype = c_int
+
         lib.rats_nat_mapping.argtypes = [c_void_p]
         lib.rats_nat_mapping.restype = c_int
 

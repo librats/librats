@@ -206,6 +206,8 @@ set(LIBRARY_SOURCES
     src/librats/transport/udp_stream.cpp
     src/librats/transport/udp_mux.h
     src/librats/transport/udp_mux.cpp
+    src/librats/transport/relay_link.h
+    src/librats/transport/relay_link.cpp
     src/librats/transport/connection.h
     src/librats/transport/connection.cpp
     src/librats/transport/reactor.h
@@ -242,6 +244,7 @@ set(LIBRARY_SOURCES
     src/librats/node/dialer.h
     src/librats/node/dialer.cpp
     src/librats/node/dial_service.h
+    src/librats/node/circuit_service.h
     src/librats/node/nat_status.h
     src/librats/node/nat_status.cpp
 
@@ -268,6 +271,9 @@ set(LIBRARY_SOURCES
     src/librats/subsystems/hole_punch.h
     src/librats/subsystems/hole_punch.cpp
     src/librats/subsystems/hole_punch_service.h
+    src/librats/subsystems/relay.h
+    src/librats/subsystems/relay.cpp
+    src/librats/subsystems/relay_service.h
 
 # dht/ — Kademlia DHT + KRPC (bencode is shared with bittorrent, always built)
     src/librats/dht/dht.h
@@ -649,6 +655,7 @@ if(RATS_BUILD_TESTS)
         tests/test_frame.cpp
         tests/test_reactor.cpp
         tests/test_transport_udp.cpp
+        tests/test_relay_link.cpp
         tests/test_dialer.cpp
         tests/test_peer_table.cpp
         tests/test_handshake.cpp
@@ -665,6 +672,7 @@ if(RATS_BUILD_TESTS)
         tests/test_reconnection.cpp
         tests/test_nat_status.cpp
         tests/test_hole_punch.cpp
+        tests/test_relay.cpp
         tests/test_logging.cpp
     )
 

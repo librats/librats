@@ -78,6 +78,11 @@ const Link kWeTcp  {"we-dialed/tcp",   ConnRole::Outbound, TransportKind::Tcp, {
 const Link kTheyUdp{"they-dialed/udp", ConnRole::Inbound,  TransportKind::Udp, {0, 3}};
 const Link kTheyTcp{"they-dialed/tcp", ConnRole::Inbound,  TransportKind::Tcp, {0, 4}};
 
+// And the two a relayed circuit can leave: one we opened through a third node, one
+// opened to us the same way.
+const Link kWeRelay  {"we-opened/relay",   ConnRole::Outbound, TransportKind::Relay, {0, 5}};
+const Link kTheyRelay{"they-opened/relay", ConnRole::Inbound,  TransportKind::Relay, {0, 6}};
+
 } // namespace
 
 // The dial race is settled by local timing, so its verdict is one the far end
@@ -130,6 +135,65 @@ TEST(PeerTableTest, EveryArrivalOrderReachesTheSameVerdictAtBothEnds) {
     std::vector<Link> links{kWeUdp, kWeTcp, kTheyUdp, kTheyTcp};
     const auto by_route = [](const Link& a, const Link& b) { return a.route.conn < b.route.conn; };
     std::sort(links.begin(), links.end(), by_route);  // next_permutation needs a start
+
+    int orders = 0;
+    do {
+        ++orders;
+        EXPECT_EQ(survivor(true, links), "we-dialed/udp")
+            << "arrival order decided the survivor (order #" << orders << ")";
+        EXPECT_EQ(survivor(false, mirrored(links)), "we-dialed/udp")
+            << "the far end kept a different link (order #" << orders << ")";
+    } while (std::next_permutation(links.begin(), links.end(), by_route));
+
+    EXPECT_EQ(orders, 24) << "not every arrival order was tried";
+}
+
+// A relayed link is not a competing dial, it is a stand-in for one — every byte it
+// carries costs a third node bandwidth and a round trip. So the moment a direct
+// link to the same peer exists, whichever way round it was made, the relayed one
+// has to go. This outranks the direction rule on purpose: a relayed link that won
+// on "we dialed it" would keep spending a stranger's bandwidth on a peer we can
+// reach ourselves, for as long as the peer stayed connected.
+TEST(PeerTableTest, ADirectLinkAlwaysSupersedesARelayedOne) {
+    for (const Link& relay : {kWeRelay, kTheyRelay}) {
+        for (const Link& direct : {kWeUdp, kWeTcp, kTheyUdp, kTheyTcp}) {
+            EXPECT_EQ(survivor(true, {relay, direct}), direct.name)
+                << "the relayed link survived a direct one arriving after it";
+            EXPECT_EQ(survivor(true, {direct, relay}), direct.name)
+                << "a relayed link arriving late displaced a direct one";
+
+            // And the far end, which computes the opposite prefer_outbound, has to
+            // reach the same verdict — otherwise each end drops the other's choice.
+            EXPECT_EQ(survivor(false, mirrored({relay, direct})), direct.name);
+            EXPECT_EQ(survivor(false, mirrored({direct, relay})), direct.name);
+        }
+    }
+}
+
+// Two circuits between the same pair — both ends asked a relay at the same moment
+// — is an ordinary cross-connect, and the ordinary rule settles it. Nothing about
+// relaying changes that; the rule above only ever compares a relayed link with a
+// direct one.
+TEST(PeerTableTest, TwoRelayedCircuitsAreSettledByDirectionAsUsual) {
+    const std::vector<Link> pair{kWeRelay, kTheyRelay};
+
+    EXPECT_EQ(survivor(true, pair), "we-opened/relay");
+    EXPECT_EQ(survivor(true, {kTheyRelay, kWeRelay}), "we-opened/relay");
+    EXPECT_EQ(survivor(false, mirrored(pair)), "we-opened/relay")
+        << "the two ends kept different circuits";
+    EXPECT_EQ(survivor(false, mirrored({kTheyRelay, kWeRelay})), "we-opened/relay");
+}
+
+// The same total-order property as above, now with a relayed link in the mix. This
+// is the case that actually happens in the field: a peer is reached through a relay
+// first, and a hole punch or a plain dial catches up afterwards — in whatever order
+// the resulting links establish. The direct datagram link must come out on top
+// every time, at both ends, which is what makes the upgrade seamless (the peer
+// table swaps the route and no disconnect is ever reported).
+TEST(PeerTableTest, ARelayedPeerIsUpgradedToADirectLinkWhateverTheOrder) {
+    std::vector<Link> links{kWeUdp, kWeTcp, kTheyUdp, kWeRelay};
+    const auto by_route = [](const Link& a, const Link& b) { return a.route.conn < b.route.conn; };
+    std::sort(links.begin(), links.end(), by_route);
 
     int orders = 0;
     do {

@@ -132,6 +132,8 @@ private:
     void EnablePortMapping(const Napi::CallbackInfo& info);
     void EnableHolePunch(const Napi::CallbackInfo& info);
     Napi::Value PunchPeer(const Napi::CallbackInfo& info);
+    void EnableRelay(const Napi::CallbackInfo& info);
+    Napi::Value ConnectViaRelay(const Napi::CallbackInfo& info);
     Napi::Value GetNatMapping(const Napi::CallbackInfo& info);
 
     // ---- pub/sub ----
@@ -570,6 +572,28 @@ Napi::Value RatsNode::PunchPeer(const Napi::CallbackInfo& info) {
     return env.Undefined();
 }
 
+// Relaying. serveAsRelay (default false) also carries OTHER peers' connections,
+// which spends real bandwidth — so it is opted into rather than assumed.
+void RatsNode::EnableRelay(const Napi::CallbackInfo& info) {
+    RATS_REQUIRE_NODE();
+    int serve = 0;
+    if (info.Length() >= 1 && info[0].IsBoolean()) serve = info[0].As<Napi::Boolean>().Value() ? 1 : 0;
+    throw_on_error(info.Env(), rats_enable_relay(node_, serve));
+}
+
+// Reach a peer through a relay. Non-blocking: success arrives as onPeerConnected.
+Napi::Value RatsNode::ConnectViaRelay(const Napi::CallbackInfo& info) {
+    RATS_REQUIRE_NODE(info.Env().Undefined());
+    Napi::Env env = info.Env();
+    if (info.Length() < 1 || !info[0].IsString()) {
+        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+    std::string peer = info[0].As<Napi::String>().Utf8Value();
+    throw_on_error(env, rats_connect_via_relay(node_, peer.c_str()));
+    return env.Undefined();
+}
+
 // What the mesh has shown about this node's own NAT (a RATS_NAT_* value).
 Napi::Value RatsNode::GetNatMapping(const Napi::CallbackInfo& info) {
     RATS_REQUIRE_NODE(info.Env().Undefined());
@@ -988,6 +1012,8 @@ Napi::Object RatsNode::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("enablePortMapping", &RatsNode::EnablePortMapping),
         InstanceMethod("enableHolePunch", &RatsNode::EnableHolePunch),
         InstanceMethod("punchPeer", &RatsNode::PunchPeer),
+        InstanceMethod("enableRelay", &RatsNode::EnableRelay),
+        InstanceMethod("connectViaRelay", &RatsNode::ConnectViaRelay),
         InstanceMethod("natMapping", &RatsNode::GetNatMapping),
         // pub/sub
         InstanceMethod("enablePubsub", &RatsNode::EnablePubsub),

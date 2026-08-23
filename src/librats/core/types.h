@@ -26,13 +26,23 @@ enum class ConnRole {
     Outbound,  ///< We dialed out to a remote address.
 };
 
-/// Which wire a connection runs over. Both are first-class: they carry the exact
-/// same block/frame protocol and the same secure handshake, and differ only in how
-/// an ordered, reliable byte stream is obtained — the kernel's TCP stack, or the
-/// library's own reliability layer on top of datagrams (see transport/udp_stream.h).
+/// Which wire a connection runs over. Tcp and Udp are first-class equals: they
+/// carry the exact same block/frame protocol and the same secure handshake, and
+/// differ only in how an ordered, reliable byte stream is obtained — the kernel's
+/// TCP stack, or the library's own reliability layer on top of datagrams (see
+/// transport/udp_stream.h). Relay is a third way of obtaining that same stream —
+/// out of another peer's connection rather than out of a socket — and is a last
+/// resort rather than an equal (see below).
 enum class TransportKind {
-    Tcp,  ///< One kernel socket per peer.
-    Udp,  ///< Reliable ordered stream over the shared UDP socket (NAT-friendly).
+    Tcp,    ///< One kernel socket per peer.
+    Udp,    ///< Reliable ordered stream over the shared UDP socket (NAT-friendly).
+    /// Carried inside another peer's connection: the byte stream is chopped into
+    /// messages a third node forwards between the two ends (see subsystems/relay.h).
+    /// Not a wire of its own — it is one of the two above, one hop further away —
+    /// but it behaves differently enough to be worth naming: it costs the relay
+    /// bandwidth, it cannot be dialed, and it must always lose to a direct link
+    /// (see PeerTable::add). Never a value connect() or the Dialer chooses.
+    Relay,
 };
 
 /// How hard an outbound datagram dial tries before it is called failed.

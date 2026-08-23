@@ -104,6 +104,41 @@ public:
     /// Valid for an id whose dial has not started yet — it is cancelled instead.
     void close(ConnId id, CloseReason reason);
 
+    // — links this reactor did not open itself ──────────────────────────────
+    //
+    // A relayed circuit is a byte stream that comes out of another peer's
+    // connection rather than out of a socket (see transport/relay_link.h), so the
+    // module that speaks the relay protocol builds the Link and hands it over.
+    // These three are that hand-over, and they are deliberately the whole of it:
+    // the reactor learns nothing about relaying, and the module learns nothing
+    // about reactors beyond "connections need to be woken".
+    //
+    // The circuit MUST be given to the reactor that owns its carrier's connection.
+    // That is what keeps every byte of it on one thread, exactly like the streams
+    // the mux hands over above, and it is the caller's job to arrange (see
+    // node/circuit_service.h).
+
+    /// Reserve a ConnId without starting anything. Thread-safe, and synchronous for
+    /// the same reason connect() is: the caller has to be able to name the
+    /// connection — to wake it, to close it — from the moment it asks for one,
+    /// rather than after a task it posted has run.
+    ConnId reserve_conn_id() noexcept {
+        return next_conn_id_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /// Adopt an already-built Link under the id `reserve_conn_id()` handed out.
+    /// Thread-safe; the adoption itself runs on the reactor thread (inline when the
+    /// caller is already on it).
+    /// @param connected whether the far end is already there. Such a link starts its
+    ///        handshake at once, like an accepted socket; one that is not waits for
+    ///        a PollOut from wake(), exactly as an outbound connect does.
+    void adopt_link(ConnId id, std::unique_ptr<Link> link, ConnRole role, bool connected);
+
+    /// Deliver poll-equivalent events (PollIn/PollOut/PollErr) to a connection whose
+    /// Link has no socket for the poller to watch. Thread-safe. A no-op for an id
+    /// that is gone, so a late wake for a torn-down circuit costs nothing.
+    void wake(ConnId id, uint32_t events);
+
     /// Drop a dial that lost its race — but only while it is still a dial. Once an
     /// attempt has established it is not an attempt any more, it is one of possibly
     /// several links to a peer, and which of those survives is the peer table's
@@ -175,6 +210,9 @@ private:
     // Negligible idle cost; on epoll/kqueue the loop still wakes on real events,
     // so this only caps idle latency.
     static constexpr int kMaxPollMs = 50;
+    /// Passes flush_dirty() makes over the connections booked for a write. More than
+    /// one because a write can book another connection's write — see flush_dirty().
+    static constexpr int kMaxFlushPasses = 4;
     /// Deadline from adopt() to reaching Established (covers connect + handshake).
     static constexpr std::chrono::milliseconds kEstablishTimeout{15000};
     /// Cadence of the housekeeping sweep over this reactor's connections (currently

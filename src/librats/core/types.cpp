@@ -33,8 +33,9 @@ const char* to_string(CloseReason r) noexcept {
 
 const char* to_string(TransportKind t) noexcept {
     switch (t) {
-        case TransportKind::Tcp: return "tcp";
-        case TransportKind::Udp: return "udp";
+        case TransportKind::Tcp:   return "tcp";
+        case TransportKind::Udp:   return "udp";
+        case TransportKind::Relay: return "relay";
     }
     return "?";
 }

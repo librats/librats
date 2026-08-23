@@ -363,6 +363,43 @@ class RatsNode:
             self._lib.lib.rats_punch_peer(self._h, _b(peer_id)),
             f"Punching to {peer_id}")
 
+    # ------------------------------------------------------------------ #
+    # NAT traversal (relaying)
+    # ------------------------------------------------------------------ #
+    def enable_relay(self, serve_as_relay: bool = False) -> None:
+        """Enable relaying. Call before start().
+
+        Reaches a peer that neither port forwarding nor hole punching could make
+        reachable, by routing the connection through a node both ends are already
+        connected to. The peer that comes out is ordinary in every way — the same
+        end-to-end encryption, the same channels — except that
+        :meth:`peer_transport` reports it as :attr:`Transport.RELAY`.
+
+        Args:
+            serve_as_relay: Also carry OTHER peers' connections. Unlike a
+                hole-punch rendezvous this spends real bandwidth on somebody
+                else's traffic, so it is off by default; a mesh in which nobody
+                serves cannot relay at all.
+        """
+        check_error(
+            self._lib.lib.rats_enable_relay(self._h, 1 if serve_as_relay else 0),
+            "Enabling relaying")
+
+    def connect_via_relay(self, peer_id: str) -> None:
+        """Try to reach ``peer_id`` through a relay. Non-blocking.
+
+        Success arrives as an ordinary peer-connected callback. Raises
+        :class:`RatsNoSuchPeerError` when there is nothing to do or nothing to
+        try with — already connected, an attempt already running, in cooldown,
+        or no peer that could carry the connection.
+
+        Usually unnecessary: with hole punching enabled too, a punch that cannot
+        work hands the target over by itself.
+        """
+        check_error(
+            self._lib.lib.rats_connect_via_relay(self._h, _b(peer_id)),
+            f"Relaying to {peer_id}")
+
     @property
     def nat_mapping(self) -> NatMapping:
         """What the mesh has shown about this node's own NAT.

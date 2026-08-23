@@ -94,6 +94,7 @@ Node::Node(NodeConfig config)
     // are narrow capabilities a module asks for by interface (see
     // node/dial_service.h, node/nat_status.h).
     services_.provide<DialService>(this);
+    services_.provide<CircuitService>(this);
     services_.provide<ExternalAddressService>(&nat_status_);
 }
 
@@ -402,6 +403,9 @@ bool Node::dial_direct(const Address& addr, TransportKind kind, const DialProfil
     if (!addr.is_valid()) return false;
     if (kind == TransportKind::Udp && !reactors_->has_udp()) return false;
     if (kind == TransportKind::Tcp && !config_.enable_tcp)   return false;
+    // A relayed circuit is not dialed: it is negotiated with a third node and then
+    // adopted (see node/circuit_service.h). There is no address to aim at here.
+    if (kind == TransportKind::Relay) return false;
 
     // Straight to the reactor, deliberately around the Dialer: this dial is not a
     // race and must not become one (see node/dial_service.h). The Dialer is left
@@ -410,6 +414,41 @@ bool Node::dial_direct(const Address& addr, TransportKind kind, const DialProfil
     // established/closed reports are no-ops there rather than corrections.
     const ConnId id = reactors_->pick(kind).connect(addr.ip.to_string(), addr.port, kind, profile);
     return id != kInvalidConnId;
+}
+
+// ── CircuitService: a relayed byte stream becomes a peer connection ─────────
+
+std::optional<PeerRoute> Node::adopt_circuit(const PeerId& carrier, std::unique_ptr<Link> link,
+                                             ConnRole role, bool connected) {
+    if (!link) return std::nullopt;
+
+    // The carrier has to still be a peer: it is the only thing this circuit's bytes
+    // can travel through, and a connection whose carrier is already gone would
+    // simply sit there until the establish deadline reaped it.
+    const auto carrier_route = peers_.route(carrier);
+    if (!carrier_route) return std::nullopt;
+
+    // Inbound circuits go through the same admission gate as an accepted socket.
+    // A relayed connection is cheaper for whoever opens it than a direct one — no
+    // NAT to get through, someone else's bandwidth — so if anything it deserves the
+    // gate more, not less.
+    if (role == ConnRole::Inbound && !admit_inbound()) return std::nullopt;
+
+    Reactor& reactor = reactors_->by_index(carrier_route->reactor);
+    // Same reactor as the carrier, which is the whole point: every byte of this
+    // circuit arrives on the carrier's connection and leaves through it, so the two
+    // share a thread and the relayed path needs no locks and no hand-offs.
+    const ConnId id = reactor.reserve_conn_id();
+    reactor.adopt_link(id, std::move(link), role, connected);
+    return PeerRoute{carrier_route->reactor, id};
+}
+
+void Node::wake_circuit(PeerRoute route, uint32_t events) {
+    reactors_->by_index(route.reactor).wake(route.conn, events);
+}
+
+void Node::close_circuit(PeerRoute route, CloseReason reason) {
+    reactors_->by_index(route.reactor).close(route.conn, reason);
 }
 
 void Node::report_dial_failed(const std::string& host, uint16_t port) {
