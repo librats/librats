@@ -246,7 +246,9 @@ private:
     /// Hand `target` to the relay module, if one is attached and the fallback is
     /// on. Called when a punch is impossible or has run out of attempts — the
     /// point at which a relayed path stops being the worse option and becomes the
-    /// only one. Caller must NOT hold the mutex.
+    /// only one. Retires the target's cooldown when the relay takes it on, so that
+    /// the upgrade punch a circuit asks for is not refused by the very give-up that
+    /// produced the circuit. Caller must NOT hold the mutex.
     void                 escalate_to_relay(const PeerId& target);
     /// Peers reachable over a DIRECT link. A relayed peer is deliberately not one:
     /// a punch to it is an upgrade in progress, and counting the circuit as success

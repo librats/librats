@@ -556,9 +556,29 @@ void HolePunch::service_sessions() {
 void HolePunch::escalate_to_relay(const PeerId& target) {
     RelayService* relay = relay_.load();
     if (!relay) return;   // no Relay attached, or the fallback is off
-    if (relay->connect_via_relay(target))
-        LOG_DEBUG("punch", "Punching to " << target.short_hex()
-                  << " is not going to work; looking for a relay instead");
+    if (!relay->connect_via_relay(target)) return;
+
+    LOG_DEBUG("punch", "Punching to " << target.short_hex()
+              << " is not going to work; looking for a relay instead");
+
+    // The target has just changed hands, and the cooldown a give-up started must not
+    // outlive that. It exists to stop us hammering a peer we cannot reach — a job
+    // the relay now owns, with an attempt timeout and a cooldown of its own.
+    //
+    // And if that attempt lands, the circuit is precisely the new information that
+    // makes another punch worth trying: the two ends are peers at last, so the
+    // rendezvous can travel over the very circuit carrying them, which is what
+    // Relay asks for the moment the circuit comes up (see subsystems/relay.h).
+    // Leaving the cooldown standing would refuse that upgrade before it started —
+    // and nothing would ever ask again, so the circuit would outlive its purpose and
+    // keep costing a third node bandwidth for the life of the peer.
+    //
+    // Bounded, not a loop: an upgrade punch that fails lands here again, and
+    // connect_via_relay then answers false — the target is already a peer — so the
+    // fresh cooldown stands. Taken after the call, never around it: Relay resolves
+    // the reverse direction through us, and this mutex must not be held into it.
+    std::lock_guard<std::mutex> lock(mutex_);
+    cooldown_.erase(target);
 }
 
 std::vector<PeerId> HolePunch::directly_connected() const {

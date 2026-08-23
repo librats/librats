@@ -655,3 +655,65 @@ TEST(RelayE2E, ARelayedPeerIsUpgradedToADirectLink) {
     b.stop();
     hub.stop();
 }
+
+// The same upgrade, reached the way it actually happens in the field. The test
+// above asks for a circuit directly, which leaves the punch's cooldown out of the
+// story; here the circuit exists BECAUSE a punch gave up, and giving up is exactly
+// what starts that cooldown. The escalation and the cooldown are two answers to the
+// same event, and if the cooldown wins the upgrade is refused before it starts —
+// nothing asks a second time, and the circuit outlives its purpose for the whole
+// life of the peer. So this pins that handing a target to the relay retires it.
+TEST(RelayE2E, GivingUpOnAPunchDoesNotBlockTheUpgradeItEscalatedInto) {
+    HolePunch::Config punch_config;
+    punch_config.attempts      = 1;       // one round, then give up (and cool down)
+    punch_config.round_timeout = 1500ms;  // wide enough to see a session while it runs
+
+    Node hub(listening_config());
+    Node a(listening_config());
+    Node b(listening_config());
+
+    hub.add_subsystem(std::make_unique<Relay>(serving()));
+    hub.add_subsystem(std::make_unique<HolePunch>());   // the hub carries the rendezvous
+
+    a.add_subsystem(std::make_unique<Relay>(Relay::Config{}));
+    auto* punch_a = a.add_subsystem(std::make_unique<HolePunch>(punch_config));
+
+    // No HolePunch on b, deliberately: a's rendezvous is never answered, so a runs
+    // its one round out and gives up — the only path that starts a cooldown, and the
+    // path every real escalation takes.
+    b.add_subsystem(std::make_unique<Relay>(Relay::Config{}));
+
+    ASSERT_TRUE(hub.start());
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(b.start());
+    a.connect("127.0.0.1", hub.listen_port());
+    b.connect("127.0.0.1", hub.listen_port());
+    ASSERT_TRUE(wait_for([&] { return hub.peer_count() == 2; }));
+    // A punch needs an endpoint of its own to advertise, or it never starts a
+    // session at all and never reaches the give-up this test is about.
+    ASSERT_TRUE(wait_for([&] {
+        return !a.nat_status().external_udp_endpoints().empty();
+    })) << "no external datagram endpoint was learned from the hub";
+
+    ASSERT_TRUE(punch_a->punch(b.local_id())) << "the punch never started";
+
+    // Giving up hands b to the relay, and the circuit comes up. Waited on directly:
+    // watching the session count drop to zero first would be watching the wrong
+    // thing — give-up, escalation, circuit and the upgrade that follows all land
+    // within a few milliseconds of each other, so a poll aimed at the gap between
+    // them would just as likely consume the window this test is here to observe.
+    ASSERT_TRUE(wait_for([&] { return relayed(a, b.local_id()); }))
+        << "the punch gave up and no circuit took over";
+
+    // Which is the moment the upgrade is asked for. It cannot succeed here — b has
+    // no HolePunch to answer — but it must be ATTEMPTED, and any session standing
+    // now is necessarily that attempt: the first one was erased before the
+    // escalation that produced the circuit above. A session for b started after the
+    // circuit is the whole difference between a fallback and a destination.
+    EXPECT_TRUE(wait_for([&] { return punch_a->active_sessions() > 0; }, 5s))
+        << "the circuit came up but the cooldown swallowed the upgrade punch";
+
+    a.stop();
+    b.stop();
+    hub.stop();
+}
