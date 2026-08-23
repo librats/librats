@@ -411,10 +411,9 @@ private:
             std::string old_name = log_file_path_ + "." + std::to_string(i);
             std::string new_name = log_file_path_ + "." + std::to_string(i + 1);
             
-            // Delete the oldest file if it exists
-            if (i == max_log_files_ - 1) {
-                std::remove(new_name.c_str());
-            }
+            // std::rename() does not replace an existing destination on Windows,
+            // so clear the target first - not just the oldest file.
+            std::remove(new_name.c_str());
             
             // Rename old file to new name
             std::rename(old_name.c_str(), new_name.c_str());
@@ -422,6 +421,7 @@ private:
         
         // Move current log file to .1
         std::string backup_name = log_file_path_ + ".1";
+        std::remove(backup_name.c_str());
         std::rename(log_file_path_.c_str(), backup_name.c_str());
     }
     
