@@ -79,6 +79,13 @@ bool http_request(const std::string& host, uint16_t port, const std::string& met
         return false;
     }
 
+    // Bound the read as well as the connect. A router that accepts the connection and
+    // then says nothing would otherwise park this thread in recv() for ever — and
+    // since UpnpClient::stop() joins this worker, Node::stop() would never return.
+    // Observed on real hardware: the IGD accepted the description request and never
+    // answered, hanging the whole node on shutdown.
+    set_socket_recv_timeout(sock, 5000);
+
     std::ostringstream req;
     req << method << " " << path << " HTTP/1.1\r\n"
         << "Host: " << host << ":" << port << "\r\n"

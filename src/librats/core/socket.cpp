@@ -730,8 +730,11 @@ std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size) {
     int bytes_received = recv(socket, reinterpret_cast<char*>(buffer.data()), buffer_size, 0);
     if (bytes_received == RATS_SOCKET_ERROR) {
         int error = get_last_socket_error();
+        // A receive timeout (SO_RCVTIMEO) surfaces here, and is not an error: the
+        // caller asked to be given back control rather than wait for ever. Windows
+        // reports it as WSAETIMEDOUT where POSIX uses EAGAIN.
 #ifdef _WIN32
-        if (error == WSAEWOULDBLOCK) { return {}; }
+        if (error == WSAEWOULDBLOCK || error == WSAETIMEDOUT) { return {}; }
 #else
         if (error == EAGAIN || error == EWOULDBLOCK) { return {}; }
 #endif
@@ -1470,6 +1473,28 @@ bool set_socket_nonblocking(socket_t socket) {
 #endif
 
     LOG_SOCKET_DEBUG("Socket set to non-blocking mode");
+    return true;
+}
+
+bool set_socket_recv_timeout(socket_t socket, int timeout_ms) {
+    if (!is_valid_socket(socket)) return false;
+
+#ifdef _WIN32
+    DWORD timeout = static_cast<DWORD>(timeout_ms < 0 ? 0 : timeout_ms);
+    if (setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout)) != 0) {
+#else
+    timeval timeout{};
+    if (timeout_ms > 0) {
+        timeout.tv_sec  = timeout_ms / 1000;
+        timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    }
+    if (setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0) {
+#endif
+        LOG_SOCKET_WARN("Failed to set receive timeout on socket " << socket
+                        << " (error: " << socket_error_string(get_last_socket_error()) << ")");
+        return false;
+    }
     return true;
 }
 
