@@ -163,6 +163,11 @@ private:
     socket_t multicast_socket_;
     std::string local_hostname_;
     std::string local_ip_address_;
+    /// The IPv4 interfaces we hold a multicast membership on, and send out of. Set by
+    /// join_multicast_group() during start() and cleared on leave, both while the
+    /// worker threads are not running, so the loops read it without a lock.
+    /// Empty means "the default interface, chosen by the kernel".
+    std::vector<std::string> interfaces_;
     
     // Threading and state
     std::atomic<bool> running_;

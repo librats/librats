@@ -343,55 +343,79 @@ bool MdnsClient::join_multicast_group() {
     if (!is_valid_socket(multicast_socket_)) {
         return false;
     }
-    
-    // Get local interface address for multicast binding
-    in_addr local_interface{};
-    if (local_ip_address_.empty() || local_ip_address_ == "127.0.0.1") {
-        local_interface.s_addr = INADDR_ANY;
-    } else {
-        inet_pton(AF_INET, local_ip_address_.c_str(), &local_interface);
-    }
-    
-    // Join IPv4 multicast group on specific interface
+
+    // Join on EVERY usable IPv4 interface, not on one guessed address.
+    //
+    // A multicast membership is per-interface, and so is IP_MULTICAST_IF. Pinning both
+    // to get_local_ip_address()'s single answer is a coin flip on any multi-homed host,
+    // and it lands wrong in the most ordinary mobile configuration there is: a phone
+    // with mobile data and Wi-Fi both up, where the chosen address can be the carrier's
+    // (a 10.x that is *also* private, so no address-range heuristic can tell them
+    // apart). Joined on the cellular interface, mDNS goes completely silent — it
+    // announces and queries into a network where no peer can hear it, and reports no
+    // error while doing it.
+    interfaces_.clear();
     ip_mreq mreq{};
     inet_pton(AF_INET, MDNS_MULTICAST_IPv4.c_str(), &mreq.imr_multiaddr);
-    mreq.imr_interface = local_interface;
-    
-    if (setsockopt(multicast_socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP, 
-                   reinterpret_cast<const char*>(&mreq), sizeof(mreq)) < 0) {
-#ifdef _WIN32
-        LOG_MDNS_ERROR("Failed to join IPv4 multicast group (error: " << WSAGetLastError() << ")");
-#else
-        LOG_MDNS_ERROR("Failed to join IPv4 multicast group (error: " << strerror(errno) << ")");
-#endif
-        return false;
+
+    for (const auto& address : network_utils::get_local_interface_addresses()) {
+        // IPv4 only (this is the IPv4 group), and loopback carries no peers.
+        in_addr candidate{};
+        if (inet_pton(AF_INET, address.c_str(), &candidate) != 1) continue;
+        if (address.rfind("127.", 0) == 0) continue;
+
+        mreq.imr_interface = candidate;
+        if (setsockopt(multicast_socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                       reinterpret_cast<const char*>(&mreq), sizeof(mreq)) < 0) {
+            // Expected on interfaces that are down or do not support multicast; only
+            // a total failure is fatal, so keep going.
+            LOG_MDNS_DEBUG("Could not join multicast group on " << address);
+            continue;
+        }
+        interfaces_.push_back(address);
     }
-    
-    // Set outgoing multicast interface (critical for Windows!)
-    if (setsockopt(multicast_socket_, IPPROTO_IP, IP_MULTICAST_IF,
-                   reinterpret_cast<const char*>(&local_interface), sizeof(local_interface)) < 0) {
+
+    if (interfaces_.empty()) {
+        // No usable interface named itself. Fall back to letting the kernel pick, which
+        // is right on a host whose addresses we failed to enumerate.
+        mreq.imr_interface.s_addr = INADDR_ANY;
+        if (setsockopt(multicast_socket_, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                       reinterpret_cast<const char*>(&mreq), sizeof(mreq)) < 0) {
 #ifdef _WIN32
-        LOG_MDNS_WARN("Failed to set multicast interface (error: " << WSAGetLastError() << ")");
+            LOG_MDNS_ERROR("Failed to join IPv4 multicast group (error: " << WSAGetLastError() << ")");
 #else
-        LOG_MDNS_WARN("Failed to set multicast interface (error: " << strerror(errno) << ")");
+            LOG_MDNS_ERROR("Failed to join IPv4 multicast group (error: " << strerror(errno) << ")");
 #endif
+            return false;
+        }
     }
-    
+
     // Set multicast TTL
     int ttl = 255;
-    if (setsockopt(multicast_socket_, IPPROTO_IP, IP_MULTICAST_TTL, 
+    if (setsockopt(multicast_socket_, IPPROTO_IP, IP_MULTICAST_TTL,
                    reinterpret_cast<const char*>(&ttl), sizeof(ttl)) < 0) {
         LOG_MDNS_WARN("Failed to set multicast TTL");
     }
-    
-    // Disable loopback
+
+    // Disable loopback: our own announcements are of no interest to us, and the
+    // receiver drops them by sender address anyway.
     int loopback = 0;
-    if (setsockopt(multicast_socket_, IPPROTO_IP, IP_MULTICAST_LOOP, 
+    if (setsockopt(multicast_socket_, IPPROTO_IP, IP_MULTICAST_LOOP,
                    reinterpret_cast<const char*>(&loopback), sizeof(loopback)) < 0) {
         LOG_MDNS_WARN("Failed to disable multicast loopback");
     }
-    
-    LOG_MDNS_INFO("Joined IPv4 multicast group: " << MDNS_MULTICAST_IPv4 << " on interface " << local_ip_address_);
+
+    if (interfaces_.empty()) {
+        LOG_MDNS_INFO("Joined IPv4 multicast group " << MDNS_MULTICAST_IPv4
+                                                     << " on the default interface");
+    } else {
+        std::string joined;
+        for (const auto& address : interfaces_) {
+            if (!joined.empty()) joined += ", ";
+            joined += address;
+        }
+        LOG_MDNS_INFO("Joined IPv4 multicast group " << MDNS_MULTICAST_IPv4 << " on " << joined);
+    }
     return true;
 }
 
@@ -400,24 +424,35 @@ bool MdnsClient::leave_multicast_group() {
         return false;
     }
     
-    // Use same interface as when joining
-    in_addr local_interface{};
-    if (local_ip_address_.empty() || local_ip_address_ == "127.0.0.1") {
-        local_interface.s_addr = INADDR_ANY;
-    } else {
-        inet_pton(AF_INET, local_ip_address_.c_str(), &local_interface);
-    }
-    
+    // Drop exactly the memberships join_multicast_group() took, on the same
+    // interfaces — an IP_DROP_MEMBERSHIP naming a different one leaves the real
+    // membership in place.
     ip_mreq mreq{};
     inet_pton(AF_INET, MDNS_MULTICAST_IPv4.c_str(), &mreq.imr_multiaddr);
-    mreq.imr_interface = local_interface;
-    
-    if (setsockopt(multicast_socket_, IPPROTO_IP, IP_DROP_MEMBERSHIP, 
-                   reinterpret_cast<const char*>(&mreq), sizeof(mreq)) < 0) {
-        LOG_MDNS_WARN("Failed to leave IPv4 multicast group");
+
+    bool all_dropped = true;
+    if (interfaces_.empty()) {
+        mreq.imr_interface.s_addr = INADDR_ANY;
+        all_dropped = setsockopt(multicast_socket_, IPPROTO_IP, IP_DROP_MEMBERSHIP,
+                                 reinterpret_cast<const char*>(&mreq), sizeof(mreq)) >= 0;
+    } else {
+        for (const auto& address : interfaces_) {
+            in_addr candidate{};
+            if (inet_pton(AF_INET, address.c_str(), &candidate) != 1) continue;
+            mreq.imr_interface = candidate;
+            if (setsockopt(multicast_socket_, IPPROTO_IP, IP_DROP_MEMBERSHIP,
+                           reinterpret_cast<const char*>(&mreq), sizeof(mreq)) < 0) {
+                all_dropped = false;
+            }
+        }
+        interfaces_.clear();
+    }
+
+    if (!all_dropped) {
+        LOG_MDNS_WARN("Failed to leave IPv4 multicast group on one or more interfaces");
         return false;
     }
-    
+
     LOG_MDNS_DEBUG("Left IPv4 multicast group");
     return true;
 }
@@ -486,8 +521,13 @@ void MdnsClient::receiver_loop() {
 
         std::string sender_ip = sender.ip.to_string();
 
-        // Ignore packets from ourselves
-        if (sender_ip == local_ip_address_) {
+        // Ignore packets from ourselves. Every address we send from counts, not just
+        // local_ip_address_: now that announcements go out of each joined interface,
+        // our own packets come back stamped with whichever address sent them, and
+        // comparing against one of them would let the rest through as "discovered
+        // peers" pointing straight back at us.
+        if (sender_ip == local_ip_address_ ||
+            std::find(interfaces_.begin(), interfaces_.end(), sender_ip) != interfaces_.end()) {
             continue;
         }
 
@@ -1255,19 +1295,52 @@ bool MdnsClient::send_multicast_packet(const std::vector<uint8_t>& packet) {
     dest_addr.sin_family = AF_INET;
     inet_pton(AF_INET, MDNS_MULTICAST_IPv4.c_str(), &dest_addr.sin_addr);
     dest_addr.sin_port = htons(MDNS_PORT);
-    
-    int sent = sendto(multicast_socket_, reinterpret_cast<const char*>(packet.data()), 
-                      static_cast<int>(packet.size()), 0, reinterpret_cast<sockaddr*>(&dest_addr), sizeof(dest_addr));
-    
-    if (sent < 0 || static_cast<size_t>(sent) != packet.size()) {
+
+    const auto send_once = [&]() {
+        const int sent = sendto(multicast_socket_, reinterpret_cast<const char*>(packet.data()),
+                                static_cast<int>(packet.size()), 0,
+                                reinterpret_cast<sockaddr*>(&dest_addr), sizeof(dest_addr));
+        return sent >= 0 && static_cast<size_t>(sent) == packet.size();
+    };
+
+    // One send per joined interface. Without this the packet takes the default route
+    // only, so a phone announcing over cellular stays invisible to the Wi-Fi it is
+    // also on — the mirror image of the join problem, and just as silent.
+    if (interfaces_.empty()) {
+        if (!send_once()) {
 #ifdef _WIN32
-        LOG_MDNS_ERROR("Failed to send multicast packet (error: " << WSAGetLastError() << ")");
+            LOG_MDNS_ERROR("Failed to send multicast packet (error: " << WSAGetLastError() << ")");
 #else
-        LOG_MDNS_ERROR("Failed to send multicast packet (error: " << strerror(errno) << ")");
+            LOG_MDNS_ERROR("Failed to send multicast packet (error: " << strerror(errno) << ")");
 #endif
+            return false;
+        }
+        return true;
+    }
+
+    bool any_sent = false;
+    for (const auto& address : interfaces_) {
+        in_addr out_interface{};
+        if (inet_pton(AF_INET, address.c_str(), &out_interface) != 1) continue;
+
+        // Also what makes this correct on Windows, where the outgoing interface is not
+        // inferred from the route the way it is elsewhere.
+        if (setsockopt(multicast_socket_, IPPROTO_IP, IP_MULTICAST_IF,
+                       reinterpret_cast<const char*>(&out_interface), sizeof(out_interface)) < 0) {
+            LOG_MDNS_DEBUG("Could not select outgoing interface " << address);
+            continue;
+        }
+        if (send_once()) {
+            any_sent = true;
+        } else {
+            LOG_MDNS_DEBUG("Failed to send multicast packet via " << address);
+        }
+    }
+
+    if (!any_sent) {
+        LOG_MDNS_ERROR("Failed to send multicast packet on any interface");
         return false;
     }
-    
     return true;
 }
 

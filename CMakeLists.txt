@@ -317,6 +317,10 @@ set(LIBRARY_SOURCES
     src/librats/mdns/mdns.h
     src/librats/mdns/log.h
     src/librats/mdns/mdns.cpp
+    # Apple-only backend; the whole translation unit is #if'd out elsewhere, which
+    # keeps this list platform-independent.
+    src/librats/mdns/mdns_dnssd.h
+    src/librats/mdns/mdns_dnssd.cpp
 
 # crypto/ — hashes, ciphers, KDFs
     src/librats/crypto/sha1.h
@@ -733,11 +737,16 @@ if(RATS_BUILD_TESTS)
         )
     endif()
     
-    # Add mDNS tests only on non-macOS platforms
+    # test_mdns.cpp drives MdnsClient's own multicast socket, which Apple platforms do
+    # not use (see MdnsBackend in subsystems/mdns_discovery.h), so it stays off there.
     if(NOT APPLE)
         list(APPEND TEST_SOURCES tests/test_mdns.cpp)
-        list(APPEND TEST_SOURCES tests/test_mdns_discovery.cpp)
+    else()
+        list(APPEND TEST_SOURCES tests/test_mdns_dnssd.cpp)
     endif()
+    # The subsystem test is backend-agnostic — it covers the adapter's lifecycle, not
+    # the network — so it runs everywhere.
+    list(APPEND TEST_SOURCES tests/test_mdns_discovery.cpp)
     
     # Create test executable
     add_executable(librats_tests ${TEST_SOURCES})
