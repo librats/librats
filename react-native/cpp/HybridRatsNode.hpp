@@ -15,6 +15,7 @@ namespace librats {
 class Node;
 class FileTransfer;
 class PubSub;
+class DhtDiscovery;
 struct NodeConfig;
 } // namespace librats
 
@@ -108,6 +109,10 @@ public:
   std::vector<std::string> topicPeers(const std::string& topic) override;
   std::vector<std::string> meshPeers(const std::string& topic) override;
 
+  // — DHT discovery —
+  void enableDht(const std::optional<DhtConfig>& config) override;
+  DhtStatus dhtStatus() override;
+
 private:
   /**
    * The Node, constructed on first use from whatever `configure()` last set.
@@ -124,10 +129,14 @@ private:
   /// The attached PubSub subsystem, or throws if enablePubSub() was never called.
   ::librats::PubSub& pubsub();
 
+  /// The attached DhtDiscovery subsystem, or throws if enableDht() was never called.
+  ::librats::DhtDiscovery& dht();
+
   std::unique_ptr<::librats::NodeConfig> config_;
   std::unique_ptr<::librats::Node> node_;
   ::librats::FileTransfer* files_ = nullptr;
   ::librats::PubSub* pubsub_ = nullptr;
+  ::librats::DhtDiscovery* dht_ = nullptr;
   bool started_ = false;
 };
 

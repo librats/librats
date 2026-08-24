@@ -114,6 +114,70 @@ export interface TransferStats {
 }
 
 /**
+ * DHT peer discovery. Every field is optional.
+ *
+ * This joins the BitTorrent Mainline DHT — a real, public, multi-million-node
+ * network — and finds peers by announcing under a hash derived from
+ * `discoveryKey`. It is plain UDP to other nodes, so unlike mDNS it needs no
+ * special iOS entitlement.
+ */
+export interface DhtConfig {
+  /** UDP port for the DHT. 0 (the default) picks an ephemeral one. */
+  dhtPort?: number
+  /**
+   * Where the routing table is persisted, so a restart bootstraps quickly
+   * instead of cold. Defaults to the node's `dataDir` when that is set; if
+   * neither is set the library falls back to the working directory, which is not
+   * writable on mobile — persistence then silently does nothing and every start
+   * is a cold bootstrap.
+   */
+  dataDir?: string
+  /** Run the IPv4 Kademlia network. Default true. */
+  enableIpv4?: boolean
+  /** Run the IPv6 Kademlia network (BEP 32) — a separate DHT. Default true. */
+  enableIpv6?: boolean
+  /**
+   * Namespaces which peers find each other. Empty (the default) uses the node's
+   * `protocol`, so peers of the same app version meet and mismatched protocols —
+   * which could not handshake anyway — never do.
+   */
+  discoveryKey?: string
+  /**
+   * Bootstrap nodes as `"host:port"` (IPv6 as `"[addr]:port"`). Empty uses the
+   * built-in public defaults.
+   */
+  bootstrapNodes?: string[]
+  /** How often to search for peers. Default 30000. */
+  searchIntervalMs?: number
+  /** How often to re-announce. Default 600000; a fresh node announces at once. */
+  announceIntervalMs?: number
+  /**
+   * Probe STUN at startup to learn the public IP and seed the node id per BEP 42.
+   * Default true. Without it the node still converges via in-DHT voting, just
+   * more slowly.
+   */
+  discoverExternalIp?: boolean
+}
+
+/** A snapshot of the DHT subsystem's state. */
+export interface DhtStatus {
+  running: boolean
+  /** IPv4 DHT UDP port; 0 when not running. */
+  port: number
+  /** IPv6 DHT UDP port; 0 when not running. */
+  portV6: number
+  /**
+   * The 40-char hex hash this node announces under. **All zeros until
+   * `start()`** — it is derived when the subsystem attaches, which happens
+   * inside `start()`, and before then the key may not even be known (an empty
+   * `discoveryKey` resolves to the node's protocol at that point).
+   */
+  discoveryHash: string
+  /** Public IP used to derive the node id, or '' if not yet known. */
+  externalAddress: string
+}
+
+/**
  * GossipSub tuning. Every field is optional; the defaults mirror the libp2p
  * reference (D=6, D_low=4, D_high=12) and suit small-to-medium meshes.
  */
@@ -338,4 +402,28 @@ export interface RatsNode
   topicPeers(topic: string): string[]
   /** This node's current mesh for a topic — the subset it exchanges full messages with. */
   meshPeers(topic: string): string[]
+
+  // --- DHT discovery ---
+  //
+  // Opt-in: call `enableDht()` before `start()`.
+  //
+  // There is deliberately no `onPeerDiscovered` here, because the subsystem does
+  // not hand discovered peers back for you to dial — it dials them itself through
+  // the node. Discovery therefore surfaces as ordinary `onPeerConnected` events,
+  // and the only thing that distinguishes a DHT-found peer from one you dialled
+  // is that you did not call `connect()` for it.
+  //
+  // Expect this to take time: joining the DHT, announcing, and searching run on
+  // their own intervals, so the first discovery typically arrives tens of seconds
+  // after `start()` rather than immediately.
+
+  /** Attach DHT discovery. Must be called before `start()`. */
+  enableDht(config?: DhtConfig): void
+
+  /**
+   * A snapshot of DHT state. Cheap to poll — useful for showing bootstrap
+   * progress, since `externalAddress` fills in once STUN or in-DHT voting
+   * resolves it.
+   */
+  dhtStatus(): DhtStatus
 }

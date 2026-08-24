@@ -6,6 +6,7 @@
 #include <librats/peer/peer.h>
 #include <librats/peer/peer_id.h>
 #include <librats/subsystems/file_transfer.h>
+#include <librats/subsystems/dht_discovery.h>
 #include <librats/subsystems/pubsub.h>
 
 #include <stdexcept>
@@ -89,6 +90,24 @@ FileProgress to_progress(const rats::FileTransfer::Progress& p) {
                       p.transfer_rate_bps, p.average_rate_bps,
                       static_cast<double>(p.elapsed.count()),
                       static_cast<double>(p.estimated_time_remaining.count()));
+}
+
+/// Lowercase hex of a 20-byte DHT hash.
+///
+/// Written out rather than calling librats' own to_hex: that lives in the
+/// librats::dht namespace, and inside HybridRatsNode the member function dht()
+/// shadows the namespace name, so neither rats::dht:: nor ::librats::dht::
+/// resolves at the call site.
+template <class Bytes20>
+std::string hash_to_hex(const Bytes20& hash) {
+  static constexpr char kDigits[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(hash.size() * 2);
+  for (uint8_t byte : hash) {
+    out.push_back(kDigits[byte >> 4]);
+    out.push_back(kDigits[byte & 0x0f]);
+  }
+  return out;
 }
 
 } // namespace
@@ -421,6 +440,73 @@ std::vector<std::string> HybridRatsNode::meshPeers(const std::string& topic) {
   std::vector<std::string> out;
   for (const auto& id : pubsub().mesh_peers(topic)) out.push_back(id.to_hex());
   return out;
+}
+
+// ── DHT discovery ───────────────────────────────────────────────────────────
+
+rats::DhtDiscovery& HybridRatsNode::dht() {
+  if (dht_ == nullptr) {
+    throw std::runtime_error(
+        "DHT discovery is not enabled - call enableDht() before start()");
+  }
+  return *dht_;
+}
+
+void HybridRatsNode::enableDht(const std::optional<DhtConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableDht() must be called before start()");
+  }
+  if (dht_ != nullptr) {
+    throw std::runtime_error("DHT discovery is already enabled");
+  }
+
+  rats::DhtDiscovery::Config cfg;
+
+  // Co-locate the routing table with the node's own state unless told otherwise.
+  // The library default is the working directory, which is not writable on either
+  // mobile platform, so inheriting data_dir is what makes persistence work at all
+  // here. Reading config_ (rather than the live Node) keeps this correct whether
+  // or not the Node has been constructed yet.
+  if (config_ != nullptr) cfg.data_dir = config_->data_dir;
+
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.dhtPort.has_value())      cfg.dht_port      = to_port(*c.dhtPort, "dhtPort");
+    if (c.dataDir.has_value())      cfg.data_dir      = *c.dataDir;
+    if (c.enableIpv4.has_value())   cfg.enable_ipv4   = *c.enableIpv4;
+    if (c.enableIpv6.has_value())   cfg.enable_ipv6   = *c.enableIpv6;
+    if (c.discoveryKey.has_value()) cfg.discovery_key = *c.discoveryKey;
+    if (c.discoverExternalIp.has_value()) {
+      cfg.discover_external_ip = *c.discoverExternalIp;
+    }
+    if (c.searchIntervalMs.has_value()) {
+      cfg.search_interval =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.searchIntervalMs));
+    }
+    if (c.announceIntervalMs.has_value()) {
+      cfg.announce_interval =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.announceIntervalMs));
+    }
+    if (c.bootstrapNodes.has_value()) {
+      for (const auto& entry : *c.bootstrapNodes) {
+        auto parsed = rats::HostEndpoint::parse(entry);
+        if (!parsed) {
+          throw std::invalid_argument(
+              "bootstrapNodes entry is not \"host:port\": " + entry);
+        }
+        cfg.bootstrap_nodes.push_back(*parsed);
+      }
+    }
+  }
+
+  dht_ = node().add_subsystem(std::make_unique<rats::DhtDiscovery>(std::move(cfg)));
+}
+
+DhtStatus HybridRatsNode::dhtStatus() {
+  auto& d = dht();
+  return DhtStatus(d.is_running(), static_cast<double>(d.dht_port()),
+                   static_cast<double>(d.dht_port_v6()),
+                   hash_to_hex(d.discovery_hash()), d.external_address());
 }
 
 } // namespace margelo::nitro::librats

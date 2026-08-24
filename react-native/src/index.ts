@@ -1,5 +1,7 @@
 import { NitroModules } from 'react-native-nitro-modules'
 import type {
+  DhtConfig,
+  DhtStatus,
   FileEntry,
   FileOffer,
   FileProgress,
@@ -16,6 +18,8 @@ export type {
   FileEntry,
   FileOffer,
   FileProgress,
+  DhtConfig,
+  DhtStatus,
   FileTransferConfig,
   PubSubConfig,
   RatsConfig,

@@ -249,6 +249,43 @@ If you need to drop messages, do it in the `subscribe` listener. The difference 
 that you cannot prevent the message being forwarded to the rest of the mesh — for
 that, a validator has to live in native code.
 
+## DHT discovery
+
+Joins the BitTorrent Mainline DHT — a real, public, multi-million-node network —
+and finds peers by announcing under a hash derived from `discoveryKey`. Opt in
+with `enableDht()` before `start()`.
+
+```ts
+const node = createNode({ dataDir, protocol: 'myapp/1.0' })
+node.enableDht({ discoveryKey: 'myapp-v1' })   // or {} for the node's protocol
+
+node.onPeerConnected((peerId) => console.log('peer', peerId))
+node.start()
+
+const s = node.dhtStatus()   // { running, port, portV6, discoveryHash, externalAddress }
+```
+
+**There is no `onPeerDiscovered`.** The subsystem does not hand peers back for you
+to dial — it dials them itself through the node, so discovery surfaces as ordinary
+`onPeerConnected` events. The only thing separating a DHT-found peer from one you
+dialled is that you never called `connect()` for it.
+
+Expect it to be slow. Joining, announcing and searching each run on their own
+interval, so the first discovery usually lands tens of seconds after `start()`.
+`dhtStatus().externalAddress` is a useful progress signal: it fills in once STUN
+or in-DHT voting resolves the public IP.
+
+Unlike mDNS, this needs **no special iOS entitlement** — it is plain UDP to other
+nodes rather than multicast, so nothing has to be requested from Apple.
+
+Two configuration notes. `discoveryKey` namespaces who finds whom; leaving it
+empty uses the node's `protocol`, so peers of the same app version meet and
+mismatched protocols — which could not handshake anyway — never do. And `dataDir`
+holds the routing table so a restart bootstraps warm; it defaults to the node's
+own `dataDir`, because the library's fallback is the working directory, which is
+not writable on mobile. With neither set, persistence silently does nothing and
+every start is a cold bootstrap.
+
 ## Scope of this slice
 
 Core: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
@@ -262,8 +299,12 @@ File transfer: `enableFileTransfer`, `sendFile`, `sendDirectory`, `acceptFile`,
 Pub/sub: `enablePubSub`, `subscribe`, `unsubscribe`, `publish`, `isSubscribed`,
 `subscribedTopics`, `topicPeers`, `meshPeers`. Not `setValidator` — see above.
 
-Not yet: DHT and mDNS discovery, NAT traversal controls, typed JSON messaging,
-and the storage and BitTorrent modules.
+Discovery: `enableDht`, `dhtStatus`.
+
+Not yet: mDNS discovery (which on iOS wants an `NWBrowser`-backed subsystem rather
+than the library's raw-socket multicast, to avoid needing Apple's multicast
+entitlement), NAT traversal controls, typed JSON messaging, and the storage and
+BitTorrent modules.
 
 ## Example app
 
@@ -378,6 +419,26 @@ Worth knowing before you change the build files:
   dialling side learns is the listener's — passing that back to the listener's own
   `sendFile()` has it offering the file to itself. Confirm delivery with
   `onFileProgress`/`onFileComplete`, not with the return value.
+- **`dhtStatus().discoveryHash` is all zeros until `start()`.** The hash is
+  derived when the subsystem attaches, which happens inside `start()` — and with
+  an empty `discoveryKey` the key is not even known before then, since it
+  resolves to the node's protocol at attach time. (Reading it early used to
+  return *uninitialised* bytes: `DhtDiscovery::hash_` was declared without an
+  initialiser, so the same call gave zeros on one platform and garbage on the
+  other. Fixed in `src/librats/subsystems/dht_discovery.h`; the example test is
+  what surfaced it.)
+- **Pin the module's Android `ndkVersion` to the app's.** With no `ndkVersion`,
+  AGP builds the library against the newest NDK installed, while the APK packages
+  the `libc++_shared.so` from the *app's* NDK (27.1.12297006 in the RN 0.87
+  template). Build against a newer one and the library ends up needing libc++
+  symbols that copy does not export — most visibly
+  `__cxa_init_primary_exception`, which newer libc++ emits for the
+  `std::promise`/`make_exception_ptr` path. The build succeeds and the app then
+  dies at launch with `UnsatisfiedLinkError: dlopen failed: cannot locate
+  symbol ...`. `android/build.gradle` now inherits `rootProject.ndkVersion`.
+  Do **not** "fix" this with `c++_static`: several .so files here exchange C++
+  types across boundaries (Nitro and JSI), which a per-library static libc++
+  quietly breaks.
 - **Resolve symlinks before walking up a path in CMake.** An example app reaches
   this package through `node_modules/react-native-librats -> ../..`, and
   `CMAKE_CURRENT_SOURCE_DIR` keeps the *linked* path — so a plain `../..` lands in

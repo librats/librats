@@ -335,6 +335,73 @@ function Demo() {
     }
   }, [append, connectPair, stopAll]);
 
+  // DHT joins a real public network, so unlike the other tests this one depends
+  // on internet reachability. It checks that the subsystem comes up and starts
+  // bootstrapping -- not that a peer is found, which needs another node
+  // announcing the same key and can take minutes.
+  const runDht = useCallback(async () => {
+    stopAll();
+    setLog([]);
+    setStatus('running');
+    try {
+      const node = createNode({ dataDir: TEMP_DIR, protocol: 'example/1.0' });
+      nodes.current = [node];
+
+      node.enableDht({
+        discoveryKey: 'librats-rn-example',
+        searchIntervalMs: 5000,
+        announceIntervalMs: 15000,
+      });
+
+      // The hash is resolved when the subsystem attaches, which happens inside
+      // start() -- so before that it is legitimately all zeros.
+      const before = node.dhtStatus();
+      append(`before start: running=${before.running} port=${before.port}`);
+      if (/[^0]/.test(before.discoveryHash)) {
+        throw new Error('hash should still be unresolved before start()');
+      }
+
+      if (!node.start()) throw new Error('node failed to start');
+
+      await waitUntil(() => node.dhtStatus().running, 20000, 'DHT did not start');
+      const status = node.dhtStatus();
+      append(`running on udp ${status.port}${status.portV6 ? ` / v6 ${status.portV6}` : ''}`);
+
+      if (status.discoveryHash.length !== 40) {
+        throw new Error(`hash is ${status.discoveryHash.length} chars, expected 40`);
+      }
+      if (!/[^0]/.test(status.discoveryHash)) {
+        throw new Error('hash still unresolved after start()');
+      }
+      append(`discovery hash: ${status.discoveryHash.slice(0, 16)}...`);
+
+      // STUN or in-DHT voting fills this in; treated as informational because it
+      // needs the network to answer.
+      const found = await waitUntil(
+        () => node.dhtStatus().externalAddress !== '',
+        25000,
+        'no external address',
+      ).then(
+        () => true,
+        () => false,
+      );
+      append(
+        found
+          ? `external address: ${node.dhtStatus().externalAddress}`
+          : 'external address not resolved (offline or STUN blocked)',
+      );
+
+      append(`peers discovered so far: ${node.peerCount}`);
+      stopAll();
+      append('stopped');
+      setStatus('pass');
+    } catch (error) {
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      stopAll();
+      setStatus('fail');
+    }
+  }, [append, stopAll]);
+
   const busy = status === 'running';
 
   return (
@@ -347,19 +414,25 @@ function Demo() {
           style={[styles.button, busy && styles.buttonDisabled]}
           onPress={runChat}
           disabled={busy}>
-          <Text style={styles.buttonText}>chat test</Text>
+          <Text style={styles.buttonText}>chat</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.button, busy && styles.buttonDisabled]}
           onPress={runFile}
           disabled={busy}>
-          <Text style={styles.buttonText}>file test</Text>
+          <Text style={styles.buttonText}>file</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.button, busy && styles.buttonDisabled]}
           onPress={runPubSub}
           disabled={busy}>
-          <Text style={styles.buttonText}>pubsub test</Text>
+          <Text style={styles.buttonText}>pubsub</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, busy && styles.buttonDisabled]}
+          onPress={runDht}
+          disabled={busy}>
+          <Text style={styles.buttonText}>dht</Text>
         </TouchableOpacity>
       </View>
 
@@ -405,7 +478,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   buttonDisabled: { backgroundColor: '#30363d' },
-  buttonText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  buttonText: { color: '#fff', fontSize: 13, fontWeight: '600' },
   statusRow: { height: 40, justifyContent: 'center', alignItems: 'center' },
   pass: { color: '#3fb950', fontSize: 20, fontWeight: '700' },
   fail: { color: '#f85149', fontSize: 20, fontWeight: '700' },
