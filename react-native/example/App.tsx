@@ -18,6 +18,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -43,6 +44,7 @@ const CHANNEL = 'chat';
 const MESSAGE = 'hello from react native';
 
 const TOPIC = 'example/announcements';
+const DISCOVERY_KEY = 'librats-rn-example-2dev';
 const GOSSIP = 'published over gossipsub';
 
 // Comfortably larger than the 256 KiB default progress interval, so the transfer
@@ -556,12 +558,217 @@ function Demo() {
     }
   }, [append, connectPair, stopAll]);
 
+  // ── two real devices ──────────────────────────────────────────────────────
+  // One device taps "listen"; the other types its address and taps "dial". The
+  // dialling side then drives every subsystem across the real network, and both
+  // sides report what the mesh says about their NAT -- which only becomes
+  // meaningful once a second peer exists.
+  const [peerAddr, setPeerAddr] = useState('');
+  const peerNode = useRef<RatsNode | null>(null);
+  // Both devices run the same responder code, so "echo whatever arrives" makes
+  // the two of them volley one message forever. Only the side that did not dial
+  // answers; the dialling side just verifies what comes back.
+  const didDial = useRef(false);
+
+  const startPeerNode = useCallback(async () => {
+    stopAll();
+    setLog([]);
+    setStatus('running');
+    try {
+      await mkdir(TEMP_DIR);
+      const node = createNode({ dataDir: TEMP_DIR, protocol: 'example/1.0' });
+      nodes.current = [node];
+      peerNode.current = node;
+
+      node.enableFileTransfer({ tempDirectory: TEMP_DIR });
+      node.enablePubSub({ heartbeatIntervalMs: 500 });
+      node.enableJsonMessaging();
+      node.enableStorage();
+      node.enablePortMapping();
+      node.enableHolePunch();
+      node.enableRelay({ serve: false });
+      // Discovery + PEX are what make a cross-network meeting possible: DHT finds
+      // peers announcing the same key, PEX gossips addresses onward, and an
+      // unreachable discovered peer is handed to HolePunch instead of dropped.
+      node.enableDht({ discoveryKey: DISCOVERY_KEY, searchIntervalMs: 10000 });
+      node.enablePeerExchange();
+
+      // Every on*() registration has to happen while the node is stopped.
+      node.onPeerConnected(id => append(`+ peer ${id.slice(0, 8)}`));
+      node.onPeerDisconnected(id => append(`- peer ${id.slice(0, 8)}`));
+
+      // Responder behaviour, so whichever side is dialled can answer.
+      node.onMessage(CHANNEL, (from, data) => {
+        const text = decodeUtf8(data);
+        append(`chat <- ${from.slice(0, 8)}: "${text}"`);
+        if (!didDial.current) {
+          node.send(from, CHANNEL, encodeUtf8(`${text} (echoed)`));
+        }
+      });
+      node.onFileOffer(offer => {
+        append(`file offer "${offer.name}" ${offer.size}B -> accepting`);
+        node.acceptFile(offer.peerId, offer.transferId, DEST);
+      });
+      node.onFileComplete((_id, ok, path) =>
+        append(ok ? `file done: ${path.replace(CACHE, '<cache>')}` : 'file FAILED'),
+      );
+      // Same rule for every responder: reply only when we were dialled.
+      node.onJson('greet', (from, json) => {
+        append(`json <- ${from.slice(0, 8)}: ${json}`);
+        if (!didDial.current) {
+          node.sendJson(from, 'greet', JSON.stringify({ ack: true }));
+        }
+      });
+      node.onStorageChange(e =>
+        append(`storage ${e.operation} ${e.key} (${e.isRemote ? 'remote' : 'local'})`),
+      );
+
+      didDial.current = false;
+      if (!node.start()) throw new Error('node failed to start');
+      node.subscribe(TOPIC, (from, _t, data) =>
+        append(`topic <- ${from.slice(0, 8)}: "${decodeUtf8(data)}"`),
+      );
+
+      append(`listening on port ${node.listenPort}`);
+      append(`peer id ${node.localId.slice(0, 16)}...`);
+      setStatus('idle');
+    } catch (error) {
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      setStatus('fail');
+    }
+  }, [append, stopAll]);
+
+  /** Drive every subsystem against whichever peer is connected. */
+  const exercise = useCallback(
+    async (node: RatsNode) => {
+      const peerId = node.peerIds()[0]!;
+      append(`connected to ${peerId.slice(0, 8)}`);
+
+      node.send(peerId, CHANNEL, encodeUtf8(MESSAGE));
+      append('chat -> sent');
+
+      append(
+        `json -> sent: ${node.sendJson(peerId, 'greet', JSON.stringify({ from: 'device' }))}`,
+      );
+
+      const meshed = await waitUntil(
+        () => node.meshPeers(TOPIC).includes(peerId),
+        15000,
+        'mesh',
+      ).then(
+        () => true,
+        () => false,
+      );
+      append(`pubsub mesh formed: ${meshed}`);
+      if (meshed) node.publish(TOPIC, encodeUtf8(GOSSIP));
+
+      node.putString('device/hello', 'from the dialling side');
+      node.putInt('device/counter', 7);
+      append(`storage put; ${node.storageCount()} key(s) locally`);
+
+      const body = 'librats-two-device-'.repeat(4096);
+      await writeFile(SOURCE, body, 'utf8');
+      const tid = node.sendFile(peerId, SOURCE);
+      append(`file -> offered ${body.length}B, transfer ${tid}`);
+
+      // Classification needs a real second peer, which we now have.
+      await waitUntil(() => node.natStatus().observationCount > 0, 20000, 'nat obs')
+        .then(
+          () => true,
+          () => false,
+        );
+      const nat = node.natStatus();
+      append(
+        `nat: ${nat.mapping} (${nat.observationCount} obs) ${nat.externalEndpoints.join(' ')}`,
+      );
+      const pm = node.portMappingStatus();
+      append(
+        pm.externalTcpPort
+          ? `port map: ${pm.externalIp} tcp ${pm.externalTcpPort} udp ${pm.externalUdpPort}`
+          : 'no port mapping (no UPnP router, or CGNAT)',
+      );
+    },
+    [append],
+  );
+
+  const dialPeer = useCallback(async () => {
+    const node = peerNode.current;
+    if (!node) {
+      append('tap listen first');
+      return;
+    }
+    setStatus('running');
+    try {
+      const [host, portText] = peerAddr.trim().split(':');
+      const port = Number(portText);
+      if (!host || !Number.isInteger(port)) {
+        throw new Error(`expected host:port, got "${peerAddr}"`);
+      }
+      append(`dialing ${host}:${port}...`);
+      didDial.current = true;
+      node.connect(host, port);
+      await waitUntil(() => node.peerCount > 0, 25000, 'no peer connected');
+      await exercise(node);
+      setStatus('pass');
+    } catch (error) {
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      setStatus('fail');
+    }
+  }, [append, exercise, peerAddr]);
+
+  /** No address anywhere: DHT announce/search plus PEX have to find the peer. */
+  const discoverPeer = useCallback(async () => {
+    const node = peerNode.current;
+    if (!node) {
+      append('tap listen first');
+      return;
+    }
+    setStatus('running');
+    try {
+      didDial.current = true;
+      append('waiting for discovery (DHT + PEX), no address given...');
+      const t0 = Date.now();
+      await waitUntil(() => node.peerCount > 0, 180000, 'nobody discovered');
+      append(`discovered after ${Math.round((Date.now() - t0) / 1000)}s`);
+      await exercise(node);
+      setStatus('pass');
+    } catch (error) {
+      const d = node.dhtStatus();
+      append(`dht running=${d.running} port=${d.port} ext=${d.externalAddress}`);
+      const n = node.natStatus();
+      append(`nat ${n.mapping} (${n.observationCount} obs)`);
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      setStatus('fail');
+    }
+  }, [append, exercise]);
+
   const busy = status === 'running';
 
   return (
     <View style={styles.screen}>
       <Text style={styles.title}>librats</Text>
       <Text style={styles.subtitle}>two nodes, one device</Text>
+
+      <View style={styles.row}>
+        <TextInput
+          style={styles.input}
+          value={peerAddr}
+          onChangeText={setPeerAddr}
+          placeholder="peer host:port"
+          placeholderTextColor="#6e7681"
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        <TouchableOpacity style={styles.button} onPress={startPeerNode}>
+          <Text style={styles.buttonText}>listen</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.button} onPress={dialPeer}>
+          <Text style={styles.buttonText}>dial</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.button} onPress={discoverPeer}>
+          <Text style={styles.buttonText}>find</Text>
+        </TouchableOpacity>
+      </View>
 
       <View style={styles.row}>
         <TouchableOpacity
@@ -635,7 +842,15 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 32, fontWeight: '700', color: '#e6edf3' },
   subtitle: { fontSize: 14, color: '#8b949e', marginBottom: 20 },
-  row: { flexDirection: 'row', gap: 5 },
+  row: { flexDirection: 'row', gap: 5, marginBottom: 8 },
+  input: {
+    flex: 2,
+    backgroundColor: '#161b22',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    color: '#e6edf3',
+    fontSize: 12,
+  },
   button: {
     flex: 1,
     backgroundColor: '#238636',
