@@ -29,6 +29,9 @@
     #endif
 #else
     #include <unistd.h>
+    #if defined(__ANDROID__)
+        #include <android/log.h>
+    #endif
 #endif
 
 namespace librats {
@@ -149,7 +152,24 @@ public:
         if (level < min_level_.load(std::memory_order_relaxed)) {
             return;
         }
-        
+
+#if defined(__ANDROID__)
+        // An Android app's stdout/stderr are discarded by default, so the cout/cerr
+        // sink below is invisible in logcat. Route console output through the platform
+        // logger instead: logcat supplies its own timestamp, level and coloring, so the
+        // bare message goes out under the module name as the tag. The file sink is
+        // unaffected and stays identical to every other platform.
+        if (console_logging_enabled_) {
+            __android_log_print(get_android_priority(level),
+                                module.empty() ? "librats" : module.c_str(),
+                                "%s", message.c_str());
+        }
+        if (file_logging_enabled_ && log_file_.is_open()) {
+            write_to_file(level, module, message);
+        }
+        return;
+#endif
+
         // Prepare console output with colors
         std::ostringstream console_oss;
         
@@ -239,6 +259,18 @@ private:
             default: return "UNKNOWN";
         }
     }
+
+#if defined(__ANDROID__)
+    int get_android_priority(LogLevel level) {
+        switch (level) {
+            case LogLevel::DEBUG: return ANDROID_LOG_DEBUG;
+            case LogLevel::INFO:  return ANDROID_LOG_INFO;
+            case LogLevel::WARN:  return ANDROID_LOG_WARN;
+            case LogLevel::ERROR: return ANDROID_LOG_ERROR;
+            default: return ANDROID_LOG_INFO;
+        }
+    }
+#endif
     
     std::string get_color_code(LogLevel level) {
         if (!colors_enabled_ || !is_terminal_) return "";
