@@ -14,9 +14,12 @@
 #include <librats/subsystems/port_mapping_service.h>
 #include <librats/subsystems/relay.h>
 #include <librats/storage/storage.h>
+#include <librats/bittorrent/magnet_uri.h>
+#include <librats/subsystems/bittorrent.h>
 #include <librats/subsystems/peer_exchange.h>
 #include <librats/subsystems/pubsub.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -797,6 +800,218 @@ void HybridRatsNode::enablePeerExchange(
   // Nothing is stored beyond the pointer: PEX has no post-attach API, it just
   // asks each new peer for its peers and dials what it learns.
   pex_ = node().add_subsystem(std::make_unique<rats::PeerExchange>(std::move(cfg)));
+}
+
+// ── BitTorrent ──────────────────────────────────────────────────────────────
+//
+// A separate swarm, not part of the node's mesh: bittorrent::Client runs its own
+// reactor and listener. What it shares with the node is the DHT, when one is
+// attached — hence the ordering requirement below.
+
+namespace {
+
+rats::bittorrent::InfoHash parse_info_hash(const std::string& hex) {
+  auto parsed = rats::bittorrent::info_hash_from_hex(hex);
+  if (!parsed) {
+    throw std::invalid_argument("info hash must be 40 hex characters, got: " + hex);
+  }
+  return *parsed;
+}
+
+std::vector<TorrentFileEntry> to_file_entries(
+    const std::vector<rats::bittorrent::TorrentStatus::File>& files) {
+  std::vector<TorrentFileEntry> out;
+  out.reserve(files.size());
+  for (const auto& file : files) {
+    out.emplace_back(file.path, static_cast<double>(file.size));
+  }
+  return out;
+}
+
+TorrentMetadata to_metadata(const rats::bittorrent::TorrentInfo& info) {
+  std::vector<TorrentFileEntry> files;
+  files.reserve(info.files().num_files());
+  for (const auto& file : info.files().files()) {
+    files.emplace_back(file.path, static_cast<double>(file.size));
+  }
+  return TorrentMetadata(info.info_hash_hex(), info.name(),
+                         static_cast<double>(info.total_size()), std::move(files));
+}
+
+} // namespace
+
+void HybridRatsNode::enableBittorrent(const std::optional<BittorrentConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableBittorrent() must be called before start()");
+  }
+  if (bittorrent_ != nullptr) {
+    throw std::runtime_error("BitTorrent is already enabled");
+  }
+
+  rats::Bittorrent::Config cfg;
+
+  // The library's default save path is the working directory, which is not writable
+  // on either mobile platform, so downloads would fail with nothing to point at.
+  // Inheriting the node's dataDir is what makes an unconfigured client usable.
+  if (config_ != nullptr && !config_->data_dir.empty()) {
+    cfg.client.download_path = config_->data_dir + "/torrents";
+  }
+
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.listenPort.has_value())   cfg.client.listen_port    = to_port(*c.listenPort, "listenPort");
+    if (c.downloadPath.has_value()) cfg.client.download_path  = *c.downloadPath;
+    if (c.peerIdPrefix.has_value()) cfg.client.peer_id_prefix = *c.peerIdPrefix;
+    if (c.useNodeDht.has_value())   cfg.use_node_dht          = *c.useNodeDht;
+  }
+
+  if (cfg.client.download_path.empty()) {
+    throw std::invalid_argument(
+        "enableBittorrent needs a downloadPath, or a dataDir on the node to derive "
+        "one from; the library's default is the working directory, which mobile "
+        "platforms do not let you write to");
+  }
+
+  // Added last so it attaches after DhtDiscovery: the client borrows that DHT at
+  // start(), and reverse-order teardown keeps it alive through stop().
+  bittorrent_ = node().add_subsystem(std::make_unique<rats::Bittorrent>(std::move(cfg)));
+}
+
+namespace {
+
+rats::Bittorrent& require_bittorrent(rats::Bittorrent* bt) {
+  if (bt == nullptr) {
+    throw std::runtime_error(
+        "BitTorrent is not enabled - call enableBittorrent() before start()");
+  }
+  return *bt;
+}
+
+rats::bittorrent::Client& require_client(rats::Bittorrent* bt) {
+  auto* client = require_bittorrent(bt).client();
+  if (client == nullptr) {
+    throw std::runtime_error("BitTorrent is not running - the node must be started");
+  }
+  return *client;
+}
+
+} // namespace
+
+std::string HybridRatsNode::addMagnet(const std::string& magnetUri,
+                                     const std::optional<std::string>& savePath) {
+  auto& client = require_client(bittorrent_);
+
+  // Parse first, for two reasons: it rejects a bad URI with a useful error instead
+  // of a silent no-op, and it yields the info hash without reading it back off the
+  // returned Torrent*, which belongs to the client's reactor thread.
+  const auto parsed = rats::bittorrent::MagnetUri::parse(magnetUri);
+  if (!parsed) throw std::invalid_argument("not a valid magnet URI: " + magnetUri);
+
+  // add_magnet_resumed rather than add_magnet: it picks up a resume file saved next
+  // to the destination, so re-adding a torrent after a restart continues instead of
+  // re-downloading, and skips the metadata fetch when the resume file has the info
+  // dict. Identical to add_magnet when there is nothing saved.
+  if (client.add_magnet_resumed(magnetUri, savePath.value_or("")) == nullptr) {
+    throw std::runtime_error("could not add magnet: " + magnetUri);
+  }
+
+  const std::string hex = rats::bittorrent::to_hex(parsed->info_hash);
+  if (std::find(torrents_.begin(), torrents_.end(), hex) == torrents_.end()) {
+    torrents_.push_back(hex);
+  }
+  return hex;
+}
+
+std::string HybridRatsNode::addTorrentFile(const std::string& path,
+                                           const std::optional<std::string>& savePath) {
+  auto& client = require_client(bittorrent_);
+
+  // Loaded here rather than via add_torrent_file so the info hash comes from the
+  // parsed metadata, and a parse failure carries the reason.
+  rats::bittorrent::TorrentParseError error;
+  auto info = rats::bittorrent::TorrentInfo::from_file(path, &error);
+  if (!info) {
+    throw std::invalid_argument("could not read torrent file " + path + ": " +
+                                error.message);
+  }
+
+  if (client.add_torrent(*info, savePath.value_or("")) == nullptr) {
+    throw std::runtime_error("could not add torrent: " + path);
+  }
+
+  const std::string hex = info->info_hash_hex();
+  if (std::find(torrents_.begin(), torrents_.end(), hex) == torrents_.end()) {
+    torrents_.push_back(hex);
+  }
+  return hex;
+}
+
+void HybridRatsNode::removeTorrent(const std::string& infoHash,
+                                   std::optional<bool> deleteFiles) {
+  require_client(bittorrent_).remove_torrent(parse_info_hash(infoHash),
+                                             deleteFiles.value_or(false));
+  torrents_.erase(std::remove(torrents_.begin(), torrents_.end(), infoHash),
+                  torrents_.end());
+}
+
+void HybridRatsNode::pauseTorrent(const std::string& infoHash) {
+  require_client(bittorrent_).pause_torrent(parse_info_hash(infoHash));
+}
+
+void HybridRatsNode::resumeTorrent(const std::string& infoHash) {
+  require_client(bittorrent_).resume_torrent(parse_info_hash(infoHash));
+}
+
+TorrentStatus HybridRatsNode::torrentStatus(const std::string& infoHash) {
+  const auto status = require_client(bittorrent_).torrent_status(parse_info_hash(infoHash));
+  return TorrentStatus(status.exists, status.name, status.has_metadata,
+                       status.is_complete, status.paused, status.progress,
+                       static_cast<double>(status.total_size),
+                       static_cast<double>(status.downloaded),
+                       static_cast<double>(status.uploaded),
+                       static_cast<double>(status.num_peers),
+                       to_file_entries(status.files));
+}
+
+std::vector<std::string> HybridRatsNode::torrentInfoHashes() { return torrents_; }
+
+BittorrentStats HybridRatsNode::bittorrentStats() {
+  auto& bt = require_bittorrent(bittorrent_);
+  auto* client = bt.client();
+  if (client == nullptr) {
+    return BittorrentStats(false, 0, bt.using_node_dht(), 0, 0, 0, 0);
+  }
+  return BittorrentStats(bt.is_running(), static_cast<double>(client->listen_port()),
+                         bt.using_node_dht(),
+                         static_cast<double>(client->num_torrents()),
+                         static_cast<double>(client->total_peers()),
+                         static_cast<double>(client->total_download_rate()),
+                         static_cast<double>(client->total_upload_rate()));
+}
+
+bool HybridRatsNode::saveResumeData(const std::string& infoHash) {
+  return require_client(bittorrent_).save_resume_data(parse_info_hash(infoHash));
+}
+
+void HybridRatsNode::saveAllResumeData() {
+  require_client(bittorrent_).save_all_resume_data();
+}
+
+void HybridRatsNode::fetchTorrentMetadata(
+    const std::string& infoHash, double timeoutMs,
+    const std::function<void(bool, const TorrentMetadata&, const std::string&)>& listener) {
+  auto& bt = require_bittorrent(bittorrent_);
+  parse_info_hash(infoHash);  // reject a malformed hash here, not on a worker thread
+
+  // Captures only the callback, never `this`: the fetch runs on a librats worker
+  // thread and may outlive this object being torn down.
+  bt.get_torrent_metadata(
+      infoHash,
+      [listener](const rats::bittorrent::TorrentInfo& info, bool success,
+                 const std::string& error) {
+        listener(success, to_metadata(info), error);
+      },
+      static_cast<int>(timeoutMs));
 }
 
 // ── distributed key-value storage ───────────────────────────────────────────

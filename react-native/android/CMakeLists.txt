@@ -49,6 +49,11 @@ set(RATS_BINDINGS       OFF CACHE BOOL "" FORCE)
 # binding exposes it, so it has to be on here or the storage symbols do not exist
 # to link against.
 set(RATS_STORAGE        ON  CACHE BOOL "Storage is part of this binding's API" FORCE)
+# BitTorrent is on because enableBittorrent() is part of this binding's API. It is
+# the one subsystem with a real size cost: it added 17 MB to the arm64 debug library
+# (54 -> 71 MB, unstripped). Drop this and the spec's BitTorrent methods together if
+# that matters more than the feature does.
+set(RATS_SEARCH_FEATURES ON  CACHE BOOL "BitTorrent is part of this binding's API" FORCE)
 
 add_subdirectory(${LIBRATS_SOURCE_DIR} ${LIBRATS_BINARY_DIR})
 

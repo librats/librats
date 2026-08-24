@@ -1,5 +1,7 @@
 import { NitroModules } from 'react-native-nitro-modules'
 import type {
+  BittorrentConfig,
+  BittorrentStats,
   DhtConfig,
   DhtStatus,
   FileEntry,
@@ -22,12 +24,17 @@ import type {
   StorageOperation,
   StorageStats,
   StorageValueType,
+  TorrentFileEntry,
+  TorrentMetadata,
+  TorrentStatus,
   TransferDirection,
   TransferStats,
   TransferStatus,
 } from './specs/RatsNode.nitro'
 
 export type {
+  BittorrentConfig,
+  BittorrentStats,
   FileEntry,
   FileOffer,
   FileProgress,
@@ -50,6 +57,9 @@ export type {
   StorageOperation,
   StorageStats,
   StorageValueType,
+  TorrentFileEntry,
+  TorrentMetadata,
+  TorrentStatus,
   TransferDirection,
   TransferStats,
   TransferStatus,

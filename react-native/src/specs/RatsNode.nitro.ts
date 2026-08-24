@@ -241,6 +241,96 @@ export interface PeerExchangeConfig {
 }
 
 /**
+ * BitTorrent configuration.
+ *
+ * This one is different from every other subsystem here: BitTorrent runs its **own**
+ * transport — its own reactor, its own listener, the swarm protocol — and does not
+ * touch the node's peer mesh at all. Nothing about a torrent peer shows up in
+ * `peerIds`, `onPeerConnected`, or any channel. What it shares with the node is the
+ * DHT: with `enableDht()` also attached it borrows that same Kademlia node instead of
+ * standing up a second one, which means one routing table for both.
+ *
+ * Enable the DHT *before* this, so the shared client is live when the node starts.
+ * Without it BitTorrent still works, DHT-less, on trackers and peer exchange.
+ *
+ * Be aware of the build cost. Unlike the other subsystems this one is compiled out
+ * unless the native build sets `RATS_SEARCH_FEATURES`, which this package turns on
+ * for both platforms. It is not free: it added 17 MB to the Android debug library
+ * (54 → 71 MB, arm64, unstripped), so a release build will pay a smaller but real
+ * share of that.
+ */
+export interface BittorrentConfig {
+  /** Swarm listen port. 0 picks an ephemeral one. Default 6881. */
+  listenPort?: number
+  /**
+   * Where downloads land, for torrents added without their own save path. Defaults
+   * to `<dataDir>/torrents`, because the library's own default is the working
+   * directory, which is not writable on either mobile platform.
+   */
+  downloadPath?: string
+  /** Client identifier prefix in the peer id. Default `-LR0001-`. */
+  peerIdPrefix?: string
+  /** Borrow the node's DHT when one is attached. Default true. */
+  useNodeDht?: boolean
+}
+
+/** One file inside a torrent. `path` is relative to the save path. */
+export interface TorrentFileEntry {
+  path: string
+  size: number
+}
+
+/**
+ * A consistent snapshot of one torrent, taken on the BitTorrent reactor so it is
+ * safe to read from JS.
+ *
+ * Progress is polled, not pushed: there is no `onTorrentProgress`, because the
+ * underlying client exposes state rather than events. Poll this while a download is
+ * live — once a second is plenty.
+ */
+export interface TorrentStatus {
+  /** False when no such torrent is loaded; every other field is then default. */
+  exists: boolean
+  name: string
+  /**
+   * A magnet starts with no metadata and fetches the info dict from peers (BEP 9).
+   * Until this is true, `name`, `totalSize` and `files` are not yet known.
+   */
+  hasMetadata: boolean
+  isComplete: boolean
+  paused: boolean
+  /** 0..1. */
+  progress: number
+  totalSize: number
+  downloaded: number
+  uploaded: number
+  numPeers: number
+  /** Empty until `hasMetadata`. */
+  files: TorrentFileEntry[]
+}
+
+/** Swarm-wide totals, for a status line. Rates are bytes/sec, sampled once a second. */
+export interface BittorrentStats {
+  running: boolean
+  /** The port actually bound, which differs from the configured one when it was 0. */
+  listenPort: number
+  /** True when the client borrowed the node's DHT rather than running DHT-less. */
+  usingNodeDht: boolean
+  numTorrents: number
+  totalPeers: number
+  downloadRate: number
+  uploadRate: number
+}
+
+/** What a metadata-only fetch returns: enough to show a torrent before downloading it. */
+export interface TorrentMetadata {
+  infoHash: string
+  name: string
+  totalSize: number
+  files: TorrentFileEntry[]
+}
+
+/**
  * Distributed key-value store configuration.
  *
  * Requires the library to be built with `RATS_STORAGE`; both platform builds in
@@ -840,4 +930,64 @@ export interface RatsNode
    * it. Check `isRemote` to tell a peer's write from your own.
    */
   onStorageChange(listener: (event: StorageChangeEvent) => void): void
+
+  // --- BitTorrent ---
+  //
+  // A separate swarm alongside the node, not part of its mesh — see BittorrentConfig.
+  // Every call below is safe from JS: the client marshals each one onto its own
+  // reactor rather than handing out reactor-owned objects.
+
+  /** Attach the BitTorrent client. Must be called before `start()`, and after
+   *  `enableDht()` if you want the two to share one DHT. */
+  enableBittorrent(config?: BittorrentConfig): void
+
+  /**
+   * Add a magnet link. Returns its info hash as 40 hex chars — the handle every
+   * other call here takes.
+   *
+   * It starts with no metadata: the info dict is fetched from peers first, so
+   * `torrentStatus().hasMetadata` is false for a moment and the name and file list
+   * arrive with it. Throws if the URI is not a valid magnet.
+   */
+  addMagnet(magnetUri: string, savePath?: string): string
+
+  /** Add a `.torrent` file from disk. Returns its info hash. Throws if the file
+   *  cannot be read or parsed. Metadata is known immediately. */
+  addTorrentFile(path: string, savePath?: string): string
+
+  /** Forget a torrent. `deleteFiles` also removes what it downloaded. */
+  removeTorrent(infoHash: string, deleteFiles?: boolean): void
+
+  /** Pause / resume without re-hashing what is already on disk. */
+  pauseTorrent(infoHash: string): void
+  resumeTorrent(infoHash: string): void
+
+  /** A snapshot of one torrent. Check `exists` first. */
+  torrentStatus(infoHash: string): TorrentStatus
+
+  /** The info hashes this node added, in the order they were added. */
+  torrentInfoHashes(): string[]
+
+  bittorrentStats(): BittorrentStats
+
+  /**
+   * Persist resume state so a restart picks up where it left off, rather than
+   * re-hashing or re-downloading. Worth calling before backgrounding.
+   */
+  saveResumeData(infoHash: string): boolean
+  saveAllResumeData(): void
+
+  /**
+   * Fetch a torrent's metadata without downloading it — enough to show a name, a
+   * size and a file list before committing to the transfer.
+   *
+   * Adds a temporary metadata-only torrent, waits for the info dict, and removes it
+   * again. The listener fires exactly once, off the JS thread; `success` is false on
+   * timeout, and `error` says why.
+   */
+  fetchTorrentMetadata(
+    infoHash: string,
+    timeoutMs: number,
+    listener: (success: boolean, info: TorrentMetadata, error: string) => void,
+  ): void
 }

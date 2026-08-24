@@ -23,6 +23,7 @@ class PortMappingService;
 class MessageJson;
 class StorageManager;
 class PeerExchange;
+class Bittorrent;
 struct NodeConfig;
 } // namespace librats
 
@@ -146,6 +147,26 @@ public:
   // — peer exchange —
   void enablePeerExchange(const std::optional<PeerExchangeConfig>& config) override;
 
+  // — BitTorrent —
+  void enableBittorrent(const std::optional<BittorrentConfig>& config) override;
+  std::string addMagnet(const std::string& magnetUri,
+                        const std::optional<std::string>& savePath) override;
+  std::string addTorrentFile(const std::string& path,
+                             const std::optional<std::string>& savePath) override;
+  void removeTorrent(const std::string& infoHash,
+                     std::optional<bool> deleteFiles) override;
+  void pauseTorrent(const std::string& infoHash) override;
+  void resumeTorrent(const std::string& infoHash) override;
+  TorrentStatus torrentStatus(const std::string& infoHash) override;
+  std::vector<std::string> torrentInfoHashes() override;
+  BittorrentStats bittorrentStats() override;
+  bool saveResumeData(const std::string& infoHash) override;
+  void saveAllResumeData() override;
+  void fetchTorrentMetadata(
+      const std::string& infoHash, double timeoutMs,
+      const std::function<void(bool, const TorrentMetadata&, const std::string&)>& listener)
+      override;
+
   // — distributed key-value storage —
   void enableStorage(const std::optional<StorageConfig>& config) override;
   bool putString(const std::string& key, const std::string& value) override;
@@ -218,6 +239,11 @@ private:
   ::librats::MessageJson* json_ = nullptr;
   ::librats::StorageManager* storage_ = nullptr;
   ::librats::PeerExchange* pex_ = nullptr;
+  ::librats::Bittorrent* bittorrent_ = nullptr;
+  /// Info hashes added through this object, in order. The client owns Torrents on
+  /// its reactor and hands out pointers that must not be touched off-thread, so
+  /// enumerating them is not safe from here — but what *we* added is ours to track.
+  std::vector<std::string> torrents_;
   bool started_ = false;
 };
 

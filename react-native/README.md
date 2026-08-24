@@ -2,10 +2,11 @@
 
 React Native bindings for librats, built on [Nitro Modules](https://nitro.margelo.com).
 
-Status: **working on both platforms.** Messaging, file transfer, pub/sub, DHT
-discovery, NAT traversal and typed JSON messaging are bound and verified running
-on an iOS simulator and an Android emulator by the [example app](#example-app).
-mDNS, storage and BitTorrent are not here yet — see
+Status: **working on both platforms.** Messaging, file transfer, pub/sub, DHT and
+mDNS discovery, NAT traversal, typed JSON messaging, peer exchange, distributed
+storage and BitTorrent are all bound, and verified by the
+[example app](#example-app) on an iOS simulator and on two physical Android
+devices. Only spider mode is deliberately left out — see
 [Scope](#scope-of-this-slice).
 
 ## Why Nitro
@@ -426,6 +427,58 @@ Three behaviours that differ from the rest of this API:
   Those booleans are accurate, not optimistic: the library's callback runs inline
   before the call returns.
 
+## BitTorrent
+
+A real BitTorrent client — magnets, `.torrent` files, trackers, peer exchange, and
+the Mainline DHT. Opt in with `enableBittorrent()` before `start()`.
+
+```ts
+const node = createNode({ dataDir, protocol: 'myapp/1.0' })
+node.enableDht()                                   // first, so the two share one DHT
+node.enableBittorrent({ downloadPath: `${dataDir}/torrents` })
+node.start()
+
+const hash = node.addMagnet('magnet:?xt=urn:btih:...')
+const s = node.torrentStatus(hash)   // { exists, name, hasMetadata, progress, ... }
+```
+
+**It is not part of the node's mesh.** This is the one subsystem that brings its own
+transport: `bittorrent::Client` runs its own reactor and listener and speaks the swarm
+protocol. No torrent peer appears in `peerIds`, `onPeerConnected`, or any channel —
+the two peer sets are entirely separate. What they share is the DHT: with
+`enableDht()` also attached the client borrows that same Kademlia node instead of
+standing up a second one, so there is one routing table for both. `enableDht()` must
+come first for that to happen; `bittorrentStats().usingNodeDht` tells you whether it
+did. Without a DHT it still runs, on trackers and peer exchange alone.
+
+**Progress is polled, not pushed.** There is no `onTorrentProgress`, because the
+underlying client exposes state rather than events. Poll `torrentStatus()` while a
+download is live — once a second is plenty. A magnet also starts with no metadata: the
+info dict is fetched from peers first (BEP 9), so `hasMetadata` is false for a moment
+and the name, size and file list arrive with it.
+
+`addMagnet()` resumes rather than restarts. It reads any resume file saved beside the
+destination, so re-adding a torrent after a restart continues from the pieces already
+on disk — and skips the metadata fetch entirely when the resume file carries the info
+dict. Call `saveResumeData()` or `saveAllResumeData()` before backgrounding to make
+that work.
+
+To show a torrent before committing to the download, `fetchTorrentMetadata()` adds a
+temporary metadata-only torrent, waits for the info dict, and removes it again —
+giving you the name, total size and file list for an info hash alone.
+
+**Build cost.** This is the only subsystem here with a size penalty worth stating:
+it is compiled out unless the native build defines `RATS_SEARCH_FEATURES`, which this
+package forces on for both platforms, and enabling it added **17 MB** to the Android
+arm64 debug library (54 → 71 MB, unstripped). A release build pays a smaller but real
+share of that. If the feature is not worth it to you, drop the
+`set(RATS_SEARCH_FEATURES ON ...)` line from `android/CMakeLists.txt` and
+`../ios/CMakeLists.txt` together with the BitTorrent methods in the spec.
+
+Spider mode — the DHT-wide infohash crawler the C++ subsystem exposes for
+rats-search — is deliberately not bound. It is a search-engine feature rather than an
+app one, and it crawls continuously, which is not something a phone should be doing.
+
 ## Scope of this slice
 
 Core: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
@@ -449,13 +502,18 @@ Typed JSON: `enableJsonMessaging`, `sendJson`, `broadcastJson`, `onJson`,
 
 Peer exchange: `enablePeerExchange`.
 
+BitTorrent: `enableBittorrent`, `addMagnet`, `addTorrentFile`, `removeTorrent`,
+`pauseTorrent`, `resumeTorrent`, `torrentStatus`, `torrentInfoHashes`,
+`bittorrentStats`, `saveResumeData`, `saveAllResumeData`, `fetchTorrentMetadata`.
+Not spider mode — see above.
+
 Storage: `enableStorage`, `putString`, `putInt`, `putDouble`, `putBinary`,
 `putJson`, `getString`, `getInt`, `getDouble`, `getBinary`, `getJson`,
 `getValueType`, `removeKey`, `hasKey`, `storageKeys`, `storageKeysWithPrefix`,
 `storageCount`, `clearStorage`, `saveStorage`, `loadStorage`, `compactStorage`,
 `requestStorageSync`, `isStorageSynced`, `storageStats`, `onStorageChange`.
 
-Not yet: the BitTorrent module.
+Nothing is left unbound now except spider mode.
 
 ## Example app
 
