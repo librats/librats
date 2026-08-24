@@ -19,6 +19,7 @@ class DhtDiscovery;
 class HolePunch;
 class Relay;
 class PortMappingService;
+class MessageJson;
 struct NodeConfig;
 } // namespace librats
 
@@ -125,6 +126,19 @@ public:
   void enableRelay(const std::optional<RelayConfig>& config) override;
   bool connectViaRelay(const std::string& peerId) override;
 
+  // — typed JSON messaging —
+  void enableJsonMessaging() override;
+  bool sendJson(const std::string& peerId, const std::string& type,
+                const std::string& json) override;
+  bool broadcastJson(const std::string& type, const std::string& json) override;
+  void onJson(const std::string& type,
+              const std::function<void(const std::string& /* peerId */,
+                                       const std::string& /* json */)>& listener) override;
+  void onceJson(const std::string& type,
+                const std::function<void(const std::string& /* peerId */,
+                                         const std::string& /* json */)>& listener) override;
+  void offJson(const std::string& type) override;
+
 private:
   /**
    * The Node, constructed on first use from whatever `configure()` last set.
@@ -149,6 +163,10 @@ private:
   ::librats::HolePunch& holePunch();
   ::librats::Relay& relay();
 
+  /// The attached MessageJson subsystem, or throws if enableJsonMessaging() was
+  /// never called.
+  ::librats::MessageJson& json();
+
   std::unique_ptr<::librats::NodeConfig> config_;
   std::unique_ptr<::librats::Node> node_;
   ::librats::FileTransfer* files_ = nullptr;
@@ -157,6 +175,7 @@ private:
   ::librats::PortMappingService* port_mapping_ = nullptr;
   ::librats::HolePunch* hole_punch_ = nullptr;
   ::librats::Relay* relay_ = nullptr;
+  ::librats::MessageJson* json_ = nullptr;
   bool started_ = false;
 };
 

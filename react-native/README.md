@@ -2,10 +2,11 @@
 
 React Native bindings for librats, built on [Nitro Modules](https://nitro.margelo.com).
 
-Status: **working on both platforms.** Core messaging and peer events, file
-transfer, and pub/sub, verified running on an iOS simulator and an Android
-emulator by the [example app](#example-app). Discovery (DHT, mDNS) and NAT
-traversal controls are not here yet — see [Scope](#scope-of-this-slice).
+Status: **working on both platforms.** Messaging, file transfer, pub/sub, DHT
+discovery, NAT traversal and typed JSON messaging are bound and verified running
+on an iOS simulator and an Android emulator by the [example app](#example-app).
+mDNS, storage and BitTorrent are not here yet — see
+[Scope](#scope-of-this-slice).
 
 ## Why Nitro
 
@@ -334,6 +335,48 @@ Port mapping maps TCP and UDP independently, because a router may grant one and
 refuse the other — hence two separate ports in `portMappingStatus()`. Behind
 carrier-grade NAT it will simply never succeed: there is no router of yours to ask.
 
+## Typed JSON messaging
+
+A named-type message bus carrying JSON, separate from the raw channels of
+`send`/`onMessage` — it rides `MessageType::Typed` with its own `[type][payload]`
+framing.
+
+```ts
+node.enableJsonMessaging()
+
+node.onJson('chat', (peerId, json) => {
+  const { text } = JSON.parse(json)
+})
+
+node.start()
+node.sendJson(peerId, 'chat', JSON.stringify({ text: 'hi' }))
+```
+
+**Use this for interoperability, not ergonomics.** Its reason to exist is talking
+to non-RN peers that already use librats' `MessageJson` — a C++, Java or Python
+node. If you control both ends, **raw channels are the cheaper choice**:
+`send`/`onMessage` already give you named routing and the authenticated peer id,
+and you would be calling `JSON.stringify` either way. This path additionally
+parses your string into the library's JSON type and re-serialises it for the wire,
+so it does strictly more work than passing the bytes yourself.
+
+JSON crosses the boundary as a **string**, not an object. That keeps the contract
+unambiguous and lets Hermes' native `JSON.parse`/`stringify` do the work, rather
+than a bespoke object bridge with its own edge cases around nested arrays and
+number precision.
+
+Three behaviours that differ from the rest of this API:
+
+- **`onJson` is additive.** Several handlers can coexist for one type and all fire
+  in registration order — unlike `onMessage` and `subscribe`, where registering
+  again replaces. `offJson(type)` removes them all.
+- **`peerId` cannot be spoofed.** It is the authenticated id from the handshake,
+  not a field inside the payload.
+- **Invalid JSON throws** at the call rather than failing silently later, and
+  `sendJson`/`broadcastJson` return false for "peer not connected" / "no peers".
+  Those booleans are accurate, not optimistic: the library's callback runs inline
+  before the call returns.
+
 ## Scope of this slice
 
 Core: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
@@ -352,9 +395,12 @@ Discovery: `enableDht`, `dhtStatus`.
 NAT traversal: `natStatus`, `enablePortMapping`, `portMappingStatus`,
 `enableHolePunch`, `punch`, `enableRelay`, `connectViaRelay`.
 
+Typed JSON: `enableJsonMessaging`, `sendJson`, `broadcastJson`, `onJson`,
+`onceJson`, `offJson`.
+
 Not yet: mDNS discovery (which on iOS wants an `NWBrowser`-backed subsystem rather
 than the library's raw-socket multicast, to avoid needing Apple's multicast
-entitlement), typed JSON messaging, and the storage and BitTorrent modules.
+entitlement), and the storage and BitTorrent modules.
 
 ## Example app
 

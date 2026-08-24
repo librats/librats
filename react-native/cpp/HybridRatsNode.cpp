@@ -9,6 +9,7 @@
 #include <librats/node/nat_status.h>
 #include <librats/subsystems/dht_discovery.h>
 #include <librats/subsystems/hole_punch.h>
+#include <librats/subsystems/message_json.h>
 #include <librats/subsystems/port_mapping_service.h>
 #include <librats/subsystems/relay.h>
 #include <librats/subsystems/pubsub.h>
@@ -665,5 +666,78 @@ void HybridRatsNode::enableRelay(const std::optional<RelayConfig>& config) {
 bool HybridRatsNode::connectViaRelay(const std::string& peerId) {
   return relay().connect_via_relay(parse_peer_id(peerId));
 }
+
+// ── typed JSON messaging ────────────────────────────────────────────────────
+
+rats::MessageJson& HybridRatsNode::json() {
+  if (json_ == nullptr) {
+    throw std::runtime_error(
+        "JSON messaging is not enabled - call enableJsonMessaging() before start()");
+  }
+  return *json_;
+}
+
+void HybridRatsNode::enableJsonMessaging() {
+  if (started_) {
+    throw std::runtime_error("enableJsonMessaging() must be called before start()");
+  }
+  if (json_ != nullptr) {
+    throw std::runtime_error("JSON messaging is already enabled");
+  }
+  json_ = node().add_subsystem(std::make_unique<rats::MessageJson>());
+}
+
+namespace {
+
+/// Parse a JS-supplied JSON string into the library's Json type, turning a parse
+/// failure into an argument error naming the type -- otherwise the only symptom is
+/// a message that silently never goes out.
+rats::Json parse_json(const std::string& text, const std::string& type) {
+  try {
+    return rats::Json::parse(text);
+  } catch (const rats::JsonError& e) {
+    throw std::invalid_argument("json for type \"" + type + "\" is not valid JSON: " +
+                                e.what());
+  }
+}
+
+} // namespace
+
+bool HybridRatsNode::sendJson(const std::string& peerId, const std::string& type,
+                              const std::string& json) {
+  // MessageJson's callback is invoked inline before send() returns, so capturing
+  // the verdict into a local and returning it is accurate rather than racy.
+  bool ok = false;
+  this->json().send(parse_peer_id(peerId), type, parse_json(json, type),
+                    [&ok](bool success, const std::string&) { ok = success; });
+  return ok;
+}
+
+bool HybridRatsNode::broadcastJson(const std::string& type, const std::string& json) {
+  bool ok = false;
+  this->json().send(type, parse_json(json, type),
+                    [&ok](bool success, const std::string&) { ok = success; });
+  return ok;
+}
+
+void HybridRatsNode::onJson(
+    const std::string& type,
+    const std::function<void(const std::string&, const std::string&)>& listener) {
+  json().on(type, [listener](const rats::PeerId& from, const rats::Json& data) {
+    // Back to a string for JS, which parses it with Hermes' native JSON.parse.
+    // dump() with no indent gives compact text, the same form the wire carries.
+    listener(from.to_hex(), data.dump());
+  });
+}
+
+void HybridRatsNode::onceJson(
+    const std::string& type,
+    const std::function<void(const std::string&, const std::string&)>& listener) {
+  json().once(type, [listener](const rats::PeerId& from, const rats::Json& data) {
+    listener(from.to_hex(), data.dump());
+  });
+}
+
+void HybridRatsNode::offJson(const std::string& type) { json().off(type); }
 
 } // namespace margelo::nitro::librats

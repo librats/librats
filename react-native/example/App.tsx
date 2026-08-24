@@ -119,6 +119,9 @@ function Demo() {
       server.enablePubSub({ heartbeatIntervalMs: 200 });
       client.enablePubSub({ heartbeatIntervalMs: 200 });
 
+      server.enableJsonMessaging();
+      client.enableJsonMessaging();
+
       setup?.(server, client);
 
       // Both directions are needed, and they are different ids: each side's
@@ -474,6 +477,85 @@ function Demo() {
     }
   }, [append, stopAll]);
 
+  const runJson = useCallback(async () => {
+    stopAll();
+    setLog([]);
+    setStatus('running');
+    try {
+      const { server, client, serverId, clientId } = await connectPair();
+      append(`handshake with ${serverId.slice(0, 8)}`);
+
+      // Additive, unlike onMessage: both handlers below fire for one message, in
+      // registration order.
+      const order: string[] = [];
+      const both = new Promise<void>(resolve => {
+        server.onJson('greet', () => {
+          order.push('first');
+        });
+        server.onJson('greet', (peerId, json) => {
+          order.push('second');
+          if (peerId !== clientId) {
+            throw new Error('sender id is not the authenticated peer');
+          }
+          const parsed = JSON.parse(json);
+          if (parsed.text !== 'hello' || parsed.n !== 42) {
+            throw new Error(`payload round-trip wrong: ${json}`);
+          }
+          resolve();
+        });
+      });
+
+      const sent = client.sendJson(serverId, 'greet', JSON.stringify({ text: 'hello', n: 42 }));
+      append(`sendJson accepted: ${sent}`);
+      if (!sent) throw new Error('peer reported not connected');
+
+      await Promise.race([both, timeout(15000, 'no typed message')]);
+      append(`handlers fired: ${order.join(', ')} (additive, in order)`);
+      if (order.join(',') !== 'first,second') {
+        throw new Error(`handler order wrong: ${order.join(',')}`);
+      }
+
+      // once() fires one time only, so a second send must not reach it again.
+      let onceCount = 0;
+      const onceFired = new Promise<void>(resolve => {
+        server.onceJson('ping', () => {
+          onceCount += 1;
+          resolve();
+        });
+      });
+      client.sendJson(serverId, 'ping', '{"i":1}');
+      await Promise.race([onceFired, timeout(15000, 'once handler never fired')]);
+      client.sendJson(serverId, 'ping', '{"i":2}');
+      await new Promise<void>(r => setTimeout(() => r(), 1500));
+      if (onceCount !== 1) throw new Error(`once fired ${onceCount} times`);
+      append('onceJson fired exactly once');
+
+      // offJson removes every handler for the type.
+      server.offJson('greet');
+      append('offJson removed the greet handlers');
+
+      // Invalid JSON is rejected at the boundary rather than silently dropped.
+      let threw = false;
+      try {
+        client.sendJson(serverId, 'greet', '{not json');
+      } catch {
+        threw = true;
+      }
+      if (!threw) throw new Error('invalid JSON was not rejected');
+      append('invalid JSON rejected with an error');
+
+      // Broadcast reports whether there was anyone to send to.
+      append(`broadcastJson to ${client.peerCount} peer(s): ${client.broadcastJson('greet', '{}')}`);
+
+      stopAll();
+      setStatus('pass');
+    } catch (error) {
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      stopAll();
+      setStatus('fail');
+    }
+  }, [append, connectPair, stopAll]);
+
   const busy = status === 'running';
 
   return (
@@ -512,6 +594,12 @@ function Demo() {
           disabled={busy}>
           <Text style={styles.buttonText}>nat</Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, busy && styles.buttonDisabled]}
+          onPress={runJson}
+          disabled={busy}>
+          <Text style={styles.buttonText}>json</Text>
+        </TouchableOpacity>
       </View>
 
       <View style={styles.statusRow}>
@@ -547,7 +635,7 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 32, fontWeight: '700', color: '#e6edf3' },
   subtitle: { fontSize: 14, color: '#8b949e', marginBottom: 20 },
-  row: { flexDirection: 'row', gap: 6 },
+  row: { flexDirection: 'row', gap: 5 },
   button: {
     flex: 1,
     backgroundColor: '#238636',
@@ -556,7 +644,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   buttonDisabled: { backgroundColor: '#30363d' },
-  buttonText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+  buttonText: { color: '#fff', fontSize: 11, fontWeight: '600' },
   statusRow: { height: 40, justifyContent: 'center', alignItems: 'center' },
   pass: { color: '#3fb950', fontSize: 20, fontWeight: '700' },
   fail: { color: '#f85149', fontSize: 20, fontWeight: '700' },

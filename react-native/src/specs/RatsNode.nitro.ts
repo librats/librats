@@ -569,4 +569,54 @@ export interface RatsNode
    * `onPeerConnected` event. False means no usable relay candidate was known.
    */
   connectViaRelay(peerId: string): boolean
+
+  // --- typed JSON messaging ---
+  //
+  // A named-type message bus carrying JSON, distinct from the raw channels of
+  // `send`/`onMessage`: it rides `MessageType::Typed` with its own
+  // [type][payload] framing.
+  //
+  // Reach for this when you need to interoperate with non-RN peers that already
+  // use librats' MessageJson — a C++, Java or Python node. **If you control both
+  // ends, raw channels are the cheaper choice**: `send`/`onMessage` already give
+  // you named routing and the authenticated peer id, and you would be calling
+  // JSON.stringify either way. This path additionally parses your string into the
+  // library's JSON type and re-serialises it for the wire, so it does strictly
+  // more work than passing the bytes yourself.
+  //
+  // JSON crosses as a string rather than an object. That keeps the boundary
+  // unambiguous and lets Hermes' native JSON.parse/stringify do the conversion,
+  // instead of a bespoke object bridge with its own edge cases around nested
+  // arrays and number precision.
+
+  /** Attach typed JSON messaging. Must be called before `start()`. */
+  enableJsonMessaging(): void
+
+  /**
+   * Send a JSON message of `type` to one peer. Throws if `json` is not valid
+   * JSON. Returns false if that peer is not connected.
+   */
+  sendJson(peerId: string, type: string, json: string): boolean
+
+  /**
+   * Send to every connected peer. Throws on invalid JSON; returns false if there
+   * were no peers to send to.
+   */
+  broadcastJson(type: string, json: string): boolean
+
+  /**
+   * Handle messages of `type`. **Additive**, unlike `onMessage` and `subscribe`:
+   * several handlers can coexist for one type and all fire in registration
+   * order. Use `offJson` to remove them.
+   *
+   * `peerId` is the authenticated id from the handshake, not a self-reported
+   * field inside the payload — so it cannot be spoofed by the sender.
+   */
+  onJson(type: string, listener: (peerId: string, json: string) => void): void
+
+  /** Like `onJson`, but the handler is removed right after it fires once. */
+  onceJson(type: string, listener: (peerId: string, json: string) => void): void
+
+  /** Remove every handler registered for `type`. */
+  offJson(type: string): void
 }
