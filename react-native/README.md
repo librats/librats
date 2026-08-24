@@ -1,0 +1,226 @@
+# react-native-librats
+
+React Native bindings for librats, built on [Nitro Modules](https://nitro.margelo.com).
+
+Status: **first vertical slice, working on both platforms.** Enough API for a
+two-device chat (create, start/stop, dial, send/receive, peer events), verified
+running on an iOS simulator and an Android emulator by the
+[example app](#example-app). File transfer, pub/sub and discovery are not here
+yet — see [Scope](#scope-of-this-slice).
+
+## Why Nitro
+
+Nitro can implement a HybridObject in **C++ for both platforms**, and librats is
+already C++. So there is exactly one implementation —
+[`cpp/HybridRatsNode.cpp`](cpp/HybridRatsNode.cpp) — shared by iOS and Android,
+with no JNI bridge and no Swift wrapper to keep in sync. For comparison, the
+native Android binding needs 753 lines of JNI plus 758 lines of Java to do less.
+
+This binding calls the **C++ `Node` API directly** rather than going through the
+C ABI in `src/librats/bindings/rats.h`. The C ABI exists to cross an FFI boundary
+(ctypes, JNI, N-API); Nitro is a C++ consumer with no such boundary, so routing
+through it would only add hex-string formatting and extra copies. The C ABI
+remains the reference for *which* capabilities to expose.
+
+## Install
+
+```bash
+npm install react-native-librats react-native-nitro-modules
+cd ios && pod install
+```
+
+Requires the New Architecture and Hermes (both are the default from React Native
+0.82, where the legacy bridge was removed).
+
+## Usage
+
+```ts
+import { createNode } from 'react-native-librats'
+
+// Configure first, then attach listeners, then start -- librats fixes config at
+// construction and expects handlers registered before start().
+const node = createNode({
+  listenPort: 8080,
+  protocol: 'myapp/1.0',   // must be identical on every platform of your app
+})
+
+node.onPeerConnected((peerId) => console.log('connected', peerId))
+node.onMessage('chat', (peerId, data) => {
+  console.log(peerId, new TextDecoder().decode(data))
+})
+
+node.start()
+node.connect('192.168.1.42', 8080)
+
+node.broadcast('chat', new TextEncoder().encode('hello').buffer)
+```
+
+`protocol` is bound into the Noise handshake prologue, so a mismatch between your
+iOS and Android builds is a **handshake failure**, not a readable error. Define it
+once in shared JS and pass the same value everywhere — which is one quiet
+advantage of driving both platforms from JS.
+
+### App lifecycle
+
+A node owns live sockets and reactor threads. iOS suspends the app shortly after
+it backgrounds and tears the sockets down regardless of what you do, and Android
+needs a foreground service to survive. Stop on background, start on resume:
+
+```ts
+AppState.addEventListener('change', (state) => {
+  if (state === 'active') node.start()
+  else node.stop()
+})
+```
+
+Set `dataDir` to an app-writable path (iOS: inside the sandbox, e.g. Documents;
+Android: `filesDir`) so the node keeps a stable identity across those restarts.
+
+## Threading
+
+librats dispatches every event on a reactor thread, never the JS thread. All
+listeners here are **async Nitro callbacks**, which Nitro schedules back onto the
+JS thread — so your handlers are safe, but they do not run synchronously with the
+native event. Do not convert them to Nitro's `Sync<>` callbacks: those may only be
+called from the JS thread, which is exactly what a reactor thread is not.
+
+## Buffers
+
+One copy in each direction, which is the minimum a correct implementation can do:
+
+- **Outbound** (`send`/`broadcast`): the JS `ArrayBuffer` is passed straight to
+  librats as a `ByteView`. Safe because `Node::send` copies into an owned `Bytes`
+  before returning, so nothing retains the JS pointer.
+- **Inbound** (`onMessage`): copied via `ArrayBuffer::copy`. The `ByteView` from
+  librats points into the connection's receive buffer, which is recycled as soon
+  as the handler returns, so it cannot be wrapped — the listener gets a buffer it
+  owns and may keep.
+
+## Layout
+
+| Path | Role |
+|------|------|
+| [`src/specs/RatsNode.nitro.ts`](src/specs/RatsNode.nitro.ts) | The TypeScript spec — the source of truth Nitrogen generates from |
+| [`src/index.ts`](src/index.ts) | `createNode()` helper |
+| [`cpp/HybridRatsNode.{hpp,cpp}`](cpp/HybridRatsNode.cpp) | The shared C++ implementation |
+| [`nitro.json`](nitro.json) | Nitro config: namespaces, module names, autolinking |
+| [`android/CMakeLists.txt`](android/CMakeLists.txt) | Pulls in the root librats CMake build |
+| [`LibratsRN.podspec`](LibratsRN.podspec) | Consumes `ios/build-xcframework.sh` output |
+| `nitrogen/generated/` | Codegen output — regenerate, never edit |
+
+Regenerate after changing the spec:
+
+```bash
+npm run nitrogen
+```
+
+Neither platform wrapper duplicates librats' source list: both configure the root
+`CMakeLists.txt` and pull it in, the same rule the `android/` and `ios/` modules
+follow.
+
+## Scope of this slice
+
+Implemented: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
+`connect`, `peerCount`, `peerIds`, `send`, `broadcast`, `onMessage`,
+`onPeerConnected`, `onPeerDisconnected`.
+
+Not yet: file transfer (needs ArrayBuffer streaming plus progress/offer
+callbacks), pub/sub, DHT and mDNS discovery, NAT traversal controls, typed JSON
+messaging, and the storage and BitTorrent modules.
+
+## Example app
+
+[`example/`](example) is a React Native app that verifies the binding on a single
+device: it creates two nodes in-process, dials one from the other over the
+loopback, completes a Noise handshake, and checks that a message comes back
+echoed. Same check as the Swift smoke test in `ios/`, driven through JS.
+
+```bash
+cd example
+npm install
+npm start -- --port 8082          # 8081 is often taken
+# iOS
+cd ios && pod install && cd ..
+npx react-native run-ios
+# Android
+npx react-native run-android
+```
+
+Press **run test**; the log ends in `PASS`. First `pod install` builds
+`LibRats.xcframework` from the C++ core, which takes a few minutes.
+
+The Android build compiles the whole librats core per ABI, so for a debug loop set
+`reactNativeArchitectures` in `example/android/gradle.properties` to just the one
+you need — the module honours it.
+
+### What is verified
+
+**Both platforms, end to end.** iOS on a simulator (Debug and Release build) and
+Android on an emulator (`libLibratsRN.so`, arm64-v8a, with the librats core linked
+in) each reach `PASS` — handshake, encrypted echo, and the disconnect event all
+arriving in JS.
+
+Also verified: Nitrogen generates from the spec; the C++ compiles clean
+(`-Wall -Wextra`, zero warnings); TypeScript typechecks.
+
+Not yet verified: **a physical device.** Everything above ran on a simulator and
+an emulator, so nothing here exercises real ARM hardware, a real network
+interface, or store packaging.
+
+### Android platform notes
+
+Two things showed up on Android that are worth knowing:
+
+- **Network-change detection falls back to polling.** Android's SELinux policy
+  denies `bind` on a `netlink_route_socket` for `untrusted_app`, so the Linux
+  netlink backend in `network_monitor.cpp` cannot start. It handles that: it logs
+  a warning and falls back to polling, which is why nothing breaks. You will see
+  the denial as an `avc: denied { bind } ... netlink_route_socket` line in
+  logcat, paired with librats' own `W/netmon: netlink bind() failed (13);
+  falling back to polling` — both are expected, not a bug. (iOS lands in the same
+  polling fallback for a different reason: `<net/route.h>` is macOS-only.)
+- **librats' logs reach logcat through `__android_log_print`.** The logger writes
+  to `std::cout`/`std::cerr` everywhere else, but an Android app's stdout goes
+  nowhere by default, so an `#if defined(__ANDROID__)` branch in `util/logger.h`
+  routes console output through the platform logger instead. The log module
+  becomes the logcat tag and the librats level becomes the Android priority, so
+  the core shows up as `I/node`, `I/socket`, `I/noise`, `W/netmon` and so on:
+
+  ```sh
+  adb logcat --pid=$(adb shell pidof com.libratsexample) node:I socket:I noise:I netmon:I '*:S'
+  ```
+
+  Timestamps and colors are left off on this path because logcat adds its own.
+  The default level is still `INFO`; the file sink is unchanged.
+
+### Things that cost a build to find
+
+Worth knowing before you change the build files:
+
+- **Hermes has no `TextDecoder`** (it does have `TextEncoder`), so the obvious
+  symmetric pair does not exist on React Native and fails only at runtime, inside
+  a message handler. That is why this package exports `encodeUtf8`/`decodeUtf8`.
+- **Do not add the XCFramework's headers to `HEADER_SEARCH_PATHS`.** CocoaPods
+  already adds `$(PODS_XCFRAMEWORKS_BUILD_DIR)/LibratsRN/Headers` for the slice
+  being built. Naming both slices yourself puts two copies of the framework's
+  `module.modulemap` in scope and clang fails with *redefinition of module
+  'LibRats'*; making it SDK-conditional is worse, because
+  `HEADER_SEARCH_PATHS[sdk=...]` *replaces* the unconditional value and silently
+  drops every React header.
+- **A Nitro module still needs a `ReactPackage` on Android.** React Native's
+  autolinking scans for a class implementing `ReactPackage` and skips the
+  dependency entirely when it finds none — so without
+  [`LibratsRNPackage.kt`](android/src/main/java/com/librats/rn/LibratsRNPackage.kt)
+  the Gradle project is never added and the module just does not exist on Android,
+  with no error. That class is also where `LibratsRNOnLoad.initializeNative()`
+  gets called; Nitrogen generates it but nothing invokes it for you.
+- **Resolve symlinks before walking up a path in CMake.** An example app reaches
+  this package through `node_modules/react-native-librats -> ../..`, and
+  `CMAKE_CURRENT_SOURCE_DIR` keeps the *linked* path — so a plain `../..` lands in
+  `node_modules`, not the repository root, and `add_subdirectory()` fails with
+  "does not contain a CMakeLists.txt file". `get_filename_component(... REALPATH)`
+  fixes it. The same applies to any npm or yarn workspace.
+- **CocoaPods skips `prepare_command` for local path pods**, which is what a
+  linked module in an example app is. The example's `Podfile` builds the
+  XCFramework itself for that reason.
+- The codegen package is **`nitrogen`**; the older `nitro-codegen` is deprecated.

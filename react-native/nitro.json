@@ -1,0 +1,20 @@
+{
+  "$schema": "https://nitro.margelo.com/nitro.schema.json",
+  "cxxNamespace": ["librats"],
+  "ios": {
+    "iosModuleName": "LibratsRN"
+  },
+  "android": {
+    "androidNamespace": ["librats"],
+    "androidCxxLibName": "LibratsRN"
+  },
+  "autolinking": {
+    "RatsNode": {
+      "all": {
+        "language": "c++",
+        "implementationClassName": "HybridRatsNode"
+      }
+    }
+  },
+  "ignorePaths": ["node_modules", "example"]
+}

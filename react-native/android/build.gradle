@@ -1,0 +1,77 @@
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+  }
+  dependencies {
+    classpath "com.android.tools.build:gradle:8.7.2"
+    // Kotlin is required: Nitrogen emits its loader as Kotlin, and
+    // LibratsRNPackage.kt calls it.
+    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21"
+  }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+// Adds the Nitrogen-generated Kotlin sources to this module's source set.
+apply from: '../nitrogen/generated/android/LibratsRN+autolinking.gradle'
+
+// Honour the consuming app's `reactNativeArchitectures` so a debug build can
+// compile one ABI instead of four. Building the whole librats core per ABI is the
+// slowest part of this module by a wide margin.
+def reactNativeArchitectures() {
+  def value = project.properties.get('reactNativeArchitectures')
+  return value ? value.split(',') : ['armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64']
+}
+
+android {
+  namespace 'com.librats.rn'
+  compileSdk 35
+
+  defaultConfig {
+    minSdk 24
+
+    externalNativeBuild {
+      cmake {
+        // -frtti / -fexceptions are required: Nitro's JSI layer and librats both
+        // use RTTI and exceptions.
+        cppFlags '-frtti', '-fexceptions', '-Wall', '-Wextra', '-Wno-unused-parameter'
+        arguments '-DANDROID_STL=c++_shared'
+      }
+    }
+
+    ndk {
+      abiFilters(*reactNativeArchitectures())
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path 'CMakeLists.txt'
+    }
+  }
+
+  buildFeatures {
+    prefab true      // NitroModules, JSI, fbjni and react-native arrive as prefabs
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlin {
+    jvmToolchain(17)
+  }
+}
+
+repositories {
+  google()
+  mavenCentral()
+}
+
+dependencies {
+  implementation 'com.facebook.react:react-android'
+  implementation project(':react-native-nitro-modules')
+}
