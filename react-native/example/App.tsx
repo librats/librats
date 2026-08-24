@@ -93,6 +93,32 @@ function Demo() {
     nodes.current = [];
   }, []);
 
+  /** Claim the harness for one run, or refuse if a run is already under way.
+   *
+   *  A run owns `nodes.current`, so two of them overlapping is not merely untidy:
+   *  the second one's stopAll() destroys the first one's nodes, and the first then
+   *  waits out its full timeout for a connection that can never arrive -- reporting
+   *  a failure that says nothing about the code under test. `busy` disables the
+   *  buttons, but it goes through React state, so a fast double tap can land before
+   *  the re-render. This ref is checked synchronously and cannot be raced. */
+  const runInFlight = useRef(false);
+
+  const beginRun = useCallback(() => {
+    if (runInFlight.current) return false;
+    runInFlight.current = true;
+    stopAll();
+    setLog([]);
+    setStatus('running');
+    return true;
+  }, [stopAll]);
+
+  /** Settle the UI and release the claim. Safe to call from anywhere, including the
+   *  handlers that never took a claim -- releasing an unheld one is a no-op. */
+  const finishRun = useCallback((next: Status) => {
+    runInFlight.current = false;
+    setStatus(next);
+  }, []);
+
   /** A connected pair with file transfer and pub/sub enabled on both.
    *
    *  `setup` runs once both nodes exist and their subsystems are enabled, but
@@ -151,9 +177,7 @@ function Demo() {
   );
 
   const runChat = useCallback(async () => {
-    stopAll();
-    setLog([]);
-    setStatus('running');
+    if (!beginRun()) return;
     try {
       // The resolver is captured before connectPair() so the handler can be
       // registered inside setup, while the nodes are still stopped.
@@ -176,18 +200,16 @@ function Demo() {
       append(`echo verified: "${reply}"`);
 
       stopAll();
-      setStatus('pass');
+      finishRun('pass');
     } catch (error) {
       append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
       stopAll();
-      setStatus('fail');
+      finishRun('fail');
     }
-  }, [append, connectPair, stopAll]);
+  }, [append, beginRun, connectPair, finishRun, stopAll]);
 
   const runFile = useCallback(async () => {
-    stopAll();
-    setLog([]);
-    setStatus('running');
+    if (!beginRun()) return;
     try {
       // Contents are cheap to verify but not uniform, so a truncated or
       // misordered transfer cannot pass by accident.
@@ -268,18 +290,16 @@ function Demo() {
       );
 
       stopAll();
-      setStatus('pass');
+      finishRun('pass');
     } catch (error) {
       append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
       stopAll();
-      setStatus('fail');
+      finishRun('fail');
     }
-  }, [append, connectPair, stopAll]);
+  }, [append, beginRun, connectPair, finishRun, stopAll]);
 
   const runPubSub = useCallback(async () => {
-    stopAll();
-    setLog([]);
-    setStatus('running');
+    if (!beginRun()) return;
     try {
       const { server, client, clientId } = await connectPair();
       append(`handshake with ${clientId.slice(0, 8)}`);
@@ -332,22 +352,20 @@ function Demo() {
       append('unsubscribed');
 
       stopAll();
-      setStatus('pass');
+      finishRun('pass');
     } catch (error) {
       append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
       stopAll();
-      setStatus('fail');
+      finishRun('fail');
     }
-  }, [append, connectPair, stopAll]);
+  }, [append, beginRun, connectPair, finishRun, stopAll]);
 
   // DHT joins a real public network, so unlike the other tests this one depends
   // on internet reachability. It checks that the subsystem comes up and starts
   // bootstrapping -- not that a peer is found, which needs another node
   // announcing the same key and can take minutes.
   const runDht = useCallback(async () => {
-    stopAll();
-    setLog([]);
-    setStatus('running');
+    if (!beginRun()) return;
     try {
       const node = createNode({ dataDir: TEMP_DIR, protocol: 'example/1.0' });
       nodes.current = [node];
@@ -399,13 +417,111 @@ function Demo() {
       append(`peers discovered so far: ${node.peerCount}`);
       stopAll();
       append('stopped');
-      setStatus('pass');
+      finishRun('pass');
     } catch (error) {
       append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
       stopAll();
-      setStatus('fail');
+      finishRun('fail');
     }
-  }, [append, stopAll]);
+  }, [append, beginRun, finishRun, stopAll]);
+
+  // mDNS on one device: two nodes announce themselves on the real network and browse
+  // for each other. How far that can go depends on the backend, and the difference is
+  // by design rather than a platform quirk:
+  //
+  //   iOS      goes through Bonjour, and mDNSResponder reports every instance
+  //            registered on the host -- including this process's own other node. So
+  //            the whole path is exercised here: announce, browse, resolve, dial,
+  //            handshake.
+  //   Android  uses the multicast socket directly, which deliberately disables
+  //            IP_MULTICAST_LOOP and drops packets from its own addresses. A second
+  //            node in the same process is therefore invisible on purpose. What is
+  //            checked here is the mechanics; discovery itself needs a second device,
+  //            which is what the peer mode below is for.
+  //
+  // Either way it depends on a network that carries multicast: a device on cellular
+  // only has no local network to discover on, and Wi-Fi client isolation on a guest
+  // network has the same effect.
+  const sameHostDiscovery = Platform.OS === 'ios';
+  const runMdns = useCallback(async () => {
+    if (!beginRun()) return;
+    try {
+      // Distinct instance names, because the subsystem filters out its own
+      // announcement by matching the label -- two nodes sharing one would each
+      // discard the other's. The random suffix matters for the same reason across
+      // devices: with a fixed label, a second phone running this test announces the
+      // name this one is filtering, and the two silently ignore each other.
+      const tag = Math.random().toString(36).slice(2, 8);
+      const alice = createNode({ listenPort: 0, protocol: 'example/1.0' });
+      const bob = createNode({
+        listenPort: 0,
+        protocol: 'example/1.0',
+        dataDir: TEMP_DIR,
+      });
+      nodes.current = [alice, bob];
+
+      alice.enableMdns({ instanceName: `rn-alice-${tag}` });
+      bob.enableMdns({ instanceName: `rn-bob-${tag}` });
+
+      let connected = 0;
+      alice.onPeerConnected(id => {
+        connected += 1;
+        append(`alice <- ${id.slice(0, 8)} found over mDNS`);
+      });
+      bob.onPeerConnected(id => {
+        connected += 1;
+        append(`bob <- ${id.slice(0, 8)} found over mDNS`);
+      });
+
+      if (!alice.start()) throw new Error('alice failed to start');
+      if (!bob.start()) throw new Error('bob failed to start');
+      append(`alice on ${alice.listenPort}, bob on ${bob.listenPort}`);
+      append('announcing _librats._tcp and browsing...');
+
+      // Enabling after start() is a mistake the binding refuses, for the same
+      // reason the on*() registrations do.
+      try {
+        alice.enableMdns();
+        throw new Error('enableMdns() after start() should have thrown');
+      } catch (error) {
+        if (!(error instanceof Error) || !/before start/.test(error.message)) throw error;
+        append('enableMdns() after start() rejected, as it should be');
+      }
+
+      if (sameHostDiscovery) {
+        // Generous: iOS has to prompt for local-network access on the first run, and
+        // an announcement can miss a browse that was a moment too early.
+        await waitUntil(
+          () => connected > 0,
+          30000,
+          'neither node discovered the other -- no multicast on this network?',
+        );
+
+        append(`peers: alice=${alice.peerCount} bob=${bob.peerCount}`);
+        if (alice.peerCount === 0 && bob.peerCount === 0) {
+          throw new Error('discovery reported but no peer is connected');
+        }
+      } else {
+        // Give the announce and browse a moment to actually happen, so a crash or a
+        // permission failure in that window still fails this test.
+        await new Promise<void>(resolve => setTimeout(() => resolve(), 3000));
+        if (connected > 0) {
+          append(`unexpected bonus: a peer was found (${connected})`);
+        } else {
+          append('announced and browsing; same-host peers are filtered on this');
+          append('backend by design -- use two devices via listen/find');
+        }
+      }
+
+      stopAll();
+      append('stopped');
+      finishRun('pass');
+    } catch (error) {
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      stopAll();
+      finishRun('fail');
+    }
+  }, [append, beginRun, finishRun, stopAll]);
 
   // NAT traversal against the real network. Two loopback nodes cannot demonstrate
   // a punch or a relay -- both need peers on opposite sides of a NAT -- so this
@@ -414,9 +530,7 @@ function Demo() {
   // about our own NAT. The mapping classification is the thing to read before
   // blaming a failed cross-network dial.
   const runNat = useCallback(async () => {
-    stopAll();
-    setLog([]);
-    setStatus('running');
+    if (!beginRun()) return;
     try {
       const node = createNode({ dataDir: TEMP_DIR, protocol: 'example/1.0' });
       nodes.current = [node];
@@ -471,18 +585,16 @@ function Demo() {
 
       stopAll();
       append('stopped');
-      setStatus('pass');
+      finishRun('pass');
     } catch (error) {
       append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
       stopAll();
-      setStatus('fail');
+      finishRun('fail');
     }
-  }, [append, stopAll]);
+  }, [append, beginRun, finishRun, stopAll]);
 
   const runJson = useCallback(async () => {
-    stopAll();
-    setLog([]);
-    setStatus('running');
+    if (!beginRun()) return;
     try {
       const { server, client, serverId, clientId } = await connectPair();
       append(`handshake with ${serverId.slice(0, 8)}`);
@@ -550,13 +662,13 @@ function Demo() {
       append(`broadcastJson to ${client.peerCount} peer(s): ${client.broadcastJson('greet', '{}')}`);
 
       stopAll();
-      setStatus('pass');
+      finishRun('pass');
     } catch (error) {
       append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
       stopAll();
-      setStatus('fail');
+      finishRun('fail');
     }
-  }, [append, connectPair, stopAll]);
+  }, [append, beginRun, connectPair, finishRun, stopAll]);
 
   // ── two real devices ──────────────────────────────────────────────────────
   // One device taps "listen"; the other types its address and taps "dial". The
@@ -571,9 +683,7 @@ function Demo() {
   const didDial = useRef(false);
 
   const startPeerNode = useCallback(async () => {
-    stopAll();
-    setLog([]);
-    setStatus('running');
+    if (!beginRun()) return;
     try {
       await mkdir(TEMP_DIR);
       const node = createNode({ dataDir: TEMP_DIR, protocol: 'example/1.0' });
@@ -592,6 +702,10 @@ function Demo() {
       // unreachable discovered peer is handed to HolePunch instead of dropped.
       node.enableDht({ discoveryKey: DISCOVERY_KEY, searchIntervalMs: 10000 });
       node.enablePeerExchange();
+      // And on the same Wi-Fi, mDNS beats all of it: no key to agree on, no
+      // bootstrap, no internet -- the other device shows up in about a second, so
+      // "dial" is only needed when the two are on different networks.
+      node.enableMdns();
 
       // Every on*() registration has to happen while the node is stopped.
       node.onPeerConnected(id => append(`+ peer ${id.slice(0, 8)}`));
@@ -631,12 +745,12 @@ function Demo() {
 
       append(`listening on port ${node.listenPort}`);
       append(`peer id ${node.localId.slice(0, 16)}...`);
-      setStatus('idle');
+      finishRun('idle');
     } catch (error) {
       append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
-      setStatus('fail');
+      finishRun('fail');
     }
-  }, [append, stopAll]);
+  }, [append, beginRun, finishRun, stopAll]);
 
   /** Drive every subsystem against whichever peer is connected. */
   const exercise = useCallback(
@@ -709,10 +823,10 @@ function Demo() {
       node.connect(host, port);
       await waitUntil(() => node.peerCount > 0, 25000, 'no peer connected');
       await exercise(node);
-      setStatus('pass');
+      finishRun('pass');
     } catch (error) {
       append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
-      setStatus('fail');
+      finishRun('fail');
     }
   }, [append, exercise, peerAddr]);
 
@@ -731,14 +845,14 @@ function Demo() {
       await waitUntil(() => node.peerCount > 0, 180000, 'nobody discovered');
       append(`discovered after ${Math.round((Date.now() - t0) / 1000)}s`);
       await exercise(node);
-      setStatus('pass');
+      finishRun('pass');
     } catch (error) {
       const d = node.dhtStatus();
       append(`dht running=${d.running} port=${d.port} ext=${d.externalAddress}`);
       const n = node.natStatus();
       append(`nat ${n.mapping} (${n.observationCount} obs)`);
       append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
-      setStatus('fail');
+      finishRun('fail');
     }
   }, [append, exercise]);
 
@@ -794,6 +908,12 @@ function Demo() {
           onPress={runDht}
           disabled={busy}>
           <Text style={styles.buttonText}>dht</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, busy && styles.buttonDisabled]}
+          onPress={runMdns}
+          disabled={busy}>
+          <Text style={styles.buttonText}>mdns</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.button, busy && styles.buttonDisabled]}
