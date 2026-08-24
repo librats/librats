@@ -241,6 +241,61 @@ export interface PeerExchangeConfig {
 }
 
 /**
+ * Liveness and round-trip-time probing. Its own thread pings every connected peer on
+ * an interval; the peer echoes the probe, which is what times the round trip.
+ *
+ * On mobile this earns its keep for a reason that has nothing to do with latency
+ * numbers: a peer behind NAT can go away without either side's socket noticing, and a
+ * connection that looks fine is the worst kind of broken. Failing pings are how you
+ * find out — `alivePeerCount` is the honest peer count, where `peerCount` is only the
+ * number of sockets that have not yet been told they are dead.
+ */
+export interface PingConfig {
+  /** How often to ping every peer. Default 10000. */
+  intervalMs?: number
+}
+
+/**
+ * Automatic re-dialling with exponential backoff, over a peer book it can persist.
+ *
+ * The subsystem a phone wants most. Mobile connections drop constantly — the network
+ * changes, the radio sleeps, a NAT binding expires — and without this every drop
+ * needs the app to notice and re-dial. It reconciles its targets against the peers
+ * actually connected each tick, so a peer that came back on an *inbound* link is left
+ * alone rather than dialled again.
+ *
+ * Set `storePath` to keep the peer book across restarts; leave it empty and the book
+ * lives only in memory, so a restart starts from nothing.
+ */
+export interface ReconnectionConfig {
+  /**
+   * Where to persist the peer book. Defaults to `<dataDir>/peers.json` when the node
+   * has a `dataDir`; empty means memory-only, and a restart forgets everyone.
+   */
+  storePath?: string
+  /** Remember peers this node dialled, automatically. Default true. */
+  persistDiscovered?: boolean
+  /** Cap on addresses actively being re-dialled. Default 1024. */
+  maxTargets?: number
+  /**
+   * Give up on a target after this many consecutive failures. Default 0 — retry for
+   * ever. A successful connection resets the count, so only permanently dead
+   * addresses are reaped.
+   */
+  maxAttempts?: number
+  /** On start, re-dial this many of the best-known peers. Default 32. */
+  startupTargets?: number
+  /** Cap on the persisted book — everyone ever met, not just active targets. Default 4096. */
+  archiveMax?: number
+  /** Forget peers unseen for this long. Default 2592000 (30 days). */
+  archiveMaxAgeSecs?: number
+  /** First retry delay; doubles up to `maxBackoffMs`. Default 1000. */
+  baseBackoffMs?: number
+  /** Ceiling on the backoff. Default 60000. */
+  maxBackoffMs?: number
+}
+
+/**
  * BitTorrent configuration.
  *
  * This one is different from every other subsystem here: BitTorrent runs its **own**
@@ -990,4 +1045,35 @@ export interface RatsNode
     timeoutMs: number,
     listener: (success: boolean, info: TorrentMetadata, error: string) => void,
   ): void
+
+  // --- keepalive and reconnection ---
+  //
+  // The two subsystems a long-lived mobile peer wants and a desktop one can shrug
+  // off: one tells you a link is dead, the other gets it back.
+
+  /** Attach RTT/liveness probing. Must be called before `start()`. */
+  enablePing(config?: PingConfig): void
+
+  /**
+   * Round-trip time to a peer in milliseconds, or -1 when no reply has been timed
+   * yet — which is also what an unreachable peer looks like, since the probe that
+   * would have measured it never came back.
+   */
+  peerRtt(peerId: string): number
+
+  /** Peers that have answered a probe. Lower than `peerCount` when a link has died
+   *  without its socket noticing, which is the case worth catching. */
+  alivePeerCount(): number
+
+  /** Attach automatic re-dialling. Must be called before `start()`. */
+  enableReconnection(config?: ReconnectionConfig): void
+
+  /** Add an address to re-dial, as `"host:port"` (IPv6 as `"[addr]:port"`). */
+  addReconnectTarget(address: string): void
+  /** Stop re-dialling an address, and drop it from the book. */
+  removeReconnectTarget(address: string): void
+  /** How many addresses are actively being re-dialled. */
+  reconnectTargetCount(): number
+  /** The best-known peers from the book, as `"host:port"`, most promising first. */
+  knownPeers(limit: number): string[]
 }

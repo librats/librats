@@ -1,5 +1,6 @@
 #include "HybridRatsNode.hpp"
 
+#include <librats/core/address.h>
 #include <librats/core/bytes.h>
 #include <librats/node/config.h>
 #include <librats/node/node.h>
@@ -17,9 +18,12 @@
 #include <librats/bittorrent/magnet_uri.h>
 #include <librats/subsystems/bittorrent.h>
 #include <librats/subsystems/peer_exchange.h>
+#include <librats/subsystems/ping_service.h>
+#include <librats/subsystems/reconnection.h>
 #include <librats/subsystems/pubsub.h>
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
@@ -1012,6 +1016,123 @@ void HybridRatsNode::fetchTorrentMetadata(
         listener(success, to_metadata(info), error);
       },
       static_cast<int>(timeoutMs));
+}
+
+// ── keepalive and reconnection ──────────────────────────────────────────────
+
+void HybridRatsNode::enablePing(const std::optional<PingConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enablePing() must be called before start()");
+  }
+  if (ping_ != nullptr) throw std::runtime_error("ping is already enabled");
+
+  auto interval = std::chrono::milliseconds(10000);
+  if (config.has_value() && config->intervalMs.has_value()) {
+    const double ms = *config->intervalMs;
+    if (ms <= 0) throw std::invalid_argument("intervalMs must be greater than zero");
+    interval = std::chrono::milliseconds(static_cast<int64_t>(ms));
+  }
+  ping_ = node().add_subsystem(std::make_unique<rats::PingService>(interval));
+}
+
+double HybridRatsNode::peerRtt(const std::string& peerId) {
+  if (ping_ == nullptr) {
+    throw std::runtime_error("ping is not enabled - call enablePing() before start()");
+  }
+  const auto rtt = ping_->last_rtt(parse_peer_id(peerId));
+  // -1 rather than 0: an unmeasured peer is not a peer with a 0ms round trip, and JS
+  // has no natural empty number to say so.
+  return rtt ? static_cast<double>(rtt->count()) : -1.0;
+}
+
+double HybridRatsNode::alivePeerCount() {
+  if (ping_ == nullptr) {
+    throw std::runtime_error("ping is not enabled - call enablePing() before start()");
+  }
+  return static_cast<double>(ping_->alive_peer_count());
+}
+
+void HybridRatsNode::enableReconnection(const std::optional<ReconnectionConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableReconnection() must be called before start()");
+  }
+  if (reconnect_ != nullptr) {
+    throw std::runtime_error("reconnection is already enabled");
+  }
+
+  rats::ReconnectionService::Config cfg;
+
+  // Persist the peer book beside the node's own state by default. The library
+  // default is memory-only, which on a phone means every restart forgets every peer
+  // it has ever met — the opposite of what this subsystem is for.
+  if (config_ != nullptr && !config_->data_dir.empty()) {
+    cfg.store_path = config_->data_dir + "/peers.json";
+  }
+
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.storePath.has_value())         cfg.store_path         = *c.storePath;
+    if (c.persistDiscovered.has_value()) cfg.persist_discovered = *c.persistDiscovered;
+    if (c.maxTargets.has_value())        cfg.max_targets        = static_cast<size_t>(*c.maxTargets);
+    if (c.maxAttempts.has_value())       cfg.max_attempts       = static_cast<size_t>(*c.maxAttempts);
+    if (c.startupTargets.has_value())    cfg.startup_targets    = static_cast<size_t>(*c.startupTargets);
+    if (c.archiveMax.has_value())        cfg.archive_max        = static_cast<size_t>(*c.archiveMax);
+    if (c.archiveMaxAgeSecs.has_value()) {
+      cfg.archive_max_age = std::chrono::seconds(static_cast<int64_t>(*c.archiveMaxAgeSecs));
+    }
+    if (c.baseBackoffMs.has_value()) {
+      cfg.base_backoff = std::chrono::milliseconds(static_cast<int64_t>(*c.baseBackoffMs));
+    }
+    if (c.maxBackoffMs.has_value()) {
+      cfg.max_backoff = std::chrono::milliseconds(static_cast<int64_t>(*c.maxBackoffMs));
+    }
+  }
+
+  reconnect_ = node().add_subsystem(
+      std::make_unique<rats::ReconnectionService>(std::move(cfg)));
+}
+
+namespace {
+
+rats::ReconnectionService& require_reconnect(rats::ReconnectionService* r) {
+  if (r == nullptr) {
+    throw std::runtime_error(
+        "reconnection is not enabled - call enableReconnection() before start()");
+  }
+  return *r;
+}
+
+rats::Address parse_address(const std::string& text) {
+  auto parsed = rats::Address::parse(text);
+  if (!parsed) {
+    throw std::invalid_argument(
+        "address must be \"host:port\" (IPv6 as \"[addr]:port\"), got: " + text);
+  }
+  return *parsed;
+}
+
+} // namespace
+
+void HybridRatsNode::addReconnectTarget(const std::string& address) {
+  require_reconnect(reconnect_).add(parse_address(address));
+}
+
+void HybridRatsNode::removeReconnectTarget(const std::string& address) {
+  require_reconnect(reconnect_).remove(parse_address(address));
+}
+
+double HybridRatsNode::reconnectTargetCount() {
+  return static_cast<double>(require_reconnect(reconnect_).target_count());
+}
+
+std::vector<std::string> HybridRatsNode::knownPeers(double limit) {
+  if (limit < 0) throw std::invalid_argument("limit must not be negative");
+  std::vector<std::string> out;
+  for (const auto& address :
+       require_reconnect(reconnect_).known_peers(static_cast<size_t>(limit))) {
+    out.push_back(address.to_string());
+  }
+  return out;
 }
 
 // ── distributed key-value storage ───────────────────────────────────────────

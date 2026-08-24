@@ -24,6 +24,8 @@ class MessageJson;
 class StorageManager;
 class PeerExchange;
 class Bittorrent;
+class PingService;
+class ReconnectionService;
 struct NodeConfig;
 } // namespace librats
 
@@ -167,6 +169,16 @@ public:
       const std::function<void(bool, const TorrentMetadata&, const std::string&)>& listener)
       override;
 
+  // — keepalive and reconnection —
+  void enablePing(const std::optional<PingConfig>& config) override;
+  double peerRtt(const std::string& peerId) override;
+  double alivePeerCount() override;
+  void enableReconnection(const std::optional<ReconnectionConfig>& config) override;
+  void addReconnectTarget(const std::string& address) override;
+  void removeReconnectTarget(const std::string& address) override;
+  double reconnectTargetCount() override;
+  std::vector<std::string> knownPeers(double limit) override;
+
   // — distributed key-value storage —
   void enableStorage(const std::optional<StorageConfig>& config) override;
   bool putString(const std::string& key, const std::string& value) override;
@@ -240,6 +252,8 @@ private:
   ::librats::StorageManager* storage_ = nullptr;
   ::librats::PeerExchange* pex_ = nullptr;
   ::librats::Bittorrent* bittorrent_ = nullptr;
+  ::librats::PingService* ping_ = nullptr;
+  ::librats::ReconnectionService* reconnect_ = nullptr;
   /// Info hashes added through this object, in order. The client owns Torrents on
   /// its reactor and hands out pointers that must not be touched off-thread, so
   /// enumerating them is not safe from here — but what *we* added is ours to track.

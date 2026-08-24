@@ -427,6 +427,36 @@ Three behaviours that differ from the rest of this API:
   Those booleans are accurate, not optimistic: the library's callback runs inline
   before the call returns.
 
+## Keepalive and reconnection
+
+Two small subsystems that matter far more on a phone than on a desktop.
+
+```ts
+node.enablePing({ intervalMs: 10000 })
+node.enableReconnection()          // peer book persists under dataDir by default
+node.start()
+
+node.peerRtt(peerId)               // ms, or -1 if no probe has returned
+node.alivePeerCount()              // peers that actually answered
+node.addReconnectTarget(`${host}:${port}`)
+node.knownPeers(16)                // best-known peers from the book
+```
+
+**Ping is not about latency numbers.** A peer behind NAT can vanish without either
+side's socket noticing, and a connection that looks fine is the worst kind of broken.
+`alivePeerCount()` is the honest count; `peerCount` is only the number of sockets that
+have not yet been told they are dead. `peerRtt()` returns **-1** when nothing has come
+back yet — which is also what an unreachable peer looks like, since the probe that
+would have measured it never returned.
+
+**Reconnection is what makes a mobile peer stay connected at all.** Networks change,
+radios sleep, NAT bindings expire; without it every drop needs the app to notice and
+re-dial. It reconciles targets against the peers actually connected each tick, so a
+peer that came back on an *inbound* link is left alone instead of dialled again. The
+peer book defaults to `<dataDir>/peers.json` — the library's own default is
+memory-only, which on a phone means forgetting every peer on every restart, so the
+binding co-locates it with the node's state instead.
+
 ## BitTorrent
 
 A real BitTorrent client — magnets, `.torrent` files, trackers, peer exchange, and
@@ -502,6 +532,10 @@ Typed JSON: `enableJsonMessaging`, `sendJson`, `broadcastJson`, `onJson`,
 
 Peer exchange: `enablePeerExchange`.
 
+Keepalive / reconnection: `enablePing`, `peerRtt`, `alivePeerCount`,
+`enableReconnection`, `addReconnectTarget`, `removeReconnectTarget`,
+`reconnectTargetCount`, `knownPeers`.
+
 BitTorrent: `enableBittorrent`, `addMagnet`, `addTorrentFile`, `removeTorrent`,
 `pauseTorrent`, `resumeTorrent`, `torrentStatus`, `torrentInfoHashes`,
 `bittorrentStats`, `saveResumeData`, `saveAllResumeData`, `fetchTorrentMetadata`.
@@ -513,7 +547,9 @@ Storage: `enableStorage`, `putString`, `putInt`, `putDouble`, `putBinary`,
 `storageCount`, `clearStorage`, `saveStorage`, `loadStorage`, `compactStorage`,
 `requestStorageSync`, `isStorageSynced`, `storageStats`, `onStorageChange`.
 
-Nothing is left unbound now except spider mode.
+Nothing is left unbound now except spider mode. Checked against the source tree
+rather than from memory: `dht_service`, `hole_punch_service` and `relay_service` are
+internal interfaces, not subsystems you attach.
 
 ## Example app
 
