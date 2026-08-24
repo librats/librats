@@ -2,11 +2,10 @@
 
 React Native bindings for librats, built on [Nitro Modules](https://nitro.margelo.com).
 
-Status: **first vertical slice, working on both platforms.** Enough API for a
-two-device chat (create, start/stop, dial, send/receive, peer events), verified
-running on an iOS simulator and an Android emulator by the
-[example app](#example-app). File transfer, pub/sub and discovery are not here
-yet — see [Scope](#scope-of-this-slice).
+Status: **working on both platforms.** Core messaging and peer events, file
+transfer, and pub/sub, verified running on an iOS simulator and an Android
+emulator by the [example app](#example-app). Discovery (DHT, mDNS) and NAT
+traversal controls are not here yet — see [Scope](#scope-of-this-slice).
 
 ## Why Nitro
 
@@ -39,10 +38,11 @@ first, which installs the codegen and runs it via the `prepare` script.
 ## Usage
 
 ```ts
-import { createNode } from 'react-native-librats'
+import { createNode, encodeUtf8, decodeUtf8 } from 'react-native-librats'
 
-// Configure first, then attach listeners, then start -- librats fixes config at
-// construction and expects handlers registered before start().
+// Configure first, then attach listeners, then start. librats fixes config at
+// construction, and it stores handlers without a lock while reactor threads read
+// them -- so every on*() call has to happen before start(), which throws otherwise.
 const node = createNode({
   listenPort: 8080,
   protocol: 'myapp/1.0',   // must be identical on every platform of your app
@@ -50,14 +50,18 @@ const node = createNode({
 
 node.onPeerConnected((peerId) => console.log('connected', peerId))
 node.onMessage('chat', (peerId, data) => {
-  console.log(peerId, new TextDecoder().decode(data))
+  console.log(peerId, decodeUtf8(data))
 })
 
 node.start()
 node.connect('192.168.1.42', 8080)
 
-node.broadcast('chat', new TextEncoder().encode('hello').buffer)
+node.broadcast('chat', encodeUtf8('hello'))
 ```
+
+`encodeUtf8` / `decodeUtf8` are exported because **Hermes has no `TextDecoder`**
+(it does provide `TextEncoder`), so the symmetric pair you would reach for does
+not exist on React Native and fails only at runtime, inside a message handler.
 
 `protocol` is bound into the Noise handshake prologue, so a mismatch between your
 iOS and Android builds is a **handshake failure**, not a readable error. Define it
@@ -99,6 +103,10 @@ One copy in each direction, which is the minimum a correct implementation can do
   librats points into the connection's receive buffer, which is recycled as soon
   as the handler returns, so it cannot be wrapped — the listener gets a buffer it
   owns and may keep.
+
+Text has to be encoded somewhere, and Hermes ships `TextEncoder` but **not**
+`TextDecoder`. Use the exported `encodeUtf8` / `decodeUtf8` rather than the global
+pair, which fails only at runtime.
 
 ## Layout
 

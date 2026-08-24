@@ -5,16 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     
     <!-- Primary Meta Tags -->
-    <title>librats - High-Performance P2P Networking Library | C++, C, Node.js, Java, Python, Android | Open Source</title>
-    <meta name="title" content="librats - High-Performance P2P Networking Library | C++, C, Node.js, Java, Python, Android | Open Source">
-    <meta name="description" content="Enterprise-grade P2P networking library with C++, C, Node.js, Java, Python, and Android support. 50x less memory than alternatives. Advanced NAT traversal (99% success), end-to-end encryption, GossipSub messaging, file transfer. Cross-platform: Windows, Linux, macOS, Android.">
-    <meta name="keywords" content="P2P networking, p2p, peer-to-peer, C++17, C++20, C++23, Node.js bindings, Python bindings, NAT traversal, UPnP, UPnP IGD, NAT-PMP, port forwarding, ICE, STUN, TURN, DHT, BitTorrent, mDNS, GossipSub, file transfer, Noise Protocol, encryption, mesh networking, real-time communication, libp2p alternative, decentralized networking, open source, npm package">
+    <title>librats - High-Performance P2P Networking Library | C++, C, Node.js, Java, Python, React Native, Android, iOS | Open Source</title>
+    <meta name="title" content="librats - High-Performance P2P Networking Library | C++, C, Node.js, Java, Python, React Native, Android, iOS | Open Source">
+    <meta name="description" content="Enterprise-grade P2P networking library with C++, C, Node.js, Java, Python, React Native, Android, and iOS support. 50x less memory than alternatives. Advanced NAT traversal (99% success), end-to-end encryption, GossipSub messaging, file transfer. Cross-platform: Windows, Linux, macOS, Android, iOS.">
+    <meta name="keywords" content="P2P networking, p2p, peer-to-peer, C++17, C++20, C++23, Node.js bindings, Python bindings, React Native bindings, iOS bindings, Swift, Nitro Modules, mobile P2P, NAT traversal, UPnP, UPnP IGD, NAT-PMP, port forwarding, ICE, STUN, TURN, DHT, BitTorrent, mDNS, GossipSub, file transfer, Noise Protocol, encryption, mesh networking, real-time communication, libp2p alternative, decentralized networking, open source, npm package">
     
     <!-- Open Graph / Facebook -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://librats.com/">
     <meta property="og:title" content="librats - High-Performance P2P Networking Library">
-    <meta property="og:description" content="Enterprise-grade P2P networking library with C++, C, Node.js, Java, Python, and Android support. 50x less memory usage, 99% NAT traversal success rate, advanced encryption, and cross-platform support.">
+    <meta property="og:description" content="Enterprise-grade P2P networking library with C++, C, Node.js, Java, Python, React Native, Android, and iOS support. 50x less memory usage, 99% NAT traversal success rate, advanced encryption, and cross-platform support.">
     <meta property="og:image" content="https://librats.com/logo.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
@@ -26,7 +26,7 @@
     <meta property="twitter:card" content="summary_large_image">
     <meta property="twitter:url" content="https://librats.com/librats/">
     <meta property="twitter:title" content="librats - High-Performance P2P Networking Library">
-    <meta property="twitter:description" content="Enterprise-grade P2P networking library with C++, C, Node.js, Java, Python, and Android support. 50x less memory usage, 99% NAT traversal success rate, advanced encryption, and cross-platform support.">
+    <meta property="twitter:description" content="Enterprise-grade P2P networking library with C++, C, Node.js, Java, Python, React Native, Android, and iOS support. 50x less memory usage, 99% NAT traversal success rate, advanced encryption, and cross-platform support.">
     <meta property="twitter:image" content="https://librats.com/logo.png">
     <meta property="twitter:image:alt" content="librats P2P networking library logo">
     <meta property="twitter:creator" content="@librats_p2p">
@@ -98,7 +98,7 @@
             </h1>
             <p class="hero-description">
                 Enterprise-grade peer-to-peer networking library with advanced NAT traversal, 
-                end-to-end encryption, and publish-subscribe messaging. Built from the ground up in C++17 with comprehensive C, Node.js, Java, Python, and Android support.
+                end-to-end encryption, and publish-subscribe messaging. Built from the ground up in C++17 with comprehensive C, Node.js, Java, Python, React Native, Android, and iOS support.
             </p>
             <div class="hero-stats">
                 <div class="stat-item">
@@ -243,8 +243,8 @@
                         <i class="fas fa-code"></i>
                     </div>
                     <h3>Multi-Language Support</h3>
-                    <p>Comprehensive language bindings for C++, C, Node.js, Java, Python, and Android. Consistent API across all platforms and languages.</p>
-                    <div class="feature-badge">5+ Languages</div>
+                    <p>Comprehensive language bindings for C++, C, Node.js, Java, Python, React Native and Android, plus an iOS build Swift imports directly. Consistent API across all platforms and languages.</p>
+                    <div class="feature-badge">7+ Languages</div>
                 </div>
             </div>
         </div>
@@ -266,6 +266,7 @@
                     <button class="tab-button" data-tab="chat">Chat App</button>
                     <button class="tab-button" data-tab="gossipsub">GossipSub</button>
                     <button class="tab-button" data-tab="files">File Transfer</button>
+                    <button class="tab-button" data-tab="reactnative">React Native</button>
                 </div>
                 <div class="tab-content">
                     <div class="tab-pane active" id="basic">
@@ -547,6 +548,44 @@ int main() {
 
     return 0;
 }</code></pre>
+                        </div>
+                    </div>
+                    <div class="tab-pane" id="reactnative">
+                        <div class="code-block">
+                            <div class="code-header">
+                                <span class="code-title">React Native (iOS + Android)</span>
+                                <button class="copy-btn" onclick="copyCode('reactnative-code')">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                            <pre><code id="reactnative-code">import { createNode, encodeUtf8, decodeUtf8 } from 'react-native-librats'
+
+// One C++ implementation drives both iOS and Android -- no JNI bridge,
+// no Swift wrapper. `protocol` is bound into the Noise handshake, so it
+// must be identical on every platform of your app.
+const node = createNode({
+  listenPort: 8080,
+  protocol: 'myapp/1.0',
+  dataDir: appWritablePath,   // keeps a stable identity across restarts
+})
+
+// Handlers go on before start(): librats stores them without a lock and
+// reads them from reactor threads, so registering later throws.
+node.onPeerConnected((peerId) =&gt; console.log('connected', peerId))
+node.onMessage('chat', (peerId, data) =&gt; {
+  console.log(peerId, decodeUtf8(data))   // Hermes has no TextDecoder
+})
+
+node.start()
+node.connect('192.168.1.42', 8080)
+node.broadcast('chat', encodeUtf8('hello from React Native'))
+
+// A node owns live sockets and threads, and iOS tears them down when the
+// app suspends. Stop on background, start on resume.
+AppState.addEventListener('change', (state) =&gt; {
+  if (state === 'active') node.start()
+  else node.stop()
+})</code></pre>
                         </div>
                     </div>
                 </div>
@@ -1144,6 +1183,22 @@ make -j$(nproc)
                                     </span>
                                 </td>
                             </tr>
+                            <tr class="platform-row in-development">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-apple platform-icon"></i>
+                                        <strong>iOS</strong>
+                                    </div>
+                                </td>
+                                <td>Xcode + CMake</td>
+                                <td>Clang 14+</td>
+                                <td>
+                                    <span class="status-badge in-development">
+                                        <i class="fas fa-cog"></i>
+                                        In Development
+                                    </span>
+                                </td>
+                            </tr>
                         </tbody>
                     </table>
                 </div>
@@ -1267,6 +1322,44 @@ make -j$(nproc)
                                     <span class="timeline available">Available Now</span>
                                 </td>
                                 <td>CPython extension with asyncio integration</td>
+                            </tr>
+                            <tr class="platform-row in-development">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-react platform-icon"></i>
+                                        <strong>React Native</strong>
+                                    </div>
+                                </td>
+                                <td>Nitro Modules (C++)</td>
+                                <td>
+                                    <span class="status-badge in-development">
+                                        <i class="fas fa-cog"></i>
+                                        In Development
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline available">Available Now</span>
+                                </td>
+                                <td>One C++ HybridObject shared by iOS and Android — no JNI bridge, no Swift wrapper. Messaging, peer events, file transfer and pub/sub (<a href="https://github.com/DEgITx/librats/tree/master/react-native" target="_blank">source</a>)</td>
+                            </tr>
+                            <tr class="platform-row in-development">
+                                <td>
+                                    <div class="platform-cell">
+                                        <i class="fab fa-swift platform-icon"></i>
+                                        <strong>iOS / Swift</strong>
+                                    </div>
+                                </td>
+                                <td>C ABI via modulemap</td>
+                                <td>
+                                    <span class="status-badge in-development">
+                                        <i class="fas fa-cog"></i>
+                                        In Development
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="timeline available">Available Now</span>
+                                </td>
+                                <td>XCFramework build of the core; Swift reaches the C ABI directly with <code>import LibRats</code>, no shim (<a href="https://github.com/DEgITx/librats/tree/master/ios" target="_blank">source</a>)</td>
                             </tr>
                             <tr class="platform-row planned">
                                 <td>

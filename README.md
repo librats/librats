@@ -8,9 +8,9 @@
 [![Release](https://img.shields.io/github/release/DEgITx/librats.svg)](https://github.com/DEgITx/librats/releases)
 [![npm](https://img.shields.io/npm/v/librats.svg)](https://www.npmjs.com/package/librats)
 
-**A high-performance, lightweight peer-to-peer networking library with C++, C, Node.js, Java, Python, and Android support**
+**A high-performance, lightweight peer-to-peer networking library with C++, C, Node.js, Java, Python, React Native, Android, and iOS support**
 
-librats is a modern P2P networking library written in C++17, with bindings for C, Node.js, Java, Python, and Android. It's designed to be fast and light enough for low-power and embedded devices, while staying simple to build on: you start with a tiny core and add exactly the features you need — nothing more.
+librats is a modern P2P networking library written in C++17, with bindings for C, Node.js, Java, Python, React Native, and Android, plus an iOS build of the core. It's designed to be fast and light enough for low-power and embedded devices, while staying simple to build on: you start with a tiny core and add exactly the features you need — nothing more.
 
 **Official Website**: [https://librats.com](https://librats.com)
 
@@ -34,7 +34,7 @@ Projects and companies building on librats:
 
 ### **Core**
 - **Native C++17** implementation for maximum performance
-- **Cross-platform** support (Windows, Linux, macOS, Android)
+- **Cross-platform** support (Windows, Linux, macOS, Android, iOS)
 - **Shared-nothing reactor** transport — connections are sharded across reactor threads with no cross-thread locking on the hot path
 - **TCP *and* UDP as equals** — the same encrypted protocol over either wire. The UDP transport is a full ordered/reliable stream (sequencing, selective acks, RTO, congestion + flow control) on one socket shared by all peers, which is what keeps a single NAT mapping open and makes hole punching possible. A dial tries UDP first and races TCP as fallback, so a UDP-hostile network still connects
 - **Self-certifying identity**: every node has a Curve25519 keypair; its `PeerId` *is* its public key, so peers authenticate each other with no PKI or central authority
@@ -96,6 +96,8 @@ Projects and companies building on librats:
 - **Node.js**: N-API native addon (`RatsNode`) with TypeScript definitions ([npm package](https://www.npmjs.com/package/librats))
 - **Java/Android**: JNI wrapper with a high-level Java API (`com.librats.RatsNode`)
 - **Python**: ctypes package with a Pythonic `RatsNode`
+- **React Native**: [`react-native/`](react-native) — a [Nitro Modules](https://nitro.margelo.com) HybridObject implemented once in C++ and shared by iOS and Android, so there is no JNI bridge and no Swift wrapper to keep in sync. Covers messaging, peer events, file transfer and pub/sub
+- **iOS**: [`ios/`](ios) — the core cross-compiles to an `XCFramework` (device + simulator) and Swift imports the C ABI directly as `import LibRats`, no shim needed
 
 ## 🚀 Quick Start
 
@@ -631,6 +633,7 @@ node.start();   // discovery uses a hash derived from your protocol identity
 | **Windows** | Visual Studio | MSVC 2017+ | ✅ **Fully Supported** |
 | **Linux** | Native | GCC 7+, Clang 5+ | ✅ **Fully Supported** |
 | **macOS** | Xcode/Native | Clang 10+ | ✅ **Fully Supported** |
+| **iOS** | Xcode + CMake | Clang 14+ | 🔶 **In Development** |
 
 #### Language Bindings & Wrappers
 
@@ -641,6 +644,8 @@ node.start();   // discovery uses a hash derived from your protocol identity
 | **Android (Java)** | JNI Wrapper | ✅ **Fully Supported** | High-level Java API for Android apps |
 | **Node.js** | N-API Addon | ✅ **Fully Supported** | `RatsNode` + TypeScript definitions ([npm](https://www.npmjs.com/package/librats)) |
 | **Python** | ctypes Package | ✅ **Fully Supported** | `RatsNode` with context-manager lifecycle |
+| **React Native** | Nitro Modules (C++) | 🔶 **In Development** | One C++ HybridObject for both platforms ([`react-native/`](react-native)). Messaging, peer events, file transfer, pub/sub; no discovery yet. Verified on simulator + emulator |
+| **iOS / Swift** | C ABI via modulemap | 🔶 **In Development** | `XCFramework` build of the core ([`ios/`](ios)); `import LibRats` reaches the C ABI directly. No idiomatic Swift wrapper yet |
 | **Rust** | FFI Bindings | 📋 **Planned** | Safe bindings with tokio async support |
 | **Go** | CGO Bindings | 📋 **Future** | CGO wrapper for Go applications |
 | **C#/.NET** | P/Invoke | 📋 **Future** | .NET bindings for Windows/Linux/macOS |
@@ -724,7 +729,14 @@ cmake .. -DRATS_STORAGE=ON -DRATS_SEARCH_FEATURES=ON -DCMAKE_BUILD_TYPE=Release
 cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
          -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 \
          -DRATS_CROSSCOMPILING=ON -DRATS_BUILD_TESTS=OFF
+
+# Build for iOS -- device + simulator slices and the XCFramework.
+# Driven by its own script, not by `cmake ..`, so run it from the repository root.
+cd .. && ios/build-xcframework.sh     # -> build/ios/LibRats.xcframework
 ```
+
+See [`ios/README.md`](ios/README.md) for how to consume that from Xcode, and
+[`react-native/README.md`](react-native/README.md) for the React Native package.
 
 ### Integrating librats Into Your Application
 
@@ -778,6 +790,7 @@ When linking against a pre-built librats, add these system libraries:
 | **Linux** | `pthread` |
 | **macOS** | `pthread` |
 | **Android** | `log` |
+| **iOS** | — (the `XCFramework` carries what it needs) |
 
 ### Running Tests
 

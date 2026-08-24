@@ -34,9 +34,13 @@ export type {
  * ```ts
  * const node = createNode({ listenPort: 8080, protocol: 'myapp/1.0' })
  * node.onPeerConnected((id) => console.log('peer', id))
- * node.onMessage('chat', (id, data) => console.log(id, new TextDecoder().decode(data)))
+ * node.onMessage('chat', (id, data) => console.log(id, decodeUtf8(data)))
  * node.start()
  * ```
+ *
+ * Every `on*` registration must come before `start()` -- librats keeps those
+ * handlers in unsynchronized state that reactor threads read, so the binding
+ * throws rather than let a registration race with live traffic.
  *
  * Remember that a node holds live sockets and threads: stop it when the app goes
  * to the background (iOS suspends the process and tears the sockets down
