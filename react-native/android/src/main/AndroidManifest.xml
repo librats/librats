@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      For enableMdns(). This is the only permission the binding declares; everything
+      else librats does needs INTERNET, which every React Native app already has.
+
+      What it does, precisely: it does not itself switch multicast on. It is the
+      prerequisite for acquiring a WifiManager.MulticastLock, which is what an app
+      needs when its Wi-Fi chipset filters out frames not addressed to the device —
+      the documented default, though in practice most modern hardware delivers
+      multicast anyway while the device is awake. Declaring it here means an app that
+      does hit the filtering can take the lock without first editing its own manifest
+      and rebuilding to discover that it needed to.
+    -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+</manifest>

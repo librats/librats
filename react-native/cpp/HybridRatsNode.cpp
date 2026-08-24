@@ -8,6 +8,7 @@
 #include <librats/subsystems/file_transfer.h>
 #include <librats/node/nat_status.h>
 #include <librats/subsystems/dht_discovery.h>
+#include <librats/subsystems/mdns_discovery.h>
 #include <librats/subsystems/hole_punch.h>
 #include <librats/subsystems/message_json.h>
 #include <librats/subsystems/port_mapping_service.h>
@@ -514,6 +515,26 @@ DhtStatus HybridRatsNode::dhtStatus() {
   return DhtStatus(d.is_running(), static_cast<double>(d.dht_port()),
                    static_cast<double>(d.dht_port_v6()),
                    hash_to_hex(d.discovery_hash()), d.external_address());
+}
+
+// ── local-network discovery ─────────────────────────────────────────────────
+
+void HybridRatsNode::enableMdns(const std::optional<MdnsConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableMdns() must be called before start()");
+  }
+  if (mdns_ != nullptr) {
+    throw std::runtime_error("mDNS discovery is already enabled");
+  }
+
+  rats::MdnsDiscovery::Config cfg;
+  if (config.has_value() && config->instanceName.has_value()) {
+    cfg.instance_name = *config->instanceName;
+  }
+
+  // Only the pointer is kept: the subsystem has no post-attach API. It announces,
+  // browses and dials on its own, so discovery arrives as onPeerConnected events.
+  mdns_ = node().add_subsystem(std::make_unique<rats::MdnsDiscovery>(std::move(cfg)));
 }
 
 // ── NAT traversal ───────────────────────────────────────────────────────────

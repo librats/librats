@@ -16,6 +16,7 @@ class Node;
 class FileTransfer;
 class PubSub;
 class DhtDiscovery;
+class MdnsDiscovery;
 class HolePunch;
 class Relay;
 class PortMappingService;
@@ -117,6 +118,7 @@ public:
 
   // — DHT discovery —
   void enableDht(const std::optional<DhtConfig>& config) override;
+  void enableMdns(const std::optional<MdnsConfig>& config) override;
   DhtStatus dhtStatus() override;
 
   // — NAT traversal —
@@ -209,6 +211,7 @@ private:
   ::librats::FileTransfer* files_ = nullptr;
   ::librats::PubSub* pubsub_ = nullptr;
   ::librats::DhtDiscovery* dht_ = nullptr;
+  ::librats::MdnsDiscovery* mdns_ = nullptr;
   ::librats::PortMappingService* port_mapping_ = nullptr;
   ::librats::HolePunch* hole_punch_ = nullptr;
   ::librats::Relay* relay_ = nullptr;

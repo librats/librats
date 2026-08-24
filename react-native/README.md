@@ -276,8 +276,8 @@ interval, so the first discovery usually lands tens of seconds after `start()`.
 `dhtStatus().externalAddress` is a useful progress signal: it fills in once STUN
 or in-DHT voting resolves the public IP.
 
-Unlike mDNS, this needs **no special iOS entitlement** — it is plain UDP to other
-nodes rather than multicast, so nothing has to be requested from Apple.
+Unlike `enableMdns()`, this needs nothing declared and asks the user for no
+permission — it is plain UDP to other nodes, not multicast.
 
 Two configuration notes. `discoveryKey` namespaces who finds whom; leaving it
 empty uses the node's `protocol`, so peers of the same app version meet and
@@ -286,6 +286,55 @@ holds the routing table so a restart bootstraps warm; it defaults to the node's
 own `dataDir`, because the library's fallback is the working directory, which is
 not writable on mobile. With neither set, persistence silently does nothing and
 every start is a cold bootstrap.
+
+## mDNS discovery
+
+For peers on the same Wi-Fi. The node advertises `_librats._tcp` with its listen
+port, browses for the same type, and dials what it finds — no key to agree on, no
+bootstrap node, and no internet connection at all.
+
+```ts
+node.enableMdns()                              // before start()
+node.enableMdns({ instanceName: 'kitchen' })   // default: rats-<peer id prefix>
+```
+
+Like the DHT it dials for you, so discovery arrives as `onPeerConnected`. Unlike
+the DHT it is quick — a peer on the same network usually appears in a second or
+two, which makes it by far the easiest way to get two devices talking.
+
+**Each platform needs one declaration, and both fail silently.** A missing
+declaration is indistinguishable from an empty network: no error, no peers.
+
+*iOS* needs two Info.plist keys in the consuming app:
+
+```xml
+<key>NSLocalNetworkUsageDescription</key>
+<string>Finds other devices running this app on your network.</string>
+<key>NSBonjourServices</key>
+<array><string>_librats._tcp</string></array>
+```
+
+Without `NSBonjourServices` listing the type, browsing returns nothing; without the
+usage description iOS cannot show the local-network prompt, so consent is denied by
+default. The first `start()` triggers that prompt — and the user can refuse it.
+
+*Android* needs `CHANGE_WIFI_MULTICAST_STATE`, which **this package's manifest
+already merges into your app**, so there is nothing to add. What it does not do is
+hold a `WifiManager.MulticastLock`. The Wi-Fi stack is documented to filter
+multicast frames not addressed to the device, though in practice most modern
+hardware delivers them anyway while awake. If discovery works with the screen on
+and stops when the device dozes, that filtering is the reason, and the app needs to
+take the lock — the permission to do so is already declared.
+
+Under the hood the two platforms use different backends, because iOS 14 gates
+direct multicast behind an entitlement Apple grants only on request: Apple
+platforms go through Bonjour (`mDNSResponder`), everything else uses a multicast
+socket directly. Both speak standard mDNS, so an iPhone and an Android phone
+discover each other normally — the split is invisible on the wire and in this API.
+
+Three things will defeat it regardless of setup: a device on cellular only (no
+local network to discover on), Wi-Fi client isolation on guest networks, and VPNs
+that capture all traffic.
 
 ## NAT traversal
 
@@ -390,7 +439,7 @@ File transfer: `enableFileTransfer`, `sendFile`, `sendDirectory`, `acceptFile`,
 Pub/sub: `enablePubSub`, `subscribe`, `unsubscribe`, `publish`, `isSubscribed`,
 `subscribedTopics`, `topicPeers`, `meshPeers`. Not `setValidator` — see above.
 
-Discovery: `enableDht`, `dhtStatus`.
+Discovery: `enableDht`, `dhtStatus`, `enableMdns`.
 
 NAT traversal: `natStatus`, `enablePortMapping`, `portMappingStatus`,
 `enableHolePunch`, `punch`, `enableRelay`, `connectViaRelay`.
@@ -398,9 +447,15 @@ NAT traversal: `natStatus`, `enablePortMapping`, `portMappingStatus`,
 Typed JSON: `enableJsonMessaging`, `sendJson`, `broadcastJson`, `onJson`,
 `onceJson`, `offJson`.
 
-Not yet: mDNS discovery (which on iOS wants an `NWBrowser`-backed subsystem rather
-than the library's raw-socket multicast, to avoid needing Apple's multicast
-entitlement), and the storage and BitTorrent modules.
+Peer exchange: `enablePeerExchange`.
+
+Storage: `enableStorage`, `putString`, `putInt`, `putDouble`, `putBinary`,
+`putJson`, `getString`, `getInt`, `getDouble`, `getBinary`, `getJson`,
+`getValueType`, `removeKey`, `hasKey`, `storageKeys`, `storageKeysWithPrefix`,
+`storageCount`, `clearStorage`, `saveStorage`, `loadStorage`, `compactStorage`,
+`requestStorageSync`, `isStorageSynced`, `storageStats`, `onStorageChange`.
+
+Not yet: the BitTorrent module.
 
 ## Example app
 

@@ -118,8 +118,8 @@ export interface TransferStats {
  *
  * This joins the BitTorrent Mainline DHT — a real, public, multi-million-node
  * network — and finds peers by announcing under a hash derived from
- * `discoveryKey`. It is plain UDP to other nodes, so unlike mDNS it needs no
- * special iOS entitlement.
+ * `discoveryKey`. It is plain UDP to other nodes, so unlike `enableMdns()` it needs
+ * nothing declared and asks the user for no permission.
  */
 export interface DhtConfig {
   /** UDP port for the DHT. 0 (the default) picks an ephemeral one. */
@@ -175,6 +175,35 @@ export interface DhtStatus {
   discoveryHash: string
   /** Public IP used to derive the node id, or '' if not yet known. */
   externalAddress: string
+}
+
+/**
+ * Local-network discovery over mDNS. The node advertises `_librats._tcp` with its
+ * listen port and dials the instances it finds, so two devices on the same Wi-Fi
+ * find each other with no DHT, no bootstrap node and no internet at all.
+ *
+ * Both platforms need something declared before this works, and neither fails
+ * loudly — a missing declaration looks exactly like an empty network:
+ *
+ * **iOS** needs two Info.plist keys. Without `NSBonjourServices` listing
+ * `_librats._tcp`, browsing returns nothing; without
+ * `NSLocalNetworkUsageDescription` the OS cannot ask the user for the local-network
+ * permission that Bonjour requires, so it is denied by default. The first call also
+ * triggers the system consent prompt, and the user can say no.
+ *
+ * **Android** needs `CHANGE_WIFI_MULTICAST_STATE`, which this package's manifest
+ * merges into your app. Note the Wi-Fi chipset may still filter multicast while the
+ * device is dozing — see the README on `MulticastLock` if discovery works with the
+ * screen on and stops with it off.
+ */
+export interface MdnsConfig {
+  /**
+   * The instance label advertised on the network. Defaults to `rats-` plus the
+   * start of the peer id, which is already unique per node — override it only to
+   * show something human-readable, and expect the OS to append a suffix if the
+   * name collides with another device.
+   */
+  instanceName?: string
 }
 
 /**
@@ -614,6 +643,22 @@ export interface RatsNode
    * resolves it.
    */
   dhtStatus(): DhtStatus
+
+  // --- local-network discovery ---
+  //
+  // Like the DHT, this dials what it finds rather than handing peers back, so
+  // discovery surfaces as ordinary `onPeerConnected` events. Unlike the DHT it is
+  // fast — a peer on the same Wi-Fi usually appears within a second or two — and it
+  // needs no internet connection whatsoever.
+
+  /**
+   * Attach mDNS discovery. Must be called before `start()`.
+   *
+   * Read `MdnsConfig` first: both platforms need a declaration in place (Info.plist
+   * keys on iOS, a manifest permission on Android) and without it discovery silently
+   * finds nothing rather than reporting an error.
+   */
+  enableMdns(config?: MdnsConfig): void
 
   // --- NAT traversal ---
   //
