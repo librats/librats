@@ -114,6 +114,27 @@ export interface TransferStats {
 }
 
 /**
+ * GossipSub tuning. Every field is optional; the defaults mirror the libp2p
+ * reference (D=6, D_low=4, D_high=12) and suit small-to-medium meshes.
+ */
+export interface PubSubConfig {
+  /** D — desired mesh degree per topic. Default 6. */
+  meshTarget?: number
+  /** D_low — graft more peers below this. Default 4. */
+  meshLow?: number
+  /** D_high — prune peers above this. Default 12. */
+  meshHigh?: number
+  /** Peers used to publish to a topic this node is not subscribed to. Default 6. */
+  fanoutSize?: number
+  /** D_lazy — peers sent IHAVE per heartbeat per topic. Default 6. */
+  gossipFactor?: number
+  /** Mesh maintenance and gossip cadence. Default 1000. */
+  heartbeatIntervalMs?: number
+  /** How many message ids are remembered for deduplication. Default 8192. */
+  seenLimit?: number
+}
+
+/**
  * A librats peer-to-peer node.
  *
  * Create one with `NitroModules.createHybridObject<RatsNode>('RatsNode')`, or use
@@ -253,4 +274,51 @@ export interface RatsNode
   onFileComplete(
     listener: (transferId: number, success: boolean, path: string) => void
   ): void
+
+  // --- pub/sub (GossipSub) ---
+  //
+  // Opt-in like file transfer: call `enablePubSub()` before `start()`.
+  //
+  // This is real GossipSub rather than floodsub — each subscribed topic keeps a
+  // bounded mesh, published messages are pushed along it, and a lazy IHAVE/IWANT
+  // layer recovers anything missed. Practically that means delivery is
+  // best-effort and unordered, and a message may reach you once even though
+  // several peers hold it.
+
+  /** Attach the pub/sub subsystem. Must be called before `start()`. */
+  enablePubSub(config?: PubSubConfig): void
+
+  /**
+   * Subscribe to a topic. One listener per topic; subscribing again to the same
+   * topic replaces the previous listener.
+   *
+   * `topic` names a global namespace shared by every node on your `protocol`, so
+   * prefix it if collisions matter. The ArrayBuffer handed to the listener owns
+   * its memory and stays valid for as long as the listener holds it.
+   */
+  subscribe(
+    topic: string,
+    listener: (peerId: string, topic: string, data: ArrayBuffer) => void
+  ): void
+
+  unsubscribe(topic: string): void
+
+  /**
+   * Publish to a topic. Goes along the mesh when this node is subscribed,
+   * otherwise through a short-lived fanout set.
+   *
+   * A subscribed publisher **also hears itself**: the local listener fires for
+   * this message with `peerId` set to this node's own `localId`. Compare against
+   * `localId` if you need to tell your own messages apart from a peer's. A node
+   * that is not subscribed has no listener and so sees nothing.
+   */
+  publish(topic: string, data: ArrayBuffer): void
+
+  isSubscribed(topic: string): boolean
+  subscribedTopics(): string[]
+
+  /** Peers that have announced interest in a topic. */
+  topicPeers(topic: string): string[]
+  /** This node's current mesh for a topic — the subset it exchanges full messages with. */
+  meshPeers(topic: string): string[]
 }

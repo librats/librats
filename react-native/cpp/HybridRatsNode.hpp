@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,7 @@
 namespace librats {
 class Node;
 class FileTransfer;
+class PubSub;
 struct NodeConfig;
 } // namespace librats
 
@@ -91,6 +93,21 @@ public:
                                const std::string& /* path */)>& listener)
       override;
 
+  // — pub/sub —
+  void enablePubSub(const std::optional<PubSubConfig>& config) override;
+  void subscribe(const std::string& topic,
+                 const std::function<void(const std::string& /* peerId */,
+                                          const std::string& /* topic */,
+                                          const std::shared_ptr<ArrayBuffer>& /* data */)>&
+                     listener) override;
+  void unsubscribe(const std::string& topic) override;
+  void publish(const std::string& topic,
+               const std::shared_ptr<ArrayBuffer>& data) override;
+  bool isSubscribed(const std::string& topic) override;
+  std::vector<std::string> subscribedTopics() override;
+  std::vector<std::string> topicPeers(const std::string& topic) override;
+  std::vector<std::string> meshPeers(const std::string& topic) override;
+
 private:
   /**
    * The Node, constructed on first use from whatever `configure()` last set.
@@ -104,9 +121,13 @@ private:
   /// never called. Ownership stays with the Node, which outlives every use here.
   ::librats::FileTransfer& files();
 
+  /// The attached PubSub subsystem, or throws if enablePubSub() was never called.
+  ::librats::PubSub& pubsub();
+
   std::unique_ptr<::librats::NodeConfig> config_;
   std::unique_ptr<::librats::Node> node_;
   ::librats::FileTransfer* files_ = nullptr;
+  ::librats::PubSub* pubsub_ = nullptr;
   bool started_ = false;
 };
 

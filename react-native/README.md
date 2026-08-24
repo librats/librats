@@ -114,6 +114,12 @@ Regenerate after changing the spec:
 npm run nitrogen
 ```
 
+Then **re-run `pod install`** (and re-sync Gradle) before building. CocoaPods
+copies the generated headers into `Pods/Headers/Public/LibratsRN/` at install
+time, so a spec that adds a type — a new config struct, say — fails the iOS build
+with `'YourNewType.hpp' file not found` until the pod is reinstalled. Nitrogen
+prints this reminder itself; it is easy to skip and costs a full build to notice.
+
 Neither platform wrapper duplicates librats' source list: both configure the root
 `CMakeLists.txt` and pull it in, the same rule the `android/` and `ios/` modules
 follow.
@@ -175,17 +181,77 @@ them, sanitise them yourself.
 `sendDirectory()` sends a whole tree as one transfer, and `transferStats()`
 returns cumulative byte and completion counters.
 
+## Pub/sub
+
+Real GossipSub, not floodsub: each subscribed topic keeps a bounded mesh,
+published messages are pushed along it, and a lazy IHAVE/IWANT layer recovers
+anything missed. Opt in with `enablePubSub()` before `start()`.
+
+```ts
+node.enablePubSub()                     // or { meshTarget, heartbeatIntervalMs, ... }
+
+node.subscribe('rooms/general', (peerId, topic, data) => {
+  console.log(topic, decodeUtf8(data))
+})
+
+node.start()
+node.publish('rooms/general', encodeUtf8('hello everyone'))
+```
+
+Three behaviours that surprise people:
+
+- **A subscribed publisher hears itself.** Publishing delivers to this node's own
+  listener too, with `peerId` set to your `localId` — so a chat UI does not need
+  to echo locally, but it does need to compare against `localId` if it wants to
+  tell its own messages apart. A node that is not subscribed to the topic has no
+  listener and sees nothing.
+- **A fresh subscription is not immediately reachable.** `SUBSCRIBE` is announced
+  asynchronously and mesh `GRAFT`s ride the heartbeat, so publishing right after
+  subscribing reaches nobody. Wait until `meshPeers(topic)` (or at least
+  `topicPeers(topic)`) contains the peer you expect — that is exactly what the
+  example's pub/sub test does.
+- **Delivery is best-effort and unordered**, and a message arrives once even
+  though several mesh peers hold it. This is not a reliable queue.
+
+`topic` is a global namespace shared by every node on your `protocol`, so prefix
+it if collisions matter.
+
+Unlike `onMessage` and the peer events, `subscribe`/`unsubscribe` are safe to call
+**after** `start()` — `PubSub` guards its topic tables with a mutex, whereas the
+core's channel router does not. Only `enablePubSub()` has to precede `start()`.
+
+### Why there is no `setValidator`
+
+librats lets you gate inbound messages per topic with a validator returning
+accept / reject / ignore. That is deliberately **not** exposed here.
+
+The validator's return value is consumed inline, on a reactor thread, to decide
+whether to deliver *and whether to forward* the message. JS can only be touched on
+the JS thread, so honouring it would mean blocking a reactor thread on the JS
+thread for every inbound message — stalling every peer on that reactor, and
+inviting deadlock. Nitro's `Sync<>` callbacks do not rescue this either: they may
+only be called *from* the JS thread, which is precisely what a reactor thread is
+not.
+
+If you need to drop messages, do it in the `subscribe` listener. The difference is
+that you cannot prevent the message being forwarded to the rest of the mesh — for
+that, a validator has to live in native code.
+
 ## Scope of this slice
 
-Implemented: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
+Core: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
 `connect`, `peerCount`, `peerIds`, `send`, `broadcast`, `onMessage`,
-`onPeerConnected`, `onPeerDisconnected`, plus the file-transfer surface above
-(`enableFileTransfer`, `sendFile`, `sendDirectory`, `acceptFile`, `rejectFile`,
-`pauseTransfer`, `resumeTransfer`, `cancelTransfer`, `transferStats`,
-`onFileOffer`, `onFileProgress`, `onFileComplete`).
+`onPeerConnected`, `onPeerDisconnected`.
 
-Not yet: pub/sub, DHT and mDNS discovery, NAT traversal controls, typed JSON
-messaging, and the storage and BitTorrent modules.
+File transfer: `enableFileTransfer`, `sendFile`, `sendDirectory`, `acceptFile`,
+`rejectFile`, `pauseTransfer`, `resumeTransfer`, `cancelTransfer`,
+`transferStats`, `onFileOffer`, `onFileProgress`, `onFileComplete`.
+
+Pub/sub: `enablePubSub`, `subscribe`, `unsubscribe`, `publish`, `isSubscribed`,
+`subscribedTopics`, `topicPeers`, `meshPeers`. Not `setValidator` — see above.
+
+Not yet: DHT and mDNS discovery, NAT traversal controls, typed JSON messaging,
+and the storage and BitTorrent modules.
 
 ## Example app
 
