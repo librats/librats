@@ -15,6 +15,7 @@
     "README.md"
   ],
   "scripts": {
+    "prepare": "nitrogen",
     "nitrogen": "nitrogen",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf nitrogen/generated"
@@ -30,11 +31,6 @@
   "peerDependencies": {
     "react-native": "*",
     "react-native-nitro-modules": "*"
-  },
-  "peerDependenciesMeta": {
-    "react-native-nitro-modules": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "nitrogen": "^0.37.0",

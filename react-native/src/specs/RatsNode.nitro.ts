@@ -205,6 +205,11 @@ export interface RatsNode
    * Handle messages arriving on a channel. One listener per channel; registering
    * a second for the same channel replaces the first.
    *
+   * **Must be called before `start()`** and throws otherwise. librats stores
+   * channel handlers in an unsynchronized map that reactor threads read on every
+   * inbound frame, so registering on a running node is a data race, not a
+   * late-but-harmless registration.
+   *
    * The ArrayBuffer handed to the listener owns its memory and stays valid for as
    * long as the listener holds it.
    */
@@ -215,6 +220,13 @@ export interface RatsNode
 
   // --- peer events ---
 
+  /**
+   * **Must be called before `start()`** and throws otherwise -- these append to
+   * a plain vector that reactor threads iterate on every peer event.
+   *
+   * Listeners accumulate: each call adds one, and there is no way to remove it.
+   * Register once, at setup, rather than from an effect that can re-run.
+   */
   onPeerConnected(listener: (peerId: string) => void): void
   onPeerDisconnected(listener: (peerId: string) => void): void
 
@@ -257,7 +269,12 @@ export interface RatsNode
 
   transferStats(): TransferStats
 
-  /** An incoming transfer needs a decision. Answer with accept or reject. */
+  /**
+   * An incoming transfer needs a decision. Answer with accept or reject.
+   *
+   * **Must be called before `start()`** and throws otherwise, like every other
+   * `on*` registration here.
+   */
   onFileOffer(listener: (offer: FileOffer) => void): void
 
   /**

@@ -56,11 +56,15 @@ xcrun -sdk iphonesimulator swiftc \
     -o "${WORK_DIR}/smoke"
 
 # Pick a simulator: the argument, else one already booted, else boot an iPhone.
-UDID="${1:-$(xcrun simctl list devices booted | grep -oE '[0-9A-F-]{36}' | head -1)}"
+# `|| true` is load-bearing: under `set -euo pipefail` the status of an
+# assignment is the status of its command substitution, so with no simulator
+# booted grep exits 1 and the script dies here -- silently, without ever
+# reaching the fallback below.
+UDID="${1:-$(xcrun simctl list devices booted | grep -oE '[0-9A-F-]{36}' | head -1 || true)}"
 
 if [[ -z "${UDID}" ]]; then
     UDID="$(xcrun simctl list devices available \
-            | grep iPhone | grep -oE '[0-9A-F-]{36}' | head -1)"
+            | grep iPhone | grep -oE '[0-9A-F-]{36}' | head -1 || true)"
     [[ -n "${UDID}" ]] || { echo "error: no iPhone simulator available" >&2; exit 1; }
     echo "==> booting ${UDID}"
     xcrun simctl boot "${UDID}"

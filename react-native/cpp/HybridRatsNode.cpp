@@ -185,6 +185,12 @@ void HybridRatsNode::onMessage(
     const std::string& channel,
     const std::function<void(const std::string&,
                              const std::shared_ptr<ArrayBuffer>&)>& listener) {
+  if (started_) {
+    throw std::runtime_error(
+        "onMessage() must be called before start(): librats registers handlers without "
+        "a lock and dispatches them from reactor threads, so registering on a "
+        "running node is a data race");
+  }
   node().on(channel, [listener](const rats::Peer& peer, rats::ByteView payload) {
     // The payload is a view into the connection's receive buffer, which is
     // recycled as soon as this handler returns — so it must be copied, not
@@ -195,12 +201,24 @@ void HybridRatsNode::onMessage(
 
 void HybridRatsNode::onPeerConnected(
     const std::function<void(const std::string&)>& listener) {
+  if (started_) {
+    throw std::runtime_error(
+        "onPeerConnected() must be called before start(): librats registers handlers without "
+        "a lock and dispatches them from reactor threads, so registering on a "
+        "running node is a data race");
+  }
   node().on_peer_connected(
       [listener](const rats::Peer& peer) { listener(peer.id().to_hex()); });
 }
 
 void HybridRatsNode::onPeerDisconnected(
     const std::function<void(const std::string&)>& listener) {
+  if (started_) {
+    throw std::runtime_error(
+        "onPeerDisconnected() must be called before start(): librats registers handlers without "
+        "a lock and dispatches them from reactor threads, so registering on a "
+        "running node is a data race");
+  }
   // Disconnect reports the id rather than a Peer handle: by the time it fires
   // there is no connection left to reach.
   node().on_peer_disconnected(
@@ -290,6 +308,12 @@ TransferStats HybridRatsNode::transferStats() {
 
 void HybridRatsNode::onFileOffer(
     const std::function<void(const FileOffer&)>& listener) {
+  if (started_) {
+    throw std::runtime_error(
+        "onFileOffer() must be called before start(): librats registers handlers without "
+        "a lock and dispatches them from reactor threads, so registering on a "
+        "running node is a data race");
+  }
   files().on_offer([listener](const rats::FileTransfer::Offer& offer) {
     listener(to_offer(offer));
   });
@@ -297,6 +321,12 @@ void HybridRatsNode::onFileOffer(
 
 void HybridRatsNode::onFileProgress(
     const std::function<void(const FileProgress&)>& listener) {
+  if (started_) {
+    throw std::runtime_error(
+        "onFileProgress() must be called before start(): librats registers handlers without "
+        "a lock and dispatches them from reactor threads, so registering on a "
+        "running node is a data race");
+  }
   files().on_progress([listener](const rats::FileTransfer::Progress& progress) {
     listener(to_progress(progress));
   });
@@ -304,6 +334,12 @@ void HybridRatsNode::onFileProgress(
 
 void HybridRatsNode::onFileComplete(
     const std::function<void(double, bool, const std::string&)>& listener) {
+  if (started_) {
+    throw std::runtime_error(
+        "onFileComplete() must be called before start(): librats registers handlers without "
+        "a lock and dispatches them from reactor threads, so registering on a "
+        "running node is a data race");
+  }
   files().on_complete(
       [listener](uint64_t id, bool success, const std::string& path) {
         listener(id_to_double(id), success, path);

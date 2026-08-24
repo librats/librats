@@ -91,62 +91,79 @@ function Demo() {
     nodes.current = [];
   }, []);
 
-  /** A connected pair with file transfer and pub/sub enabled on both. */
-  const connectPair = useCallback(async () => {
-    const server = createNode({ listenPort: 0, protocol: 'example/1.0' });
-    const client = createNode({
-      listenPort: 0,
-      protocol: 'example/1.0',
-      enableListen: false, // dial-only, the usual shape for a mobile peer
-    });
-    nodes.current = [server, client];
+  /** A connected pair with file transfer and pub/sub enabled on both.
+   *
+   *  `setup` runs once both nodes exist and their subsystems are enabled, but
+   *  before either one starts -- which is where every on*() registration has to
+   *  go. librats stores those handlers without a lock and dispatches them from
+   *  reactor threads, so registering on a running node is a data race, and the
+   *  binding throws rather than let one happen. subscribe() is the exception:
+   *  it takes the PubSub mutex and is safe at any time. */
+  const connectPair = useCallback(
+    async (setup?: (server: RatsNode, client: RatsNode) => void) => {
+      const server = createNode({ listenPort: 0, protocol: 'example/1.0' });
+      const client = createNode({
+        listenPort: 0,
+        protocol: 'example/1.0',
+        enableListen: false, // dial-only, the usual shape for a mobile peer
+      });
+      nodes.current = [server, client];
 
-    // Subsystems are opt-in and must be attached before start().
-    await mkdir(TEMP_DIR);
-    server.enableFileTransfer({ tempDirectory: TEMP_DIR });
-    client.enableFileTransfer({ tempDirectory: TEMP_DIR });
+      // Subsystems are opt-in and must be attached before start().
+      await mkdir(TEMP_DIR);
+      server.enableFileTransfer({ tempDirectory: TEMP_DIR });
+      client.enableFileTransfer({ tempDirectory: TEMP_DIR });
 
-    // A brisk heartbeat so mesh formation happens in a test-friendly time; the
-    // 1000ms default is tuned for real meshes, not for a two-node loopback.
-    server.enablePubSub({ heartbeatIntervalMs: 200 });
-    client.enablePubSub({ heartbeatIntervalMs: 200 });
+      // A brisk heartbeat so mesh formation happens in a test-friendly time; the
+      // 1000ms default is tuned for real meshes, not for a two-node loopback.
+      server.enablePubSub({ heartbeatIntervalMs: 200 });
+      client.enablePubSub({ heartbeatIntervalMs: 200 });
 
-    // Both directions are needed, and they are different ids: each side's
-    // onPeerConnected reports *the other* node. Sending to the wrong one is
-    // silent -- sendFile still returns a transfer id, because it only checks that
-    // the file is readable, not that the peer exists.
-    const serverSawClient = new Promise<string>(resolve => {
-      server.onPeerConnected(resolve);
-    });
-    const clientSawServer = new Promise<string>(resolve => {
-      client.onPeerConnected(resolve);
-    });
+      setup?.(server, client);
 
-    if (!server.start()) throw new Error('server failed to start');
-    if (!client.start()) throw new Error('client failed to start');
+      // Both directions are needed, and they are different ids: each side's
+      // onPeerConnected reports *the other* node. Sending to the wrong one is
+      // silent -- sendFile still returns a transfer id, because it only checks that
+      // the file is readable, not that the peer exists.
+      const serverSawClient = new Promise<string>(resolve => {
+        server.onPeerConnected(resolve);
+      });
+      const clientSawServer = new Promise<string>(resolve => {
+        client.onPeerConnected(resolve);
+      });
 
-    client.connect('127.0.0.1', server.listenPort);
-    const [clientId, serverId] = await Promise.race([
-      Promise.all([serverSawClient, clientSawServer]),
-      timeout(15000, 'no handshake'),
-    ]);
-    return { server, client, clientId, serverId };
-  }, []);
+      if (!server.start()) throw new Error('server failed to start');
+      if (!client.start()) throw new Error('client failed to start');
+
+      client.connect('127.0.0.1', server.listenPort);
+      const [clientId, serverId] = await Promise.race([
+        Promise.all([serverSawClient, clientSawServer]),
+        timeout(15000, 'no handshake'),
+      ]);
+      return { server, client, clientId, serverId };
+    },
+    [],
+  );
 
   const runChat = useCallback(async () => {
     stopAll();
     setLog([]);
     setStatus('running');
     try {
-      const { server, client, serverId } = await connectPair();
-      append(`handshake with ${serverId.slice(0, 8)}`);
-
-      server.onMessage(CHANNEL, (from, data) => {
-        server.send(from, CHANNEL, data); // echo straight back
-      });
+      // The resolver is captured before connectPair() so the handler can be
+      // registered inside setup, while the nodes are still stopped.
+      let resolveEcho!: (text: string) => void;
       const echoed = new Promise<string>(resolve => {
-        client.onMessage(CHANNEL, (_from, data) => resolve(decodeUtf8(data)));
+        resolveEcho = resolve;
       });
+
+      const { client, serverId } = await connectPair((srv, cli) => {
+        srv.onMessage(CHANNEL, (from, data) => {
+          srv.send(from, CHANNEL, data); // echo straight back
+        });
+        cli.onMessage(CHANNEL, (_from, data) => resolveEcho(decodeUtf8(data)));
+      });
+      append(`handshake with ${serverId.slice(0, 8)}`);
 
       client.send(serverId, CHANNEL, encodeUtf8(MESSAGE));
       const reply = await Promise.race([echoed, timeout(15000, 'no echo')]);
@@ -179,40 +196,47 @@ function Demo() {
       }
       append(`wrote source: ${FILE_BYTES} bytes`);
 
-      const { server, client, clientId } = await connectPair();
-      append(`handshake with ${clientId.slice(0, 8)}`);
-
-      // The receiver decides what to do with each offer. Ignoring one would
-      // occupy the sender until it times out.
-      client.onFileOffer(offer => {
-        append(
-          `offer: "${offer.name}" ${offer.size} bytes, ` +
-            `${offer.files.length} file(s)${offer.isDirectory ? ', directory' : ''}`,
-        );
-        client.acceptFile(offer.peerId, offer.transferId, DEST);
-      });
-
+      // Settled from inside setup, so the callbacks are registered while the
+      // nodes are still stopped.
       let progressEvents = 0;
-      client.onFileProgress(p => {
-        progressEvents += 1;
-        if (progressEvents === 1) {
-          append(
-            `first progress: ${p.percent.toFixed(0)}% ` +
-              `(${p.direction}, ${p.status}) ` +
-              `${(p.transferRateBps / 1024).toFixed(0)} KiB/s`,
-          );
-        }
+      let resolveDone!: (path: string) => void;
+      let rejectDone!: (error: Error) => void;
+      const done = new Promise<string>((resolve, reject) => {
+        resolveDone = resolve;
+        rejectDone = reject;
       });
 
-      const done = new Promise<string>((resolve, reject) => {
-        client.onFileComplete((_id, success, path) => {
+      const { server, clientId } = await connectPair((_srv, cli) => {
+        // The receiver decides what to do with each offer. Ignoring one would
+        // occupy the sender until it times out.
+        cli.onFileOffer(offer => {
+          append(
+            `offer: "${offer.name}" ${offer.size} bytes, ` +
+              `${offer.files.length} file(s)${offer.isDirectory ? ', directory' : ''}`,
+          );
+          cli.acceptFile(offer.peerId, offer.transferId, DEST);
+        });
+
+        cli.onFileProgress(p => {
+          progressEvents += 1;
+          if (progressEvents === 1) {
+            append(
+              `first progress: ${p.percent.toFixed(0)}% ` +
+                `(${p.direction}, ${p.status}) ` +
+                `${(p.transferRateBps / 1024).toFixed(0)} KiB/s`,
+            );
+          }
+        });
+
+        cli.onFileComplete((_id, success, path) => {
           if (success) {
-            resolve(path);
+            resolveDone(path);
           } else {
-            reject(new Error('transfer reported failure'));
+            rejectDone(new Error('transfer reported failure'));
           }
         });
       });
+      append(`handshake with ${clientId.slice(0, 8)}`);
 
       const transferId = server.sendFile(clientId, SOURCE);
       if (transferId === 0) throw new Error('sendFile rejected the source path');

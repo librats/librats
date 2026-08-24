@@ -32,6 +32,10 @@ cd ios && pod install
 Requires the New Architecture and Hermes (both are the default from React Native
 0.82, where the legacy bridge was removed).
 
+The published package ships Nitro's generated sources. Working from a clone of
+this repository, they are not in the tree — run `npm install` in `react-native/`
+first, which installs the codegen and runs it via the `prepare` script.
+
 ## Usage
 
 ```ts
@@ -261,6 +265,12 @@ loopback, completes a Noise handshake, and checks that a message comes back
 echoed. Same check as the Swift smoke test in `ios/`, driven through JS.
 
 ```bash
+# The binding itself first: nitrogen/generated/ is not in the repository, and
+# both `pod install` and Gradle fail on their autolinking include without it.
+# `npm install` here installs the codegen and runs it (the `prepare` script).
+cd react-native
+npm install
+
 cd example
 npm install
 npm start -- --port 8082          # 8081 is often taken
