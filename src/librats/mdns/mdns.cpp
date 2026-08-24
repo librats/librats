@@ -657,6 +657,14 @@ void MdnsClient::process_query(const DnsMessage& query, const std::string& sende
         if (question.name == our_service_name) {
             should_respond = true;
         }
+
+        // ...or for the host name our SRV record points at. A resolver that still has
+        // our announcement cached never needs to ask, since the A record rides along in
+        // it — but one holding only the SRV does, and unanswered it cannot turn the
+        // target into an address. The response carries every record either way.
+        if (question.type == DnsRecordType::A && question.name == host_name()) {
+            should_respond = true;
+        }
         
         if (should_respond) {
             LOG_MDNS_DEBUG("Responding to mDNS query for: " << question.name);
@@ -815,10 +823,7 @@ DnsMessage MdnsClient::create_announcement_message() {
     announcement.header.flags = static_cast<uint16_t>(MdnsFlags::AUTHORITATIVE);
     
     std::string our_service_name = create_service_instance_name(service_instance_name_);
-    std::string our_hostname = local_hostname_;
-    if (our_hostname.find(".local.") == std::string::npos) {
-        our_hostname += ".local.";
-    }
+    std::string our_hostname = host_name();
     
     // Create PTR record
     DnsResourceRecord ptr_record = create_ptr_record(service_type_, our_service_name);
@@ -1276,6 +1281,38 @@ std::string MdnsClient::create_service_instance_name(const std::string& instance
     }
     
     return clean_name + "." + service_type_;
+}
+
+std::string MdnsClient::host_name() const {
+    // Announce a host name derived from the service instance, not the system's own.
+    //
+    // The system name is not unique where it matters most. Android reports "localhost"
+    // for every device, and this client implements none of mDNS's name-conflict
+    // defence, so every Android peer on a LAN would claim "localhost.local." and a
+    // resolver asking for it gets whichever answered first — handing a dialer the
+    // wrong device's address. On desktops it is a different problem with the same
+    // shape: the OS's own responder already owns and defends the real host name, so
+    // announcing an A record for it makes us a second authority for a name we do not
+    // own.
+    //
+    // The instance label avoids both. MdnsDiscovery derives it from the PeerId, so it
+    // is unique per node — including between two nodes in one process — and nothing
+    // else on the network claims it.
+    std::string label = service_instance_name_;
+    std::replace_if(label.begin(), label.end(),
+                    [](char c) { return !std::isalnum(c) && c != '-'; }, '-');
+
+    // Before the first announce_service() there is no instance to name ourselves
+    // after, and the system name is all we have.
+    if (label.empty()) label = local_hostname_;
+    if (label.empty()) label = "librats-node";
+
+    // A DNS label stops at 63 octets, and a trailing hyphen is not a legal label.
+    if (label.size() > 63) label.resize(63);
+    while (!label.empty() && label.back() == '-') label.pop_back();
+    if (label.empty()) label = "librats-node";
+
+    return label + ".local.";
 }
 
 std::string MdnsClient::extract_instance_name_from_service(const std::string& service_name) {

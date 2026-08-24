@@ -745,8 +745,10 @@ if(RATS_BUILD_TESTS)
         list(APPEND TEST_SOURCES tests/test_mdns_dnssd.cpp)
     endif()
     # The subsystem test is backend-agnostic — it covers the adapter's lifecycle, not
-    # the network — so it runs everywhere.
+    # the network — so it runs everywhere. So is the host-name test: a pure accessor,
+    # no socket.
     list(APPEND TEST_SOURCES tests/test_mdns_discovery.cpp)
+    list(APPEND TEST_SOURCES tests/test_mdns_hostname.cpp)
     
     # Create test executable
     add_executable(librats_tests ${TEST_SOURCES})

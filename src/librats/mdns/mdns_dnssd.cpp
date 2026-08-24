@@ -284,12 +284,14 @@ void DnssdMdnsClient::emit_resolved() {
         // That is why this is not strictly equivalent to DNSServiceGetAddrInfo with the
         // browse's interface index.
         //
-        // And it trusts the peer's hostname to be unique, which on a LAN of Android
-        // peers it is not: MdnsClient announces the host as "localhost", and it
-        // implements no name-conflict defence, so two Android nodes both claim
-        // "localhost.local." and a resolver gets whichever answers first. The
-        // raw-socket backend sidesteps this by reading the address straight out of the
-        // announcement's A record instead of resolving the name at all.
+        // And it trusts the peer's host name to be unique. librats peers earn that:
+        // MdnsClient::host_name() announces the service instance label, which is
+        // derived from the PeerId, rather than the system's own name — it used to
+        // announce the latter, and since Android reports "localhost" for every device,
+        // every Android peer on a LAN claimed "localhost.local." and this lookup could
+        // return the wrong phone. A non-librats responder could still collide, which
+        // the raw-socket backend is immune to because it reads the address straight out
+        // of the announcement's A record rather than resolving the name at all.
         std::string ip = network_utils::resolve_hostname(item.host);
         if (ip.empty()) ip = network_utils::resolve_hostname_v6(item.host);
         if (ip.empty()) {
@@ -297,7 +299,8 @@ void DnssdMdnsClient::emit_resolved() {
             continue;
         }
 
-        LOG_MDNS_DEBUG("Resolved " << item.full_name << " to " << ip << ":" << item.port);
+        LOG_MDNS_DEBUG("Resolved " << item.full_name << " (host " << item.host << ") to "
+                                   << ip << ":" << item.port);
         // Always reported as new: this backend keeps no service cache, and the only
         // consumer (MdnsDiscovery) de-duplicates by address anyway.
         const MdnsService service(item.full_name, item.host, ip, item.port);
