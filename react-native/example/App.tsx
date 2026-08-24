@@ -530,6 +530,96 @@ function Demo() {
     }
   }, [append, beginRun, finishRun, stopAll]);
 
+  // BitTorrent, entirely offline. A synthetic info hash finds no peers, which is
+  // the point: everything here is local state, so the test says something definite
+  // on a device with no internet rather than depending on a live swarm.
+  //
+  // What it cannot cover is a real transfer, or the metadata fetch -- both need
+  // peers that actually have the torrent. Those are left to a manual run.
+  const runBittorrent = useCallback(async () => {
+    if (!beginRun()) return;
+    try {
+      await mkdir(TEMP_DIR);
+      const node = createNode({ dataDir: TEMP_DIR, protocol: 'example/1.0' });
+      nodes.current = [node];
+
+      // Before the DHT, so the client can borrow it -- the ordering the subsystem
+      // documents. Without a DHT it still runs, on trackers and PEX alone.
+      node.enableDht({ discoveryKey: DISCOVERY_KEY });
+      node.enableBittorrent({ listenPort: 0, downloadPath: TEMP_DIR });
+
+      if (!node.start()) throw new Error('node failed to start');
+
+      const stats = node.bittorrentStats();
+      append(`swarm on port ${stats.listenPort}, dht shared: ${stats.usingNodeDht}`);
+      if (!stats.running) throw new Error('client did not start');
+      if (stats.listenPort === 0) throw new Error('no swarm port was bound');
+      if (!stats.usingNodeDht) throw new Error('client did not borrow the node DHT');
+
+      try {
+        node.enableBittorrent();
+        throw new Error('enableBittorrent() after start() should have thrown');
+      } catch (error) {
+        if (!(error instanceof Error) || !/before start/.test(error.message)) throw error;
+      }
+
+      // A malformed magnet must be rejected rather than silently doing nothing.
+      try {
+        node.addMagnet('not-a-magnet');
+        throw new Error('a malformed magnet should have thrown');
+      } catch (error) {
+        if (!(error instanceof Error) || !/magnet/i.test(error.message)) throw error;
+      }
+      append('bad magnet and late enable both rejected');
+
+      const hash = '0123456789abcdef0123456789abcdef01234567';
+      const added = node.addMagnet(`magnet:?xt=urn:btih:${hash}&dn=librats-rn-example`);
+      if (added !== hash) throw new Error(`info hash came back as ${added}`);
+      append(`added magnet ${added.slice(0, 16)}...`);
+
+      if (!node.torrentInfoHashes().includes(hash)) {
+        throw new Error('the torrent is missing from torrentInfoHashes()');
+      }
+
+      let status = node.torrentStatus(hash);
+      if (!status.exists) throw new Error('the torrent it just added does not exist');
+      // A magnet carries no info dict, so nothing about the content is known yet.
+      if (status.hasMetadata) throw new Error('a fresh magnet cannot have metadata');
+      append(`status: metadata=${status.hasMetadata} peers=${status.numPeers}`);
+
+      node.pauseTorrent(hash);
+      await waitUntil(() => node.torrentStatus(hash).paused, 5000, 'torrent did not pause');
+      node.resumeTorrent(hash);
+      await waitUntil(() => !node.torrentStatus(hash).paused, 5000, 'torrent did not resume');
+      append('paused and resumed');
+
+      node.removeTorrent(hash);
+      status = node.torrentStatus(hash);
+      if (status.exists) throw new Error('the torrent survived removal');
+      if (node.torrentInfoHashes().length !== 0) {
+        throw new Error('torrentInfoHashes() still lists it');
+      }
+      append('removed');
+
+      // An unknown torrent is a normal answer, not an error.
+      if (node.torrentStatus(hash).exists) throw new Error('unknown torrent reported exists');
+      try {
+        node.torrentStatus('nope');
+        throw new Error('a malformed info hash should have thrown');
+      } catch (error) {
+        if (!(error instanceof Error) || !/40 hex/.test(error.message)) throw error;
+      }
+
+      stopAll();
+      append('stopped');
+      finishRun('pass');
+    } catch (error) {
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      stopAll();
+      finishRun('fail');
+    }
+  }, [append, beginRun, finishRun, stopAll]);
+
   // NAT traversal against the real network. Two loopback nodes cannot demonstrate
   // a punch or a relay -- both need peers on opposite sides of a NAT -- so this
   // checks the parts that are observable from one device: that the subsystems
@@ -927,6 +1017,12 @@ function Demo() {
           onPress={runNat}
           disabled={busy}>
           <Text style={styles.buttonText}>nat</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, busy && styles.buttonDisabled]}
+          onPress={runBittorrent}
+          disabled={busy}>
+          <Text style={styles.buttonText}>bt</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.button, busy && styles.buttonDisabled]}
