@@ -27,7 +27,16 @@ def reactNativeArchitectures() {
 
 android {
   namespace 'com.librats.rn'
-  compileSdk 35
+
+  // Inherit the consuming app's compileSdk rather than pinning one. Pinning breaks
+  // release builds outright: Nitro compiles against the app's level and its release
+  // AAR metadata then requires every consumer to match, so a hardcoded 35 fails
+  // checkReleaseAarMetadata with "requires libraries and applications that depend on
+  // it to compile against version 37 or later". Debug builds do not check this, which
+  // is why it stays hidden until someone tries to ship.
+  compileSdk rootProject.ext.has('compileSdkVersion')
+      ? Integer.parseInt(rootProject.ext.get('compileSdkVersion').toString())
+      : 35
 
   // Inherit the consuming app's NDK instead of letting AGP pick the newest one
   // installed. Getting this wrong is a runtime crash, not a build error: the app
