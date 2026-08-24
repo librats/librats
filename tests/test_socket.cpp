@@ -332,7 +332,11 @@ TEST_F(SocketTest, UdpBatchReceiveReportsWouldBlockOnAnEmptySocket) {
 // pins the mechanism that fixes it — a receive timeout has to give control back, and
 // report no-data rather than an error.
 TEST_F(SocketTest, RecvTimeoutReturnsInsteadOfBlockingForever) {
-    socket_t server = create_tcp_server(0, 1);
+    // IPv4 explicitly, not the dual-stack default: the client below dials 127.0.0.1,
+    // and asking for the bound port of a dual-stack (IPv6) socket through a
+    // sockaddr_in is a portability trap — POSIX truncates the oversized address
+    // silently, while Windows fails getsockname outright with WSAEFAULT.
+    socket_t server = create_tcp_server(0, 1, "", AddressFamily::IPv4);
     ASSERT_TRUE(is_valid_socket(server));
 
     // Port 0 means "any", so ask the kernel which one it actually bound.
