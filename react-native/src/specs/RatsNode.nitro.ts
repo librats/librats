@@ -310,9 +310,8 @@ export interface ReconnectionConfig {
  *
  * Be aware of the build cost. Unlike the other subsystems this one is compiled out
  * unless the native build sets `RATS_SEARCH_FEATURES`, which this package turns on
- * for both platforms. It is not free: it added 17 MB to the Android debug library
- * (54 → 71 MB, arm64, unstripped), so a release build will pay a smaller but real
- * share of that.
+ * for both platforms. Measured on a release build, stripped, Android arm64: it adds
+ * **0.5 MB** to librats (2.73 -> 3.25 MB), which is what an APK actually ships.
  */
 export interface BittorrentConfig {
   /** Swarm listen port. 0 picks an ephemeral one. Default 6881. */

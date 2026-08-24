@@ -64,10 +64,10 @@ set(RATS_SHARED_LIBRARY  OFF CACHE BOOL ""                                     F
 # Native binding exposes it, so it has to be on here or the storage symbols do not
 # exist to link against.
 set(RATS_STORAGE       ON  CACHE BOOL "Storage is part of this binding's API" FORCE)
-# BitTorrent is on because enableBittorrent() is part of this binding's API. It is
-# the one subsystem with a real size cost: it added 17 MB to the arm64 debug library
-# (54 -> 71 MB, unstripped). Drop this and the spec's BitTorrent methods together if
-# that matters more than the feature does.
+# BitTorrent is on because enableBittorrent() is part of this binding's API. Its cost
+# is 0.5 MB on a stripped arm64 release build of librats (2.73 -> 3.25 MB) — measure
+# stripped, not the ~10 MB the unstripped debug artifacts differ by. Drop this and the
+# spec's BitTorrent methods together if that still matters more than the feature.
 set(RATS_SEARCH_FEATURES ON  CACHE BOOL "BitTorrent is part of this binding's API" FORCE)
 
 # Install rules stay ON: `cmake --install` is how the header tree (including the

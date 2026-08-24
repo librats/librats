@@ -497,13 +497,20 @@ To show a torrent before committing to the download, `fetchTorrentMetadata()` ad
 temporary metadata-only torrent, waits for the info dict, and removes it again —
 giving you the name, total size and file list for an info hash alone.
 
-**Build cost.** This is the only subsystem here with a size penalty worth stating:
-it is compiled out unless the native build defines `RATS_SEARCH_FEATURES`, which this
-package forces on for both platforms, and enabling it added **17 MB** to the Android
-arm64 debug library (54 → 71 MB, unstripped). A release build pays a smaller but real
-share of that. If the feature is not worth it to you, drop the
-`set(RATS_SEARCH_FEATURES ON ...)` line from `android/CMakeLists.txt` and
-`../ios/CMakeLists.txt` together with the BitTorrent methods in the spec.
+**Build cost: 0.5 MB.** It is compiled out unless the native build defines
+`RATS_SEARCH_FEATURES`, which this package forces on for both platforms. Measured on a
+stripped `Release` build of librats for Android arm64 — the artifact an APK actually
+ships — it takes the library from **2.73 MB to 3.25 MB**, about +19%.
+
+Measure stripped, and measure release. The equivalent *debug unstripped* libraries
+differ by 10 MB, and the two debug APK libraries by 17 MB; those numbers describe
+symbol tables, not what a user downloads, and quoting them overstates the cost by more
+than thirty times.
+
+If the feature is not worth even that, remove the `set(RATS_SEARCH_FEATURES ON ...)`
+line from `android/CMakeLists.txt` and `../ios/CMakeLists.txt` **and** the BitTorrent
+methods from the spec — the flag alone will not link, because the binding calls
+`librats::Bittorrent` unconditionally.
 
 Spider mode — the DHT-wide infohash crawler the C++ subsystem exposes for
 rats-search — is deliberately not bound. It is a search-engine feature rather than an
