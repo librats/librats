@@ -1,0 +1,49 @@
+# Resolve react_native_pods.rb with node to allow for hoisting
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve(
+    "react-native/scripts/react_native_pods.rb",
+    {paths: [process.argv[1]]},
+  )', __dir__]).strip
+
+platform :ios, min_ios_version_supported
+prepare_react_native_project!
+
+# librats is consumed as an XCFramework built from the C++ core. The podspec has a
+# prepare_command for this, but CocoaPods skips prepare_command for local path
+# pods (which is what a linked module in an example app is), so build it here.
+# A published package would ship the prebuilt XCFramework instead.
+module_root = File.expand_path('../..', __dir__)
+unless Dir.exist?(File.join(module_root, 'ios/LibRats.xcframework'))
+  Pod::UI.puts '[librats] building LibRats.xcframework (first pod install only)...'
+  build_dir = File.join(module_root, 'ios/build')
+  script = File.expand_path('../../ios/build-xcframework.sh', module_root)
+  raise "librats build script not found at #{script}" unless File.exist?(script)
+  Pod::Executable.execute_command(script, [build_dir], true)
+  FileUtils.cp_r(File.join(build_dir, 'LibRats.xcframework'),
+                 File.join(module_root, 'ios'))
+end
+
+linkage = ENV['USE_FRAMEWORKS']
+if linkage != nil
+  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+  use_frameworks! :linkage => linkage.to_sym
+end
+
+target 'LibratsExample' do
+  config = use_native_modules!
+
+  use_react_native!(
+    :path => config[:reactNativePath],
+    # An absolute path to your application root.
+    :app_path => "#{Pod::Config.instance.installation_root}/.."
+  )
+
+  post_install do |installer|
+    react_native_post_install(
+      installer,
+      config[:reactNativePath],
+      :mac_catalyst_enabled => false,
+      # :ccache_enabled => true
+    )
+  end
+end

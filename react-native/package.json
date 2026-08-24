@@ -1,0 +1,45 @@
+{
+  "name": "react-native-librats",
+  "version": "0.1.0",
+  "description": "React Native bindings for librats - P2P networking, via Nitro Modules",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "src",
+    "cpp",
+    "android",
+    "ios",
+    "nitrogen/generated",
+    "nitro.json",
+    "LibratsRN.podspec",
+    "README.md"
+  ],
+  "scripts": {
+    "nitrogen": "nitrogen",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf nitrogen/generated"
+  },
+  "keywords": [
+    "react-native",
+    "librats",
+    "p2p",
+    "nitro",
+    "networking"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "react-native": "*",
+    "react-native-nitro-modules": "*"
+  },
+  "peerDependenciesMeta": {
+    "react-native-nitro-modules": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "nitrogen": "^0.37.0",
+    "react-native": "^0.87.0",
+    "react-native-nitro-modules": "^0.37.0",
+    "typescript": "^5.5.0"
+  }
+}
