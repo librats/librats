@@ -29,6 +29,17 @@ android {
   namespace 'com.librats.rn'
   compileSdk 35
 
+  // Inherit the consuming app's NDK instead of letting AGP pick the newest one
+  // installed. Getting this wrong is a runtime crash, not a build error: the app
+  // packages one libc++_shared.so (from its own NDK, via React Native's prefabs),
+  // and a library built against a newer NDK links against libc++ symbols that
+  // copy does not export. It then fails at dlopen with
+  // "cannot locate symbol __cxa_init_primary_exception", after the build has
+  // happily succeeded.
+  if (rootProject.hasProperty('ndkVersion')) {
+    ndkVersion rootProject.property('ndkVersion')
+  }
+
   defaultConfig {
     minSdk 24
 
