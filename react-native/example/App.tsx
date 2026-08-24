@@ -620,6 +620,92 @@ function Demo() {
     }
   }, [append, beginRun, finishRun, stopAll]);
 
+  // Ping and reconnection: the two subsystems a long-lived mobile peer wants, and the
+  // two the example was missing until 07_full_chat.cpp made the gap obvious.
+  //
+  // Both are verifiable on one device. Ping needs a live pair and a round trip, which
+  // the loopback provides. Reconnection is checked as bookkeeping rather than as a
+  // recovery: making a real drop happen would mean killing a socket out from under the
+  // reactor, and a test that fakes the drop proves nothing about the re-dial anyway.
+  const runKeepalive = useCallback(async () => {
+    if (!beginRun()) return;
+    try {
+      await mkdir(TEMP_DIR);
+      const server = createNode({ listenPort: 0, protocol: 'example/1.0' });
+      const client = createNode({
+        listenPort: 0,
+        protocol: 'example/1.0',
+        dataDir: TEMP_DIR,
+      });
+      nodes.current = [server, client];
+
+      // A brisk interval so a round trip is measured in test time, not the 10s default.
+      server.enablePing({ intervalMs: 300 });
+      client.enablePing({ intervalMs: 300 });
+      client.enableReconnection({ storePath: `${TEMP_DIR}/peers-test.json` });
+
+      const sawEachOther = new Promise<string>(resolve => {
+        client.onPeerConnected(resolve);
+      });
+
+      if (!server.start()) throw new Error('server failed to start');
+      if (!client.start()) throw new Error('client failed to start');
+
+      for (const [name, node] of [['ping', server], ['reconnection', client]] as const) {
+        try {
+          if (name === 'ping') node.enablePing();
+          else node.enableReconnection();
+          throw new Error(`enable ${name} after start() should have thrown`);
+        } catch (error) {
+          if (!(error instanceof Error) || !/before start/.test(error.message)) throw error;
+        }
+      }
+      append('late enable rejected for both');
+
+      client.connect('127.0.0.1', server.listenPort);
+      const serverId = await Promise.race([sawEachOther, timeout(15000, 'no handshake')]);
+      append(`handshake with ${serverId.slice(0, 8)}`);
+
+      // -1 until a probe has come back, which is also what a dead peer reads as.
+      if (client.peerRtt(serverId) !== -1) {
+        throw new Error('rtt should be unmeasured before the first probe returns');
+      }
+      await waitUntil(() => client.peerRtt(serverId) >= 0, 15000, 'no rtt was measured');
+      const rtt = client.peerRtt(serverId);
+      append(`rtt ${rtt}ms, alive ${client.alivePeerCount()}/${client.peerCount}`);
+      if (client.alivePeerCount() < 1) throw new Error('the peer answered but reads as dead');
+
+      // The reconnect book: adding a target is what a real app does on connect, so it
+      // can be re-dialled later without the app remembering anything itself.
+      const target = `127.0.0.1:${server.listenPort}`;
+      client.addReconnectTarget(target);
+      if (client.reconnectTargetCount() < 1) throw new Error('target was not recorded');
+      if (!client.knownPeers(16).includes(target)) {
+        throw new Error(`knownPeers() does not list ${target}`);
+      }
+      append(`reconnect targets: ${client.reconnectTargetCount()}, book has the peer`);
+
+      client.removeReconnectTarget(target);
+      append(`after remove: ${client.reconnectTargetCount()} target(s)`);
+
+      try {
+        client.addReconnectTarget('not-an-address');
+        throw new Error('a malformed address should have thrown');
+      } catch (error) {
+        if (!(error instanceof Error) || !/host:port/.test(error.message)) throw error;
+      }
+      append('malformed address rejected');
+
+      stopAll();
+      append('stopped');
+      finishRun('pass');
+    } catch (error) {
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      stopAll();
+      finishRun('fail');
+    }
+  }, [append, beginRun, finishRun, stopAll]);
+
   // NAT traversal against the real network. Two loopback nodes cannot demonstrate
   // a punch or a relay -- both need peers on opposite sides of a NAT -- so this
   // checks the parts that are observable from one device: that the subsystems
@@ -1023,6 +1109,12 @@ function Demo() {
           onPress={runBittorrent}
           disabled={busy}>
           <Text style={styles.buttonText}>bt</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, busy && styles.buttonDisabled]}
+          onPress={runKeepalive}
+          disabled={busy}>
+          <Text style={styles.buttonText}>ping</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.button, busy && styles.buttonDisabled]}
