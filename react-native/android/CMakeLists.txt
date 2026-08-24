@@ -45,6 +45,11 @@ set(RATS_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
 # since Nitro is a C++ consumer and has no FFI boundary to flatten across.
 set(RATS_BINDINGS       OFF CACHE BOOL "" FORCE)
 
+# The distributed key-value store is off by default in the root build; this
+# binding exposes it, so it has to be on here or the storage symbols do not exist
+# to link against.
+set(RATS_STORAGE        ON  CACHE BOOL "Storage is part of this binding's API" FORCE)
+
 add_subdirectory(${LIBRATS_SOURCE_DIR} ${LIBRATS_BINARY_DIR})
 
 target_link_libraries(LibratsRN rats)

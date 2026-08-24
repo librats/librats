@@ -178,6 +178,100 @@ export interface DhtStatus {
 }
 
 /**
+ * Peer exchange (PEX): peers gossip the addresses of peers they know, so the mesh
+ * grows from the links it already has — no DHT or tracker needed.
+ *
+ * Pull-only: on connecting to a peer this node asks for a sample of its peers and
+ * dials the ones it does not have. **Both sides must have it enabled** — the
+ * responder needs it to answer.
+ *
+ * Pair it with hole punching. A PEX entry carries an id *and* an address, which is
+ * exactly what a peer behind a NAT cannot be reached at: the advertised endpoint
+ * fails to dial and the mesh silently stays one link short. With `HolePunch`
+ * attached, PEX hands that id to it instead of writing the peer off — which is
+ * what makes reaching a specific peer by id work organically as the mesh grows.
+ */
+export interface PeerExchangeConfig {
+  /** Cap on entries sent, and acted on, per response. Default 32. */
+  maxAddressesPerResponse?: number
+  /** How many peers to ask for on connect. Default 32. */
+  requestMax?: number
+  /** Ask automatically whenever a peer connects. Default true. */
+  requestOnConnect?: boolean
+  /**
+   * Only share globally-routable addresses. Default false. Turn this on if you do
+   * not want LAN addresses gossiped outside the LAN.
+   */
+  publicOnly?: boolean
+  /** Suppress re-dialling the same address for this long. Default 300000. */
+  dialCooldownMs?: number
+  /** Stop dialling discovered peers once this many are connected. 0 = no limit. */
+  peerTarget?: number
+  /** Hand an unreachable discovered peer to HolePunch. Default true. */
+  punchOnDialFailure?: boolean
+}
+
+/**
+ * Distributed key-value store configuration.
+ *
+ * Requires the library to be built with `RATS_STORAGE`; both platform builds in
+ * this package turn it on.
+ */
+export interface StorageConfig {
+  /**
+   * Where the database files live. Defaults to the node's `dataDir`, because the
+   * library's own default (`"./storage"`) is relative to the working directory
+   * and not writable on either mobile platform. With neither set, `enableStorage`
+   * throws rather than letting every write fail later.
+   */
+  dataDirectory?: string
+  /** Filename prefix for the database. Default "rats_storage". */
+  databaseName?: string
+  /** Replicate changes to peers. Default true; false makes it a local store. */
+  enableSync?: boolean
+  /** Tombstones tolerated before compaction. Default 1000. */
+  compactionThreshold?: number
+  /** Largest value accepted, in bytes. Default 16 MiB. */
+  maxValueSize?: number
+  /** Persist to disk at all. Default true; false is memory-only. */
+  persistToDisk?: boolean
+}
+
+/** Which typed accessor a stored value belongs to. */
+export type StorageValueType = 'binary' | 'string' | 'int' | 'double' | 'json'
+
+export type StorageOperation = 'put' | 'delete'
+
+/**
+ * A change to the store, local or replicated from a peer.
+ *
+ * The values themselves are not included: read them back with the typed getters
+ * if you need them, so a large write does not cross the bridge just to announce
+ * itself.
+ */
+export interface StorageChangeEvent {
+  operation: StorageOperation
+  key: string
+  /** Meaningful for `put`; for `delete` it describes what was removed. */
+  type: StorageValueType
+  timestampMs: number
+  /** Peer that made the change, as hex. */
+  originPeerId: string
+  /** True when this arrived from another peer rather than a local call. */
+  isRemote: boolean
+}
+
+export interface StorageStats {
+  totalEntries: number
+  /** Tombstones still held for conflict resolution. */
+  deletedEntries: number
+  totalDataBytes: number
+  diskUsageBytes: number
+  entriesSynced: number
+  entriesSent: number
+}
+
+/**
  * How this node's own side of the NAT behaves, as reported by the mesh.
  *
  * This is the single most useful thing to look at when a cross-network connection
@@ -619,4 +713,86 @@ export interface RatsNode
 
   /** Remove every handler registered for `type`. */
   offJson(type: string): void
+
+  // --- distributed key-value storage ---
+  //
+  // A replicated store with Last-Write-Wins conflict resolution: a local write is
+  // broadcast to peers, and on connect both sides exchange a full snapshot so a
+  // late joiner catches up. LWW makes the merge order-independent.
+  //
+  // What LWW means in practice: **concurrent writes to one key do not merge, the
+  // later timestamp simply wins and the other is lost.** That is fine for
+  // last-known-state (a profile, a setting, a presence flag) and wrong for
+  // anything you would otherwise increment or append. Two phones editing the same
+  // key offline will lose one edit.
+  //
+  // Timestamps come from each device's clock, so a badly-skewed clock can make a
+  // stale write win. There is no vector clock here.
+
+  // --- peer exchange ---
+
+  /**
+   * Attach peer exchange. Must be called before `start()`.
+   *
+   * There is nothing to call afterwards — PEX is autonomous, asking each new peer
+   * for its peers and dialling what it learns. Enable `enableHolePunch()` too so
+   * an unreachable discovered peer is punched rather than dropped.
+   */
+  enablePeerExchange(config?: PeerExchangeConfig): void
+
+  /** Attach the store. Must be called before `start()`. */
+  enableStorage(config?: StorageConfig): void
+
+  /**
+   * Typed writes. Each returns false if the value exceeds `maxValueSize` or the
+   * store rejected it.
+   *
+   * The types are distinct on the wire, so a value written with `putInt` reads
+   * back through `getInt` — including for a C++ or Java peer. Note `putInt` takes
+   * a JS `number`, which represents integers exactly only up to 2^53; a peer
+   * storing a full int64 beyond that will not round-trip through JS.
+   */
+  putString(key: string, value: string): boolean
+  putInt(key: string, value: number): boolean
+  putDouble(key: string, value: number): boolean
+  putBinary(key: string, value: ArrayBuffer): boolean
+  /** Throws if `json` is not valid JSON. */
+  putJson(key: string, json: string): boolean
+
+  /**
+   * Typed reads. `undefined` means either absent or stored as a different type —
+   * `getValueType()` distinguishes those.
+   */
+  getString(key: string): string | undefined
+  getInt(key: string): number | undefined
+  getDouble(key: string): number | undefined
+  getBinary(key: string): ArrayBuffer | undefined
+  getJson(key: string): string | undefined
+  getValueType(key: string): StorageValueType | undefined
+
+  /** Writes a tombstone and replicates it; the key stays until compaction. */
+  removeKey(key: string): boolean
+  hasKey(key: string): boolean
+  storageKeys(): string[]
+  storageKeysWithPrefix(prefix: string): string[]
+  storageCount(): number
+  clearStorage(): void
+
+  /** Flush to disk. Also happens automatically; call it before backgrounding. */
+  saveStorage(): boolean
+  /** Reload from disk, discarding in-memory state. */
+  loadStorage(): boolean
+  /** Drop tombstones that are no longer needed. Returns how many were removed. */
+  compactStorage(): number
+
+  /** Ask peers for a full snapshot. False if there is no peer to ask. */
+  requestStorageSync(): boolean
+  isStorageSynced(): boolean
+  storageStats(): StorageStats
+
+  /**
+   * Observe changes, local and remote. One listener; registering again replaces
+   * it. Check `isRemote` to tell a peer's write from your own.
+   */
+  onStorageChange(listener: (event: StorageChangeEvent) => void): void
 }

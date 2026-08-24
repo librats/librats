@@ -60,6 +60,11 @@ set(RATS_BINDINGS        ON  CACHE BOOL "The C ABI is what Swift imports"      F
 set(RATS_STATIC_LIBRARY  ON  CACHE BOOL "Static: no dylib to sign or embed"    FORCE)
 set(RATS_SHARED_LIBRARY  OFF CACHE BOOL ""                                     FORCE)
 
+# The distributed key-value store is off by default in the root build; the React
+# Native binding exposes it, so it has to be on here or the storage symbols do not
+# exist to link against.
+set(RATS_STORAGE       ON  CACHE BOOL "Storage is part of this binding's API" FORCE)
+
 # Install rules stay ON: `cmake --install` is how the header tree (including the
 # generated version.h / features.h) is staged for the XCFramework.
 set(RATS_INSTALL         ON  CACHE BOOL "Staged into the XCFramework"          FORCE)

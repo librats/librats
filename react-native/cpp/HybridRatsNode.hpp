@@ -20,6 +20,8 @@ class HolePunch;
 class Relay;
 class PortMappingService;
 class MessageJson;
+class StorageManager;
+class PeerExchange;
 struct NodeConfig;
 } // namespace librats
 
@@ -139,6 +141,38 @@ public:
                                          const std::string& /* json */)>& listener) override;
   void offJson(const std::string& type) override;
 
+  // — peer exchange —
+  void enablePeerExchange(const std::optional<PeerExchangeConfig>& config) override;
+
+  // — distributed key-value storage —
+  void enableStorage(const std::optional<StorageConfig>& config) override;
+  bool putString(const std::string& key, const std::string& value) override;
+  bool putInt(const std::string& key, double value) override;
+  bool putDouble(const std::string& key, double value) override;
+  bool putBinary(const std::string& key,
+                 const std::shared_ptr<ArrayBuffer>& value) override;
+  bool putJson(const std::string& key, const std::string& json) override;
+  std::optional<std::string> getString(const std::string& key) override;
+  std::optional<double> getInt(const std::string& key) override;
+  std::optional<double> getDouble(const std::string& key) override;
+  std::optional<std::shared_ptr<ArrayBuffer>> getBinary(const std::string& key) override;
+  std::optional<std::string> getJson(const std::string& key) override;
+  std::optional<StorageValueType> getValueType(const std::string& key) override;
+  bool removeKey(const std::string& key) override;
+  bool hasKey(const std::string& key) override;
+  std::vector<std::string> storageKeys() override;
+  std::vector<std::string> storageKeysWithPrefix(const std::string& prefix) override;
+  double storageCount() override;
+  void clearStorage() override;
+  bool saveStorage() override;
+  bool loadStorage() override;
+  double compactStorage() override;
+  bool requestStorageSync() override;
+  bool isStorageSynced() override;
+  StorageStats storageStats() override;
+  void onStorageChange(
+      const std::function<void(const StorageChangeEvent&)>& listener) override;
+
 private:
   /**
    * The Node, constructed on first use from whatever `configure()` last set.
@@ -167,6 +201,9 @@ private:
   /// never called.
   ::librats::MessageJson& json();
 
+  /// The attached StorageManager, or throws if enableStorage() was never called.
+  ::librats::StorageManager& storage();
+
   std::unique_ptr<::librats::NodeConfig> config_;
   std::unique_ptr<::librats::Node> node_;
   ::librats::FileTransfer* files_ = nullptr;
@@ -176,6 +213,8 @@ private:
   ::librats::HolePunch* hole_punch_ = nullptr;
   ::librats::Relay* relay_ = nullptr;
   ::librats::MessageJson* json_ = nullptr;
+  ::librats::StorageManager* storage_ = nullptr;
+  ::librats::PeerExchange* pex_ = nullptr;
   bool started_ = false;
 };
 

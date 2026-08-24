@@ -12,6 +12,8 @@
 #include <librats/subsystems/message_json.h>
 #include <librats/subsystems/port_mapping_service.h>
 #include <librats/subsystems/relay.h>
+#include <librats/storage/storage.h>
+#include <librats/subsystems/peer_exchange.h>
 #include <librats/subsystems/pubsub.h>
 
 #include <stdexcept>
@@ -739,5 +741,223 @@ void HybridRatsNode::onceJson(
 }
 
 void HybridRatsNode::offJson(const std::string& type) { json().off(type); }
+
+// ── peer exchange ───────────────────────────────────────────────────────────
+
+void HybridRatsNode::enablePeerExchange(
+    const std::optional<PeerExchangeConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enablePeerExchange() must be called before start()");
+  }
+  if (pex_ != nullptr) {
+    throw std::runtime_error("peer exchange is already enabled");
+  }
+
+  rats::PeerExchange::Config cfg;
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.maxAddressesPerResponse.has_value()) {
+      cfg.max_addresses_per_response =
+          static_cast<size_t>(*c.maxAddressesPerResponse);
+    }
+    if (c.requestMax.has_value())        cfg.request_max        = static_cast<size_t>(*c.requestMax);
+    if (c.requestOnConnect.has_value())  cfg.request_on_connect = *c.requestOnConnect;
+    if (c.publicOnly.has_value())        cfg.public_only        = *c.publicOnly;
+    if (c.peerTarget.has_value())        cfg.peer_target        = static_cast<size_t>(*c.peerTarget);
+    if (c.punchOnDialFailure.has_value()) {
+      cfg.punch_on_dial_failure = *c.punchOnDialFailure;
+    }
+    if (c.dialCooldownMs.has_value()) {
+      cfg.dial_cooldown =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.dialCooldownMs));
+    }
+  }
+
+  // Nothing is stored beyond the pointer: PEX has no post-attach API, it just
+  // asks each new peer for its peers and dials what it learns.
+  pex_ = node().add_subsystem(std::make_unique<rats::PeerExchange>(std::move(cfg)));
+}
+
+// ── distributed key-value storage ───────────────────────────────────────────
+
+namespace {
+
+StorageValueType to_value_type(rats::StorageValueType t) {
+  switch (t) {
+    case rats::StorageValueType::BINARY: return StorageValueType::BINARY;
+    case rats::StorageValueType::STRING: return StorageValueType::STRING;
+    case rats::StorageValueType::INT64:  return StorageValueType::INT;
+    case rats::StorageValueType::DOUBLE: return StorageValueType::DOUBLE;
+    case rats::StorageValueType::JSON:   return StorageValueType::JSON;
+  }
+  return StorageValueType::BINARY;
+}
+
+StorageChangeEvent to_change_event(const rats::StorageChangeEvent& e) {
+  // The values themselves are left out: read them back with the typed getters if
+  // needed, so a 16 MiB write does not cross the bridge merely to announce itself.
+  return StorageChangeEvent(
+      e.operation == rats::StorageOperation::OP_PUT ? StorageOperation::PUT
+                                                    : StorageOperation::DELETE,
+      e.key, to_value_type(e.type), static_cast<double>(e.timestamp_ms),
+      e.origin_peer_id, e.is_remote);
+}
+
+} // namespace
+
+rats::StorageManager& HybridRatsNode::storage() {
+  if (storage_ == nullptr) {
+    throw std::runtime_error(
+        "storage is not enabled - call enableStorage() before start()");
+  }
+  return *storage_;
+}
+
+void HybridRatsNode::enableStorage(const std::optional<StorageConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableStorage() must be called before start()");
+  }
+  if (storage_ != nullptr) {
+    throw std::runtime_error("storage is already enabled");
+  }
+
+  rats::StorageConfig cfg;
+
+  // The library default is "./storage", relative to the working directory, which
+  // is not writable on either mobile platform. Inherit the node's data_dir so the
+  // database lands beside the identity; refuse outright when neither is available
+  // rather than letting every single write fail later.
+  if (config_ != nullptr && !config_->data_dir.empty()) {
+    cfg.data_directory = config_->data_dir + "/storage";
+  } else {
+    cfg.data_directory.clear();
+  }
+
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.dataDirectory.has_value())  cfg.data_directory = *c.dataDirectory;
+    if (c.databaseName.has_value())   cfg.database_name  = *c.databaseName;
+    if (c.enableSync.has_value())     cfg.enable_sync    = *c.enableSync;
+    if (c.persistToDisk.has_value())  cfg.persist_to_disk = *c.persistToDisk;
+    if (c.compactionThreshold.has_value()) {
+      cfg.compaction_threshold = static_cast<uint32_t>(*c.compactionThreshold);
+    }
+    if (c.maxValueSize.has_value()) {
+      cfg.max_value_size = static_cast<uint32_t>(*c.maxValueSize);
+    }
+  }
+
+  if (cfg.persist_to_disk && cfg.data_directory.empty()) {
+    throw std::invalid_argument(
+        "storage needs a writable directory: set dataDirectory, or the node's "
+        "dataDir, or persistToDisk: false for a memory-only store");
+  }
+
+  storage_ = node().add_subsystem(std::make_unique<rats::StorageManager>(cfg));
+}
+
+bool HybridRatsNode::putString(const std::string& key, const std::string& value) {
+  return storage().put(key, value);
+}
+
+bool HybridRatsNode::putInt(const std::string& key, double value) {
+  // JS numbers are doubles, so only integers up to 2^53 survive exactly. Reject
+  // anything else instead of silently truncating into an int64 slot.
+  if (value != static_cast<double>(static_cast<int64_t>(value)) ||
+      value > 9007199254740992.0 || value < -9007199254740992.0) {
+    throw std::invalid_argument(
+        "putInt needs an integer within +/-2^53; use putDouble or putString "
+        "for anything else");
+  }
+  return storage().put(key, static_cast<int64_t>(value));
+}
+
+bool HybridRatsNode::putDouble(const std::string& key, double value) {
+  return storage().put(key, value);
+}
+
+bool HybridRatsNode::putBinary(const std::string& key,
+                               const std::shared_ptr<ArrayBuffer>& value) {
+  const auto view = view_of(value);
+  return storage().put(key, std::vector<uint8_t>(view.data(), view.data() + view.size()));
+}
+
+bool HybridRatsNode::putJson(const std::string& key, const std::string& json) {
+  return storage().put_json(key, parse_json(json, key));
+}
+
+std::optional<std::string> HybridRatsNode::getString(const std::string& key) {
+  return storage().get_string(key);
+}
+
+std::optional<double> HybridRatsNode::getInt(const std::string& key) {
+  const auto v = storage().get_int(key);
+  if (!v.has_value()) return std::nullopt;
+  return static_cast<double>(*v);
+}
+
+std::optional<double> HybridRatsNode::getDouble(const std::string& key) {
+  return storage().get_double(key);
+}
+
+std::optional<std::shared_ptr<ArrayBuffer>> HybridRatsNode::getBinary(
+    const std::string& key) {
+  const auto v = storage().get_binary(key);
+  if (!v.has_value()) return std::nullopt;
+  return ArrayBuffer::copy(v->data(), v->size());
+}
+
+std::optional<std::string> HybridRatsNode::getJson(const std::string& key) {
+  const auto v = storage().get_json(key);
+  if (!v.has_value()) return std::nullopt;
+  return v->dump();
+}
+
+std::optional<StorageValueType> HybridRatsNode::getValueType(const std::string& key) {
+  const auto t = storage().get_type(key);
+  if (!t.has_value()) return std::nullopt;
+  return to_value_type(*t);
+}
+
+bool HybridRatsNode::removeKey(const std::string& key) { return storage().remove(key); }
+bool HybridRatsNode::hasKey(const std::string& key) { return storage().has(key); }
+
+std::vector<std::string> HybridRatsNode::storageKeys() { return storage().keys(); }
+
+std::vector<std::string> HybridRatsNode::storageKeysWithPrefix(
+    const std::string& prefix) {
+  return storage().keys_with_prefix(prefix);
+}
+
+double HybridRatsNode::storageCount() {
+  return static_cast<double>(storage().size());
+}
+
+void HybridRatsNode::clearStorage() { storage().clear(); }
+bool HybridRatsNode::saveStorage() { return storage().save(); }
+bool HybridRatsNode::loadStorage() { return storage().load(); }
+
+double HybridRatsNode::compactStorage() {
+  return static_cast<double>(storage().compact());
+}
+
+bool HybridRatsNode::requestStorageSync() { return storage().request_sync(); }
+bool HybridRatsNode::isStorageSynced() { return storage().is_synced(); }
+
+StorageStats HybridRatsNode::storageStats() {
+  const auto s = storage().get_statistics();
+  return StorageStats(static_cast<double>(s.total_entries),
+                      static_cast<double>(s.deleted_entries),
+                      static_cast<double>(s.total_data_bytes),
+                      static_cast<double>(s.disk_usage_bytes),
+                      static_cast<double>(s.entries_synced),
+                      static_cast<double>(s.entries_sent));
+}
+
+void HybridRatsNode::onStorageChange(
+    const std::function<void(const StorageChangeEvent&)>& listener) {
+  storage().set_change_callback(
+      [listener](const rats::StorageChangeEvent& e) { listener(to_change_event(e)); });
+}
 
 } // namespace margelo::nitro::librats
