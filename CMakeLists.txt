@@ -493,6 +493,11 @@ if(WIN32)
 endif()
 
 if(ANDROID)
+    # The logger routes console output through __android_log_print, because an app's
+    # stdout/stderr go nowhere on Android.
+    find_library(log-lib log)
+    target_link_libraries(rats ${log-lib})
+
     if(DEFINED ANDROID_PLATFORM)
         string(REGEX REPLACE "android-" "" ANDROID_API_LEVEL ${ANDROID_PLATFORM})
         math(EXPR ANDROID_API_LEVEL "${ANDROID_API_LEVEL}")
