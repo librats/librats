@@ -6,6 +6,7 @@
 #include <librats/peer/peer.h>
 #include <librats/peer/peer_id.h>
 #include <librats/subsystems/file_transfer.h>
+#include <librats/subsystems/pubsub.h>
 
 #include <stdexcept>
 #include <utility>
@@ -307,6 +308,83 @@ void HybridRatsNode::onFileComplete(
       [listener](uint64_t id, bool success, const std::string& path) {
         listener(id_to_double(id), success, path);
       });
+}
+
+// ── pub/sub ─────────────────────────────────────────────────────────────────
+
+rats::PubSub& HybridRatsNode::pubsub() {
+  if (pubsub_ == nullptr) {
+    throw std::runtime_error(
+        "pub/sub is not enabled - call enablePubSub() before start()");
+  }
+  return *pubsub_;
+}
+
+void HybridRatsNode::enablePubSub(const std::optional<PubSubConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enablePubSub() must be called before start()");
+  }
+  if (pubsub_ != nullptr) {
+    throw std::runtime_error("pub/sub is already enabled");
+  }
+
+  rats::PubSub::Config cfg;
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.meshTarget.has_value())   cfg.mesh_target   = static_cast<int>(*c.meshTarget);
+    if (c.meshLow.has_value())      cfg.mesh_low      = static_cast<int>(*c.meshLow);
+    if (c.meshHigh.has_value())     cfg.mesh_high     = static_cast<int>(*c.meshHigh);
+    if (c.fanoutSize.has_value())   cfg.fanout_size   = static_cast<int>(*c.fanoutSize);
+    if (c.gossipFactor.has_value()) cfg.gossip_factor = static_cast<int>(*c.gossipFactor);
+    if (c.heartbeatIntervalMs.has_value()) {
+      cfg.heartbeat_interval =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.heartbeatIntervalMs));
+    }
+    if (c.seenLimit.has_value()) cfg.seen_limit = static_cast<size_t>(*c.seenLimit);
+  }
+
+  pubsub_ = node().add_subsystem(std::make_unique<rats::PubSub>(std::move(cfg)));
+}
+
+void HybridRatsNode::subscribe(
+    const std::string& topic,
+    const std::function<void(const std::string&, const std::string&,
+                             const std::shared_ptr<ArrayBuffer>&)>& listener) {
+  pubsub().subscribe(topic, [listener](const rats::PeerId& from,
+                                       const std::string& t, rats::ByteView data) {
+    // Copied for the same reason as a channel message: the view points into
+    // buffers the subsystem reuses once this handler returns.
+    listener(from.to_hex(), t, ArrayBuffer::copy(data.data(), data.size()));
+  });
+}
+
+void HybridRatsNode::unsubscribe(const std::string& topic) {
+  pubsub().unsubscribe(topic);
+}
+
+void HybridRatsNode::publish(const std::string& topic,
+                             const std::shared_ptr<ArrayBuffer>& data) {
+  pubsub().publish(topic, view_of(data));
+}
+
+bool HybridRatsNode::isSubscribed(const std::string& topic) {
+  return pubsub().is_subscribed(topic);
+}
+
+std::vector<std::string> HybridRatsNode::subscribedTopics() {
+  return pubsub().subscribed_topics();
+}
+
+std::vector<std::string> HybridRatsNode::topicPeers(const std::string& topic) {
+  std::vector<std::string> out;
+  for (const auto& id : pubsub().peers_for_topic(topic)) out.push_back(id.to_hex());
+  return out;
+}
+
+std::vector<std::string> HybridRatsNode::meshPeers(const std::string& topic) {
+  std::vector<std::string> out;
+  for (const auto& id : pubsub().mesh_peers(topic)) out.push_back(id.to_hex());
+  return out;
 }
 
 } // namespace margelo::nitro::librats

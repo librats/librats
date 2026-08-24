@@ -1,13 +1,15 @@
 /**
  * librats React Native example.
  *
- * Two self-verifying tests, both run with a pair of nodes inside this one
+ * Three self-verifying tests, each run with a pair of nodes inside this one
  * process so a single device is enough to prove the binding works:
  *
- *   chat - one node dials the other over the loopback, they complete a Noise
- *          handshake, and a message comes back echoed.
- *   file - one node offers a 512 KiB file, the other accepts it, and the
- *          received bytes are compared against what was sent.
+ *   chat   - one node dials the other over the loopback, they complete a Noise
+ *            handshake, and a message comes back echoed.
+ *   file   - one node offers a 512 KiB file, the other accepts it, and the
+ *            received bytes are compared against what was sent.
+ *   pubsub - both subscribe to a topic, the mesh forms, one publishes, and the
+ *            other receives it (as does the publisher itself).
  */
 import React, { useCallback, useRef, useState } from 'react';
 import {
@@ -40,6 +42,9 @@ type Status = 'idle' | 'running' | 'pass' | 'fail';
 const CHANNEL = 'chat';
 const MESSAGE = 'hello from react native';
 
+const TOPIC = 'example/announcements';
+const GOSSIP = 'published over gossipsub';
+
 // Comfortably larger than the 256 KiB default progress interval, so the transfer
 // produces several progress events rather than completing in one step.
 const FILE_BYTES = 512 * 1024;
@@ -53,6 +58,21 @@ function timeout(ms: number, what: string): Promise<never> {
   return new Promise((_resolve, reject) =>
     setTimeout(() => reject(new Error(`${what} within ${ms / 1000}s`)), ms),
   );
+}
+
+/** Poll until `check` holds. GossipSub forms its mesh on a heartbeat, so the
+ *  interesting states here arrive a beat or two after the call that triggers them. */
+async function waitUntil(
+  check: () => boolean,
+  ms: number,
+  what: string,
+): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise<void>(resolve => setTimeout(() => resolve(), 100));
+  }
+  throw new Error(`${what} within ${ms / 1000}s`);
 }
 
 function Demo() {
@@ -71,7 +91,7 @@ function Demo() {
     nodes.current = [];
   }, []);
 
-  /** A connected sender/receiver pair, with file transfer enabled on both. */
+  /** A connected pair with file transfer and pub/sub enabled on both. */
   const connectPair = useCallback(async () => {
     const server = createNode({ listenPort: 0, protocol: 'example/1.0' });
     const client = createNode({
@@ -85,6 +105,11 @@ function Demo() {
     await mkdir(TEMP_DIR);
     server.enableFileTransfer({ tempDirectory: TEMP_DIR });
     client.enableFileTransfer({ tempDirectory: TEMP_DIR });
+
+    // A brisk heartbeat so mesh formation happens in a test-friendly time; the
+    // 1000ms default is tuned for real meshes, not for a two-node loopback.
+    server.enablePubSub({ heartbeatIntervalMs: 200 });
+    client.enablePubSub({ heartbeatIntervalMs: 200 });
 
     // Both directions are needed, and they are different ids: each side's
     // onPeerConnected reports *the other* node. Sending to the wrong one is
@@ -222,6 +247,70 @@ function Demo() {
     }
   }, [append, connectPair, stopAll]);
 
+  const runPubSub = useCallback(async () => {
+    stopAll();
+    setLog([]);
+    setStatus('running');
+    try {
+      const { server, client, clientId } = await connectPair();
+      append(`handshake with ${clientId.slice(0, 8)}`);
+
+      // Both sides subscribe, so the publisher pushes along a real mesh rather
+      // than the short-lived fanout set used for unsubscribed topics.
+      const received = new Promise<string>(resolve => {
+        client.subscribe(TOPIC, (_peerId, _topic, data) =>
+          resolve(decodeUtf8(data)),
+        );
+      });
+      // A subscribed publisher also hears its own message, tagged with its own
+      // peer id -- which is how a chat UI tells its messages apart from a
+      // peer's, so it is worth asserting rather than treating as noise.
+      const heardSelf = new Promise<string>(resolve => {
+        server.subscribe(TOPIC, peerId => resolve(peerId));
+      });
+
+      if (!client.isSubscribed(TOPIC)) throw new Error('subscribe did not register');
+      append(`subscribed topics: ${client.subscribedTopics().join(', ')}`);
+
+      // SUBSCRIBE is announced asynchronously and GRAFT rides the heartbeat, so
+      // publishing straight away would reach nobody.
+      await waitUntil(
+        () => server.meshPeers(TOPIC).includes(clientId),
+        15000,
+        'mesh did not form',
+      );
+      append(
+        `mesh formed: ${server.meshPeers(TOPIC).length} peer(s), ` +
+          `${server.topicPeers(TOPIC).length} known subscriber(s)`,
+      );
+
+      server.publish(TOPIC, encodeUtf8(GOSSIP));
+      const got = await Promise.race([received, timeout(15000, 'no gossip')]);
+      if (got !== GOSSIP) throw new Error(`payload mismatch: "${got}"`);
+      append(`subscriber received: "${got}"`);
+
+      const selfId = await Promise.race([
+        heardSelf,
+        timeout(15000, 'publisher did not hear itself'),
+      ]);
+      if (selfId !== server.localId) {
+        throw new Error(`self-delivery tagged ${selfId.slice(0, 8)}, not own id`);
+      }
+      append(`publisher heard itself, tagged ${selfId.slice(0, 8)} (own id)`);
+
+      client.unsubscribe(TOPIC);
+      if (client.isSubscribed(TOPIC)) throw new Error('unsubscribe did not take');
+      append('unsubscribed');
+
+      stopAll();
+      setStatus('pass');
+    } catch (error) {
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      stopAll();
+      setStatus('fail');
+    }
+  }, [append, connectPair, stopAll]);
+
   const busy = status === 'running';
 
   return (
@@ -241,6 +330,12 @@ function Demo() {
           onPress={runFile}
           disabled={busy}>
           <Text style={styles.buttonText}>file test</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, busy && styles.buttonDisabled]}
+          onPress={runPubSub}
+          disabled={busy}>
+          <Text style={styles.buttonText}>pubsub test</Text>
         </TouchableOpacity>
       </View>
 
@@ -277,7 +372,7 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 32, fontWeight: '700', color: '#e6edf3' },
   subtitle: { fontSize: 14, color: '#8b949e', marginBottom: 20 },
-  row: { flexDirection: 'row', gap: 12 },
+  row: { flexDirection: 'row', gap: 8 },
   button: {
     flex: 1,
     backgroundColor: '#238636',
@@ -286,7 +381,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   buttonDisabled: { backgroundColor: '#30363d' },
-  buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  buttonText: { color: '#fff', fontSize: 14, fontWeight: '600' },
   statusRow: { height: 40, justifyContent: 'center', alignItems: 'center' },
   pass: { color: '#3fb950', fontSize: 20, fontWeight: '700' },
   fail: { color: '#f85149', fontSize: 20, fontWeight: '700' },
