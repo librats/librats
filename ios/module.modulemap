@@ -1,0 +1,13 @@
+// Exposes the librats C ABI to Swift as `import LibRats`.
+//
+// Only bindings/rats.h is declared, so Swift sees the 70-function C surface and
+// none of the C++ headers that sit beside it in the same tree. rats.h is plain C
+// (stddef.h, stdint.h, and the preprocessor-only rats_export.h → features.h),
+// which is what makes a direct import possible with no shim.
+//
+// Header paths resolve relative to this file, so it must be installed at the
+// root of the header tree — the directory that has librats/ underneath it.
+module LibRats {
+    header "librats/bindings/rats.h"
+    export *
+}

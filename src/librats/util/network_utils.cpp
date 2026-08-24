@@ -17,8 +17,17 @@
         #include <ifaddrs.h>
     #endif
 
+    #ifdef __APPLE__
+        #include <TargetConditionals.h>
+    #endif
+
     // macOS / BSD default-gateway lookup via the PF_ROUTE sysctl routing table.
-    #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
+    // Apple ships <net/route.h> in the macOS SDK only: on iOS (and tvOS/watchOS)
+    // the sysctl still exists but its declarations are not public, so those
+    // targets skip this branch and rely on append_gateway_heuristics() below,
+    // which every platform falls back to anyway.
+    #if (defined(__APPLE__) && defined(TARGET_OS_OSX) && TARGET_OS_OSX) || \
+        defined(__FreeBSD__) || defined(__NetBSD__) || \
         defined(__OpenBSD__) || defined(__DragonFly__)
         #define RATS_HAVE_BSD_ROUTES 1
         #include <sys/types.h>

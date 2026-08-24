@@ -25,7 +25,21 @@
     #include <cerrno>
 #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
       defined(__OpenBSD__) || defined(__DragonFly__)
+    #ifdef __APPLE__
+        #include <TargetConditionals.h>
+    #endif
+    // Apple ships <net/route.h> in the macOS SDK only. On iOS the PF_ROUTE
+    // socket itself is usable but the message declarations are not public, so
+    // there is nothing to parse against — those targets take the polling
+    // fallback at the bottom of this file (backend_start() returns false).
+    // A native backend for iOS belongs on Network.framework's nw_path_monitor
+    // rather than on route messages.
+    #if !defined(__APPLE__) || (defined(TARGET_OS_OSX) && TARGET_OS_OSX)
     #define RATS_MONITOR_BSD_ROUTES 1
+    #endif
+#endif
+
+#if defined(RATS_MONITOR_BSD_ROUTES)
     #include <sys/types.h>
     #include <sys/socket.h>
     #include <net/route.h>
