@@ -7,6 +7,7 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
 [![Release](https://img.shields.io/github/release/DEgITx/librats.svg)](https://github.com/DEgITx/librats/releases)
 [![npm](https://img.shields.io/npm/v/librats.svg)](https://www.npmjs.com/package/librats)
+[![vcpkg](https://img.shields.io/vcpkg/v/librats)](https://vcpkg.io/en/package/librats)
 
 **A high-performance, lightweight peer-to-peer networking library with C++, C, Node.js, Java, Python, React Native, Android, and iOS support**
 
@@ -779,6 +780,24 @@ add_executable(my_p2p_app main.cpp)
 target_link_libraries(my_p2p_app PRIVATE rats)
 # Include directories are propagated automatically (use #include <librats/node/node.h>).
 ```
+
+#### Method 3: vcpkg
+
+librats is in the official [vcpkg](https://vcpkg.io/en/package/librats) registry:
+
+```bash
+vcpkg install librats
+# optional features:
+vcpkg install librats[bindings,search-features,storage]
+```
+
+```cmake
+find_package(rats CONFIG REQUIRED)
+target_link_libraries(my_p2p_app PRIVATE rats::rats)
+```
+
+(The port lives in [`ports/librats/`](ports/librats) in this repository and can also be used as an
+overlay port with `vcpkg install librats --overlay-ports=<path-to-librats>/ports`.)
 
 #### Required System Libraries
 
