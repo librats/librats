@@ -506,10 +506,17 @@ function Demo() {
         // permission failure in that window still fails this test.
         await new Promise<void>(resolve => setTimeout(() => resolve(), 3000));
         if (connected > 0) {
-          append(`unexpected bonus: a peer was found (${connected})`);
+          // Same-host peers are filtered out on this backend, so anything found
+          // here is necessarily on another device -- which is the part a single
+          // device cannot prove. Two phones running this at once is the expected
+          // way to see it, not a fluke: the instance names carry a random suffix
+          // precisely so they do not collide.
+          append(`${connected} peer(s) found over mDNS -- on another device,`);
+          append('since same-host peers are filtered on this backend');
         } else {
-          append('announced and browsing; same-host peers are filtered on this');
-          append('backend by design -- use two devices via listen/find');
+          append('announced and browsing, and nothing else answered. Same-host');
+          append('peers are filtered here by design, so run this on a second');
+          append('device at the same time to see discovery actually happen.');
         }
       }
 
