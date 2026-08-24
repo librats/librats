@@ -10,10 +10,10 @@
     "test": "jest"
   },
   "dependencies": {
+    "@dr.pogodin/react-native-fs": "^2.40.0",
+    "@react-native/new-app-screen": "0.87.0",
     "react": "19.2.3",
     "react-native": "0.87.0",
-    "@react-native/new-app-screen": "0.87.0",
-    "react-native-safe-area-context": "^5.5.2",
     "react-native-librats": "file:..",
     "react-native-nitro-modules": "^0.37.0"
   },

@@ -25,6 +25,95 @@ export interface RatsConfig {
 }
 
 /**
+ * File-transfer configuration. Mirrors the subset of
+ * `librats::FileTransfer::Config` this binding exposes.
+ */
+export interface FileTransferConfig {
+  /**
+   * Where in-progress downloads are written before being verified and moved to
+   * their destination. **Required**, because the library default (".") is the
+   * process working directory, which is not writable on either mobile platform.
+   * Use a cache path — the app's Caches directory on iOS, `cacheDir` on Android.
+   */
+  tempDirectory: string
+  /** Payload bytes per chunk. Default 65536. */
+  chunkSize?: number
+  /** Maximum un-acked bytes in flight; the backpressure window. Default 4 MiB. */
+  windowBytes?: number
+  /** Abort a transfer that has been idle this long. Default 60. */
+  transferTimeoutSecs?: number
+  /** Whole-file SHA-256 check end to end. Default true; turning it off is unwise. */
+  verifyIntegrity?: boolean
+}
+
+/** One file inside a transfer. A single-file transfer has exactly one. */
+export interface FileEntry {
+  /** POSIX path relative to the transfer root. */
+  relativePath: string
+  size: number
+}
+
+/**
+ * An incoming transfer awaiting a decision. Answer every offer with either
+ * `acceptFile()` or `rejectFile()` — an ignored offer occupies the sender until
+ * it times out.
+ *
+ * Treat `name` and every `files[].relativePath` as untrusted: they come from the
+ * peer. The library validates manifest paths against traversal before writing,
+ * but if you build a UI or a destination path from them, sanitise them yourself.
+ */
+export interface FileOffer {
+  peerId: string
+  transferId: number
+  /** File or directory name as the sender declared it. Untrusted. */
+  name: string
+  /** Total bytes across all files. */
+  size: number
+  isDirectory: boolean
+  files: FileEntry[]
+}
+
+export type TransferDirection = 'sending' | 'receiving'
+
+export type TransferStatus =
+  | 'pending'
+  | 'active'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+/** A progress snapshot, delivered for transfers in both directions. */
+export interface FileProgress {
+  transferId: number
+  peerId: string
+  direction: TransferDirection
+  status: TransferStatus
+  bytesTransferred: number
+  totalBytes: number
+  filesCompleted: number
+  totalFiles: number
+  /** Completion in [0, 100], precomputed from the byte counts. */
+  percent: number
+  /** Recent smoothed throughput, bytes/sec. */
+  transferRateBps: number
+  /** Mean throughput since the transfer went live, bytes/sec. */
+  averageRateBps: number
+  /** Time since the transfer went live. */
+  elapsedMs: number
+  /** ETA at the recent rate. 0 means unknown. */
+  etaMs: number
+}
+
+/** Aggregate counters since the node started. */
+export interface TransferStats {
+  bytesSent: number
+  bytesReceived: number
+  completed: number
+  failed: number
+}
+
+/**
  * A librats peer-to-peer node.
  *
  * Create one with `NitroModules.createHybridObject<RatsNode>('RatsNode')`, or use
@@ -107,4 +196,61 @@ export interface RatsNode
 
   onPeerConnected(listener: (peerId: string) => void): void
   onPeerDisconnected(listener: (peerId: string) => void): void
+
+  // --- file transfer ---
+  //
+  // Opt-in, like every librats capability: call `enableFileTransfer()` before
+  // `start()` or the methods below throw. Files are streamed natively by path —
+  // no bytes cross the JS bridge, so a multi-gigabyte transfer costs the JS
+  // thread nothing beyond the progress events.
+
+  /**
+   * Attach the file-transfer subsystem. Must be called before `start()`, and
+   * before any of the methods or listeners below.
+   */
+  enableFileTransfer(config: FileTransferConfig): void
+
+  /**
+   * Offer a single file to a peer. Returns the transfer id, or 0 if the file
+   * cannot be read. Non-blocking: the offer goes out and the peer decides.
+   */
+  sendFile(peerId: string, path: string): number
+
+  /** Offer a directory tree, sent recursively as one transfer. 0 on failure. */
+  sendDirectory(peerId: string, path: string): number
+
+  /**
+   * Accept an offered transfer. For a single file `destPath` is the destination
+   * file path; for a directory it is the destination directory. Data lands in a
+   * temp file and is moved into place only after its SHA-256 verifies.
+   */
+  acceptFile(peerId: string, transferId: number, destPath: string): void
+
+  /** Decline an offered transfer. */
+  rejectFile(peerId: string, transferId: number): void
+
+  /** Control a live transfer from either side. False if no such transfer. */
+  pauseTransfer(peerId: string, transferId: number): boolean
+  resumeTransfer(peerId: string, transferId: number): boolean
+  cancelTransfer(peerId: string, transferId: number): boolean
+
+  transferStats(): TransferStats
+
+  /** An incoming transfer needs a decision. Answer with accept or reject. */
+  onFileOffer(listener: (offer: FileOffer) => void): void
+
+  /**
+   * Progress for transfers in both directions. Fires on the library's own
+   * cadence (roughly per progress interval), not per chunk.
+   */
+  onFileProgress(listener: (progress: FileProgress) => void): void
+
+  /**
+   * A transfer finished. `path` is the final destination on the receiving side
+   * and the source path on the sending side. Check `success`: a failed integrity
+   * check or a disk error also arrives here.
+   */
+  onFileComplete(
+    listener: (transferId: number, success: boolean, path: string) => void
+  ): void
 }

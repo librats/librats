@@ -118,14 +118,73 @@ Neither platform wrapper duplicates librats' source list: both configure the roo
 `CMakeLists.txt` and pull it in, the same rule the `android/` and `ios/` modules
 follow.
 
+## File transfer
+
+Opt-in like every librats capability — call `enableFileTransfer()` before
+`start()`, on both the sending and receiving node.
+
+**Files never cross the JS bridge.** The native side streams them by path, so a
+multi-gigabyte transfer costs the JS thread nothing beyond the progress events.
+That is why the API takes paths rather than `ArrayBuffer`s.
+
+```ts
+const node = createNode({ dataDir })
+node.enableFileTransfer({ tempDirectory: `${cacheDir}/rats-transfers` })
+
+// The receiver must answer every offer -- an ignored one occupies the sender
+// until it times out.
+node.onFileOffer((offer) => {
+  if (offer.size < 100_000_000) {
+    node.acceptFile(offer.peerId, offer.transferId, `${docsDir}/${offer.name}`)
+  } else {
+    node.rejectFile(offer.peerId, offer.transferId)
+  }
+})
+
+node.onFileProgress((p) => {
+  console.log(`${p.percent.toFixed(0)}% at ${p.transferRateBps / 1024} KiB/s, eta ${p.etaMs}ms`)
+})
+
+node.onFileComplete((transferId, success, path) => {
+  console.log(success ? `saved to ${path}` : 'transfer failed')
+})
+
+node.start()
+
+const transferId = node.sendFile(peerId, `${docsDir}/photo.jpg`)  // 0 = unreadable
+node.pauseTransfer(peerId, transferId)
+node.resumeTransfer(peerId, transferId)
+node.cancelTransfer(peerId, transferId)
+```
+
+`tempDirectory` is **required**. The library default is `"."`, the process working
+directory, which is not writable on either mobile platform — so the binding
+rejects an empty value up front rather than letting every transfer fail later at
+the first temp-file write. Use a cache path (iOS Caches, Android `cacheDir`):
+it holds only in-progress downloads, which are moved to their destination once
+the whole-file SHA-256 verifies.
+
+Two things worth knowing about the data model. `transferId` is a JS `number` and
+that is exact, not a rounding compromise: ids come from a counter starting at 1,
+so they stay far inside the 2^53 a double represents precisely — no `bigint`
+needed. And `offer.name` plus every `offer.files[].relativePath` come from the
+peer, so treat them as untrusted; the library validates manifest paths against
+traversal before writing, but if you build a destination path or a UI label out of
+them, sanitise them yourself.
+
+`sendDirectory()` sends a whole tree as one transfer, and `transferStats()`
+returns cumulative byte and completion counters.
+
 ## Scope of this slice
 
 Implemented: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
 `connect`, `peerCount`, `peerIds`, `send`, `broadcast`, `onMessage`,
-`onPeerConnected`, `onPeerDisconnected`.
+`onPeerConnected`, `onPeerDisconnected`, plus the file-transfer surface above
+(`enableFileTransfer`, `sendFile`, `sendDirectory`, `acceptFile`, `rejectFile`,
+`pauseTransfer`, `resumeTransfer`, `cancelTransfer`, `transferStats`,
+`onFileOffer`, `onFileProgress`, `onFileComplete`).
 
-Not yet: file transfer (needs ArrayBuffer streaming plus progress/offer
-callbacks), pub/sub, DHT and mDNS discovery, NAT traversal controls, typed JSON
+Not yet: pub/sub, DHT and mDNS discovery, NAT traversal controls, typed JSON
 messaging, and the storage and BitTorrent modules.
 
 ## Example app
@@ -146,8 +205,16 @@ npx react-native run-ios
 npx react-native run-android
 ```
 
-Press **run test**; the log ends in `PASS`. First `pod install` builds
+Press **chat test** or **file test**; each log ends in `PASS`. The file test
+writes a 512 KiB file, offers it from one node to the other, accepts it, and
+compares the received bytes against what was sent. First `pod install` builds
 `LibRats.xcframework` from the C++ core, which takes a few minutes.
+
+The example deliberately has no safe-area library: `react-native-safe-area-context`'s
+Fabric component references debug-only RN symbols that RN 0.87's *prebuilt* core
+does not export, so linking the iOS app fails with a wall of undefined
+`facebook::react::Sealable` / `ShadowNode::getDebugName` symbols. Explicit padding
+costs nothing here and removes a whole class of build fragility.
 
 The Android build compiles the whole librats core per ABI, so for a debug loop set
 `reactNativeArchitectures` in `example/android/gradle.properties` to just the one
@@ -155,13 +222,18 @@ you need — the module honours it.
 
 ### What is verified
 
-**Both platforms, end to end.** iOS on a simulator (Debug and Release build) and
-Android on an emulator (`libLibratsRN.so`, arm64-v8a, with the librats core linked
-in) each reach `PASS` — handshake, encrypted echo, and the disconnect event all
-arriving in JS.
+**Both platforms, both tests, end to end** — iOS on a simulator and Android on an
+emulator (`libLibratsRN.so`, arm64-v8a, with the librats core linked in):
+
+| | iOS simulator | Android emulator |
+|---|---|---|
+| Handshake, encrypted echo, disconnect event | `PASS` | `PASS` |
+| 512 KiB file: offer, accept, 10 progress events, complete | `PASS` | `PASS` |
+| Received bytes compared against source | identical | identical |
 
 Also verified: Nitrogen generates from the spec; the C++ compiles clean
-(`-Wall -Wextra`, zero warnings); TypeScript typechecks.
+(`-Wall -Wextra`, zero warnings); TypeScript typechecks in both the module and
+the example.
 
 Not yet verified: **a physical device.** Everything above ran on a simulator and
 an emulator, so nothing here exercises real ARM hardware, a real network
@@ -214,6 +286,14 @@ Worth knowing before you change the build files:
   the Gradle project is never added and the module just does not exist on Android,
   with no error. That class is also where `LibratsRNOnLoad.initializeNative()`
   gets called; Nitrogen generates it but nothing invokes it for you.
+- **`sendFile()` returning a non-zero id does not mean the peer exists.** It
+  checks only that the file is readable, then queues an offer; sending to an id
+  that is not connected fails silently and the transfer simply never progresses,
+  timing out after `transferTimeoutSecs`. Watch for this with the two peer ids in
+  a pair: each side's `onPeerConnected` reports *the other* node, so the id the
+  dialling side learns is the listener's — passing that back to the listener's own
+  `sendFile()` has it offering the file to itself. Confirm delivery with
+  `onFileProgress`/`onFileComplete`, not with the return value.
 - **Resolve symlinks before walking up a path in CMake.** An example app reaches
   this package through `node_modules/react-native-librats -> ../..`, and
   `CMAKE_CURRENT_SOURCE_DIR` keeps the *linked* path — so a plain `../..` lands in
