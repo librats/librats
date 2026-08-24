@@ -402,6 +402,78 @@ function Demo() {
     }
   }, [append, stopAll]);
 
+  // NAT traversal against the real network. Two loopback nodes cannot demonstrate
+  // a punch or a relay -- both need peers on opposite sides of a NAT -- so this
+  // checks the parts that are observable from one device: that the subsystems
+  // attach, that the router is asked for a mapping, and what the mesh reports
+  // about our own NAT. The mapping classification is the thing to read before
+  // blaming a failed cross-network dial.
+  const runNat = useCallback(async () => {
+    stopAll();
+    setLog([]);
+    setStatus('running');
+    try {
+      const node = createNode({ dataDir: TEMP_DIR, protocol: 'example/1.0' });
+      nodes.current = [node];
+
+      node.enablePortMapping({ leaseDurationSeconds: 600 });
+      node.enableHolePunch({ attempts: 2 });
+      // serve:false is the mobile default -- carrying other peers' traffic costs
+      // battery, and a phone is rarely reachable enough to be a useful relay.
+      node.enableRelay({ serve: false });
+
+      // natStatus needs no subsystem at all.
+      const before = node.natStatus();
+      append(`before start: mapping=${before.mapping} observations=${before.observationCount}`);
+      if (before.mapping !== 'unknown') {
+        throw new Error(`expected unknown before any peer, got ${before.mapping}`);
+      }
+
+      if (!node.start()) throw new Error('node failed to start');
+      append(`listening on ${node.listenPort}`);
+
+      // UPnP/NAT-PMP probe the gateway in the background; either may be absent.
+      const mapped = await waitUntil(
+        () => node.portMappingStatus().externalTcpPort !== 0,
+        20000,
+        'no port mapping',
+      ).then(
+        () => true,
+        () => false,
+      );
+      const pm = node.portMappingStatus();
+      append(
+        mapped
+          ? `port mapping: tcp ${pm.externalTcpPort} udp ${pm.externalUdpPort}`
+          : 'no port mapping (no UPnP/NAT-PMP router, or CGNAT)',
+      );
+
+      // Classification needs two independent UDP peers, so on one device it stays
+      // unknown -- which is itself the correct answer, not a failure.
+      const nat = node.natStatus();
+      append(`nat mapping: ${nat.mapping} (${nat.observationCount} observation(s))`);
+      append(
+        nat.externalEndpoints.length > 0
+          ? `external: ${nat.externalEndpoints.join(', ')}`
+          : 'no external endpoint observed yet (needs a UDP peer)',
+      );
+
+      // Both take a peer id and report whether an attempt could even start. With
+      // no peers there is nothing to carry a rendezvous, so false is expected.
+      const fakePeer = node.localId;
+      append(`punch(self) startable: ${node.punch(fakePeer)}`);
+      append(`connectViaRelay(self) startable: ${node.connectViaRelay(fakePeer)}`);
+
+      stopAll();
+      append('stopped');
+      setStatus('pass');
+    } catch (error) {
+      append(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
+      stopAll();
+      setStatus('fail');
+    }
+  }, [append, stopAll]);
+
   const busy = status === 'running';
 
   return (
@@ -433,6 +505,12 @@ function Demo() {
           onPress={runDht}
           disabled={busy}>
           <Text style={styles.buttonText}>dht</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, busy && styles.buttonDisabled]}
+          onPress={runNat}
+          disabled={busy}>
+          <Text style={styles.buttonText}>nat</Text>
         </TouchableOpacity>
       </View>
 
@@ -469,7 +547,7 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 32, fontWeight: '700', color: '#e6edf3' },
   subtitle: { fontSize: 14, color: '#8b949e', marginBottom: 20 },
-  row: { flexDirection: 'row', gap: 8 },
+  row: { flexDirection: 'row', gap: 6 },
   button: {
     flex: 1,
     backgroundColor: '#238636',
@@ -478,7 +556,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   buttonDisabled: { backgroundColor: '#30363d' },
-  buttonText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  buttonText: { color: '#fff', fontSize: 12, fontWeight: '600' },
   statusRow: { height: 40, justifyContent: 'center', alignItems: 'center' },
   pass: { color: '#3fb950', fontSize: 20, fontWeight: '700' },
   fail: { color: '#f85149', fontSize: 20, fontWeight: '700' },

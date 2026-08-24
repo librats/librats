@@ -6,7 +6,11 @@
 #include <librats/peer/peer.h>
 #include <librats/peer/peer_id.h>
 #include <librats/subsystems/file_transfer.h>
+#include <librats/node/nat_status.h>
 #include <librats/subsystems/dht_discovery.h>
+#include <librats/subsystems/hole_punch.h>
+#include <librats/subsystems/port_mapping_service.h>
+#include <librats/subsystems/relay.h>
 #include <librats/subsystems/pubsub.h>
 
 #include <stdexcept>
@@ -507,6 +511,159 @@ DhtStatus HybridRatsNode::dhtStatus() {
   return DhtStatus(d.is_running(), static_cast<double>(d.dht_port()),
                    static_cast<double>(d.dht_port_v6()),
                    hash_to_hex(d.discovery_hash()), d.external_address());
+}
+
+// ── NAT traversal ───────────────────────────────────────────────────────────
+
+NatStatus HybridRatsNode::natStatus() {
+  // No subsystem to enable: the node collects these observations from the
+  // identify exchange for free. Before any UDP peer has connected the mapping is
+  // simply Unknown.
+  const auto& status = node().nat_status();
+
+  std::vector<std::string> endpoints;
+  for (const auto& address : status.external_udp_endpoints()) {
+    endpoints.push_back(address.to_string());
+  }
+
+  NatMapping mapping = NatMapping::UNKNOWN;
+  switch (status.udp_mapping()) {
+    case rats::NatMapping::Unknown:             mapping = NatMapping::UNKNOWN; break;
+    case rats::NatMapping::Open:                mapping = NatMapping::OPEN; break;
+    case rats::NatMapping::EndpointIndependent: mapping = NatMapping::ENDPOINTINDEPENDENT; break;
+    case rats::NatMapping::EndpointDependent:   mapping = NatMapping::ENDPOINTDEPENDENT; break;
+  }
+
+  return NatStatus(mapping, static_cast<double>(status.observation_count()),
+                   std::move(endpoints));
+}
+
+rats::PortMappingService& HybridRatsNode::portMapping() {
+  if (port_mapping_ == nullptr) {
+    throw std::runtime_error(
+        "port mapping is not enabled - call enablePortMapping() before start()");
+  }
+  return *port_mapping_;
+}
+
+void HybridRatsNode::enablePortMapping(
+    const std::optional<PortMappingConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enablePortMapping() must be called before start()");
+  }
+  if (port_mapping_ != nullptr) {
+    throw std::runtime_error("port mapping is already enabled");
+  }
+
+  rats::PortMappingConfig cfg;
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.enabled.has_value())       cfg.enabled       = *c.enabled;
+    if (c.enableUpnp.has_value())    cfg.enable_upnp   = *c.enableUpnp;
+    if (c.enableNatpmp.has_value())  cfg.enable_natpmp = *c.enableNatpmp;
+    if (c.leaseDurationSeconds.has_value()) {
+      cfg.lease_duration_seconds =
+          static_cast<uint32_t>(*c.leaseDurationSeconds);
+    }
+  }
+
+  port_mapping_ =
+      node().add_subsystem(std::make_unique<rats::PortMappingService>(std::move(cfg)));
+}
+
+PortMappingStatus HybridRatsNode::portMappingStatus() {
+  auto& service = portMapping();
+  // The two protocols are mapped independently -- a router may grant one and
+  // refuse the other -- so both are reported separately rather than as one flag.
+  const auto tcp = service.mapped_public_address(rats::PortMapProtocol::TCP);
+  const auto udp = service.mapped_public_address(rats::PortMapProtocol::UDP);
+
+  std::string ip;
+  if (tcp.has_value())      ip = tcp->first;
+  else if (udp.has_value()) ip = udp->first;
+
+  return PortMappingStatus(ip,
+                           tcp.has_value() ? static_cast<double>(tcp->second) : 0.0,
+                           udp.has_value() ? static_cast<double>(udp->second) : 0.0);
+}
+
+rats::HolePunch& HybridRatsNode::holePunch() {
+  if (hole_punch_ == nullptr) {
+    throw std::runtime_error(
+        "hole punching is not enabled - call enableHolePunch() before start()");
+  }
+  return *hole_punch_;
+}
+
+void HybridRatsNode::enableHolePunch(const std::optional<HolePunchConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableHolePunch() must be called before start()");
+  }
+  if (hole_punch_ != nullptr) {
+    throw std::runtime_error("hole punching is already enabled");
+  }
+
+  rats::HolePunch::Config cfg;
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.maxRelays.has_value())    cfg.max_relays    = static_cast<size_t>(*c.maxRelays);
+    if (c.maxAddresses.has_value()) cfg.max_addresses = static_cast<size_t>(*c.maxAddresses);
+    if (c.attempts.has_value())     cfg.attempts      = static_cast<int>(*c.attempts);
+    if (c.roundTimeoutMs.has_value()) {
+      cfg.round_timeout =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.roundTimeoutMs));
+    }
+  }
+
+  hole_punch_ = node().add_subsystem(std::make_unique<rats::HolePunch>(std::move(cfg)));
+}
+
+bool HybridRatsNode::punch(const std::string& peerId) {
+  return holePunch().punch(parse_peer_id(peerId));
+}
+
+rats::Relay& HybridRatsNode::relay() {
+  if (relay_ == nullptr) {
+    throw std::runtime_error(
+        "relaying is not enabled - call enableRelay() before start()");
+  }
+  return *relay_;
+}
+
+void HybridRatsNode::enableRelay(const std::optional<RelayConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableRelay() must be called before start()");
+  }
+  if (relay_ != nullptr) {
+    throw std::runtime_error("relaying is already enabled");
+  }
+
+  rats::Relay::Config cfg;
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.enableClient.has_value())   cfg.enable_client   = *c.enableClient;
+    if (c.acceptInbound.has_value())  cfg.accept_inbound  = *c.acceptInbound;
+    if (c.serve.has_value())          cfg.serve           = *c.serve;
+    if (c.maxOutboundCircuits.has_value()) {
+      cfg.max_outbound_circuits = static_cast<size_t>(*c.maxOutboundCircuits);
+    }
+    if (c.maxCircuits.has_value()) {
+      cfg.max_circuits = static_cast<size_t>(*c.maxCircuits);
+    }
+    if (c.maxBytesPerCircuit.has_value()) {
+      cfg.max_bytes_per_circuit = static_cast<uint64_t>(*c.maxBytesPerCircuit);
+    }
+    if (c.openTimeoutMs.has_value()) {
+      cfg.open_timeout =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.openTimeoutMs));
+    }
+  }
+
+  relay_ = node().add_subsystem(std::make_unique<rats::Relay>(std::move(cfg)));
+}
+
+bool HybridRatsNode::connectViaRelay(const std::string& peerId) {
+  return relay().connect_via_relay(parse_peer_id(peerId));
 }
 
 } // namespace margelo::nitro::librats

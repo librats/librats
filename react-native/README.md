@@ -286,6 +286,54 @@ own `dataDir`, because the library's fallback is the working directory, which is
 not writable on mobile. With neither set, persistence silently does nothing and
 every start is a cold bootstrap.
 
+## NAT traversal
+
+Three mechanisms, in order of preference, plus one read-only signal that tells you
+which of them can work.
+
+```ts
+node.enablePortMapping()                 // ask the router to forward the port
+node.enableHolePunch()                   // both sides dial at the same instant
+node.enableRelay({ serve: false })       // carry the stream through a third node
+node.start()
+
+node.natStatus()          // { mapping, observationCount, externalEndpoints }
+node.portMappingStatus()  // { externalIp, externalTcpPort, externalUdpPort }
+node.punch(peerId)            // false = attempt could not even start
+node.connectViaRelay(peerId)  // false = no usable relay known
+```
+
+**Start with `natStatus().mapping`** when a cross-network dial fails. It needs no
+subsystem — the node collects it from the identify exchange for free — and it
+answers the only question that matters:
+
+| `mapping` | Meaning |
+|---|---|
+| `unknown` | Fewer than two independent UDP observations yet. Not a failure. |
+| `open` | No NAT in the path; an ordinary dial already reaches you. |
+| `endpointIndependent` | One external port for every destination — **punchable**. |
+| `endpointDependent` | A fresh mapping per destination (symmetric) — **a punch cannot work**; relay is the only way through. |
+
+That last row is the one with budget attached. A punch is free; a relay needs a
+node that is actually reachable, which in practice means **a server you run**. So
+whether your users land on `endpointDependent` decides whether this is
+peer-to-peer software or peer-to-peer software plus infrastructure — and on mobile
+carrier networks, `endpointDependent` is common. Measure it on real networks
+before committing to a design.
+
+`punch()` and `connectViaRelay()` are non-blocking and their return value only
+says whether an attempt could be *started* — success arrives as `onPeerConnected`.
+`punch()` returns false with no peer in common to carry the rendezvous, or while a
+target is in cooldown after earlier failures.
+
+`serve: false` is the default on `enableRelay` and the right answer on mobile:
+carrying other peers' traffic costs bandwidth and battery, and a phone is rarely
+reachable enough to be useful as a relay anyway.
+
+Port mapping maps TCP and UDP independently, because a router may grant one and
+refuse the other — hence two separate ports in `portMappingStatus()`. Behind
+carrier-grade NAT it will simply never succeed: there is no router of yours to ask.
+
 ## Scope of this slice
 
 Core: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
@@ -301,10 +349,12 @@ Pub/sub: `enablePubSub`, `subscribe`, `unsubscribe`, `publish`, `isSubscribed`,
 
 Discovery: `enableDht`, `dhtStatus`.
 
+NAT traversal: `natStatus`, `enablePortMapping`, `portMappingStatus`,
+`enableHolePunch`, `punch`, `enableRelay`, `connectViaRelay`.
+
 Not yet: mDNS discovery (which on iOS wants an `NWBrowser`-backed subsystem rather
 than the library's raw-socket multicast, to avoid needing Apple's multicast
-entitlement), NAT traversal controls, typed JSON messaging, and the storage and
-BitTorrent modules.
+entitlement), typed JSON messaging, and the storage and BitTorrent modules.
 
 ## Example app
 

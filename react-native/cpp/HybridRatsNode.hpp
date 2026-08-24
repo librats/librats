@@ -16,6 +16,9 @@ class Node;
 class FileTransfer;
 class PubSub;
 class DhtDiscovery;
+class HolePunch;
+class Relay;
+class PortMappingService;
 struct NodeConfig;
 } // namespace librats
 
@@ -113,6 +116,15 @@ public:
   void enableDht(const std::optional<DhtConfig>& config) override;
   DhtStatus dhtStatus() override;
 
+  // — NAT traversal —
+  NatStatus natStatus() override;
+  void enablePortMapping(const std::optional<PortMappingConfig>& config) override;
+  PortMappingStatus portMappingStatus() override;
+  void enableHolePunch(const std::optional<HolePunchConfig>& config) override;
+  bool punch(const std::string& peerId) override;
+  void enableRelay(const std::optional<RelayConfig>& config) override;
+  bool connectViaRelay(const std::string& peerId) override;
+
 private:
   /**
    * The Node, constructed on first use from whatever `configure()` last set.
@@ -132,11 +144,19 @@ private:
   /// The attached DhtDiscovery subsystem, or throws if enableDht() was never called.
   ::librats::DhtDiscovery& dht();
 
+  /// Attached NAT-traversal subsystems, or throw if their enable was never called.
+  ::librats::PortMappingService& portMapping();
+  ::librats::HolePunch& holePunch();
+  ::librats::Relay& relay();
+
   std::unique_ptr<::librats::NodeConfig> config_;
   std::unique_ptr<::librats::Node> node_;
   ::librats::FileTransfer* files_ = nullptr;
   ::librats::PubSub* pubsub_ = nullptr;
   ::librats::DhtDiscovery* dht_ = nullptr;
+  ::librats::PortMappingService* port_mapping_ = nullptr;
+  ::librats::HolePunch* hole_punch_ = nullptr;
+  ::librats::Relay* relay_ = nullptr;
   bool started_ = false;
 };
 

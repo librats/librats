@@ -178,6 +178,100 @@ export interface DhtStatus {
 }
 
 /**
+ * How this node's own side of the NAT behaves, as reported by the mesh.
+ *
+ * This is the single most useful thing to look at when a cross-network connection
+ * fails, because it says whether a hole punch is even possible.
+ */
+export type NatMapping =
+  /** Not enough independent observations yet. */
+  | 'unknown'
+  /** No NAT in the path: peers see an address this node holds itself. */
+  | 'open'
+  /** One external port for every destination — punchable. */
+  | 'endpointIndependent'
+  /** A fresh mapping per destination (symmetric) — a punch cannot work; relay only. */
+  | 'endpointDependent'
+
+export interface NatStatus {
+  mapping: NatMapping
+  /** How many distinct peers have reported an observation. Two is enough to classify. */
+  observationCount: number
+  /** External UDP endpoints peers have seen, freshest first, as `"ip:port"`. */
+  externalEndpoints: string[]
+}
+
+/** Automatic router port forwarding via UPnP IGD and NAT-PMP. */
+export interface PortMappingConfig {
+  /** Master switch. Default true. */
+  enabled?: boolean
+  /** Use the UPnP IGD backend. Default true. */
+  enableUpnp?: boolean
+  /** Use the NAT-PMP backend. Default true. */
+  enableNatpmp?: boolean
+  /** Requested lease length. Default 3600. */
+  leaseDurationSeconds?: number
+}
+
+/** What the router actually granted. Both protocols are mapped independently. */
+export interface PortMappingStatus {
+  /** '' until a backend succeeds. */
+  externalIp: string
+  /** 0 until the TCP mapping succeeds. */
+  externalTcpPort: number
+  /** 0 until the UDP mapping succeeds. */
+  externalUdpPort: number
+}
+
+/**
+ * UDP hole punching: reaches a peer behind a NAT by arranging, through a peer both
+ * sides already have, that the two dial each other at the same instant.
+ *
+ * Only works when this node's mapping is `endpointIndependent` — check
+ * `natStatus()`. Against a symmetric NAT nothing learned from one peer predicts
+ * what a third will see, so `Relay` is the only way through.
+ */
+export interface HolePunchConfig {
+  /** Peers asked to carry one rendezvous; the ones without the target drop it. Default 3. */
+  maxRelays?: number
+  /** Endpoints advertised to the target, and so dialled by it. Default 4. */
+  maxAddresses?: number
+  /** Rendezvous rounds before giving up on a target for a while. Default 3. */
+  attempts?: number
+  /** Budget for one round, covering two relayed hops plus the punch burst. Default 6000. */
+  roundTimeoutMs?: number
+}
+
+/**
+ * Relaying: carries a connection through a third node when no direct path exists.
+ *
+ * What is relayed is the byte stream, so the Noise handshake still runs end to end
+ * and the relay moves ciphertext it cannot read. A circuit that comes up then tries
+ * to upgrade itself to a direct link.
+ */
+export interface RelayConfig {
+  /** Use relays to reach peers this node cannot dial. Default true. */
+  enableClient?: boolean
+  /** Budget for opening one circuit. Default 8000. */
+  openTimeoutMs?: number
+  /** Concurrent outbound circuits. Default 8. */
+  maxOutboundCircuits?: number
+  /** Accept circuits others open *to* this node. Default true. */
+  acceptInbound?: boolean
+  /**
+   * Act as a relay *for other peers* — carrying their traffic. Default false, and
+   * usually the right answer on mobile: serving costs bandwidth and battery, and
+   * a phone is rarely reachable enough to be useful as one. Relaying needs nodes
+   * that are dialable, which in practice means servers you run.
+   */
+  serve?: boolean
+  /** When serving: total circuits carried. Default 32. */
+  maxCircuits?: number
+  /** When serving: bytes one circuit may carry before it is closed. Default 64 MiB. */
+  maxBytesPerCircuit?: number
+}
+
+/**
  * GossipSub tuning. Every field is optional; the defaults mirror the libp2p
  * reference (D=6, D_low=4, D_high=12) and suit small-to-medium meshes.
  */
@@ -426,4 +520,53 @@ export interface RatsNode
    * resolves it.
    */
   dhtStatus(): DhtStatus
+
+  // --- NAT traversal ---
+  //
+  // Three separate mechanisms, tried in roughly this order of preference:
+  //
+  //   port mapping - ask the router to forward the listen port, so peers can dial
+  //                  in directly. Free when it works; useless behind carrier-grade
+  //                  NAT, where there is no router of yours to ask.
+  //   hole punch   - both sides dial at the same instant so each opens the mapping
+  //                  the other needs. Requires an `endpointIndependent` mapping.
+  //   relay        - carry the stream through a third node. Always works, but needs
+  //                  a node that is actually reachable, which in practice means a
+  //                  server you run.
+  //
+  // `natStatus()` is what tells you which of these can work, and needs no
+  // subsystem — the node collects it from the identify exchange for free.
+
+  /**
+   * What the mesh has reported about this node's own NAT. Available without
+   * enabling anything; meaningful once at least two peers have connected over UDP
+   * (`observationCount >= 2`). Read this first when a cross-network dial fails.
+   */
+  natStatus(): NatStatus
+
+  /** Attach automatic router port forwarding (UPnP + NAT-PMP). Before `start()`. */
+  enablePortMapping(config?: PortMappingConfig): void
+
+  /** What the router granted. All-empty until a backend succeeds, or forever if none can. */
+  portMappingStatus(): PortMappingStatus
+
+  /** Attach UDP hole punching. Before `start()`. */
+  enableHolePunch(config?: HolePunchConfig): void
+
+  /**
+   * Try to reach a peer by hole punching. Non-blocking; success arrives as an
+   * `onPeerConnected` event. False means the attempt could not even be started —
+   * no peer in common to carry the rendezvous, or the target is in cooldown after
+   * earlier failures.
+   */
+  punch(peerId: string): boolean
+
+  /** Attach relaying. Before `start()`. */
+  enableRelay(config?: RelayConfig): void
+
+  /**
+   * Try to reach a peer through a relay. Non-blocking; success arrives as an
+   * `onPeerConnected` event. False means no usable relay candidate was known.
+   */
+  connectViaRelay(peerId: string): boolean
 }
