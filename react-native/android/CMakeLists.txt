@@ -24,7 +24,25 @@ add_library(LibratsRN SHARED
 # — and CMAKE_CURRENT_SOURCE_DIR keeps the *linked* path, so a plain "../.." lands
 # in node_modules instead of the repository root and add_subdirectory() fails.
 get_filename_component(LIBRATS_MODULE_ANDROID_DIR "${CMAKE_CURRENT_SOURCE_DIR}" REALPATH)
-get_filename_component(LIBRATS_SOURCE_DIR "${LIBRATS_MODULE_ANDROID_DIR}/../.." REALPATH)
+
+# Two layouts to support. In this repository the core is two levels up; in a package
+# installed from npm there is nothing up there but node_modules, so the core is
+# vendored into the package at publish time (scripts/vendor-core.mjs). Prefer the
+# vendored copy when it exists, which is exactly the installed case.
+if(EXISTS "${LIBRATS_MODULE_ANDROID_DIR}/../vendor/librats/CMakeLists.txt")
+    get_filename_component(LIBRATS_SOURCE_DIR "${LIBRATS_MODULE_ANDROID_DIR}/../vendor/librats" REALPATH)
+    message(STATUS "librats: building the vendored core (installed package)")
+else()
+    get_filename_component(LIBRATS_SOURCE_DIR "${LIBRATS_MODULE_ANDROID_DIR}/../.." REALPATH)
+    message(STATUS "librats: building the core from the repository at ${LIBRATS_SOURCE_DIR}")
+endif()
+
+if(NOT EXISTS "${LIBRATS_SOURCE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR
+        "Cannot find the librats core at ${LIBRATS_SOURCE_DIR}. In a published package "
+        "it should be at vendor/librats — reinstall the package, since a tarball built "
+        "without the vendor step cannot compile.")
+endif()
 set(LIBRATS_BINARY_DIR ${CMAKE_BINARY_DIR}/librats_native)
 
 if(NOT EXISTS "${LIBRATS_SOURCE_DIR}/CMakeLists.txt")
