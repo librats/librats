@@ -5,6 +5,7 @@
 #include <librats/node/node.h>
 #include <librats/peer/peer.h>
 #include <librats/peer/peer_id.h>
+#include <librats/subsystems/file_transfer.h>
 
 #include <stdexcept>
 #include <utility>
@@ -36,6 +37,59 @@ rats::ByteView view_of(const std::shared_ptr<ArrayBuffer>& data) {
   return rats::ByteView(data->data(), data->size());
 }
 
+/// Transfer ids come from an incrementing counter starting at 1, so every real id
+/// is far inside the 2^53 a double represents exactly -- which is why the JS API
+/// uses `number` rather than the bigint a uint64 would otherwise demand.
+double id_to_double(uint64_t id) { return static_cast<double>(id); }
+
+uint64_t id_from_double(double id, const char* what) {
+  if (id < 0 || id != static_cast<double>(static_cast<uint64_t>(id))) {
+    throw std::invalid_argument(std::string(what) + " must be a non-negative integer");
+  }
+  return static_cast<uint64_t>(id);
+}
+
+TransferDirection to_direction(rats::FileTransfer::Direction d) {
+  return d == rats::FileTransfer::Direction::Sending ? TransferDirection::SENDING
+                                                     : TransferDirection::RECEIVING;
+}
+
+TransferStatus to_status(rats::FileTransfer::Status s) {
+  using S = rats::FileTransfer::Status;
+  switch (s) {
+    case S::Pending:   return TransferStatus::PENDING;
+    case S::Active:    return TransferStatus::ACTIVE;
+    case S::Paused:    return TransferStatus::PAUSED;
+    case S::Completed: return TransferStatus::COMPLETED;
+    case S::Failed:    return TransferStatus::FAILED;
+    case S::Cancelled: return TransferStatus::CANCELLED;
+  }
+  // Every enumerator is handled above; this keeps the compiler quiet about a
+  // value arriving from a future library version.
+  return TransferStatus::PENDING;
+}
+
+FileOffer to_offer(const rats::FileTransfer::Offer& o) {
+  std::vector<FileEntry> files;
+  files.reserve(o.files.size());
+  for (const auto& f : o.files) {
+    files.emplace_back(f.relative_path, static_cast<double>(f.size));
+  }
+  return FileOffer(o.from.to_hex(), id_to_double(o.id), o.name,
+                   static_cast<double>(o.size), o.is_directory, std::move(files));
+}
+
+FileProgress to_progress(const rats::FileTransfer::Progress& p) {
+  return FileProgress(id_to_double(p.id), p.peer.to_hex(), to_direction(p.direction),
+                      to_status(p.status), static_cast<double>(p.bytes_transferred),
+                      static_cast<double>(p.total_bytes),
+                      static_cast<double>(p.files_completed),
+                      static_cast<double>(p.total_files), p.percent(),
+                      p.transfer_rate_bps, p.average_rate_bps,
+                      static_cast<double>(p.elapsed.count()),
+                      static_cast<double>(p.estimated_time_remaining.count()));
+}
+
 } // namespace
 
 HybridRatsNode::HybridRatsNode() : HybridObject(TAG) {}
@@ -60,11 +114,13 @@ void HybridRatsNode::configure(const RatsConfig& config) {
     throw std::runtime_error("configure() must be called before start()");
   }
   if (node_ != nullptr) {
-    // The Node already exists because a listener was registered first, and
-    // librats fixes configuration at construction. Rebuilding it here would
-    // silently drop those listeners, so refuse instead.
+    // The Node already exists -- something built it first, by registering a
+    // listener or enabling a subsystem -- and librats fixes configuration at
+    // construction. Rebuilding it here would silently drop whatever was already
+    // attached to it, so refuse instead.
     throw std::runtime_error(
-        "configure() must be called before registering listeners");
+        "configure() must be called first, before enabling subsystems or "
+        "registering listeners");
   }
 
   auto cfg = std::make_unique<rats::NodeConfig>();
@@ -148,6 +204,109 @@ void HybridRatsNode::onPeerDisconnected(
   // there is no connection left to reach.
   node().on_peer_disconnected(
       [listener](const rats::PeerId& id) { listener(id.to_hex()); });
+}
+
+// ── file transfer ───────────────────────────────────────────────────────────
+
+rats::FileTransfer& HybridRatsNode::files() {
+  if (files_ == nullptr) {
+    throw std::runtime_error(
+        "file transfer is not enabled - call enableFileTransfer() before start()");
+  }
+  return *files_;
+}
+
+void HybridRatsNode::enableFileTransfer(const FileTransferConfig& config) {
+  if (started_) {
+    throw std::runtime_error("enableFileTransfer() must be called before start()");
+  }
+  if (files_ != nullptr) {
+    throw std::runtime_error("file transfer is already enabled");
+  }
+  if (config.tempDirectory.empty()) {
+    // The library would fall back to ".", the process working directory, which is
+    // not writable on iOS or Android -- so every transfer would fail at the first
+    // temp-file write rather than here, where the cause is obvious.
+    throw std::invalid_argument("tempDirectory must not be empty");
+  }
+
+  rats::FileTransfer::Config cfg;
+  cfg.temp_directory = config.tempDirectory;
+  if (config.chunkSize.has_value()) {
+    cfg.chunk_size = static_cast<uint32_t>(*config.chunkSize);
+  }
+  if (config.windowBytes.has_value()) {
+    cfg.window_bytes = static_cast<uint32_t>(*config.windowBytes);
+  }
+  if (config.transferTimeoutSecs.has_value()) {
+    cfg.transfer_timeout_secs = static_cast<uint32_t>(*config.transferTimeoutSecs);
+  }
+  if (config.verifyIntegrity.has_value()) {
+    cfg.verify_integrity = *config.verifyIntegrity;
+  }
+
+  files_ = node().add_subsystem(std::make_unique<rats::FileTransfer>(std::move(cfg)));
+}
+
+double HybridRatsNode::sendFile(const std::string& peerId, const std::string& path) {
+  return id_to_double(files().send_file(parse_peer_id(peerId), path));
+}
+
+double HybridRatsNode::sendDirectory(const std::string& peerId,
+                                     const std::string& path) {
+  return id_to_double(files().send_directory(parse_peer_id(peerId), path));
+}
+
+void HybridRatsNode::acceptFile(const std::string& peerId, double transferId,
+                                const std::string& destPath) {
+  files().accept(parse_peer_id(peerId), id_from_double(transferId, "transferId"),
+                 destPath);
+}
+
+void HybridRatsNode::rejectFile(const std::string& peerId, double transferId) {
+  files().reject(parse_peer_id(peerId), id_from_double(transferId, "transferId"));
+}
+
+bool HybridRatsNode::pauseTransfer(const std::string& peerId, double transferId) {
+  return files().pause(parse_peer_id(peerId), id_from_double(transferId, "transferId"));
+}
+
+bool HybridRatsNode::resumeTransfer(const std::string& peerId, double transferId) {
+  return files().resume(parse_peer_id(peerId), id_from_double(transferId, "transferId"));
+}
+
+bool HybridRatsNode::cancelTransfer(const std::string& peerId, double transferId) {
+  return files().cancel(parse_peer_id(peerId), id_from_double(transferId, "transferId"));
+}
+
+TransferStats HybridRatsNode::transferStats() {
+  const auto s = files().stats();
+  return TransferStats(static_cast<double>(s.bytes_sent),
+                       static_cast<double>(s.bytes_received),
+                       static_cast<double>(s.completed),
+                       static_cast<double>(s.failed));
+}
+
+void HybridRatsNode::onFileOffer(
+    const std::function<void(const FileOffer&)>& listener) {
+  files().on_offer([listener](const rats::FileTransfer::Offer& offer) {
+    listener(to_offer(offer));
+  });
+}
+
+void HybridRatsNode::onFileProgress(
+    const std::function<void(const FileProgress&)>& listener) {
+  files().on_progress([listener](const rats::FileTransfer::Progress& progress) {
+    listener(to_progress(progress));
+  });
+}
+
+void HybridRatsNode::onFileComplete(
+    const std::function<void(double, bool, const std::string&)>& listener) {
+  files().on_complete(
+      [listener](uint64_t id, bool success, const std::string& path) {
+        listener(id_to_double(id), success, path);
+      });
 }
 
 } // namespace margelo::nitro::librats

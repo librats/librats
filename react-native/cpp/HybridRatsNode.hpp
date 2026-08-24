@@ -12,6 +12,7 @@
 // why the destructor is declared here and defined in the .cpp.
 namespace librats {
 class Node;
+class FileTransfer;
 struct NodeConfig;
 } // namespace librats
 
@@ -70,6 +71,26 @@ public:
       const std::function<void(const std::string& /* peerId */)>& listener)
       override;
 
+  // — file transfer —
+  void enableFileTransfer(const FileTransferConfig& config) override;
+  double sendFile(const std::string& peerId, const std::string& path) override;
+  double sendDirectory(const std::string& peerId, const std::string& path) override;
+  void acceptFile(const std::string& peerId, double transferId,
+                  const std::string& destPath) override;
+  void rejectFile(const std::string& peerId, double transferId) override;
+  bool pauseTransfer(const std::string& peerId, double transferId) override;
+  bool resumeTransfer(const std::string& peerId, double transferId) override;
+  bool cancelTransfer(const std::string& peerId, double transferId) override;
+  TransferStats transferStats() override;
+  void onFileOffer(
+      const std::function<void(const FileOffer&)>& listener) override;
+  void onFileProgress(
+      const std::function<void(const FileProgress&)>& listener) override;
+  void onFileComplete(
+      const std::function<void(double /* transferId */, bool /* success */,
+                               const std::string& /* path */)>& listener)
+      override;
+
 private:
   /**
    * The Node, constructed on first use from whatever `configure()` last set.
@@ -79,8 +100,13 @@ private:
    */
   ::librats::Node& node();
 
+  /// The attached FileTransfer subsystem, or throws if enableFileTransfer() was
+  /// never called. Ownership stays with the Node, which outlives every use here.
+  ::librats::FileTransfer& files();
+
   std::unique_ptr<::librats::NodeConfig> config_;
   std::unique_ptr<::librats::Node> node_;
+  ::librats::FileTransfer* files_ = nullptr;
   bool started_ = false;
 };
 

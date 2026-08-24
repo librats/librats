@@ -1,7 +1,27 @@
 import { NitroModules } from 'react-native-nitro-modules'
-import type { RatsConfig, RatsNode } from './specs/RatsNode.nitro'
+import type {
+  FileEntry,
+  FileOffer,
+  FileProgress,
+  FileTransferConfig,
+  RatsConfig,
+  RatsNode,
+  TransferDirection,
+  TransferStats,
+  TransferStatus,
+} from './specs/RatsNode.nitro'
 
-export type { RatsConfig, RatsNode }
+export type {
+  FileEntry,
+  FileOffer,
+  FileProgress,
+  FileTransferConfig,
+  RatsConfig,
+  RatsNode,
+  TransferDirection,
+  TransferStats,
+  TransferStatus,
+}
 
 /**
  * Create a librats node.
