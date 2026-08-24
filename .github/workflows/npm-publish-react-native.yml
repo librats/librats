@@ -1,0 +1,161 @@
+name: Publish React Native to NPM
+
+# Separate from npm-publish.yml because the two packages have almost nothing in
+# common at publish time. The Node.js addon compiles a native binary on the runner
+# and ships it; react-native-librats ships *sources* — the consumer's Gradle and
+# CocoaPods build them — so there is no CMake step here, and the job that matters is
+# making sure the tarball is complete.
+#
+# Tags: this package is versioned independently of the C++ library, so releases meant
+# for it are tagged rn-v<version> (e.g. rn-v0.2.0). A plain v<version> release is
+# ignored, which keeps a core release from republishing an unchanged JS package.
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag or ref to publish (leave empty for the current branch)'
+        required: false
+      version:
+        description: 'Version to publish as (leave empty to keep package.json)'
+        required: false
+
+# Required for OIDC trusted publishing
+permissions:
+  id-token: write  # Required for OIDC authentication
+  contents: read   # Required to checkout code
+
+jobs:
+  publish-npm:
+    # Skip core-only releases; see the note on tags above.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'rn-v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Ensure npm 11.5.1 or later for trusted publishing support
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        working-directory: react-native
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: react-native
+        run: npm run typecheck
+
+      # The spec is the source of truth and the generated code is not committed, so
+      # regenerate rather than trusting whatever a contributor last ran locally. A spec
+      # change that was never regenerated fails here instead of in a consumer's build.
+      - name: Generate Nitro bindings
+        working-directory: react-native
+        run: npm run nitrogen
+
+      - name: Fail if the generated code is stale
+        working-directory: react-native
+        run: |
+          # nitrogen output is gitignored, so this only catches a *committed* generated
+          # tree drifting from the spec — harmless when there is nothing tracked.
+          if [ -n "$(git status --porcelain nitrogen 2>/dev/null)" ]; then
+            echo "Generated Nitro code differs from the committed tree:"
+            git --no-pager diff --stat nitrogen
+          fi
+
+      - name: Set version (on release)
+        if: github.event_name == 'release'
+        working-directory: react-native
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#rn-v}"   # rn-v0.2.0 -> 0.2.0
+          VERSION="${VERSION#v}"
+          echo "Publishing version: $VERSION"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Set version (manual)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        working-directory: react-native
+        run: npm version "${{ github.event.inputs.version }}" --no-git-tag-version --allow-same-version
+
+      # `npm pack` runs prepack, which vendors the librats core into the package. The
+      # checks below are the point of this job: the two ways this package can ship
+      # broken are silent, and both have happened.
+      - name: Pack
+        working-directory: react-native
+        run: npm pack --pack-destination /tmp
+
+      - name: Verify the tarball is complete and clean
+        working-directory: react-native
+        run: |
+          set -euo pipefail
+          TARBALL=$(ls /tmp/react-native-librats-*.tgz)
+          echo "Verifying $TARBALL ($(du -h "$TARBALL" | cut -f1))"
+          FILES=$(tar -tzf "$TARBALL")
+
+          # 1. The core must be vendored in. Without it both platform builds resolve
+          #    to node_modules/ and fail: Android cannot add_subdirectory the core,
+          #    and the podspec cannot find build-xcframework.sh.
+          for required in \
+            package/vendor/librats/CMakeLists.txt \
+            package/vendor/librats/src/librats/node/node.h \
+            package/vendor/librats/ios/build-xcframework.sh \
+            package/cpp/HybridRatsNode.cpp \
+            package/nitrogen/generated/shared/c++/HybridRatsNodeSpec.hpp \
+            package/android/CMakeLists.txt \
+            package/LibratsRN.podspec
+          do
+            echo "$FILES" | grep -qx "$required" || { echo "MISSING: $required"; exit 1; }
+          done
+
+          # 2. No build output. `files` once listed whole directories, which pulled in
+          #    android/.cxx, android/build and a locally-built 127 MB XCFramework —
+          #    2.2 GB of artifacts, and the size depended on what you happened to
+          #    build before packing.
+          if echo "$FILES" | grep -qE '\.cxx/|/build/|\.xcframework/|\.so$|\.o$|\.a$'; then
+            echo "Build output leaked into the tarball:"
+            echo "$FILES" | grep -E '\.cxx/|/build/|\.xcframework/|\.so$|\.o$|\.a$' | head -20
+            exit 1
+          fi
+
+          # 3. A tarball this far off its expected size means the file list changed
+          #    shape; better to look than to publish it.
+          SIZE=$(stat -c%s "$TARBALL")
+          echo "Packed size: $SIZE bytes"
+          [ "$SIZE" -gt 200000 ]  || { echo "Suspiciously small — is the core there?"; exit 1; }
+          [ "$SIZE" -lt 20000000 ] || { echo "Suspiciously large — build output?"; exit 1; }
+
+          echo "Tarball looks right: $(echo "$FILES" | wc -l) files"
+
+      # Trusted publishing with OIDC - no token needed!
+      # Provenance is automatically generated
+      - name: Publish to NPM (release)
+        if: github.event_name == 'release' && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'alpha')
+        working-directory: react-native
+        run: npm publish --access public
+
+      - name: Publish to NPM (beta)
+        if: github.event_name == 'release' && contains(github.ref_name, 'beta')
+        working-directory: react-native
+        run: npm publish --access public --tag beta
+
+      - name: Publish to NPM (alpha)
+        if: github.event_name == 'release' && contains(github.ref_name, 'alpha')
+        working-directory: react-native
+        run: npm publish --access public --tag alpha
+
+      - name: Publish to NPM (manual)
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: react-native
+        run: npm publish --access public --tag next
