@@ -5,9 +5,11 @@
 #include "test_paths.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef RATS_STORAGE
 
@@ -543,12 +545,13 @@ TEST_F(StorageManagerTest, ChangeCallback) {
 
 namespace {
 
-NodeConfig storage_node_config(bool listen) {
+NodeConfig storage_node_config(bool listen, size_t send_queue_limit = 0) {
     NodeConfig c;
     c.bind_address = "127.0.0.1";
     c.security = NodeConfig::Security::Noise;
     c.enable_listen = listen;
     c.protocol = librats_test::test_protocol();
+    c.send_queue_limit = send_queue_limit;
     return c;
 }
 
@@ -629,6 +632,379 @@ TEST_F(StorageReplicationTest, SnapshotSyncOnConnect) {
 
     client.stop();
     server.stop();
+}
+
+
+//=============================================================================
+// Backpressure: a snapshot is a paced stream, not one message
+//=============================================================================
+
+namespace {
+
+// Fills `store` with `count` values of `value_bytes` each, keyed k000000…
+size_t fill(StorageManager& store, size_t count, size_t value_bytes, const char* prefix = "k") {
+    const std::string value(value_bytes, 'v');
+    char key[64];
+    for (size_t i = 0; i < count; ++i) {
+        std::snprintf(key, sizeof(key), "%s%06zu", prefix, i);
+        EXPECT_TRUE(store.put(key, value)) << "put failed at " << i;
+    }
+    return count * value_bytes;
+}
+
+} // namespace
+
+// The regression this whole design exists for. A database far larger than a
+// connection's send high-water mark (8 MiB by default) used to be serialized
+// into ONE sync response — which the transport answers by dropping the peer as
+// a slow consumer, on every single connect. Streamed in bounded chunks it
+// simply arrives, and the link survives.
+TEST_F(StorageReplicationTest, OversizedDatabaseSyncsWithoutDroppingThePeer) {
+    Node server(storage_node_config(true));
+    Node client(storage_node_config(false));
+
+    auto server_store = std::make_unique<StorageManager>(mem_storage_config());
+    auto client_store = std::make_unique<StorageManager>(mem_storage_config());
+    StorageManager* srv = server_store.get();
+    StorageManager* cli = client_store.get();
+
+    server.add_subsystem(std::move(server_store));
+    client.add_subsystem(std::move(client_store));
+
+    ASSERT_TRUE(server.start());
+
+    // 12 MiB: past the 8 MiB high-water mark at which a connection drops its
+    // peer, and past the 2 MiB mark at which send() starts answering "no room".
+    constexpr size_t kEntries = 192;
+    constexpr size_t kValue   = 64 * 1024;
+    fill(*srv, kEntries, kValue);
+
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }))
+        << "peers did not connect";
+
+    ASSERT_TRUE(wait_for([&] { return cli->size() == kEntries; }, 60s))
+        << "client received " << cli->size() << " of " << kEntries << " entries";
+
+    // Every value arrived intact, not just every key.
+    for (size_t i : {size_t(0), kEntries / 2, kEntries - 1}) {
+        char key[64];
+        std::snprintf(key, sizeof(key), "k%06zu", i);
+        auto v = cli->get_string(key);
+        ASSERT_TRUE(v.has_value()) << "missing " << key;
+        EXPECT_EQ(v->size(), kValue) << "truncated " << key;
+    }
+
+    // The point: still connected. Under the old one-message snapshot the peer
+    // was gone with CloseReason::SlowConsumer long before this line.
+    EXPECT_EQ(client.peer_count(), 1u);
+    EXPECT_EQ(server.peer_count(), 1u);
+
+    // And it arrived as a stream: 12 MiB cannot fit in one 256 KiB chunk.
+    EXPECT_GT(cli->get_statistics().sync_chunks_received, 1u);
+    EXPECT_GT(srv->get_statistics().sync_chunks_sent, 1u);
+
+    client.stop();
+    server.stop();
+}
+
+// The same thing on a deliberately tiny send queue, so the pacing loop has to
+// stop and resume many times over rather than a handful. Cheap to run, and it
+// exercises the send()-said-no path densely.
+TEST_F(StorageReplicationTest, SnapshotPacesAgainstATinySendQueue) {
+    // 128 KiB queue: "no room" at 32 KiB, peer dropped at 128 KiB.
+    Node server(storage_node_config(true, 128 * 1024));
+    Node client(storage_node_config(false, 128 * 1024));
+
+    StorageConfig cfg = mem_storage_config();
+    cfg.sync_batch_bytes = 16 * 1024;   // must stay under the 32 KiB low-water mark
+    cfg.max_value_size   = 16 * 1024;
+
+    auto server_store = std::make_unique<StorageManager>(cfg);
+    auto client_store = std::make_unique<StorageManager>(cfg);
+    StorageManager* srv = server_store.get();
+    StorageManager* cli = client_store.get();
+
+    server.add_subsystem(std::move(server_store));
+    client.add_subsystem(std::move(client_store));
+
+    ASSERT_TRUE(server.start());
+
+    constexpr size_t kEntries = 400;
+    fill(*srv, kEntries, 4 * 1024);   // 1.6 MiB — 12x the whole send queue
+
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1; })) << "did not connect";
+
+    ASSERT_TRUE(wait_for([&] { return cli->size() == kEntries; }, 60s))
+        << "client received " << cli->size() << " of " << kEntries << " entries";
+    EXPECT_EQ(client.peer_count(), 1u);
+    EXPECT_EQ(server.peer_count(), 1u);
+    EXPECT_GT(srv->get_statistics().sync_chunks_sent, 10u) << "should have taken many chunks";
+
+    client.stop();
+    server.stop();
+}
+
+// Both ends ask for a snapshot on connect, so two large streams cross on the
+// one link. Each is paced against that link independently and both converge.
+TEST_F(StorageReplicationTest, SnapshotsCrossingInBothDirectionsConverge) {
+    Node server(storage_node_config(true, 128 * 1024));
+    Node client(storage_node_config(false, 128 * 1024));
+
+    StorageConfig cfg = mem_storage_config();
+    cfg.sync_batch_bytes = 16 * 1024;
+    cfg.max_value_size   = 16 * 1024;
+
+    auto server_store = std::make_unique<StorageManager>(cfg);
+    auto client_store = std::make_unique<StorageManager>(cfg);
+    StorageManager* srv = server_store.get();
+    StorageManager* cli = client_store.get();
+
+    server.add_subsystem(std::move(server_store));
+    client.add_subsystem(std::move(client_store));
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    // Disjoint key spaces, so the merged size is the sum and neither side can
+    // pass by having simply kept its own data.
+    constexpr size_t kEach = 200;
+    fill(*srv, kEach, 4 * 1024, "server-");
+    fill(*cli, kEach, 4 * 1024, "client-");
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1; })) << "did not connect";
+
+    ASSERT_TRUE(wait_for([&] { return cli->size() == 2 * kEach && srv->size() == 2 * kEach; }, 60s))
+        << "client has " << cli->size() << ", server has " << srv->size()
+        << ", expected " << 2 * kEach << " on both";
+    EXPECT_EQ(cli->keys_with_prefix("server-").size(), kEach);
+    EXPECT_EQ(srv->keys_with_prefix("client-").size(), kEach);
+    EXPECT_EQ(client.peer_count(), 1u);
+    EXPECT_EQ(server.peer_count(), 1u);
+
+    client.stop();
+    server.stop();
+}
+
+// A burst of writes far bigger than the link can carry does not kill the peer:
+// the writes that could not be sent individually are made good by the snapshot
+// the congested peer is then owed.
+TEST_F(StorageReplicationTest, WriteBurstOverflowingTheLinkStillConverges) {
+    Node server(storage_node_config(true, 128 * 1024));
+    Node client(storage_node_config(false, 128 * 1024));
+
+    StorageConfig cfg = mem_storage_config();
+    cfg.sync_batch_bytes     = 16 * 1024;
+    cfg.max_value_size       = 16 * 1024;
+    cfg.sync_min_interval_ms = 100;   // re-sync promptly rather than every 5 s
+
+    auto server_store = std::make_unique<StorageManager>(cfg);
+    auto client_store = std::make_unique<StorageManager>(cfg);
+    StorageManager* srv = server_store.get();
+    StorageManager* cli = client_store.get();
+
+    server.add_subsystem(std::move(server_store));
+    client.add_subsystem(std::move(client_store));
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1; })) << "did not connect";
+    ASSERT_TRUE(wait_for([&] { return cli->is_synced(); })) << "initial sync did not finish";
+
+    // Written as fast as put() will go, with no regard for the link at all —
+    // which is exactly how an application uses a key-value store.
+    constexpr size_t kEntries = 600;
+    fill(*srv, kEntries, 4 * 1024);
+
+    ASSERT_TRUE(wait_for([&] { return cli->size() == kEntries; }, 60s))
+        << "client has " << cli->size() << " of " << kEntries;
+    EXPECT_EQ(client.peer_count(), 1u) << "peer was dropped under the burst";
+    EXPECT_EQ(server.peer_count(), 1u);
+
+    client.stop();
+    server.stop();
+}
+
+// A peer cannot make us store a value bigger than our own limit — the guard a
+// local put() has always had, applied to the wire too.
+TEST_F(StorageReplicationTest, RemoteEntryOverOurLimitIsRejected) {
+    Node server(storage_node_config(true));
+    Node client(storage_node_config(false));
+
+    StorageConfig big = mem_storage_config();
+    big.max_value_size = 512 * 1024;
+    StorageConfig small = mem_storage_config();
+    small.max_value_size = 16 * 1024;
+
+    auto server_store = std::make_unique<StorageManager>(big);
+    auto client_store = std::make_unique<StorageManager>(small);
+    StorageManager* srv = server_store.get();
+    StorageManager* cli = client_store.get();
+
+    server.add_subsystem(std::move(server_store));
+    client.add_subsystem(std::move(client_store));
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1; })) << "did not connect";
+
+    ASSERT_TRUE(srv->put("small", std::string(1024, 'x')));
+    ASSERT_TRUE(srv->put("huge",  std::string(256 * 1024, 'x')));
+
+    // The value within the client's limit lands; the one past it never does.
+    ASSERT_TRUE(wait_for([&] { return cli->has("small"); })) << "small value did not replicate";
+    EXPECT_FALSE(cli->has("huge"));
+    EXPECT_EQ(client.peer_count(), 1u) << "an oversized entry must not cost the link";
+
+    client.stop();
+    server.stop();
+}
+
+//=============================================================================
+// Configuration limits
+//=============================================================================
+
+TEST_F(StorageManagerTest, ValueOverMaxSizeIsRejected) {
+    StorageConfig cfg = config_;
+    cfg.max_value_size = 4096;
+    storage_ = std::make_unique<StorageManager>(cfg);
+
+    EXPECT_TRUE(storage_->put("ok", std::string(4096, 'x')));
+    EXPECT_FALSE(storage_->put("too_big", std::string(4097, 'x')));
+    EXPECT_FALSE(storage_->has("too_big"));
+}
+
+// A value or a chunk bigger than what a send queue reports room for would make
+// the first link it travels on unwritable, so both are clamped rather than
+// trusted — the old 16 MiB default was twice the mark that drops a peer.
+TEST_F(StorageManagerTest, ConfigSizeLimitsAreClamped) {
+    StorageConfig cfg = config_;
+    cfg.max_value_size   = 64 * 1024 * 1024;
+    cfg.sync_batch_bytes = 64 * 1024 * 1024;
+    storage_ = std::make_unique<StorageManager>(cfg);
+    EXPECT_EQ(storage_->get_config().max_value_size, StorageConfig::kMaxValueSize);
+    EXPECT_EQ(storage_->get_config().sync_batch_bytes, StorageConfig::kMaxSyncBatchBytes);
+
+    // A batch too small to be worth its own framing is raised to the floor.
+    cfg.max_value_size   = 1024;
+    cfg.sync_batch_bytes = 1;
+    storage_->set_config(cfg);
+    EXPECT_EQ(storage_->get_config().max_value_size, 1024u);
+    EXPECT_EQ(storage_->get_config().sync_batch_bytes, StorageConfig::kMinSyncBatchBytes);
+
+    // The default must already be safe against the default connection queue.
+    const StorageConfig defaults;
+    EXPECT_LE(defaults.max_value_size, StorageConfig::kMaxValueSize);
+    EXPECT_LE(defaults.sync_batch_bytes, StorageConfig::kMaxSyncBatchBytes);
+}
+
+//=============================================================================
+// Entry framing under hostile input
+//=============================================================================
+
+// An entry declares its own length, and every field is read against that length.
+// A key length that reaches past the entry must fail rather than read on into
+// whatever follows it in the batch.
+TEST_F(StorageTest, DeserializeRejectsFieldReachingPastTheEntry) {
+    StorageEntry entry;
+    entry.key = "k";
+    entry.type = StorageValueType::STRING;
+    entry.data = {'v'};
+    entry.timestamp_ms = 1;
+    entry.origin_peer_id = "p";
+    entry.calculate_checksum();
+
+    std::vector<uint8_t> buf = entry.serialize();
+    // Inflate the key length to cover the whole entry and then some.
+    buf[4] = 0xFF; buf[5] = 0xFF; buf[6] = 0xFF; buf[7] = 0xFF;
+
+    StorageEntry out;
+    size_t bytes_read = 0;
+    EXPECT_FALSE(StorageEntry::deserialize(buf, 0, out, bytes_read));
+
+    // A total length past the end of the buffer is refused too.
+    buf = entry.serialize();
+    buf[0] = 0x7F;
+    EXPECT_FALSE(StorageEntry::deserialize(buf, 0, out, bytes_read));
+}
+
+// Two entries back to back: the first must consume exactly its own bytes, so
+// the second starts where it should. This is what walking a snapshot chunk does.
+TEST_F(StorageTest, DeserializeStopsAtTheEntryBoundary) {
+    StorageEntry a, b;
+    a.key = "alpha"; a.type = StorageValueType::STRING; a.data = {'1'};
+    a.timestamp_ms = 10; a.origin_peer_id = "pa"; a.calculate_checksum();
+    b.key = "beta";  b.type = StorageValueType::BINARY; b.data = {9, 8, 7};
+    b.timestamp_ms = 20; b.origin_peer_id = "pb"; b.calculate_checksum();
+
+    std::vector<uint8_t> buf;
+    a.serialize_into(buf);
+    const size_t first_size = buf.size();
+    b.serialize_into(buf);
+
+    EXPECT_EQ(first_size, a.serialized_size());
+    EXPECT_EQ(buf.size(), a.serialized_size() + b.serialized_size());
+
+    StorageEntry out;
+    size_t read_a = 0, read_b = 0;
+    ASSERT_TRUE(StorageEntry::deserialize(buf, 0, out, read_a));
+    EXPECT_EQ(read_a, first_size);
+    EXPECT_EQ(out.key, "alpha");
+    EXPECT_TRUE(out.verify_checksum());
+
+    ASSERT_TRUE(StorageEntry::deserialize(buf, read_a, out, read_b));
+    EXPECT_EQ(read_a + read_b, buf.size());
+    EXPECT_EQ(out.key, "beta");
+    EXPECT_EQ(out.data, (std::vector<uint8_t>{9, 8, 7}));
+    EXPECT_TRUE(out.verify_checksum());
+}
+
+// The pointer overload parses straight out of a receive buffer, at an offset,
+// without the caller copying the payload into a vector first.
+TEST_F(StorageTest, DeserializeFromRawBufferAtOffset) {
+    StorageEntry entry;
+    entry.key = "raw"; entry.type = StorageValueType::INT64;
+    entry.data = {0, 0, 0, 0, 0, 0, 0, 42};
+    entry.timestamp_ms = 7; entry.origin_peer_id = "p"; entry.calculate_checksum();
+
+    std::vector<uint8_t> buf{0xAA, 0xBB};   // an opcode + flags byte ahead of it
+    entry.serialize_into(buf);
+
+    StorageEntry out;
+    size_t bytes_read = 0;
+    ASSERT_TRUE(StorageEntry::deserialize(buf.data(), buf.size(), 2, out, bytes_read));
+    EXPECT_EQ(bytes_read, buf.size() - 2);
+    EXPECT_EQ(out.key, "raw");
+    EXPECT_EQ(out.data, entry.data);
+
+    // One byte short of complete: refused, not read past.
+    EXPECT_FALSE(StorageEntry::deserialize(buf.data(), buf.size() - 1, 2, out, bytes_read));
+}
+
+// The ordered map turns a prefix query into a range scan; the boundaries are
+// what a scan gets wrong, so they are what this checks.
+TEST_F(StorageManagerTest, KeysWithPrefixScansOnlyTheRange) {
+    storage_ = std::make_unique<StorageManager>(config_);
+
+    for (const char* k : {"a", "user", "user:1", "user:2", "user;", "usez", "zzz"})
+        ASSERT_TRUE(storage_->put(k, std::string("v")));
+
+    auto found = storage_->keys_with_prefix("user:");
+    std::sort(found.begin(), found.end());
+    EXPECT_EQ(found, (std::vector<std::string>{"user:1", "user:2"}));
+
+    found = storage_->keys_with_prefix("user");
+    std::sort(found.begin(), found.end());
+    EXPECT_EQ(found, (std::vector<std::string>{"user", "user:1", "user:2", "user;"}));
+
+    EXPECT_TRUE(storage_->keys_with_prefix("nothing").empty());
+    EXPECT_EQ(storage_->keys_with_prefix("").size(), 7u);
 }
 
 #endif // RATS_STORAGE

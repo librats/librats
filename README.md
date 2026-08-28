@@ -417,9 +417,16 @@ if (auto rtt = ping->last_rtt(peer_id))
 auto* storage = node.add_subsystem(std::make_unique<StorageManager>());
 node.start();
 
-storage->put("greeting", "hello");                       // syncs to connected peers via GossipSub
+storage->put("greeting", "hello");   // replicated to connected peers (Last-Write-Wins)
 if (auto v = storage->get_string("greeting")) std::cout << *v << "\n";
 ```
+
+On connect the two sides exchange a full snapshot, streamed in bounded chunks
+paced against each link's send queue, so a database far larger than that queue
+syncs without the peer being dropped as a slow consumer. `StorageConfig` tunes
+the two sizes that matter — `max_value_size` (1 MiB) and `sync_batch_bytes`
+(256 KiB); both must stay under a quarter of `NodeConfig::send_queue_limit`, and
+both are clamped to that assumption for the default 8 MiB queue.
 
 ## 📖 API Documentation
 

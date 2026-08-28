@@ -22,6 +22,15 @@ void put_u32(std::vector<uint8_t>& b, uint32_t v) {
     for (int i = 3; i >= 0; --i) b.push_back(static_cast<uint8_t>((v >> (i * 8)) & 0xFF));
 }
 
+void write_u32(uint8_t* p, uint32_t v) {
+    for (int i = 0; i < 4; ++i) p[i] = static_cast<uint8_t>((v >> ((3 - i) * 8)) & 0xFF);
+}
+
+uint32_t read_u32(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8)  |  static_cast<uint32_t>(p[3]);
+}
+
 } // namespace
 
 //=============================================================================
@@ -61,9 +70,11 @@ bool StorageEntry::verify_checksum() const {
     return temp.checksum == checksum;
 }
 
-std::vector<uint8_t> StorageEntry::serialize() const {
-    std::vector<uint8_t> buffer;
+size_t StorageEntry::serialized_size() const {
+    return 4 + 4 + key.size() + 1 + 1 + 8 + 4 + origin_peer_id.size() + 4 + data.size() + 4;
+}
 
+void StorageEntry::serialize_into(std::vector<uint8_t>& buffer) const {
     // Format:
     // [4 bytes] total_length (excluding this field)
     // [4 bytes] key_length
@@ -77,156 +88,109 @@ std::vector<uint8_t> StorageEntry::serialize() const {
     // [data_length bytes] data
     // [4 bytes] checksum
 
-    // Calculate total size first
-    uint32_t key_len = static_cast<uint32_t>(key.size());
-    uint32_t peer_id_len = static_cast<uint32_t>(origin_peer_id.size());
-    uint32_t data_len = static_cast<uint32_t>(data.size());
-    uint32_t total_len = 4 + key_len + 1 + 1 + 8 + 4 + peer_id_len + 4 + data_len + 4;
+    const uint32_t key_len     = static_cast<uint32_t>(key.size());
+    const uint32_t peer_id_len = static_cast<uint32_t>(origin_peer_id.size());
+    const uint32_t data_len    = static_cast<uint32_t>(data.size());
+    const uint32_t total_len   = 4 + key_len + 1 + 1 + 8 + 4 + peer_id_len + 4 + data_len + 4;
 
-    buffer.reserve(4 + total_len);
-
-    // Total length (big endian)
-    buffer.push_back((total_len >> 24) & 0xFF);
-    buffer.push_back((total_len >> 16) & 0xFF);
-    buffer.push_back((total_len >> 8) & 0xFF);
-    buffer.push_back(total_len & 0xFF);
-
-    // Key length (big endian)
-    buffer.push_back((key_len >> 24) & 0xFF);
-    buffer.push_back((key_len >> 16) & 0xFF);
-    buffer.push_back((key_len >> 8) & 0xFF);
-    buffer.push_back(key_len & 0xFF);
-
-    // Key
+    // Deliberately no reserve() here. Appending entry after entry into one
+    // buffer is the whole point of this overload, and a reserve() of exactly
+    // what the next entry needs re-allocates on every single call — turning the
+    // batch into O(n^2) copying. The vector's own geometric growth is what makes
+    // the append amortised; callers that know the total up front (serialize(),
+    // the snapshot chunk) reserve once, outside the loop.
+    put_u32(buffer, total_len);
+    put_u32(buffer, key_len);
     buffer.insert(buffer.end(), key.begin(), key.end());
-
-    // Type
     buffer.push_back(static_cast<uint8_t>(type));
-
-    // Deleted flag
     buffer.push_back(deleted ? 1 : 0);
-
-    // Timestamp (big endian)
     for (int i = 7; i >= 0; i--) {
         buffer.push_back(static_cast<uint8_t>((timestamp_ms >> (i * 8)) & 0xFF));
     }
-
-    // Peer ID length (big endian)
-    buffer.push_back((peer_id_len >> 24) & 0xFF);
-    buffer.push_back((peer_id_len >> 16) & 0xFF);
-    buffer.push_back((peer_id_len >> 8) & 0xFF);
-    buffer.push_back(peer_id_len & 0xFF);
-
-    // Peer ID
+    put_u32(buffer, peer_id_len);
     buffer.insert(buffer.end(), origin_peer_id.begin(), origin_peer_id.end());
-
-    // Data length (big endian)
-    buffer.push_back((data_len >> 24) & 0xFF);
-    buffer.push_back((data_len >> 16) & 0xFF);
-    buffer.push_back((data_len >> 8) & 0xFF);
-    buffer.push_back(data_len & 0xFF);
-
-    // Data
+    put_u32(buffer, data_len);
     buffer.insert(buffer.end(), data.begin(), data.end());
+    put_u32(buffer, checksum);
+}
 
-    // Checksum (big endian)
-    buffer.push_back((checksum >> 24) & 0xFF);
-    buffer.push_back((checksum >> 16) & 0xFF);
-    buffer.push_back((checksum >> 8) & 0xFF);
-    buffer.push_back(checksum & 0xFF);
-
+std::vector<uint8_t> StorageEntry::serialize() const {
+    std::vector<uint8_t> buffer;
+    buffer.reserve(serialized_size());
+    serialize_into(buffer);
     return buffer;
+}
+
+bool StorageEntry::deserialize(const uint8_t* buffer, size_t size, size_t offset,
+                               StorageEntry& entry, size_t& bytes_read) {
+    bytes_read = 0;
+
+    if (offset > size || size - offset < 4) return false;
+
+    // The entry declares its own length; every field below is read against that
+    // end rather than against the end of the buffer, so an entry can neither
+    // overrun the buffer nor reach into the entry that follows it in a batch.
+    const uint32_t total_len = read_u32(buffer + offset);
+    if (size - offset - 4 < total_len) return false;
+
+    size_t       pos = offset + 4;
+    const size_t end = pos + total_len;
+
+    // Reads the next `n` bytes if the entry still declares that many.
+    const auto take = [&](size_t n) -> const uint8_t* {
+        if (end - pos < n) return nullptr;
+        const uint8_t* p = buffer + pos;
+        pos += n;
+        return p;
+    };
+
+    const uint8_t* p = take(4);
+    if (!p) return false;
+    const uint32_t key_len = read_u32(p);
+
+    p = take(key_len);
+    if (!p) return false;
+    entry.key.assign(reinterpret_cast<const char*>(p), key_len);
+
+    p = take(2);   // type + deleted flag
+    if (!p) return false;
+    entry.type    = static_cast<StorageValueType>(p[0]);
+    entry.deleted = p[1] != 0;
+
+    p = take(8);
+    if (!p) return false;
+    entry.timestamp_ms = 0;
+    for (int i = 0; i < 8; i++) entry.timestamp_ms = (entry.timestamp_ms << 8) | p[i];
+
+    p = take(4);
+    if (!p) return false;
+    const uint32_t peer_id_len = read_u32(p);
+
+    p = take(peer_id_len);
+    if (!p) return false;
+    entry.origin_peer_id.assign(reinterpret_cast<const char*>(p), peer_id_len);
+
+    p = take(4);
+    if (!p) return false;
+    const uint32_t data_len = read_u32(p);
+
+    p = take(data_len);
+    if (!p) return false;
+    entry.data.assign(p, p + data_len);
+
+    p = take(4);
+    if (!p) return false;
+    entry.checksum = read_u32(p);
+
+    // Trailing bytes inside the declared length are skipped, not rejected: that
+    // is what lets a field be appended to the format without a version bump.
+    bytes_read = end - offset;
+    return true;
 }
 
 bool StorageEntry::deserialize(const std::vector<uint8_t>& buffer, size_t offset,
                                StorageEntry& entry, size_t& bytes_read) {
-    bytes_read = 0;
-
-    // Minimum size check (4 bytes for total_length)
-    if (offset + 4 > buffer.size()) {
-        return false;
-    }
-
-    // Read total length
-    uint32_t total_len = (static_cast<uint32_t>(buffer[offset]) << 24) |
-                         (static_cast<uint32_t>(buffer[offset + 1]) << 16) |
-                         (static_cast<uint32_t>(buffer[offset + 2]) << 8) |
-                         static_cast<uint32_t>(buffer[offset + 3]);
-
-    // Check if we have enough data
-    if (offset + 4 + total_len > buffer.size()) {
-        return false;
-    }
-
-    size_t pos = offset + 4;
-
-    // Read key length
-    if (pos + 4 > buffer.size()) return false;
-    uint32_t key_len = (static_cast<uint32_t>(buffer[pos]) << 24) |
-                       (static_cast<uint32_t>(buffer[pos + 1]) << 16) |
-                       (static_cast<uint32_t>(buffer[pos + 2]) << 8) |
-                       static_cast<uint32_t>(buffer[pos + 3]);
-    pos += 4;
-
-    // Read key
-    if (pos + key_len > buffer.size()) return false;
-    entry.key = std::string(buffer.begin() + pos, buffer.begin() + pos + key_len);
-    pos += key_len;
-
-    // Read type
-    if (pos + 1 > buffer.size()) return false;
-    entry.type = static_cast<StorageValueType>(buffer[pos]);
-    pos += 1;
-
-    // Read deleted flag
-    if (pos + 1 > buffer.size()) return false;
-    entry.deleted = buffer[pos] != 0;
-    pos += 1;
-
-    // Read timestamp
-    if (pos + 8 > buffer.size()) return false;
-    entry.timestamp_ms = 0;
-    for (int i = 0; i < 8; i++) {
-        entry.timestamp_ms = (entry.timestamp_ms << 8) | buffer[pos + i];
-    }
-    pos += 8;
-
-    // Read peer ID length
-    if (pos + 4 > buffer.size()) return false;
-    uint32_t peer_id_len = (static_cast<uint32_t>(buffer[pos]) << 24) |
-                           (static_cast<uint32_t>(buffer[pos + 1]) << 16) |
-                           (static_cast<uint32_t>(buffer[pos + 2]) << 8) |
-                           static_cast<uint32_t>(buffer[pos + 3]);
-    pos += 4;
-
-    // Read peer ID
-    if (pos + peer_id_len > buffer.size()) return false;
-    entry.origin_peer_id = std::string(buffer.begin() + pos, buffer.begin() + pos + peer_id_len);
-    pos += peer_id_len;
-
-    // Read data length
-    if (pos + 4 > buffer.size()) return false;
-    uint32_t data_len = (static_cast<uint32_t>(buffer[pos]) << 24) |
-                        (static_cast<uint32_t>(buffer[pos + 1]) << 16) |
-                        (static_cast<uint32_t>(buffer[pos + 2]) << 8) |
-                        static_cast<uint32_t>(buffer[pos + 3]);
-    pos += 4;
-
-    // Read data
-    if (pos + data_len > buffer.size()) return false;
-    entry.data = std::vector<uint8_t>(buffer.begin() + pos, buffer.begin() + pos + data_len);
-    pos += data_len;
-
-    // Read checksum
-    if (pos + 4 > buffer.size()) return false;
-    entry.checksum = (static_cast<uint32_t>(buffer[pos]) << 24) |
-                     (static_cast<uint32_t>(buffer[pos + 1]) << 16) |
-                     (static_cast<uint32_t>(buffer[pos + 2]) << 8) |
-                     static_cast<uint32_t>(buffer[pos + 3]);
-    pos += 4;
-
-    bytes_read = pos - offset;
-    return true;
+    return deserialize(buffer.data(), buffer.size(), offset, entry, bytes_read);
 }
 
 bool StorageEntry::wins_over(const StorageEntry& other) const {
@@ -267,12 +231,27 @@ StorageValueType string_to_storage_value_type(const std::string& str) {
 // StorageManager Implementation
 //=============================================================================
 
+void StorageManager::sanitize_config(StorageConfig& config) {
+    // A value or a chunk bigger than what one send queue reports room for would
+    // make the very first one it travels on unwritable — and two of them would
+    // trip the high-water mark and drop the peer. Clamp rather than reject: the
+    // limits are a safety belt, not something a caller tunes for correctness.
+    config.max_value_size =
+        (std::min)(config.max_value_size, StorageConfig::kMaxValueSize);
+    config.sync_batch_bytes =
+        (std::min)(config.sync_batch_bytes, StorageConfig::kMaxSyncBatchBytes);
+    config.sync_batch_bytes =
+        (std::max)(config.sync_batch_bytes, StorageConfig::kMinSyncBatchBytes);
+}
+
 StorageManager::StorageManager(const StorageConfig& config)
     : config_(config),
       sync_status_(StorageSyncStatus::NOT_STARTED),
       initial_sync_complete_(false),
       running_(true),
       dirty_(false) {
+
+    sanitize_config(config_);
 
     // Initialize statistics
     stats_ = StorageStatistics();
@@ -301,6 +280,8 @@ void StorageManager::shutdown() {
     if (!running_.exchange(false)) return;
 
     LOG_STORAGE_INFO("StorageManager shutting down...");
+
+    stop_sync_thread();
 
     // Wake up persistence thread
     {
@@ -357,20 +338,47 @@ void StorageManager::attach(NodeContext& ctx) {
         [this](const Peer& peer, ByteView payload) { on_storage_message(peer.id(), payload); });
     network_->on_peer_connected(
         [this](const Peer& peer) { on_peer_connected(peer.id()); });
+    // Without this the per-peer sync state of every peer that ever connected
+    // would be kept forever, snapshot cursors and all.
+    network_->on_peer_disconnected(
+        [this](const PeerId& id) { on_peer_disconnected(id); });
+    // The other half of honouring send()'s return value: a peer that filled up is
+    // owed a snapshot, and this is what says the link has room to serve it.
+    network_->on_peer_writable(
+        [this](const Peer& peer) { on_peer_writable(peer.id()); });
 }
 
 void StorageManager::start() {
-    // The persistence thread is already running (started in the constructor) and
-    // sync is driven by peer events registered in attach(); nothing to spin up here.
+    // The persistence thread is already running (started in the constructor).
+    // The sync thread only exists once there is a network to pace against.
+    if (config_.enable_sync && network_) start_sync_thread();
 }
 
 void StorageManager::stop() {
     shutdown();
 }
 
+void StorageManager::start_sync_thread() {
+    if (sync_running_.exchange(true)) return;
+    batch_bytes_   = config_.sync_batch_bytes;
+    sync_interval_ = std::chrono::milliseconds(config_.sync_min_interval_ms);
+    sync_thread_ = std::thread(&StorageManager::sync_thread_loop, this);
+}
+
+void StorageManager::stop_sync_thread() {
+    if (!sync_running_.exchange(false)) return;
+    // Taken and dropped for the ordering alone: it puts the flag store above
+    // before any wait the thread is about to enter, so the notify below cannot
+    // slip past a thread that had already decided to sleep.
+    { std::lock_guard<std::mutex> lock(sync_mutex_); }
+    sync_cv_.notify_all();
+    if (sync_thread_.joinable()) sync_thread_.join();
+}
+
 void StorageManager::set_config(const StorageConfig& config) {
     std::lock_guard<std::mutex> lock(storage_mutex_);
     config_ = config;
+    sanitize_config(config_);
 
     if (config_.persist_to_disk) {
         create_directories(config_.data_directory.c_str());
@@ -646,14 +654,12 @@ std::vector<std::string> StorageManager::keys() const {
 std::vector<std::string> StorageManager::keys_with_prefix(const std::string& prefix) const {
     std::lock_guard<std::mutex> lock(storage_mutex_);
 
+    // A range scan, not a full walk: the map is ordered, so the matching keys are
+    // exactly the contiguous run starting at lower_bound(prefix).
     std::vector<std::string> result;
-
-    for (const auto& pair : entries_) {
-        if (!pair.second.deleted &&
-            pair.first.size() >= prefix.size() &&
-            pair.first.compare(0, prefix.size(), prefix) == 0) {
-            result.push_back(pair.first);
-        }
+    for (auto it = entries_.lower_bound(prefix); it != entries_.end(); ++it) {
+        if (it->first.compare(0, prefix.size(), prefix) != 0) break;
+        if (!it->second.deleted) result.push_back(it->first);
     }
 
     return result;
@@ -865,6 +871,9 @@ librats::Json StorageManager::get_statistics_json() const {
     result["entries_sent"] = stats.entries_sent;
     result["sync_requests_received"] = stats.sync_requests_received;
     result["sync_requests_sent"] = stats.sync_requests_sent;
+    result["sync_chunks_sent"] = stats.sync_chunks_sent;
+    result["sync_chunks_received"] = stats.sync_chunks_received;
+    result["resyncs_scheduled"] = stats.resyncs_scheduled;
 
     switch (stats.sync_status) {
         case StorageSyncStatus::NOT_STARTED: result["sync_status"] = "not_started"; break;
@@ -882,17 +891,21 @@ librats::Json StorageManager::get_statistics_json() const {
 
 void StorageManager::on_storage_message(const PeerId& from, ByteView payload) {
     if (payload.empty()) return;
+    if (payload.size() > kMaxInboundMessage) {
+        LOG_STORAGE_WARN("Oversized storage message (" << payload.size() << " B) from "
+                         << from.short_hex() << "; ignored");
+        return;
+    }
 
     const uint8_t* p = payload.data();
-    const size_t n = payload.size();
-    const uint8_t op = p[0];
+    const size_t   n = payload.size();
 
-    if (op == OP_ENTRY) {
-        // Deserialize a single entry from the payload (after the opcode byte).
-        std::vector<uint8_t> buf(p + 1, p + n);
+    switch (p[0]) {
+    case OP_ENTRY: {
+        // Parsed straight out of the receive buffer — no copy of the payload.
         StorageEntry entry;
         size_t bytes_read = 0;
-        if (!StorageEntry::deserialize(buf, 0, entry, bytes_read)) {
+        if (!StorageEntry::deserialize(p, n, 1, entry, bytes_read)) {
             LOG_STORAGE_WARN("Malformed storage entry from " << from.short_hex());
             return;
         }
@@ -912,64 +925,117 @@ void StorageManager::on_storage_message(const PeerId& from, ByteView payload) {
             // Re-flood to other peers; LWW makes a duplicate lose, so this stops.
             forward_entry(entry, from);
         }
-    } else if (op == OP_SYNC_REQUEST) {
+        break;
+    }
+
+    case OP_SYNC_REQUEST: {
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
             stats_.sync_requests_received++;
         }
-        send_sync_response(from);
-    } else if (op == OP_SYNC_RESPONSE) {
-        // [3][count:u32][entry]*
-        if (n < 5) return;
-        uint32_t count = (static_cast<uint32_t>(p[1]) << 24) |
-                         (static_cast<uint32_t>(p[2]) << 16) |
-                         (static_cast<uint32_t>(p[3]) << 8) |
-                         static_cast<uint32_t>(p[4]);
-        std::vector<uint8_t> buf(p + 5, p + n);
-        size_t offset = 0;
-        int applied = 0;
-        for (uint32_t i = 0; i < count && offset < buf.size(); i++) {
-            StorageEntry entry;
-            size_t bytes_read = 0;
-            if (!StorageEntry::deserialize(buf, offset, entry, bytes_read)) break;
-            offset += bytes_read;
-            if (!entry.verify_checksum()) continue;
+        // Queue the work; the sync thread serializes and paces it. Serializing
+        // the database here would be doing it on a reactor thread, under
+        // storage_mutex_, for as long as the database is big.
+        schedule_snapshot(from, /*requested_by_peer=*/true);
+        break;
+    }
 
-            StorageChangeEvent event;
-            if (apply_remote_entry(entry, &event)) {
-                applied++;
-                notify_change(event);
-            }
-        }
+    case OP_SYNC_CHUNK: {
+        // [3][flags:u8][count:u32][entry]*
+        if (n < 6) return;
+        const bool     last  = (p[1] & FLAG_LAST) != 0;
+        const uint32_t count = read_u32(p + 2);
 
-        {
-            std::lock_guard<std::mutex> lock(sync_mutex_);
-            sync_status_ = StorageSyncStatus::COMPLETED;
-            initial_sync_complete_ = true;
-            last_sync_time_ = std::chrono::steady_clock::now();
-        }
+        const uint32_t applied = apply_chunk(from, p + 6, n - 6, count);
+        if (applied > 0) mark_dirty();
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
             stats_.entries_synced += applied;
+            stats_.sync_chunks_received++;
         }
-        if (applied > 0) mark_dirty();
 
-        LOG_STORAGE_INFO("Sync from " << from.short_hex() << " applied " << applied << " entries");
+        LOG_STORAGE_DEBUG("Snapshot chunk from " << from.short_hex() << ": " << count
+                          << " entries, " << applied << " applied" << (last ? " (last)" : ""));
+        if (!last) break;
+
+        {
+            std::lock_guard<std::mutex> lock(sync_mutex_);
+            sync_status_           = StorageSyncStatus::COMPLETED;
+            initial_sync_complete_ = true;
+            last_sync_time_        = std::chrono::steady_clock::now();
+        }
+        LOG_STORAGE_INFO("Snapshot from " << from.short_hex() << " complete");
         if (sync_complete_callback_) sync_complete_callback_(true, "");
+        break;
     }
+
+    default:
+        LOG_STORAGE_WARN("Unknown storage opcode " << static_cast<int>(p[0])
+                         << " from " << from.short_hex());
+        break;
+    }
+}
+
+uint32_t StorageManager::apply_chunk(const PeerId& from, const uint8_t* data, size_t size,
+                                     uint32_t count) {
+    uint32_t applied = 0;
+    size_t   offset  = 0;
+
+    for (uint32_t i = 0; i < count && offset < size; i++) {
+        StorageEntry entry;
+        size_t bytes_read = 0;
+        if (!StorageEntry::deserialize(data, size, offset, entry, bytes_read)) {
+            LOG_STORAGE_WARN("Truncated snapshot chunk from " << from.short_hex()
+                             << " at entry " << i);
+            break;
+        }
+        offset += bytes_read;
+        if (!entry.verify_checksum()) continue;
+
+        StorageChangeEvent event;
+        if (apply_remote_entry(entry, &event)) {
+            applied++;
+            notify_change(event);
+        }
+    }
+    return applied;
 }
 
 void StorageManager::on_peer_connected(const PeerId& peer_id) {
     if (!config_.enable_sync) return;
 
     // Anti-entropy: ask the new peer for a full snapshot. Both ends do this on
-    // connect, so the two databases converge via LWW.
+    // connect, so the two databases converge via LWW. Both snapshots are streams
+    // paced against their own link, so the pair crossing costs bandwidth and
+    // nothing else.
     {
         std::lock_guard<std::mutex> lock(sync_mutex_);
         if (sync_status_ == StorageSyncStatus::NOT_STARTED)
             sync_status_ = StorageSyncStatus::IN_PROGRESS;
+        peers_.emplace(peer_id, PeerSync{});
     }
     send_sync_request(peer_id);
+}
+
+void StorageManager::on_peer_disconnected(const PeerId& peer_id) {
+    {
+        std::lock_guard<std::mutex> lock(sync_mutex_);
+        if (peers_.erase(peer_id) == 0) return;   // drops any snapshot in flight to it
+        ++sync_epoch_;
+    }
+    sync_cv_.notify_all();
+}
+
+void StorageManager::on_peer_writable(const PeerId& peer_id) {
+    // The link drained. Either a snapshot was waiting for room, or one is owed
+    // because live entries were dropped while it was full — the sync thread
+    // decides which; all this has to do is wake it.
+    {
+        std::lock_guard<std::mutex> lock(sync_mutex_);
+        if (peers_.find(peer_id) == peers_.end()) return;
+        ++sync_epoch_;
+    }
+    sync_cv_.notify_all();
 }
 
 //=============================================================================
@@ -1029,42 +1095,59 @@ std::string StorageManager::deserialize_string(const std::vector<uint8_t>& data)
 // Private Methods - Network Operations
 //=============================================================================
 
-void StorageManager::broadcast_entry(const StorageEntry& entry) {
-    if (!network_) return;
+void StorageManager::replicate_entry(const StorageEntry& entry, const PeerId* except) {
+    if (!network_ || !config_.enable_sync) return;
 
     std::vector<uint8_t> msg;
+    msg.reserve(1 + entry.serialized_size());
     msg.push_back(OP_ENTRY);
-    std::vector<uint8_t> serialized = entry.serialize();
-    msg.insert(msg.end(), serialized.begin(), serialized.end());
+    entry.serialize_into(msg);
+    const ByteView view(msg);
 
-    network_->broadcast(MessageType::Storage, ByteView(msg));
-
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.entries_sent++;
-    }
-}
-
-void StorageManager::forward_entry(const StorageEntry& entry, const PeerId& except) {
-    if (!network_) return;
-
-    std::vector<uint8_t> msg;
-    msg.push_back(OP_ENTRY);
-    std::vector<uint8_t> serialized = entry.serialize();
-    msg.insert(msg.end(), serialized.begin(), serialized.end());
-    ByteView view(msg);
+    uint64_t             sent = 0;
+    std::vector<PeerId>  congested;
 
     for (const PeerId& peer : network_->connected_peers()) {
-        if (peer == except) continue;
-        network_->send(peer, MessageType::Storage, view);
+        if (except && peer == *except) continue;
+
+        // A peer already owed a snapshot is skipped outright: it is behind by
+        // more than this entry, and the snapshot that is coming carries the
+        // winning state for this key too.
+        {
+            std::lock_guard<std::mutex> lock(sync_mutex_);
+            const auto it = peers_.find(peer);
+            if (it != peers_.end() && it->second.owed) continue;
+        }
+
+        // The message is queued either way; a false says the queue is past the
+        // mark and that continuing is what gets the peer dropped. So we stop
+        // sending this peer individual entries and owe it a snapshot instead —
+        // safe because the store is LWW and the snapshot is the whole state.
+        if (network_->send(peer, MessageType::Storage, view)) {
+            ++sent;
+        } else {
+            congested.push_back(peer);
+        }
+    }
+
+    for (const PeerId& peer : congested) schedule_snapshot(peer, /*requested_by_peer=*/false);
+
+    if (sent > 0) {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.entries_sent += sent;
     }
 }
 
 void StorageManager::send_sync_request(const PeerId& peer_id) {
     if (!network_) return;
 
-    std::vector<uint8_t> msg{OP_SYNC_REQUEST};
-    network_->send(peer_id, MessageType::Storage, ByteView(msg));
+    const std::vector<uint8_t> msg{OP_SYNC_REQUEST};
+    // One byte cannot fill a queue on its own, so a false here means the queue
+    // was already full — the peer will ask us for a snapshot on its own side
+    // anyway, and this request is retried the next time it connects.
+    if (!network_->send(peer_id, MessageType::Storage, ByteView(msg))) {
+        LOG_STORAGE_DEBUG("Sync request to " << peer_id.short_hex() << " queued behind a full link");
+    }
 
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
@@ -1074,32 +1157,168 @@ void StorageManager::send_sync_request(const PeerId& peer_id) {
     LOG_STORAGE_DEBUG("Sent sync request to peer " << peer_id.short_hex());
 }
 
-void StorageManager::send_sync_response(const PeerId& peer_id) {
-    if (!network_) return;
-
-    std::vector<uint8_t> msg;
-    msg.push_back(OP_SYNC_RESPONSE);
-
-    uint32_t count = 0;
-    std::vector<uint8_t> entries_blob;
+void StorageManager::schedule_snapshot(const PeerId& peer, bool requested_by_peer) {
     {
-        std::lock_guard<std::mutex> lock(storage_mutex_);
-        for (const auto& pair : entries_) {
-            std::vector<uint8_t> serialized = pair.second.serialize();
-            entries_blob.insert(entries_blob.end(), serialized.begin(), serialized.end());
-            count++;
+        std::lock_guard<std::mutex> lock(sync_mutex_);
+        PeerSync& st = peers_[peer];
+        if (st.streaming || st.owed) return;   // one snapshot at a time, per peer
+        st.owed = true;
+        ++sync_epoch_;
+    }
+    if (!requested_by_peer) {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.resyncs_scheduled++;
+    }
+    sync_cv_.notify_all();
+}
+
+//=============================================================================
+// The sync thread — every snapshot chunk is serialized and paced here, never
+// on a reactor thread.
+//=============================================================================
+
+void StorageManager::sync_thread_loop() {
+    // How long to leave a link that had no room before asking it again. There is
+    // no event for bytes a caller handed over that the reactor never had to
+    // queue, so writability is polled rather than waited on — see
+    // PeerNetwork::peer_writable.
+    constexpr auto kBlockedPoll = std::chrono::milliseconds(20);
+    const auto     never        = std::chrono::steady_clock::time_point::max();
+
+    while (sync_running_.load()) {
+        const auto now = std::chrono::steady_clock::now();
+
+        // Promote what has come due, and collect what can be streamed now. The
+        // network is never called under sync_mutex_, so writability is tested
+        // once the lock is dropped.
+        std::vector<PeerId> streaming;
+        auto                wake_at = never;
+        uint64_t            epoch   = 0;
+        {
+            std::lock_guard<std::mutex> lock(sync_mutex_);
+            epoch = sync_epoch_;
+            for (auto& [id, st] : peers_) {
+                if (!st.streaming && st.owed) {
+                    const auto ready_at = st.last_start + sync_interval_;
+                    if (st.last_start.time_since_epoch().count() != 0 && now < ready_at) {
+                        wake_at = (std::min)(wake_at, ready_at);   // still cooling down
+                        continue;
+                    }
+                    st.streaming  = true;
+                    st.started    = false;
+                    st.cursor.clear();
+                    st.owed       = false;
+                    st.last_start = now;
+                }
+                if (st.streaming) streaming.push_back(id);
+            }
         }
+
+        bool progressed = false;
+        for (const PeerId& peer : streaming) {
+            if (!sync_running_.load()) return;
+            if (!network_->peer_writable(peer)) {
+                wake_at = (std::min)(wake_at, now + kBlockedPoll);
+                continue;
+            }
+            switch (stream_snapshot_chunk(peer)) {
+                case ChunkResult::Continue: progressed = true; break;
+                case ChunkResult::Blocked:  wake_at = (std::min)(wake_at, now + kBlockedPoll); break;
+                case ChunkResult::Finished: break;
+            }
+        }
+        if (progressed) continue;   // more to send and room to send it: no wait
+
+        std::unique_lock<std::mutex> lock(sync_mutex_);
+        if (!sync_running_.load()) return;
+        // Everything above ran outside this lock, so a snapshot may have been
+        // scheduled — and its notify already delivered to nobody — since the scan.
+        // The epoch is what catches that; without it a wait() here could be a
+        // wait forever with work sitting in the map.
+        if (sync_epoch_ != epoch) continue;
+        if (wake_at == never) sync_cv_.wait(lock);
+        else                  sync_cv_.wait_until(lock, wake_at);
+    }
+}
+
+StorageManager::ChunkResult StorageManager::stream_snapshot_chunk(const PeerId& peer) {
+    std::string cursor;
+    bool        started = false;
+    {
+        std::lock_guard<std::mutex> lock(sync_mutex_);
+        const auto it = peers_.find(peer);
+        if (it == peers_.end() || !it->second.streaming) return ChunkResult::Finished;
+        cursor  = it->second.cursor;
+        started = it->second.started;
     }
 
-    put_u32(msg, count);
-    msg.insert(msg.end(), entries_blob.begin(), entries_blob.end());
+    std::vector<uint8_t> msg;
+    msg.reserve(batch_bytes_ + 64);
+    msg.push_back(OP_SYNC_CHUNK);
+    msg.push_back(0);        // flags, filled in below
+    put_u32(msg, 0);         // count, filled in below
 
-    network_->send(peer_id, MessageType::Storage, ByteView(msg));
+    uint32_t    count = 0;
+    std::string last  = cursor;
+    bool        done  = false;
+    {
+        // The one place the whole database is walked, and it is walked a chunk at
+        // a time: storage_mutex_ is held for `batch_bytes_` worth of work and no
+        // more, on this thread rather than a reactor's. Between chunks nothing is
+        // held at all — the cursor alone resumes the walk, so writes landing
+        // mid-snapshot neither block nor derail it.
+        std::lock_guard<std::mutex> lock(storage_mutex_);
+        auto it = started ? entries_.upper_bound(cursor) : entries_.begin();
+        while (it != entries_.end()) {
+            it->second.serialize_into(msg);
+            last = it->first;
+            ++count;
+            ++it;
+            // Checked after appending, so an entry larger than the target still
+            // goes out on its own instead of stalling the walk forever.
+            if (msg.size() >= batch_bytes_) break;
+        }
+        done = (it == entries_.end());
+    }
 
-    LOG_STORAGE_DEBUG("Sent sync response to peer " << peer_id.short_hex() << " with " << count << " entries");
+    if (done) msg[1] = FLAG_LAST;
+    write_u32(msg.data() + 2, count);
+
+    const bool room = network_->send(peer, MessageType::Storage, ByteView(msg));
+
+    {
+        std::lock_guard<std::mutex> lock(sync_mutex_);
+        const auto it = peers_.find(peer);
+        // The peer may have disconnected while the chunk was being built; its
+        // state is gone and this chunk was the last of it.
+        if (it == peers_.end()) return ChunkResult::Finished;
+        it->second.cursor  = last;
+        it->second.started = true;
+        if (done) it->second.streaming = false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.sync_chunks_sent++;
+        stats_.entries_sent += count;
+    }
+
+    LOG_STORAGE_DEBUG("Snapshot chunk to " << peer.short_hex() << ": " << count << " entries, "
+                      << msg.size() << " B" << (done ? " (last)" : ""));
+    if (done) return ChunkResult::Finished;
+    return room ? ChunkResult::Continue : ChunkResult::Blocked;
 }
 
 bool StorageManager::apply_remote_entry(const StorageEntry& entry, StorageChangeEvent* out_event) {
+    // The same limit a local put() is held to. Without it a peer could push a
+    // value this node would then have to re-serialize into every snapshot it
+    // serves — and one big enough to blow through a send queue on its way out.
+    if (entry.data.size() > config_.max_value_size) {
+        LOG_STORAGE_WARN("Remote entry '" << entry.key << "' of " << entry.data.size()
+                         << " B exceeds maximum " << config_.max_value_size << "; rejected");
+        return false;
+    }
+    if (entry.key.empty()) return false;
+
     StorageChangeEvent event;
     event.operation = entry.deleted ? StorageOperation::OP_DELETE : StorageOperation::OP_PUT;
     event.key = entry.key;
@@ -1178,9 +1397,11 @@ bool StorageManager::write_data_file() {
         };
         fwrite(count_bytes, 1, 4, file);
 
-        // Write each entry
+        // Write each entry, reusing one buffer rather than allocating per entry.
+        std::vector<uint8_t> serialized;
         for (const auto& pair : entries_) {
-            std::vector<uint8_t> serialized = pair.second.serialize();
+            serialized.clear();
+            pair.second.serialize_into(serialized);
             fwrite(serialized.data(), 1, serialized.size(), file);
         }
 

@@ -74,6 +74,15 @@ public:
     /// subsystem that never checks that return never needs this either. Runs on a
     /// reactor thread. Default: not offered (nothing subscribes).
     virtual void                on_peer_writable(PeerEventHandler /*handler*/) {}
+    /// The same question send() answers — "has this peer room for more?" — asked
+    /// without sending anything. For a subsystem that paces a long fan-out from a
+    /// thread of its own (StorageManager streaming a snapshot): the event alone
+    /// cannot serve it, because a queue filled *only* with bytes handed to send()
+    /// that the reactor has not taken up yet never crossed anything on the
+    /// connection, so nothing raises on_peer_writable when they drain. Safe to
+    /// poll — it weighs those in-flight bytes too. False for an unknown peer.
+    /// Default: always writable, all a mock that merely moves messages can claim.
+    virtual bool                peer_writable(const PeerId& /*id*/) const { return true; }
 };
 
 struct NodeContext;  // node/node_context.h — bundles network + events + services

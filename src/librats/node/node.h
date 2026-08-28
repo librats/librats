@@ -230,7 +230,7 @@ public:
     /// for room on a thread of its own — the event alone cannot serve it, because
     /// a queue that filled *only* with bytes still in transit never crossed
     /// anything on the connection and so raises no event when they drain.
-    bool peer_writable(const PeerId& id) const;
+    bool peer_writable(const PeerId& id) const override;
 
     // — events (register before start(); invoked on a reactor thread). Multiple
     //   listeners are supported, so subsystems and the app can both subscribe. —
