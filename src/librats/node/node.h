@@ -193,6 +193,14 @@ public:
     ///         low-water mark, and an application that keeps going regardless
     ///         will eventually have the peer dropped as a slow consumer. Wait for
     ///         on_peer_writable instead. Also false if the peer is not connected.
+    ///
+    ///         "Stop" is meant literally, and yielding is part of it: the mark is
+    ///         re-tested inside the reactor task this call hands off to, and it is
+    ///         that test which flips the peer to unwritable and later raises
+    ///         on_peer_writable. A caller that answers a false by looping straight
+    ///         back into send() therefore starves the very thread that would tell
+    ///         it to stop — the queue keeps growing while the signal it is waiting
+    ///         for never gets a turn to be produced.
     bool send(const PeerId& to, std::string_view channel, ByteView payload);
     /// Send raw bytes on a named channel to every connected peer.
     /// @return whether *every* one of them still has room — a fan-out can only
@@ -205,11 +213,18 @@ public:
     /// transfer, a large stream — address peers individually with send().
     bool broadcast(std::string_view channel, ByteView payload);
 
-    /// Whether a peer's send queue currently has room — the same answer send()
-    /// returns, without sending anything. False for a peer that is not connected.
-    /// Note that the answer describes the queue as the reactor last left it: a
-    /// message handed over a moment ago may not be counted yet, which is why the
-    /// signal to stop is the *return of send()* rather than a poll before it.
+    /// Whether a peer's send queue currently has room, as the reactor last left
+    /// it. False for a peer that is not connected.
+    ///
+    /// Deliberately weaker than the answer send() returns, and not a substitute
+    /// for it: send() also weighs what the caller has just handed over and the
+    /// reactor has not picked up yet, so it can answer false while this still
+    /// answers true. The two converge as soon as the reactor runs — it re-tests
+    /// the mark with those bytes counted in — which is why the signal to stop is
+    /// the *return of send()* rather than a poll before it, and the signal to
+    /// resume is on_peer_writable rather than a poll after it. Polling in place of
+    /// either is a busy-wait that never lets the reactor produce the answer it is
+    /// polling for.
     bool peer_writable(const PeerId& id) const;
 
     // — events (register before start(); invoked on a reactor thread). Multiple

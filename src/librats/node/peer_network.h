@@ -49,7 +49,9 @@ public:
     /// Send to one peer. @return whether that peer's send queue still has room;
     /// false means "stop and wait for on_peer_writable" — the message is queued
     /// either way, but continuing past this is what gets a peer dropped as a slow
-    /// consumer. Also false if the peer is not connected.
+    /// consumer. Also false if the peer is not connected. Wait on the event and
+    /// not on a poll of the queue's state: the answer is re-derived on the reactor
+    /// thread, so a caller that spins instead of yielding never lets it change.
     virtual bool                send(const PeerId& to, MessageType type, ByteView payload) = 0;
     /// Send to every connected peer. @return whether *every* one of them still
     /// has room, so a subsystem that fans out can pause on the slowest.
