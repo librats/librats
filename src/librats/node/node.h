@@ -213,18 +213,23 @@ public:
     /// transfer, a large stream — address peers individually with send().
     bool broadcast(std::string_view channel, ByteView payload);
 
-    /// Whether a peer's send queue currently has room, as the reactor last left
-    /// it. False for a peer that is not connected.
+    /// Whether a peer's send queue has room for more. False for a peer that is
+    /// not connected.
     ///
-    /// Deliberately weaker than the answer send() returns, and not a substitute
-    /// for it: send() also weighs what the caller has just handed over and the
-    /// reactor has not picked up yet, so it can answer false while this still
-    /// answers true. The two converge as soon as the reactor runs — it re-tests
-    /// the mark with those bytes counted in — which is why the signal to stop is
-    /// the *return of send()* rather than a poll before it, and the signal to
-    /// resume is on_peer_writable rather than a poll after it. Polling in place of
-    /// either is a busy-wait that never lets the reactor produce the answer it is
-    /// polling for.
+    /// The same question send() answers, asked without sending anything: it
+    /// weighs both halves of what the peer is carrying — the bytes the reactor
+    /// has queued, and the bytes a caller has handed to send() that the reactor
+    /// has not taken up yet. So it is safe to poll: a caller that has just filled
+    /// the queue in a tight loop keeps being told "no room" until the reactor has
+    /// actually looked at what it was given, rather than being told "go on"
+    /// because nothing observable has changed yet.
+    ///
+    /// It stays a hint about a queue that drains as it is read, so the ordinary
+    /// flow is unchanged: the signal to stop is the return of send(), and the
+    /// signal to resume is on_peer_writable. This is for a caller that must wait
+    /// for room on a thread of its own — the event alone cannot serve it, because
+    /// a queue that filled *only* with bytes still in transit never crossed
+    /// anything on the connection and so raises no event when they drain.
     bool peer_writable(const PeerId& id) const;
 
     // — events (register before start(); invoked on a reactor thread). Multiple

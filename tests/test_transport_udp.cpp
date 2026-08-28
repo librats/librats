@@ -2439,6 +2439,79 @@ TEST(TransportUdpTest, AnApplicationThatHeedsBackpressureKeepsItsPeer) {
     server.stop();
 }
 
+// The two ways of asking "may I send more?" must not contradict each other.
+// send() weighs both halves of what a peer is carrying — what the reactor has
+// queued, and what a caller has handed over that the reactor has not taken up
+// yet — and peer_writable() has to weigh the same two. If it reports only the
+// first, an application pacing itself by waiting on it is told "there is room"
+// about a queue it has just filled itself: the connection has not looked at
+// those bytes, so nothing about it has changed and no event is coming. It then
+// keeps filling until the peer is dropped as a slow consumer.
+//
+// Parking the client's reactor inside a message handler is what makes this
+// deterministic rather than a race with the drain: while it cannot run, nothing
+// handed to it can reach the connection, so the in-transit half is the only
+// place the bytes are counted.
+TEST(TransportUdpTest, PeerWritableWeighsBytesTheReactorHasNotTakenUpYet) {
+    NodeConfig server_cfg = base_config();
+    NodeConfig client_cfg = base_config();
+    client_cfg.enable_listen = false;
+    // 1 MiB before the peer would be dropped, so 256 KiB before send() says stop.
+    client_cfg.send_queue_limit = 1024 * 1024;
+
+    Node server(server_cfg), client(client_cfg);
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    std::atomic<size_t> got{0};
+    server.on("bulk", [&](Peer, ByteView payload) { got += payload.size(); });
+
+    std::atomic<bool> parked{false}, release{false};
+    client.on("park", [&](Peer, ByteView) {
+        parked = true;
+        while (!release.load()) std::this_thread::sleep_for(1ms);
+    });
+
+    std::atomic<int> lost{0};
+    client.on_peer_disconnected([&](const PeerId&) { ++lost; });
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+
+    const PeerId peer = client.peers().front().id;
+    EXPECT_TRUE(client.peer_writable(peer)) << "an idle peer reported no room";
+
+    const std::string park_msg = "park";
+    server.broadcast("park", ByteView(park_msg));
+    ASSERT_TRUE(wait_for([&] { return parked.load(); })) << "the reactor never parked";
+
+    // Hand over chunks until the mark is crossed. The reactor cannot be running,
+    // so every one of them is still in transit and none of it has been queued.
+    constexpr size_t kChunk = 32 * 1024;
+    const std::string chunk(kChunk, 'c');
+    size_t offered = 0;
+    bool   refused = false;
+    for (int i = 0; i < 64 && !refused; ++i) {
+        refused = !client.send(peer, "bulk", ByteView(chunk));
+        offered += kChunk;
+    }
+    ASSERT_TRUE(refused) << "offering " << offered << " B never crossed the low-water mark";
+    EXPECT_FALSE(client.peer_writable(peer))
+        << "reported room in a queue the caller had just filled: send() and "
+           "peer_writable() answered the same question differently";
+
+    release = true;
+    EXPECT_TRUE(wait_for([&] { return client.peer_writable(peer); }))
+        << "the room never came back once the reactor could drain";
+    ASSERT_TRUE(wait_for([&] { return got.load() == offered; }, 30s))
+        << "backpressure dropped data it should only have delayed (" << got.load()
+        << " of " << offered << " B)";
+    EXPECT_EQ(lost.load(), 0) << "the peer was dropped although it was never over the mark";
+
+    client.stop();
+    server.stop();
+}
+
 TEST(TransportUdpTest, TwoNodesConnectOverUdp) {
     NodeConfig server_cfg = base_config();
     server_cfg.enable_tcp = false;              // UDP is the only way in

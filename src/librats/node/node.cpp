@@ -488,7 +488,15 @@ bool Node::send(const PeerId& to, std::string_view channel, ByteView payload) {
 
 bool Node::peer_writable(const PeerId& id) const {
     const auto dest = peers_.destination(id);
-    return dest && dest->writable;
+    if (!dest) return false;
+    // Both halves of the backlog, exactly as send() weighs them: what the reactor
+    // has already queued (`writable`) *and* what a caller has handed over that the
+    // reactor has not taken up yet (`owed`). Reporting only the first would answer
+    // "there is room" to a caller that has just filled the queue itself and is
+    // waiting to hear otherwise — the queue it filled has not been looked at yet,
+    // so nothing about it has changed, and no event is coming either.
+    return dest->writable &&
+           dest->owed->load(std::memory_order_relaxed) <= send_low_water();
 }
 
 bool Node::broadcast(std::string_view channel, ByteView payload) {
