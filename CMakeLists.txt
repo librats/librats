@@ -492,21 +492,58 @@ if(WIN32)
     target_link_libraries(rats ws2_32 iphlpapi bcrypt advapi32)
 endif()
 
-if(ANDROID)
-    # The logger routes console output through __android_log_print, because an app's
-    # stdout/stderr go nowhere on Android.
-    find_library(log-lib log)
-    target_link_libraries(rats ${log-lib})
+# Android can be built two ways, and only one of them sets CMake's ANDROID variable:
+# through the NDK's android.toolchain.cmake (sets ANDROID / ANDROID_PLATFORM), or by
+# simply pointing CC/CXX at the NDK's <triple><api>-clang wrappers, which is what the
+# Android CI does. The compiler is the only thing that knows in both cases, so ask it
+# rather than trusting a toolchain-file-only variable.
+if(NOT ANDROID)
+    check_cxx_source_compiles("
+#ifndef __ANDROID__
+#error not android
+#endif
+int main() { return 0; }
+" RATS_TARGET_IS_ANDROID)
+else()
+    set(RATS_TARGET_IS_ANDROID TRUE)
+endif()
 
+if(RATS_TARGET_IS_ANDROID)
+    # The logger routes console output through __android_log_print, because an app's
+    # stdout/stderr go nowhere on Android. This is used from librats/util/logger.h,
+    # i.e. from consumers of the static library too, so the dependency is PUBLIC.
+    # Only search for it when the NDK toolchain file configured a sysroot to search;
+    # with a bare NDK clang, find_library would look at host paths, so let the driver
+    # resolve -llog out of its own sysroot instead.
+    if(ANDROID)
+        find_library(log-lib log)
+        target_link_libraries(rats ${log-lib})
+    else()
+        target_link_libraries(rats log)
+    endif()
+
+    # API level: from the toolchain file when it set one, otherwise from the compiler.
     if(DEFINED ANDROID_PLATFORM)
         string(REGEX REPLACE "android-" "" ANDROID_API_LEVEL ${ANDROID_PLATFORM})
         math(EXPR ANDROID_API_LEVEL "${ANDROID_API_LEVEL}")
         message(STATUS "Android API level detected: ${ANDROID_API_LEVEL}")
+        if(ANDROID_API_LEVEL LESS 24)
+            set(RATS_ANDROID_NEEDS_IFADDRS TRUE)
+        endif()
     else()
-        message(FATAL_ERROR "ANDROID_PLATFORM is not defined!")
+        check_cxx_source_compiles("
+#include <android/api-level.h>
+#if __ANDROID_API__ < 24
+#error too old
+#endif
+int main() { return 0; }
+" RATS_ANDROID_API_24_OR_NEWER)
+        if(NOT RATS_ANDROID_API_24_OR_NEWER)
+            set(RATS_ANDROID_NEEDS_IFADDRS TRUE)
+        endif()
     endif()
 
-    if(ANDROID_API_LEVEL LESS 24)
+    if(RATS_ANDROID_NEEDS_IFADDRS)
         target_sources(rats PRIVATE ${PROJECT_SOURCE_DIR}/3rdparty/android/ifaddrs-android.c)
         target_include_directories(rats
             PRIVATE
