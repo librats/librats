@@ -1183,7 +1183,7 @@ void StorageManager::sync_thread_loop() {
     // queue, so writability is polled rather than waited on — see
     // PeerNetwork::peer_writable.
     constexpr auto kBlockedPoll = std::chrono::milliseconds(20);
-    const auto     never        = std::chrono::steady_clock::time_point::max();
+    const auto     never        = (std::chrono::steady_clock::time_point::max)();
 
     while (sync_running_.load()) {
         const auto now = std::chrono::steady_clock::now();
