@@ -2571,8 +2571,17 @@ TEST(TransportUdpTest, AMessagePastTheBlockCeilingIsRefusedNotFatal) {
         EXPECT_FALSE(client.send(peer, "bulk", ByteView(toobig)));
     }
 
-    // A small message right behind it still arrives, which is the point: the
-    // refusal cost the connection nothing.
+    // Those bytes were charged against the peer the moment they were handed over
+    // and are discharged when the reactor reaches them — which is also where they
+    // are refused. Until that happens the peer honestly reports no room, so asking
+    // any sooner asks about the refused message rather than about the connection.
+    // (Copying 64 MiB into the reactor takes long enough for the two to race, which
+    // is how this first showed up: on the machine that was slower at it.)
+    ASSERT_TRUE(wait_for([&] { return client.peer_writable(peer); }, 30s))
+        << "the refused message left the peer charged for bytes nobody is carrying";
+
+    // A small message behind it still arrives, which is the point: the refusal cost
+    // the connection nothing.
     const std::string ok(32, 'o');
     EXPECT_TRUE(client.send(peer, "bulk", ByteView(ok)));
     ASSERT_TRUE(wait_for([&] { return got.load() == ok.size(); }, 30s));
@@ -2597,7 +2606,8 @@ TEST(TransportUdpTest, PeerHandleReportsBackpressure) {
     Node server(server_cfg), client(client_cfg);
     ASSERT_TRUE(server.start());
     ASSERT_TRUE(client.start());
-    server.on("bulk", [](Peer, ByteView) {});
+    std::atomic<size_t> got{0};
+    server.on("bulk", [&](Peer, ByteView payload) { got += payload.size(); });
 
     std::atomic<int> lost{0};
     client.on_peer_disconnected([&](const PeerId&, CloseReason) { ++lost; });
@@ -2610,17 +2620,18 @@ TEST(TransportUdpTest, PeerHandleReportsBackpressure) {
     ASSERT_TRUE(handle.has_value());
     EXPECT_TRUE(client.peer_writable(peer_id)) << "an idle peer reported no room";
 
-    const std::string chunk(32 * 1024, 'p');
-    bool refused = false;
-    for (int i = 0; i < 64 && !refused; ++i) refused = !handle->send("bulk", ByteView(chunk));
+    // One message past the mark, so the answer does not depend on how fast the
+    // reactor drains: the bytes are charged to the peer by this very thread before
+    // send() returns, and 128 KiB is already past the 64 KiB mark on its own.
+    // Anything that waits for the reactor here races it instead of testing it.
+    const std::string over_the_mark(128 * 1024, 'p');
+    EXPECT_FALSE(handle->send("bulk", ByteView(over_the_mark)))
+        << "Peer::send() reported room after being handed twice the mark";
+    EXPECT_EQ(lost.load(), 0) << "one message over the mark is not a slow consumer";
 
-    EXPECT_TRUE(refused) << "Peer::send() never reported the queue filling up";
-    // The handle's bytes are charged to the peer, so the other way of asking sees
-    // them too — the two must never contradict each other.
-    EXPECT_FALSE(client.peer_writable(peer_id))
-        << "Peer::send() said no room while peer_writable() said there was";
-    EXPECT_EQ(lost.load(), 0) << "heeding the answer should have kept the peer";
-
+    // "No room" meant wait, not lost: it arrives, and then there is room again.
+    ASSERT_TRUE(wait_for([&] { return got.load() == over_the_mark.size(); }, 30s))
+        << "Peer::send() answered no room and dropped the message with it";
     ASSERT_TRUE(wait_for([&] { return client.peer_writable(peer_id); }, 30s))
         << "the queue filled and never reported draining";
 
