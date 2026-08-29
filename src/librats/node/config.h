@@ -52,8 +52,15 @@ struct RATS_API NodeConfig {
     /// connection. 0 disables the fallback: only the preferred transport is tried.
     uint32_t transport_fallback_ms = 1200;
 
-    /// Bytes a peer's send queue may hold before the peer is dropped as a slow
-    /// consumer. 0 uses the library default (8 MiB).
+    /// Bytes a peer's send queue may hold before an application that keeps
+    /// sending anyway has the peer dropped as a slow consumer. 0 uses the library
+    /// default (8 MiB).
+    ///
+    /// It is not a maximum message size. A single message is always queued
+    /// whatever its size — a message cannot be sent by halves, and a healthy
+    /// connection must not die over one large frame — so the queue's real ceiling
+    /// is this plus one message. What gets a peer dropped is offering *another*
+    /// message while the queue is still over the mark.
     ///
     /// A quarter of this is the mark at which send() starts answering "no room"
     /// and on_peer_writable is what says the room is back — so lowering it makes

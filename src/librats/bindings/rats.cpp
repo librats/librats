@@ -85,6 +85,24 @@ char* dup_string(const std::string& s) {
     return out;
 }
 
+rats_close_reason_t to_c_reason(CloseReason r) {
+    switch (r) {
+        case CloseReason::LocalClose:      return RATS_CLOSE_LOCAL;
+        case CloseReason::PeerClosed:      return RATS_CLOSE_PEER_CLOSED;
+        case CloseReason::PeerReset:       return RATS_CLOSE_PEER_RESET;
+        case CloseReason::ConnectFailed:   return RATS_CLOSE_CONNECT_FAILED;
+        case CloseReason::HandshakeFailed: return RATS_CLOSE_HANDSHAKE_FAILED;
+        case CloseReason::ProtocolError:   return RATS_CLOSE_PROTOCOL_ERROR;
+        case CloseReason::SlowConsumer:    return RATS_CLOSE_SLOW_CONSUMER;
+        case CloseReason::ReactorShutdown: return RATS_CLOSE_SHUTDOWN;
+        case CloseReason::DuplicateConn:   return RATS_CLOSE_DUPLICATE;
+        case CloseReason::PeerLimit:       return RATS_CLOSE_PEER_LIMIT;
+        case CloseReason::IdleTimeout:     return RATS_CLOSE_IDLE_TIMEOUT;
+        case CloseReason::DialSuperseded:  return RATS_CLOSE_DIAL_SUPERSEDED;
+    }
+    return RATS_CLOSE_PEER_CLOSED;
+}
+
 } // namespace
 
 extern "C" {
@@ -103,6 +121,24 @@ const char* rats_error_str(rats_error_t err) {
     return "RATS_ERR_UNKNOWN";
 }
 
+const char* rats_close_reason_str(rats_close_reason_t reason) {
+    switch (reason) {
+        case RATS_CLOSE_LOCAL:            return "RATS_CLOSE_LOCAL";
+        case RATS_CLOSE_PEER_CLOSED:      return "RATS_CLOSE_PEER_CLOSED";
+        case RATS_CLOSE_PEER_RESET:       return "RATS_CLOSE_PEER_RESET";
+        case RATS_CLOSE_CONNECT_FAILED:   return "RATS_CLOSE_CONNECT_FAILED";
+        case RATS_CLOSE_HANDSHAKE_FAILED: return "RATS_CLOSE_HANDSHAKE_FAILED";
+        case RATS_CLOSE_PROTOCOL_ERROR:   return "RATS_CLOSE_PROTOCOL_ERROR";
+        case RATS_CLOSE_SLOW_CONSUMER:    return "RATS_CLOSE_SLOW_CONSUMER";
+        case RATS_CLOSE_SHUTDOWN:         return "RATS_CLOSE_SHUTDOWN";
+        case RATS_CLOSE_DUPLICATE:        return "RATS_CLOSE_DUPLICATE";
+        case RATS_CLOSE_PEER_LIMIT:       return "RATS_CLOSE_PEER_LIMIT";
+        case RATS_CLOSE_IDLE_TIMEOUT:     return "RATS_CLOSE_IDLE_TIMEOUT";
+        case RATS_CLOSE_DIAL_SUPERSEDED:  return "RATS_CLOSE_DIAL_SUPERSEDED";
+    }
+    return "RATS_CLOSE_UNKNOWN";
+}
+
 /* — construction / lifecycle — */
 
 rats_config_t rats_config_default(void) {
@@ -118,6 +154,7 @@ rats_config_t rats_config_default(void) {
     c.enable_udp            = 1;
     c.preferred_transport   = RATS_TRANSPORT_UDP;
     c.transport_fallback_ms = 1200;
+    c.send_queue_limit      = 0;
     return c;
 }
 
@@ -153,6 +190,7 @@ rats_t rats_create_config(const rats_config_t* cfg) {
                                          ? TransportKind::Tcp
                                          : TransportKind::Udp;
         config.transport_fallback_ms = cfg->transport_fallback_ms;
+        config.send_queue_limit      = cfg->send_queue_limit;
     }
     return make_handle(std::move(config));
 }
@@ -224,6 +262,13 @@ rats_error_t rats_send(rats_t node, const char* peer_id_hex,
     return RATS_OK;
 }
 
+int rats_peer_writable(rats_t node, const char* peer_id_hex) {
+    if (!peer_id_hex) return 0;
+    auto id = PeerId::from_hex(peer_id_hex);
+    if (!id) return 0;
+    return node_of(node)->peer_writable(*id) ? 1 : 0;
+}
+
 rats_error_t rats_broadcast(rats_t node, const char* channel, const void* data, size_t len) {
     if (!channel) return RATS_ERR_INVALID_ARG;
     node_of(node)->broadcast(channel, ByteView(static_cast<const uint8_t*>(data), len));
@@ -238,10 +283,18 @@ rats_error_t rats_on_peer_connected(rats_t node, rats_peer_cb cb, void* user) {
     return RATS_OK;
 }
 
-rats_error_t rats_on_peer_disconnected(rats_t node, rats_peer_cb cb, void* user) {
+rats_error_t rats_on_peer_disconnected(rats_t node, rats_peer_disconnect_cb cb, void* user) {
     if (!cb) return RATS_ERR_INVALID_ARG;
-    node_of(node)->on_peer_disconnected([cb, user](const PeerId& id) {
-        cb(user, id.to_hex().c_str());
+    node_of(node)->on_peer_disconnected([cb, user](const PeerId& id, CloseReason reason) {
+        cb(user, id.to_hex().c_str(), to_c_reason(reason));
+    });
+    return RATS_OK;
+}
+
+rats_error_t rats_on_peer_writable(rats_t node, rats_peer_cb cb, void* user) {
+    if (!cb) return RATS_ERR_INVALID_ARG;
+    node_of(node)->on_peer_writable([cb, user](const Peer& peer) {
+        cb(user, peer.id().to_hex().c_str());
     });
     return RATS_OK;
 }

@@ -173,6 +173,17 @@ static void peer_bridge(void* user, const char* peer_id_hex) {
     env->DeleteLocalRef(cls);
 }
 
+// Disconnects carry a reason the connected event has no room for. The Java
+// PeerCallback takes only the id, so the reason is logged rather than dropped
+// silently; widening PeerCallback is the follow-up that makes it reachable from
+// Kotlin/Java (the C ABI already carries it — see rats_on_peer_disconnected).
+static void peer_disconnect_bridge(void* user, const char* peer_id_hex,
+                                   rats_close_reason_t reason) {
+    LOGD("peer disconnected: %s (%s)", peer_id_hex ? peer_id_hex : "?",
+         rats_close_reason_str(reason));
+    peer_bridge(user, peer_id_hex);
+}
+
 static void message_bridge(void* user, const char* peer_id_hex, const void* data, size_t len) {
     JNIEnv* env = getEnv();
     if (!env) return;
@@ -463,7 +474,7 @@ JNIEXPORT jint JNICALL
 Java_com_librats_RatsNode_nativeOnPeerDisconnected(JNIEnv* env, jobject, jlong ptr, jobject cb) {
     rats_t node = node_of(ptr);
     jobject ref = trackRef(env, node, cb);
-    return rats_on_peer_disconnected(node, peer_bridge, ref);
+    return rats_on_peer_disconnected(node, peer_disconnect_bridge, ref);
 }
 
 // ---- discovery / NAT ----

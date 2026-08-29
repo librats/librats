@@ -690,7 +690,7 @@ void Node::on_closed(Connection& conn, CloseReason reason) {
     // let a long-gone peer keep voting on how our NAT behaves.
     nat_status_.forget(id);
     LOG_INFO("node", "Peer " << id.short_hex() << " disconnected (" << to_string(reason) << ")");
-    for (auto& cb : peer_disconnected_) cb(id);
+    for (auto& cb : peer_disconnected_) cb(id, reason);
 }
 
 void Node::on_writable_changed(Connection& conn, bool writable) {
@@ -857,9 +857,16 @@ std::vector<Address> Node::observed_addresses() const {
 
 // ── Peer handle methods (defined here for the full Node type) ────────────────
 
-void Peer::send(std::string_view channel, ByteView payload) const {
-    node_->route_send(route_, FrameHeader{MessageType::App, 0, MessageRouter::channel_id(channel)},
-                      payload.to_bytes());
+bool Peer::send(std::string_view channel, ByteView payload) const {
+    // Deliberately by id, not by this handle's route. The route existed to skip the
+    // directory lookup on the reply path — but answering "is there room?" needs the
+    // peer's writability and its in-transit counter, both of which live in the
+    // directory, so the lookup is unavoidable the moment send() has an answer to
+    // give. Once it is being paid anyway, the captured route buys nothing and can
+    // only be wrong: a handle outlives its connection (a relayed link superseded by
+    // a direct one, a dial race, a reconnect), and sending on the superseded one
+    // drops the message with nothing said. The peer is what the caller means.
+    return node_->send(id_, channel, payload);
 }
 
 void Peer::disconnect() const {

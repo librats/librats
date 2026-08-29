@@ -53,6 +53,33 @@ typedef enum {
     RATS_TRANSPORT_RELAY = 2
 } rats_transport_t;
 
+/* Why a peer connection ended, handed to rats_on_peer_disconnected(). The
+ * reason is what tells "I was sending too fast" apart from "the peer left" —
+ * without it both look the same and the usual answer to either is to reconnect
+ * and repeat whatever caused it. Use rats_close_reason_str() for a name. */
+typedef enum {
+    RATS_CLOSE_LOCAL            = 0,  /* we asked to disconnect */
+    RATS_CLOSE_PEER_CLOSED      = 1,  /* the peer closed cleanly */
+    RATS_CLOSE_PEER_RESET       = 2,  /* connection reset / socket error */
+    RATS_CLOSE_CONNECT_FAILED   = 3,  /* the dial never completed */
+    RATS_CLOSE_HANDSHAKE_FAILED = 4,  /* secure handshake failed or timed out */
+    RATS_CLOSE_PROTOCOL_ERROR   = 5,  /* malformed frame / decryption failure */
+    /* We kept sending while this peer's queue was already past its limit. THE
+     * ONE REASON THE APPLICATION CAN PREVENT: heed rats_send()'s answer and
+     * rats_peer_writable(), and wait for the writable callback. It does NOT mean
+     * a single message was too big — one message is always accepted whatever its
+     * size; only piling more on a full queue gets a peer dropped. */
+    RATS_CLOSE_SLOW_CONSUMER    = 6,
+    RATS_CLOSE_SHUTDOWN         = 7,  /* the node is stopping */
+    RATS_CLOSE_DUPLICATE        = 8,  /* superseded by another link to the same peer */
+    RATS_CLOSE_PEER_LIMIT       = 9,  /* inbound refused: peer limit reached */
+    RATS_CLOSE_IDLE_TIMEOUT     = 10, /* datagram link went silent */
+    RATS_CLOSE_DIAL_SUPERSEDED  = 11  /* a racing dial over the other transport won */
+} rats_close_reason_t;
+
+/** Static human-readable name for a close reason (never NULL, never freed). */
+RATS_API const char* rats_close_reason_str(rats_close_reason_t reason);
+
 /* Bitmask of transports (see rats_transports / rats_peer_transports). */
 #define RATS_TRANSPORT_MASK_TCP 0x1u
 #define RATS_TRANSPORT_MASK_UDP 0x2u
@@ -102,6 +129,14 @@ typedef struct {
     rats_transport_t preferred_transport;     /* tried first when dialing (default UDP) */
     uint32_t         transport_fallback_ms;   /* delay before racing the other transport;
                                                * 0 = never fall back (default 1200) */
+
+    /* Bytes a peer's send queue may hold before an application that keeps sending
+     * anyway has that peer dropped with RATS_CLOSE_SLOW_CONSUMER. 0 = the library
+     * default (8 MiB). A quarter of it is where rats_peer_writable() starts
+     * answering 0, so lowering this makes an application feel backpressure sooner.
+     * It is NOT a maximum message size: one message is always queued whatever its
+     * size. */
+    size_t           send_queue_limit;
 } rats_config_t;
 
 /** A config pre-filled with the library defaults (listening, Noise, ephemeral
@@ -153,18 +188,44 @@ RATS_API size_t rats_max_peers(rats_t node);
 
 /* — messaging (named application channel, raw bytes) — */
 
+/** Queue bytes for one peer on a named channel. RATS_OK means accepted and
+ *  queued, never that it arrived. Pair it with rats_peer_writable() below if you
+ *  send in bulk — that is the only way to learn you are outrunning the link
+ *  before the peer is dropped for it. */
 RATS_API rats_error_t rats_send(rats_t node, const char* peer_id_hex,
                                           const char* channel, const void* data, size_t len);
 RATS_API rats_error_t rats_broadcast(rats_t node, const char* channel,
                                                const void* data, size_t len);
 
+/** Whether this peer's send queue still has room — the same question rats_send()
+ *  answers, asked without sending. Returns 1 for room, 0 for none (and 0 for a
+ *  peer that is not connected).
+ *
+ *  A 0 says "stop". The message you just sent was queued like any other and
+ *  nothing was dropped, but keep piling on and this peer is dropped with
+ *  RATS_CLOSE_SLOW_CONSUMER. Wait for the callback registered with
+ *  rats_on_peer_writable(), or poll this from a thread of your own.
+ *
+ *  Ask it right after rats_send(): the bytes you just handed over are already
+ *  counted, so the answer covers your own send and not just what the reactor has
+ *  got round to. It is NOT a size limit — a single message of any size is always
+ *  accepted; only sending more on top of a full queue drops a peer. */
+RATS_API int rats_peer_writable(rats_t node, const char* peer_id_hex);
+
 /* — callbacks (register before start; invoked on a reactor thread) — */
 
 typedef void (*rats_peer_cb)(void* user, const char* peer_id_hex);
+typedef void (*rats_peer_disconnect_cb)(void* user, const char* peer_id_hex,
+                                        rats_close_reason_t reason);
 typedef void (*rats_message_cb)(void* user, const char* peer_id_hex, const void* data, size_t len);
 
 RATS_API rats_error_t rats_on_peer_connected(rats_t node, rats_peer_cb cb, void* user);
-RATS_API rats_error_t rats_on_peer_disconnected(rats_t node, rats_peer_cb cb, void* user);
+RATS_API rats_error_t rats_on_peer_disconnected(rats_t node, rats_peer_disconnect_cb cb,
+                                                          void* user);
+/** "This peer can be written to again" — fired when a peer whose queue had filled
+ *  past its mark has drained back under it. The other half of rats_send()
+ *  reporting 0; an application that never asks never needs this. */
+RATS_API rats_error_t rats_on_peer_writable(rats_t node, rats_peer_cb cb, void* user);
 RATS_API rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb cb, void* user);
 
 /* — optional subsystems (enable before start) — */

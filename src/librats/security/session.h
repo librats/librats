@@ -30,6 +30,13 @@ public:
     /// The remote peer's identity, proven during the handshake.
     virtual const PeerId& remote_id() const = 0;
 
+    /// Bytes encrypt() adds to a plaintext of any size (an AEAD tag, typically).
+    /// The send path needs the ciphertext's size *before* encrypting it, because
+    /// a message it turns out it cannot frame must be refused without a nonce
+    /// having been spent on it — the counters run in lockstep at both ends, so a
+    /// message encrypted and then not sent would break every one after it.
+    virtual size_t overhead() const noexcept = 0;
+
     /// True if traffic is actually encrypted (false for the plaintext passthrough).
     virtual bool is_secure() const = 0;
 };

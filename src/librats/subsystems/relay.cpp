@@ -1072,7 +1072,8 @@ void Relay::attach(NodeContext& ctx) {
     ctx.network.on(MessageType::Relay,
                    [state](const Peer& peer, ByteView payload) { state->handle(peer, payload); });
     ctx.network.on_peer_connected([state](const Peer& peer) { state->on_peer_connected(peer); });
-    ctx.network.on_peer_disconnected([state](const PeerId& id) { state->on_peer_disconnected(id); });
+    ctx.network.on_peer_disconnected(
+        [state](const PeerId& id, CloseReason) { state->on_peer_disconnected(id); });
     ctx.network.on_peer_writable([state](const Peer& peer) { state->on_peer_writable(peer.id()); });
 
     services_ = &ctx.services;

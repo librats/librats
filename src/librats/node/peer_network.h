@@ -17,6 +17,7 @@
 #include "librats/peer/peer_id.h"
 #include "librats/peer/peer_info.h"
 #include "librats/core/address.h"
+#include "librats/core/types.h"  // CloseReason
 
 #include <cstdint>
 #include <functional>
@@ -33,7 +34,12 @@ public:
     using MessageHandler = std::function<void(const Peer&, ByteView)>;
 
     using PeerEventHandler       = std::function<void(const Peer&)>;
-    using PeerDisconnectHandler  = std::function<void(const PeerId&)>;
+    /// A peer went away, and why. The reason matters as much as the event: an
+    /// application dropped as a slow consumer (CloseReason::SlowConsumer) has to
+    /// slow down, while one whose peer simply left should reconnect — and without
+    /// the reason those look identical, so the usual answer to both is to redial
+    /// and repeat whatever caused it.
+    using PeerDisconnectHandler  = std::function<void(const PeerId&, CloseReason)>;
     using DialFailedHandler      = std::function<void(const Address&)>;
 
     virtual const PeerId&       local_id() const = 0;

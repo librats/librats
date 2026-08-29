@@ -36,8 +36,9 @@ int main(int argc, char** argv) {
     node.on_peer_connected([](const Peer& peer) {
         std::cout << "[+] connected: " << peer.id().short_hex() << "\n";
     });
-    node.on_peer_disconnected([](const PeerId& id) {
-        std::cout << "[-] disconnected: " << id.short_hex() << "\n";
+    node.on_peer_disconnected([](const PeerId& id, CloseReason reason) {
+        std::cout << "[-] disconnected: " << id.short_hex()
+                  << " (" << to_string(reason) << ")\n";
     });
     node.on("chat", [](const Peer& peer, ByteView data) {
         std::cout << peer.id().short_hex() << ": "

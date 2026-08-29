@@ -80,7 +80,7 @@ void FileTransfer::attach(NodeContext& ctx) {
     network_ = &ctx.network;
     network_->on(MessageType::FileChunk,
                  [this](const Peer& peer, ByteView payload) { on_message(peer, payload); });
-    network_->on_peer_disconnected([this](const PeerId& id) {
+    network_->on_peer_disconnected([this](const PeerId& id, CloseReason) {
         // Fail every in-flight transfer with the departed peer and reclaim temps.
         std::vector<std::shared_ptr<Outgoing>> out;
         std::vector<std::shared_ptr<Incoming>> in;

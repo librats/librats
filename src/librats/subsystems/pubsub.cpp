@@ -106,7 +106,7 @@ void PubSub::attach(NodeContext& ctx) {
     network_->on(MessageType::Gossip,
                          [this](const Peer& peer, ByteView payload) { on_gossip(peer, payload); });
     network_->on_peer_connected([this](const Peer& peer) { on_new_peer(peer); });
-    network_->on_peer_disconnected([this](const PeerId& id) { on_peer_gone(id); });
+    network_->on_peer_disconnected([this](const PeerId& id, CloseReason) { on_peer_gone(id); });
 }
 
 void PubSub::start() {

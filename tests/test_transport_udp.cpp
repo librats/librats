@@ -2397,7 +2397,7 @@ TEST(TransportUdpTest, AnApplicationThatHeedsBackpressureKeepsItsPeer) {
     client.on_peer_writable([&](const Peer&) { ++openings; });
 
     std::atomic<int> lost{0};
-    client.on_peer_disconnected([&](const PeerId&) { ++lost; });
+    client.on_peer_disconnected([&](const PeerId&, CloseReason) { ++lost; });
 
     client.connect("127.0.0.1", server.listen_port());
     ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
@@ -2439,6 +2439,195 @@ TEST(TransportUdpTest, AnApplicationThatHeedsBackpressureKeepsItsPeer) {
     server.stop();
 }
 
+// A message larger than the whole send queue is not a slow consumer, and must not
+// be answered with a disconnection.
+//
+// It used to be. The high-water mark was weighed AFTER the message had been added
+// to the queue, so any single message bigger than the mark crossed it by itself and
+// the peer was dropped on the spot — on an idle connection, over a link draining at
+// full speed, with nothing about the peer being slow at all. With the default 8 MiB
+// mark that made node.send(peer, ch, 10 MiB) a guaranteed disconnect on the first
+// call, delivering none of it, while the wire itself carries blocks up to 64 MiB.
+//
+// A message cannot be queued by halves, so the size of ONE of them can never be
+// evidence that a peer is not keeping up. What is evidence — and what still closes
+// the connection — is a caller piling on MORE while the queue is already over the
+// mark (the test after this one).
+TEST(TransportUdpTest, OneLargeMessageIsNotASlowConsumer) {
+    NodeConfig server_cfg = base_config();
+    NodeConfig client_cfg = base_config();
+    client_cfg.enable_listen = false;
+    // 256 KiB before a slow consumer would be dropped, and one message four times
+    // that. Under the old rule this was fatal; nothing else about it is unusual.
+    client_cfg.send_queue_limit = 256 * 1024;
+    constexpr size_t kMessage = 1024 * 1024;
+
+    Node server(server_cfg), client(client_cfg);
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    std::atomic<size_t> got{0};
+    server.on("bulk", [&](Peer, ByteView payload) { got += payload.size(); });
+
+    std::atomic<int>         lost{0};
+    std::atomic<CloseReason> why{CloseReason::PeerClosed};
+    client.on_peer_disconnected([&](const PeerId&, CloseReason reason) {
+        why.store(reason);
+        ++lost;
+    });
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+    const PeerId peer = client.peers().front().id;
+
+    const std::string big(kMessage, 'B');
+    // The answer is still "no room" — the queue really is over its low-water mark —
+    // but that is a request to wait, not a death sentence.
+    EXPECT_FALSE(client.send(peer, "bulk", ByteView(big)))
+        << "a message four times the queue limit reported room to spare";
+
+    ASSERT_TRUE(wait_for([&] { return got.load() == kMessage || lost.load() > 0; }, 30s));
+    EXPECT_EQ(lost.load(), 0) << "the peer was dropped for ONE message ("
+                              << to_string(why.load()) << ") — nothing was slow here";
+    EXPECT_EQ(got.load(), kMessage) << "the message was not delivered in full";
+    EXPECT_EQ(client.peer_count(), 1u);
+
+    // And the connection is still usable afterwards, once it has drained.
+    ASSERT_TRUE(wait_for([&] { return client.peer_writable(peer); }, 30s));
+    const std::string after(16, 'a');
+    EXPECT_TRUE(client.send(peer, "bulk", ByteView(after)));
+    ASSERT_TRUE(wait_for([&] { return got.load() == kMessage + after.size(); }));
+
+    client.stop();
+    server.stop();
+}
+
+// The other half of the rule above: ignoring the answer entirely IS what gets a
+// peer dropped, and the application is told exactly that. Before CloseReason
+// reached on_peer_disconnected, this was indistinguishable from the peer simply
+// leaving — so the natural response was to redial and do it all again.
+TEST(TransportUdpTest, IgnoringBackpressureDropsThePeerAndSaysWhy) {
+    NodeConfig server_cfg = base_config();
+    NodeConfig client_cfg = base_config();
+    client_cfg.enable_listen = false;
+    client_cfg.send_queue_limit = 256 * 1024;
+
+    Node server(server_cfg), client(client_cfg);
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    server.on("bulk", [](Peer, ByteView) {});
+
+    std::atomic<int>         lost{0};
+    std::atomic<CloseReason> why{CloseReason::PeerClosed};
+    client.on_peer_disconnected([&](const PeerId&, CloseReason reason) {
+        why.store(reason);
+        ++lost;
+    });
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+    const PeerId peer = client.peers().front().id;
+
+    // Never stop, never wait, never look at the answer — the behaviour the mark
+    // exists to catch. 64 MiB offered against a 256 KiB queue.
+    const std::string chunk(64 * 1024, 'x');
+    for (int i = 0; i < 1024 && lost.load() == 0; ++i)
+        client.send(peer, "bulk", ByteView(chunk));
+
+    ASSERT_TRUE(wait_for([&] { return lost.load() > 0; }, 30s))
+        << "a sender that ignored every answer kept its peer — the queue is unbounded";
+    EXPECT_EQ(why.load(), CloseReason::SlowConsumer)
+        << "the peer was dropped for the right thing but told the wrong reason: "
+        << to_string(why.load());
+
+    client.stop();
+    server.stop();
+}
+
+// A message past the wire's own ceiling can never be sent, however long anyone
+// waits — so it is refused, and refusing is all that happens. Queueing it would
+// hand the peer a block its decoder is obliged to reject, turning "too big" into a
+// protocol error and a dead connection at the far end.
+TEST(TransportUdpTest, AMessagePastTheBlockCeilingIsRefusedNotFatal) {
+    NodeConfig server_cfg = base_config();
+    NodeConfig client_cfg = base_config();
+    client_cfg.enable_listen = false;
+
+    Node server(server_cfg), client(client_cfg);
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+
+    std::atomic<size_t> got{0};
+    server.on("bulk", [&](Peer, ByteView payload) { got += payload.size(); });
+    std::atomic<int> lost{0};
+    client.on_peer_disconnected([&](const PeerId&, CloseReason) { ++lost; });
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+    const PeerId peer = client.peers().front().id;
+
+    {   // released before the assertions below, so the test does not sit on it
+        const std::string toobig(framer::kMaxBlockSize, 'X');  // + header + tag ⇒ past the cap
+        EXPECT_FALSE(client.send(peer, "bulk", ByteView(toobig)));
+    }
+
+    // A small message right behind it still arrives, which is the point: the
+    // refusal cost the connection nothing.
+    const std::string ok(32, 'o');
+    EXPECT_TRUE(client.send(peer, "bulk", ByteView(ok)));
+    ASSERT_TRUE(wait_for([&] { return got.load() == ok.size(); }, 30s));
+    EXPECT_EQ(lost.load(), 0) << "an oversized message took the connection with it";
+
+    client.stop();
+    server.stop();
+}
+
+// A Peer handle is what every callback is handed, so replying through it is the
+// most ordinary way to write to a peer — and it has to be able to feel
+// backpressure like any other sender. While Peer::send() returned void it could
+// not: a handler could fill a queue with no way to know, and the bytes it queued
+// were invisible to peer_writable() as well, because that path skipped the
+// in-transit counter entirely.
+TEST(TransportUdpTest, PeerHandleReportsBackpressure) {
+    NodeConfig server_cfg = base_config();
+    NodeConfig client_cfg = base_config();
+    client_cfg.enable_listen = false;
+    client_cfg.send_queue_limit = 256 * 1024;   // ⇒ 64 KiB before "no room"
+
+    Node server(server_cfg), client(client_cfg);
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    server.on("bulk", [](Peer, ByteView) {});
+
+    std::atomic<int> lost{0};
+    client.on_peer_disconnected([&](const PeerId&, CloseReason) { ++lost; });
+
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+    const PeerId peer_id = client.peers().front().id;
+
+    auto handle = client.peer(peer_id);
+    ASSERT_TRUE(handle.has_value());
+    EXPECT_TRUE(client.peer_writable(peer_id)) << "an idle peer reported no room";
+
+    const std::string chunk(32 * 1024, 'p');
+    bool refused = false;
+    for (int i = 0; i < 64 && !refused; ++i) refused = !handle->send("bulk", ByteView(chunk));
+
+    EXPECT_TRUE(refused) << "Peer::send() never reported the queue filling up";
+    // The handle's bytes are charged to the peer, so the other way of asking sees
+    // them too — the two must never contradict each other.
+    EXPECT_FALSE(client.peer_writable(peer_id))
+        << "Peer::send() said no room while peer_writable() said there was";
+    EXPECT_EQ(lost.load(), 0) << "heeding the answer should have kept the peer";
+
+    ASSERT_TRUE(wait_for([&] { return client.peer_writable(peer_id); }, 30s))
+        << "the queue filled and never reported draining";
+
+    client.stop();
+    server.stop();
+}
+
 // The two ways of asking "may I send more?" must not contradict each other.
 // send() weighs both halves of what a peer is carrying — what the reactor has
 // queued, and what a caller has handed over that the reactor has not taken up
@@ -2473,7 +2662,7 @@ TEST(TransportUdpTest, PeerWritableWeighsBytesTheReactorHasNotTakenUpYet) {
     });
 
     std::atomic<int> lost{0};
-    client.on_peer_disconnected([&](const PeerId&) { ++lost; });
+    client.on_peer_disconnected([&](const PeerId&, CloseReason) { ++lost; });
 
     client.connect("127.0.0.1", server.listen_port());
     ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));

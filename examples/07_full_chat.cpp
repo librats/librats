@@ -86,8 +86,9 @@ int main(int argc, char** argv) {
         if (auto info = peer.info())
             for (const Address& a : info->addresses) reconnect->add(a);
     });
-    node.on_peer_disconnected([](const PeerId& id) {
-        std::cout << "[-] peer gone: " << id.short_hex() << "\n";
+    node.on_peer_disconnected([](const PeerId& id, CloseReason reason) {
+        std::cout << "[-] peer gone: " << id.short_hex()
+                  << " (" << to_string(reason) << ")\n";
     });
 
     pubsub->subscribe(room, [room](const PeerId& from, const std::string&, ByteView data) {

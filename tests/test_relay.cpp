@@ -411,7 +411,7 @@ TEST(RelayE2E, ACircuitEndsWhenItOutstaysItsByteCap) {
     Trio trio(hub_config);
 
     std::atomic<bool> lost{false};
-    trio.a.on_peer_disconnected([&](const PeerId& id) {
+    trio.a.on_peer_disconnected([&](const PeerId& id, CloseReason) {
         if (id == trio.b.local_id()) lost.store(true);
     });
 
@@ -435,7 +435,7 @@ TEST(RelayE2E, LosingTheRelayEndsTheCircuit) {
     Trio trio;
 
     std::atomic<bool> lost{false};
-    trio.b.on_peer_disconnected([&](const PeerId& id) {
+    trio.b.on_peer_disconnected([&](const PeerId& id, CloseReason) {
         if (id == trio.a.local_id()) lost.store(true);
     });
 
@@ -602,7 +602,7 @@ TEST(RelayE2E, ARelayedPeerIsUpgradedToADirectLink) {
     b.add_subsystem(std::make_unique<HolePunch>());
 
     std::atomic<int> disconnects{0};
-    a.on_peer_disconnected([&](const PeerId& id) {
+    a.on_peer_disconnected([&](const PeerId& id, CloseReason) {
         if (id == b.local_id()) ++disconnects;
     });
     // The upgrade can be quick enough that polling would never catch the circuit,

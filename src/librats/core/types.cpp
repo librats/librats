@@ -13,7 +13,7 @@ const char* to_string(ConnState s) noexcept {
     return "?";
 }
 
-const char* to_string(CloseReason r) noexcept {
+RATS_API const char* to_string(CloseReason r) noexcept {
     switch (r) {
         case CloseReason::LocalClose:      return "LocalClose";
         case CloseReason::PeerClosed:      return "PeerClosed";

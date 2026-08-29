@@ -84,7 +84,9 @@ enum class CloseReason {
     ConnectFailed,     ///< Outbound transport connect never completed.
     HandshakeFailed,   ///< Secure-channel handshake failed or timed out.
     ProtocolError,     ///< Malformed frame / decryption failure on the wire.
-    SlowConsumer,      ///< Send buffer exceeded its high-water mark.
+    SlowConsumer,      ///< Kept sending with the queue already past its high-water
+                       ///< mark. Not "a message was too large": one message is
+                       ///< always queued whatever its size (Connection::send).
     ReactorShutdown,   ///< Reactor is stopping.
     DuplicateConn,     ///< Redundant connection to a peer we already hold; superseded.
     PeerLimit,         ///< Inbound rejected: the configured peer limit is reached.
@@ -93,11 +95,12 @@ enum class CloseReason {
 };
 
 const char* to_string(ConnState) noexcept;
-const char* to_string(CloseReason) noexcept;
-/// Exported, unlike its siblings above: TransportKind is part of the public
-/// surface (NodeConfig::preferred_transport, PeerInfo::transport), so a consumer
-/// of the shared build needs to be able to render one. ConnState/CloseReason only
-/// ever appear on Connection, which does not cross the library boundary.
+/// Exported: a CloseReason is handed to every on_peer_disconnected handler, so a
+/// consumer of the shared build has to be able to render one. (ConnState above is
+/// not — it never leaves Connection.)
+RATS_API const char* to_string(CloseReason) noexcept;
+/// Exported for the same reason: TransportKind is part of the public surface
+/// (NodeConfig::preferred_transport, PeerInfo::transport).
 RATS_API const char* to_string(TransportKind) noexcept;
 
 } // namespace librats

@@ -74,7 +74,7 @@ std::vector<Address> ReconnectionService::known_peers(size_t n) const {
 void ReconnectionService::attach(NodeContext& ctx) {
     network_ = &ctx.network;
     network_->on_peer_connected([this](const Peer& peer) { on_connected(peer); });
-    network_->on_peer_disconnected([this](const PeerId& id) { on_disconnected(id); });
+    network_->on_peer_disconnected([this](const PeerId& id, CloseReason) { on_disconnected(id); });
     network_->on_dial_failed([this](const Address& addr) { on_dial_failed(addr); });
 }
 

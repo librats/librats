@@ -32,6 +32,7 @@ class PlaintextSession final : public Session {
 public:
     explicit PlaintextSession(PeerId remote) : remote_id_(remote) {}
     bool encrypt(ByteView plain, Bytes& out) override { out.assign(plain.begin(), plain.end()); return true; }
+    size_t overhead() const noexcept override { return 0; }
     bool decrypt(ByteView cipher, Bytes& out) override { out.assign(cipher.begin(), cipher.end()); return true; }
     const PeerId& remote_id() const override { return remote_id_; }
     bool is_secure() const override { return false; }

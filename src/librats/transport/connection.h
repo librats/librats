@@ -85,8 +85,11 @@ public:
 
 class Connection {
 public:
-    /// High-water mark for the memory held by the send queue; exceeding it closes the
-    /// connection with CloseReason::SlowConsumer.
+    /// High-water mark for the memory held by the send queue. A caller that offers
+    /// another message while the queue is *still* over it has the connection closed
+    /// with CloseReason::SlowConsumer. The mark is never applied to the message that
+    /// crosses it: one message may always be queued, whatever its size (see send()),
+    /// so the queue's ceiling is this plus one message rather than this exactly.
     static constexpr size_t kDefaultSendHighWater = 8 * 1024 * 1024;
 
     /// Where send() starts answering "no room". A quarter of the hard limit, so a
@@ -124,6 +127,13 @@ public:
     bool          is_secure() const noexcept { return session_ && session_->is_secure(); }
 
     /// Queue an application frame for the peer. No-op unless Established.
+    ///
+    /// Never refuses and never drops: whatever it is handed is queued, however
+    /// large. The size of a single message is not what the high-water mark is
+    /// about — a message cannot be queued by halves, so a connection that is
+    /// draining perfectly well must not be torn down over one big frame. What
+    /// closes a connection is offering *another* message while the queue is still
+    /// over the mark, which is the actual evidence that the peer is not keeping up.
     ///
     /// @return whether there is still room for more. False means the queue is
     ///         past its low-water mark — this frame is queued like any other,

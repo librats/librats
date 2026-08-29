@@ -250,7 +250,7 @@ TEST(NodeTest, DisconnectNotifiesPeer) {
     Node client(client_config());
 
     std::atomic<int> server_disconnects{0};
-    server.on_peer_disconnected([&](PeerId) { server_disconnects++; });
+    server.on_peer_disconnected([&](PeerId, CloseReason) { server_disconnects++; });
 
     ASSERT_TRUE(server.start());
     ASSERT_TRUE(client.start());

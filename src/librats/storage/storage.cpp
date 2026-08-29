@@ -341,7 +341,7 @@ void StorageManager::attach(NodeContext& ctx) {
     // Without this the per-peer sync state of every peer that ever connected
     // would be kept forever, snapshot cursors and all.
     network_->on_peer_disconnected(
-        [this](const PeerId& id) { on_peer_disconnected(id); });
+        [this](const PeerId& id, CloseReason) { on_peer_disconnected(id); });
     // The other half of honouring send()'s return value: a peer that filled up is
     // owed a snapshot, and this is what says the link has room to serve it.
     network_->on_peer_writable(

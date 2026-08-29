@@ -508,11 +508,15 @@ void RatsNode::OnPeerDisconnected(const Napi::CallbackInfo& info) {
     }
     on_disconnected_ = std::make_unique<CbContext>();
     on_disconnected_->init(env, info[0].As<Napi::Function>(), "on_peer_disconnected");
-    auto trampoline = [](void* user, const char* peer_id) {
+    // Second argument is why the peer went: "RATS_CLOSE_SLOW_CONSUMER" is the one
+    // an application can act on (it was sending faster than the link drained).
+    // Callbacks that only declare (peerId) are unaffected.
+    auto trampoline = [](void* user, const char* peer_id, rats_close_reason_t reason) {
         auto* c = static_cast<CbContext*>(user);
         std::string peer = peer_id ? peer_id : "";
-        c->tsfn.BlockingCall([peer](Napi::Env env, Napi::Function js) {
-            js.Call({Napi::String::New(env, peer)});
+        std::string why  = rats_close_reason_str(reason);
+        c->tsfn.BlockingCall([peer, why](Napi::Env env, Napi::Function js) {
+            js.Call({Napi::String::New(env, peer), Napi::String::New(env, why)});
         });
     };
     throw_on_error(env, rats_on_peer_disconnected(node_, trampoline, on_disconnected_.get()));

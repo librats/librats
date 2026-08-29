@@ -465,19 +465,46 @@ size_t max_peers() const;
 void   set_max_peers(size_t n);
 bool   peer_limit_reached() const;
 
-// Messaging (raw bytes on a named channel)
-void send(const PeerId& to, std::string_view channel, ByteView payload);
-void broadcast(std::string_view channel, ByteView payload);
+// Messaging (raw bytes on a named channel). The bool is backpressure: false means
+// "queued, but stop and wait for on_peer_writable" — see Backpressure below.
+bool send(const PeerId& to, std::string_view channel, ByteView payload);
+bool broadcast(std::string_view channel, ByteView payload);
+bool peer_writable(const PeerId& id) const;      // the same question, without sending
 
 // Events (additive; run on a reactor thread)
 void on_peer_connected(PeerEventHandler cb);     // (const Peer&)
-void on_peer_disconnected(PeerDisconnectHandler cb);  // (const PeerId&)
+void on_peer_disconnected(PeerDisconnectHandler cb);  // (const PeerId&, CloseReason)
+void on_peer_writable(PeerEventHandler cb);      // (const Peer&) — room again
 void on(std::string_view channel, MessageRouter::Handler cb);  // (const Peer&, ByteView)
 
 // Node-scoped coordination shared with subsystems
 EventBus&        events();      // fire-and-forget, one→many (e.g. NetworkChanged)
 ServiceRegistry& services();    // targeted capability lookup, one→one
 ```
+
+#### Backpressure
+
+Sending is non-blocking, so a peer that reads slower than you write is answered by
+its queue growing. Three things bound that, and they are the whole contract:
+
+- **`send()` (and `Peer::send()`) returns whether there is still room.** `false`
+  means *this message was queued like any other, nothing was dropped* — but stop.
+  It is the queue passing its low-water mark (a quarter of
+  `NodeConfig::send_queue_limit`, so 2 MiB by default).
+- **`on_peer_writable` says the room is back**, and `peer_writable()` asks the same
+  question without sending — for a caller that must wait on a thread of its own.
+- **Keep sending regardless and the peer is dropped**, with
+  `CloseReason::SlowConsumer` handed to `on_peer_disconnected` so you can tell that
+  apart from a peer that simply left. It takes offering *another* message while the
+  queue is still over `send_queue_limit`; the mark is never charged against the
+  message that crosses it, so **a single message of any size is always queued** —
+  one large frame on a healthy connection is not a slow consumer. The only hard
+  limit on one message is the 64 MiB wire block, past which `send()` refuses
+  outright (returning `false`, connection untouched) because no amount of waiting
+  would ever make it fit.
+
+The same three are in the C ABI: `rats_peer_writable()`, `rats_on_peer_writable()`,
+and the `rats_close_reason_t` handed to `rats_on_peer_disconnected()`.
 
 ### `NodeConfig`
 
@@ -551,7 +578,7 @@ int main(void) {
 }
 ```
 
-Key entry points: `rats_create` / `rats_create_config` / `rats_config_default` / `rats_destroy`, `rats_start` / `rats_stop`, `rats_connect`, `rats_send` / `rats_broadcast`, `rats_on` / `rats_on_peer_connected` / `rats_on_peer_disconnected`, `rats_enable_{dht,mdns,pubsub,json,file_transfer,ping,reconnect,port_mapping}`, `rats_subscribe` / `rats_publish`, `rats_on_json` / `rats_send_json`, `rats_send_file` / `rats_accept_file`, `rats_peer_ids`, `rats_local_id`, `rats_protocol`, `rats_version` / `rats_version_string` / `rats_git_describe` / `rats_abi`, `rats_set_log_level` / `rats_set_log_file`.
+Key entry points: `rats_create` / `rats_create_config` / `rats_config_default` / `rats_destroy`, `rats_start` / `rats_stop`, `rats_connect`, `rats_send` / `rats_broadcast`, `rats_on` / `rats_on_peer_connected` / `rats_on_peer_disconnected` / `rats_on_peer_writable`, `rats_peer_writable` / `rats_close_reason_str`, `rats_enable_{dht,mdns,pubsub,json,file_transfer,ping,reconnect,port_mapping}`, `rats_subscribe` / `rats_publish`, `rats_on_json` / `rats_send_json`, `rats_send_file` / `rats_accept_file`, `rats_peer_ids`, `rats_local_id`, `rats_protocol`, `rats_version` / `rats_version_string` / `rats_git_describe` / `rats_abi`, `rats_set_log_level` / `rats_set_log_file`.
 
 ## 🏢 Architecture
 

@@ -51,6 +51,46 @@ uint8_t Connection::reactor_index() const noexcept { return reactor_.index(); }
 bool Connection::send(FrameHeader header, ByteView payload) {
     if (state_ != ConnState::Established) return false;  // frames only flow post-handshake
 
+    // Weighed on the backlog as it stands BEFORE this message, never after it has
+    // been added. A message is indivisible — there is no queueing half of one — so
+    // judging a caller by the mark its own message has just crossed answers "that
+    // message was bigger than a limit nobody published" with a disconnection, on a
+    // connection that is idle, healthy and draining at full speed. What the mark is
+    // for is a peer that cannot keep up, and the evidence for that is a caller
+    // piling MORE on top of a backlog that is already over it.
+    //
+    // So one message may always be queued, whatever its size — the queue may exceed
+    // the mark by exactly that message and no more — and offering another before it
+    // has drained is what makes a caller a slow consumer. Nothing is ever dropped
+    // or refused here, which is what the layers above rely on: a relayed circuit
+    // (transport/relay_link.cpp) reports bytes as written the moment it hands them
+    // over, and a byte stream cannot survive one of them going missing.
+    // The one thing that is refused outright rather than queued: a message too
+    // large to be framed at all. The block prefix tops out at kMaxBlockSize and the
+    // peer's decoder rejects anything past it, so queueing this would spend the
+    // link only to have the far end hang up on a protocol error it was handed on
+    // purpose. Waiting cannot help either — no amount of draining makes it fit — so
+    // the honest answer is a refusal, with the frame unqueued and the connection
+    // untouched. Checked before encrypt() because the nonce counters run in
+    // lockstep: a message encrypted and then dropped would break every one after.
+    if (framer::kHeaderSize + payload.size() + session_->overhead() > framer::kMaxBlockSize) {
+        LOG_WARN("connection", "Peer " << remote_id_.short_hex() << " refused a "
+                 << payload.size() << " B message: past the " << framer::kMaxBlockSize
+                 << " B block ceiling; split it");
+        return false;
+    }
+
+    const size_t backlog_before = backlog();
+    if (backlog_before > send_high_water_) {
+        LOG_WARN("connection", "Peer " << remote_id_.short_hex() << " offered more with "
+                 << backlog_before << " B still queued past the high-water mark ("
+                 << send_high_water_ << " B); closing as slow consumer");
+        close_reason_ = CloseReason::SlowConsumer;
+        state_ = ConnState::Closing;
+        reactor_.close(id_, CloseReason::SlowConsumer);
+        return false;
+    }
+
     Bytes inner;
     framer::encode_message(inner, header, payload);
 
@@ -64,14 +104,6 @@ bool Connection::send(FrameHeader header, ByteView payload) {
     queue_block(std::move(cipher));
 
     const size_t backlog_now = backlog();
-    if (backlog_now > send_high_water_) {
-        LOG_WARN("connection", "Peer " << remote_id_.short_hex() << " over send high-water ("
-                 << backlog_now << " B); closing as slow consumer");
-        close_reason_ = CloseReason::SlowConsumer;
-        state_ = ConnState::Closing;
-        reactor_.close(id_, CloseReason::SlowConsumer);
-        return false;
-    }
 
     // The queue has grown past what a caller should keep adding to. Everything
     // still goes out — nothing is dropped here — but the answer to "may I send

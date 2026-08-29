@@ -336,15 +336,25 @@ TEST(NodeCApiTest, MaxPeersCapsInbound) {
     rats_destroy(a); rats_destroy(b); rats_destroy(server);
 }
 
-// The disconnect callback fires (with the peer id) when a peer drops.
+// The disconnect callback fires — with the peer id AND why it went. The reason is
+// the half that lets an application respond: a peer that left is one to redial, a
+// peer dropped as a slow consumer means "you were sending too fast", and redialing
+// that one just repeats the overload. They are indistinguishable without it.
+namespace {
+struct GoneCtx { std::atomic<int> count{0}; std::atomic<int> reason{-1}; };
+} // namespace
+
 TEST(NodeCApiTest, DisconnectCallbackFires) {
     rats_t server = rats_create(0);
     rats_t client = rats_create_ex(0, 0, "127.0.0.1", RATS_SECURITY_NOISE);
 
-    std::atomic<int> disconnects{0};
-    rats_on_peer_disconnected(server, [](void* u, const char* id) {
-        if (id && std::strlen(id) == 64) static_cast<std::atomic<int>*>(u)->fetch_add(1);
-    }, &disconnects);
+    GoneCtx gone;
+    rats_on_peer_disconnected(server, [](void* u, const char* id, rats_close_reason_t why) {
+        auto* c = static_cast<GoneCtx*>(u);
+        c->reason.store(static_cast<int>(why));
+        if (id && std::strlen(id) == 64) c->count.fetch_add(1);
+    }, &gone);
+    std::atomic<int>& disconnects = gone.count;
 
     ASSERT_EQ(rats_start(server), RATS_OK);
     ASSERT_EQ(rats_start(client), RATS_OK);
@@ -355,9 +365,73 @@ TEST(NodeCApiTest, DisconnectCallbackFires) {
     ASSERT_TRUE(wait_for([&] { return disconnects.load() == 1; }));
     EXPECT_EQ(rats_peer_count(server), 0u);
 
+    // A clean stop at the far end, not something we did — and above all not
+    // RATS_CLOSE_SLOW_CONSUMER, the one reason an application must act on.
+    const int why = gone.reason.load();
+    EXPECT_NE(why, -1) << "the callback ran without ever setting a reason";
+    EXPECT_NE(why, static_cast<int>(RATS_CLOSE_SLOW_CONSUMER));
+    EXPECT_STRNE(rats_close_reason_str(static_cast<rats_close_reason_t>(why)),
+                 "RATS_CLOSE_UNKNOWN")
+        << "a reason crossed the C ABI that rats_close_reason_str cannot name";
+
     rats_stop(server);
     rats_destroy(client);
     rats_destroy(server);
+}
+
+// Backpressure, through the C ABI. Every FFI binding is built on this header, so
+// a signal missing here is a signal missing from Node.js, Python, Java and Android
+// alike — and there, the only way an application ever learned it was sending too
+// fast was the disconnection itself.
+namespace {
+struct WritableCtx { std::atomic<int> openings{0}; std::atomic<int> lost{0}; };
+} // namespace
+
+TEST(NodeCApiTest, PeerWritableAndTheWritableCallback) {
+    rats_config_t cfg = rats_config_default();
+    cfg.listen_port      = 0;
+    cfg.bind_address     = "127.0.0.1";
+    cfg.send_queue_limit = 256 * 1024;   // ⇒ 64 KiB before "no room"
+
+    rats_t server = rats_create(0);
+    rats_t client = rats_create_config(&cfg);
+
+    WritableCtx ctx;
+    rats_on_peer_writable(client, [](void* u, const char*) {
+        static_cast<WritableCtx*>(u)->openings.fetch_add(1);
+    }, &ctx);
+    rats_on_peer_disconnected(client, [](void* u, const char*, rats_close_reason_t) {
+        static_cast<WritableCtx*>(u)->lost.fetch_add(1);
+    }, &ctx);
+
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    rats_connect(client, "127.0.0.1", rats_listen_port(server));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
+
+    char* server_id = rats_local_id(server);
+    ASSERT_NE(server_id, nullptr);
+
+    EXPECT_EQ(rats_peer_writable(client, server_id), 1) << "an idle peer reported no room";
+    EXPECT_EQ(rats_peer_writable(client, "not-a-peer-id"), 0);
+
+    // Fill it, heeding the answer — which is only possible now that there is one.
+    const std::vector<uint8_t> chunk(32 * 1024, 'c');
+    bool told_to_stop = false;
+    for (int i = 0; i < 64 && !told_to_stop; ++i) {
+        ASSERT_EQ(rats_send(client, server_id, "bulk", chunk.data(), chunk.size()), RATS_OK);
+        told_to_stop = rats_peer_writable(client, server_id) == 0;
+    }
+    EXPECT_TRUE(told_to_stop) << "the queue never reported filling up";
+
+    ASSERT_TRUE(wait_for([&] { return ctx.openings.load() > 0; }, 30s))
+        << "the queue filled and nothing ever said it had drained";
+    EXPECT_EQ(rats_peer_writable(client, server_id), 1);
+    EXPECT_EQ(ctx.lost.load(), 0) << "a sender that heeded the answer lost its peer anyway";
+
+    rats_string_free(server_id);
+    rats_stop(client); rats_stop(server);
+    rats_destroy(client); rats_destroy(server);
 }
 
 namespace {

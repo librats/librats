@@ -314,8 +314,9 @@ int main(int argc, char** argv) {
             if (info) for (const Address& a : info->addresses) sub.reconnect->add(a);
         }
     });
-    node.on_peer_disconnected([](const PeerId& id) {
-        std::cout << "[-] peer disconnected: " << id.short_hex() << "\n";
+    node.on_peer_disconnected([](const PeerId& id, CloseReason reason) {
+        std::cout << "[-] peer disconnected: " << id.short_hex()
+                  << " (" << to_string(reason) << ")\n";
     });
     node.on("chat", [](const Peer& peer, ByteView data) {
         std::cout << peer.id().short_hex() << ": " << to_text(data) << "\n";
