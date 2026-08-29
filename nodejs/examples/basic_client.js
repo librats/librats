@@ -19,7 +19,7 @@ node.onPeerConnected((peerId) => {
   node.send(peerId, 'chat', 'Hello! Welcome to the network.');
 });
 
-node.onPeerDisconnected((peerId) => console.log(`- peer ${peerId}`));
+node.onPeerDisconnected((peerId, reason) => console.log(`- peer ${peerId} (${reason})`));
 
 // Raw channel: the payload arrives as a Buffer.
 node.on('chat', (peerId, data) => {

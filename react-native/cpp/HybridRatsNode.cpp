@@ -1,6 +1,7 @@
 #include "HybridRatsNode.hpp"
 
 #include <librats/core/bytes.h>
+#include <librats/core/types.h>
 #include <librats/node/config.h>
 #include <librats/node/node.h>
 #include <librats/peer/peer.h>
@@ -181,6 +182,10 @@ void HybridRatsNode::broadcast(const std::string& channel,
   node().broadcast(channel, view_of(data));
 }
 
+bool HybridRatsNode::peerWritable(const std::string& peerId) {
+  return node().peer_writable(parse_peer_id(peerId));
+}
+
 void HybridRatsNode::onMessage(
     const std::string& channel,
     const std::function<void(const std::string&,
@@ -212,7 +217,7 @@ void HybridRatsNode::onPeerConnected(
 }
 
 void HybridRatsNode::onPeerDisconnected(
-    const std::function<void(const std::string&)>& listener) {
+    const std::function<void(const std::string&, const std::string&)>& listener) {
   if (started_) {
     throw std::runtime_error(
         "onPeerDisconnected() must be called before start(): librats registers handlers without "
@@ -220,9 +225,24 @@ void HybridRatsNode::onPeerDisconnected(
         "running node is a data race");
   }
   // Disconnect reports the id rather than a Peer handle: by the time it fires
-  // there is no connection left to reach.
-  node().on_peer_disconnected(
-      [listener](const rats::PeerId& id) { listener(id.to_hex()); });
+  // there is no connection left to reach. The reason comes along because it is
+  // what tells "the peer left" apart from "you were sending too fast" — and only
+  // the second is something JS can act on.
+  node().on_peer_disconnected([listener](const rats::PeerId& id, rats::CloseReason reason) {
+    listener(id.to_hex(), rats::to_string(reason));
+  });
+}
+
+void HybridRatsNode::onPeerWritable(
+    const std::function<void(const std::string&)>& listener) {
+  if (started_) {
+    throw std::runtime_error(
+        "onPeerWritable() must be called before start(): librats registers handlers without "
+        "a lock and dispatches them from reactor threads, so registering on a "
+        "running node is a data race");
+  }
+  node().on_peer_writable(
+      [listener](const rats::Peer& peer) { listener(peer.id().to_hex()); });
 }
 
 // ── file transfer ───────────────────────────────────────────────────────────

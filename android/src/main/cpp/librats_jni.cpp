@@ -173,15 +173,25 @@ static void peer_bridge(void* user, const char* peer_id_hex) {
     env->DeleteLocalRef(cls);
 }
 
-// Disconnects carry a reason the connected event has no room for. The Java
-// PeerCallback takes only the id, so the reason is logged rather than dropped
-// silently; widening PeerCallback is the follow-up that makes it reachable from
-// Kotlin/Java (the C ABI already carries it — see rats_on_peer_disconnected).
+// Disconnects carry a reason the connected event has no room for, so they get
+// their own bridge and their own Java interface (PeerDisconnectCallback). The
+// reason is what tells "the peer left" apart from "this node was sending too
+// fast" — only the second is something the app can act on.
 static void peer_disconnect_bridge(void* user, const char* peer_id_hex,
                                    rats_close_reason_t reason) {
-    LOGD("peer disconnected: %s (%s)", peer_id_hex ? peer_id_hex : "?",
-         rats_close_reason_str(reason));
-    peer_bridge(user, peer_id_hex);
+    JNIEnv* env = getEnv();
+    if (!env) return;
+    jobject obj = static_cast<jobject>(user);
+    jclass cls; jmethodID m;
+    if (!resolveMethod(env, obj, "onPeerDisconnected",
+                       "(Ljava/lang/String;Ljava/lang/String;)V", &cls, &m)) return;
+    jstring jid  = toJString(env, peer_id_hex);
+    jstring jwhy = toJString(env, rats_close_reason_str(reason));
+    env->CallVoidMethod(obj, m, jid, jwhy);
+    clearPendingException(env, "peer disconnect");
+    env->DeleteLocalRef(jwhy);
+    env->DeleteLocalRef(jid);
+    env->DeleteLocalRef(cls);
 }
 
 static void message_bridge(void* user, const char* peer_id_hex, const void* data, size_t len) {
@@ -452,6 +462,12 @@ Java_com_librats_RatsNode_nativeBroadcast(JNIEnv* env, jobject, jlong ptr, jstri
     return rc;
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_librats_RatsNode_nativePeerWritable(JNIEnv* env, jobject, jlong ptr, jstring peerId) {
+    std::string id = toCString(env, peerId);
+    return rats_peer_writable(node_of(ptr), id.c_str()) ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_librats_RatsNode_nativeOn(JNIEnv* env, jobject, jlong ptr, jstring channel,
                                      jobject callback) {
@@ -475,6 +491,13 @@ Java_com_librats_RatsNode_nativeOnPeerDisconnected(JNIEnv* env, jobject, jlong p
     rats_t node = node_of(ptr);
     jobject ref = trackRef(env, node, cb);
     return rats_on_peer_disconnected(node, peer_disconnect_bridge, ref);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsNode_nativeOnPeerWritable(JNIEnv* env, jobject, jlong ptr, jobject cb) {
+    rats_t node = node_of(ptr);
+    jobject ref = trackRef(env, node, cb);
+    return rats_on_peer_writable(node, peer_bridge, ref);
 }
 
 // ---- discovery / NAT ----

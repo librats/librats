@@ -192,14 +192,31 @@ export interface RatsNode
   // --- messaging ---
 
   /**
-   * Send raw bytes to one peer on a named channel. False if that peer is not
-   * connected. The buffer is copied before the call returns, so the caller may
-   * reuse or discard it immediately.
+   * Send raw bytes to one peer on a named channel. The buffer is copied before
+   * the call returns, so the caller may reuse or discard it immediately.
+   *
+   * False means either that the peer is not connected, or that its queue is out
+   * of room — in the second case the message was still queued, and false is a
+   * request to pause (see `peerWritable()` below).
    */
   send(peerId: string, channel: string, data: ArrayBuffer): boolean
 
   /** Send raw bytes to every connected peer on a named channel. */
   broadcast(channel: string, data: ArrayBuffer): void
+
+  /**
+   * Whether this peer's send queue still has room. False also for a peer that is
+   * not connected.
+   *
+   * `send()` returning true only means the message was queued, never that it
+   * arrived — so if you send in bulk, this is how you learn you are outrunning
+   * the link. False means stop: the message you just sent was queued like any
+   * other and nothing was dropped, but keep going and the peer is dropped with
+   * reason `SlowConsumer`. Wait for `onPeerWritable`, or poll this.
+   *
+   * It is not a size limit — one message of any size is always queued.
+   */
+  peerWritable(peerId: string): boolean
 
   /**
    * Handle messages arriving on a channel. One listener per channel; registering
@@ -228,7 +245,21 @@ export interface RatsNode
    * Register once, at setup, rather than from an effect that can re-run.
    */
   onPeerConnected(listener: (peerId: string) => void): void
-  onPeerDisconnected(listener: (peerId: string) => void): void
+
+  /**
+   * `reason` is why the peer went — "RATS_CLOSE_PEER_CLOSED", "RATS_CLOSE_SLOW_CONSUMER"
+   * and so on. It is worth branching on: a peer that left is one to redial, while
+   * `RATS_CLOSE_SLOW_CONSUMER` means *you* were sending faster than the link
+   * drained, and redialing that one just repeats the overload.
+   */
+  onPeerDisconnected(listener: (peerId: string, reason: string) => void): void
+
+  /**
+   * A peer whose send queue had filled past its mark has drained back under it —
+   * the other half of `peerWritable()` returning false. An app that never checks
+   * that never needs this.
+   */
+  onPeerWritable(listener: (peerId: string) => void): void
 
   // --- file transfer ---
   //

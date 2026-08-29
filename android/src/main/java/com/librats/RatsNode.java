@@ -328,6 +328,22 @@ public class RatsNode implements AutoCloseable {
         check(nativeBroadcast(ptr(), channel, data), "broadcast on '" + channel + "'");
     }
 
+    /**
+     * Whether this peer's send queue still has room; false too for a peer that is
+     * not connected.
+     *
+     * <p>{@link #send} returning normally only means the message was queued, never
+     * that it arrived — so if you send in bulk, this is how you learn you are
+     * outrunning the link. False means pause: what you just sent was queued like
+     * anything else and nothing was dropped, but keep piling on and the peer is
+     * dropped with {@code RATS_CLOSE_SLOW_CONSUMER}. Wait for
+     * {@link #onPeerWritable(PeerCallback)}, or poll this. It is not a size limit
+     * — one message of any size is always queued.</p>
+     */
+    public boolean peerWritable(String peerId) {
+        return nativePeerWritable(ptr(), peerId);
+    }
+
     /** Registers an additive handler for a named channel. Call before start. */
     public void on(String channel, MessageCallback callback) {
         check(nativeOn(ptr(), channel, callback), "register handler for '" + channel + "'");
@@ -340,9 +356,21 @@ public class RatsNode implements AutoCloseable {
         check(nativeOnPeerConnected(ptr(), callback), "register peer-connected callback");
     }
 
-    /** Sets the peer-disconnected callback. Call before start. */
-    public void onPeerDisconnected(PeerCallback callback) {
+    /**
+     * Sets the peer-disconnected callback, which is told why the peer went.
+     * Call before start.
+     */
+    public void onPeerDisconnected(PeerDisconnectCallback callback) {
         check(nativeOnPeerDisconnected(ptr(), callback), "register peer-disconnected callback");
+    }
+
+    /**
+     * Sets the callback fired when a peer whose send queue had filled past its
+     * mark has drained back under it — the other half of
+     * {@link #peerWritable(String)} returning false. Call before start.
+     */
+    public void onPeerWritable(PeerCallback callback) {
+        check(nativeOnPeerWritable(ptr(), callback), "register peer-writable callback");
     }
 
     // ===================== discovery (enable before start) =====================
@@ -704,10 +732,12 @@ public class RatsNode implements AutoCloseable {
 
     private native int nativeSend(long ptr, String peerId, String channel, byte[] data);
     private native int nativeBroadcast(long ptr, String channel, byte[] data);
+    private native boolean nativePeerWritable(long ptr, String peerId);
     private native int nativeOn(long ptr, String channel, MessageCallback callback);
 
     private native int nativeOnPeerConnected(long ptr, PeerCallback callback);
-    private native int nativeOnPeerDisconnected(long ptr, PeerCallback callback);
+    private native int nativeOnPeerDisconnected(long ptr, PeerDisconnectCallback callback);
+    private native int nativeOnPeerWritable(long ptr, PeerCallback callback);
 
     private native int nativeEnableDht(long ptr, int dhtPort, String discoveryKey);
     private native int nativeEnableMdns(long ptr);

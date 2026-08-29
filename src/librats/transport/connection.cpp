@@ -51,20 +51,6 @@ uint8_t Connection::reactor_index() const noexcept { return reactor_.index(); }
 bool Connection::send(FrameHeader header, ByteView payload) {
     if (state_ != ConnState::Established) return false;  // frames only flow post-handshake
 
-    // Weighed on the backlog as it stands BEFORE this message, never after it has
-    // been added. A message is indivisible — there is no queueing half of one — so
-    // judging a caller by the mark its own message has just crossed answers "that
-    // message was bigger than a limit nobody published" with a disconnection, on a
-    // connection that is idle, healthy and draining at full speed. What the mark is
-    // for is a peer that cannot keep up, and the evidence for that is a caller
-    // piling MORE on top of a backlog that is already over it.
-    //
-    // So one message may always be queued, whatever its size — the queue may exceed
-    // the mark by exactly that message and no more — and offering another before it
-    // has drained is what makes a caller a slow consumer. Nothing is ever dropped
-    // or refused here, which is what the layers above rely on: a relayed circuit
-    // (transport/relay_link.cpp) reports bytes as written the moment it hands them
-    // over, and a byte stream cannot survive one of them going missing.
     // The one thing that is refused outright rather than queued: a message too
     // large to be framed at all. The block prefix tops out at kMaxBlockSize and the
     // peer's decoder rejects anything past it, so queueing this would spend the
@@ -80,6 +66,20 @@ bool Connection::send(FrameHeader header, ByteView payload) {
         return false;
     }
 
+    // Weighed on the backlog as it stands BEFORE this message, never after it has
+    // been added. A message is indivisible — there is no queueing half of one — so
+    // judging a caller by the mark its own message has just crossed answers "that
+    // message was bigger than a limit nobody published" with a disconnection, on a
+    // connection that is idle, healthy and draining at full speed. What the mark is
+    // for is a peer that cannot keep up, and the evidence for that is a caller
+    // piling MORE on top of a backlog that is already over it.
+    //
+    // So one message may always be queued, whatever its size — the queue may exceed
+    // the mark by exactly that message and no more — and offering another before it
+    // has drained is what makes a caller a slow consumer. Nothing is ever dropped
+    // or refused here, which is what the layers above rely on: a relayed circuit
+    // (transport/relay_link.cpp) reports bytes as written the moment it hands them
+    // over, and a byte stream cannot survive one of them going missing.
     const size_t backlog_before = backlog();
     if (backlog_before > send_high_water_) {
         LOG_WARN("connection", "Peer " << remote_id_.short_hex() << " offered more with "

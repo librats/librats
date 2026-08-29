@@ -91,9 +91,23 @@ declare module 'librats' {
     preferredTransport?: TransportValue;
     /** Delay before the other transport is raced alongside; 0 disables. Default 1200. */
     transportFallbackMs?: number;
+    /**
+     * Bytes a peer's send queue may hold before an app that keeps sending anyway
+     * has that peer dropped with reason `RATS_CLOSE_SLOW_CONSUMER`. 0 (default)
+     * uses the library's 8 MiB. A quarter of it is where `peerWritable()` starts
+     * returning false. Not a maximum message size.
+     */
+    sendQueueLimit?: number;
   }
 
   export type PeerHandler = (peerId: string) => void;
+  /**
+   * `reason` is why the peer went — "RATS_CLOSE_PEER_CLOSED",
+   * "RATS_CLOSE_SLOW_CONSUMER" and so on. Worth branching on: a peer that left is
+   * one to redial, while SLOW_CONSUMER means *you* were sending faster than the
+   * link drained, and redialing that one just repeats the overload.
+   */
+  export type PeerDisconnectHandler = (peerId: string, reason: string) => void;
   export type MessageHandler = (peerId: string, data: Buffer) => void;
   export type TopicHandler = (peerId: string, topic: string, data: Buffer) => void;
   export type JsonHandler = (peerId: string, value: any) => void;
@@ -180,17 +194,31 @@ declare module 'librats' {
 
     // ---- raw channel messaging ----
 
-    /** Send raw bytes on a named channel to one peer. */
+    /**
+     * Send raw bytes on a named channel to one peer. Returning means the message
+     * was queued, never that it arrived — if you send in bulk, follow it with
+     * `peerWritable()`.
+     */
     send(peerId: string, channel: string, data: string | Buffer): void;
     /** Broadcast raw bytes on a named channel to every connected peer. */
     broadcast(channel: string, data: string | Buffer): void;
+    /**
+     * Whether this peer's send queue still has room (false also when it is not
+     * connected). False means stop: what you just sent was queued like anything
+     * else and nothing was dropped, but keep piling on and the peer is dropped
+     * with reason `RATS_CLOSE_SLOW_CONSUMER`. Wait for `onPeerWritable`, or poll
+     * this. Not a size limit — one message of any size is always queued.
+     */
+    peerWritable(peerId: string): boolean;
     /** Register a handler for a named channel. Additive; register before `start()`. */
     on(channel: string, handler: MessageHandler): void;
 
     // ---- peer events (register before start) ----
 
     onPeerConnected(handler: PeerHandler): void;
-    onPeerDisconnected(handler: PeerHandler): void;
+    onPeerDisconnected(handler: PeerDisconnectHandler): void;
+    /** A peer whose queue had filled has drained back under its mark. */
+    onPeerWritable(handler: PeerHandler): void;
 
     // ---- discovery (enable before start) ----
 

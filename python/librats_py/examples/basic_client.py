@@ -43,7 +43,7 @@ def main() -> None:
     with RatsNode(listen_port) as node:
         # All of this happens before start().
         node.on_peer_connected(lambda peer: print(f"+ {peer}"))
-        node.on_peer_disconnected(lambda peer: print(f"- {peer}"))
+        node.on_peer_disconnected(lambda peer, why: print(f"- {peer} ({why})"))
 
         def on_chat(peer_id: str, data: bytes) -> None:
             print(f"\n[{peer_id[:16]}…] {data.decode('utf-8', 'replace')}")

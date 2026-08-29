@@ -20,7 +20,8 @@ from ctypes import (
 from typing import Optional
 
 from .callbacks import (
-    PeerCallbackType, MessageCallbackType, TopicCallbackType, JsonCallbackType,
+    PeerCallbackType, PeerDisconnectCallbackType,
+    MessageCallbackType, TopicCallbackType, JsonCallbackType,
     FileOfferCallbackType, FileProgressCallbackType, FileCompleteCallbackType,
 )
 
@@ -50,6 +51,11 @@ class RatsConfig(Structure):
         ("enable_udp", c_int),           # int (default 1)
         ("preferred_transport", c_int),  # rats_transport_t (default UDP)
         ("transport_fallback_ms", c_uint32),  # 0 = never race the other transport
+        # Bytes a peer's send queue may hold before an application that keeps
+        # sending anyway has that peer dropped with RATS_CLOSE_SLOW_CONSUMER.
+        # 0 = the library default (8 MiB). Not a maximum message size — one
+        # message of any size is always queued.
+        ("send_queue_limit", c_size_t),
     ]
 
 
@@ -207,12 +213,21 @@ class LibratsCtypes:
         lib.rats_broadcast.argtypes = [c_void_p, c_char_p, c_void_p, c_size_t]
         lib.rats_broadcast.restype = c_int
 
+        lib.rats_peer_writable.argtypes = [c_void_p, c_char_p]
+        lib.rats_peer_writable.restype = c_int
+
+        lib.rats_close_reason_str.argtypes = [c_int]
+        lib.rats_close_reason_str.restype = c_char_p
+
         # --- core callbacks ---
         lib.rats_on_peer_connected.argtypes = [c_void_p, PeerCallbackType, c_void_p]
         lib.rats_on_peer_connected.restype = c_int
 
-        lib.rats_on_peer_disconnected.argtypes = [c_void_p, PeerCallbackType, c_void_p]
+        lib.rats_on_peer_disconnected.argtypes = [c_void_p, PeerDisconnectCallbackType, c_void_p]
         lib.rats_on_peer_disconnected.restype = c_int
+
+        lib.rats_on_peer_writable.argtypes = [c_void_p, PeerCallbackType, c_void_p]
+        lib.rats_on_peer_writable.restype = c_int
 
         lib.rats_on.argtypes = [c_void_p, c_char_p, MessageCallbackType, c_void_p]
         lib.rats_on.restype = c_int

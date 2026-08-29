@@ -106,8 +106,8 @@ public class MainActivity extends AppCompatActivity {
                 updateUI();
             }));
 
-            node.onPeerDisconnected(peerId -> runOnUiThread(() -> {
-                appendMessage("- peer " + peerId);
+            node.onPeerDisconnected((peerId, reason) -> runOnUiThread(() -> {
+                appendMessage("- peer " + peerId + " (" + reason + ")");
                 updateUI();
             }));
 

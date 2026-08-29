@@ -194,7 +194,11 @@ RatsNode(listen_port=0, *, enable_listen=True, bind_address=None,
 
 ### Peer events
 
-`on_peer_connected(cb)` · `on_peer_disconnected(cb)` where `cb(peer_id: str)`
+`on_peer_connected(cb)` · `on_peer_writable(cb)` where `cb(peer_id: str)` ·
+`on_peer_disconnected(cb)` where `cb(peer_id: str, reason: str)` — `reason` is a
+name like `"RATS_CLOSE_SLOW_CONSUMER"`, which means *you* were sending faster
+than the link drained. `peer_writable(peer_id) -> bool` asks the same thing
+without sending; `False` means pause until `on_peer_writable` fires.
 
 ### Subsystems (enable before start)
 

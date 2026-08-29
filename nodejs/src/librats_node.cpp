@@ -82,6 +82,7 @@ private:
     // Single-slot callbacks (peer connect/disconnect, file offer/progress/complete).
     std::unique_ptr<CbContext> on_connected_;
     std::unique_ptr<CbContext> on_disconnected_;
+    std::unique_ptr<CbContext> on_writable_;
     std::unique_ptr<CbContext> on_file_offer_;
     std::unique_ptr<CbContext> on_file_progress_;
     std::unique_ptr<CbContext> on_file_complete_;
@@ -120,11 +121,13 @@ private:
     // ---- raw channel messaging ----
     Napi::Value Send(const Napi::CallbackInfo& info);
     Napi::Value Broadcast(const Napi::CallbackInfo& info);
+    Napi::Value PeerWritable(const Napi::CallbackInfo& info);
     void On(const Napi::CallbackInfo& info);
 
     // ---- peer events ----
     void OnPeerConnected(const Napi::CallbackInfo& info);
     void OnPeerDisconnected(const Napi::CallbackInfo& info);
+    void OnPeerWritable(const Napi::CallbackInfo& info);
 
     // ---- discovery / NAT ----
     void EnableDht(const Napi::CallbackInfo& info);
@@ -226,6 +229,13 @@ RatsNode::RatsNode(const Napi::CallbackInfo& info)
             c.transport_fallback_ms =
                 cfg.Get("transportFallbackMs").As<Napi::Number>().Uint32Value();
 
+        // Bytes a peer may have queued before an app that keeps sending anyway has
+        // it dropped as a slow consumer. A quarter of it is where peerWritable()
+        // starts saying false, so lowering it makes backpressure felt sooner.
+        if (cfg.Has("sendQueueLimit"))
+            c.send_queue_limit =
+                static_cast<size_t>(cfg.Get("sendQueueLimit").As<Napi::Number>().Int64Value());
+
         node_ = rats_create_config(&c);
     } else {
         int port = 0;
@@ -259,6 +269,7 @@ RatsNode::~RatsNode() {
 void RatsNode::Teardown() {
     if (on_connected_) on_connected_->release();
     if (on_disconnected_) on_disconnected_->release();
+    if (on_writable_) on_writable_->release();
     if (on_file_offer_) on_file_offer_->release();
     if (on_file_progress_) on_file_progress_->release();
     if (on_file_complete_) on_file_complete_->release();
@@ -435,6 +446,19 @@ Napi::Value RatsNode::Send(const Napi::CallbackInfo& info) {
     return env.Undefined();
 }
 
+// send() only says the message was queued. This is how a JS caller learns it is
+// outrunning the link — before the peer is dropped for it.
+Napi::Value RatsNode::PeerWritable(const Napi::CallbackInfo& info) {
+    RATS_REQUIRE_NODE(info.Env().Undefined());
+    Napi::Env env = info.Env();
+    if (info.Length() < 1 || !info[0].IsString()) {
+        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+    std::string peer = info[0].As<Napi::String>().Utf8Value();
+    return Napi::Boolean::New(env, rats_peer_writable(node_, peer.c_str()) != 0);
+}
+
 Napi::Value RatsNode::Broadcast(const Napi::CallbackInfo& info) {
     RATS_REQUIRE_NODE(info.Env().Undefined());
     Napi::Env env = info.Env();
@@ -520,6 +544,25 @@ void RatsNode::OnPeerDisconnected(const Napi::CallbackInfo& info) {
         });
     };
     throw_on_error(env, rats_on_peer_disconnected(node_, trampoline, on_disconnected_.get()));
+}
+
+void RatsNode::OnPeerWritable(const Napi::CallbackInfo& info) {
+    RATS_REQUIRE_NODE();
+    Napi::Env env = info.Env();
+    if (info.Length() < 1 || !info[0].IsFunction()) {
+        Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
+        return;
+    }
+    on_writable_ = std::make_unique<CbContext>();
+    on_writable_->init(env, info[0].As<Napi::Function>(), "on_peer_writable");
+    auto trampoline = [](void* user, const char* peer_id) {
+        auto* c = static_cast<CbContext*>(user);
+        std::string peer = peer_id ? peer_id : "";
+        c->tsfn.BlockingCall([peer](Napi::Env env, Napi::Function js) {
+            js.Call({Napi::String::New(env, peer)});
+        });
+    };
+    throw_on_error(env, rats_on_peer_writable(node_, trampoline, on_writable_.get()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,10 +1049,12 @@ Napi::Object RatsNode::Init(Napi::Env env, Napi::Object exports) {
         // raw channel messaging
         InstanceMethod("send", &RatsNode::Send),
         InstanceMethod("broadcast", &RatsNode::Broadcast),
+        InstanceMethod("peerWritable", &RatsNode::PeerWritable),
         InstanceMethod("on", &RatsNode::On),
         // peer events
         InstanceMethod("onPeerConnected", &RatsNode::OnPeerConnected),
         InstanceMethod("onPeerDisconnected", &RatsNode::OnPeerDisconnected),
+        InstanceMethod("onPeerWritable", &RatsNode::OnPeerWritable),
         // discovery / NAT
         InstanceMethod("enableDht", &RatsNode::EnableDht),
         InstanceMethod("enableMdns", &RatsNode::EnableMdns),

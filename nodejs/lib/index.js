@@ -194,6 +194,14 @@ class RatsNode {
   broadcast(channel, data) { this._native.broadcast(channel, data); }
 
   /**
+   * Whether this peer's send queue still has room. False means pause and wait for
+   * `onPeerWritable` — keep sending regardless and the peer is dropped with
+   * reason `RATS_CLOSE_SLOW_CONSUMER`.
+   * @param {string} peerId @returns {boolean}
+   */
+  peerWritable(peerId) { return this._native.peerWritable(peerId); }
+
+  /**
    * Register a handler for a named channel. Additive; register before `start()`.
    * @param {string} channel
    * @param {(peerId: string, data: Buffer) => void} handler
@@ -205,8 +213,15 @@ class RatsNode {
   /** @param {(peerId: string) => void} handler fired when a peer connects. */
   onPeerConnected(handler) { this._native.onPeerConnected(handler); }
 
-  /** @param {(peerId: string) => void} handler fired when a peer disconnects. */
+  /**
+   * @param {(peerId: string, reason: string) => void} handler fired when a peer
+   * disconnects. `reason` is a name like "RATS_CLOSE_SLOW_CONSUMER", which means
+   * this node was sending faster than the link drained.
+   */
   onPeerDisconnected(handler) { this._native.onPeerDisconnected(handler); }
+
+  /** @param {(peerId: string) => void} handler fired when a full queue drained. */
+  onPeerWritable(handler) { this._native.onPeerWritable(handler); }
 
   // ---- discovery (enable before start) ----
 

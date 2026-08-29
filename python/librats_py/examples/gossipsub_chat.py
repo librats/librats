@@ -22,7 +22,8 @@ class GossipSubChat:
 
         # Enable + subscribe BEFORE start().
         self.node.on_peer_connected(lambda pid: self._print(f"+ {pid[:16]}… joined"))
-        self.node.on_peer_disconnected(lambda pid: self._print(f"- {pid[:16]}… left"))
+        self.node.on_peer_disconnected(
+            lambda pid, why: self._print(f"- {pid[:16]}… left ({why})"))
         self.node.enable_pubsub()
         self.node.subscribe(topic, self.on_topic_message)
 

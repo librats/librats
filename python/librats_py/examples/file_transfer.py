@@ -23,7 +23,8 @@ class FileTransferExample:
 
         # Register callbacks + enable subsystem BEFORE start().
         self.node.on_peer_connected(lambda pid: print(f"+ Peer connected: {pid}"))
-        self.node.on_peer_disconnected(lambda pid: print(f"- Peer disconnected: {pid}"))
+        self.node.on_peer_disconnected(
+            lambda pid, why: print(f"- Peer disconnected: {pid} ({why})"))
 
         self.node.enable_file_transfer(temp_dir=download_dir)
         self.node.on_file_offer(self.on_offer)

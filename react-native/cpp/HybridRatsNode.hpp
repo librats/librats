@@ -66,10 +66,15 @@ public:
           listener) override;
 
   // — peer events —
+  bool peerWritable(const std::string& peerId) override;
   void onPeerConnected(
       const std::function<void(const std::string& /* peerId */)>& listener)
       override;
   void onPeerDisconnected(
+      const std::function<void(const std::string& /* peerId */,
+                               const std::string& /* reason */)>& listener)
+      override;
+  void onPeerWritable(
       const std::function<void(const std::string& /* peerId */)>& listener)
       override;
 

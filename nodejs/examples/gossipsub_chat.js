@@ -17,7 +17,7 @@ const topic = topicArg || 'lobby';
 const node = new RatsNode(portArg ? Number(portArg) : 8080);
 
 node.onPeerConnected((peerId) => console.log(`+ peer ${peerId}`));
-node.onPeerDisconnected((peerId) => console.log(`- peer ${peerId}`));
+node.onPeerDisconnected((peerId, reason) => console.log(`- peer ${peerId} (${reason})`));
 
 node.enablePubsub();
 node.subscribe(topic, (peerId, name, data) => {

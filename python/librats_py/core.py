@@ -27,9 +27,10 @@ from .enums import (RatsError as ErrorCode, Security, Transport, NatMapping,
                     LogLevel, VersionInfo)
 from .exceptions import RatsError, check_error
 from .callbacks import (
-    PeerCallback, MessageCallback, TopicCallback, JsonCallback,
+    PeerCallback, PeerDisconnectCallback, MessageCallback, TopicCallback, JsonCallback,
     FileOfferCallback, FileProgressCallback, FileCompleteCallback,
-    PeerCallbackType, MessageCallbackType, TopicCallbackType, JsonCallbackType,
+    PeerCallbackType, PeerDisconnectCallbackType,
+    MessageCallbackType, TopicCallbackType, JsonCallbackType,
     FileOfferCallbackType, FileProgressCallbackType, FileCompleteCallbackType,
 )
 
@@ -63,6 +64,7 @@ class RatsNode:
         enable_udp: bool = True,
         preferred_transport: Transport = Transport.UDP,
         transport_fallback_ms: int = 1200,
+        send_queue_limit: int = 0,
     ):
         """Create a node.
 
@@ -82,6 +84,12 @@ class RatsNode:
                 a peer can dial back.
             transport_fallback_ms: How long the preferred transport dials alone
                 before the other is raced alongside it; 0 disables the fallback.
+            send_queue_limit: Bytes a peer's send queue may hold before an
+                application that keeps sending anyway has that peer dropped with
+                ``RATS_CLOSE_SLOW_CONSUMER``; 0 = the library default (8 MiB). A
+                quarter of it is where :meth:`peer_writable` starts saying False,
+                so lowering it makes backpressure felt sooner. It is not a
+                maximum message size — one message of any size is always queued.
         """
         self._lib = get_librats()
 
@@ -94,6 +102,7 @@ class RatsNode:
         cfg.enable_udp = 1 if enable_udp else 0
         cfg.preferred_transport = int(preferred_transport)
         cfg.transport_fallback_ms = transport_fallback_ms
+        cfg.send_queue_limit = send_queue_limit
         # Keep bytes alive for the duration of the create call.
         self._cfg_keepalive = [
             _b(bind_address), _b(data_dir), _b(protocol),
@@ -255,11 +264,27 @@ class RatsNode:
     # Raw channel messaging
     # ------------------------------------------------------------------ #
     def send(self, peer_id: str, channel: str, data: bytes) -> None:
-        """Send raw ``data`` on a named ``channel`` to one peer."""
+        """Send raw ``data`` on a named ``channel`` to one peer.
+
+        Returning normally means the message was queued, never that it arrived.
+        If you send in bulk, check :meth:`peer_writable` afterwards — that is the
+        only way to learn you are outrunning the link before the peer is dropped
+        for it.
+        """
         check_error(
             self._lib.lib.rats_send(self._h, _b(peer_id), _b(channel),
                                     data, len(data)),
             f"Sending on channel {channel} to {peer_id}")
+
+    def peer_writable(self, peer_id: str) -> bool:
+        """Whether this peer's send queue still has room (False if not connected).
+
+        False means stop: the message you just sent was queued like any other and
+        nothing was dropped, but keep piling on and the peer is dropped with
+        ``RATS_CLOSE_SLOW_CONSUMER``. Wait for :meth:`on_peer_writable`, or poll
+        this. Not a size limit — one message of any size is always queued.
+        """
+        return bool(self._lib.lib.rats_peer_writable(self._h, _b(peer_id)))
 
     def broadcast(self, channel: str, data: bytes) -> None:
         """Broadcast raw ``data`` on a named ``channel`` to all peers."""
@@ -292,9 +317,34 @@ class RatsNode:
         """Register a ``callback(peer_id: str)`` for new peer connections."""
         self._register_peer_cb("connected", "rats_on_peer_connected", callback)
 
-    def on_peer_disconnected(self, callback: PeerCallback) -> None:
-        """Register a ``callback(peer_id: str)`` for peer disconnections."""
-        self._register_peer_cb("disconnected", "rats_on_peer_disconnected", callback)
+    def on_peer_disconnected(self, callback: PeerDisconnectCallback) -> None:
+        """Register a ``callback(peer_id: str, reason: str)`` for disconnections.
+
+        ``reason`` is a name like ``"RATS_CLOSE_PEER_CLOSED"``. Branch on it: a
+        peer that left is one to redial, while ``"RATS_CLOSE_SLOW_CONSUMER"``
+        means *you* were sending faster than the link drained, and redialing that
+        one only repeats the overload.
+        """
+        def trampoline(user, peer_id_ptr, reason):
+            try:
+                why = self._lib.lib.rats_close_reason_str(reason)
+                callback(peer_id_ptr.decode('utf-8') if peer_id_ptr else "",
+                         why.decode('utf-8') if why else "")
+            except Exception as exc:
+                _report(exc, "peer disconnected callback")
+        c_cb = PeerDisconnectCallbackType(trampoline)
+        self._c_callbacks["peer:disconnected"] = c_cb
+        check_error(
+            self._lib.lib.rats_on_peer_disconnected(self._h, c_cb, None),
+            "Registering peer disconnected handler")
+
+    def on_peer_writable(self, callback: PeerCallback) -> None:
+        """Register a ``callback(peer_id: str)`` for "this peer has room again".
+
+        The other half of :meth:`peer_writable` returning False; an application
+        that never checks that never needs this.
+        """
+        self._register_peer_cb("writable", "rats_on_peer_writable", callback)
 
     def _register_peer_cb(self, slot: str, c_func_name: str, callback: PeerCallback):
         def trampoline(user, peer_id_ptr):

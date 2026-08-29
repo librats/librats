@@ -21,6 +21,11 @@ from ctypes import CFUNCTYPE, c_void_p, c_char_p, c_size_t, c_int, c_uint64
 # rats_peer_cb(user, peer_id_hex)
 PeerCallbackType = CFUNCTYPE(None, c_void_p, c_char_p)
 
+# rats_peer_disconnect_cb(user, peer_id_hex, reason). Its own prototype and not
+# PeerCallbackType: the C side really does push a third argument, and a ctypes
+# trampoline declared with two would be called through a mismatched signature.
+PeerDisconnectCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_int)
+
 # rats_message_cb(user, peer_id_hex, data, len)
 MessageCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_void_p, c_size_t)
 
@@ -48,6 +53,8 @@ FileCompleteCallbackType = CFUNCTYPE(None, c_void_p, c_uint64, c_int, c_char_p)
 
 # (peer_id: str) -> None
 PeerCallback = Optional[Callable[[str], None]]
+# callback(peer_id, reason) — reason is a name like "RATS_CLOSE_SLOW_CONSUMER"
+PeerDisconnectCallback = Optional[Callable[[str, str], None]]
 # (peer_id: str, data: bytes) -> None
 MessageCallback = Optional[Callable[[str, bytes], None]]
 # (peer_id: str, topic: str, data: bytes) -> None

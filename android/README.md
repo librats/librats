@@ -79,7 +79,7 @@ RatsNode node = new RatsNode(new RatsNode.Config()
 
 // Everything below happens before start().
 node.onPeerConnected(peerId -> Log.d(TAG, "+ " + peerId));
-node.onPeerDisconnected(peerId -> Log.d(TAG, "- " + peerId));
+node.onPeerDisconnected((peerId, reason) -> Log.d(TAG, "- " + peerId + " (" + reason + ")"));
 node.on("chat", (peerId, data) ->
         Log.d(TAG, peerId + ": " + new String(data, StandardCharsets.UTF_8)));
 node.enableMdns();
@@ -209,7 +209,7 @@ node.removeReconnect("192.168.1.100", 8080);
 **Raw channel messaging** — `send(peerId, channel, data)`,
 `broadcast(channel, data)`, `on(channel, MessageCallback)`
 
-**Peer events** — `onPeerConnected(PeerCallback)`, `onPeerDisconnected(PeerCallback)`
+**Peer events** — `onPeerConnected(PeerCallback)`, `onPeerDisconnected(PeerDisconnectCallback)` (the callback is told *why*: `"RATS_CLOSE_SLOW_CONSUMER"` means this node was sending faster than the link drained), `onPeerWritable(PeerCallback)` plus `peerWritable(String)`
 
 **Subsystems** *(enable before start)*
 

@@ -25,7 +25,7 @@ fs.mkdirSync(downloadDir, { recursive: true });
 const node = new RatsNode(portArg ? Number(portArg) : 8080);
 
 node.onPeerConnected((peerId) => console.log(`+ peer ${peerId}`));
-node.onPeerDisconnected((peerId) => console.log(`- peer ${peerId}`));
+node.onPeerDisconnected((peerId, reason) => console.log(`- peer ${peerId} (${reason})`));
 
 // tempDir holds in-progress downloads; they move to their destination on completion.
 node.enableFileTransfer(tempDir);

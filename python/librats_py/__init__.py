@@ -52,6 +52,7 @@ from .exceptions import (
 )
 from .callbacks import (
     PeerCallback,
+    PeerDisconnectCallback,
     MessageCallback,
     TopicCallback,
     JsonCallback,
@@ -94,6 +95,7 @@ __all__ = [
     "RatsBindError",
     # callback type aliases
     "PeerCallback",
+    "PeerDisconnectCallback",
     "MessageCallback",
     "TopicCallback",
     "JsonCallback",
