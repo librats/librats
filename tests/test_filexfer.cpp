@@ -119,7 +119,7 @@ TEST(FilexferTest, SenderCancelBeforeAccept) {
     std::atomic<uint64_t> offer_id{0};
     // Receiver observes the offer but deliberately never accepts/rejects it.
     p.recv->on_offer([&](const FileTransfer::Offer& o) { offer_id = o.id; offered = true; });
-    p.send->on_complete([&](uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
+    p.send->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
     ASSERT_TRUE(bring_up(p));
 
     const uint64_t id = p.send->send_file(p.server->local_id(), src);
@@ -142,8 +142,8 @@ TEST(FilexferTest, SendsEmptyFile) {
     Pair p = make_pair();
     std::atomic<bool> rdone{false}, rok{false}, sdone{false}, sok{false};
     p.recv->on_offer([&](const FileTransfer::Offer& o) { p.recv->accept(o.from, o.id, dst); });
-    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
-    p.send->on_complete([&](uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    p.send->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
     ASSERT_TRUE(bring_up(p));
 
     ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
@@ -177,7 +177,7 @@ TEST(FilexferTest, SendsDirectoryTree) {
         EXPECT_EQ(o.files.size(), 3u);
         p.recv->accept(o.from, o.id, "ft_dstdir");
     });
-    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
     ASSERT_TRUE(bring_up(p));
 
     ASSERT_NE(p.send->send_directory(p.server->local_id(), "ft_srcdir"), 0u);
@@ -208,8 +208,8 @@ TEST(FilexferTest, ReceiverCancelMidTransfer) {
             p.recv->cancel(pr.peer, pr.id);
         }
     });
-    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
-    p.send->on_complete([&](uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    p.send->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
     ASSERT_TRUE(bring_up(p));
 
     ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
@@ -235,8 +235,8 @@ TEST(FilexferTest, PauseAndResume) {
     std::atomic<uint64_t> tid{0};
 
     p.recv->on_offer([&](const FileTransfer::Offer& o) { p.recv->accept(o.from, o.id, dst); });
-    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
-    p.send->on_complete([&](uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    p.send->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
     p.send->on_progress([&](const FileTransfer::Progress& pr) {
         if (pr.direction == FileTransfer::Direction::Sending && pr.bytes_transferred > 0 &&
             !paused.exchange(true)) {
@@ -284,8 +284,8 @@ TEST(FilexferTest, ProgressReportsRateAndEta) {
     bool    saw_eta = false, bad_percent = false, elapsed_regressed = false;
 
     p.recv->on_offer([&](const FileTransfer::Offer& o) { p.recv->accept(o.from, o.id, dst); });
-    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
-    p.send->on_complete([&](uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    p.send->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
     p.send->on_progress([&](const FileTransfer::Progress& pr) {
         if (pr.direction != FileTransfer::Direction::Sending) return;
         {
@@ -342,7 +342,7 @@ TEST(FilexferTest, ConcurrentTransfers) {
     Pair p = make_pair();
     std::atomic<int> completed{0}, ok_count{0};
     p.recv->on_offer([&](const FileTransfer::Offer& o) { p.recv->accept(o.from, o.id, "ftd_" + o.name); });
-    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) {
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) {
         if (ok) ok_count.fetch_add(1);
         completed.fetch_add(1);
     });
@@ -381,8 +381,8 @@ TEST(FilexferTest, SendsFileWithIntegrity) {
     std::atomic<bool> send_done{false}, send_ok{false};
 
     recv->on_offer([&](const FileTransfer::Offer& offer) { recv->accept(offer.from, offer.id, dst); });
-    recv->on_complete([&](uint64_t, bool ok, const std::string&) { recv_ok = ok; recv_done = true; });
-    send->on_complete([&](uint64_t, bool ok, const std::string&) { send_ok = ok; send_done = true; });
+    recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { recv_ok = ok; recv_done = true; });
+    send->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { send_ok = ok; send_done = true; });
 
     ASSERT_TRUE(server.start());
     ASSERT_TRUE(client.start());
@@ -423,7 +423,7 @@ TEST(FilexferTest, RejectedOfferFailsCleanly) {
 
     std::atomic<bool> send_done{false}, send_ok{true};
     recv->on_offer([&](const FileTransfer::Offer& offer) { recv->reject(offer.from, offer.id); });
-    send->on_complete([&](uint64_t, bool ok, const std::string&) { send_ok = ok; send_done = true; });
+    send->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { send_ok = ok; send_done = true; });
 
     ASSERT_TRUE(server.start());
     ASSERT_TRUE(client.start());
@@ -456,7 +456,7 @@ TEST(FilexferTest, HostileManifestCountIsRejected) {
         offers.fetch_add(1);
         p.recv->accept(o.from, o.id, dst);
     });
-    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
     ASSERT_TRUE(bring_up(p));
 
     std::vector<uint8_t> m;
@@ -515,7 +515,7 @@ TEST(FilexferTest, TempFilesDoNotCollideAcrossSenders) {
     recv->on_offer([&](const FileTransfer::Offer& o) {
         recv->accept(o.from, o.id, o.name == src_a ? dst_a : dst_b);
     });
-    recv->on_complete([&](uint64_t, bool ok, const std::string&) {
+    recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) {
         if (ok) ok_count.fetch_add(1);
         completed.fetch_add(1);
     });
@@ -556,7 +556,7 @@ TEST(FilexferTest, ShaMismatchRejectsAndReclaimsTemp) {
     Pair p = make_pair();
     std::atomic<bool> offered{false}, rdone{false}, rok{true};
     p.recv->on_offer([&](const FileTransfer::Offer& o) { p.recv->accept(o.from, o.id, dst); offered = true; });
-    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
     ASSERT_TRUE(bring_up(p));
 
     const uint64_t id = 4242;
@@ -628,7 +628,7 @@ TEST(FilexferTest, SendsDirectoryWithEmptyFileBetween) {
         EXPECT_EQ(o.files.size(), 3u);
         p.recv->accept(o.from, o.id, "ft_mixdst");
     });
-    p.recv->on_complete([&](uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
     ASSERT_TRUE(bring_up(p));
 
     ASSERT_NE(p.send->send_directory(p.server->local_id(), "ft_mixsrc"), 0u);
@@ -663,7 +663,7 @@ TEST(FilexferTest, CancelReclaimsTempFile) {
             p.recv->cancel(pr.peer, pr.id);
         }
     });
-    p.recv->on_complete([&](uint64_t, bool, const std::string&) { rdone = true; });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool, const std::string&) { rdone = true; });
     ASSERT_TRUE(bring_up(p));
 
     ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
@@ -679,4 +679,75 @@ TEST(FilexferTest, CancelReclaimsTempFile) {
     delete_file(src.c_str());
     delete_file(dst.c_str());
     delete_file(temp.c_str());
+}
+
+// A transfer is named by (peer, id), not by id alone. Outgoing ids come from one
+// node-wide counter, so every node's first transfer is id 1 — a peer that was
+// never given that id can still name it. Before the lookup was scoped to the
+// counterparty, any connected peer could cancel, complete or stall somebody
+// else's transfer by guessing a small integer.
+TEST(FilexferTest, ControlOpcodesFromAStrangerDoNotTouchAnotherPeersTransfer) {
+    const std::string src = "ft_xpeer_src.bin", dst = "ft_xpeer_dst.bin";
+    const auto content = make_pattern(4 * 1024 * 1024);
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+    delete_file(dst.c_str());
+
+    // Two listening receivers and one dialing sender connected to both. Only the
+    // first receiver is ever offered anything.
+    auto receiver = std::make_unique<Node>(listening_config());
+    auto stranger = std::make_unique<Node>(listening_config());
+    auto sender = std::make_unique<Node>(dialing_config());
+
+    auto rft = std::make_unique<FileTransfer>(".");
+    auto sft = std::make_unique<FileTransfer>(".");
+    FileTransfer* recv = rft.get();
+    FileTransfer* send = sft.get();
+    receiver->add_subsystem(std::move(rft));
+    sender->add_subsystem(std::move(sft));
+    // The stranger needs no FileTransfer of its own: it speaks the wire directly.
+
+    std::atomic<bool> rdone{false}, rok{false}, sdone{false}, sok{false};
+    std::atomic<uint64_t> offered{0};
+    recv->on_offer([&](const FileTransfer::Offer& o) {
+        offered = o.id;
+        recv->accept(o.from, o.id, dst);
+    });
+    recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    send->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { sok = ok; sdone = true; });
+
+    ASSERT_TRUE(receiver->start());
+    ASSERT_TRUE(stranger->start());
+    ASSERT_TRUE(sender->start());
+    sender->connect("127.0.0.1", receiver->listen_port());
+    sender->connect("127.0.0.1", stranger->listen_port());
+    ASSERT_TRUE(wait_for([&] { return sender->peer_count() == 2; }));
+
+    const uint64_t id = send->send_file(receiver->local_id(), src);
+    ASSERT_NE(id, 0u);
+    ASSERT_TRUE(wait_for([&] { return offered.load() == id; }));
+
+    // The stranger names the sender's live transfer and tries to tear it down.
+    // Every one of these must be ignored: they arrive from a peer that is not the
+    // transfer's counterparty.
+    for (uint8_t op : { uint8_t{7} /*CANCEL*/, uint8_t{8} /*PAUSE*/ }) {
+        std::vector<uint8_t> m;
+        m.push_back(op);
+        put_u64(m, id);
+        stranger->send(sender->local_id(), MessageType::FileChunk, ByteView(m));
+    }
+    {
+        std::vector<uint8_t> m;  // COMPLETE(ok=0): "your transfer failed"
+        m.push_back(6);
+        put_u64(m, id);
+        m.push_back(0);
+        stranger->send(sender->local_id(), MessageType::FileChunk, ByteView(m));
+    }
+
+    ASSERT_TRUE(wait_for([&] { return rdone.load() && sdone.load(); }));
+    EXPECT_TRUE(rok.load()) << "receiver's transfer was torn down by an unrelated peer";
+    EXPECT_TRUE(sok.load()) << "sender's transfer was torn down by an unrelated peer";
+    EXPECT_EQ(read_all(dst), content);
+
+    delete_file(src.c_str());
+    delete_file(dst.c_str());
 }

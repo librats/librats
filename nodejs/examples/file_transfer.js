@@ -45,7 +45,7 @@ node.onFileProgress((transferId, peerId, done, total, status) => {
   console.log(`[${transferId}] ${pct}% (${done}/${total}) status=${status}`);
 });
 
-node.onFileComplete((transferId, success, filePath) => {
+node.onFileComplete((transferId, peerId, success, filePath) => {
   console.log(success ? `[${transferId}] done: ${filePath}` : `[${transferId}] failed`);
 });
 

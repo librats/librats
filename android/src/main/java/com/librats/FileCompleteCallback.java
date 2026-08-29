@@ -14,5 +14,5 @@ public interface FileCompleteCallback {
      * @param success    true if the transfer completed successfully
      * @param path       final path of the transferred file/directory (may be null)
      */
-    void onFileComplete(long transferId, boolean success, String path);
+    void onFileComplete(long transferId, String peerId, boolean success, String path);
 }

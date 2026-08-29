@@ -333,8 +333,8 @@ int main(int argc, char** argv) {
                   << " (" << offer.size << " bytes) — accepting into ./downloads\n";
         sub.files->accept(offer.from, offer.id, "./downloads/" + offer.name);
     });
-    sub.files->on_complete([](uint64_t id, bool ok, const std::string& path) {
-        std::cout << "[file] transfer " << id << (ok ? " complete: " : " FAILED: ") << path << "\n";
+    sub.files->on_complete([](const librats::PeerId& from, uint64_t id, bool ok, const std::string& path) {
+        std::cout << "[file] transfer " << id << " with " << from.short_hex() << (ok ? " complete: " : " FAILED: ") << path << "\n";
     });
 
     if (!node.start()) {

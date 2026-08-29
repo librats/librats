@@ -320,7 +320,12 @@ export interface RatsNode
    * check or a disk error also arrives here.
    */
   onFileComplete(
-    listener: (transferId: number, success: boolean, path: string) => void
+    listener: (
+      transferId: number,
+      peerId: string,
+      success: boolean,
+      path: string
+    ) => void
   ): void
 
   // --- pub/sub (GossipSub) ---

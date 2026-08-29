@@ -94,8 +94,8 @@ public:
   void onFileProgress(
       const std::function<void(const FileProgress&)>& listener) override;
   void onFileComplete(
-      const std::function<void(double /* transferId */, bool /* success */,
-                               const std::string& /* path */)>& listener)
+      const std::function<void(double /* transferId */, const std::string& /* peerId */,
+                               bool /* success */, const std::string& /* path */)>& listener)
       override;
 
   // — pub/sub —

@@ -147,7 +147,7 @@ node.enableFileTransfer(getCacheDir().getAbsolutePath());   // before start()
 node.onFileOffer((peerId, transferId, name, size, isDir) ->
         node.acceptFile(peerId, transferId, downloadDir + "/" + name));
 node.onFileProgress((transferId, peerId, done, total, status) -> { });
-node.onFileComplete((transferId, success, path) -> { });
+node.onFileComplete((transferId, peerId, success, path) -> { });
 
 long id = node.sendFile(peerId, "/path/to/file.txt");   // 0 if refused outright
 long dirId = node.sendDirectory(peerId, "/path/to/dir");
@@ -240,7 +240,7 @@ All are `@FunctionalInterface`, so a lambda or method reference works anywhere.
 | `JsonCallback` | `onJsonMessage(String peerId, String json)` |
 | `FileOfferCallback` | `onFileOffer(String peerId, long transferId, String name, long size, boolean isDirectory)` |
 | `FileProgressCallback` | `onFileProgress(long transferId, String peerId, long bytesTransferred, long totalBytes, FileTransferStatus status)` |
-| `FileCompleteCallback` | `onFileComplete(long transferId, boolean success, String path)` |
+| `FileCompleteCallback` | `onFileComplete(long transferId, String peerId, boolean success, String path)` |
 
 ### Enums
 

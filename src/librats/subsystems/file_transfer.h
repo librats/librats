@@ -77,7 +77,12 @@ public:
         uint32_t    chunk_size           = 64 * 1024;        ///< payload bytes per chunk
         uint32_t    window_bytes         = 4 * 1024 * 1024;  ///< max un-acked bytes in flight
         uint32_t    progress_interval    = 256 * 1024;       ///< receiver acks every N bytes
-        uint32_t    transfer_timeout_secs = 60;              ///< abort a transfer idle this long
+        uint32_t    transfer_timeout_secs = 60;              ///< abort an *active* transfer idle this long
+        // An offered transfer is waiting on a human or an app callback, not on the
+        // wire, so it gets its own (longer) deadline. Applied to both sides: the
+        // sender drops an offer nobody answered, and the receiver reclaims an offer
+        // its app never accepted or rejected.
+        uint32_t    offer_timeout_secs    = 300;
         uint32_t    worker_threads       = 4;                ///< concurrent outgoing transfers
         uint32_t    disk_threads         = 4;                ///< receive-side disk-writer pool size
         bool        verify_integrity     = true;             ///< whole-file SHA-256 end-to-end check
@@ -134,7 +139,12 @@ public:
 
     using OfferHandler    = std::function<void(const Offer&)>;
     using ProgressHandler = std::function<void(const Progress&)>;
-    using CompleteHandler = std::function<void(uint64_t id, bool success, const std::string& path)>;
+    // The peer is part of the identity of a transfer, not decoration: incoming ids
+    // are allocated by the *sender*, so every node's first offer is id 1 and two
+    // peers routinely have a transfer of the same id in flight at once. A handler
+    // given only the id cannot tell which of them finished.
+    using CompleteHandler =
+        std::function<void(const PeerId& peer, uint64_t id, bool success, const std::string& path)>;
 
     explicit FileTransfer(std::string temp_dir = ".");
     explicit FileTransfer(Config config);
@@ -318,7 +328,15 @@ private:
     void emit_progress(const std::shared_ptr<Outgoing>& t);
     void emit_progress(const std::shared_ptr<Incoming>& t);
 
-    std::shared_ptr<Outgoing> find_outgoing(uint64_t id) const;
+    // Both lookups are peer-scoped. Outgoing ids are unique on this node, so the
+    // peer is not needed to *find* the transfer — it is needed to establish that
+    // the sender of the message is the transfer's counterparty. Without that check
+    // any connected peer can cancel, complete or stall somebody else's transfer by
+    // naming an id it was never given.
+    std::shared_ptr<Outgoing> find_outgoing(const PeerId& peer, uint64_t id) const;
+    // Unchecked lookup, for ids that came off our own send queue rather than off
+    // the wire. Never call it with an id a peer supplied.
+    std::shared_ptr<Outgoing> find_own_outgoing(uint64_t id) const;
     std::shared_ptr<Incoming> find_incoming(const PeerId& peer, uint64_t id) const;
 
     void send_to(const PeerId& peer, const Bytes& msg) {

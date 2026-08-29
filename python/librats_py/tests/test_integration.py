@@ -121,7 +121,7 @@ class TestIntegration(unittest.TestCase):
             a.accept_file(peer_id, transfer_id, os.path.join(dest_dir, name))
 
         a.on_file_offer(on_offer)
-        a.on_file_complete(lambda tid, ok, path: completed.append((ok, path)))
+        a.on_file_complete(lambda tid, peer, ok, path: completed.append((ok, path)))
 
         a.start()
         b.start()

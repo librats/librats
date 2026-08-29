@@ -353,7 +353,8 @@ void HybridRatsNode::onFileProgress(
 }
 
 void HybridRatsNode::onFileComplete(
-    const std::function<void(double, bool, const std::string&)>& listener) {
+    const std::function<void(double, const std::string&, bool, const std::string&)>&
+        listener) {
   if (started_) {
     throw std::runtime_error(
         "onFileComplete() must be called before start(): librats registers handlers without "
@@ -361,8 +362,9 @@ void HybridRatsNode::onFileComplete(
         "running node is a data race");
   }
   files().on_complete(
-      [listener](uint64_t id, bool success, const std::string& path) {
-        listener(id_to_double(id), success, path);
+      [listener](const librats::PeerId& peer, uint64_t id, bool success,
+                 const std::string& path) {
+        listener(id_to_double(id), peer.to_hex(), success, path);
       });
 }
 

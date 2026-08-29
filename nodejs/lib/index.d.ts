@@ -127,6 +127,7 @@ declare module 'librats' {
   ) => void;
   export type FileCompleteHandler = (
     transferId: number,
+    peerId: string,
     success: boolean,
     path: string
   ) => void;

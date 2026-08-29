@@ -855,7 +855,7 @@ void RatsNode::OnFileProgress(const Napi::CallbackInfo& info) {
     throw_on_error(env, rats_on_file_progress(node_, trampoline, on_file_progress_.get()));
 }
 
-// rats_file_complete_cb(user, transfer_id, success, path)
+// rats_file_complete_cb(user, transfer_id, peer_id_hex, success, path)
 void RatsNode::OnFileComplete(const Napi::CallbackInfo& info) {
     RATS_REQUIRE_NODE();
     Napi::Env env = info.Env();
@@ -865,12 +865,15 @@ void RatsNode::OnFileComplete(const Napi::CallbackInfo& info) {
     }
     on_file_complete_ = std::make_unique<CbContext>();
     on_file_complete_->init(env, info[0].As<Napi::Function>(), "on_file_complete");
-    auto trampoline = [](void* user, uint64_t transfer_id, int success, const char* path) {
+    auto trampoline = [](void* user, uint64_t transfer_id, const char* peer_id_hex, int success,
+                         const char* path) {
         auto* c = static_cast<CbContext*>(user);
         std::string p = path ? path : "";
+        std::string peer = peer_id_hex ? peer_id_hex : "";
         bool ok = success != 0;
-        c->tsfn.BlockingCall([transfer_id, ok, p](Napi::Env env, Napi::Function js) {
+        c->tsfn.BlockingCall([transfer_id, peer, ok, p](Napi::Env env, Napi::Function js) {
             js.Call({Napi::Number::New(env, static_cast<double>(transfer_id)),
+                     Napi::String::New(env, peer),
                      Napi::Boolean::New(env, ok),
                      Napi::String::New(env, p)});
         });

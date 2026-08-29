@@ -282,16 +282,19 @@ static void file_progress_bridge(void* user, uint64_t transfer_id, const char* p
     env->DeleteLocalRef(cls);
 }
 
-static void file_complete_bridge(void* user, uint64_t transfer_id, int success, const char* path) {
+static void file_complete_bridge(void* user, uint64_t transfer_id, const char* peer_id_hex,
+                                 int success, const char* path) {
     JNIEnv* env = getEnv();
     if (!env) return;
     jobject obj = static_cast<jobject>(user);
     jclass cls; jmethodID m;
-    if (!resolveMethod(env, obj, "onFileComplete", "(JZLjava/lang/String;)V", &cls, &m)) return;
+    if (!resolveMethod(env, obj, "onFileComplete", "(JLjava/lang/String;ZLjava/lang/String;)V", &cls, &m)) return;
     jstring jpath = toJString(env, path);
-    env->CallVoidMethod(obj, m, static_cast<jlong>(transfer_id),
+    jstring jpeer = toJString(env, peer_id_hex);
+    env->CallVoidMethod(obj, m, static_cast<jlong>(transfer_id), jpeer,
                         success ? JNI_TRUE : JNI_FALSE, jpath);
     clearPendingException(env, "file complete");
+    env->DeleteLocalRef(jpeer);
     env->DeleteLocalRef(jpath);
     env->DeleteLocalRef(cls);
 }

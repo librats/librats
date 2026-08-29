@@ -574,8 +574,9 @@ rats_error_t rats_on_file_complete(rats_t node, rats_file_complete_cb cb, void* 
     if (!cb) return RATS_ERR_INVALID_ARG;
     auto* h = as_handle(node);
     if (!h->files) return RATS_ERR_NOT_ENABLED;
-    h->files->on_complete([cb, user](uint64_t id, bool success, const std::string& path) {
-        cb(user, id, success ? 1 : 0, path.c_str());
+    h->files->on_complete([cb, user](const PeerId& peer, uint64_t id, bool success, const std::string& path) {
+        const std::string hex = peer.to_hex();
+        cb(user, id, hex.c_str(), success ? 1 : 0, path.c_str());
     });
     return RATS_OK;
 }

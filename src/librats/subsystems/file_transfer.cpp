@@ -143,10 +143,21 @@ FileTransfer::Stats FileTransfer::stats() const {
 
 // ── lookups ───────────────────────────────────────────────────────────────────
 
-std::shared_ptr<FileTransfer::Outgoing> FileTransfer::find_outgoing(uint64_t id) const {
+std::shared_ptr<FileTransfer::Outgoing> FileTransfer::find_own_outgoing(uint64_t id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = outgoing_.find(id);
     return it == outgoing_.end() ? nullptr : it->second;
+}
+
+std::shared_ptr<FileTransfer::Outgoing> FileTransfer::find_outgoing(const PeerId& peer, uint64_t id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = outgoing_.find(id);
+    if (it == outgoing_.end()) return nullptr;
+    // The id alone found it; the peer is what proves the sender is entitled to it.
+    // Outgoing ids come from one node-wide counter, so a peer that never received
+    // this id can still name it — and every control opcode below would otherwise
+    // act on a stranger's transfer.
+    return it->second->peer == peer ? it->second : nullptr;
 }
 
 std::shared_ptr<FileTransfer::Incoming> FileTransfer::find_incoming(const PeerId& peer, uint64_t id) const {
@@ -241,7 +252,7 @@ void FileTransfer::worker_loop() {
             id = send_queue_.front();
             send_queue_.pop();
         }
-        auto t = find_outgoing(id);
+        auto t = find_own_outgoing(id);  // id came from our queue, not from a peer
         if (!t) continue;
         {
             std::lock_guard<std::mutex> lk(t->mtx);
@@ -380,7 +391,7 @@ void FileTransfer::finish_outgoing(const std::shared_ptr<Outgoing>& t, bool succ
     if (cancelled)      LOG_INFO("filexfer", "Send [" << t->id << "] cancelled");
     else if (success)   LOG_INFO("filexfer", "Send [" << t->id << "] completed (" << t->root << ")");
     else                LOG_WARN("filexfer", "Send [" << t->id << "] failed");
-    if (complete_handler_) complete_handler_(t->id, success, t->root);
+    if (complete_handler_) complete_handler_(t->peer, t->id, success, t->root);
 }
 
 // ── Receiver ──────────────────────────────────────────────────────────────────
@@ -428,7 +439,7 @@ void FileTransfer::reject(const PeerId& from, uint64_t id) {
         if (pit != incoming_.end()) pit->second.erase(id);
     }
     Bytes m; m.push_back(OP_RESPONSE); put_u64(m, id); m.push_back(0); send_to(from, m);
-    if (t && complete_handler_) complete_handler_(id, false, "");
+    if (t && complete_handler_) complete_handler_(from, id, false, "");
 }
 
 // ── Receive-side disk writer (off the reactor thread) ─────────────────────────
@@ -627,7 +638,7 @@ void FileTransfer::finish_incoming(const std::shared_ptr<Incoming>& t, bool succ
     else if (success)     LOG_INFO("filexfer", "Receive [" << t->id << "] completed -> " << dest);
     else if (error.empty()) LOG_WARN("filexfer", "Receive [" << t->id << "] failed");
     else                  LOG_WARN("filexfer", "Receive [" << t->id << "] failed: " << error);
-    if (complete_handler_) complete_handler_(t->id, success, dest);
+    if (complete_handler_) complete_handler_(t->peer, t->id, success, dest);
 }
 
 // ── Message dispatch (reactor thread) ────────────────────────────────────────
@@ -675,7 +686,7 @@ void FileTransfer::on_message(const Peer& peer, ByteView payload) {
             const uint64_t id = r.u64();
             const uint8_t accepted = r.u8();
             if (!r.ok) return;
-            auto t = find_outgoing(id);
+            auto t = find_outgoing(from, id);
             if (!t) return;
             if (!accepted) { finish_outgoing(t, false); return; }
             { std::lock_guard<std::mutex> lk(t->mtx); if (t->status == Status::Pending) t->status = Status::Active; t->last_activity = std::chrono::steady_clock::now(); }
@@ -703,7 +714,7 @@ void FileTransfer::on_message(const Peer& peer, ByteView payload) {
             const uint64_t id = r.u64();
             const uint64_t received = r.u64();
             if (!r.ok) return;
-            auto t = find_outgoing(id);
+            auto t = find_outgoing(from, id);
             if (!t) return;
             { std::lock_guard<std::mutex> lk(t->mtx); t->acked = received; t->last_activity = std::chrono::steady_clock::now(); }
             t->cv.notify_all();
@@ -713,13 +724,13 @@ void FileTransfer::on_message(const Peer& peer, ByteView payload) {
             const uint64_t id = r.u64();
             const uint8_t ok = r.u8();
             if (!r.ok) return;
-            if (auto t = find_outgoing(id)) finish_outgoing(t, ok != 0);
+            if (auto t = find_outgoing(from, id)) finish_outgoing(t, ok != 0);
             return;
         }
         case OP_CANCEL: {
             const uint64_t id = r.u64();
             if (!r.ok) return;
-            if (auto t = find_outgoing(id)) {
+            if (auto t = find_outgoing(from, id)) {
                 { std::lock_guard<std::mutex> lk(t->mtx); t->status = Status::Cancelled; t->cv.notify_all(); }
                 finish_outgoing(t, false);
             }
@@ -732,14 +743,14 @@ void FileTransfer::on_message(const Peer& peer, ByteView payload) {
         case OP_PAUSE: {
             const uint64_t id = r.u64();
             if (!r.ok) return;
-            if (auto t = find_outgoing(id)) { std::lock_guard<std::mutex> lk(t->mtx); if (t->status == Status::Active) t->status = Status::Paused; t->cv.notify_all(); }
+            if (auto t = find_outgoing(from, id)) { std::lock_guard<std::mutex> lk(t->mtx); if (t->status == Status::Active) t->status = Status::Paused; t->cv.notify_all(); }
             if (auto t = find_incoming(from, id)) { std::lock_guard<std::mutex> lk(t->mtx); if (t->status == Status::Active) t->status = Status::Paused; }
             return;
         }
         case OP_RESUME: {
             const uint64_t id = r.u64();
             if (!r.ok) return;
-            if (auto t = find_outgoing(id)) {
+            if (auto t = find_outgoing(from, id)) {
                 bool requeue = false;
                 { std::lock_guard<std::mutex> lk(t->mtx); if (t->status == Status::Paused) { t->status = Status::Active; t->last_activity = std::chrono::steady_clock::now(); requeue = true; } t->cv.notify_all(); }
                 if (requeue) queue_send(id);
@@ -860,7 +871,7 @@ void FileTransfer::handle_file_end(const PeerId& from, uint64_t id, uint32_t fid
 
 bool FileTransfer::cancel(const PeerId& peer, uint64_t id) {
     bool acted = false;
-    if (auto t = find_outgoing(id)) {
+    if (auto t = find_outgoing(peer, id)) {
         { std::lock_guard<std::mutex> lk(t->mtx); if (!t->finished) { t->status = Status::Cancelled; t->cv.notify_all(); acted = true; } }
         if (acted) { send_simple(t->peer, OP_CANCEL, id); finish_outgoing(t, false); }
     }
@@ -873,7 +884,7 @@ bool FileTransfer::cancel(const PeerId& peer, uint64_t id) {
 }
 
 bool FileTransfer::pause(const PeerId& peer, uint64_t id) {
-    if (auto t = find_outgoing(id)) {
+    if (auto t = find_outgoing(peer, id)) {
         bool ok = false;
         { std::lock_guard<std::mutex> lk(t->mtx); if (t->status == Status::Active) { t->status = Status::Paused; ok = true; t->cv.notify_all(); } }
         if (ok) { send_simple(t->peer, OP_PAUSE, id); return true; }
@@ -887,7 +898,7 @@ bool FileTransfer::pause(const PeerId& peer, uint64_t id) {
 }
 
 bool FileTransfer::resume(const PeerId& peer, uint64_t id) {
-    if (auto t = find_outgoing(id)) {
+    if (auto t = find_outgoing(peer, id)) {
         bool ok = false;
         { std::lock_guard<std::mutex> lk(t->mtx); if (t->status == Status::Paused) { t->status = Status::Active; t->last_activity = std::chrono::steady_clock::now(); ok = true; t->cv.notify_all(); } }
         if (ok) { send_simple(t->peer, OP_RESUME, id); queue_send(id); return true; }
@@ -940,7 +951,16 @@ void FileTransfer::maintenance_loop() {
         if (!running_.load()) return;
 
         const auto now = std::chrono::steady_clock::now();
-        const uint32_t timeout = config_.transfer_timeout_secs;
+
+        // Two deadlines, because Pending and Active are waiting on different
+        // things. An Active transfer is waiting on the wire, so silence means the
+        // link is gone. A Pending one is waiting on the far side's application to
+        // answer the offer, which legitimately takes longer than a network
+        // round-trip — the app may be prompting a user or sitting behind a busy
+        // event loop. Sharing one deadline meant an offer nobody had answered yet
+        // was killed as if the peer had vanished.
+        const uint32_t idle_timeout  = config_.transfer_timeout_secs;
+        const uint32_t offer_timeout = config_.offer_timeout_secs;
 
         std::vector<std::shared_ptr<Outgoing>> out;
         std::vector<std::shared_ptr<Incoming>> in;
@@ -950,21 +970,35 @@ void FileTransfer::maintenance_loop() {
             for (auto& [peer, m] : incoming_) for (auto& [id, t] : m) in.push_back(t);
         }
 
+        auto expired = [&](Status status, std::chrono::steady_clock::time_point since) {
+            const uint32_t limit = (status == Status::Pending) ? offer_timeout : idle_timeout;
+            return limit > 0
+                && std::chrono::duration_cast<std::chrono::seconds>(now - since).count() > limit;
+        };
+
         for (auto& t : out) {
             bool stale = false;
             { std::lock_guard<std::mutex> lk(t->mtx);
-              if (!t->finished && t->status != Status::Paused &&
-                  std::chrono::duration_cast<std::chrono::seconds>(now - t->last_activity).count() > timeout)
+              if (!t->finished && t->status != Status::Paused && expired(t->status, t->last_activity))
                   stale = true; }
             if (stale) { LOG_WARN("filexfer", "outgoing transfer " << t->id << " timed out"); send_complete(t->peer, t->id, false); finish_outgoing(t, false); }
         }
         for (auto& t : in) {
             bool stale = false;
             { std::lock_guard<std::mutex> lk(t->mtx);
-              if (!t->finished && t->status != Status::Paused && t->status != Status::Pending &&
-                  std::chrono::duration_cast<std::chrono::seconds>(now - t->last_activity).count() > timeout)
+              if (!t->finished && t->status != Status::Paused && expired(t->status, t->last_activity))
                   stale = true; }
-            if (stale) { LOG_WARN("filexfer", "incoming transfer " << t->id << " timed out"); send_complete(t->peer, t->id, false); finish_incoming(t, false, "timed out"); }
+            // A Pending incoming transfer is an offer our own app never answered.
+            // It used to be exempt from every deadline and so leaked for the life
+            // of the process; reclaiming it is a reject, not a network failure.
+            bool pending = false;
+            { std::lock_guard<std::mutex> lk(t->mtx); pending = (t->status == Status::Pending); }
+            if (stale && pending) {
+                LOG_WARN("filexfer", "incoming offer " << t->id << " was never answered; rejecting");
+                reject(t->peer, t->id);
+            } else if (stale) {
+                LOG_WARN("filexfer", "incoming transfer " << t->id << " timed out"); send_complete(t->peer, t->id, false); finish_incoming(t, false, "timed out");
+            }
         }
     }
 }

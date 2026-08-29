@@ -345,7 +345,8 @@ typedef void (*rats_file_offer_cb)(void* user, const char* peer_id_hex, uint64_t
                                    const char* name, uint64_t size, int is_directory);
 typedef void (*rats_file_progress_cb)(void* user, uint64_t transfer_id, const char* peer_id_hex,
                                       uint64_t bytes_transferred, uint64_t total_bytes, int status);
-typedef void (*rats_file_complete_cb)(void* user, uint64_t transfer_id, int success, const char* path);
+typedef void (*rats_file_complete_cb)(void* user, uint64_t transfer_id, const char* peer_id_hex,
+                                      int success, const char* path);
 
 /** Enable the file-transfer subsystem. `temp_dir` holds in-progress downloads
  *  (NULL → current directory). Call before start(). */

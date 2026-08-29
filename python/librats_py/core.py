@@ -607,11 +607,16 @@ class RatsNode:
             "Registering file progress handler")
 
     def on_file_complete(self, callback: FileCompleteCallback) -> None:
-        """Register a completion handler ``callback(transfer_id, success, path)``."""
-        def trampoline(user, transfer_id, success, path_ptr):
+        """Register a handler ``callback(transfer_id, peer_id, success, path)``.
+
+        The peer is part of a transfer's identity: incoming ids are allocated by
+        the sender, so two peers can have a transfer of the same id in flight.
+        """
+        def trampoline(user, transfer_id, peer_ptr, success, path_ptr):
             try:
                 path = path_ptr.decode('utf-8') if path_ptr else ""
-                callback(int(transfer_id), bool(success), path)
+                peer_id = peer_ptr.decode('utf-8') if peer_ptr else ""
+                callback(int(transfer_id), peer_id, bool(success), path)
             except Exception as exc:
                 _report(exc, "file complete callback")
         c_cb = FileCompleteCallbackType(trampoline)

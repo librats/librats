@@ -45,9 +45,9 @@ class FileTransferExample:
         print(f"  transfer {transfer_id}: {pct}% ({done}/{total}) "
               f"[{FileTransferStatus(status).name}]")
 
-    def on_complete(self, transfer_id, success, path):
+    def on_complete(self, transfer_id, peer_id, success, path):
         state = "completed" if success else "failed"
-        print(f"\nTransfer {transfer_id} {state}: {path}")
+        print(f"\nTransfer {transfer_id} with {peer_id[:8]} {state}: {path}")
 
     def start(self):
         self.node.start()

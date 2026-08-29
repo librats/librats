@@ -45,8 +45,8 @@ FileProgressCallbackType = CFUNCTYPE(
     None, c_void_p, c_uint64, c_char_p, c_uint64, c_uint64, c_int
 )
 
-# rats_file_complete_cb(user, transfer_id, success, path)
-FileCompleteCallbackType = CFUNCTYPE(None, c_void_p, c_uint64, c_int, c_char_p)
+# rats_file_complete_cb(user, transfer_id, peer_id_hex, success, path)
+FileCompleteCallbackType = CFUNCTYPE(None, c_void_p, c_uint64, c_char_p, c_int, c_char_p)
 
 
 # --- Pythonic callback signatures (post-decoding) ---
@@ -65,5 +65,5 @@ JsonCallback = Optional[Callable[[str, Any], None]]
 FileOfferCallback = Optional[Callable[[str, int, str, int, bool], None]]
 # (transfer_id: int, peer_id: str, bytes_transferred: int, total_bytes: int, status: int) -> None
 FileProgressCallback = Optional[Callable[[int, str, int, int, int], None]]
-# (transfer_id: int, success: bool, path: str) -> None
-FileCompleteCallback = Optional[Callable[[int, bool, str], None]]
+# (transfer_id: int, peer_id: str, success: bool, path: str) -> None
+FileCompleteCallback = Optional[Callable[[int, str, bool, str], None]]

@@ -59,8 +59,8 @@ int main(int argc, char** argv) {
     files->on_progress([](const FileTransfer::Progress& p) {
         std::cout << "\r[progress] " << static_cast<int>(p.percent()) << "%   " << std::flush;
     });
-    files->on_complete([&](uint64_t id, bool ok, const std::string& path) {
-        std::cout << "\n[done] transfer " << id << (ok ? " OK: " : " FAILED: ") << path << "\n";
+    files->on_complete([&](const librats::PeerId& from, uint64_t id, bool ok, const std::string& path) {
+        std::cout << "\n[done] transfer " << id << " with " << from.short_hex() << (ok ? " OK: " : " FAILED: ") << path << "\n";
         done = true;  // let the sender exit; a long-running receiver would omit this
     });
 
