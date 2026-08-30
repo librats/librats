@@ -46,6 +46,10 @@ struct RatsHandle {
     Relay*               relay     = nullptr;
 #ifdef RATS_SEARCH_FEATURES
     Bittorrent*          bittorrent = nullptr;
+    /// MSE/PE policy for the BitTorrent session, applied when it is enabled.
+    /// Defaults match the C++ side: obfuscate outgoing dials first, accept both.
+    bittorrent::EncPolicy bt_out_enc = bittorrent::EncPolicy::Enabled;
+    bittorrent::EncPolicy bt_in_enc  = bittorrent::EncPolicy::Enabled;
 #endif
     std::string data_dir;  ///< copied from NodeConfig so subsystems can co-locate state
     bool dht_enabled     = false;
@@ -687,13 +691,45 @@ rats_error_t rats_enable_bittorrent(rats_t node, uint16_t listen_port, const cha
     if (h->started) return RATS_ERR_ALREADY_STARTED;
     if (!h->bittorrent) {
         Bittorrent::Config cfg;
-        cfg.client.listen_port   = listen_port;
-        cfg.client.download_path = download_path ? download_path : ".";
+        cfg.client.listen_port    = listen_port;
+        cfg.client.download_path  = download_path ? download_path : ".";
+        cfg.client.out_enc_policy = h->bt_out_enc;
+        cfg.client.in_enc_policy  = h->bt_in_enc;
         h->bittorrent = h->node->add_subsystem(std::make_unique<Bittorrent>(cfg));
     }
     return RATS_OK;
 #else
     (void)node; (void)listen_port; (void)download_path;
+    return RATS_ERR_NOT_ENABLED;
+#endif
+}
+
+rats_error_t rats_bt_set_encryption(rats_t node, rats_bt_enc_policy_t out_policy,
+                                    rats_bt_enc_policy_t in_policy) {
+#ifdef RATS_SEARCH_FEATURES
+    auto to_policy = [](rats_bt_enc_policy_t p, bool& ok) {
+        switch (p) {
+            case RATS_BT_ENC_FORCED:   return bittorrent::EncPolicy::Forced;
+            case RATS_BT_ENC_ENABLED:  return bittorrent::EncPolicy::Enabled;
+            case RATS_BT_ENC_DISABLED: return bittorrent::EncPolicy::Disabled;
+        }
+        ok = false;
+        return bittorrent::EncPolicy::Enabled;
+    };
+    bool ok = true;
+    auto* h = as_handle(node);
+    if (h->started)    return RATS_ERR_ALREADY_STARTED;
+    // The policy is baked into the session's config when it is created, so asking
+    // for it afterwards would silently do nothing — say so instead.
+    if (h->bittorrent) return RATS_ERR_ALREADY_STARTED;
+    const auto out = to_policy(out_policy, ok);
+    const auto in  = to_policy(in_policy, ok);
+    if (!ok) return RATS_ERR_INVALID_ARG;
+    h->bt_out_enc = out;
+    h->bt_in_enc  = in;
+    return RATS_OK;
+#else
+    (void)node; (void)out_policy; (void)in_policy;
     return RATS_ERR_NOT_ENABLED;
 #endif
 }

@@ -401,6 +401,22 @@ RATS_API rats_error_t rats_remove_reconnect(rats_t node, const char* host, uint1
 /** Enable BitTorrent. listen_port 0 picks an ephemeral port; download_path is the
  *  default save directory (NULL = "."). Enable DHT first to share the node's DHT. */
 RATS_API rats_error_t rats_enable_bittorrent(rats_t node, uint16_t listen_port, const char* download_path);
+
+/** MSE/PE connection obfuscation policy (see librats/bittorrent/mse.h). */
+typedef enum {
+    RATS_BT_ENC_FORCED   = 0,  /**< obfuscated connections only, both directions */
+    RATS_BT_ENC_ENABLED  = 1,  /**< default: obfuscate first, fall back to plaintext */
+    RATS_BT_ENC_DISABLED = 2,  /**< plaintext only */
+} rats_bt_enc_policy_t;
+
+/**
+ * Set the BitTorrent encryption policy. Optional — the default (ENABLED for both)
+ * already dials obfuscated first, which is what reaches the large part of the swarm
+ * that refuses plaintext. Must be called BEFORE rats_enable_bittorrent, since the
+ * policy is fixed when the session is created.
+ */
+RATS_API rats_error_t rats_bt_set_encryption(rats_t node, rats_bt_enc_policy_t out_policy,
+                                             rats_bt_enc_policy_t in_policy);
 /** Start downloading a magnet link (metadata is fetched from peers). */
 RATS_API rats_error_t rats_bt_add_magnet(rats_t node, const char* magnet_uri, const char* save_path);
 /** Start a torrent from a .torrent file on disk. */

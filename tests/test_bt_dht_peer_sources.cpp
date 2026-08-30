@@ -27,7 +27,7 @@ using PeerSink = std::function<void(const std::string& ip, std::uint16_t port)>;
 
 class FakeHost final : public TorrentHost {
 public:
-    void connect_peer(Torrent&, const std::string& ip, std::uint16_t port) override {
+    void connect_peer(Torrent&, const std::string& ip, std::uint16_t port, bool) override {
         dialed.emplace_back(ip, port);
     }
     const PeerId& peer_id() const override { return id_; }

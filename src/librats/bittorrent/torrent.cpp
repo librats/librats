@@ -201,7 +201,7 @@ void Torrent::try_connect() {
     if (!running_ || paused_ || peers_.size() >= kMaxPeers) return;
     auto candidates = peer_list_.connect_candidates(kMaxPeers - peers_.size(),
                                                     PeerList::Clock::now());
-    for (const auto& c : candidates) host_.connect_peer(*this, c.ip, c.port);
+    for (const auto& c : candidates) host_.connect_peer(*this, c.ip, c.port, c.prefer_encrypted);
 }
 
 void Torrent::on_connect_failed(const std::string& ip, std::uint16_t port) {
@@ -278,7 +278,7 @@ void Torrent::on_handshake(PeerConnection& pc, const InfoHash&, const PeerId&) {
     peers_.push_back(&pc);
     outstanding_[&pc] = 0;
     recent_down_[&pc] = 0;
-    peer_list_.set_connected(pc.remote_ip(), pc.remote_port());
+    peer_list_.set_connected(pc.remote_ip(), pc.remote_port(), pc.encrypted());
     // Milestone: the first peer on a torrent is worth an INFO line; the rest are
     // routine (each peer's handshake is already logged at DEBUG in bt.peer).
     if (peers_.size() == 1)

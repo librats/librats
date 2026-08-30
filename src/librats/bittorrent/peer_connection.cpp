@@ -22,6 +22,10 @@ constexpr std::uint32_t kMaxMessageLen = 2 * 1024 * 1024;
 
 constexpr std::size_t kRecvChunk = 64 * 1024;
 
+/// The fixed prefix of a plaintext handshake: the length byte plus the protocol
+/// string. Enough on its own to tell a plaintext peer from an obfuscated one.
+constexpr std::size_t kHandshakeHeaderSize = 1 + kProtocolStringLen;
+
 /// Ceiling on how far rx_ may be grown on the strength of a *declared* message length
 /// alone. Sizing the buffer for the whole message up front (as libtorrent does, growing
 /// straight to packet_size) turns a large message into one allocation instead of a
@@ -55,7 +59,8 @@ constexpr auto kTickInterval     = std::chrono::seconds(10);
 PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
                                const InfoHash& info_hash, const PeerId& our_peer_id,
                                std::uint32_t num_pieces, Observer* observer,
-                               std::string remote_ip, std::uint16_t remote_port)
+                               std::string remote_ip, std::uint16_t remote_port,
+                               bool encrypt)
     : reactor_(reactor)
     , sock_(sock)
     , outgoing_(outgoing)
@@ -66,10 +71,12 @@ PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
     , bound_(true)
     , remote_ip_(std::move(remote_ip))
     , remote_port_(remote_port)
+    , want_mse_(encrypt)
     , peer_have_(num_pieces, false) {}
 
 PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, const PeerId& our_peer_id,
-                               Resolver resolver, std::string remote_ip, std::uint16_t remote_port)
+                               Resolver resolver, std::string remote_ip, std::uint16_t remote_port,
+                               EncPolicy enc_policy, mse::Handshake::SkeyResolver skey)
     : reactor_(reactor)
     , sock_(sock)
     , outgoing_(false)
@@ -80,7 +87,13 @@ PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, const PeerId& ou
     , resolver_(std::move(resolver))
     , bound_(false)
     , remote_ip_(std::move(remote_ip))
-    , remote_port_(remote_port) {}
+    , remote_port_(remote_port)
+    , enc_policy_(enc_policy)
+    , skey_(std::move(skey))
+      // An inbound peer never says which of the two protocols it is opening, so
+      // unless policy has already settled the question we have to look at the
+      // first bytes before we can interpret any of them.
+    , detecting_(enc_policy != EncPolicy::Disabled && bool(skey_)) {}
 
 PeerConnection::~PeerConnection() {
     // Cancel the tick before we die so its captured `this` can never fire on freed
@@ -106,16 +119,26 @@ void PeerConnection::start() {
     // An outgoing peer sends its handshake immediately; an incoming one waits to
     // learn the info-hash, then replies (see parse_handshake()).
     if (outgoing_) {
-        LOG_DEBUG("bt.peer", remote_ip_ << ':' << remote_port_ << " → handshake sent ("
-                             << short_hash(info_hash_) << ')');
-        send_handshake();
+        if (want_mse_) {
+            // Obfuscated dial: the BitTorrent handshake is not written directly,
+            // it rides inside step 3 of the MSE handshake as the initial payload.
+            handshake_sent_ = true;
+            mse_ = std::make_unique<mse::Handshake>(info_hash_, build_handshake(), mse::kBoth);
+            LOG_DEBUG("bt.peer", remote_ip_ << ':' << remote_port_ << " → MSE handshake sent ("
+                                 << short_hash(info_hash_) << ')');
+            pump_mse(mse::Handshake::Status::NeedMore);
+        } else {
+            LOG_DEBUG("bt.peer", remote_ip_ << ':' << remote_port_ << " → handshake sent ("
+                                 << short_hash(info_hash_) << ')');
+            send_handshake();
+        }
     }
 }
 
-void PeerConnection::send_handshake() {
-    std::uint8_t hs[kHandshakeSize];
+Bytes PeerConnection::build_handshake() {
+    Bytes hs(kHandshakeSize);
     hs[0] = std::uint8_t(kProtocolStringLen);
-    std::memcpy(hs + 1, kProtocolString, kProtocolStringLen);
+    std::memcpy(hs.data() + 1, kProtocolString, kProtocolStringLen);
     ReservedBytes reserved{};
     reserved::enable_dht(reserved);
     // NOTE: we deliberately do NOT advertise the Fast Extension (BEP 6). We do not
@@ -126,11 +149,15 @@ void PeerConnection::send_handshake() {
     // nothing, so we'd never download from them. Re-enable only once BEP 6 is
     // actually implemented in dispatch().
     reserved::enable_extensions(reserved);
-    std::memcpy(hs + 20, reserved.data(), 8);
-    std::memcpy(hs + 28, info_hash_.data(), 20);
-    std::memcpy(hs + 48, our_peer_id_.data(), 20);
+    std::memcpy(hs.data() + 20, reserved.data(), 8);
+    std::memcpy(hs.data() + 28, info_hash_.data(), 20);
+    std::memcpy(hs.data() + 48, our_peer_id_.data(), 20);
+    return hs;
+}
+
+void PeerConnection::send_handshake() {
     handshake_sent_ = true;
-    queue(ByteView(hs, kHandshakeSize));
+    queue(build_handshake());
     flush();
 }
 
@@ -185,9 +212,20 @@ void PeerConnection::do_read() {
         }
 
         last_recv_ = std::chrono::steady_clock::now();
-        rx_.commit(std::size_t(n));
 
-        parse();
+        if (mse_) {
+            // The obfuscated handshake owns the stream while it runs: these bytes
+            // are its business, not rx_'s, and they are landed in rx_'s spare tail
+            // only because that is where the recv() had to go. Nothing is committed.
+            pump_mse(mse_->consume(into.data(), std::size_t(n)));
+        } else {
+            // Past the handshake the payload cipher is a plain XOR over the stream,
+            // so decrypting each arrival in place — before anything else looks at
+            // it — is all it takes to make the rest of the class cipher-agnostic.
+            if (rc4_active_) rc4_recv_.process(into.data(), std::size_t(n));
+            rx_.commit(std::size_t(n));
+            parse();
+        }
         if (closed_) return;
 
         if (std::size_t(n) < into.size()) return;  // kernel buffer drained
@@ -211,8 +249,84 @@ std::size_t PeerConnection::read_size() const {
     return kRecvChunk;
 }
 
+// ---- MSE / PE ----
+
+bool PeerConnection::detect_inbound_encryption() {
+    // A plaintext peer opens with the 20-byte protocol header; an MSE peer opens
+    // with 96 bytes of DH public key, which is a uniformly random number. Twenty
+    // bytes is therefore both necessary and more than sufficient to tell them
+    // apart — the odds of a key beginning with this exact literal are 2^-160.
+    if (rx_.size() < kHandshakeHeaderSize) { rx_need_ = kHandshakeHeaderSize; return false; }
+
+    const bool plaintext = rx_.data()[0] == kProtocolStringLen &&
+                           std::memcmp(rx_.data() + 1, kProtocolString, kProtocolStringLen) == 0;
+    detecting_ = false;
+
+    if (plaintext) {
+        if (enc_policy_ == EncPolicy::Forced) {
+            close("plaintext peer refused: encryption required");
+            return false;
+        }
+        return true;  // fall through to the ordinary handshake path
+    }
+
+    // Obfuscated. Hand the state machine everything received so far and take the
+    // bytes out of rx_ — from here until finish_mse() the stream is entirely its.
+    mse_ = std::make_unique<mse::Handshake>(skey_, mse::kBoth);
+    LOG_DEBUG("bt.peer", remote_ip_ << ':' << remote_port_ << " ← MSE handshake");
+    const auto status = mse_->consume(rx_.data(), rx_.size());
+    rx_.consume(rx_.size());
+    pump_mse(status);
+    return false;  // parse() resumes from finish_mse(), not from here
+}
+
+void PeerConnection::pump_mse(mse::Handshake::Status status) {
+    if (status == mse::Handshake::Status::Failed) {
+        close("MSE handshake failed: " + mse_->error());
+        return;
+    }
+    // Output first, and always: on the receiving side the same advance() that
+    // reaches Done is the one that produced step 4, and the peer is waiting for it.
+    if (Bytes out = mse_->take_output(); !out.empty()) {
+        queue_raw(std::move(out));
+        flush();
+        if (closed_) return;
+    }
+    if (status == mse::Handshake::Status::Done) finish_mse();
+}
+
+void PeerConnection::finish_mse() {
+    mse::Handshake::Result& r = mse_->result();
+    rc4_send_   = r.send_cipher;
+    rc4_recv_   = r.recv_cipher;
+    rc4_active_ = r.rc4_payload;
+    encrypted_  = true;
+    mse_skey_   = r.info_hash;
+
+    // The receiver's initial payload came out of the encrypted region already
+    // decrypted; whatever arrived behind it is raw, and only ciphertext if
+    // crypto_select actually chose RC4.
+    Bytes ia   = std::move(r.initial_payload);
+    Bytes rest = mse_->leftover().to_bytes();
+    mse_.reset();
+    if (rc4_active_ && !rest.empty()) rc4_recv_.process(rest.data(), rest.size());
+
+    LOG_DEBUG("bt.peer", remote_ip_ << ':' << remote_port_ << " MSE established ("
+                         << (rc4_active_ ? "rc4" : "plaintext payload") << ')');
+
+    for (const Bytes* b : {&ia, &rest}) {
+        if (b->empty()) continue;
+        const ByteSpan into = rx_.prepare(b->size());
+        std::memcpy(into.data(), b->data(), b->size());
+        rx_.commit(b->size());
+    }
+    parse();
+}
+
 void PeerConnection::parse() {
     rx_need_ = 0;  // recomputed below: 0 == no message is mid-flight
+
+    if (detecting_ && !detect_inbound_encryption()) return;
 
     if (!handshake_received_) {
         if (rx_.size() < kHandshakeSize) { rx_need_ = kHandshakeSize; return; }
@@ -247,6 +361,15 @@ bool PeerConnection::parse_handshake() {
 
     InfoHash their_info{};
     std::memcpy(their_info.data(), d + 28, 20);
+
+    // On an obfuscated inbound connection the torrent was already named once, by
+    // the stream key in MSE step 3. The handshake must agree with it: a peer that
+    // unlocks the RC4 keys with one info-hash and then asks for a different torrent
+    // is either broken or probing, and the two must not be allowed to diverge.
+    if (encrypted_ && !outgoing_ && their_info != mse_skey_) {
+        close("handshake info-hash does not match the MSE stream key");
+        return false;
+    }
 
     if (bound_) {
         // Outgoing: the info-hash must be the one we dialed for.
@@ -438,6 +561,23 @@ void PeerConnection::send_extended(std::uint8_t ext_id, ByteView payload) {
     queue(ByteView(header, sizeof(header)));
     if (!payload.empty()) queue(payload);
     flush();
+}
+
+void PeerConnection::queue(ByteView bytes) {
+    if (closed_ || bytes.empty()) return;
+    if (!rc4_active_) { tx_.append(bytes); return; }
+    // The source is not ours to modify (a message header on the stack, a bitfield
+    // owned by the picker), so encrypt through a scratch buffer. assign() reuses
+    // its capacity, so this costs no allocation after the first message.
+    enc_scratch_.assign(bytes.begin(), bytes.end());
+    rc4_send_.process(enc_scratch_.data(), enc_scratch_.size());
+    tx_.append(ByteView(enc_scratch_.data(), enc_scratch_.size()));
+}
+
+void PeerConnection::queue(Bytes bytes) {
+    if (closed_ || bytes.empty()) return;
+    if (rc4_active_) rc4_send_.process(bytes.data(), bytes.size());  // ours: encrypt in place
+    tx_.append(std::move(bytes));
 }
 
 void PeerConnection::flush() {

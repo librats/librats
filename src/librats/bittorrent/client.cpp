@@ -113,8 +113,16 @@ void Client::on_accept() {
             out.num_pieces = it->second->num_pieces();
             return true;
         };
+        // An inbound peer may open either protocol; the connection sniffs which and
+        // enforces in_enc_policy. The stream-key resolver is what lets an obfuscated
+        // peer name its torrent without ever putting the info-hash on the wire.
+        mse::Handshake::SkeyResolver skey =
+            [this](const std::uint8_t* obfuscated, const std::uint8_t* req3, InfoHash& out) {
+                return resolve_mse_skey(obfuscated, req3, out);
+            };
         auto pc = std::make_unique<PeerConnection>(reactor_, s, peer_id_, std::move(resolver),
-                                                   std::move(ip), port);
+                                                   std::move(ip), port, config_.in_enc_policy,
+                                                   std::move(skey));
         LOG_DEBUG("bt.client", "inbound connection from " << ip << ':' << port);
         PeerConnection* raw = pc.get();
         connections_.push_back(std::move(pc));
@@ -122,7 +130,28 @@ void Client::on_accept() {
     }
 }
 
-void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port) {
+bool Client::dial_encrypted(bool prefer_encrypted) const noexcept {
+    switch (config_.out_enc_policy) {
+        case EncPolicy::Forced:   return true;
+        case EncPolicy::Disabled: return false;
+        case EncPolicy::Enabled:  break;
+    }
+    return prefer_encrypted;
+}
+
+bool Client::resolve_mse_skey(const std::uint8_t* obfuscated, const std::uint8_t* req3_hash,
+                              InfoHash& out) const {
+    // Linear over the session's torrents: the stream key is deliberately not
+    // reversible, so guess-and-check is the only way, and a node holds few enough
+    // torrents for one SHA-1 each to be nothing next to the DH that just ran.
+    for (const auto& [ih, t] : torrents_) {
+        if (mse::skey_matches(obfuscated, req3_hash, ih)) { out = ih; return true; }
+    }
+    return false;
+}
+
+void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port,
+                          bool prefer_encrypted) {
     if (connections_.size() >= kMaxConnections) { torrent.on_connect_failed(ip, port); return; }
     socket_t s = tcp_connect_start(ip, int(port));
     if (!is_valid_socket(s)) { torrent.on_connect_failed(ip, port); return; }
@@ -131,7 +160,8 @@ void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t
     // the connect completes, so we re-resolve it (and bail if it's gone) rather
     // than dereference a dangling pointer (H10). The socket is tracked so a
     // mid-connect stop() can reclaim it.
-    const InfoHash ih = torrent.info_hash();
+    const InfoHash ih      = torrent.info_hash();
+    const bool     encrypt = dial_encrypted(prefer_encrypted);
 
     // The connect deadline. Whichever of the two fires first takes the socket out
     // of pending_connects_; the other then finds it gone and does nothing, so the
@@ -147,7 +177,7 @@ void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t
     });
     pending_connects_.emplace(s, deadline);
 
-    reactor_.add(s, PollOut, [this, ih, s, ip, port](std::uint32_t) {
+    reactor_.add(s, PollOut, [this, ih, s, ip, port, encrypt](std::uint32_t) {
         auto pending = pending_connects_.find(s);
         if (pending == pending_connects_.end()) return;  // the deadline already reclaimed it
         reactor_.cancel(pending->second);
@@ -162,7 +192,7 @@ void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t
         }
         auto pc = std::make_unique<PeerConnection>(reactor_, s, /*outgoing=*/true,
                                                    t->info_hash(), peer_id_, t->num_pieces(), t,
-                                                   ip, port);
+                                                   ip, port, encrypt);
         PeerConnection* raw = pc.get();
         connections_.push_back(std::move(pc));
         raw->start();

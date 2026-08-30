@@ -53,7 +53,10 @@ class Torrent;
 class RATS_API TorrentHost {
 public:
     virtual ~TorrentHost() = default;
-    virtual void          connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port) = 0;
+    /// Dial a peer for @p torrent. @p prefer_encrypted is the PeerList's per-peer
+    /// MSE alternation; the host combines it with the session's policy.
+    virtual void          connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port,
+                                       bool prefer_encrypted) = 0;
     virtual const PeerId& peer_id() const = 0;
     virtual std::uint16_t listen_port() const = 0;
     /// Discover peers for @p info_hash via the DHT (if the host has one); each

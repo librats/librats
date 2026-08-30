@@ -76,6 +76,15 @@ public:
         /// this bound is what decides how many it gets through. Matches
         /// libtorrent's peer_connect_timeout default.
         std::chrono::milliseconds connect_timeout{std::chrono::seconds(15)};
+
+        /// How we dial. Enabled (the default, as in libtorrent) alternates per
+        /// attempt starting with MSE, so a peer that refuses obfuscation is still
+        /// reached on its next turn and one that refuses plaintext — a large and
+        /// growing part of the swarm — is reached at all.
+        EncPolicy out_enc_policy = EncPolicy::Enabled;
+        /// What we accept. Enabled takes both; Forced turns away plaintext peers;
+        /// Disabled turns away obfuscated ones.
+        EncPolicy in_enc_policy  = EncPolicy::Enabled;
     };
 
     Client();
@@ -157,7 +166,8 @@ public:
     DhtClient* get_dht_client() const noexcept { return dht_; }
 
     // ---- TorrentHost ----
-    void          connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port) override;
+    void          connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port,
+                               bool prefer_encrypted) override;
     const PeerId& peer_id() const override { return peer_id_; }
     void          find_peers_via_dht(const InfoHash& info_hash,
                                      std::function<void(const std::string& ip, std::uint16_t port)> on_peer) override;
@@ -172,6 +182,13 @@ public:
 private:
     void open_listener();
     void on_accept();
+    /// Should this dial be obfuscated? Policy decides outright unless it is
+    /// Enabled, in which case the peer's own alternation does.
+    bool dial_encrypted(bool prefer_encrypted) const noexcept;
+    /// MSE stream-key resolver handed to every inbound connection: try each
+    /// torrent we hold against the obfuscated hash the peer sent.
+    bool resolve_mse_skey(const std::uint8_t* obfuscated, const std::uint8_t* req3_hash,
+                          InfoHash& out) const;
     void schedule_reap();
     void reap_closed();
     void sample_rates();  ///< recompute down_rate_/up_rate_ from per-torrent byte counters

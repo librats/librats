@@ -141,6 +141,11 @@ TEST(BtConnectTimeout, CompletedConnectSurvivesItsDeadline) {
     cfg.download_path   = dir;
     cfg.peer_id_prefix  = "-LR0005-";
     cfg.connect_timeout = std::chrono::milliseconds(100);  // short, so it would bite
+    // The fake peer above answers a plaintext handshake and nothing else. This test
+    // is about the connect deadline, not about encryption, so dial in the clear
+    // rather than have the default MSE-first policy stall against a peer that
+    // cannot complete it — see test_bt_mse_wire.cpp for the obfuscated path.
+    cfg.out_enc_policy  = EncPolicy::Disabled;
 
     Client c(cfg);
     c.open();
@@ -148,7 +153,10 @@ TEST(BtConnectTimeout, CompletedConnectSurvivesItsDeadline) {
     ASSERT_TRUE(t);
 
     t->add_peer("127.0.0.1", std::uint16_t(server_port));
-    ASSERT_TRUE(pump_until(c, [&] { return c.torrent_status(ih).num_peers == 1; }, 5000))
+    // EXPECT, not ASSERT: an early return here would skip the join below and leave
+    // a running std::thread to be destroyed, which terminates the whole binary and
+    // buries whatever actually went wrong.
+    EXPECT_TRUE(pump_until(c, [&] { return c.torrent_status(ih).num_peers == 1; }, 5000))
         << "the local peer never completed its handshake";
     EXPECT_EQ(c.num_pending_connects(), 0u);  // the completion took it off the list
 

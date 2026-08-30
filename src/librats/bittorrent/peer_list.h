@@ -38,7 +38,14 @@ class PeerList {
 public:
     using Clock = std::chrono::steady_clock;
 
-    struct Endpoint { std::string ip; std::uint16_t port; };
+    struct Endpoint {
+        std::string   ip;
+        std::uint16_t port;
+        /// Whether to open this attempt with an MSE handshake. Only consulted when
+        /// the session's policy is EncPolicy::Enabled, where it alternates per
+        /// attempt so a peer that refuses one form is reached with the other.
+        bool          prefer_encrypted = true;
+    };
 
     struct Peer {
         std::string       ip;
@@ -51,6 +58,11 @@ public:
         /// When our last connection to this peer *ended*. Zero until one does,
         /// which is what lets a freshly discovered peer be dialed immediately.
         Clock::time_point last_attempt{};
+        /// Whether the next dial should be obfuscated. Starts true — nearly every
+        /// client in the swarm speaks MSE, and a good part of it accepts nothing
+        /// else — and flips on each attempt so a peer is eventually tried both
+        /// ways. A completed handshake pins it to whatever actually worked.
+        bool              prefer_encrypted = true;
     };
 
     static constexpr std::uint32_t kMaxFails = 5;
@@ -75,7 +87,9 @@ public:
 
     /// The peer completed its handshake: it is a live connection, and whatever
     /// failures it accumulated getting here no longer count against it.
-    void set_connected(const std::string& ip, std::uint16_t port);
+    /// @p encrypted records whether that took MSE, so the next dial starts there
+    /// instead of paying for the alternation again.
+    void set_connected(const std::string& ip, std::uint16_t port, bool encrypted);
 
     /// Why a connection to this peer ended — the three cases earn different
     /// treatment on the way back in.

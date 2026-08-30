@@ -37,18 +37,24 @@ std::vector<PeerList::Endpoint> PeerList::connect_candidates(std::size_t max, Cl
     // now ends in on_connect_failed or on_disconnected — the connect deadline in
     // Client guarantees it — so nothing can leave a peer stamp-less forever.
     for (std::size_t i = 0; i < take; ++i) {
-        eligible_peers[i]->connecting = true;
-        out.push_back(Endpoint{eligible_peers[i]->ip, eligible_peers[i]->port});
+        Peer& p = *eligible_peers[i];
+        p.connecting = true;
+        out.push_back(Endpoint{p.ip, p.port, p.prefer_encrypted});
+        // Flip now, not on failure: this attempt has claimed the current mode, so
+        // whatever happens to it the *next* one should try the other. A success
+        // pins the working mode back in set_connected().
+        p.prefer_encrypted = !p.prefer_encrypted;
     }
     return out;
 }
 
-void PeerList::set_connected(const std::string& ip, std::uint16_t port) {
+void PeerList::set_connected(const std::string& ip, std::uint16_t port, bool encrypted) {
     auto it = peers_.find(key(ip, port));
     if (it == peers_.end()) return;
-    it->second.connected  = true;
-    it->second.connecting = false;
-    it->second.fail_count = 0;  // reaching a working session clears the penalty
+    it->second.connected        = true;
+    it->second.connecting       = false;
+    it->second.fail_count       = 0;  // reaching a working session clears the penalty
+    it->second.prefer_encrypted = encrypted;
 }
 
 void PeerList::on_disconnected(const std::string& ip, std::uint16_t port, Disconnect how,

@@ -14,9 +14,17 @@
  * Wire format: a 68-byte handshake, then length-prefixed messages
  * `[u32 length][u8 id][payload]` (length 0 = keep-alive). All integers are
  * big-endian.
+ *
+ * That stream may be wrapped in MSE/PE obfuscation (see mse.h). When it is, an
+ * MSE handshake runs first and the bytes above are then RC4'd in both directions
+ * — but only between here and the socket: everything from parse() and the send_*
+ * methods inward sees the same plaintext protocol either way. An inbound
+ * connection does not announce which it is, so the first 20 bytes are sniffed —
+ * a literal "\x13BitTorrent protocol" is plaintext, anything else is a DH key.
  */
 
 #include "librats/bittorrent/bitfield.h"
+#include "librats/bittorrent/mse.h"
 #include "librats/bittorrent/reactor.h"
 #include "librats/bittorrent/types.h"
 #include "librats/core/bytes.h"
@@ -26,6 +34,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -75,13 +84,22 @@ public:
 
     /// Outgoing connection: we know the torrent up front.
     /// @param num_pieces sizes the peer's bitfield; 0 if metadata isn't known yet.
+    /// @param encrypt   open with an MSE handshake rather than a plaintext one.
+    ///                  The caller decides (policy, plus what worked for this peer
+    ///                  last time); the connection just does as it is told.
     PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
                    const InfoHash& info_hash, const PeerId& our_peer_id,
                    std::uint32_t num_pieces, Observer* observer,
-                   std::string remote_ip = "", std::uint16_t remote_port = 0);
+                   std::string remote_ip = "", std::uint16_t remote_port = 0,
+                   bool encrypt = false);
     /// Incoming connection: the torrent is resolved from the peer's handshake.
+    /// @param enc_policy what we accept — plaintext, MSE, or either.
+    /// @param skey       resolves an obfuscated MSE stream key to a torrent;
+    ///                   required whenever @p enc_policy permits MSE.
     PeerConnection(Reactor& reactor, socket_t sock, const PeerId& our_peer_id,
-                   Resolver resolver, std::string remote_ip = "", std::uint16_t remote_port = 0);
+                   Resolver resolver, std::string remote_ip = "", std::uint16_t remote_port = 0,
+                   EncPolicy enc_policy = EncPolicy::Disabled,
+                   mse::Handshake::SkeyResolver skey = {});
     ~PeerConnection();
 
     PeerConnection(const PeerConnection&) = delete;
@@ -96,6 +114,10 @@ public:
     bool            closed()          const noexcept { return closed_; }
     bool            handshake_done()  const noexcept { return handshake_sent_ && handshake_received_; }
     bool            outgoing()        const noexcept { return outgoing_; }
+    /// True once an MSE handshake has completed. Note this says the *connection*
+    /// was obfuscated, not that the payload is still encrypted — crypto_select may
+    /// have settled on plaintext after the obfuscated header.
+    bool            encrypted()       const noexcept { return encrypted_; }
     bool            am_choking()      const noexcept { return am_choking_; }
     bool            am_interested()   const noexcept { return am_interested_; }
     bool            peer_choking()    const noexcept { return peer_choking_; }
@@ -130,14 +152,37 @@ private:
     void parse();
     bool parse_handshake();
     void send_handshake();
+    /// The 68 bytes of the BitTorrent handshake, built but not queued — MSE needs
+    /// them as its initial payload rather than as something to write directly.
+    Bytes build_handshake();
     void dispatch(MessageId id, const std::uint8_t* payload, std::uint32_t len);
 
+    // ---- MSE ----
+    /// Decide from the first 20 bytes of an inbound stream whether the peer is
+    /// speaking plaintext or MSE, and start the obfuscated handshake if it is.
+    /// Returns false if it closed the connection (a policy refusal) or is still
+    /// waiting for bytes.
+    bool detect_inbound_encryption();
+    /// Write whatever the handshake produced, then act on @p status.
+    void pump_mse(mse::Handshake::Status status);
+    /// Adopt the negotiated ciphers and hand the handshake's leftovers to parse().
+    void finish_mse();
+
     void send_message(MessageId id, const std::uint8_t* payload, std::uint32_t len);
-    /// Append to the send queue. No syscall: the caller flushes once the whole
-    /// message is queued, so a message never costs more than one send().
-    void queue(ByteView bytes) { if (!closed_) tx_.append(bytes); }
-    /// Queue a buffer the caller already owns — moved in, never copied.
-    void queue(Bytes bytes) { if (!closed_) tx_.append(std::move(bytes)); }
+    /// Append to the send queue, encrypting first if the payload stream is RC4'd.
+    /// No syscall: the caller flushes once the whole message is queued, so a
+    /// message never costs more than one send().
+    ///
+    /// This is the single funnel every protocol message goes through, and that is
+    /// what makes the cipher correct: RC4 is one keystream, so bytes have to be
+    /// encrypted in exactly the order they enter the queue, exactly once each.
+    void queue(ByteView bytes);
+    /// Queue a buffer the caller already owns — moved in, and encrypted in place if
+    /// need be, so a block read from disk is never copied.
+    void queue(Bytes bytes);
+    /// Queue bytes that must bypass the payload cipher: the MSE handshake, which
+    /// carries its own encryption and establishes the cipher everything else uses.
+    void queue_raw(Bytes bytes) { if (!closed_) tx_.append(std::move(bytes)); }
     /// Push the queue to the socket with one gather-send, (dis)arm write interest,
     /// and enforce the send high-water mark. May close the connection.
     void flush();
@@ -158,6 +203,23 @@ private:
     bool          bound_ = true;    ///< false for an unresolved incoming connection
     std::string   remote_ip_;       ///< peer's address (source for incoming, dialed for outgoing)
     std::uint16_t remote_port_ = 0;
+
+    // ---- MSE / PE ----
+    EncPolicy                       enc_policy_ = EncPolicy::Disabled;  ///< inbound only
+    mse::Handshake::SkeyResolver    skey_;                              ///< inbound only
+    /// Runs the obfuscated handshake and owns the byte stream while it does, so
+    /// nothing reaches rx_ until it has finished and been destroyed.
+    std::unique_ptr<mse::Handshake> mse_;
+    mse::Rc4Cipher                  rc4_send_;
+    mse::Rc4Cipher                  rc4_recv_;
+    bool                            rc4_active_ = false;  ///< payload stream is RC4'd
+    bool                            encrypted_  = false;  ///< an MSE handshake completed
+    bool                            want_mse_   = false;  ///< outbound: dial obfuscated
+    bool                            detecting_  = false;  ///< inbound: still sniffing
+    InfoHash                        mse_skey_{};          ///< torrent the stream key named
+    /// Scratch for encrypting copy-appends, kept around so a steady stream of small
+    /// messages does not allocate a buffer each.
+    Bytes                           enc_scratch_;
 
     ReceiveBuffer     rx_;
     /// Wire size of the message rx_ is mid-way through (4-byte prefix included), once

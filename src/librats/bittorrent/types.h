@@ -32,6 +32,19 @@ using PeerId = std::array<std::uint8_t, kPeerIdSize>;
 /// The 8 reserved bytes exchanged in the BitTorrent handshake.
 using ReservedBytes = std::array<std::uint8_t, 8>;
 
+/// How willing we are to speak MSE/PE (see bittorrent/mse.h). Named and valued
+/// after libtorrent's pe_forced / pe_enabled / pe_disabled so the behaviour is
+/// recognisable to anyone who has configured a BitTorrent client before.
+enum class EncPolicy {
+    /// Obfuscated connections only. Plaintext is refused in both directions.
+    Forced,
+    /// Both are acceptable. Outgoing dials alternate — MSE first, plaintext on the
+    /// peer's next attempt — so a peer that rejects one is reached with the other.
+    Enabled,
+    /// Never speak MSE: dial in plaintext, refuse obfuscated inbound connections.
+    Disabled,
+};
+
 // ---- Protocol constants ----
 constexpr char          kProtocolString[]    = "BitTorrent protocol";  // 19 chars (+NUL)
 constexpr std::size_t   kProtocolStringLen   = 19;

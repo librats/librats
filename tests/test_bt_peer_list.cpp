@@ -98,7 +98,7 @@ TEST(BtPeerList, ConnectedClearsFailures) {
     pl.add("1.1.1.1", 1, PeerSource::Tracker);
     auto c = pl.connect_candidates(1, T0);
     pl.on_connect_failed(c[0].ip, c[0].port, T0);
-    pl.set_connected("1.1.1.1", 1);
+    pl.set_connected("1.1.1.1", 1, /*encrypted=*/false);
     EXPECT_EQ(pl.num_candidates(T0), 0u);  // connected, not a candidate
 
     // Disconnected after a completed handshake: not a failure, so the backoff is the
@@ -137,7 +137,7 @@ TEST(BtPeerList, ReleasedPeerIsImmediatelyRedialable) {
     pl.add("1.1.1.1", 1, PeerSource::Tracker);
 
     ASSERT_EQ(pl.connect_candidates(1, T0).size(), 1u);
-    pl.set_connected("1.1.1.1", 1);
+    pl.set_connected("1.1.1.1", 1, /*encrypted=*/false);
     pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::Release, T0);
 
     // No backoff at all: the very next dial round gets it back.
@@ -177,6 +177,50 @@ TEST(BtPeerList, BackoffGrowsWithFailureCount) {
     pl.on_connect_failed("1.1.1.1", 1, second);                   // fail_count = 2 → 180 s
     EXPECT_EQ(pl.num_candidates(second + std::chrono::seconds(179)), 0u);
     EXPECT_EQ(pl.num_candidates(second + std::chrono::seconds(180)), 1u);
+}
+
+// Under EncPolicy::Enabled the dialer follows this flag, so a peer that turns away
+// one form of handshake is reached with the other on its next turn. It starts
+// obfuscated: most of the swarm speaks MSE and a growing part of it accepts
+// nothing else.
+TEST(BtPeerList, EncryptionPreferenceAlternatesPerAttempt) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Dht);
+
+    auto first = pl.connect_candidates(1, T0);
+    ASSERT_EQ(first.size(), 1u);
+    EXPECT_TRUE(first[0].prefer_encrypted);
+
+    pl.on_connect_failed("1.1.1.1", 1, T0);
+    auto second = pl.connect_candidates(1, at(std::chrono::seconds(120)));
+    ASSERT_EQ(second.size(), 1u);
+    EXPECT_FALSE(second[0].prefer_encrypted) << "the second attempt must try the other form";
+
+    pl.on_connect_failed("1.1.1.1", 1, at(std::chrono::seconds(120)));
+    auto third = pl.connect_candidates(1, at(std::chrono::seconds(500)));
+    ASSERT_EQ(third.size(), 1u);
+    EXPECT_TRUE(third[0].prefer_encrypted);
+}
+
+TEST(BtPeerList, ASuccessfulHandshakePinsTheModeThatWorked) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Dht);
+
+    // First attempt is encrypted and fails; the second, plaintext, gets through.
+    ASSERT_TRUE(pl.connect_candidates(1, T0)[0].prefer_encrypted);
+    pl.on_connect_failed("1.1.1.1", 1, T0);
+
+    const auto t1 = at(std::chrono::seconds(120));
+    ASSERT_FALSE(pl.connect_candidates(1, t1)[0].prefer_encrypted);
+    pl.set_connected("1.1.1.1", 1, /*encrypted=*/false);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::Clean, t1);
+
+    // The next dial should go straight back to what worked rather than resume
+    // alternating and waste an attempt on the form we know it refuses.
+    const auto t2 = at(std::chrono::seconds(300));
+    auto again = pl.connect_candidates(1, t2);
+    ASSERT_EQ(again.size(), 1u);
+    EXPECT_FALSE(again[0].prefer_encrypted);
 }
 
 TEST(BtPeerList, BanRemovesFromCandidates) {
