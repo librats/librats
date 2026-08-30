@@ -77,7 +77,12 @@ void Torrent::stop() {
         trackers_->stop();                          // drains the in-flight Stopped announce
         trackers_.reset();
     }
-    for (PeerConnection* pc : peers_) pc->close("torrent stopped");
+    // Snapshot + release, for the same two reasons as pause(): close() runs
+    // on_closed inline and erases from peers_ mid-loop, and a peer we drop on our
+    // own way out has not failed us.
+    releasing_peers_ = true;
+    for (PeerConnection* pc : std::vector<PeerConnection*>(peers_)) pc->close("torrent stopped");
+    releasing_peers_ = false;
     peers_.clear();
     outstanding_.clear();
     recent_down_.clear();
@@ -145,7 +150,14 @@ void Torrent::pause() {
     LOG_INFO("bt.torrent", short_hash(info_hash()) << " paused (" << peers_.size() << " peers dropped)");
     // Drop all peers and their per-peer request state, but keep picker_/disk_ so a
     // later resume() does not have to re-hash what is already on disk.
-    for (PeerConnection* pc : peers_) pc->close("torrent paused");
+    //
+    // These peers did nothing wrong, so release them without the reconnect penalty
+    // — otherwise resume() would sit out the backoff before it could dial the very
+    // peers it just dropped. Iterate a SNAPSHOT: close() runs on_closed inline,
+    // which erases from peers_ (see the same hazard in on_check_complete).
+    releasing_peers_ = true;
+    for (PeerConnection* pc : std::vector<PeerConnection*>(peers_)) pc->close("torrent paused");
+    releasing_peers_ = false;
     peers_.clear();
     outstanding_.clear();
     request_time_.clear();
@@ -176,14 +188,24 @@ void Torrent::add_peer(const std::string& ip, std::uint16_t port) {
         post([this] { try_connect(); });
 }
 
+std::function<void(const std::string&, std::uint16_t)> Torrent::dht_peer_sink() {
+    // Safe to capture `this` bare: the host re-resolves the torrent by info-hash on
+    // the reactor thread before invoking this, and removal happens only there, so a
+    // torrent that is still registered when the sink runs is still alive.
+    return [this](const std::string& ip, std::uint16_t port) {
+        if (peer_list_.add(ip, port, PeerSource::Dht)) try_connect();
+    };
+}
+
 void Torrent::try_connect() {
     if (!running_ || paused_ || peers_.size() >= kMaxPeers) return;
-    auto candidates = peer_list_.connect_candidates(kMaxPeers - peers_.size());
+    auto candidates = peer_list_.connect_candidates(kMaxPeers - peers_.size(),
+                                                    PeerList::Clock::now());
     for (const auto& c : candidates) host_.connect_peer(*this, c.ip, c.port);
 }
 
 void Torrent::on_connect_failed(const std::string& ip, std::uint16_t port) {
-    peer_list_.on_connect_failed(ip, port);
+    peer_list_.on_connect_failed(ip, port, PeerList::Clock::now());
 }
 
 // ---- scheduling ----
@@ -207,16 +229,19 @@ void Torrent::tick() {
     // Ask the DHT for fresh peers periodically (every ~30 s).
     if (tick_count_ % 30 == 1) {
         LOG_DEBUG("bt.torrent", short_hash(info_hash()) << " → DHT get_peers");
-        host_.find_peers_via_dht(info_hash(), [this](const std::string& ip, std::uint16_t port) {
-            if (peer_list_.add(ip, port, PeerSource::Dht)) try_connect();
-        });
+        host_.find_peers_via_dht(info_hash(), dht_peer_sink());
     }
     // Announce ourselves to the DHT so others can find us — promptly on startup,
     // then every ~15 min per BEP 5 (H15). Was previously never done → undiscoverable.
+    //
+    // The announce is a get_peers traversal with an announce_peer at the end, so it
+    // sees the very peers we are looking for. Dropping them meant a magnet waited
+    // for the *next* find_peers round (~30 s) to be told about addresses the node
+    // already had in hand — half the wait before the first live peer, for nothing.
     if (tick_count_ % 900 == 5) {
         LOG_DEBUG("bt.torrent", short_hash(info_hash()) << " → DHT announce_peer port "
                                 << host_.listen_port());
-        host_.announce_to_dht(info_hash(), host_.listen_port());
+        host_.announce_to_dht(info_hash(), host_.listen_port(), dht_peer_sink());
     }
     // Re-announce when the tracker's requested interval has elapsed (H13).
     if (tick_count_ >= next_announce_tick_) {
@@ -253,7 +278,7 @@ void Torrent::on_handshake(PeerConnection& pc, const InfoHash&, const PeerId&) {
     peers_.push_back(&pc);
     outstanding_[&pc] = 0;
     recent_down_[&pc] = 0;
-    peer_list_.set_connected(pc.remote_ip(), pc.remote_port(), true);
+    peer_list_.set_connected(pc.remote_ip(), pc.remote_port());
     // Milestone: the first peer on a torrent is worth an INFO line; the rest are
     // routine (each peer's handshake is already logged at DEBUG in bt.peer).
     if (peers_.size() == 1)
@@ -512,7 +537,16 @@ void Torrent::on_request(PeerConnection& pc, std::uint32_t piece, std::uint32_t 
 }
 
 void Torrent::on_closed(PeerConnection& pc, const std::string&) {
-    peer_list_.set_connected(pc.remote_ip(), pc.remote_port(), false);
+    // A connection that died before the handshake completed never gave us anything;
+    // count it against the peer so it backs off instead of being re-dialed on the
+    // next tick. A peer that requires encryption (which we do not speak) closes
+    // exactly here, and without the penalty we would hammer it once a second for as
+    // long as the torrent lives. A peer we dropped ourselves (pause) is neither
+    // penalised nor delayed — see releasing_peers_.
+    const auto how = releasing_peers_      ? PeerList::Disconnect::Release
+                     : pc.handshake_done() ? PeerList::Disconnect::Clean
+                                           : PeerList::Disconnect::Failed;
+    peer_list_.on_disconnected(pc.remote_ip(), pc.remote_port(), how, PeerList::Clock::now());
     pex_sent_.erase(&pc);
     remove_peer(&pc);
 }

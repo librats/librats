@@ -61,8 +61,12 @@ public:
     virtual void find_peers_via_dht(const InfoHash& /*info_hash*/,
                                     std::function<void(const std::string& ip, std::uint16_t port)> /*on_peer*/) {}
     /// Announce ourselves to the DHT for @p info_hash on @p port so other clients
-    /// doing get_peers can find us (BEP 5). Default no-op (no DHT attached).
-    virtual void announce_to_dht(const InfoHash& /*info_hash*/, std::uint16_t /*port*/) {}
+    /// doing get_peers can find us (BEP 5). An announce *is* a get_peers traversal
+    /// with a write at the end, so it discovers peers as a side effect; they are
+    /// delivered to @p on_peer on the reactor thread exactly like find_peers_via_dht's
+    /// are, rather than being thrown away. Default no-op (no DHT attached).
+    virtual void announce_to_dht(const InfoHash& /*info_hash*/, std::uint16_t /*port*/,
+                                 std::function<void(const std::string& ip, std::uint16_t port)> /*on_peer*/ = {}) {}
 };
 
 class RATS_API Torrent final : public PeerConnection::Observer {
@@ -143,6 +147,15 @@ public:
     void on_closed(PeerConnection&, const std::string& reason) override;
 
 private:
+    /// Set while pause() is tearing down its peers, so on_closed can tell "we let
+    /// this peer go" from "this peer failed on us" and skip the reconnect penalty.
+    bool releasing_peers_ = false;
+
+    /// The callback both DHT paths (find_peers and announce) hand to the host:
+    /// merge the address into peer_list_ and dial if it is new. Runs on the
+    /// reactor thread — the host marshals it there.
+    std::function<void(const std::string&, std::uint16_t)> dht_peer_sink();
+
     /// Post @p fn to the reactor, guarded by alive_ so it is dropped if this
     /// torrent has since been destroyed. Disk and tracker completions run on their
     /// own worker threads and marshal back through here; a completion that a worker

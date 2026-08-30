@@ -741,9 +741,11 @@ if(RATS_BUILD_TESTS)
             tests/test_bt_choker.cpp
             tests/test_bt_download.cpp
             tests/test_bt_stall_metadata.cpp
+            tests/test_bt_connect_timeout.cpp
             # Phase 6 — extension protocol + metadata exchange + discovery
             tests/test_bt_extensions.cpp
             tests/test_bt_magnet_fetch.cpp
+            tests/test_bt_dht_peer_sources.cpp
             tests/test_bt_peer_list.cpp
             tests/test_bt_pex.cpp
             tests/test_bt_tracker.cpp

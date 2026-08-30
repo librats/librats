@@ -8,10 +8,15 @@
  * Every discovery source — tracker, DHT, PEX, LSD, incoming — funnels addresses
  * here; the Torrent then asks for connect_candidates() to dial. The list
  * deduplicates, remembers which sources vouched for a peer, counts connection
- * failures (so hopeless peers drift to the back and eventually drop out), and
- * supports banning. Owned by one torrent on the reactor thread — not thread-safe.
+ * failures (so hopeless peers drift to the back and eventually drop out), applies
+ * a reconnect backoff to peers that have just failed, and supports banning. Owned
+ * by one torrent on the reactor thread — not thread-safe.
+ *
+ * Time is passed in rather than read from the clock so the backoff is testable;
+ * the Torrent supplies Clock::now().
  */
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -31,42 +36,91 @@ enum class PeerSource : std::uint8_t {
 
 class PeerList {
 public:
+    using Clock = std::chrono::steady_clock;
+
     struct Endpoint { std::string ip; std::uint16_t port; };
 
     struct Peer {
-        std::string   ip;
-        std::uint16_t port       = 0;
-        std::uint8_t  sources    = 0;
-        bool          connected  = false;
-        bool          connecting = false;
-        bool          banned     = false;
-        std::uint32_t fail_count = 0;
+        std::string       ip;
+        std::uint16_t     port       = 0;
+        std::uint8_t      sources    = 0;
+        bool              connected  = false;
+        bool              connecting = false;
+        bool              banned     = false;
+        std::uint32_t     fail_count = 0;
+        /// When our last connection to this peer *ended*. Zero until one does,
+        /// which is what lets a freshly discovered peer be dialed immediately.
+        Clock::time_point last_attempt{};
     };
 
     static constexpr std::uint32_t kMaxFails = 5;
 
+    /// Base reconnect delay, scaled by the failure count: a peer is not re-dialed
+    /// until (fail_count + 1) * kMinReconnectInterval has passed since the last
+    /// attempt. Without it a peer that accepts TCP and then drops us — a client
+    /// that requires encryption does exactly this — is re-dialed on every torrent
+    /// tick, once a second, forever, while genuinely useful addresses wait behind
+    /// it. Mirrors libtorrent's min_reconnect_time (60 s) and its
+    /// `session_time - last_connected < (failcount + 1) * min_reconnect_time` gate.
+    static constexpr std::chrono::seconds kMinReconnectInterval{60};
+
     /// Add or merge a candidate. Returns true if it was newly created.
     bool add(const std::string& ip, std::uint16_t port, PeerSource source);
 
-    /// Up to @p max eligible peers to dial (not connected/connecting/banned, and
-    /// under the failure limit), best first. The returned peers are marked
-    /// `connecting` so they aren't handed out again until resolved.
-    std::vector<Endpoint> connect_candidates(std::size_t max);
+    /// Up to @p max eligible peers to dial (not connected/connecting/banned, under
+    /// the failure limit, and past their reconnect backoff at @p now), best first.
+    /// The returned peers are marked `connecting` so they aren't handed out again
+    /// until the attempt resolves.
+    std::vector<Endpoint> connect_candidates(std::size_t max, Clock::time_point now);
 
-    void set_connected(const std::string& ip, std::uint16_t port, bool connected);
-    void on_connect_failed(const std::string& ip, std::uint16_t port);
+    /// The peer completed its handshake: it is a live connection, and whatever
+    /// failures it accumulated getting here no longer count against it.
+    void set_connected(const std::string& ip, std::uint16_t port);
+
+    /// Why a connection to this peer ended — the three cases earn different
+    /// treatment on the way back in.
+    enum class Disconnect {
+        /// It never became usable: refused mid-handshake, protocol error, dropped
+        /// before the handshake completed. Penalised and backed off.
+        Failed,
+        /// It carried a real session and then ended. No penalty, but still backed
+        /// off — re-opening a connection the peer just closed helps nobody.
+        Clean,
+        /// *We* dropped it for our own reasons (pausing the torrent), and nothing
+        /// about the peer changed. Neither penalised nor backed off, so a resume
+        /// dials straight back. This is libtorrent's fast_reconnect: it is the one
+        /// case where last_connected is deliberately left unstamped.
+        Release,
+    };
+
+    /// A connection to this peer ended; see Disconnect for how @p how is treated.
+    void on_disconnected(const std::string& ip, std::uint16_t port, Disconnect how,
+                         Clock::time_point now);
+
+    /// The outbound connect itself never completed (refused, unreachable, timed out).
+    void on_connect_failed(const std::string& ip, std::uint16_t port, Clock::time_point now);
+
     void ban(const std::string& ip, std::uint16_t port);
 
-    std::size_t size()           const noexcept { return peers_.size(); }
-    std::size_t num_candidates() const;          ///< count currently eligible to dial
+    std::size_t size() const noexcept { return peers_.size(); }
+    /// Count of peers currently eligible to dial at @p now (backoff included).
+    std::size_t num_candidates(Clock::time_point now) const;
     bool        contains(const std::string& ip, std::uint16_t port) const;
 
 private:
     static std::string key(const std::string& ip, std::uint16_t port) {
         return ip + ":" + std::to_string(port);
     }
+    /// Eligible ignoring time: not already in play, not banned, chances left.
     bool eligible(const Peer& p) const noexcept {
         return !p.connected && !p.connecting && !p.banned && p.fail_count < kMaxFails;
+    }
+    /// Eligible *and* past its reconnect backoff. A peer never dialed
+    /// (last_attempt == {}) is always ready.
+    bool ready(const Peer& p, Clock::time_point now) const noexcept {
+        if (!eligible(p)) return false;
+        if (p.last_attempt == Clock::time_point{}) return true;
+        return now - p.last_attempt >= (p.fail_count + 1) * kMinReconnectInterval;
     }
 
     std::unordered_map<std::string, Peer> peers_;

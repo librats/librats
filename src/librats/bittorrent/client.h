@@ -35,6 +35,7 @@
 #include <mutex>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -65,6 +66,16 @@ public:
         std::uint16_t listen_port    = 6881;   ///< 0 = ephemeral
         std::string   download_path;           ///< default save directory
         std::string   peer_id_prefix = "-LR0001-";
+        /// How long an outbound TCP connect may stay pending before we give up on
+        /// the address. Without a deadline of our own, the only thing that ever
+        /// abandons an unreachable peer is the OS SYN retry — ~21 s on Windows,
+        /// longer still on Linux — and for all that time the peer sits `connecting`
+        /// in the PeerList: not retried, not penalised, holding a socket. Most DHT
+        /// peers are behind a NAT with no forwarded TCP port, so a magnet has to
+        /// work through a lot of dead addresses before it reaches one that answers;
+        /// this bound is what decides how many it gets through. Matches
+        /// libtorrent's peer_connect_timeout default.
+        std::chrono::milliseconds connect_timeout{std::chrono::seconds(15)};
     };
 
     Client();
@@ -130,6 +141,10 @@ public:
 
     // ---- aggregate stats (for status lines / UI) ----
     std::size_t   num_torrents() const noexcept { return torrents_.size(); }
+    /// Outbound connects still waiting on the TCP handshake. Reactor-thread only;
+    /// exposed so a caller (and the tests for the connect deadline) can see that a
+    /// dead address is actually being reclaimed rather than held forever.
+    std::size_t   num_pending_connects() const noexcept { return pending_connects_.size(); }
     std::size_t   total_peers()  const;
     /// Swarm-wide transfer rates in bytes/sec, sampled once per second by the
     /// housekeeping timer. Atomic so they can be read from another thread.
@@ -146,7 +161,8 @@ public:
     const PeerId& peer_id() const override { return peer_id_; }
     void          find_peers_via_dht(const InfoHash& info_hash,
                                      std::function<void(const std::string& ip, std::uint16_t port)> on_peer) override;
-    void          announce_to_dht(const InfoHash& info_hash, std::uint16_t port) override;
+    void          announce_to_dht(const InfoHash& info_hash, std::uint16_t port,
+                                  std::function<void(const std::string& ip, std::uint16_t port)> on_peer = {}) override;
 
     /// Largest number of peer connections (in + out) the session will hold at once.
     /// Beyond this, inbound sockets are accepted and immediately closed so a flood
@@ -211,10 +227,12 @@ private:
 
     std::map<InfoHash, std::unique_ptr<Torrent>>      torrents_;
     std::vector<std::unique_ptr<PeerConnection>>      connections_;
-    /// Outbound sockets still waiting for connect() to complete. Tracked so a
-    /// mid-connect stop() can close them, and so the completion looks the torrent
-    /// up by info-hash rather than holding a raw Torrent* that may have been removed.
-    std::unordered_set<socket_t>                      pending_connects_;
+    /// Outbound sockets still waiting for connect() to complete, each mapped to the
+    /// timer that abandons it at Config::connect_timeout. Tracked so a mid-connect
+    /// stop() can close them, so the completion looks the torrent up by info-hash
+    /// rather than holding a raw Torrent* that may have been removed, and so the
+    /// deadline and the completion can each tell whether the other got there first.
+    std::unordered_map<socket_t, TimerId>             pending_connects_;
 
     // Rate sampling (updated on the reactor thread once per second).
     std::atomic<std::uint64_t>            down_rate_{0};

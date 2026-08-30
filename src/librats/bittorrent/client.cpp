@@ -52,7 +52,11 @@ void Client::stop() {
     connections_.clear();
     // Reclaim any outbound sockets still mid-connect (their completion lambda will
     // never run now that the reactor is stopped).
-    for (socket_t s : pending_connects_) { reactor_.remove(s); close_socket(s); }
+    for (const auto& [s, deadline] : pending_connects_) {
+        reactor_.cancel(deadline);
+        reactor_.remove(s);
+        close_socket(s);
+    }
     pending_connects_.clear();
     if (is_valid_socket(listener_)) { reactor_.remove(listener_); close_socket(listener_); listener_ = RATS_INVALID_SOCKET; }
     // Fresh token, so a Client that is start()ed again gets DHT peers delivered.
@@ -128,10 +132,27 @@ void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t
     // than dereference a dangling pointer (H10). The socket is tracked so a
     // mid-connect stop() can reclaim it.
     const InfoHash ih = torrent.info_hash();
-    pending_connects_.insert(s);
+
+    // The connect deadline. Whichever of the two fires first takes the socket out
+    // of pending_connects_; the other then finds it gone and does nothing, so the
+    // fd is closed exactly once and the peer is reported to the torrent once.
+    const TimerId deadline = reactor_.schedule(config_.connect_timeout, [this, s, ih, ip, port] {
+        if (pending_connects_.erase(s) == 0) return;  // the connect already completed
+        reactor_.remove(s);
+        close_socket(s);
+        LOG_DEBUG("bt.client", "connect to " << ip << ':' << port << " timed out after "
+                               << config_.connect_timeout.count() << " ms");
+        auto it = torrents_.find(ih);
+        if (it != torrents_.end()) it->second->on_connect_failed(ip, port);
+    });
+    pending_connects_.emplace(s, deadline);
+
     reactor_.add(s, PollOut, [this, ih, s, ip, port](std::uint32_t) {
+        auto pending = pending_connects_.find(s);
+        if (pending == pending_connects_.end()) return;  // the deadline already reclaimed it
+        reactor_.cancel(pending->second);
+        pending_connects_.erase(pending);
         reactor_.remove(s);  // done watching for connect completion
-        pending_connects_.erase(s);
         auto it = torrents_.find(ih);
         Torrent* t = (it != torrents_.end()) ? it->second.get() : nullptr;
         if (tcp_connect_result(s) != 0 || !t) {
@@ -172,10 +193,25 @@ void Client::find_peers_via_dht(const InfoHash& info_hash,
     });
 }
 
-void Client::announce_to_dht(const InfoHash& info_hash, std::uint16_t port) {
+void Client::announce_to_dht(const InfoHash& info_hash, std::uint16_t port,
+                             std::function<void(const std::string&, std::uint16_t)> on_peer) {
     // Publish ourselves to the info-hash's DHT nodes so other clients' get_peers
     // find us (BEP 5). DhtClient is the node's shared, thread-safe instance.
-    if (dht_ && dht_->is_running()) dht_->announce_peer(info_hash, port);
+    if (!dht_ || !dht_->is_running()) return;
+    if (!on_peer) { dht_->announce_peer(info_hash, port); return; }
+    // An announce runs a get_peers traversal of its own, so it discovers the same
+    // peers a find_peers would. Deliver them through the identical guarded marshal
+    // as find_peers_via_dht (see the reasoning there) instead of discarding them.
+    dht_->announce_peer(info_hash, port,
+                        [this, guard = dht_guard_, info_hash, on_peer](const std::vector<Address>& peers,
+                                                                      const InfoHash&) {
+        std::lock_guard<std::mutex> lock(guard->mutex);
+        if (!guard->alive) return;  // Client stopped/destroyed — its reactor is gone
+        reactor_.post([this, info_hash, peers, on_peer] {
+            if (torrents_.find(info_hash) == torrents_.end()) return;  // torrent gone
+            for (const Address& a : peers) on_peer(a.ip.to_string(), a.port);
+        });
+    });
 }
 
 Torrent* Client::add_torrent(const TorrentInfo& info, const std::string& save_path) {
