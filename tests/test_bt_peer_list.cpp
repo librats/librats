@@ -298,3 +298,105 @@ TEST(BtPeerList, LowerFailureCountRanksFirst) {
     ASSERT_EQ(next.size(), 1u);
     EXPECT_FALSE(has(next, fail_ep.ip, fail_ep.port));  // the failed one is not first
 }
+
+// ---- uTP preference ----------------------------------------------------------
+//
+// Unlike the encryption form, which alternates, the uTP preference is a latch:
+// every peer is assumed to speak it (most of the swarm does), and the first dial
+// that fails to reach a handshake settles the question for good. Re-asking it every
+// other attempt would spend a wasted connect timeout on a peer we already have the
+// answer for.
+
+TEST(BtPeerList, PeersAreDialedOverUtpUntilOneProvesOtherwise) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Dht);
+    auto c = pl.connect_candidates(1, T0);
+    ASSERT_EQ(c.size(), 1u);
+    EXPECT_TRUE(c[0].prefer_utp) << "a freshly discovered peer should be tried over uTP first";
+}
+
+TEST(BtPeerList, AFailedUtpDialSwitchesThePeerToTcp) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Dht);
+    ASSERT_TRUE(pl.connect_candidates(1, T0)[0].prefer_utp);
+
+    pl.note_utp_dial_failed("1.1.1.1", 1);
+    // FailedRetryNow, so the TCP attempt happens at once rather than a minute later:
+    // one wasted round trip is the entire cost of the optimism above.
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::FailedRetryNow, T0);
+
+    auto next = pl.connect_candidates(1, T0);
+    ASSERT_EQ(next.size(), 1u) << "the waiver did not make the peer immediately dialable";
+    EXPECT_FALSE(next[0].prefer_utp);
+}
+
+// The answer has to stick, or every second dial would pay the timeout again.
+TEST(BtPeerList, TheUtpVerdictIsRememberedAcrossAttempts) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Dht);
+    pl.connect_candidates(1, T0);
+    pl.note_utp_dial_failed("1.1.1.1", 1);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::Failed, T0);
+
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        const auto when = at(PeerList::kMinReconnectInterval * (attempt + 1) * (attempt + 1));
+        auto       c    = pl.connect_candidates(1, when);
+        ASSERT_EQ(c.size(), 1u) << "attempt " << attempt;
+        EXPECT_FALSE(c[0].prefer_utp) << "attempt " << attempt << " went back to uTP";
+        pl.on_disconnected(c[0].ip, c[0].port, PeerList::Disconnect::Failed, when);
+    }
+}
+
+// A uTP connection that actually worked outranks the guess, and is never withdrawn:
+// a peer that answered once will answer again, and a later failure is far more
+// likely to be the peer being gone than the transport being wrong.
+TEST(BtPeerList, AWorkingUtpConnectionPinsThePeerToUtp) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Dht);
+    pl.connect_candidates(1, T0);
+    pl.set_connected("1.1.1.1", 1, /*encrypted=*/false, PeerTransport::Utp);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::Clean, T0);
+
+    const auto later = at(PeerList::kMinReconnectInterval * 2);
+    auto       c     = pl.connect_candidates(1, later);
+    ASSERT_EQ(c.size(), 1u);
+    EXPECT_TRUE(c[0].prefer_utp);
+
+    // Even a subsequent failed uTP dial must not undo a confirmed one.
+    pl.note_utp_dial_failed("1.1.1.1", 1);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::Failed, later);
+    auto again = pl.connect_candidates(1, at(PeerList::kMinReconnectInterval * 10));
+    ASSERT_EQ(again.size(), 1u);
+    EXPECT_TRUE(again[0].prefer_utp);
+}
+
+// A peer that connects to *us* over uTP has proved the transport just as surely as
+// one we dialed, so a later dial to it should start there.
+TEST(BtPeerList, AnInboundUtpPeerCountsAsConfirmation) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Incoming);
+    pl.note_utp_dial_failed("1.1.1.1", 1);          // an earlier dial had failed
+    pl.set_connected("1.1.1.1", 1, false, PeerTransport::Utp);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::Clean, T0);
+
+    auto c = pl.connect_candidates(1, at(PeerList::kMinReconnectInterval * 2));
+    ASSERT_EQ(c.size(), 1u);
+    EXPECT_TRUE(c[0].prefer_utp);
+}
+
+// The two preferences are independent: settling the transport must not disturb the
+// encryption alternation, which has its own reason to keep flipping.
+TEST(BtPeerList, TheTransportVerdictLeavesTheEncryptionAlternationAlone) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Dht);
+    auto first = pl.connect_candidates(1, T0);
+    ASSERT_EQ(first.size(), 1u);
+    const bool first_enc = first[0].prefer_encrypted;
+
+    pl.note_utp_dial_failed("1.1.1.1", 1);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::FailedRetryNow, T0);
+
+    auto second = pl.connect_candidates(1, T0);
+    ASSERT_EQ(second.size(), 1u);
+    EXPECT_NE(second[0].prefer_encrypted, first_enc);
+}

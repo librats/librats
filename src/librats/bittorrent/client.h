@@ -18,6 +18,7 @@
 #include "librats/util/rats_export.h"
 #include "librats/bittorrent/peer_connection.h"
 #include "librats/bittorrent/reactor.h"
+#include "librats/bittorrent/utp_manager.h"
 #include "librats/bittorrent/torrent.h"
 #include "librats/bittorrent/torrent_info.h"
 #include "librats/bittorrent/types.h"
@@ -85,6 +86,20 @@ public:
         /// What we accept. Enabled takes both; Forced turns away plaintext peers;
         /// Disabled turns away obfuscated ones.
         EncPolicy in_enc_policy  = EncPolicy::Enabled;
+
+        /// Dial peers over uTP (BEP 29) when they look like they support it. On by
+        /// default, as in every modern client: it is what keeps a saturated swarm
+        /// from making the rest of the user's connection unusable, and most of the
+        /// swarm now answers UDP more readily than TCP. A peer that does not answer
+        /// costs exactly one round trip before we fall back (see
+        /// PeerList::note_utp_dial_failed).
+        bool enable_outgoing_utp = true;
+        /// Answer inbound uTP connections. Off means we still dial out over uTP but
+        /// never accept — the equivalent of a firewalled UDP port.
+        bool enable_incoming_utp = true;
+        /// Dial peers over TCP. Turning it off makes uTP the only outgoing
+        /// transport, which is only sensible on a link where TCP is the problem.
+        bool enable_outgoing_tcp = true;
     };
 
     Client();
@@ -166,8 +181,7 @@ public:
     DhtClient* get_dht_client() const noexcept { return dht_; }
 
     // ---- TorrentHost ----
-    void          connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port,
-                               bool prefer_encrypted) override;
+    void          connect_peer(Torrent& torrent, const PeerList::Endpoint& peer) override;
     const PeerId& peer_id() const override { return peer_id_; }
     void          find_peers_via_dht(const InfoHash& info_hash,
                                      std::function<void(const std::string& ip, std::uint16_t port)> on_peer) override;
@@ -182,6 +196,16 @@ public:
 private:
     void open_listener();
     void on_accept();
+    /// Build the resolver + stream-key pair every inbound connection needs, and
+    /// wrap @p link in a PeerConnection. Shared by the TCP and uTP accept paths,
+    /// which differ in nothing but how the bytes arrive.
+    void adopt_inbound(std::unique_ptr<PeerLink> link, std::string ip, std::uint16_t port);
+    /// An inbound uTP stream completed its handshake; give it a PeerConnection.
+    void on_utp_accept(utp::Stream& stream);
+    /// Dial @p peer over uTP. Returns false if uTP is unavailable, so the caller
+    /// falls back to TCP.
+    bool connect_peer_utp(Torrent& torrent, const PeerList::Endpoint& peer, DialOptions opts);
+    void connect_peer_tcp(Torrent& torrent, const PeerList::Endpoint& peer, DialOptions opts);
     /// Should this dial be obfuscated? Policy decides outright unless it is
     /// Enabled, in which case the peer's own alternation does.
     bool dial_encrypted(bool prefer_encrypted) const noexcept;
@@ -220,6 +244,10 @@ private:
 
     Reactor       reactor_;
     Config        config_;
+    /// The one shared UDP socket every uTP peer rides, bound to the same port as
+    /// the TCP listener (see open_listener). Empty of streams — and cheap — when
+    /// uTP is switched off on both sides.
+    utp::Manager  utp_;
     PeerId        peer_id_;
     socket_t      listener_     = RATS_INVALID_SOCKET;
     std::uint16_t actual_port_  = 0;

@@ -12,6 +12,7 @@ Client::Client() : Client(Config{}) {}
 
 Client::Client(Config config)
     : config_(std::move(config))
+    , utp_(reactor_)
     , peer_id_(generate_peer_id(config_.peer_id_prefix)) {}
 
 Client::~Client() {
@@ -59,6 +60,8 @@ void Client::stop() {
     }
     pending_connects_.clear();
     if (is_valid_socket(listener_)) { reactor_.remove(listener_); close_socket(listener_); listener_ = RATS_INVALID_SOCKET; }
+    // After connections_, so every UtpPeerLink has already handed its stream back.
+    utp_.close();
     // Fresh token, so a Client that is start()ed again gets DHT peers delivered.
     // Safe to swap unsynchronised: the reactor thread is joined and the old token is
     // kept alive by whatever callbacks still hold it.
@@ -66,16 +69,44 @@ void Client::stop() {
 }
 
 void Client::open_listener() {
-    listener_ = create_tcp_server(config_.listen_port, 16, "", AddressFamily::IPv4);
+    const bool want_utp = config_.enable_outgoing_utp || config_.enable_incoming_utp;
+
+    // TCP and uTP must answer on the *same* port: a peer learns one number for us
+    // (from the tracker, the DHT or PEX) and has to be able to reach us with it
+    // over either wire. When the port is ephemeral the TCP bind picks it and the
+    // UDP bind may then find that number already taken by something else, so the
+    // pair is acquired as a pair and retried as one.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        listener_ = create_tcp_server(config_.listen_port, 16, "", AddressFamily::IPv4);
+        if (!is_valid_socket(listener_)) break;
+        actual_port_ = std::uint16_t(get_bound_port(listener_));
+        if (!want_utp || utp_.open(actual_port_)) break;
+
+        if (config_.listen_port != 0) {
+            // A fixed port has nowhere else to go. TCP still works, so run without
+            // uTP rather than refusing to start.
+            LOG_WARN("bt.client", "UDP port " << actual_port_
+                                  << " unavailable — running without uTP");
+            break;
+        }
+        close_socket(listener_);
+        listener_ = RATS_INVALID_SOCKET;
+    }
+
     if (!is_valid_socket(listener_)) {
         LOG_ERROR("bt.client", "failed to bind listen port " << config_.listen_port
                                << " — inbound peers disabled");
         return;
     }
     set_socket_nonblocking(listener_);
-    actual_port_ = std::uint16_t(get_bound_port(listener_));
     reactor_.add(listener_, PollIn, [this](std::uint32_t) { on_accept(); });
-    LOG_INFO("bt.client", "listening on port " << actual_port_);
+
+    if (utp_.is_open()) {
+        utp_.set_accept_incoming(config_.enable_incoming_utp);
+        utp_.set_accept_handler([this](utp::Stream& s) { on_utp_accept(s); });
+    }
+    LOG_INFO("bt.client", "listening on port " << actual_port_
+                          << (utp_.is_open() ? " (TCP + uTP)" : " (TCP)"));
 }
 
 void Client::on_accept() {
@@ -106,28 +137,45 @@ void Client::on_accept() {
             }
         }
 
-        auto resolver = [this](const InfoHash& ih, PeerConnection::Binding& out) -> bool {
-            auto it = torrents_.find(ih);
-            if (it == torrents_.end() || !it->second) return false;
-            out.observer   = it->second.get();
-            out.num_pieces = it->second->num_pieces();
-            return true;
-        };
-        // An inbound peer may open either protocol; the connection sniffs which and
-        // enforces in_enc_policy. The stream-key resolver is what lets an obfuscated
-        // peer name its torrent without ever putting the info-hash on the wire.
-        mse::Handshake::SkeyResolver skey =
-            [this](const std::uint8_t* obfuscated, const std::uint8_t* req3, InfoHash& out) {
-                return resolve_mse_skey(obfuscated, req3, out);
-            };
-        auto pc = std::make_unique<PeerConnection>(reactor_, s, peer_id_, std::move(resolver),
-                                                   std::move(ip), port, config_.in_enc_policy,
-                                                   std::move(skey));
-        LOG_DEBUG("bt.client", "inbound connection from " << ip << ':' << port);
-        PeerConnection* raw = pc.get();
-        connections_.push_back(std::move(pc));
-        raw->start();
+        adopt_inbound(std::make_unique<TcpPeerLink>(reactor_, s), std::move(ip), port);
     }
+}
+
+void Client::adopt_inbound(std::unique_ptr<PeerLink> link, std::string ip, std::uint16_t port) {
+    auto resolver = [this](const InfoHash& ih, PeerConnection::Binding& out) -> bool {
+        auto it = torrents_.find(ih);
+        if (it == torrents_.end() || !it->second) return false;
+        out.observer   = it->second.get();
+        out.num_pieces = it->second->num_pieces();
+        return true;
+    };
+    // An inbound peer may open either protocol; the connection sniffs which and
+    // enforces in_enc_policy. The stream-key resolver is what lets an obfuscated
+    // peer name its torrent without ever putting the info-hash on the wire.
+    mse::Handshake::SkeyResolver skey =
+        [this](const std::uint8_t* obfuscated, const std::uint8_t* req3, InfoHash& out) {
+            return resolve_mse_skey(obfuscated, req3, out);
+        };
+    LOG_DEBUG("bt.client", "inbound connection from " << ip << ':' << port);
+    auto pc = std::make_unique<PeerConnection>(reactor_, std::move(link), peer_id_,
+                                               std::move(resolver), std::move(ip), port,
+                                               config_.in_enc_policy, std::move(skey));
+    PeerConnection* raw = pc.get();
+    connections_.push_back(std::move(pc));
+    raw->start();
+}
+
+void Client::on_utp_accept(utp::Stream& stream) {
+    // The stream cap is the manager's; this is the session-wide connection cap. A
+    // stream we refuse here is simply left without an observer, which is exactly
+    // what tells the manager to reap it on its next pass.
+    if (connections_.size() >= kMaxConnections) {
+        LOG_DEBUG("bt.client", "connection cap " << kMaxConnections
+                               << " reached, dropping inbound uTP");
+        return;
+    }
+    const Address& from = stream.remote();
+    adopt_inbound(std::make_unique<UtpPeerLink>(utp_, stream), from.ip.to_string(), from.port);
 }
 
 bool Client::dial_encrypted(bool prefer_encrypted) const noexcept {
@@ -150,9 +198,61 @@ bool Client::resolve_mse_skey(const std::uint8_t* obfuscated, const std::uint8_t
     return false;
 }
 
-void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t port,
-                          bool prefer_encrypted) {
-    if (connections_.size() >= kMaxConnections) { torrent.on_connect_failed(ip, port); return; }
+void Client::connect_peer(Torrent& torrent, const PeerList::Endpoint& peer) {
+    if (connections_.size() >= kMaxConnections) {
+        torrent.on_connect_failed(peer.ip, peer.port);
+        return;
+    }
+
+    DialOptions opts;
+    opts.obfuscate = dial_encrypted(peer.prefer_encrypted);
+    // Only an alternating policy has a second encryption form to fall back to. Under
+    // Forced or Disabled there is nothing else to try there, so a refusal is a plain
+    // failure and the peer should serve its usual backoff.
+    const bool enc_alternates = config_.out_enc_policy == EncPolicy::Enabled;
+
+    if (config_.enable_outgoing_utp && peer.prefer_utp && utp_.is_open()) {
+        // A uTP dial that never reaches a handshake is worth retrying immediately —
+        // over TCP if we have it, otherwise with the other encryption form.
+        opts.retry_other_form_on_failure = enc_alternates || config_.enable_outgoing_tcp;
+        if (connect_peer_utp(torrent, peer, opts)) return;
+    }
+    if (!config_.enable_outgoing_tcp) {
+        torrent.on_connect_failed(peer.ip, peer.port);
+        return;
+    }
+    opts.retry_other_form_on_failure = enc_alternates;
+    connect_peer_tcp(torrent, peer, opts);
+}
+
+bool Client::connect_peer_utp(Torrent& torrent, const PeerList::Endpoint& peer, DialOptions opts) {
+    // IpAddress::parse rather than the Address(string, port) constructor: that one
+    // asserts on anything non-numeric, and while every peer source we have hands us
+    // numeric addresses, a dial is not the place to discover otherwise.
+    const auto ip = IpAddress::parse(peer.ip);
+    if (!ip) return false;
+    utp::Stream* stream = utp_.connect(Address(*ip, peer.port));
+    if (stream == nullptr) return false;
+
+    // No pending-connect bookkeeping, unlike TCP: the stream accepts the handshake
+    // bytes immediately and holds them until its SYN is answered, so there is no
+    // half-open state for the Client to track. The stream's own connect timeout and
+    // the connection's handshake deadline both still apply.
+    auto pc = std::make_unique<PeerConnection>(reactor_,
+                                               std::make_unique<UtpPeerLink>(utp_, *stream),
+                                               /*outgoing=*/true, torrent.info_hash(), peer_id_,
+                                               torrent.num_pieces(), &torrent,
+                                               peer.ip, peer.port, opts);
+    LOG_DEBUG("bt.client", "dialing " << peer.ip << ':' << peer.port << " over uTP");
+    PeerConnection* raw = pc.get();
+    connections_.push_back(std::move(pc));
+    raw->start();
+    return true;
+}
+
+void Client::connect_peer_tcp(Torrent& torrent, const PeerList::Endpoint& endpoint, DialOptions enc) {
+    const std::string   ip   = endpoint.ip;
+    const std::uint16_t port = endpoint.port;
     socket_t s = tcp_connect_start(ip, int(port));
     if (!is_valid_socket(s)) { torrent.on_connect_failed(ip, port); return; }
 
@@ -161,13 +261,6 @@ void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t
     // than dereference a dangling pointer (H10). The socket is tracked so a
     // mid-connect stop() can reclaim it.
     const InfoHash ih = torrent.info_hash();
-
-    DialEncryption enc;
-    enc.obfuscate = dial_encrypted(prefer_encrypted);
-    // Only an alternating policy has a second form to fall back to. Under Forced or
-    // Disabled there is nothing else to try, so a refusal is a plain failure and the
-    // peer should serve its usual backoff.
-    enc.retry_other_form_on_failure = config_.out_enc_policy == EncPolicy::Enabled;
 
     // The connect deadline. Whichever of the two fires first takes the socket out
     // of pending_connects_; the other then finds it gone and does nothing, so the
@@ -196,9 +289,10 @@ void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t
             if (t) t->on_connect_failed(ip, port);
             return;
         }
-        auto pc = std::make_unique<PeerConnection>(reactor_, s, /*outgoing=*/true,
-                                                   t->info_hash(), peer_id_, t->num_pieces(), t,
-                                                   ip, port, enc);
+        auto pc = std::make_unique<PeerConnection>(reactor_,
+                                                   std::make_unique<TcpPeerLink>(reactor_, s),
+                                                   /*outgoing=*/true, t->info_hash(), peer_id_,
+                                                   t->num_pieces(), t, ip, port, enc);
         PeerConnection* raw = pc.get();
         connections_.push_back(std::move(pc));
         raw->start();

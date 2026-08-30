@@ -77,8 +77,10 @@ protected:
         for (std::size_t i = 0; i < 20; ++i) info_[i] = std::uint8_t(i + 1);
         pa_ = generate_peer_id("-LR0001-");
         pb_ = generate_peer_id("-LR0002-");
-        a_ = std::make_unique<PeerConnection>(r_, sa_, /*outgoing=*/true,  info_, pa_, num_pieces_, &obs_a_);
-        b_ = std::make_unique<PeerConnection>(r_, sb_, /*outgoing=*/false, info_, pb_, num_pieces_, &obs_b_);
+        a_ = std::make_unique<PeerConnection>(r_, std::make_unique<TcpPeerLink>(r_, sa_),
+                                              /*outgoing=*/true,  info_, pa_, num_pieces_, &obs_a_);
+        b_ = std::make_unique<PeerConnection>(r_, std::make_unique<TcpPeerLink>(r_, sb_),
+                                              /*outgoing=*/false, info_, pb_, num_pieces_, &obs_b_);
         a_->start();
         b_->start();
     }
@@ -258,8 +260,8 @@ TEST(BtPeerConnectionStandalone, MismatchedInfoHashCloses) {
     PeerId pb = generate_peer_id("-LR0002-");
     Recorder oa, ob;
 
-    PeerConnection a(r, sa, /*outgoing=*/true,  mine,  pa, 4, &oa);
-    PeerConnection b(r, sb, /*outgoing=*/false, other, pb, 4, &ob);
+    PeerConnection a(r, std::make_unique<TcpPeerLink>(r, sa), /*outgoing=*/true,  mine,  pa, 4, &oa);
+    PeerConnection b(r, std::make_unique<TcpPeerLink>(r, sb), /*outgoing=*/false, other, pb, 4, &ob);
     a.start();
     b.start();
 

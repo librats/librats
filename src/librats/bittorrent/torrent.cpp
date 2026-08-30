@@ -201,7 +201,7 @@ void Torrent::try_connect() {
     if (!running_ || paused_ || peers_.size() >= kMaxPeers) return;
     auto candidates = peer_list_.connect_candidates(kMaxPeers - peers_.size(),
                                                     PeerList::Clock::now());
-    for (const auto& c : candidates) host_.connect_peer(*this, c.ip, c.port, c.prefer_encrypted);
+    for (const auto& c : candidates) host_.connect_peer(*this, c);
 }
 
 void Torrent::on_connect_failed(const std::string& ip, std::uint16_t port) {
@@ -278,7 +278,7 @@ void Torrent::on_handshake(PeerConnection& pc, const InfoHash&, const PeerId&) {
     peers_.push_back(&pc);
     outstanding_[&pc] = 0;
     recent_down_[&pc] = 0;
-    peer_list_.set_connected(pc.remote_ip(), pc.remote_port(), pc.encrypted());
+    peer_list_.set_connected(pc.remote_ip(), pc.remote_port(), pc.encrypted(), pc.transport());
     // Milestone: the first peer on a torrent is worth an INFO line; the rest are
     // routine (each peer's handshake is already logged at DEBUG in bt.peer).
     if (peers_.size() == 1)
@@ -548,6 +548,13 @@ void Torrent::on_closed(PeerConnection& pc, const std::string&) {
                      : pc.handshake_done() ? PeerList::Disconnect::Clean
                      : pc.fast_reconnect() ? PeerList::Disconnect::FailedRetryNow
                                            : PeerList::Disconnect::Failed;
+    // A dial we opened over uTP that never reached a handshake says something the
+    // failure count alone does not: this peer probably has no uTP at all. Record it
+    // so the immediate retry above goes out over TCP instead of repeating itself.
+    // Only for outgoing connections — an inbound uTP peer that drops us proves the
+    // transport works, whatever else went wrong.
+    if (pc.outgoing() && pc.transport() == PeerTransport::Utp && !pc.handshake_done())
+        peer_list_.note_utp_dial_failed(pc.remote_ip(), pc.remote_port());
     peer_list_.on_disconnected(pc.remote_ip(), pc.remote_port(), how, PeerList::Clock::now());
     pex_sent_.erase(&pc);
     remove_peer(&pc);

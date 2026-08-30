@@ -45,6 +45,20 @@ enum class EncPolicy {
     Disabled,
 };
 
+/// Which wire a peer connection is carried on. Both are first-class: the
+/// BitTorrent protocol above them is byte-for-byte identical, and a peer reached
+/// either way is treated the same everywhere except when deciding how to dial it
+/// again (see PeerList::Peer::supports_utp).
+enum class PeerTransport : std::uint8_t {
+    /// A kernel TCP socket. Always available, universally reachable, and rude to
+    /// everything else sharing the uplink.
+    Tcp,
+    /// uTP (BEP 29) over the session's one shared UDP socket: same guarantees,
+    /// delay-based congestion control that yields to TCP instead of competing with
+    /// it, and one NAT mapping for the whole swarm.
+    Utp,
+};
+
 // ---- Protocol constants ----
 constexpr char          kProtocolString[]    = "BitTorrent protocol";  // 19 chars (+NUL)
 constexpr std::size_t   kProtocolStringLen   = 19;

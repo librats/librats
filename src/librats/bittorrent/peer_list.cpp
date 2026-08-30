@@ -39,7 +39,12 @@ std::vector<PeerList::Endpoint> PeerList::connect_candidates(std::size_t max, Cl
     for (std::size_t i = 0; i < take; ++i) {
         Peer& p = *eligible_peers[i];
         p.connecting = true;
-        out.push_back(Endpoint{p.ip, p.port, p.prefer_encrypted});
+        // uTP unless this peer has already shown it has none. Unlike the encryption
+        // form this is a latch, not an alternation: one failed uTP dial settles the
+        // question, and re-asking it every other attempt would spend a wasted round
+        // trip on a peer we already know the answer for.
+        out.push_back(Endpoint{p.ip, p.port, p.prefer_encrypted,
+                               p.supports_utp || p.confirmed_supports_utp});
         // Flip now, not on failure: this attempt has claimed the current mode, so
         // whatever happens to it the *next* one should try the other. A success
         // pins the working mode back in set_connected().
@@ -48,13 +53,28 @@ std::vector<PeerList::Endpoint> PeerList::connect_candidates(std::size_t max, Cl
     return out;
 }
 
-void PeerList::set_connected(const std::string& ip, std::uint16_t port, bool encrypted) {
+void PeerList::set_connected(const std::string& ip, std::uint16_t port, bool encrypted,
+                             PeerTransport transport) {
     auto it = peers_.find(key(ip, port));
     if (it == peers_.end()) return;
-    it->second.connected        = true;
-    it->second.connecting       = false;
-    it->second.fail_count       = 0;  // reaching a working session clears the penalty
-    it->second.prefer_encrypted = encrypted;
+    Peer& p          = it->second;
+    p.connected        = true;
+    p.connecting       = false;
+    p.fail_count       = 0;  // reaching a working session clears the penalty
+    p.prefer_encrypted = encrypted;
+    if (transport == PeerTransport::Utp) {
+        // Proof rather than assumption. Clearing the optimistic flag alongside is
+        // libtorrent's bookkeeping: from here on the confirmation is what keeps us
+        // dialing uTP, so a stale guess can never contradict it.
+        p.confirmed_supports_utp = true;
+        p.supports_utp           = false;
+    }
+}
+
+void PeerList::note_utp_dial_failed(const std::string& ip, std::uint16_t port) {
+    auto it = peers_.find(key(ip, port));
+    if (it == peers_.end()) return;
+    it->second.supports_utp = false;
 }
 
 void PeerList::on_disconnected(const std::string& ip, std::uint16_t port, Disconnect how,

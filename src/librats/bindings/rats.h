@@ -417,6 +417,20 @@ typedef enum {
  */
 RATS_API rats_error_t rats_bt_set_encryption(rats_t node, rats_bt_enc_policy_t out_policy,
                                              rats_bt_enc_policy_t in_policy);
+
+/**
+ * Turn uTP (BEP 29) on or off, per direction. Optional — both are on by default,
+ * which is what every modern client ships: uTP's delay-based congestion control
+ * yields to other traffic instead of saturating the user's uplink, and much of the
+ * swarm answers UDP more readily than TCP. A peer with no uTP costs one connect
+ * timeout before the dial falls back to TCP, and is remembered.
+ *
+ * Pass non-zero to enable each direction. Turning outgoing uTP off makes every dial TCP. Turning incoming off still dials
+ * out over uTP but never answers, which is what a blocked inbound UDP port looks
+ * like anyway. Must be called BEFORE rats_enable_bittorrent, since the setting is
+ * fixed when the session is created.
+ */
+RATS_API rats_error_t rats_bt_set_utp(rats_t node, int enable_outgoing, int enable_incoming);
 /** Start downloading a magnet link (metadata is fetched from peers). */
 RATS_API rats_error_t rats_bt_add_magnet(rats_t node, const char* magnet_uri, const char* save_path);
 /** Start a torrent from a .torrent file on disk. */

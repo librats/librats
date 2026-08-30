@@ -16,6 +16,8 @@
  * the Torrent supplies Clock::now().
  */
 
+#include "librats/bittorrent/types.h"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +47,9 @@ public:
         /// the session's policy is EncPolicy::Enabled, where it alternates per
         /// attempt so a peer that refuses one form is reached with the other.
         bool          prefer_encrypted = true;
+        /// Whether to dial over uTP rather than TCP. Only consulted when the
+        /// session has outgoing uTP enabled.
+        bool          prefer_utp = true;
     };
 
     struct Peer {
@@ -66,6 +71,16 @@ public:
         /// How many backoff waivers this peer has already been granted; see
         /// kMaxFastReconnects.
         std::uint8_t      fast_reconnects  = 0;
+        /// Optimism: assume every peer speaks uTP until one proves otherwise, since
+        /// most of the swarm does and a peer that does not costs exactly one wasted
+        /// dial to discover (which the fast-reconnect waiver then makes free).
+        /// Cleared by the first uTP dial that fails to reach a handshake.
+        bool              supports_utp = true;
+        /// A uTP connection to this peer has actually worked. Outranks the guess
+        /// above and is never withdrawn: a peer that answered uTP once will answer
+        /// it again, and a later failure is far more likely to be the peer being
+        /// gone than the transport being wrong.
+        bool              confirmed_supports_utp = false;
     };
 
     static constexpr std::uint32_t kMaxFails = 5;
@@ -98,8 +113,19 @@ public:
     /// The peer completed its handshake: it is a live connection, and whatever
     /// failures it accumulated getting here no longer count against it.
     /// @p encrypted records whether that took MSE, so the next dial starts there
-    /// instead of paying for the alternation again.
-    void set_connected(const std::string& ip, std::uint16_t port, bool encrypted);
+    /// instead of paying for the alternation again; @p transport does the same for
+    /// the wire it arrived on.
+    void set_connected(const std::string& ip, std::uint16_t port, bool encrypted,
+                       PeerTransport transport = PeerTransport::Tcp);
+
+    /// An outgoing uTP dial to this peer never reached a handshake. Take it as
+    /// evidence the peer has no uTP — the overwhelmingly likely cause, since a peer
+    /// whose TCP port is reachable usually has the UDP one blocked rather than the
+    /// other way round — and dial it over TCP from here on. Paired with
+    /// Disconnect::FailedRetryNow, so the TCP attempt happens immediately rather
+    /// than after the backoff: the whole point is that one wasted dial costs
+    /// nothing but a round trip.
+    void note_utp_dial_failed(const std::string& ip, std::uint16_t port);
 
     /// Why a connection to this peer ended — the three cases earn different
     /// treatment on the way back in.

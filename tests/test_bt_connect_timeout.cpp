@@ -91,6 +91,11 @@ TEST(BtConnectTimeout, AbandonsUnreachablePeerAtTheDeadline) {
     cfg.download_path    = dir;
     cfg.peer_id_prefix   = "-LR0004-";
     cfg.connect_timeout  = std::chrono::milliseconds(200);
+    // This is the *TCP* connect deadline, and num_pending_connects() only counts TCP
+    // dials — a uTP dial has no half-open state to track (it is a datagram exchange
+    // with its own timeout). Left on, the default uTP-first policy would mean no TCP
+    // connect ever starts and the test would measure nothing.
+    cfg.enable_outgoing_utp = false;
 
     Client c(cfg);
     c.open();
@@ -146,6 +151,10 @@ TEST(BtConnectTimeout, CompletedConnectSurvivesItsDeadline) {
     // rather than have the default MSE-first policy stall against a peer that
     // cannot complete it — see test_bt_mse_wire.cpp for the obfuscated path.
     cfg.out_enc_policy  = EncPolicy::Disabled;
+    // Same reason as above, plus: the fake peer is a TCP listener, so a uTP dial
+    // would simply spend its 3 s connect timeout before falling back. Nothing to do
+    // with the deadline under test.
+    cfg.enable_outgoing_utp = false;
 
     Client c(cfg);
     c.open();

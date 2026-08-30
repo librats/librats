@@ -10,12 +10,6 @@ namespace librats::bittorrent {
 
 namespace {
 
-#ifdef _WIN32
-inline bool would_block() { return WSAGetLastError() == WSAEWOULDBLOCK; }
-#else
-inline bool would_block() { return errno == EAGAIN || errno == EWOULDBLOCK; }
-#endif
-
 /// Largest message we will accept. A bitfield for ~16M pieces fits; a piece
 /// message is ~16 KiB. Anything larger is treated as a protocol violation.
 constexpr std::uint32_t kMaxMessageLen = 2 * 1024 * 1024;
@@ -56,13 +50,13 @@ constexpr auto kTickInterval     = std::chrono::seconds(10);
 
 } // namespace
 
-PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
+PeerConnection::PeerConnection(Reactor& reactor, std::unique_ptr<PeerLink> link, bool outgoing,
                                const InfoHash& info_hash, const PeerId& our_peer_id,
                                std::uint32_t num_pieces, Observer* observer,
                                std::string remote_ip, std::uint16_t remote_port,
-                               DialEncryption enc)
+                               DialOptions opts)
     : reactor_(reactor)
-    , sock_(sock)
+    , link_(std::move(link))
     , outgoing_(outgoing)
     , info_hash_(info_hash)
     , our_peer_id_(our_peer_id)
@@ -71,15 +65,16 @@ PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
     , bound_(true)
     , remote_ip_(std::move(remote_ip))
     , remote_port_(remote_port)
-    , want_mse_(enc.obfuscate)
-    , fast_reconnect_(enc.retry_other_form_on_failure)
+    , want_mse_(opts.obfuscate)
+    , fast_reconnect_(opts.retry_other_form_on_failure)
     , peer_have_(num_pieces, false) {}
 
-PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, const PeerId& our_peer_id,
+PeerConnection::PeerConnection(Reactor& reactor, std::unique_ptr<PeerLink> link,
+                               const PeerId& our_peer_id,
                                Resolver resolver, std::string remote_ip, std::uint16_t remote_port,
                                EncPolicy enc_policy, mse::Handshake::SkeyResolver skey)
     : reactor_(reactor)
-    , sock_(sock)
+    , link_(std::move(link))
     , outgoing_(false)
     , info_hash_{}
     , our_peer_id_(our_peer_id)
@@ -100,18 +95,13 @@ PeerConnection::~PeerConnection() {
     // Cancel the tick before we die so its captured `this` can never fire on freed
     // memory. Same reactor thread owns both the timer and this destructor.
     if (tick_timer_ != kInvalidTimerId) { reactor_.cancel(tick_timer_); tick_timer_ = kInvalidTimerId; }
-    if (!closed_ && is_valid_socket(sock_)) {
-        reactor_.remove(sock_);
-        close_socket(sock_);
-        sock_ = RATS_INVALID_SOCKET;
-    }
+    if (!closed_) link_->close();
 }
 
 void PeerConnection::start() {
     if (started_) return;
     started_ = true;
-    set_socket_nonblocking(sock_);
-    reactor_.add(sock_, PollIn, [this](std::uint32_t ev) { on_io(ev); });
+    link_->start(this);
 
     const auto now = std::chrono::steady_clock::now();
     created_ = last_recv_ = last_sent_ = now;
@@ -169,11 +159,7 @@ void PeerConnection::close(const std::string& reason) {
     // consumer, remote close, torrent stop): one greppable line per disconnect.
     LOG_DEBUG("bt.peer", remote_ip_ << ':' << remote_port_ << " disconnect: " << reason);
     if (tick_timer_ != kInvalidTimerId) { reactor_.cancel(tick_timer_); tick_timer_ = kInvalidTimerId; }
-    if (is_valid_socket(sock_)) {
-        reactor_.remove(sock_);
-        close_socket(sock_);
-        sock_ = RATS_INVALID_SOCKET;
-    }
+    link_->close();
     // Drop the send backlog; rx_ is deliberately left alone — close() can be called
     // from inside a message handler that still holds a ByteView into it.
     tx_.clear();
@@ -182,13 +168,16 @@ void PeerConnection::close(const std::string& reason) {
 
 // ---- I/O ----
 
-void PeerConnection::on_io(std::uint32_t events) {
-    if (closed_) return;
-    if (events & PollOut) flush();
-    if (closed_) return;
-    if (events & PollIn) do_read();
-    if (closed_) return;
-    if (events & (PollErr | PollHup)) close("socket error");
+void PeerConnection::on_link_readable() {
+    if (!closed_) do_read();
+}
+
+void PeerConnection::on_link_writable() {
+    if (!closed_) flush();
+}
+
+void PeerConnection::on_link_error(const std::string& reason) {
+    if (!closed_) close(reason);
 }
 
 void PeerConnection::do_read() {
@@ -203,14 +192,11 @@ void PeerConnection::do_read() {
     for (;;) {
         const ByteSpan into = rx_.prepare(read_size());
 
-        const int n = ::recv(sock_, reinterpret_cast<char*>(into.data()),
-                             static_cast<int>(into.size()), 0);
-        if (n == 0) { close("peer closed connection"); return; }
-        if (n < 0) {
-            if (would_block()) return;
-            close("recv error");
-            return;
-        }
+        const PeerLink::IoResult r = link_->read(into);
+        if (r.status == PeerLink::Status::WouldBlock) return;
+        if (r.status == PeerLink::Status::Closed) { close("peer closed connection"); return; }
+        if (r.status == PeerLink::Status::Error)  { close("recv error"); return; }
+        const std::size_t n = r.bytes;
 
         last_recv_ = std::chrono::steady_clock::now();
 
@@ -218,18 +204,18 @@ void PeerConnection::do_read() {
             // The obfuscated handshake owns the stream while it runs: these bytes
             // are its business, not rx_'s, and they are landed in rx_'s spare tail
             // only because that is where the recv() had to go. Nothing is committed.
-            pump_mse(mse_->consume(into.data(), std::size_t(n)));
+            pump_mse(mse_->consume(into.data(), n));
         } else {
             // Past the handshake the payload cipher is a plain XOR over the stream,
             // so decrypting each arrival in place — before anything else looks at
             // it — is all it takes to make the rest of the class cipher-agnostic.
-            if (rc4_active_) rc4_recv_.process(into.data(), std::size_t(n));
-            rx_.commit(std::size_t(n));
+            if (rc4_active_) rc4_recv_.process(into.data(), n);
+            rx_.commit(n);
             parse();
         }
         if (closed_) return;
 
-        if (std::size_t(n) < into.size()) return;  // kernel buffer drained
+        if (n < into.size()) return;  // the link has nothing more ready
     }
 }
 
@@ -589,14 +575,15 @@ void PeerConnection::flush() {
         ByteView slices[kMaxSendSlices];
         const std::size_t count = tx_.gather(slices, kMaxSendSlices);
 
-        const std::ptrdiff_t n = send_vectored(sock_, slices, count);
-        if (n > 0) {
+        const PeerLink::IoResult r = link_->write(slices, count);
+        if (r.status == PeerLink::Status::Ok && r.bytes > 0) {
             last_sent_ = std::chrono::steady_clock::now();
-            tx_.pop_front(std::size_t(n));
+            tx_.pop_front(r.bytes);
             continue;
         }
-        if (n == 0) break;                 // nothing accepted; retry on PollOut
-        if (would_block()) break;          // congested; the backlog waits for PollOut
+        // Nothing accepted: the link is congested and the backlog waits to be told
+        // it may write again.
+        if (r.status != PeerLink::Status::Error) break;
         close("send error");
         return;
     }
@@ -612,7 +599,7 @@ void PeerConnection::flush() {
 void PeerConnection::want_write(bool on) {
     if (on == want_write_ || closed_) return;
     want_write_ = on;
-    reactor_.modify(sock_, PollIn | (on ? PollOut : PollNone));
+    link_->want_write(on);
 }
 
 void PeerConnection::tick() {

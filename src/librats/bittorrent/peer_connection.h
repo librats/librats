@@ -5,11 +5,13 @@
  * @brief One peer link: the BitTorrent wire handshake, message codec and the
  *        choke/interest state machine.
  *
- * A PeerConnection owns a non-blocking TCP socket registered with a Reactor and
- * lives entirely on that reactor's thread. It turns the byte stream into
- * protocol events delivered to an Observer, and offers send_* methods to emit
- * messages. It deliberately knows nothing about pieces-to-request strategy or
- * disk — the owning Torrent (a later phase) drives those through this surface.
+ * A PeerConnection owns a non-blocking byte stream — a PeerLink, which is either
+ * a TCP socket or a uTP stream (BEP 29) — and lives entirely on the reactor's
+ * thread. It turns that stream into protocol events delivered to an Observer, and
+ * offers send_* methods to emit messages. It deliberately knows nothing about
+ * pieces-to-request strategy or disk — the owning Torrent drives those through
+ * this surface — and nothing about which transport carries it: everything below
+ * read/write is the link's business.
  *
  * Wire format: a 68-byte handshake, then length-prefixed messages
  * `[u32 length][u8 id][payload]` (length 0 = keep-alive). All integers are
@@ -25,6 +27,7 @@
 
 #include "librats/bittorrent/bitfield.h"
 #include "librats/bittorrent/mse.h"
+#include "librats/bittorrent/peer_link.h"
 #include "librats/bittorrent/reactor.h"
 #include "librats/bittorrent/types.h"
 #include "librats/core/bytes.h"
@@ -57,16 +60,17 @@ enum class MessageId : std::uint8_t {
 /// How an outgoing connection opens, and what a failure to open it means for the
 /// peer's next attempt. Decided by the caller from the session policy plus what
 /// worked for this peer last time; the connection just carries it.
-struct DialEncryption {
+struct DialOptions {
     /// Run an MSE handshake instead of writing a plaintext one.
     bool obfuscate = false;
-    /// This dial is one of an alternating pair (EncPolicy::Enabled), so a peer that
-    /// refuses it has probably refused the *form*, not us — the other one is worth
-    /// trying at once rather than after the reconnect backoff.
+    /// There is another way to reach this peer that we have not tried yet — the
+    /// other encryption form (EncPolicy::Enabled), or TCP after a uTP dial. A peer
+    /// that refuses this attempt has very likely refused the *form*, not us, so the
+    /// alternative is worth trying at once rather than after the reconnect backoff.
     bool retry_other_form_on_failure = false;
 };
 
-class PeerConnection {
+class PeerConnection : private PeerLink::Observer {
 public:
     /// Protocol events. All fire on the reactor thread; ByteView arguments are
     /// only valid for the duration of the call (copy if you need to keep them).
@@ -95,19 +99,20 @@ public:
     using Resolver = std::function<bool(const InfoHash& their_info_hash, Binding& out)>;
 
     /// Outgoing connection: we know the torrent up front.
+    /// @param link      the byte stream, TCP or uTP; owned from here on.
     /// @param num_pieces sizes the peer's bitfield; 0 if metadata isn't known yet.
-    /// @param enc       whether to open with an MSE handshake, and whether a
-    ///                  failure to open should be retried with the other form.
-    PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
+    /// @param opts      whether to open with an MSE handshake, and whether a
+    ///                  failure to open should be retried another way.
+    PeerConnection(Reactor& reactor, std::unique_ptr<PeerLink> link, bool outgoing,
                    const InfoHash& info_hash, const PeerId& our_peer_id,
                    std::uint32_t num_pieces, Observer* observer,
                    std::string remote_ip = "", std::uint16_t remote_port = 0,
-                   DialEncryption enc = DialEncryption{});
+                   DialOptions opts = DialOptions{});
     /// Incoming connection: the torrent is resolved from the peer's handshake.
     /// @param enc_policy what we accept — plaintext, MSE, or either.
     /// @param skey       resolves an obfuscated MSE stream key to a torrent;
     ///                   required whenever @p enc_policy permits MSE.
-    PeerConnection(Reactor& reactor, socket_t sock, const PeerId& our_peer_id,
+    PeerConnection(Reactor& reactor, std::unique_ptr<PeerLink> link, const PeerId& our_peer_id,
                    Resolver resolver, std::string remote_ip = "", std::uint16_t remote_port = 0,
                    EncPolicy enc_policy = EncPolicy::Disabled,
                    mse::Handshake::SkeyResolver skey = {});
@@ -125,6 +130,9 @@ public:
     bool            closed()          const noexcept { return closed_; }
     bool            handshake_done()  const noexcept { return handshake_sent_ && handshake_received_; }
     bool            outgoing()        const noexcept { return outgoing_; }
+    /// Which wire carries this connection. Only the reconnect policy cares — the
+    /// protocol above is identical either way.
+    PeerTransport   transport()       const noexcept { return link_->transport(); }
     /// True once an MSE handshake has completed. Note this says the *connection*
     /// was obfuscated, not that the payload is still encrypted — crypto_select may
     /// have settled on plaintext after the obfuscated header.
@@ -161,7 +169,11 @@ public:
     void send_extended(std::uint8_t ext_id, ByteView payload);
 
 private:
-    void on_io(std::uint32_t events);
+    // ---- PeerLink::Observer ----
+    void on_link_readable() override;
+    void on_link_writable() override;
+    void on_link_error(const std::string& reason) override;
+
     void do_read();
     std::size_t read_size() const;  ///< bytes to offer the next recv() (see rx_need_)
     void parse();
@@ -207,7 +219,7 @@ private:
     void tick();
 
     Reactor&      reactor_;
-    socket_t      sock_;
+    std::unique_ptr<PeerLink> link_;
     bool          outgoing_;
     InfoHash      info_hash_;
     PeerId        our_peer_id_;

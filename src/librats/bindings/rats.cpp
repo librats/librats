@@ -50,6 +50,8 @@ struct RatsHandle {
     /// Defaults match the C++ side: obfuscate outgoing dials first, accept both.
     bittorrent::EncPolicy bt_out_enc = bittorrent::EncPolicy::Enabled;
     bittorrent::EncPolicy bt_in_enc  = bittorrent::EncPolicy::Enabled;
+    bool bt_out_utp = true;
+    bool bt_in_utp  = true;
 #endif
     std::string data_dir;  ///< copied from NodeConfig so subsystems can co-locate state
     bool dht_enabled     = false;
@@ -693,8 +695,10 @@ rats_error_t rats_enable_bittorrent(rats_t node, uint16_t listen_port, const cha
         Bittorrent::Config cfg;
         cfg.client.listen_port    = listen_port;
         cfg.client.download_path  = download_path ? download_path : ".";
-        cfg.client.out_enc_policy = h->bt_out_enc;
-        cfg.client.in_enc_policy  = h->bt_in_enc;
+        cfg.client.out_enc_policy      = h->bt_out_enc;
+        cfg.client.in_enc_policy       = h->bt_in_enc;
+        cfg.client.enable_outgoing_utp = h->bt_out_utp;
+        cfg.client.enable_incoming_utp = h->bt_in_utp;
         h->bittorrent = h->node->add_subsystem(std::make_unique<Bittorrent>(cfg));
     }
     return RATS_OK;
@@ -730,6 +734,23 @@ rats_error_t rats_bt_set_encryption(rats_t node, rats_bt_enc_policy_t out_policy
     return RATS_OK;
 #else
     (void)node; (void)out_policy; (void)in_policy;
+    return RATS_ERR_NOT_ENABLED;
+#endif
+}
+
+rats_error_t rats_bt_set_utp(rats_t node, int enable_outgoing, int enable_incoming) {
+#ifdef RATS_SEARCH_FEATURES
+    auto* h = as_handle(node);
+    if (h->started) return RATS_ERR_ALREADY_STARTED;
+    // Same reasoning as rats_bt_set_encryption: the setting is baked into the
+    // session's config when it is created, so accepting it afterwards would
+    // silently do nothing.
+    if (h->bittorrent) return RATS_ERR_ALREADY_STARTED;
+    h->bt_out_utp = enable_outgoing != 0;
+    h->bt_in_utp  = enable_incoming != 0;
+    return RATS_OK;
+#else
+    (void)node; (void)enable_outgoing; (void)enable_incoming;
     return RATS_ERR_NOT_ENABLED;
 #endif
 }

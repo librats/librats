@@ -381,6 +381,13 @@ if(RATS_SEARCH_FEATURES)
         src/librats/bittorrent/reactor.cpp
         src/librats/bittorrent/mse.h
         src/librats/bittorrent/mse.cpp
+        src/librats/bittorrent/utp_packet.h
+        src/librats/bittorrent/utp_stream.h
+        src/librats/bittorrent/utp_stream.cpp
+        src/librats/bittorrent/utp_manager.h
+        src/librats/bittorrent/utp_manager.cpp
+        src/librats/bittorrent/peer_link.h
+        src/librats/bittorrent/peer_link.cpp
         src/librats/bittorrent/peer_connection.h
         src/librats/bittorrent/peer_connection.cpp
         src/librats/bittorrent/choker.h
@@ -739,11 +746,13 @@ if(RATS_BUILD_TESTS)
             # Phase 4 — reactor + peer wire protocol
             tests/test_bt_reactor.cpp
             tests/test_bt_mse.cpp
+            tests/test_bt_utp.cpp
             tests/test_bt_peer_connection.cpp
             # Phase 5 — torrent + client + choker
             tests/test_bt_choker.cpp
             tests/test_bt_download.cpp
             tests/test_bt_mse_wire.cpp
+            tests/test_bt_utp_wire.cpp
             tests/test_bt_stall_metadata.cpp
             tests/test_bt_connect_timeout.cpp
             # Phase 6 — extension protocol + metadata exchange + discovery
