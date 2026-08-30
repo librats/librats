@@ -160,8 +160,14 @@ void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t
     // the connect completes, so we re-resolve it (and bail if it's gone) rather
     // than dereference a dangling pointer (H10). The socket is tracked so a
     // mid-connect stop() can reclaim it.
-    const InfoHash ih      = torrent.info_hash();
-    const bool     encrypt = dial_encrypted(prefer_encrypted);
+    const InfoHash ih = torrent.info_hash();
+
+    DialEncryption enc;
+    enc.obfuscate = dial_encrypted(prefer_encrypted);
+    // Only an alternating policy has a second form to fall back to. Under Forced or
+    // Disabled there is nothing else to try, so a refusal is a plain failure and the
+    // peer should serve its usual backoff.
+    enc.retry_other_form_on_failure = config_.out_enc_policy == EncPolicy::Enabled;
 
     // The connect deadline. Whichever of the two fires first takes the socket out
     // of pending_connects_; the other then finds it gone and does nothing, so the
@@ -177,7 +183,7 @@ void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t
     });
     pending_connects_.emplace(s, deadline);
 
-    reactor_.add(s, PollOut, [this, ih, s, ip, port, encrypt](std::uint32_t) {
+    reactor_.add(s, PollOut, [this, ih, s, ip, port, enc](std::uint32_t) {
         auto pending = pending_connects_.find(s);
         if (pending == pending_connects_.end()) return;  // the deadline already reclaimed it
         reactor_.cancel(pending->second);
@@ -192,7 +198,7 @@ void Client::connect_peer(Torrent& torrent, const std::string& ip, std::uint16_t
         }
         auto pc = std::make_unique<PeerConnection>(reactor_, s, /*outgoing=*/true,
                                                    t->info_hash(), peer_id_, t->num_pieces(), t,
-                                                   ip, port, encrypt);
+                                                   ip, port, enc);
         PeerConnection* raw = pc.get();
         connections_.push_back(std::move(pc));
         raw->start();

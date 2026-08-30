@@ -539,12 +539,14 @@ void Torrent::on_request(PeerConnection& pc, std::uint32_t piece, std::uint32_t 
 void Torrent::on_closed(PeerConnection& pc, const std::string&) {
     // A connection that died before the handshake completed never gave us anything;
     // count it against the peer so it backs off instead of being re-dialed on the
-    // next tick. A peer that requires encryption (which we do not speak) closes
-    // exactly here, and without the penalty we would hammer it once a second for as
-    // long as the torrent lives. A peer we dropped ourselves (pause) is neither
-    // penalised nor delayed — see releasing_peers_.
+    // next tick — without the penalty we would hammer it once a second for as long
+    // as the torrent lives. Two exceptions: a peer we dropped ourselves (pause) is
+    // neither penalised nor delayed, and a dial that may simply have opened with the
+    // wrong form of handshake is penalised but not delayed, so the other form can be
+    // tried at once rather than a minute later. See PeerList::Disconnect.
     const auto how = releasing_peers_      ? PeerList::Disconnect::Release
                      : pc.handshake_done() ? PeerList::Disconnect::Clean
+                     : pc.fast_reconnect() ? PeerList::Disconnect::FailedRetryNow
                                            : PeerList::Disconnect::Failed;
     peer_list_.on_disconnected(pc.remote_ip(), pc.remote_port(), how, PeerList::Clock::now());
     pex_sent_.erase(&pc);

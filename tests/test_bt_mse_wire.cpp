@@ -5,6 +5,7 @@
 #include "librats/bittorrent/bencode.h"
 #include "librats/crypto/sha1.h"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -167,6 +168,42 @@ TEST_F(BtMseWire, PlaintextStillWorksWithEncryptionDisabled) {
 // The shipping defaults, on both sides.
 TEST_F(BtMseWire, DefaultPoliciesInteroperate) {
     EXPECT_TRUE(transfer(EncPolicy::Enabled, EncPolicy::Enabled));
+}
+
+// The fast-reconnect path, end to end. The seeder refuses obfuscated connections,
+// the leecher's default policy opens with one — so the first dial is rejected and
+// the transfer can only happen if the peer is re-dialed in the other form. It is
+// the *time limit* that makes this a real test: the reconnect backoff alone would
+// be 120 s, so completing inside a few seconds of pumping is only possible because
+// a refused handshake waives the wait.
+TEST_F(BtMseWire, FallsBackToPlaintextWithoutServingTheBackoff) {
+    const Bytes data = make_data(40000);
+    TorrentInfo info = build_and_seed("f.bin", data, 16384, seed_dir());
+
+    Client seeder(config(seed_dir(), "-LR0001-", EncPolicy::Enabled, EncPolicy::Disabled));
+    Client leecher(config(dl_dir(), "-LR0002-", EncPolicy::Enabled, EncPolicy::Enabled));
+    seeder.open();
+    leecher.open();
+
+    Torrent* st = seeder.add_torrent(info, seed_dir());
+    Torrent* lt = leecher.add_torrent(info, dl_dir());
+    ASSERT_NE(st, nullptr);
+    ASSERT_NE(lt, nullptr);
+    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return st->state() == Torrent::State::Seeding; }));
+
+    const auto started = std::chrono::steady_clock::now();
+    lt->add_peer("127.0.0.1", seeder.listen_port());
+    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }, 12000))
+        << "progress=" << lt->progress() << " peers=" << lt->num_peers();
+
+    // The redial rides the torrent's one-second tick, so a handful of seconds is
+    // plenty of headroom while still being nowhere near a served backoff.
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    EXPECT_LT(elapsed, std::chrono::seconds(30))
+        << "the plaintext retry looks like it waited out the reconnect backoff";
+
+    seeder.stop();
+    leecher.stop();
 }
 
 // A seeder is the interesting direction for volume: pieces flow seeder -> leecher,

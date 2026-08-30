@@ -60,7 +60,7 @@ PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
                                const InfoHash& info_hash, const PeerId& our_peer_id,
                                std::uint32_t num_pieces, Observer* observer,
                                std::string remote_ip, std::uint16_t remote_port,
-                               bool encrypt)
+                               DialEncryption enc)
     : reactor_(reactor)
     , sock_(sock)
     , outgoing_(outgoing)
@@ -71,7 +71,8 @@ PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
     , bound_(true)
     , remote_ip_(std::move(remote_ip))
     , remote_port_(remote_port)
-    , want_mse_(encrypt)
+    , want_mse_(enc.obfuscate)
+    , fast_reconnect_(enc.retry_other_form_on_failure)
     , peer_have_(num_pieces, false) {}
 
 PeerConnection::PeerConnection(Reactor& reactor, socket_t sock, const PeerId& our_peer_id,

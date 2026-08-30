@@ -63,6 +63,9 @@ public:
         /// else — and flips on each attempt so a peer is eventually tried both
         /// ways. A completed handshake pins it to whatever actually worked.
         bool              prefer_encrypted = true;
+        /// How many backoff waivers this peer has already been granted; see
+        /// kMaxFastReconnects.
+        std::uint8_t      fast_reconnects  = 0;
     };
 
     static constexpr std::uint32_t kMaxFails = 5;
@@ -75,6 +78,13 @@ public:
     /// it. Mirrors libtorrent's min_reconnect_time (60 s) and its
     /// `session_time - last_connected < (failcount + 1) * min_reconnect_time` gate.
     static constexpr std::chrono::seconds kMinReconnectInterval{60};
+
+    /// How many times a peer may skip that wait to try the *other* encryption
+    /// form (see Disconnect::FailedRetryNow). Two covers both alternations; past
+    /// that a peer that keeps refusing us waits its turn like any other, which is
+    /// what stops an endless one-second ping-pong with a peer that rejects both.
+    /// Mirrors libtorrent's cap on torrent_peer::fast_reconnects.
+    static constexpr std::uint8_t kMaxFastReconnects = 2;
 
     /// Add or merge a candidate. Returns true if it was newly created.
     bool add(const std::string& ip, std::uint16_t port, PeerSource source);
@@ -97,6 +107,14 @@ public:
         /// It never became usable: refused mid-handshake, protocol error, dropped
         /// before the handshake completed. Penalised and backed off.
         Failed,
+        /// Failed as above, but we dialed one of two alternating encryption forms
+        /// and the other is worth trying at once — the peer very likely refused
+        /// the handshake we opened with, not us. Penalised like Failed (so a peer
+        /// that rejects both still runs out of chances) but made eligible
+        /// immediately instead of waiting out a minute to learn a one-bit answer.
+        /// Granted at most kMaxFastReconnects times per peer. libtorrent's
+        /// fast_reconnect, which rewinds last_connected for the same reason.
+        FailedRetryNow,
         /// It carried a real session and then ended. No penalty, but still backed
         /// off — re-opening a connection the peer just closed helps nobody.
         Clean,

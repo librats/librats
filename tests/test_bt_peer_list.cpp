@@ -223,6 +223,55 @@ TEST(BtPeerList, ASuccessfulHandshakePinsTheModeThatWorked) {
     EXPECT_FALSE(again[0].prefer_encrypted);
 }
 
+// Learning that a peer wanted the other form of handshake costs one round trip;
+// making it cost a minute of backoff on top is the thing this waiver removes.
+TEST(BtPeerList, FailedRetryNowSkipsTheBackoff) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Dht);
+
+    auto first = pl.connect_candidates(1, T0);
+    ASSERT_EQ(first.size(), 1u);
+    ASSERT_TRUE(first[0].prefer_encrypted);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::FailedRetryNow, T0);
+
+    // Eligible again straight away — and with the other form, since the hand-out
+    // above already flipped the preference.
+    auto second = pl.connect_candidates(1, T0);
+    ASSERT_EQ(second.size(), 1u) << "the waiver did not make the peer eligible";
+    EXPECT_FALSE(second[0].prefer_encrypted);
+}
+
+// The waiver skips the wait, not the penalty: a peer that refuses us whatever we
+// open with still runs out of chances rather than being dialed forever.
+TEST(BtPeerList, FailedRetryNowStillCountsAsAFailure) {
+    PeerList pl;
+    pl.add("1.1.1.1", 1, PeerSource::Dht);
+
+    pl.connect_candidates(1, T0);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::FailedRetryNow, T0);
+    pl.connect_candidates(1, T0);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::FailedRetryNow, T0);
+
+    // Both waivers are spent, so the third failure serves its time like any other.
+    // Each of the three counted, so the wait is (3 + 1) * 60 s.
+    auto third = pl.connect_candidates(1, T0);
+    ASSERT_EQ(third.size(), 1u);
+    pl.on_disconnected("1.1.1.1", 1, PeerList::Disconnect::FailedRetryNow, T0);
+    EXPECT_EQ(pl.num_candidates(T0), 0u) << "a third waiver was granted";
+    EXPECT_EQ(pl.num_candidates(at(std::chrono::seconds(239))), 0u);
+    EXPECT_EQ(pl.num_candidates(at(std::chrono::seconds(240))), 1u);
+
+    // And the failures still accumulate toward the drop threshold.
+    auto now = at(std::chrono::seconds(240));
+    while (pl.num_candidates(now) > 0) {
+        auto c = pl.connect_candidates(1, now);
+        pl.on_disconnected(c[0].ip, c[0].port, PeerList::Disconnect::FailedRetryNow, now);
+        now += PeerList::kMinReconnectInterval * (PeerList::kMaxFails + 1);
+    }
+    EXPECT_EQ(pl.num_candidates(now + std::chrono::hours(24)), 0u)
+        << "the peer was never dropped";
+}
+
 TEST(BtPeerList, BanRemovesFromCandidates) {
     PeerList pl;
     pl.add("1.1.1.1", 1, PeerSource::Tracker);

@@ -54,6 +54,18 @@ enum class MessageId : std::uint8_t {
     Extended      = 20,
 };
 
+/// How an outgoing connection opens, and what a failure to open it means for the
+/// peer's next attempt. Decided by the caller from the session policy plus what
+/// worked for this peer last time; the connection just carries it.
+struct DialEncryption {
+    /// Run an MSE handshake instead of writing a plaintext one.
+    bool obfuscate = false;
+    /// This dial is one of an alternating pair (EncPolicy::Enabled), so a peer that
+    /// refuses it has probably refused the *form*, not us — the other one is worth
+    /// trying at once rather than after the reconnect backoff.
+    bool retry_other_form_on_failure = false;
+};
+
 class PeerConnection {
 public:
     /// Protocol events. All fire on the reactor thread; ByteView arguments are
@@ -84,14 +96,13 @@ public:
 
     /// Outgoing connection: we know the torrent up front.
     /// @param num_pieces sizes the peer's bitfield; 0 if metadata isn't known yet.
-    /// @param encrypt   open with an MSE handshake rather than a plaintext one.
-    ///                  The caller decides (policy, plus what worked for this peer
-    ///                  last time); the connection just does as it is told.
+    /// @param enc       whether to open with an MSE handshake, and whether a
+    ///                  failure to open should be retried with the other form.
     PeerConnection(Reactor& reactor, socket_t sock, bool outgoing,
                    const InfoHash& info_hash, const PeerId& our_peer_id,
                    std::uint32_t num_pieces, Observer* observer,
                    std::string remote_ip = "", std::uint16_t remote_port = 0,
-                   bool encrypt = false);
+                   DialEncryption enc = DialEncryption{});
     /// Incoming connection: the torrent is resolved from the peer's handshake.
     /// @param enc_policy what we accept — plaintext, MSE, or either.
     /// @param skey       resolves an obfuscated MSE stream key to a torrent;
@@ -118,6 +129,10 @@ public:
     /// was obfuscated, not that the payload is still encrypted — crypto_select may
     /// have settled on plaintext after the obfuscated header.
     bool            encrypted()       const noexcept { return encrypted_; }
+    /// Should a failure to reach the handshake on this connection skip the peer's
+    /// reconnect backoff, so the other encryption form can be tried at once?
+    /// Meaningless once handshake_done() — by then the form is known to work.
+    bool            fast_reconnect()  const noexcept { return fast_reconnect_; }
     bool            am_choking()      const noexcept { return am_choking_; }
     bool            am_interested()   const noexcept { return am_interested_; }
     bool            peer_choking()    const noexcept { return peer_choking_; }
@@ -215,6 +230,9 @@ private:
     bool                            rc4_active_ = false;  ///< payload stream is RC4'd
     bool                            encrypted_  = false;  ///< an MSE handshake completed
     bool                            want_mse_   = false;  ///< outbound: dial obfuscated
+    /// Outbound: this dial was one of an alternating pair, so failing to reach the
+    /// handshake earns the peer an immediate retry with the other form.
+    bool                            fast_reconnect_ = false;
     bool                            detecting_  = false;  ///< inbound: still sniffing
     InfoHash                        mse_skey_{};          ///< torrent the stream key named
     /// Scratch for encrypting copy-appends, kept around so a steady stream of small

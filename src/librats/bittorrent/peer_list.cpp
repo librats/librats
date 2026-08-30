@@ -65,10 +65,24 @@ void PeerList::on_disconnected(const std::string& ip, std::uint16_t port, Discon
     p.connected  = false;
     p.connecting = false;
     if (how == Disconnect::Release) return;  // our own doing — leave the peer untouched
+
+    const bool failed = how == Disconnect::Failed || how == Disconnect::FailedRetryNow;
+    if (failed && p.fail_count < kMaxFails) ++p.fail_count;
+
+    // A waiver clears the clock rather than setting it, so the peer reads as never
+    // dialed and comes back on the very next pass — the whole point being to learn
+    // whether it wanted the other form of handshake, which costs one round trip and
+    // should not cost a minute. Still counted against fail_count above, and rationed
+    // by kMaxFastReconnects, so this cannot become a loop.
+    if (how == Disconnect::FailedRetryNow && p.fast_reconnects < kMaxFastReconnects) {
+        ++p.fast_reconnects;
+        p.last_attempt = Clock::time_point{};
+        return;
+    }
+
     // Stamp the attempt even for a clean disconnect: the backoff is what keeps the
     // dial loop from immediately re-opening a connection the peer just closed.
     p.last_attempt = now;
-    if (how == Disconnect::Failed && p.fail_count < kMaxFails) ++p.fail_count;
 }
 
 void PeerList::on_connect_failed(const std::string& ip, std::uint16_t port, Clock::time_point now) {
