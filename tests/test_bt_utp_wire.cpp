@@ -95,12 +95,31 @@ protected:
         return c;
     }
 
-    bool pump_until(Client& a, Client& b, const std::function<bool()>& done, int iters = 8000) {
-        for (int i = 0; i < iters; ++i) {
+    /// How long a transfer that *should* work is given. Every one of them finishes
+    /// in well under a second, so this is a hang guard and nothing else.
+    static constexpr std::chrono::milliseconds kTransferBudget{60000};
+    /// How long a transfer that must *not* happen is watched for. A uTP dial to a
+    /// port that will not answer dies on utp::kConnectTimeoutMs (3 s) — a stream
+    /// that has never been heard from fails on its first timeout — and with TCP
+    /// turned off there is nothing to follow it, so this watches well past the end
+    /// of everything that can happen.
+    static constexpr std::chrono::milliseconds kRefusalBudget{6000};
+
+    /// Drive both reactors until @p done, or until @p budget of wall clock is gone.
+    ///
+    /// The budget is real time rather than a number of iterations on purpose: an
+    /// idle poll returns when the OS timer granularity says so and not when we
+    /// asked, so a fixed iteration count buys wildly different amounts of waiting
+    /// on different kernels — and the negative control below is made of nothing but
+    /// waiting. Spelling the wait as time keeps it honest and bounded.
+    bool pump_until(Client& a, Client& b, const std::function<bool()>& done,
+                    std::chrono::milliseconds budget = kTransferBudget) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        do {
             if (done()) return true;
             a.reactor().run_one(2);
             b.reactor().run_one(2);
-        }
+        } while (std::chrono::steady_clock::now() < deadline);
         return done();
     }
 
@@ -169,7 +188,7 @@ TEST_F(BtUtpWire, UtpOnlyDialerCannotReachASeederWithInboundUtpOff) {
     ASSERT_TRUE(pump_until(seeder, leecher, [&] { return st->state() == Torrent::State::Seeding; }));
 
     lt->add_peer("127.0.0.1", seeder.listen_port());
-    EXPECT_FALSE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }, 2000));
+    EXPECT_FALSE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }, kRefusalBudget));
 
     seeder.stop();
     leecher.stop();
@@ -230,7 +249,7 @@ TEST_F(BtUtpWire, FallsBackToTcpWithoutServingTheReconnectBackoff) {
 
     const auto started = std::chrono::steady_clock::now();
     lt->add_peer("127.0.0.1", seeder.listen_port());
-    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }, 20000))
+    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }))
         << "progress=" << lt->progress() << " peers=" << lt->num_peers();
 
     // The uTP dial gives up after its own connect timeout (3 s) and the redial rides
@@ -267,7 +286,7 @@ TEST_F(BtUtpWire, LargeTransferOverUtpIsByteExact) {
     ASSERT_TRUE(pump_until(seeder, leecher, [&] { return st->state() == Torrent::State::Seeding; }));
 
     lt->add_peer("127.0.0.1", seeder.listen_port());
-    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }, 60000))
+    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }))
         << "progress=" << lt->progress() << " peers=" << lt->num_peers();
 
     std::ifstream in((stdfs::path(dl_dir()) / "big.bin").string(), std::ios::binary);

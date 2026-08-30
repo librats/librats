@@ -86,18 +86,37 @@ protected:
         return c;
     }
 
-    bool pump_until(Client& a, Client& b, const std::function<bool()>& done, int iters = 8000) {
-        for (int i = 0; i < iters; ++i) {
+    /// How long a transfer that *should* work is given. Every one of them finishes
+    /// in tens of milliseconds, so this is a hang guard and nothing else.
+    static constexpr std::chrono::milliseconds kTransferBudget{30000};
+    /// How long a transfer that must *not* happen is watched for. The refusal costs
+    /// one round trip and earns one immediate retry, which rides the torrent's
+    /// one-second tick — so the whole sequence is over ~1.1 s in and nothing can
+    /// follow it until the 60 s reconnect backoff, far beyond any budget here.
+    static constexpr std::chrono::milliseconds kRefusalBudget{3000};
+
+    /// Drive both reactors until @p done, or until @p budget of wall clock is gone.
+    ///
+    /// The budget is real time rather than a number of iterations on purpose: an
+    /// idle poll returns when the OS timer granularity says so and not when we
+    /// asked, so a fixed iteration count buys wildly different amounts of waiting
+    /// on different kernels — and the negative controls below are made of nothing
+    /// but waiting. Spelling the wait as time keeps them honest and bounded.
+    bool pump_until(Client& a, Client& b, const std::function<bool()>& done,
+                    std::chrono::milliseconds budget = kTransferBudget) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        do {
             if (done()) return true;
             a.reactor().run_one(2);
             b.reactor().run_one(2);
-        }
+        } while (std::chrono::steady_clock::now() < deadline);
         return done();
     }
 
     /// Seed a torrent, dial it from the leecher, and report whether it downloaded.
     /// The two policies are the whole point of each test below.
-    bool transfer(EncPolicy leecher_out, EncPolicy seeder_in, int iters = 8000) {
+    bool transfer(EncPolicy leecher_out, EncPolicy seeder_in,
+                  std::chrono::milliseconds budget = kTransferBudget) {
         const Bytes data = make_data(40000);           // 3 pieces of 16 KiB
         TorrentInfo info = build_and_seed("f.bin", data, 16384, seed_dir());
 
@@ -116,7 +135,7 @@ protected:
                                [&] { return st->state() == Torrent::State::Seeding; }));
 
         lt->add_peer("127.0.0.1", seeder.listen_port());
-        const bool done = pump_until(seeder, leecher, [&] { return lt->is_complete(); }, iters);
+        const bool done = pump_until(seeder, leecher, [&] { return lt->is_complete(); }, budget);
 
         // Verify the bytes really are the bytes, not just that the state machine
         // declared victory: an encryption bug that corrupted the stream would fail
@@ -151,13 +170,13 @@ TEST_F(BtMseWire, ForcedOnBothSidesTransfersEndToEnd) {
 // unable to obfuscate, the same Forced seeder must refuse it. If this passed, the
 // two above would prove nothing.
 TEST_F(BtMseWire, ForcedSeederRefusesAPlaintextOnlyDialer) {
-    EXPECT_FALSE(transfer(EncPolicy::Disabled, EncPolicy::Forced, /*iters=*/1500));
+    EXPECT_FALSE(transfer(EncPolicy::Disabled, EncPolicy::Forced, kRefusalBudget));
 }
 
 // And the mirror image: a seeder that refuses obfuscation must refuse a dialer
 // that will only obfuscate.
 TEST_F(BtMseWire, SeederWithEncryptionOffRefusesAnMseOnlyDialer) {
-    EXPECT_FALSE(transfer(EncPolicy::Forced, EncPolicy::Disabled, /*iters=*/1500));
+    EXPECT_FALSE(transfer(EncPolicy::Forced, EncPolicy::Disabled, kRefusalBudget));
 }
 
 // Plaintext must keep working exactly as before for peers on both extremes.
@@ -193,7 +212,7 @@ TEST_F(BtMseWire, FallsBackToPlaintextWithoutServingTheBackoff) {
 
     const auto started = std::chrono::steady_clock::now();
     lt->add_peer("127.0.0.1", seeder.listen_port());
-    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }, 12000))
+    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }))
         << "progress=" << lt->progress() << " peers=" << lt->num_peers();
 
     // The redial rides the torrent's one-second tick, so a handful of seconds is
@@ -225,7 +244,7 @@ TEST_F(BtMseWire, EncryptedTransferSurvivesManyPiecesAndPartialReads) {
     ASSERT_TRUE(pump_until(seeder, leecher, [&] { return st->state() == Torrent::State::Seeding; }));
 
     lt->add_peer("127.0.0.1", seeder.listen_port());
-    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }, 30000))
+    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }))
         << "progress=" << lt->progress() << " peers=" << lt->num_peers();
 
     std::ifstream in((stdfs::path(dl_dir()) / "big.bin").string(), std::ios::binary);
