@@ -2,10 +2,12 @@
 
 React Native bindings for librats, built on [Nitro Modules](https://nitro.margelo.com).
 
-Status: **working on both platforms.** Core messaging and peer events, file
-transfer, and pub/sub, verified running on an iOS simulator and an Android
-emulator by the [example app](#example-app). Discovery (DHT, mDNS) and NAT
-traversal controls are not here yet — see [Scope](#scope-of-this-slice).
+Status: **working on both platforms.** Messaging, file transfer, pub/sub, DHT and
+mDNS discovery, NAT traversal, typed JSON messaging, peer exchange, distributed
+storage and BitTorrent are all bound, and verified by the
+[example app](#example-app) on an iOS simulator and on two physical Android
+devices. Only spider mode is deliberately left out — see
+[Scope](#scope-of-this-slice).
 
 ## Why Nitro
 
@@ -249,6 +251,271 @@ If you need to drop messages, do it in the `subscribe` listener. The difference 
 that you cannot prevent the message being forwarded to the rest of the mesh — for
 that, a validator has to live in native code.
 
+## DHT discovery
+
+Joins the BitTorrent Mainline DHT — a real, public, multi-million-node network —
+and finds peers by announcing under a hash derived from `discoveryKey`. Opt in
+with `enableDht()` before `start()`.
+
+```ts
+const node = createNode({ dataDir, protocol: 'myapp/1.0' })
+node.enableDht({ discoveryKey: 'myapp-v1' })   // or {} for the node's protocol
+
+node.onPeerConnected((peerId) => console.log('peer', peerId))
+node.start()
+
+const s = node.dhtStatus()   // { running, port, portV6, discoveryHash, externalAddress }
+```
+
+**There is no `onPeerDiscovered`.** The subsystem does not hand peers back for you
+to dial — it dials them itself through the node, so discovery surfaces as ordinary
+`onPeerConnected` events. The only thing separating a DHT-found peer from one you
+dialled is that you never called `connect()` for it.
+
+Expect it to be slow. Joining, announcing and searching each run on their own
+interval, so the first discovery usually lands tens of seconds after `start()`.
+`dhtStatus().externalAddress` is a useful progress signal: it fills in once STUN
+or in-DHT voting resolves the public IP.
+
+Unlike `enableMdns()`, this needs nothing declared and asks the user for no
+permission — it is plain UDP to other nodes, not multicast.
+
+Two configuration notes. `discoveryKey` namespaces who finds whom; leaving it
+empty uses the node's `protocol`, so peers of the same app version meet and
+mismatched protocols — which could not handshake anyway — never do. And `dataDir`
+holds the routing table so a restart bootstraps warm; it defaults to the node's
+own `dataDir`, because the library's fallback is the working directory, which is
+not writable on mobile. With neither set, persistence silently does nothing and
+every start is a cold bootstrap.
+
+## mDNS discovery
+
+For peers on the same Wi-Fi. The node advertises `_librats._tcp` with its listen
+port, browses for the same type, and dials what it finds — no key to agree on, no
+bootstrap node, and no internet connection at all.
+
+```ts
+node.enableMdns()                              // before start()
+node.enableMdns({ instanceName: 'kitchen' })   // default: rats-<peer id prefix>
+```
+
+Like the DHT it dials for you, so discovery arrives as `onPeerConnected`. Unlike
+the DHT it is quick — a peer on the same network usually appears in a second or
+two, which makes it by far the easiest way to get two devices talking.
+
+**Each platform needs one declaration, and both fail silently.** A missing
+declaration is indistinguishable from an empty network: no error, no peers.
+
+*iOS* needs two Info.plist keys in the consuming app:
+
+```xml
+<key>NSLocalNetworkUsageDescription</key>
+<string>Finds other devices running this app on your network.</string>
+<key>NSBonjourServices</key>
+<array><string>_librats._tcp</string></array>
+```
+
+Without `NSBonjourServices` listing the type, browsing returns nothing; without the
+usage description iOS cannot show the local-network prompt, so consent is denied by
+default. The first `start()` triggers that prompt — and the user can refuse it.
+
+*Android* needs `CHANGE_WIFI_MULTICAST_STATE`, which **this package's manifest
+already merges into your app**, so there is nothing to add. What it does not do is
+hold a `WifiManager.MulticastLock`. The Wi-Fi stack is documented to filter
+multicast frames not addressed to the device, though in practice most modern
+hardware delivers them anyway while awake. If discovery works with the screen on
+and stops when the device dozes, that filtering is the reason, and the app needs to
+take the lock — the permission to do so is already declared.
+
+Under the hood the two platforms use different backends, because iOS 14 gates
+direct multicast behind an entitlement Apple grants only on request: Apple
+platforms go through Bonjour (`mDNSResponder`), everything else uses a multicast
+socket directly. Both speak standard mDNS, so an iPhone and an Android phone
+discover each other normally — the split is invisible on the wire and in this API.
+
+Three things will defeat it regardless of setup: a device on cellular only (no
+local network to discover on), Wi-Fi client isolation on guest networks, and VPNs
+that capture all traffic.
+
+## NAT traversal
+
+Three mechanisms, in order of preference, plus one read-only signal that tells you
+which of them can work.
+
+```ts
+node.enablePortMapping()                 // ask the router to forward the port
+node.enableHolePunch()                   // both sides dial at the same instant
+node.enableRelay({ serve: false })       // carry the stream through a third node
+node.start()
+
+node.natStatus()          // { mapping, observationCount, externalEndpoints }
+node.portMappingStatus()  // { externalIp, externalTcpPort, externalUdpPort }
+node.punch(peerId)            // false = attempt could not even start
+node.connectViaRelay(peerId)  // false = no usable relay known
+```
+
+**Start with `natStatus().mapping`** when a cross-network dial fails. It needs no
+subsystem — the node collects it from the identify exchange for free — and it
+answers the only question that matters:
+
+| `mapping` | Meaning |
+|---|---|
+| `unknown` | Fewer than two independent UDP observations yet. Not a failure. |
+| `open` | No NAT in the path; an ordinary dial already reaches you. |
+| `endpointIndependent` | One external port for every destination — **punchable**. |
+| `endpointDependent` | A fresh mapping per destination (symmetric) — **a punch cannot work**; relay is the only way through. |
+
+That last row is the one with budget attached. A punch is free; a relay needs a
+node that is actually reachable, which in practice means **a server you run**. So
+whether your users land on `endpointDependent` decides whether this is
+peer-to-peer software or peer-to-peer software plus infrastructure — and on mobile
+carrier networks, `endpointDependent` is common. Measure it on real networks
+before committing to a design.
+
+`punch()` and `connectViaRelay()` are non-blocking and their return value only
+says whether an attempt could be *started* — success arrives as `onPeerConnected`.
+`punch()` returns false with no peer in common to carry the rendezvous, or while a
+target is in cooldown after earlier failures.
+
+`serve: false` is the default on `enableRelay` and the right answer on mobile:
+carrying other peers' traffic costs bandwidth and battery, and a phone is rarely
+reachable enough to be useful as a relay anyway.
+
+Port mapping maps TCP and UDP independently, because a router may grant one and
+refuse the other — hence two separate ports in `portMappingStatus()`. Behind
+carrier-grade NAT it will simply never succeed: there is no router of yours to ask.
+
+## Typed JSON messaging
+
+A named-type message bus carrying JSON, separate from the raw channels of
+`send`/`onMessage` — it rides `MessageType::Typed` with its own `[type][payload]`
+framing.
+
+```ts
+node.enableJsonMessaging()
+
+node.onJson('chat', (peerId, json) => {
+  const { text } = JSON.parse(json)
+})
+
+node.start()
+node.sendJson(peerId, 'chat', JSON.stringify({ text: 'hi' }))
+```
+
+**Use this for interoperability, not ergonomics.** Its reason to exist is talking
+to non-RN peers that already use librats' `MessageJson` — a C++, Java or Python
+node. If you control both ends, **raw channels are the cheaper choice**:
+`send`/`onMessage` already give you named routing and the authenticated peer id,
+and you would be calling `JSON.stringify` either way. This path additionally
+parses your string into the library's JSON type and re-serialises it for the wire,
+so it does strictly more work than passing the bytes yourself.
+
+JSON crosses the boundary as a **string**, not an object. That keeps the contract
+unambiguous and lets Hermes' native `JSON.parse`/`stringify` do the work, rather
+than a bespoke object bridge with its own edge cases around nested arrays and
+number precision.
+
+Three behaviours that differ from the rest of this API:
+
+- **`onJson` is additive.** Several handlers can coexist for one type and all fire
+  in registration order — unlike `onMessage` and `subscribe`, where registering
+  again replaces. `offJson(type)` removes them all.
+- **`peerId` cannot be spoofed.** It is the authenticated id from the handshake,
+  not a field inside the payload.
+- **Invalid JSON throws** at the call rather than failing silently later, and
+  `sendJson`/`broadcastJson` return false for "peer not connected" / "no peers".
+  Those booleans are accurate, not optimistic: the library's callback runs inline
+  before the call returns.
+
+## Keepalive and reconnection
+
+Two small subsystems that matter far more on a phone than on a desktop.
+
+```ts
+node.enablePing({ intervalMs: 10000 })
+node.enableReconnection()          // peer book persists under dataDir by default
+node.start()
+
+node.peerRtt(peerId)               // ms, or -1 if no probe has returned
+node.alivePeerCount()              // peers that actually answered
+node.addReconnectTarget(`${host}:${port}`)
+node.knownPeers(16)                // best-known peers from the book
+```
+
+**Ping is not about latency numbers.** A peer behind NAT can vanish without either
+side's socket noticing, and a connection that looks fine is the worst kind of broken.
+`alivePeerCount()` is the honest count; `peerCount` is only the number of sockets that
+have not yet been told they are dead. `peerRtt()` returns **-1** when nothing has come
+back yet — which is also what an unreachable peer looks like, since the probe that
+would have measured it never returned.
+
+**Reconnection is what makes a mobile peer stay connected at all.** Networks change,
+radios sleep, NAT bindings expire; without it every drop needs the app to notice and
+re-dial. It reconciles targets against the peers actually connected each tick, so a
+peer that came back on an *inbound* link is left alone instead of dialled again. The
+peer book defaults to `<dataDir>/peers.json` — the library's own default is
+memory-only, which on a phone means forgetting every peer on every restart, so the
+binding co-locates it with the node's state instead.
+
+## BitTorrent
+
+A real BitTorrent client — magnets, `.torrent` files, trackers, peer exchange, and
+the Mainline DHT. Opt in with `enableBittorrent()` before `start()`.
+
+```ts
+const node = createNode({ dataDir, protocol: 'myapp/1.0' })
+node.enableDht()                                   // first, so the two share one DHT
+node.enableBittorrent({ downloadPath: `${dataDir}/torrents` })
+node.start()
+
+const hash = node.addMagnet('magnet:?xt=urn:btih:...')
+const s = node.torrentStatus(hash)   // { exists, name, hasMetadata, progress, ... }
+```
+
+**It is not part of the node's mesh.** This is the one subsystem that brings its own
+transport: `bittorrent::Client` runs its own reactor and listener and speaks the swarm
+protocol. No torrent peer appears in `peerIds`, `onPeerConnected`, or any channel —
+the two peer sets are entirely separate. What they share is the DHT: with
+`enableDht()` also attached the client borrows that same Kademlia node instead of
+standing up a second one, so there is one routing table for both. `enableDht()` must
+come first for that to happen; `bittorrentStats().usingNodeDht` tells you whether it
+did. Without a DHT it still runs, on trackers and peer exchange alone.
+
+**Progress is polled, not pushed.** There is no `onTorrentProgress`, because the
+underlying client exposes state rather than events. Poll `torrentStatus()` while a
+download is live — once a second is plenty. A magnet also starts with no metadata: the
+info dict is fetched from peers first (BEP 9), so `hasMetadata` is false for a moment
+and the name, size and file list arrive with it.
+
+`addMagnet()` resumes rather than restarts. It reads any resume file saved beside the
+destination, so re-adding a torrent after a restart continues from the pieces already
+on disk — and skips the metadata fetch entirely when the resume file carries the info
+dict. Call `saveResumeData()` or `saveAllResumeData()` before backgrounding to make
+that work.
+
+To show a torrent before committing to the download, `fetchTorrentMetadata()` adds a
+temporary metadata-only torrent, waits for the info dict, and removes it again —
+giving you the name, total size and file list for an info hash alone.
+
+**Build cost: 0.5 MB.** It is compiled out unless the native build defines
+`RATS_SEARCH_FEATURES`, which this package forces on for both platforms. Measured on a
+stripped `Release` build of librats for Android arm64 — the artifact an APK actually
+ships — it takes the library from **2.73 MB to 3.25 MB**, about +19%.
+
+Measure stripped, and measure release. The equivalent *debug unstripped* libraries
+differ by 10 MB, and the two debug APK libraries by 17 MB; those numbers describe
+symbol tables, not what a user downloads, and quoting them overstates the cost by more
+than thirty times.
+
+If the feature is not worth even that, remove the `set(RATS_SEARCH_FEATURES ON ...)`
+line from `android/CMakeLists.txt` and `../ios/CMakeLists.txt` **and** the BitTorrent
+methods from the spec — the flag alone will not link, because the binding calls
+`librats::Bittorrent` unconditionally.
+
+Spider mode — the DHT-wide infohash crawler the C++ subsystem exposes for
+rats-search — is deliberately not bound. It is a search-engine feature rather than an
+app one, and it crawls continuously, which is not something a phone should be doing.
+
 ## Scope of this slice
 
 Core: `configure`, `start`, `stop`, `isRunning`, `listenPort`, `localId`,
@@ -262,8 +529,34 @@ File transfer: `enableFileTransfer`, `sendFile`, `sendDirectory`, `acceptFile`,
 Pub/sub: `enablePubSub`, `subscribe`, `unsubscribe`, `publish`, `isSubscribed`,
 `subscribedTopics`, `topicPeers`, `meshPeers`. Not `setValidator` — see above.
 
-Not yet: DHT and mDNS discovery, NAT traversal controls, typed JSON messaging,
-and the storage and BitTorrent modules.
+Discovery: `enableDht`, `dhtStatus`, `enableMdns`.
+
+NAT traversal: `natStatus`, `enablePortMapping`, `portMappingStatus`,
+`enableHolePunch`, `punch`, `enableRelay`, `connectViaRelay`.
+
+Typed JSON: `enableJsonMessaging`, `sendJson`, `broadcastJson`, `onJson`,
+`onceJson`, `offJson`.
+
+Peer exchange: `enablePeerExchange`.
+
+Keepalive / reconnection: `enablePing`, `peerRtt`, `alivePeerCount`,
+`enableReconnection`, `addReconnectTarget`, `removeReconnectTarget`,
+`reconnectTargetCount`, `knownPeers`.
+
+BitTorrent: `enableBittorrent`, `addMagnet`, `addTorrentFile`, `removeTorrent`,
+`pauseTorrent`, `resumeTorrent`, `torrentStatus`, `torrentInfoHashes`,
+`bittorrentStats`, `saveResumeData`, `saveAllResumeData`, `fetchTorrentMetadata`.
+Not spider mode — see above.
+
+Storage: `enableStorage`, `putString`, `putInt`, `putDouble`, `putBinary`,
+`putJson`, `getString`, `getInt`, `getDouble`, `getBinary`, `getJson`,
+`getValueType`, `removeKey`, `hasKey`, `storageKeys`, `storageKeysWithPrefix`,
+`storageCount`, `clearStorage`, `saveStorage`, `loadStorage`, `compactStorage`,
+`requestStorageSync`, `isStorageSynced`, `storageStats`, `onStorageChange`.
+
+Nothing is left unbound now except spider mode. Checked against the source tree
+rather than from memory: `dht_service`, `hole_punch_service` and `relay_service` are
+internal interfaces, not subsystems you attach.
 
 ## Example app
 
@@ -378,6 +671,26 @@ Worth knowing before you change the build files:
   dialling side learns is the listener's — passing that back to the listener's own
   `sendFile()` has it offering the file to itself. Confirm delivery with
   `onFileProgress`/`onFileComplete`, not with the return value.
+- **`dhtStatus().discoveryHash` is all zeros until `start()`.** The hash is
+  derived when the subsystem attaches, which happens inside `start()` — and with
+  an empty `discoveryKey` the key is not even known before then, since it
+  resolves to the node's protocol at attach time. (Reading it early used to
+  return *uninitialised* bytes: `DhtDiscovery::hash_` was declared without an
+  initialiser, so the same call gave zeros on one platform and garbage on the
+  other. Fixed in `src/librats/subsystems/dht_discovery.h`; the example test is
+  what surfaced it.)
+- **Pin the module's Android `ndkVersion` to the app's.** With no `ndkVersion`,
+  AGP builds the library against the newest NDK installed, while the APK packages
+  the `libc++_shared.so` from the *app's* NDK (27.1.12297006 in the RN 0.87
+  template). Build against a newer one and the library ends up needing libc++
+  symbols that copy does not export — most visibly
+  `__cxa_init_primary_exception`, which newer libc++ emits for the
+  `std::promise`/`make_exception_ptr` path. The build succeeds and the app then
+  dies at launch with `UnsatisfiedLinkError: dlopen failed: cannot locate
+  symbol ...`. `android/build.gradle` now inherits `rootProject.ndkVersion`.
+  Do **not** "fix" this with `c++_static`: several .so files here exchange C++
+  types across boundaries (Nitro and JSI), which a per-library static libc++
+  quietly breaks.
 - **Resolve symlinks before walking up a path in CMake.** An example app reaches
   this package through `node_modules/react-native-librats -> ../..`, and
   `CMAKE_CURRENT_SOURCE_DIR` keeps the *linked* path — so a plain `../..` lands in

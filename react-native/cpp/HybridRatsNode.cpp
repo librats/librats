@@ -1,5 +1,6 @@
 #include "HybridRatsNode.hpp"
 
+#include <librats/core/address.h>
 #include <librats/core/bytes.h>
 #include <librats/core/types.h>
 #include <librats/node/config.h>
@@ -7,8 +8,23 @@
 #include <librats/peer/peer.h>
 #include <librats/peer/peer_id.h>
 #include <librats/subsystems/file_transfer.h>
+#include <librats/node/nat_status.h>
+#include <librats/subsystems/dht_discovery.h>
+#include <librats/subsystems/mdns_discovery.h>
+#include <librats/subsystems/hole_punch.h>
+#include <librats/subsystems/message_json.h>
+#include <librats/subsystems/port_mapping_service.h>
+#include <librats/subsystems/relay.h>
+#include <librats/storage/storage.h>
+#include <librats/bittorrent/magnet_uri.h>
+#include <librats/subsystems/bittorrent.h>
+#include <librats/subsystems/peer_exchange.h>
+#include <librats/subsystems/ping_service.h>
+#include <librats/subsystems/reconnection.h>
 #include <librats/subsystems/pubsub.h>
 
+#include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
@@ -90,6 +106,24 @@ FileProgress to_progress(const rats::FileTransfer::Progress& p) {
                       p.transfer_rate_bps, p.average_rate_bps,
                       static_cast<double>(p.elapsed.count()),
                       static_cast<double>(p.estimated_time_remaining.count()));
+}
+
+/// Lowercase hex of a 20-byte DHT hash.
+///
+/// Written out rather than calling librats' own to_hex: that lives in the
+/// librats::dht namespace, and inside HybridRatsNode the member function dht()
+/// shadows the namespace name, so neither rats::dht:: nor ::librats::dht::
+/// resolves at the call site.
+template <class Bytes20>
+std::string hash_to_hex(const Bytes20& hash) {
+  static constexpr char kDigits[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(hash.size() * 2);
+  for (uint8_t byte : hash) {
+    out.push_back(kDigits[byte >> 4]);
+    out.push_back(kDigits[byte & 0x0f]);
+  }
+  return out;
 }
 
 } // namespace
@@ -443,6 +477,866 @@ std::vector<std::string> HybridRatsNode::meshPeers(const std::string& topic) {
   std::vector<std::string> out;
   for (const auto& id : pubsub().mesh_peers(topic)) out.push_back(id.to_hex());
   return out;
+}
+
+// ── DHT discovery ───────────────────────────────────────────────────────────
+
+rats::DhtDiscovery& HybridRatsNode::dht() {
+  if (dht_ == nullptr) {
+    throw std::runtime_error(
+        "DHT discovery is not enabled - call enableDht() before start()");
+  }
+  return *dht_;
+}
+
+void HybridRatsNode::enableDht(const std::optional<DhtConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableDht() must be called before start()");
+  }
+  if (dht_ != nullptr) {
+    throw std::runtime_error("DHT discovery is already enabled");
+  }
+
+  rats::DhtDiscovery::Config cfg;
+
+  // Co-locate the routing table with the node's own state unless told otherwise.
+  // The library default is the working directory, which is not writable on either
+  // mobile platform, so inheriting data_dir is what makes persistence work at all
+  // here. Reading config_ (rather than the live Node) keeps this correct whether
+  // or not the Node has been constructed yet.
+  if (config_ != nullptr) cfg.data_dir = config_->data_dir;
+
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.dhtPort.has_value())      cfg.dht_port      = to_port(*c.dhtPort, "dhtPort");
+    if (c.dataDir.has_value())      cfg.data_dir      = *c.dataDir;
+    if (c.enableIpv4.has_value())   cfg.enable_ipv4   = *c.enableIpv4;
+    if (c.enableIpv6.has_value())   cfg.enable_ipv6   = *c.enableIpv6;
+    if (c.discoveryKey.has_value()) cfg.discovery_key = *c.discoveryKey;
+    if (c.discoverExternalIp.has_value()) {
+      cfg.discover_external_ip = *c.discoverExternalIp;
+    }
+    if (c.searchIntervalMs.has_value()) {
+      cfg.search_interval =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.searchIntervalMs));
+    }
+    if (c.announceIntervalMs.has_value()) {
+      cfg.announce_interval =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.announceIntervalMs));
+    }
+    if (c.bootstrapNodes.has_value()) {
+      for (const auto& entry : *c.bootstrapNodes) {
+        auto parsed = rats::HostEndpoint::parse(entry);
+        if (!parsed) {
+          throw std::invalid_argument(
+              "bootstrapNodes entry is not \"host:port\": " + entry);
+        }
+        cfg.bootstrap_nodes.push_back(*parsed);
+      }
+    }
+  }
+
+  dht_ = node().add_subsystem(std::make_unique<rats::DhtDiscovery>(std::move(cfg)));
+}
+
+DhtStatus HybridRatsNode::dhtStatus() {
+  auto& d = dht();
+  return DhtStatus(d.is_running(), static_cast<double>(d.dht_port()),
+                   static_cast<double>(d.dht_port_v6()),
+                   hash_to_hex(d.discovery_hash()), d.external_address());
+}
+
+// ── local-network discovery ─────────────────────────────────────────────────
+
+void HybridRatsNode::enableMdns(const std::optional<MdnsConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableMdns() must be called before start()");
+  }
+  if (mdns_ != nullptr) {
+    throw std::runtime_error("mDNS discovery is already enabled");
+  }
+
+  rats::MdnsDiscovery::Config cfg;
+  if (config.has_value() && config->instanceName.has_value()) {
+    cfg.instance_name = *config->instanceName;
+  }
+
+  // Only the pointer is kept: the subsystem has no post-attach API. It announces,
+  // browses and dials on its own, so discovery arrives as onPeerConnected events.
+  mdns_ = node().add_subsystem(std::make_unique<rats::MdnsDiscovery>(std::move(cfg)));
+}
+
+// ── NAT traversal ───────────────────────────────────────────────────────────
+
+NatStatus HybridRatsNode::natStatus() {
+  // No subsystem to enable: the node collects these observations from the
+  // identify exchange for free. Before any UDP peer has connected the mapping is
+  // simply Unknown.
+  const auto& status = node().nat_status();
+
+  std::vector<std::string> endpoints;
+  for (const auto& address : status.external_udp_endpoints()) {
+    endpoints.push_back(address.to_string());
+  }
+
+  NatMapping mapping = NatMapping::UNKNOWN;
+  switch (status.udp_mapping()) {
+    case rats::NatMapping::Unknown:             mapping = NatMapping::UNKNOWN; break;
+    case rats::NatMapping::Open:                mapping = NatMapping::OPEN; break;
+    case rats::NatMapping::EndpointIndependent: mapping = NatMapping::ENDPOINTINDEPENDENT; break;
+    case rats::NatMapping::EndpointDependent:   mapping = NatMapping::ENDPOINTDEPENDENT; break;
+  }
+
+  return NatStatus(mapping, static_cast<double>(status.observation_count()),
+                   std::move(endpoints));
+}
+
+rats::PortMappingService& HybridRatsNode::portMapping() {
+  if (port_mapping_ == nullptr) {
+    throw std::runtime_error(
+        "port mapping is not enabled - call enablePortMapping() before start()");
+  }
+  return *port_mapping_;
+}
+
+void HybridRatsNode::enablePortMapping(
+    const std::optional<PortMappingConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enablePortMapping() must be called before start()");
+  }
+  if (port_mapping_ != nullptr) {
+    throw std::runtime_error("port mapping is already enabled");
+  }
+
+  rats::PortMappingConfig cfg;
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.enabled.has_value())       cfg.enabled       = *c.enabled;
+    if (c.enableUpnp.has_value())    cfg.enable_upnp   = *c.enableUpnp;
+    if (c.enableNatpmp.has_value())  cfg.enable_natpmp = *c.enableNatpmp;
+    if (c.leaseDurationSeconds.has_value()) {
+      cfg.lease_duration_seconds =
+          static_cast<uint32_t>(*c.leaseDurationSeconds);
+    }
+  }
+
+  port_mapping_ =
+      node().add_subsystem(std::make_unique<rats::PortMappingService>(std::move(cfg)));
+}
+
+PortMappingStatus HybridRatsNode::portMappingStatus() {
+  auto& service = portMapping();
+  // The two protocols are mapped independently -- a router may grant one and
+  // refuse the other -- so both are reported separately rather than as one flag.
+  const auto tcp = service.mapped_public_address(rats::PortMapProtocol::TCP);
+  const auto udp = service.mapped_public_address(rats::PortMapProtocol::UDP);
+
+  std::string ip;
+  if (tcp.has_value())      ip = tcp->first;
+  else if (udp.has_value()) ip = udp->first;
+
+  return PortMappingStatus(ip,
+                           tcp.has_value() ? static_cast<double>(tcp->second) : 0.0,
+                           udp.has_value() ? static_cast<double>(udp->second) : 0.0);
+}
+
+rats::HolePunch& HybridRatsNode::holePunch() {
+  if (hole_punch_ == nullptr) {
+    throw std::runtime_error(
+        "hole punching is not enabled - call enableHolePunch() before start()");
+  }
+  return *hole_punch_;
+}
+
+void HybridRatsNode::enableHolePunch(const std::optional<HolePunchConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableHolePunch() must be called before start()");
+  }
+  if (hole_punch_ != nullptr) {
+    throw std::runtime_error("hole punching is already enabled");
+  }
+
+  rats::HolePunch::Config cfg;
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.maxRelays.has_value())    cfg.max_relays    = static_cast<size_t>(*c.maxRelays);
+    if (c.maxAddresses.has_value()) cfg.max_addresses = static_cast<size_t>(*c.maxAddresses);
+    if (c.attempts.has_value())     cfg.attempts      = static_cast<int>(*c.attempts);
+    if (c.roundTimeoutMs.has_value()) {
+      cfg.round_timeout =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.roundTimeoutMs));
+    }
+  }
+
+  hole_punch_ = node().add_subsystem(std::make_unique<rats::HolePunch>(std::move(cfg)));
+}
+
+bool HybridRatsNode::punch(const std::string& peerId) {
+  return holePunch().punch(parse_peer_id(peerId));
+}
+
+rats::Relay& HybridRatsNode::relay() {
+  if (relay_ == nullptr) {
+    throw std::runtime_error(
+        "relaying is not enabled - call enableRelay() before start()");
+  }
+  return *relay_;
+}
+
+void HybridRatsNode::enableRelay(const std::optional<RelayConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableRelay() must be called before start()");
+  }
+  if (relay_ != nullptr) {
+    throw std::runtime_error("relaying is already enabled");
+  }
+
+  rats::Relay::Config cfg;
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.enableClient.has_value())   cfg.enable_client   = *c.enableClient;
+    if (c.acceptInbound.has_value())  cfg.accept_inbound  = *c.acceptInbound;
+    if (c.serve.has_value())          cfg.serve           = *c.serve;
+    if (c.maxOutboundCircuits.has_value()) {
+      cfg.max_outbound_circuits = static_cast<size_t>(*c.maxOutboundCircuits);
+    }
+    if (c.maxCircuits.has_value()) {
+      cfg.max_circuits = static_cast<size_t>(*c.maxCircuits);
+    }
+    if (c.maxBytesPerCircuit.has_value()) {
+      cfg.max_bytes_per_circuit = static_cast<uint64_t>(*c.maxBytesPerCircuit);
+    }
+    if (c.openTimeoutMs.has_value()) {
+      cfg.open_timeout =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.openTimeoutMs));
+    }
+  }
+
+  relay_ = node().add_subsystem(std::make_unique<rats::Relay>(std::move(cfg)));
+}
+
+bool HybridRatsNode::connectViaRelay(const std::string& peerId) {
+  return relay().connect_via_relay(parse_peer_id(peerId));
+}
+
+// ── typed JSON messaging ────────────────────────────────────────────────────
+
+rats::MessageJson& HybridRatsNode::json() {
+  if (json_ == nullptr) {
+    throw std::runtime_error(
+        "JSON messaging is not enabled - call enableJsonMessaging() before start()");
+  }
+  return *json_;
+}
+
+void HybridRatsNode::enableJsonMessaging() {
+  if (started_) {
+    throw std::runtime_error("enableJsonMessaging() must be called before start()");
+  }
+  if (json_ != nullptr) {
+    throw std::runtime_error("JSON messaging is already enabled");
+  }
+  json_ = node().add_subsystem(std::make_unique<rats::MessageJson>());
+}
+
+namespace {
+
+/// Parse a JS-supplied JSON string into the library's Json type, turning a parse
+/// failure into an argument error naming the type -- otherwise the only symptom is
+/// a message that silently never goes out.
+rats::Json parse_json(const std::string& text, const std::string& type) {
+  try {
+    return rats::Json::parse(text);
+  } catch (const rats::JsonError& e) {
+    throw std::invalid_argument("json for type \"" + type + "\" is not valid JSON: " +
+                                e.what());
+  }
+}
+
+} // namespace
+
+bool HybridRatsNode::sendJson(const std::string& peerId, const std::string& type,
+                              const std::string& json) {
+  // MessageJson's callback is invoked inline before send() returns, so capturing
+  // the verdict into a local and returning it is accurate rather than racy.
+  bool ok = false;
+  this->json().send(parse_peer_id(peerId), type, parse_json(json, type),
+                    [&ok](bool success, const std::string&) { ok = success; });
+  return ok;
+}
+
+bool HybridRatsNode::broadcastJson(const std::string& type, const std::string& json) {
+  bool ok = false;
+  this->json().send(type, parse_json(json, type),
+                    [&ok](bool success, const std::string&) { ok = success; });
+  return ok;
+}
+
+void HybridRatsNode::onJson(
+    const std::string& type,
+    const std::function<void(const std::string&, const std::string&)>& listener) {
+  json().on(type, [listener](const rats::PeerId& from, const rats::Json& data) {
+    // Back to a string for JS, which parses it with Hermes' native JSON.parse.
+    // dump() with no indent gives compact text, the same form the wire carries.
+    listener(from.to_hex(), data.dump());
+  });
+}
+
+void HybridRatsNode::onceJson(
+    const std::string& type,
+    const std::function<void(const std::string&, const std::string&)>& listener) {
+  json().once(type, [listener](const rats::PeerId& from, const rats::Json& data) {
+    listener(from.to_hex(), data.dump());
+  });
+}
+
+void HybridRatsNode::offJson(const std::string& type) { json().off(type); }
+
+// ── peer exchange ───────────────────────────────────────────────────────────
+
+void HybridRatsNode::enablePeerExchange(
+    const std::optional<PeerExchangeConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enablePeerExchange() must be called before start()");
+  }
+  if (pex_ != nullptr) {
+    throw std::runtime_error("peer exchange is already enabled");
+  }
+
+  rats::PeerExchange::Config cfg;
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.maxAddressesPerResponse.has_value()) {
+      cfg.max_addresses_per_response =
+          static_cast<size_t>(*c.maxAddressesPerResponse);
+    }
+    if (c.requestMax.has_value())        cfg.request_max        = static_cast<size_t>(*c.requestMax);
+    if (c.requestOnConnect.has_value())  cfg.request_on_connect = *c.requestOnConnect;
+    if (c.publicOnly.has_value())        cfg.public_only        = *c.publicOnly;
+    if (c.peerTarget.has_value())        cfg.peer_target        = static_cast<size_t>(*c.peerTarget);
+    if (c.punchOnDialFailure.has_value()) {
+      cfg.punch_on_dial_failure = *c.punchOnDialFailure;
+    }
+    if (c.dialCooldownMs.has_value()) {
+      cfg.dial_cooldown =
+          std::chrono::milliseconds(static_cast<int64_t>(*c.dialCooldownMs));
+    }
+  }
+
+  // Nothing is stored beyond the pointer: PEX has no post-attach API, it just
+  // asks each new peer for its peers and dials what it learns.
+  pex_ = node().add_subsystem(std::make_unique<rats::PeerExchange>(std::move(cfg)));
+}
+
+// ── BitTorrent ──────────────────────────────────────────────────────────────
+//
+// A separate swarm, not part of the node's mesh: bittorrent::Client runs its own
+// reactor and listener. What it shares with the node is the DHT, when one is
+// attached — hence the ordering requirement below.
+
+namespace {
+
+rats::bittorrent::InfoHash parse_info_hash(const std::string& hex) {
+  auto parsed = rats::bittorrent::info_hash_from_hex(hex);
+  if (!parsed) {
+    throw std::invalid_argument("info hash must be 40 hex characters, got: " + hex);
+  }
+  return *parsed;
+}
+
+std::vector<TorrentFileEntry> to_file_entries(
+    const std::vector<rats::bittorrent::TorrentStatus::File>& files) {
+  std::vector<TorrentFileEntry> out;
+  out.reserve(files.size());
+  for (const auto& file : files) {
+    out.emplace_back(file.path, static_cast<double>(file.size));
+  }
+  return out;
+}
+
+TorrentMetadata to_metadata(const rats::bittorrent::TorrentInfo& info) {
+  std::vector<TorrentFileEntry> files;
+  files.reserve(info.files().num_files());
+  for (const auto& file : info.files().files()) {
+    files.emplace_back(file.path, static_cast<double>(file.size));
+  }
+  return TorrentMetadata(info.info_hash_hex(), info.name(),
+                         static_cast<double>(info.total_size()), std::move(files));
+}
+
+} // namespace
+
+void HybridRatsNode::enableBittorrent(const std::optional<BittorrentConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableBittorrent() must be called before start()");
+  }
+  if (bittorrent_ != nullptr) {
+    throw std::runtime_error("BitTorrent is already enabled");
+  }
+
+  rats::Bittorrent::Config cfg;
+
+  // The library's default save path is the working directory, which is not writable
+  // on either mobile platform, so downloads would fail with nothing to point at.
+  // Inheriting the node's dataDir is what makes an unconfigured client usable.
+  if (config_ != nullptr && !config_->data_dir.empty()) {
+    cfg.client.download_path = config_->data_dir + "/torrents";
+  }
+
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.listenPort.has_value())   cfg.client.listen_port    = to_port(*c.listenPort, "listenPort");
+    if (c.downloadPath.has_value()) cfg.client.download_path  = *c.downloadPath;
+    if (c.peerIdPrefix.has_value()) cfg.client.peer_id_prefix = *c.peerIdPrefix;
+    if (c.useNodeDht.has_value())   cfg.use_node_dht          = *c.useNodeDht;
+  }
+
+  if (cfg.client.download_path.empty()) {
+    throw std::invalid_argument(
+        "enableBittorrent needs a downloadPath, or a dataDir on the node to derive "
+        "one from; the library's default is the working directory, which mobile "
+        "platforms do not let you write to");
+  }
+
+  // Added last so it attaches after DhtDiscovery: the client borrows that DHT at
+  // start(), and reverse-order teardown keeps it alive through stop().
+  bittorrent_ = node().add_subsystem(std::make_unique<rats::Bittorrent>(std::move(cfg)));
+}
+
+namespace {
+
+rats::Bittorrent& require_bittorrent(rats::Bittorrent* bt) {
+  if (bt == nullptr) {
+    throw std::runtime_error(
+        "BitTorrent is not enabled - call enableBittorrent() before start()");
+  }
+  return *bt;
+}
+
+rats::bittorrent::Client& require_client(rats::Bittorrent* bt) {
+  auto* client = require_bittorrent(bt).client();
+  if (client == nullptr) {
+    throw std::runtime_error("BitTorrent is not running - the node must be started");
+  }
+  return *client;
+}
+
+} // namespace
+
+std::string HybridRatsNode::addMagnet(const std::string& magnetUri,
+                                     const std::optional<std::string>& savePath) {
+  auto& client = require_client(bittorrent_);
+
+  // Parse first, for two reasons: it rejects a bad URI with a useful error instead
+  // of a silent no-op, and it yields the info hash without reading it back off the
+  // returned Torrent*, which belongs to the client's reactor thread.
+  const auto parsed = rats::bittorrent::MagnetUri::parse(magnetUri);
+  if (!parsed) throw std::invalid_argument("not a valid magnet URI: " + magnetUri);
+
+  // add_magnet_resumed rather than add_magnet: it picks up a resume file saved next
+  // to the destination, so re-adding a torrent after a restart continues instead of
+  // re-downloading, and skips the metadata fetch when the resume file has the info
+  // dict. Identical to add_magnet when there is nothing saved.
+  if (client.add_magnet_resumed(magnetUri, savePath.value_or("")) == nullptr) {
+    throw std::runtime_error("could not add magnet: " + magnetUri);
+  }
+
+  const std::string hex = rats::bittorrent::to_hex(parsed->info_hash);
+  if (std::find(torrents_.begin(), torrents_.end(), hex) == torrents_.end()) {
+    torrents_.push_back(hex);
+  }
+  return hex;
+}
+
+std::string HybridRatsNode::addTorrentFile(const std::string& path,
+                                           const std::optional<std::string>& savePath) {
+  auto& client = require_client(bittorrent_);
+
+  // Loaded here rather than via add_torrent_file so the info hash comes from the
+  // parsed metadata, and a parse failure carries the reason.
+  rats::bittorrent::TorrentParseError error;
+  auto info = rats::bittorrent::TorrentInfo::from_file(path, &error);
+  if (!info) {
+    throw std::invalid_argument("could not read torrent file " + path + ": " +
+                                error.message);
+  }
+
+  if (client.add_torrent(*info, savePath.value_or("")) == nullptr) {
+    throw std::runtime_error("could not add torrent: " + path);
+  }
+
+  const std::string hex = info->info_hash_hex();
+  if (std::find(torrents_.begin(), torrents_.end(), hex) == torrents_.end()) {
+    torrents_.push_back(hex);
+  }
+  return hex;
+}
+
+void HybridRatsNode::removeTorrent(const std::string& infoHash,
+                                   std::optional<bool> deleteFiles) {
+  require_client(bittorrent_).remove_torrent(parse_info_hash(infoHash),
+                                             deleteFiles.value_or(false));
+  torrents_.erase(std::remove(torrents_.begin(), torrents_.end(), infoHash),
+                  torrents_.end());
+}
+
+void HybridRatsNode::pauseTorrent(const std::string& infoHash) {
+  require_client(bittorrent_).pause_torrent(parse_info_hash(infoHash));
+}
+
+void HybridRatsNode::resumeTorrent(const std::string& infoHash) {
+  require_client(bittorrent_).resume_torrent(parse_info_hash(infoHash));
+}
+
+TorrentStatus HybridRatsNode::torrentStatus(const std::string& infoHash) {
+  const auto status = require_client(bittorrent_).torrent_status(parse_info_hash(infoHash));
+  return TorrentStatus(status.exists, status.name, status.has_metadata,
+                       status.is_complete, status.paused, status.progress,
+                       static_cast<double>(status.total_size),
+                       static_cast<double>(status.downloaded),
+                       static_cast<double>(status.uploaded),
+                       static_cast<double>(status.num_peers),
+                       to_file_entries(status.files));
+}
+
+std::vector<std::string> HybridRatsNode::torrentInfoHashes() { return torrents_; }
+
+BittorrentStats HybridRatsNode::bittorrentStats() {
+  auto& bt = require_bittorrent(bittorrent_);
+  auto* client = bt.client();
+  if (client == nullptr) {
+    return BittorrentStats(false, 0, bt.using_node_dht(), 0, 0, 0, 0);
+  }
+  return BittorrentStats(bt.is_running(), static_cast<double>(client->listen_port()),
+                         bt.using_node_dht(),
+                         static_cast<double>(client->num_torrents()),
+                         static_cast<double>(client->total_peers()),
+                         static_cast<double>(client->total_download_rate()),
+                         static_cast<double>(client->total_upload_rate()));
+}
+
+bool HybridRatsNode::saveResumeData(const std::string& infoHash) {
+  return require_client(bittorrent_).save_resume_data(parse_info_hash(infoHash));
+}
+
+void HybridRatsNode::saveAllResumeData() {
+  require_client(bittorrent_).save_all_resume_data();
+}
+
+void HybridRatsNode::fetchTorrentMetadata(
+    const std::string& infoHash, double timeoutMs,
+    const std::function<void(bool, const TorrentMetadata&, const std::string&)>& listener) {
+  auto& bt = require_bittorrent(bittorrent_);
+  parse_info_hash(infoHash);  // reject a malformed hash here, not on a worker thread
+
+  // Captures only the callback, never `this`: the fetch runs on a librats worker
+  // thread and may outlive this object being torn down.
+  bt.get_torrent_metadata(
+      infoHash,
+      [listener](const rats::bittorrent::TorrentInfo& info, bool success,
+                 const std::string& error) {
+        listener(success, to_metadata(info), error);
+      },
+      static_cast<int>(timeoutMs));
+}
+
+// ── keepalive and reconnection ──────────────────────────────────────────────
+
+void HybridRatsNode::enablePing(const std::optional<PingConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enablePing() must be called before start()");
+  }
+  if (ping_ != nullptr) throw std::runtime_error("ping is already enabled");
+
+  auto interval = std::chrono::milliseconds(10000);
+  if (config.has_value() && config->intervalMs.has_value()) {
+    const double ms = *config->intervalMs;
+    if (ms <= 0) throw std::invalid_argument("intervalMs must be greater than zero");
+    interval = std::chrono::milliseconds(static_cast<int64_t>(ms));
+  }
+  ping_ = node().add_subsystem(std::make_unique<rats::PingService>(interval));
+}
+
+double HybridRatsNode::peerRtt(const std::string& peerId) {
+  if (ping_ == nullptr) {
+    throw std::runtime_error("ping is not enabled - call enablePing() before start()");
+  }
+  const auto rtt = ping_->last_rtt(parse_peer_id(peerId));
+  // -1 rather than 0: an unmeasured peer is not a peer with a 0ms round trip, and JS
+  // has no natural empty number to say so.
+  return rtt ? static_cast<double>(rtt->count()) : -1.0;
+}
+
+double HybridRatsNode::alivePeerCount() {
+  if (ping_ == nullptr) {
+    throw std::runtime_error("ping is not enabled - call enablePing() before start()");
+  }
+  return static_cast<double>(ping_->alive_peer_count());
+}
+
+void HybridRatsNode::enableReconnection(const std::optional<ReconnectionConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableReconnection() must be called before start()");
+  }
+  if (reconnect_ != nullptr) {
+    throw std::runtime_error("reconnection is already enabled");
+  }
+
+  rats::ReconnectionService::Config cfg;
+
+  // Persist the peer book beside the node's own state by default. The library
+  // default is memory-only, which on a phone means every restart forgets every peer
+  // it has ever met — the opposite of what this subsystem is for.
+  if (config_ != nullptr && !config_->data_dir.empty()) {
+    cfg.store_path = config_->data_dir + "/peers.json";
+  }
+
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.storePath.has_value())         cfg.store_path         = *c.storePath;
+    if (c.persistDiscovered.has_value()) cfg.persist_discovered = *c.persistDiscovered;
+    if (c.maxTargets.has_value())        cfg.max_targets        = static_cast<size_t>(*c.maxTargets);
+    if (c.maxAttempts.has_value())       cfg.max_attempts       = static_cast<size_t>(*c.maxAttempts);
+    if (c.startupTargets.has_value())    cfg.startup_targets    = static_cast<size_t>(*c.startupTargets);
+    if (c.archiveMax.has_value())        cfg.archive_max        = static_cast<size_t>(*c.archiveMax);
+    if (c.archiveMaxAgeSecs.has_value()) {
+      cfg.archive_max_age = std::chrono::seconds(static_cast<int64_t>(*c.archiveMaxAgeSecs));
+    }
+    if (c.baseBackoffMs.has_value()) {
+      cfg.base_backoff = std::chrono::milliseconds(static_cast<int64_t>(*c.baseBackoffMs));
+    }
+    if (c.maxBackoffMs.has_value()) {
+      cfg.max_backoff = std::chrono::milliseconds(static_cast<int64_t>(*c.maxBackoffMs));
+    }
+  }
+
+  reconnect_ = node().add_subsystem(
+      std::make_unique<rats::ReconnectionService>(std::move(cfg)));
+}
+
+namespace {
+
+rats::ReconnectionService& require_reconnect(rats::ReconnectionService* r) {
+  if (r == nullptr) {
+    throw std::runtime_error(
+        "reconnection is not enabled - call enableReconnection() before start()");
+  }
+  return *r;
+}
+
+rats::Address parse_address(const std::string& text) {
+  auto parsed = rats::Address::parse(text);
+  if (!parsed) {
+    throw std::invalid_argument(
+        "address must be \"host:port\" (IPv6 as \"[addr]:port\"), got: " + text);
+  }
+  return *parsed;
+}
+
+} // namespace
+
+void HybridRatsNode::addReconnectTarget(const std::string& address) {
+  require_reconnect(reconnect_).add(parse_address(address));
+}
+
+void HybridRatsNode::removeReconnectTarget(const std::string& address) {
+  require_reconnect(reconnect_).remove(parse_address(address));
+}
+
+double HybridRatsNode::reconnectTargetCount() {
+  return static_cast<double>(require_reconnect(reconnect_).target_count());
+}
+
+std::vector<std::string> HybridRatsNode::knownPeers(double limit) {
+  if (limit < 0) throw std::invalid_argument("limit must not be negative");
+  std::vector<std::string> out;
+  for (const auto& address :
+       require_reconnect(reconnect_).known_peers(static_cast<size_t>(limit))) {
+    out.push_back(address.to_string());
+  }
+  return out;
+}
+
+// ── distributed key-value storage ───────────────────────────────────────────
+
+namespace {
+
+StorageValueType to_value_type(rats::StorageValueType t) {
+  switch (t) {
+    case rats::StorageValueType::BINARY: return StorageValueType::BINARY;
+    case rats::StorageValueType::STRING: return StorageValueType::STRING;
+    case rats::StorageValueType::INT64:  return StorageValueType::INT;
+    case rats::StorageValueType::DOUBLE: return StorageValueType::DOUBLE;
+    case rats::StorageValueType::JSON:   return StorageValueType::JSON;
+  }
+  return StorageValueType::BINARY;
+}
+
+StorageChangeEvent to_change_event(const rats::StorageChangeEvent& e) {
+  // The values themselves are left out: read them back with the typed getters if
+  // needed, so a 16 MiB write does not cross the bridge merely to announce itself.
+  return StorageChangeEvent(
+      e.operation == rats::StorageOperation::OP_PUT ? StorageOperation::PUT
+                                                    : StorageOperation::DELETE,
+      e.key, to_value_type(e.type), static_cast<double>(e.timestamp_ms),
+      e.origin_peer_id, e.is_remote);
+}
+
+} // namespace
+
+rats::StorageManager& HybridRatsNode::storage() {
+  if (storage_ == nullptr) {
+    throw std::runtime_error(
+        "storage is not enabled - call enableStorage() before start()");
+  }
+  return *storage_;
+}
+
+void HybridRatsNode::enableStorage(const std::optional<StorageConfig>& config) {
+  if (started_) {
+    throw std::runtime_error("enableStorage() must be called before start()");
+  }
+  if (storage_ != nullptr) {
+    throw std::runtime_error("storage is already enabled");
+  }
+
+  rats::StorageConfig cfg;
+
+  // The library default is "./storage", relative to the working directory, which
+  // is not writable on either mobile platform. Inherit the node's data_dir so the
+  // database lands beside the identity; refuse outright when neither is available
+  // rather than letting every single write fail later.
+  if (config_ != nullptr && !config_->data_dir.empty()) {
+    cfg.data_directory = config_->data_dir + "/storage";
+  } else {
+    cfg.data_directory.clear();
+  }
+
+  if (config.has_value()) {
+    const auto& c = *config;
+    if (c.dataDirectory.has_value())  cfg.data_directory = *c.dataDirectory;
+    if (c.databaseName.has_value())   cfg.database_name  = *c.databaseName;
+    if (c.enableSync.has_value())     cfg.enable_sync    = *c.enableSync;
+    if (c.persistToDisk.has_value())  cfg.persist_to_disk = *c.persistToDisk;
+    if (c.compactionThreshold.has_value()) {
+      cfg.compaction_threshold = static_cast<uint32_t>(*c.compactionThreshold);
+    }
+    if (c.maxValueSize.has_value()) {
+      cfg.max_value_size = static_cast<uint32_t>(*c.maxValueSize);
+    }
+  }
+
+  if (cfg.persist_to_disk && cfg.data_directory.empty()) {
+    throw std::invalid_argument(
+        "storage needs a writable directory: set dataDirectory, or the node's "
+        "dataDir, or persistToDisk: false for a memory-only store");
+  }
+
+  storage_ = node().add_subsystem(std::make_unique<rats::StorageManager>(cfg));
+}
+
+bool HybridRatsNode::putString(const std::string& key, const std::string& value) {
+  return storage().put(key, value);
+}
+
+bool HybridRatsNode::putInt(const std::string& key, double value) {
+  // JS numbers are doubles, so only integers up to 2^53 survive exactly. Reject
+  // anything else instead of silently truncating into an int64 slot.
+  if (value != static_cast<double>(static_cast<int64_t>(value)) ||
+      value > 9007199254740992.0 || value < -9007199254740992.0) {
+    throw std::invalid_argument(
+        "putInt needs an integer within +/-2^53; use putDouble or putString "
+        "for anything else");
+  }
+  return storage().put(key, static_cast<int64_t>(value));
+}
+
+bool HybridRatsNode::putDouble(const std::string& key, double value) {
+  return storage().put(key, value);
+}
+
+bool HybridRatsNode::putBinary(const std::string& key,
+                               const std::shared_ptr<ArrayBuffer>& value) {
+  const auto view = view_of(value);
+  return storage().put(key, std::vector<uint8_t>(view.data(), view.data() + view.size()));
+}
+
+bool HybridRatsNode::putJson(const std::string& key, const std::string& json) {
+  return storage().put_json(key, parse_json(json, key));
+}
+
+std::optional<std::string> HybridRatsNode::getString(const std::string& key) {
+  return storage().get_string(key);
+}
+
+std::optional<double> HybridRatsNode::getInt(const std::string& key) {
+  const auto v = storage().get_int(key);
+  if (!v.has_value()) return std::nullopt;
+  return static_cast<double>(*v);
+}
+
+std::optional<double> HybridRatsNode::getDouble(const std::string& key) {
+  return storage().get_double(key);
+}
+
+std::optional<std::shared_ptr<ArrayBuffer>> HybridRatsNode::getBinary(
+    const std::string& key) {
+  const auto v = storage().get_binary(key);
+  if (!v.has_value()) return std::nullopt;
+  return ArrayBuffer::copy(v->data(), v->size());
+}
+
+std::optional<std::string> HybridRatsNode::getJson(const std::string& key) {
+  const auto v = storage().get_json(key);
+  if (!v.has_value()) return std::nullopt;
+  return v->dump();
+}
+
+std::optional<StorageValueType> HybridRatsNode::getValueType(const std::string& key) {
+  const auto t = storage().get_type(key);
+  if (!t.has_value()) return std::nullopt;
+  return to_value_type(*t);
+}
+
+bool HybridRatsNode::removeKey(const std::string& key) { return storage().remove(key); }
+bool HybridRatsNode::hasKey(const std::string& key) { return storage().has(key); }
+
+std::vector<std::string> HybridRatsNode::storageKeys() { return storage().keys(); }
+
+std::vector<std::string> HybridRatsNode::storageKeysWithPrefix(
+    const std::string& prefix) {
+  return storage().keys_with_prefix(prefix);
+}
+
+double HybridRatsNode::storageCount() {
+  return static_cast<double>(storage().size());
+}
+
+void HybridRatsNode::clearStorage() { storage().clear(); }
+bool HybridRatsNode::saveStorage() { return storage().save(); }
+bool HybridRatsNode::loadStorage() { return storage().load(); }
+
+double HybridRatsNode::compactStorage() {
+  return static_cast<double>(storage().compact());
+}
+
+bool HybridRatsNode::requestStorageSync() { return storage().request_sync(); }
+bool HybridRatsNode::isStorageSynced() { return storage().is_synced(); }
+
+StorageStats HybridRatsNode::storageStats() {
+  const auto s = storage().get_statistics();
+  return StorageStats(static_cast<double>(s.total_entries),
+                      static_cast<double>(s.deleted_entries),
+                      static_cast<double>(s.total_data_bytes),
+                      static_cast<double>(s.disk_usage_bytes),
+                      static_cast<double>(s.entries_synced),
+                      static_cast<double>(s.entries_sent));
+}
+
+void HybridRatsNode::onStorageChange(
+    const std::function<void(const StorageChangeEvent&)>& listener) {
+  storage().set_change_callback(
+      [listener](const rats::StorageChangeEvent& e) { listener(to_change_event(e)); });
 }
 
 } // namespace margelo::nitro::librats

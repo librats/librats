@@ -325,3 +325,45 @@ TEST_F(SocketTest, UdpBatchReceiveReportsWouldBlockOnAnEmptySocket) {
 
     close_socket(sock);
 }
+
+// A blocking recv() with no deadline is how Node::stop() came to hang for ever: a
+// router accepted librats' UPnP description request, sent nothing, never closed, and
+// the worker thread that UpnpClient::stop() joins sat in recv() indefinitely. This
+// pins the mechanism that fixes it — a receive timeout has to give control back, and
+// report no-data rather than an error.
+TEST_F(SocketTest, RecvTimeoutReturnsInsteadOfBlockingForever) {
+    // IPv4 explicitly, not the dual-stack default: the client below dials 127.0.0.1,
+    // and asking for the bound port of a dual-stack (IPv6) socket through a
+    // sockaddr_in is a portability trap — POSIX truncates the oversized address
+    // silently, while Windows fails getsockname outright with WSAEFAULT.
+    socket_t server = create_tcp_server(0, 1, "", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(server));
+
+    // Port 0 means "any", so ask the kernel which one it actually bound.
+    sockaddr_in bound{};
+    socklen_t bound_len = sizeof(bound);
+    ASSERT_EQ(getsockname(server, reinterpret_cast<sockaddr*>(&bound), &bound_len), 0);
+    const uint16_t port = ntohs(bound.sin_port);
+    ASSERT_NE(port, 0);
+
+    socket_t client = create_tcp_client("127.0.0.1", port, 5000);
+    ASSERT_TRUE(is_valid_socket(client));
+
+    // Accept, then deliberately say nothing at all — the behaviour that hung.
+    socket_t accepted = accept_client(server);
+    ASSERT_TRUE(is_valid_socket(accepted));
+
+    ASSERT_TRUE(set_socket_recv_timeout(client, 200));
+
+    const auto began = std::chrono::steady_clock::now();
+    const auto data = receive_tcp_data(client, 4096);
+    const auto waited = std::chrono::steady_clock::now() - began;
+
+    EXPECT_TRUE(data.empty()) << "a timeout must read as no-data, like a clean close";
+    EXPECT_GE(waited, std::chrono::milliseconds(150)) << "it waited less than asked";
+    EXPECT_LT(waited, std::chrono::seconds(3)) << "it did not honour the timeout";
+
+    close_socket(accepted);
+    close_socket(client);
+    close_socket(server);
+}

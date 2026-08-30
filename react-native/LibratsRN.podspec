@@ -34,7 +34,13 @@ Pod::Spec.new do |s|
     if [ ! -d "ios/LibRats.xcframework" ]; then
       echo "[librats] building LibRats.xcframework (first pod install only)..."
       mkdir -p ios
-      ../ios/build-xcframework.sh "$(pwd)/ios/build" >/dev/null
+      # vendor/librats/ios exists in a package installed from npm; ../ios is the
+      # repository layout. Same reasoning as android/CMakeLists.txt.
+      if [ -x "vendor/librats/ios/build-xcframework.sh" ]; then
+        vendor/librats/ios/build-xcframework.sh "$(pwd)/ios/build" >/dev/null
+      else
+        ../ios/build-xcframework.sh "$(pwd)/ios/build" >/dev/null
+      fi
       cp -R "$(pwd)/ios/build/LibRats.xcframework" ios/
     fi
   CMD

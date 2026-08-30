@@ -92,17 +92,27 @@ operation and make *resume* fast instead: `ReconnectionService` plus a persisted
 `data_dir` (so the `PeerId` is stable) already covers most of it. The Swift API
 needs explicit lifecycle hooks so an app can stop and restart the node cleanly.
 
-**Discovery.** `MdnsDiscovery` uses raw-socket multicast
-(`IP_ADD_MEMBERSHIP`/`IP_MULTICAST_IF`), which on iOS 14+ requires the
-`com.apple.developer.networking.multicast` entitlement — that needs an explicit
-approval request to Apple. Note the mDNS tests are already excluded on Apple in
-the root `CMakeLists.txt`, so this is the least-exercised Darwin path.
+**Discovery.** Done, and it did not need a new subsystem. `MdnsDiscovery` now
+selects its backend at compile time through the `MdnsBackend` alias: raw-socket
+multicast everywhere else, Bonjour (`dns_sd.h`) on Apple. The raw socket is not an
+option here — since iOS 14, sending or receiving multicast directly requires
+`com.apple.developer.networking.multicast`, an entitlement Apple grants only on
+request — while routing through `mDNSResponder` needs no entitlement at all.
 
-The better route exploits the subsystem architecture: write an iOS-native
-discovery `Subsystem` on Apple's `NWBrowser`/`NWListener`, which needs only an
-`NSLocalNetworkUsageDescription` string and no entitlement approval. Nothing above
-the subsystem contract changes, and peers still interoperate normally — an iOS
-node discovering differently connects to everyone else exactly the same way.
+`dns_sd` turned out to be a better fit than `NWBrowser`, which was the original
+plan: it is a C API in `libSystem` on both macOS and iOS, so there is no
+Objective-C++, no extra framework to link, and `DNSServiceRegister` advertises the
+port the node *already* listens on rather than standing up a second listener of its
+own. See [`mdns_dnssd.h`](../src/librats/mdns/mdns_dnssd.h).
+
+Two Info.plist keys are required of the consuming app, and both fail silently:
+`NSBonjourServices` must list `_librats._tcp` or browsing returns nothing, and
+`NSLocalNetworkUsageDescription` must be present or iOS cannot ask for the
+local-network consent Bonjour depends on.
+
+Both backends speak standard mDNS, so an iOS node and an Android one find each
+other on the same Wi-Fi. `tests/test_mdns_dnssd.cpp` covers the Apple backend;
+`test_mdns.cpp` remains excluded there, since the socket it drives is unused.
 
 **NAT traversal.** UPnP and NAT-PMP are plain UDP to the gateway and need no
 entitlement, but gateway detection on iOS is heuristic (see above) and on cellular
@@ -122,7 +132,6 @@ connection survives.
 
 - An idiomatic Swift `RatsNode` wrapper over the C ABI, at parity with the Java API.
 - Packaging: a Swift Package / podspec, and a CI job building the XCFramework.
-- The `NWBrowser`-based discovery subsystem, replacing raw-socket mDNS on iOS.
 - A backgrounding story wired into the Swift lifecycle.
 - `get_os_name()` in [`os.cpp`](../src/librats/util/os.cpp) reports `"macOS"` on
   iOS, and the `machdep.cpu.brand_string` sysctl does not exist on ARM. Cosmetic,

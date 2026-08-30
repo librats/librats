@@ -7,10 +7,13 @@
   "files": [
     "src",
     "cpp",
-    "android",
-    "ios",
+    "android/CMakeLists.txt",
+    "android/build.gradle",
+    "android/src",
     "nitrogen/generated",
     "nitro.json",
+    "scripts",
+    "vendor",
     "LibratsRN.podspec",
     "README.md"
   ],
@@ -18,7 +21,9 @@
     "prepare": "nitrogen",
     "nitrogen": "nitrogen",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf nitrogen/generated"
+    "clean": "rm -rf nitrogen/generated",
+    "vendor": "node scripts/vendor-core.mjs",
+    "prepack": "node scripts/vendor-core.mjs && nitrogen"
   },
   "keywords": [
     "react-native",

@@ -24,7 +24,25 @@ add_library(LibratsRN SHARED
 # — and CMAKE_CURRENT_SOURCE_DIR keeps the *linked* path, so a plain "../.." lands
 # in node_modules instead of the repository root and add_subdirectory() fails.
 get_filename_component(LIBRATS_MODULE_ANDROID_DIR "${CMAKE_CURRENT_SOURCE_DIR}" REALPATH)
-get_filename_component(LIBRATS_SOURCE_DIR "${LIBRATS_MODULE_ANDROID_DIR}/../.." REALPATH)
+
+# Two layouts to support. In this repository the core is two levels up; in a package
+# installed from npm there is nothing up there but node_modules, so the core is
+# vendored into the package at publish time (scripts/vendor-core.mjs). Prefer the
+# vendored copy when it exists, which is exactly the installed case.
+if(EXISTS "${LIBRATS_MODULE_ANDROID_DIR}/../vendor/librats/CMakeLists.txt")
+    get_filename_component(LIBRATS_SOURCE_DIR "${LIBRATS_MODULE_ANDROID_DIR}/../vendor/librats" REALPATH)
+    message(STATUS "librats: building the vendored core (installed package)")
+else()
+    get_filename_component(LIBRATS_SOURCE_DIR "${LIBRATS_MODULE_ANDROID_DIR}/../.." REALPATH)
+    message(STATUS "librats: building the core from the repository at ${LIBRATS_SOURCE_DIR}")
+endif()
+
+if(NOT EXISTS "${LIBRATS_SOURCE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR
+        "Cannot find the librats core at ${LIBRATS_SOURCE_DIR}. In a published package "
+        "it should be at vendor/librats — reinstall the package, since a tarball built "
+        "without the vendor step cannot compile.")
+endif()
 set(LIBRATS_BINARY_DIR ${CMAKE_BINARY_DIR}/librats_native)
 
 if(NOT EXISTS "${LIBRATS_SOURCE_DIR}/CMakeLists.txt")
@@ -44,6 +62,16 @@ set(RATS_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
 # The C ABI is not needed here — this binding calls the C++ Node API directly,
 # since Nitro is a C++ consumer and has no FFI boundary to flatten across.
 set(RATS_BINDINGS       OFF CACHE BOOL "" FORCE)
+
+# The distributed key-value store is off by default in the root build; this
+# binding exposes it, so it has to be on here or the storage symbols do not exist
+# to link against.
+set(RATS_STORAGE        ON  CACHE BOOL "Storage is part of this binding's API" FORCE)
+# BitTorrent is on because enableBittorrent() is part of this binding's API. Its cost
+# is 0.5 MB on a stripped arm64 release build of librats (2.73 -> 3.25 MB) — measure
+# stripped, not the ~10 MB the unstripped debug artifacts differ by. Drop this and the
+# spec's BitTorrent methods together if that still matters more than the feature.
+set(RATS_SEARCH_FEATURES ON  CACHE BOOL "BitTorrent is part of this binding's API" FORCE)
 
 add_subdirectory(${LIBRATS_SOURCE_DIR} ${LIBRATS_BINARY_DIR})
 

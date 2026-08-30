@@ -461,6 +461,24 @@ bool set_socket_nonblocking(socket_t socket);
 bool set_socket_blocking(socket_t socket);
 
 /**
+ * Bound how long a blocking recv() on this socket may wait for data.
+ *
+ * A blocking read with no deadline turns an unresponsive peer into a permanent hang:
+ * it accepts the connection, sends nothing, and never closes, so recv() waits for
+ * ever and any thread joining that worker waits with it. Real routers do exactly
+ * this (see UpnpClient::fetch_description), so treat a timeout as mandatory on any
+ * socket talking to hardware you do not control.
+ *
+ * On timeout, receive_tcp_data() reports no data — indistinguishable from a clean
+ * close, which is the right answer for a Connection: close exchange.
+ *
+ * @param socket The socket handle
+ * @param timeout_ms Milliseconds to wait; 0 restores waiting for ever
+ * @return true if successful, false otherwise
+ */
+bool set_socket_recv_timeout(socket_t socket, int timeout_ms);
+
+/**
  * Connect to a socket address with timeout
  * @param socket The socket handle (should be non-blocking)
  * @param addr The socket address structure
