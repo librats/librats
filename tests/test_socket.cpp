@@ -85,6 +85,72 @@ TEST_F(SocketTest, UDPSocketCreationTest) {
     close_socket(udp_v6);
 }
 
+// A datagram port is not implicitly shareable, and a caller that says so is obeyed.
+//
+// The three tests below pin the behaviour that decides whether the BitTorrent uTP
+// mux and the DHT can both claim the torrent port. They used to both succeed and
+// then silently split the arriving datagrams between them, which reads at every
+// layer above as unexplained packet loss on both.
+TEST_F(SocketTest, ExclusiveUdpBindRefusesAPortSomebodyElseHolds) {
+    socket_t held = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(held));
+    const int port = get_bound_port(held);
+    ASSERT_GT(port, 0);
+
+    socket_t second = create_udp_socket(port, "127.0.0.1", AddressFamily::IPv4,
+                                        UdpPortMode::Exclusive);
+    EXPECT_FALSE(is_valid_socket(second))
+        << "an Exclusive bind took a port another socket is already serving";
+    if (is_valid_socket(second)) close_socket(second);
+    close_socket(held);
+}
+
+// The other half of the contract: Exclusive must not be a bind that always fails.
+TEST_F(SocketTest, ExclusiveUdpBindTakesAFreePort) {
+    // Learn a port that is free by binding and releasing it. Racy in principle,
+    // which is why the assertion below is only about the mode, not the number.
+    socket_t probe = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(probe));
+    const int port = get_bound_port(probe);
+    close_socket(probe);
+
+    socket_t s = create_udp_socket(port, "127.0.0.1", AddressFamily::IPv4,
+                                   UdpPortMode::Exclusive);
+    ASSERT_TRUE(is_valid_socket(s));
+    EXPECT_EQ(get_bound_port(s), port);
+    close_socket(s);
+
+    // Port 0 is exclusive by construction — the kernel does not hand out a port it
+    // has already given away — so the mode must not get in the way of an ephemeral
+    // bind either.
+    socket_t eph = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4,
+                                     UdpPortMode::Exclusive);
+    EXPECT_TRUE(is_valid_socket(eph));
+    close_socket(eph);
+}
+
+// And the reverse direction: once a socket has claimed a port exclusively, a later
+// Shared bind must not be able to take it away. Only Windows can enforce this (via
+// SO_EXCLUSIVEADDRUSE); elsewhere a plain bind already refuses to share a unicast
+// datagram port, so the expectation holds for a different reason.
+TEST_F(SocketTest, AnExclusivelyHeldUdpPortCannotBeSharedAfterwards) {
+    socket_t probe = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(probe));
+    const int port = get_bound_port(probe);
+    close_socket(probe);
+
+    socket_t owner = create_udp_socket(port, "127.0.0.1", AddressFamily::IPv4,
+                                       UdpPortMode::Exclusive);
+    ASSERT_TRUE(is_valid_socket(owner));
+
+    socket_t sharer = create_udp_socket(port, "127.0.0.1", AddressFamily::IPv4,
+                                        UdpPortMode::Shared);
+    EXPECT_FALSE(is_valid_socket(sharer))
+        << "a Shared bind took a port held exclusively";
+    if (is_valid_socket(sharer)) close_socket(sharer);
+    close_socket(owner);
+}
+
 // Test TCP client-server communication
 TEST_F(SocketTest, TCPClientServerCommunicationTest) {
     // Create server

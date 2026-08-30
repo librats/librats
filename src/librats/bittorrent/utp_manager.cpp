@@ -31,7 +31,16 @@ Manager::~Manager() {
 
 bool Manager::open(std::uint16_t port, const std::string& bind_address) {
     if (is_open()) return true;
-    socket_ = create_udp_socket(int(port), bind_address, AddressFamily::IPv4);
+    // Exclusive, and this is the one place in the library where that matters. The
+    // port we want by protocol is the torrent port, which the DHT is very often
+    // already serving on UDP — mainline BitTorrent puts them on one number. A
+    // Shared bind succeeds there and then the two sockets split the datagrams
+    // between them: every uTP answer that lands on the DHT socket is a dial that
+    // times out for no visible reason, and every KRPC reply that lands here is a
+    // DHT query that goes unanswered. Failing instead lets the caller take a port
+    // that is really ours.
+    socket_ = create_udp_socket(int(port), bind_address, AddressFamily::IPv4,
+                                UdpPortMode::Exclusive);
     if (!is_valid_socket(socket_)) return false;
     set_socket_nonblocking(socket_);
     port_ = std::uint16_t(get_bound_port(socket_));

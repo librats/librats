@@ -53,6 +53,26 @@ enum class AddressFamily {
 };
 
 /**
+ * Whether a UDP bind is allowed to land on a port another socket already holds.
+ *
+ * On a datagram socket SO_REUSEADDR does not mean what it means for TCP. There is
+ * no TIME_WAIT to wait out, so what the option actually buys is the right to bind
+ * a port somebody else is already serving — and then the kernel hands each arriving
+ * datagram to one of the two, by a rule neither of them can see. Both sockets read
+ * a fraction of a stream neither of them is meant to share, and nothing reports an
+ * error at any point.
+ *
+ * `Shared` is the historical default and is right for a port only one subsystem
+ * ever wants. `Exclusive` is for a port that is *also* plausibly somebody else's —
+ * the BitTorrent uTP mux, which by protocol wants the same number the DHT is
+ * already serving. There the bind must fail loudly so the caller can move.
+ */
+enum class UdpPortMode {
+    Shared,     ///< May bind over an existing holder (SO_REUSEADDR).
+    Exclusive   ///< Bind fails if the port is taken, and refuses later sharers.
+};
+
+/**
  * Whether a socket bound with `af` can send to an address of the given family
  * at all.
  *
@@ -240,10 +260,12 @@ int send_tcp_string(socket_t socket, const std::string& data);
  * @param port The port to bind to (0 for any available port)
  * @param bind_address The interface IP address to bind to (empty for all interfaces)
  * @param af Address family (DualStack by default)
+ * @param mode Whether the port may be shared with a socket that already holds it
  * @return UDP socket handle, or RATS_INVALID_SOCKET on error
  */
 socket_t create_udp_socket(int port = 0, const std::string& bind_address = "",
-                           AddressFamily af = AddressFamily::DualStack);
+                           AddressFamily af = AddressFamily::DualStack,
+                           UdpPortMode mode = UdpPortMode::Shared);
 
 /**
  * Send UDP data to a destination host and port

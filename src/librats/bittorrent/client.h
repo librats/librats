@@ -119,6 +119,10 @@ public:
 
     bool          is_running()  const noexcept { return opened_; }
     std::uint16_t listen_port() const noexcept { return actual_port_; }
+    /// The port the uTP mux actually got, or 0 if there is none. Normally equal to
+    /// listen_port(); it differs when that number's UDP half was already taken, in
+    /// which case uTP can dial out but nothing can dial in over it.
+    std::uint16_t utp_port() const noexcept { return utp_.port(); }
     Reactor&      reactor() noexcept { return reactor_; }
 
     Torrent* add_torrent(const TorrentInfo& info, const std::string& save_path = "");

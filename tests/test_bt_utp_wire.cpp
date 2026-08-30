@@ -65,6 +65,39 @@ TorrentInfo build_and_seed(const std::string& name, const Bytes& data, std::uint
     return *TorrentInfo::from_info_dict(info.encode(), InfoHash{});
 }
 
+/// Hold the UDP half of a port while leaving its TCP half free — the shape a DHT
+/// leaves behind when it is serving the torrent port, which mainline BitTorrent
+/// says it should be. Shared, exactly as every other UDP socket in the library
+/// asks for it. Returns RATS_INVALID_SOCKET if no such port turned up.
+librats::socket_t squat_udp_port(std::uint16_t& port) {
+    for (int i = 0; i < 32; ++i) {
+        // Find a free number, then take it *by number* — which is what makes the
+        // squatter a faithful stand-in. A port asked for by number is bound with
+        // SO_REUSEADDR, and it is that option on both sides that lets a second
+        // socket land on top; an ephemeral bind sets nothing and would refuse the
+        // second bind for the wrong reason, quietly making the test prove nothing.
+        librats::socket_t probe_udp =
+            librats::create_udp_socket(0, "", librats::AddressFamily::IPv4);
+        if (!librats::is_valid_socket(probe_udp)) break;
+        const int p = librats::get_bound_port(probe_udp);
+        librats::close_socket(probe_udp);
+
+        // The client needs the TCP half of this number, or the test would be
+        // watching a listener fail rather than a mux move aside.
+        librats::socket_t probe_tcp =
+            librats::create_tcp_server(p, 4, "", librats::AddressFamily::IPv4);
+        if (!librats::is_valid_socket(probe_tcp)) continue;
+        librats::close_socket(probe_tcp);
+
+        librats::socket_t udp = librats::create_udp_socket(p, "", librats::AddressFamily::IPv4);
+        if (librats::is_valid_socket(udp)) {
+            port = std::uint16_t(p);
+            return udp;
+        }
+    }
+    return RATS_INVALID_SOCKET;
+}
+
 class BtUtpWire : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -342,4 +375,100 @@ TEST_F(BtUtpWire, TcpAndUtpShareOneListenPort) {
 
     c.stop();
     other.stop();
+}
+
+// The port the mux wants is the torrent port, and the DHT is very often already on
+// its UDP half — mainline puts them on one number. Binding over it succeeds on
+// every platform if you ask to share, and then the kernel splits the arriving
+// datagrams between the two sockets: uTP dials time out because their answers went
+// to the DHT, and DHT queries go unanswered because their replies came here. The
+// mux must decline that port and take one that is really its own.
+TEST_F(BtUtpWire, TheUtpMuxMovesAsideWhenTheTorrentPortsUdpHalfIsTaken) {
+    std::uint16_t     port = 0;
+    librats::socket_t dht_like = squat_udp_port(port);
+    ASSERT_TRUE(librats::is_valid_socket(dht_like)) << "could not stage a contested port";
+
+    Client::Config lc      = config(dl_dir(), "-LR0010-");
+    lc.listen_port         = port;
+    lc.enable_outgoing_tcp = false;  // uTP or nothing, so completing proves it works
+    Client leecher(lc);
+    leecher.open();
+
+    // TCP keeps the number peers are told about; only the mux moves.
+    EXPECT_EQ(leecher.listen_port(), port);
+    ASSERT_GT(leecher.utp_port(), 0) << "the mux gave up its transport instead of moving";
+    EXPECT_NE(leecher.utp_port(), port);
+
+    // And it is still a working transport. An outgoing dial is answered on the
+    // source port of its own SYN, so what number the mux ended up on is the peer's
+    // problem to discover, not ours to advertise.
+    const Bytes data = make_data(40000);
+    TorrentInfo info = build_and_seed("f.bin", data, 16384, seed_dir());
+    Client      seeder(config(seed_dir(), "-LR0011-"));
+    seeder.open();
+    ASSERT_GT(seeder.listen_port(), 0);
+
+    Torrent* st = seeder.add_torrent(info, seed_dir());
+    Torrent* lt = leecher.add_torrent(info, dl_dir());
+    ASSERT_NE(st, nullptr);
+    ASSERT_NE(lt, nullptr);
+    ASSERT_TRUE(pump_until(seeder, leecher, [&] { return st->state() == Torrent::State::Seeding; }));
+
+    lt->add_peer("127.0.0.1", seeder.listen_port());
+    EXPECT_TRUE(pump_until(seeder, leecher, [&] { return lt->is_complete(); }))
+        << "uTP stopped working once it was not on the advertised port; progress="
+        << lt->progress();
+
+    seeder.stop();
+    leecher.stop();
+    librats::close_socket(dht_like);
+}
+
+// The other side of the same bug, and the one that was doing the real damage: the
+// socket that already held the port must keep every datagram sent to it. When the
+// mux shared the port instead, roughly two thirds of the DHT's replies were handed
+// to the mux, which does not know a KRPC message from a hole in the ground and drops
+// it — a DHT that looks like it is on a lossy link, with nothing logged anywhere.
+TEST_F(BtUtpWire, OpeningAClientDoesNotStealDatagramsFromThePortsOwner) {
+    std::uint16_t     port     = 0;
+    librats::socket_t incumbent = squat_udp_port(port);
+    ASSERT_TRUE(librats::is_valid_socket(incumbent)) << "could not stage a contested port";
+    librats::set_socket_nonblocking(incumbent);
+
+    Client::Config lc = config(dl_dir(), "-LR0012-");
+    lc.listen_port    = port;
+    Client leecher(lc);
+    leecher.open();
+    // Not an ASSERT: the datagram count below is the measurement this test exists
+    // for, and it is worth seeing even when the mux has landed where it should not.
+    EXPECT_NE(leecher.utp_port(), port);
+
+    // Send from a third socket so nothing about the delivery depends on which of
+    // the two ends opened first.
+    librats::socket_t sender = librats::create_udp_socket(0, "", librats::AddressFamily::IPv4);
+    ASSERT_TRUE(librats::is_valid_socket(sender));
+    const librats::Address dest("127.0.0.1", port);
+
+    constexpr int kDatagrams = 32;
+    for (int i = 0; i < kDatagrams; ++i) {
+        const std::uint8_t body[4] = {'d', 'h', 't', std::uint8_t(i)};
+        ASSERT_GT(librats::send_udp_to(sender, body, sizeof(body), dest,
+                                       librats::AddressFamily::IPv4), 0);
+    }
+
+    int received = 0;
+    for (int spin = 0; spin < 400 && received < kDatagrams; ++spin) {
+        std::uint8_t     buf[64];
+        librats::Address from;
+        const std::ptrdiff_t n = librats::recv_udp_from(incumbent, buf, sizeof(buf), from);
+        if (n > 0) { ++received; continue; }
+        // Give the loopback a moment; a would-block here is timing, not loss.
+        leecher.reactor().run_one(2);
+    }
+    EXPECT_EQ(received, kDatagrams)
+        << "the client's uTP mux is eating datagrams addressed to the port's owner";
+
+    leecher.stop();
+    librats::close_socket(sender);
+    librats::close_socket(incumbent);
 }

@@ -76,24 +76,55 @@ void Client::open_listener() {
     // over either wire. When the port is ephemeral the TCP bind picks it and the
     // UDP bind may then find that number already taken by something else, so the
     // pair is acquired as a pair and retried as one.
-    for (int attempt = 0; attempt < 8; ++attempt) {
-        listener_ = create_tcp_server(config_.listen_port, 16, "", AddressFamily::IPv4);
-        if (!is_valid_socket(listener_)) break;
-        actual_port_ = std::uint16_t(get_bound_port(listener_));
-        if (!want_utp || utp_.open(actual_port_)) break;
-
-        if (config_.listen_port != 0) {
-            // A fixed port has nowhere else to go. TCP still works, so run without
-            // uTP rather than refusing to start.
-            LOG_WARN("bt.client", "UDP port " << actual_port_
-                                  << " unavailable — running without uTP");
+    constexpr int kPairAttempts = 8;
+    for (int attempt = 0; attempt < kPairAttempts; ++attempt) {
+        const socket_t tcp = create_tcp_server(config_.listen_port, 16, "", AddressFamily::IPv4);
+        if (!is_valid_socket(tcp)) break;
+        const std::uint16_t port = std::uint16_t(get_bound_port(tcp));
+        // Keep this TCP socket when the pair came up, when a fixed port leaves us
+        // nowhere to move, or when this was the last go — running out of attempts
+        // must not cost us a listener we already hold. Only a retry that is really
+        // going to happen may throw one away.
+        if (!want_utp || utp_.open(port) || config_.listen_port != 0
+            || attempt + 1 == kPairAttempts) {
+            listener_    = tcp;
+            actual_port_ = port;
             break;
         }
-        close_socket(listener_);
-        listener_ = RATS_INVALID_SOCKET;
+        close_socket(tcp);
+    }
+
+    // The matching UDP port was taken — most often by our own DHT, which by mainline
+    // convention serves the torrent port. An ephemeral one is still worth having:
+    // an outgoing dial is answered on the source port of its own SYN, so it does not
+    // care what that number is. Only inbound uTP needs the advertised port, and it is
+    // the half we give up here. Nothing is lost by trying — with outgoing uTP off
+    // there is nothing left for a mux to do, so we do not open one.
+    if (want_utp && !utp_.is_open() && config_.enable_outgoing_utp) {
+        if (!utp_.open(0)) {
+            LOG_WARN("bt.client", "no UDP port available — running without uTP");
+        } else if (actual_port_ != 0) {
+            LOG_WARN("bt.client", "UDP port " << actual_port_ << " is held by another socket — "
+                                  "uTP on port " << utp_.port() << " instead: dialling out works, "
+                                  "inbound uTP does not");
+        } else {
+            // No listener at all, so there is no advertised number to have missed.
+            LOG_WARN("bt.client", "uTP on port " << utp_.port() << ", outgoing only");
+        }
+    }
+
+    // Inbound uTP only means anything on the port peers are told about. On any other
+    // number nothing would ever arrive, so say so rather than pretend to listen.
+    const bool utp_inbound = utp_.is_open() && utp_.port() == actual_port_
+                             && config_.enable_incoming_utp;
+    if (utp_.is_open()) {
+        utp_.set_accept_incoming(utp_inbound);
+        utp_.set_accept_handler([this](utp::Stream& s) { on_utp_accept(s); });
     }
 
     if (!is_valid_socket(listener_)) {
+        // Outgoing uTP may well be up, so this is not the end of the session — but
+        // nobody can reach us, which is worth an error either way.
         LOG_ERROR("bt.client", "failed to bind listen port " << config_.listen_port
                                << " — inbound peers disabled");
         return;
@@ -101,12 +132,10 @@ void Client::open_listener() {
     set_socket_nonblocking(listener_);
     reactor_.add(listener_, PollIn, [this](std::uint32_t) { on_accept(); });
 
-    if (utp_.is_open()) {
-        utp_.set_accept_incoming(config_.enable_incoming_utp);
-        utp_.set_accept_handler([this](utp::Stream& s) { on_utp_accept(s); });
-    }
     LOG_INFO("bt.client", "listening on port " << actual_port_
-                          << (utp_.is_open() ? " (TCP + uTP)" : " (TCP)"));
+                          << (utp_inbound              ? " (TCP + uTP)"
+                              : utp_.is_open()         ? " (TCP, uTP outgoing only)"
+                                                       : " (TCP)"));
 }
 
 void Client::on_accept() {

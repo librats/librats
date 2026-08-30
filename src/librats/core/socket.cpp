@@ -860,7 +860,8 @@ int send_tcp_string(socket_t socket, const std::string& data) {
 
 // ── UDP Socket Functions ────────────────────────────────────────────────────
 
-socket_t create_udp_socket(int port, const std::string& bind_address, AddressFamily af) {
+socket_t create_udp_socket(int port, const std::string& bind_address, AddressFamily af,
+                           UdpPortMode mode) {
     if (!validate_port(port)) return RATS_INVALID_SOCKET;
 
     const char* af_label = (af == AddressFamily::IPv4) ? "IPv4" :
@@ -891,8 +892,8 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
     }
 #endif
 
-    // Reuse the address — but only for a port we asked for by number, where the
-    // point is to rebind a port a previous run may still be lingering on.
+    // Reuse the address — but only for a port we asked for by number, and only when
+    // the caller has not said the port must be its own.
     //
     // Never when the kernel is choosing the port. On a datagram socket the option
     // does not merely relax rebinding, it takes the port out of the set an auto-bind
@@ -901,7 +902,13 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
     // here did. The two then share the port and the kernel picks one of them per
     // datagram, so a dial-only socket can land on the port a listener beside it is
     // serving and start eating its traffic. Rare, and invisible from either end.
-    if (port != 0) {
+    //
+    // Exclusive asks for the same guarantee on a port given by number, where the
+    // clash is not rare at all: two subsystems can want one number by protocol. Not
+    // setting the option is what makes *our* bind fail over somebody else's socket;
+    // SO_EXCLUSIVEADDRUSE closes the other direction on Windows, where a later bind
+    // that does set SO_REUSEADDR would otherwise take the port out from under us.
+    if (port != 0 && mode == UdpPortMode::Shared) {
         int opt = 1;
         if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR,
                        (char*)&opt, sizeof(opt)) == RATS_SOCKET_ERROR) {
@@ -911,6 +918,19 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
             return RATS_INVALID_SOCKET;
         }
     }
+#ifdef _WIN32
+    if (port != 0 && mode == UdpPortMode::Exclusive) {
+        // Best-effort: not having it still leaves the bind itself exclusive, which
+        // is the half that matters for a socket opened after the one it clashes with.
+        int opt = 1;
+        if (setsockopt(udp_socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+                       (char*)&opt, sizeof(opt)) == RATS_SOCKET_ERROR) {
+            LOG_SOCKET_DEBUG("SO_EXCLUSIVEADDRUSE unavailable on " << af_label
+                             << " UDP socket (error: "
+                             << socket_error_string(get_last_socket_error()) << ")");
+        }
+    }
+#endif
 
     // For IPv6/DualStack sockets, configure IPV6_V6ONLY
     if (family == AF_INET6) {
@@ -943,8 +963,16 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
 
         if (bind(udp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == RATS_SOCKET_ERROR) {
             const int error = get_last_socket_error();
-            LOG_SOCKET_ERROR("Failed to bind " << af_label << " UDP socket to port " << port
-                             << " (error: " << socket_error_string(error) << ")");
+            // An Exclusive bind losing a contested port is the question being
+            // answered, not a fault: the caller asked precisely so it could move.
+            if (mode == UdpPortMode::Exclusive) {
+                LOG_SOCKET_DEBUG("Port " << port << " already held, " << af_label
+                                 << " UDP bind declined (error: "
+                                 << socket_error_string(error) << ")");
+            } else {
+                LOG_SOCKET_ERROR("Failed to bind " << af_label << " UDP socket to port " << port
+                                 << " (error: " << socket_error_string(error) << ")");
+            }
             return fail_socket(udp_socket, error);
         }
     } else {
@@ -965,8 +993,16 @@ socket_t create_udp_socket(int port, const std::string& bind_address, AddressFam
 
         if (bind(udp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == RATS_SOCKET_ERROR) {
             const int error = get_last_socket_error();
-            LOG_SOCKET_ERROR("Failed to bind " << af_label << " UDP socket to port " << port
-                             << " (error: " << socket_error_string(error) << ")");
+            // An Exclusive bind losing a contested port is the question being
+            // answered, not a fault: the caller asked precisely so it could move.
+            if (mode == UdpPortMode::Exclusive) {
+                LOG_SOCKET_DEBUG("Port " << port << " already held, " << af_label
+                                 << " UDP bind declined (error: "
+                                 << socket_error_string(error) << ")");
+            } else {
+                LOG_SOCKET_ERROR("Failed to bind " << af_label << " UDP socket to port " << port
+                                 << " (error: " << socket_error_string(error) << ")");
+            }
             return fail_socket(udp_socket, error);
         }
     }
