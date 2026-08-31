@@ -105,7 +105,12 @@ private:
     }
 
     Config                     config_;
-    InfoHash                   hash_;
+    /// Zero until attach() resolves it from the discovery key / node protocol.
+    /// Value-initialised because discovery_hash() is public and callable before
+    /// then: without the braces the array is default-initialised, so an early
+    /// read returned indeterminate bytes (observably zeros on one platform and
+    /// garbage on another).
+    InfoHash                   hash_{};
     PeerNetwork*               network_ = nullptr;
     std::unique_ptr<DhtClient> dht_;    ///< IPv4 Kademlia network
     std::unique_ptr<DhtClient> dht6_;   ///< IPv6 Kademlia network (BEP 32)

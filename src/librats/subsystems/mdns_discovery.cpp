@@ -19,7 +19,7 @@ void MdnsDiscovery::start() {
                                               : config_.instance_name;
     const uint16_t port = network_->listen_port();
 
-    mdns_ = std::make_unique<MdnsClient>(instance_, port);
+    mdns_ = std::make_unique<MdnsBackend>(instance_, port);
     mdns_->set_service_callback([this](const MdnsService& service, bool is_new) { on_service(service, is_new); });
     if (!mdns_->start()) {
         LOG_ERROR("mdns-discovery", "Failed to start mDNS client");

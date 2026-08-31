@@ -35,6 +35,18 @@
 	</dict>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string></string>
+	<!--
+	  Required by enableMdns(). NSBonjourServices must list every service type the
+	  app browses for, or mDNSResponder returns nothing at all; and without a
+	  usage description iOS cannot present the local-network prompt, so consent is
+	  denied by default. Both failures are silent — discovery just finds no peers.
+	-->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>LibratsExample finds other devices running the app on your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_librats._tcp</string>
+	</array>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

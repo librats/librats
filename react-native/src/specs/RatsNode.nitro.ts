@@ -114,6 +114,431 @@ export interface TransferStats {
 }
 
 /**
+ * DHT peer discovery. Every field is optional.
+ *
+ * This joins the BitTorrent Mainline DHT — a real, public, multi-million-node
+ * network — and finds peers by announcing under a hash derived from
+ * `discoveryKey`. It is plain UDP to other nodes, so unlike `enableMdns()` it needs
+ * nothing declared and asks the user for no permission.
+ */
+export interface DhtConfig {
+  /** UDP port for the DHT. 0 (the default) picks an ephemeral one. */
+  dhtPort?: number
+  /**
+   * Where the routing table is persisted, so a restart bootstraps quickly
+   * instead of cold. Defaults to the node's `dataDir` when that is set; if
+   * neither is set the library falls back to the working directory, which is not
+   * writable on mobile — persistence then silently does nothing and every start
+   * is a cold bootstrap.
+   */
+  dataDir?: string
+  /** Run the IPv4 Kademlia network. Default true. */
+  enableIpv4?: boolean
+  /** Run the IPv6 Kademlia network (BEP 32) — a separate DHT. Default true. */
+  enableIpv6?: boolean
+  /**
+   * Namespaces which peers find each other. Empty (the default) uses the node's
+   * `protocol`, so peers of the same app version meet and mismatched protocols —
+   * which could not handshake anyway — never do.
+   */
+  discoveryKey?: string
+  /**
+   * Bootstrap nodes as `"host:port"` (IPv6 as `"[addr]:port"`). Empty uses the
+   * built-in public defaults.
+   */
+  bootstrapNodes?: string[]
+  /** How often to search for peers. Default 30000. */
+  searchIntervalMs?: number
+  /** How often to re-announce. Default 600000; a fresh node announces at once. */
+  announceIntervalMs?: number
+  /**
+   * Probe STUN at startup to learn the public IP and seed the node id per BEP 42.
+   * Default true. Without it the node still converges via in-DHT voting, just
+   * more slowly.
+   */
+  discoverExternalIp?: boolean
+}
+
+/** A snapshot of the DHT subsystem's state. */
+export interface DhtStatus {
+  running: boolean
+  /** IPv4 DHT UDP port; 0 when not running. */
+  port: number
+  /** IPv6 DHT UDP port; 0 when not running. */
+  portV6: number
+  /**
+   * The 40-char hex hash this node announces under. **All zeros until
+   * `start()`** — it is derived when the subsystem attaches, which happens
+   * inside `start()`, and before then the key may not even be known (an empty
+   * `discoveryKey` resolves to the node's protocol at that point).
+   */
+  discoveryHash: string
+  /** Public IP used to derive the node id, or '' if not yet known. */
+  externalAddress: string
+}
+
+/**
+ * Local-network discovery over mDNS. The node advertises `_librats._tcp` with its
+ * listen port and dials the instances it finds, so two devices on the same Wi-Fi
+ * find each other with no DHT, no bootstrap node and no internet at all.
+ *
+ * Both platforms need something declared before this works, and neither fails
+ * loudly — a missing declaration looks exactly like an empty network:
+ *
+ * **iOS** needs two Info.plist keys. Without `NSBonjourServices` listing
+ * `_librats._tcp`, browsing returns nothing; without
+ * `NSLocalNetworkUsageDescription` the OS cannot ask the user for the local-network
+ * permission that Bonjour requires, so it is denied by default. The first call also
+ * triggers the system consent prompt, and the user can say no.
+ *
+ * **Android** needs `CHANGE_WIFI_MULTICAST_STATE`, which this package's manifest
+ * merges into your app. Note the Wi-Fi chipset may still filter multicast while the
+ * device is dozing — see the README on `MulticastLock` if discovery works with the
+ * screen on and stops with it off.
+ */
+export interface MdnsConfig {
+  /**
+   * The instance label advertised on the network. Defaults to `rats-` plus the
+   * start of the peer id, which is already unique per node — override it only to
+   * show something human-readable, and expect the OS to append a suffix if the
+   * name collides with another device.
+   */
+  instanceName?: string
+}
+
+/**
+ * Peer exchange (PEX): peers gossip the addresses of peers they know, so the mesh
+ * grows from the links it already has — no DHT or tracker needed.
+ *
+ * Pull-only: on connecting to a peer this node asks for a sample of its peers and
+ * dials the ones it does not have. **Both sides must have it enabled** — the
+ * responder needs it to answer.
+ *
+ * Pair it with hole punching. A PEX entry carries an id *and* an address, which is
+ * exactly what a peer behind a NAT cannot be reached at: the advertised endpoint
+ * fails to dial and the mesh silently stays one link short. With `HolePunch`
+ * attached, PEX hands that id to it instead of writing the peer off — which is
+ * what makes reaching a specific peer by id work organically as the mesh grows.
+ */
+export interface PeerExchangeConfig {
+  /** Cap on entries sent, and acted on, per response. Default 32. */
+  maxAddressesPerResponse?: number
+  /** How many peers to ask for on connect. Default 32. */
+  requestMax?: number
+  /** Ask automatically whenever a peer connects. Default true. */
+  requestOnConnect?: boolean
+  /**
+   * Only share globally-routable addresses. Default false. Turn this on if you do
+   * not want LAN addresses gossiped outside the LAN.
+   */
+  publicOnly?: boolean
+  /** Suppress re-dialling the same address for this long. Default 300000. */
+  dialCooldownMs?: number
+  /** Stop dialling discovered peers once this many are connected. 0 = no limit. */
+  peerTarget?: number
+  /** Hand an unreachable discovered peer to HolePunch. Default true. */
+  punchOnDialFailure?: boolean
+}
+
+/**
+ * Liveness and round-trip-time probing. Its own thread pings every connected peer on
+ * an interval; the peer echoes the probe, which is what times the round trip.
+ *
+ * On mobile this earns its keep for a reason that has nothing to do with latency
+ * numbers: a peer behind NAT can go away without either side's socket noticing, and a
+ * connection that looks fine is the worst kind of broken. Failing pings are how you
+ * find out — `alivePeerCount` is the honest peer count, where `peerCount` is only the
+ * number of sockets that have not yet been told they are dead.
+ */
+export interface PingConfig {
+  /** How often to ping every peer. Default 10000. */
+  intervalMs?: number
+}
+
+/**
+ * Automatic re-dialling with exponential backoff, over a peer book it can persist.
+ *
+ * The subsystem a phone wants most. Mobile connections drop constantly — the network
+ * changes, the radio sleeps, a NAT binding expires — and without this every drop
+ * needs the app to notice and re-dial. It reconciles its targets against the peers
+ * actually connected each tick, so a peer that came back on an *inbound* link is left
+ * alone rather than dialled again.
+ *
+ * Set `storePath` to keep the peer book across restarts; leave it empty and the book
+ * lives only in memory, so a restart starts from nothing.
+ */
+export interface ReconnectionConfig {
+  /**
+   * Where to persist the peer book. Defaults to `<dataDir>/peers.json` when the node
+   * has a `dataDir`; empty means memory-only, and a restart forgets everyone.
+   */
+  storePath?: string
+  /** Remember peers this node dialled, automatically. Default true. */
+  persistDiscovered?: boolean
+  /** Cap on addresses actively being re-dialled. Default 1024. */
+  maxTargets?: number
+  /**
+   * Give up on a target after this many consecutive failures. Default 0 — retry for
+   * ever. A successful connection resets the count, so only permanently dead
+   * addresses are reaped.
+   */
+  maxAttempts?: number
+  /** On start, re-dial this many of the best-known peers. Default 32. */
+  startupTargets?: number
+  /** Cap on the persisted book — everyone ever met, not just active targets. Default 4096. */
+  archiveMax?: number
+  /** Forget peers unseen for this long. Default 2592000 (30 days). */
+  archiveMaxAgeSecs?: number
+  /** First retry delay; doubles up to `maxBackoffMs`. Default 1000. */
+  baseBackoffMs?: number
+  /** Ceiling on the backoff. Default 60000. */
+  maxBackoffMs?: number
+}
+
+/**
+ * BitTorrent configuration.
+ *
+ * This one is different from every other subsystem here: BitTorrent runs its **own**
+ * transport — its own reactor, its own listener, the swarm protocol — and does not
+ * touch the node's peer mesh at all. Nothing about a torrent peer shows up in
+ * `peerIds`, `onPeerConnected`, or any channel. What it shares with the node is the
+ * DHT: with `enableDht()` also attached it borrows that same Kademlia node instead of
+ * standing up a second one, which means one routing table for both.
+ *
+ * Enable the DHT *before* this, so the shared client is live when the node starts.
+ * Without it BitTorrent still works, DHT-less, on trackers and peer exchange.
+ *
+ * Be aware of the build cost. Unlike the other subsystems this one is compiled out
+ * unless the native build sets `RATS_SEARCH_FEATURES`, which this package turns on
+ * for both platforms. Measured on a release build, stripped, Android arm64: it adds
+ * **0.5 MB** to librats (2.73 -> 3.25 MB), which is what an APK actually ships.
+ */
+export interface BittorrentConfig {
+  /** Swarm listen port. 0 picks an ephemeral one. Default 6881. */
+  listenPort?: number
+  /**
+   * Where downloads land, for torrents added without their own save path. Defaults
+   * to `<dataDir>/torrents`, because the library's own default is the working
+   * directory, which is not writable on either mobile platform.
+   */
+  downloadPath?: string
+  /** Client identifier prefix in the peer id. Default `-LR0001-`. */
+  peerIdPrefix?: string
+  /** Borrow the node's DHT when one is attached. Default true. */
+  useNodeDht?: boolean
+}
+
+/** One file inside a torrent. `path` is relative to the save path. */
+export interface TorrentFileEntry {
+  path: string
+  size: number
+}
+
+/**
+ * A consistent snapshot of one torrent, taken on the BitTorrent reactor so it is
+ * safe to read from JS.
+ *
+ * Progress is polled, not pushed: there is no `onTorrentProgress`, because the
+ * underlying client exposes state rather than events. Poll this while a download is
+ * live — once a second is plenty.
+ */
+export interface TorrentStatus {
+  /** False when no such torrent is loaded; every other field is then default. */
+  exists: boolean
+  name: string
+  /**
+   * A magnet starts with no metadata and fetches the info dict from peers (BEP 9).
+   * Until this is true, `name`, `totalSize` and `files` are not yet known.
+   */
+  hasMetadata: boolean
+  isComplete: boolean
+  paused: boolean
+  /** 0..1. */
+  progress: number
+  totalSize: number
+  downloaded: number
+  uploaded: number
+  numPeers: number
+  /** Empty until `hasMetadata`. */
+  files: TorrentFileEntry[]
+}
+
+/** Swarm-wide totals, for a status line. Rates are bytes/sec, sampled once a second. */
+export interface BittorrentStats {
+  running: boolean
+  /** The port actually bound, which differs from the configured one when it was 0. */
+  listenPort: number
+  /** True when the client borrowed the node's DHT rather than running DHT-less. */
+  usingNodeDht: boolean
+  numTorrents: number
+  totalPeers: number
+  downloadRate: number
+  uploadRate: number
+}
+
+/** What a metadata-only fetch returns: enough to show a torrent before downloading it. */
+export interface TorrentMetadata {
+  infoHash: string
+  name: string
+  totalSize: number
+  files: TorrentFileEntry[]
+}
+
+/**
+ * Distributed key-value store configuration.
+ *
+ * Requires the library to be built with `RATS_STORAGE`; both platform builds in
+ * this package turn it on.
+ */
+export interface StorageConfig {
+  /**
+   * Where the database files live. Defaults to the node's `dataDir`, because the
+   * library's own default (`"./storage"`) is relative to the working directory
+   * and not writable on either mobile platform. With neither set, `enableStorage`
+   * throws rather than letting every write fail later.
+   */
+  dataDirectory?: string
+  /** Filename prefix for the database. Default "rats_storage". */
+  databaseName?: string
+  /** Replicate changes to peers. Default true; false makes it a local store. */
+  enableSync?: boolean
+  /** Tombstones tolerated before compaction. Default 1000. */
+  compactionThreshold?: number
+  /** Largest value accepted, in bytes. Default 16 MiB. */
+  maxValueSize?: number
+  /** Persist to disk at all. Default true; false is memory-only. */
+  persistToDisk?: boolean
+}
+
+/** Which typed accessor a stored value belongs to. */
+export type StorageValueType = 'binary' | 'string' | 'int' | 'double' | 'json'
+
+export type StorageOperation = 'put' | 'delete'
+
+/**
+ * A change to the store, local or replicated from a peer.
+ *
+ * The values themselves are not included: read them back with the typed getters
+ * if you need them, so a large write does not cross the bridge just to announce
+ * itself.
+ */
+export interface StorageChangeEvent {
+  operation: StorageOperation
+  key: string
+  /** Meaningful for `put`; for `delete` it describes what was removed. */
+  type: StorageValueType
+  timestampMs: number
+  /** Peer that made the change, as hex. */
+  originPeerId: string
+  /** True when this arrived from another peer rather than a local call. */
+  isRemote: boolean
+}
+
+export interface StorageStats {
+  totalEntries: number
+  /** Tombstones still held for conflict resolution. */
+  deletedEntries: number
+  totalDataBytes: number
+  diskUsageBytes: number
+  entriesSynced: number
+  entriesSent: number
+}
+
+/**
+ * How this node's own side of the NAT behaves, as reported by the mesh.
+ *
+ * This is the single most useful thing to look at when a cross-network connection
+ * fails, because it says whether a hole punch is even possible.
+ */
+export type NatMapping =
+  /** Not enough independent observations yet. */
+  | 'unknown'
+  /** No NAT in the path: peers see an address this node holds itself. */
+  | 'open'
+  /** One external port for every destination — punchable. */
+  | 'endpointIndependent'
+  /** A fresh mapping per destination (symmetric) — a punch cannot work; relay only. */
+  | 'endpointDependent'
+
+export interface NatStatus {
+  mapping: NatMapping
+  /** How many distinct peers have reported an observation. Two is enough to classify. */
+  observationCount: number
+  /** External UDP endpoints peers have seen, freshest first, as `"ip:port"`. */
+  externalEndpoints: string[]
+}
+
+/** Automatic router port forwarding via UPnP IGD and NAT-PMP. */
+export interface PortMappingConfig {
+  /** Master switch. Default true. */
+  enabled?: boolean
+  /** Use the UPnP IGD backend. Default true. */
+  enableUpnp?: boolean
+  /** Use the NAT-PMP backend. Default true. */
+  enableNatpmp?: boolean
+  /** Requested lease length. Default 3600. */
+  leaseDurationSeconds?: number
+}
+
+/** What the router actually granted. Both protocols are mapped independently. */
+export interface PortMappingStatus {
+  /** '' until a backend succeeds. */
+  externalIp: string
+  /** 0 until the TCP mapping succeeds. */
+  externalTcpPort: number
+  /** 0 until the UDP mapping succeeds. */
+  externalUdpPort: number
+}
+
+/**
+ * UDP hole punching: reaches a peer behind a NAT by arranging, through a peer both
+ * sides already have, that the two dial each other at the same instant.
+ *
+ * Only works when this node's mapping is `endpointIndependent` — check
+ * `natStatus()`. Against a symmetric NAT nothing learned from one peer predicts
+ * what a third will see, so `Relay` is the only way through.
+ */
+export interface HolePunchConfig {
+  /** Peers asked to carry one rendezvous; the ones without the target drop it. Default 3. */
+  maxRelays?: number
+  /** Endpoints advertised to the target, and so dialled by it. Default 4. */
+  maxAddresses?: number
+  /** Rendezvous rounds before giving up on a target for a while. Default 3. */
+  attempts?: number
+  /** Budget for one round, covering two relayed hops plus the punch burst. Default 6000. */
+  roundTimeoutMs?: number
+}
+
+/**
+ * Relaying: carries a connection through a third node when no direct path exists.
+ *
+ * What is relayed is the byte stream, so the Noise handshake still runs end to end
+ * and the relay moves ciphertext it cannot read. A circuit that comes up then tries
+ * to upgrade itself to a direct link.
+ */
+export interface RelayConfig {
+  /** Use relays to reach peers this node cannot dial. Default true. */
+  enableClient?: boolean
+  /** Budget for opening one circuit. Default 8000. */
+  openTimeoutMs?: number
+  /** Concurrent outbound circuits. Default 8. */
+  maxOutboundCircuits?: number
+  /** Accept circuits others open *to* this node. Default true. */
+  acceptInbound?: boolean
+  /**
+   * Act as a relay *for other peers* — carrying their traffic. Default false, and
+   * usually the right answer on mobile: serving costs bandwidth and battery, and
+   * a phone is rarely reachable enough to be useful as one. Relaying needs nodes
+   * that are dialable, which in practice means servers you run.
+   */
+  serve?: boolean
+  /** When serving: total circuits carried. Default 32. */
+  maxCircuits?: number
+  /** When serving: bytes one circuit may carry before it is closed. Default 64 MiB. */
+  maxBytesPerCircuit?: number
+}
+
+/**
  * GossipSub tuning. Every field is optional; the defaults mirror the libp2p
  * reference (D=6, D_low=4, D_high=12) and suit small-to-medium meshes.
  */
@@ -374,4 +799,316 @@ export interface RatsNode
   topicPeers(topic: string): string[]
   /** This node's current mesh for a topic — the subset it exchanges full messages with. */
   meshPeers(topic: string): string[]
+
+  // --- DHT discovery ---
+  //
+  // Opt-in: call `enableDht()` before `start()`.
+  //
+  // There is deliberately no `onPeerDiscovered` here, because the subsystem does
+  // not hand discovered peers back for you to dial — it dials them itself through
+  // the node. Discovery therefore surfaces as ordinary `onPeerConnected` events,
+  // and the only thing that distinguishes a DHT-found peer from one you dialled
+  // is that you did not call `connect()` for it.
+  //
+  // Expect this to take time: joining the DHT, announcing, and searching run on
+  // their own intervals, so the first discovery typically arrives tens of seconds
+  // after `start()` rather than immediately.
+
+  /** Attach DHT discovery. Must be called before `start()`. */
+  enableDht(config?: DhtConfig): void
+
+  /**
+   * A snapshot of DHT state. Cheap to poll — useful for showing bootstrap
+   * progress, since `externalAddress` fills in once STUN or in-DHT voting
+   * resolves it.
+   */
+  dhtStatus(): DhtStatus
+
+  // --- local-network discovery ---
+  //
+  // Like the DHT, this dials what it finds rather than handing peers back, so
+  // discovery surfaces as ordinary `onPeerConnected` events. Unlike the DHT it is
+  // fast — a peer on the same Wi-Fi usually appears within a second or two — and it
+  // needs no internet connection whatsoever.
+
+  /**
+   * Attach mDNS discovery. Must be called before `start()`.
+   *
+   * Read `MdnsConfig` first: both platforms need a declaration in place (Info.plist
+   * keys on iOS, a manifest permission on Android) and without it discovery silently
+   * finds nothing rather than reporting an error.
+   */
+  enableMdns(config?: MdnsConfig): void
+
+  // --- NAT traversal ---
+  //
+  // Three separate mechanisms, tried in roughly this order of preference:
+  //
+  //   port mapping - ask the router to forward the listen port, so peers can dial
+  //                  in directly. Free when it works; useless behind carrier-grade
+  //                  NAT, where there is no router of yours to ask.
+  //   hole punch   - both sides dial at the same instant so each opens the mapping
+  //                  the other needs. Requires an `endpointIndependent` mapping.
+  //   relay        - carry the stream through a third node. Always works, but needs
+  //                  a node that is actually reachable, which in practice means a
+  //                  server you run.
+  //
+  // `natStatus()` is what tells you which of these can work, and needs no
+  // subsystem — the node collects it from the identify exchange for free.
+
+  /**
+   * What the mesh has reported about this node's own NAT. Available without
+   * enabling anything; meaningful once at least two peers have connected over UDP
+   * (`observationCount >= 2`). Read this first when a cross-network dial fails.
+   */
+  natStatus(): NatStatus
+
+  /** Attach automatic router port forwarding (UPnP + NAT-PMP). Before `start()`. */
+  enablePortMapping(config?: PortMappingConfig): void
+
+  /** What the router granted. All-empty until a backend succeeds, or forever if none can. */
+  portMappingStatus(): PortMappingStatus
+
+  /** Attach UDP hole punching. Before `start()`. */
+  enableHolePunch(config?: HolePunchConfig): void
+
+  /**
+   * Try to reach a peer by hole punching. Non-blocking; success arrives as an
+   * `onPeerConnected` event. False means the attempt could not even be started —
+   * no peer in common to carry the rendezvous, or the target is in cooldown after
+   * earlier failures.
+   */
+  punch(peerId: string): boolean
+
+  /** Attach relaying. Before `start()`. */
+  enableRelay(config?: RelayConfig): void
+
+  /**
+   * Try to reach a peer through a relay. Non-blocking; success arrives as an
+   * `onPeerConnected` event. False means no usable relay candidate was known.
+   */
+  connectViaRelay(peerId: string): boolean
+
+  // --- typed JSON messaging ---
+  //
+  // A named-type message bus carrying JSON, distinct from the raw channels of
+  // `send`/`onMessage`: it rides `MessageType::Typed` with its own
+  // [type][payload] framing.
+  //
+  // Reach for this when you need to interoperate with non-RN peers that already
+  // use librats' MessageJson — a C++, Java or Python node. **If you control both
+  // ends, raw channels are the cheaper choice**: `send`/`onMessage` already give
+  // you named routing and the authenticated peer id, and you would be calling
+  // JSON.stringify either way. This path additionally parses your string into the
+  // library's JSON type and re-serialises it for the wire, so it does strictly
+  // more work than passing the bytes yourself.
+  //
+  // JSON crosses as a string rather than an object. That keeps the boundary
+  // unambiguous and lets Hermes' native JSON.parse/stringify do the conversion,
+  // instead of a bespoke object bridge with its own edge cases around nested
+  // arrays and number precision.
+
+  /** Attach typed JSON messaging. Must be called before `start()`. */
+  enableJsonMessaging(): void
+
+  /**
+   * Send a JSON message of `type` to one peer. Throws if `json` is not valid
+   * JSON. Returns false if that peer is not connected.
+   */
+  sendJson(peerId: string, type: string, json: string): boolean
+
+  /**
+   * Send to every connected peer. Throws on invalid JSON; returns false if there
+   * were no peers to send to.
+   */
+  broadcastJson(type: string, json: string): boolean
+
+  /**
+   * Handle messages of `type`. **Additive**, unlike `onMessage` and `subscribe`:
+   * several handlers can coexist for one type and all fire in registration
+   * order. Use `offJson` to remove them.
+   *
+   * `peerId` is the authenticated id from the handshake, not a self-reported
+   * field inside the payload — so it cannot be spoofed by the sender.
+   */
+  onJson(type: string, listener: (peerId: string, json: string) => void): void
+
+  /** Like `onJson`, but the handler is removed right after it fires once. */
+  onceJson(type: string, listener: (peerId: string, json: string) => void): void
+
+  /** Remove every handler registered for `type`. */
+  offJson(type: string): void
+
+  // --- distributed key-value storage ---
+  //
+  // A replicated store with Last-Write-Wins conflict resolution: a local write is
+  // broadcast to peers, and on connect both sides exchange a full snapshot so a
+  // late joiner catches up. LWW makes the merge order-independent.
+  //
+  // What LWW means in practice: **concurrent writes to one key do not merge, the
+  // later timestamp simply wins and the other is lost.** That is fine for
+  // last-known-state (a profile, a setting, a presence flag) and wrong for
+  // anything you would otherwise increment or append. Two phones editing the same
+  // key offline will lose one edit.
+  //
+  // Timestamps come from each device's clock, so a badly-skewed clock can make a
+  // stale write win. There is no vector clock here.
+
+  // --- peer exchange ---
+
+  /**
+   * Attach peer exchange. Must be called before `start()`.
+   *
+   * There is nothing to call afterwards — PEX is autonomous, asking each new peer
+   * for its peers and dialling what it learns. Enable `enableHolePunch()` too so
+   * an unreachable discovered peer is punched rather than dropped.
+   */
+  enablePeerExchange(config?: PeerExchangeConfig): void
+
+  /** Attach the store. Must be called before `start()`. */
+  enableStorage(config?: StorageConfig): void
+
+  /**
+   * Typed writes. Each returns false if the value exceeds `maxValueSize` or the
+   * store rejected it.
+   *
+   * The types are distinct on the wire, so a value written with `putInt` reads
+   * back through `getInt` — including for a C++ or Java peer. Note `putInt` takes
+   * a JS `number`, which represents integers exactly only up to 2^53; a peer
+   * storing a full int64 beyond that will not round-trip through JS.
+   */
+  putString(key: string, value: string): boolean
+  putInt(key: string, value: number): boolean
+  putDouble(key: string, value: number): boolean
+  putBinary(key: string, value: ArrayBuffer): boolean
+  /** Throws if `json` is not valid JSON. */
+  putJson(key: string, json: string): boolean
+
+  /**
+   * Typed reads. `undefined` means either absent or stored as a different type —
+   * `getValueType()` distinguishes those.
+   */
+  getString(key: string): string | undefined
+  getInt(key: string): number | undefined
+  getDouble(key: string): number | undefined
+  getBinary(key: string): ArrayBuffer | undefined
+  getJson(key: string): string | undefined
+  getValueType(key: string): StorageValueType | undefined
+
+  /** Writes a tombstone and replicates it; the key stays until compaction. */
+  removeKey(key: string): boolean
+  hasKey(key: string): boolean
+  storageKeys(): string[]
+  storageKeysWithPrefix(prefix: string): string[]
+  storageCount(): number
+  clearStorage(): void
+
+  /** Flush to disk. Also happens automatically; call it before backgrounding. */
+  saveStorage(): boolean
+  /** Reload from disk, discarding in-memory state. */
+  loadStorage(): boolean
+  /** Drop tombstones that are no longer needed. Returns how many were removed. */
+  compactStorage(): number
+
+  /** Ask peers for a full snapshot. False if there is no peer to ask. */
+  requestStorageSync(): boolean
+  isStorageSynced(): boolean
+  storageStats(): StorageStats
+
+  /**
+   * Observe changes, local and remote. One listener; registering again replaces
+   * it. Check `isRemote` to tell a peer's write from your own.
+   */
+  onStorageChange(listener: (event: StorageChangeEvent) => void): void
+
+  // --- BitTorrent ---
+  //
+  // A separate swarm alongside the node, not part of its mesh — see BittorrentConfig.
+  // Every call below is safe from JS: the client marshals each one onto its own
+  // reactor rather than handing out reactor-owned objects.
+
+  /** Attach the BitTorrent client. Must be called before `start()`, and after
+   *  `enableDht()` if you want the two to share one DHT. */
+  enableBittorrent(config?: BittorrentConfig): void
+
+  /**
+   * Add a magnet link. Returns its info hash as 40 hex chars — the handle every
+   * other call here takes.
+   *
+   * It starts with no metadata: the info dict is fetched from peers first, so
+   * `torrentStatus().hasMetadata` is false for a moment and the name and file list
+   * arrive with it. Throws if the URI is not a valid magnet.
+   */
+  addMagnet(magnetUri: string, savePath?: string): string
+
+  /** Add a `.torrent` file from disk. Returns its info hash. Throws if the file
+   *  cannot be read or parsed. Metadata is known immediately. */
+  addTorrentFile(path: string, savePath?: string): string
+
+  /** Forget a torrent. `deleteFiles` also removes what it downloaded. */
+  removeTorrent(infoHash: string, deleteFiles?: boolean): void
+
+  /** Pause / resume without re-hashing what is already on disk. */
+  pauseTorrent(infoHash: string): void
+  resumeTorrent(infoHash: string): void
+
+  /** A snapshot of one torrent. Check `exists` first. */
+  torrentStatus(infoHash: string): TorrentStatus
+
+  /** The info hashes this node added, in the order they were added. */
+  torrentInfoHashes(): string[]
+
+  bittorrentStats(): BittorrentStats
+
+  /**
+   * Persist resume state so a restart picks up where it left off, rather than
+   * re-hashing or re-downloading. Worth calling before backgrounding.
+   */
+  saveResumeData(infoHash: string): boolean
+  saveAllResumeData(): void
+
+  /**
+   * Fetch a torrent's metadata without downloading it — enough to show a name, a
+   * size and a file list before committing to the transfer.
+   *
+   * Adds a temporary metadata-only torrent, waits for the info dict, and removes it
+   * again. The listener fires exactly once, off the JS thread; `success` is false on
+   * timeout, and `error` says why.
+   */
+  fetchTorrentMetadata(
+    infoHash: string,
+    timeoutMs: number,
+    listener: (success: boolean, info: TorrentMetadata, error: string) => void,
+  ): void
+
+  // --- keepalive and reconnection ---
+  //
+  // The two subsystems a long-lived mobile peer wants and a desktop one can shrug
+  // off: one tells you a link is dead, the other gets it back.
+
+  /** Attach RTT/liveness probing. Must be called before `start()`. */
+  enablePing(config?: PingConfig): void
+
+  /**
+   * Round-trip time to a peer in milliseconds, or -1 when no reply has been timed
+   * yet — which is also what an unreachable peer looks like, since the probe that
+   * would have measured it never came back.
+   */
+  peerRtt(peerId: string): number
+
+  /** Peers that have answered a probe. Lower than `peerCount` when a link has died
+   *  without its socket noticing, which is the case worth catching. */
+  alivePeerCount(): number
+
+  /** Attach automatic re-dialling. Must be called before `start()`. */
+  enableReconnection(config?: ReconnectionConfig): void
+
+  /** Add an address to re-dial, as `"host:port"` (IPv6 as `"[addr]:port"`). */
+  addReconnectTarget(address: string): void
+  /** Stop re-dialling an address, and drop it from the book. */
+  removeReconnectTarget(address: string): void
+  /** How many addresses are actively being re-dialled. */
+  reconnectTargetCount(): number
+  /** The best-known peers from the book, as `"host:port"`, most promising first. */
+  knownPeers(limit: number): string[]
 }
