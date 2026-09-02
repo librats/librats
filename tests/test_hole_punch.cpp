@@ -136,7 +136,13 @@ TEST(HolePunchE2E, SimultaneousPunchesFromBothEndsStillConnect) {
     ASSERT_TRUE(wait_for([&] { return knows_own_endpoint(a) && knows_own_endpoint(b); }));
 
     EXPECT_TRUE(punch_a->punch(b.local_id()));
-    EXPECT_TRUE(punch_b->punch(a.local_id()));
+
+    // B decides at the same moment — but "the same moment" is itself a race against
+    // A's Connect, which needs only two loopback hops to arrive. If it gets there
+    // first, B is already answering A's rendezvous and declines to open a second one
+    // for the same peer. That is the same collision settled one message earlier, so
+    // the answer here is not the requirement; what comes out of it is.
+    punch_b->punch(a.local_id());
 
     ASSERT_TRUE(wait_for([&] {
         return a.peer(b.local_id()).has_value() && b.peer(a.local_id()).has_value();
@@ -149,6 +155,77 @@ TEST(HolePunchE2E, SimultaneousPunchesFromBothEndsStillConnect) {
 
     a.stop();
     b.stop();
+    hub.stop();
+}
+
+// The same collision, pinned down rather than raced for. Above, both ends opening a
+// rendezvous at once depends on two Connects crossing on the wire; here the second
+// one is injected by hand at a moment B is known to be holding an initiator session,
+// so the symmetric rule is exercised on every run and in both directions.
+//
+// The stranger runs no HolePunch of its own — it answers nothing, which is what
+// leaves B's opened round standing while the collision is delivered to it.
+TEST(HolePunchE2E, HeadOnRendezvousIsSettledByTheSmallerPeerId) {
+    Node hub(listening_config());
+    Node b(listening_config());
+    Node stranger(listening_config());
+
+    auto* relay   = hub.add_subsystem(std::make_unique<HolePunch>());
+    auto* punch_b = b.add_subsystem(std::make_unique<HolePunch>());
+
+    ASSERT_TRUE(hub.start());
+    ASSERT_TRUE(b.start());
+    ASSERT_TRUE(stranger.start());
+
+    b.connect("127.0.0.1", hub.listen_port());
+    stranger.connect("127.0.0.1", hub.listen_port());
+    ASSERT_TRUE(wait_for([&] { return hub.peer_count() == 2 && knows_own_endpoint(b); }));
+
+    ASSERT_TRUE(punch_b->punch(stranger.local_id()));
+    ASSERT_TRUE(wait_for([&] { return relay->relayed() >= 1u; }, 5s))
+        << "B's own rendezvous never reached the relay";
+
+    // ... and now the other end opens one of its own, into that.
+    stranger.send(hub.local_id(), MessageType::Punch,
+                  ByteView(relay_envelope(b.local_id(), unreachable_connect())));
+    ASSERT_TRUE(wait_for([&] { return relay->relayed() >= 2u; }, 5s))
+        << "the competing rendezvous never reached B";
+
+    // Whoever holds the smaller id keeps the round and ignores the other's Connect;
+    // the larger stands down and answers, which is one more message through the
+    // relay. Both ends compute the same rule, so exactly one of them stands down.
+    const bool b_keeps_the_round = b.local_id() < stranger.local_id();
+    if (b_keeps_the_round) {
+        std::this_thread::sleep_for(300ms);
+        EXPECT_EQ(relay->relayed(), 2u) << "B answered a round its own id should have won";
+    } else {
+        ASSERT_TRUE(wait_for([&] { return relay->relayed() >= 3u; }, 5s))
+            << "B neither kept its round nor stood down and answered";
+        std::this_thread::sleep_for(300ms);
+        EXPECT_EQ(relay->relayed(), 3u)
+            << "the two ends read each other's answer as a new round and ping-ponged";
+    }
+
+    // Either way it is one session, and nothing has been dialed yet: a Sync is
+    // still owed, by whichever end kept the round.
+    EXPECT_EQ(punch_b->active_sessions(), 1u);
+    EXPECT_EQ(punch_b->punches_started(), 0u);
+
+    // And that is exactly what the stood-down side is waiting for — while the side
+    // that kept its round is waiting for a Connect, and ignores a Sync it never asked
+    // anyone to send.
+    stranger.send(hub.local_id(), MessageType::Punch,
+                  ByteView(relay_envelope(b.local_id(), sync_body())));
+    if (b_keeps_the_round) {
+        std::this_thread::sleep_for(300ms);
+        EXPECT_EQ(punch_b->punches_started(), 0u) << "B punched on a Sync it never asked for";
+    } else {
+        EXPECT_TRUE(wait_for([&] { return punch_b->punches_started() == 1u; }, 5s))
+            << "B stood down but never acted on the Sync it was waiting for";
+    }
+
+    b.stop();
+    stranger.stop();
     hub.stop();
 }
 
