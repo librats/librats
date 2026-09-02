@@ -73,19 +73,39 @@ void Client::open_listener() {
 
     // TCP and uTP must answer on the *same* port: a peer learns one number for us
     // (from the tracker, the DHT or PEX) and has to be able to reach us with it
-    // over either wire. When the port is ephemeral the TCP bind picks it and the
-    // UDP bind may then find that number already taken by something else, so the
-    // pair is acquired as a pair and retried as one.
+    // over either wire. So the pair is acquired as a pair and retried as one — and
+    // which half picks the number is what decides whether the retry buys anything.
+    //
+    // On a fixed port nothing is picked: TCP takes the number it was given, and the
+    // mux either gets the UDP half or moves aside (the DHT case — mainline serves
+    // the DHT on the torrent port). On an ephemeral port the *UDP* half chooses and
+    // TCP follows it, because UDP is the scarce side. An ephemeral UDP bind is by
+    // construction a number nobody holds, while a TCP-chosen number is only a guess
+    // about UDP — and a guess a retry cannot improve on, since the OS hands out
+    // ephemeral ports in sequence: any block-shaped obstruction (a reserved range,
+    // a neighbouring process's mux) takes all eight consecutive attempts with it.
     constexpr int kPairAttempts = 8;
     for (int attempt = 0; attempt < kPairAttempts; ++attempt) {
-        const socket_t tcp = create_tcp_server(config_.listen_port, 16, "", AddressFamily::IPv4);
-        if (!is_valid_socket(tcp)) break;
+        // open(0) is idempotent, so this both opens the mux and re-reads its port.
+        // A mux that cannot open at all must not cost us the TCP listener too, so
+        // it falls back to TCP picking — where there is nothing left to pair with.
+        const bool     udp_first = want_utp && config_.listen_port == 0 && utp_.open(0);
+        const int      want      = udp_first ? int(utp_.port()) : config_.listen_port;
+        const socket_t tcp       = create_tcp_server(want, 16, "", AddressFamily::IPv4);
+        if (!is_valid_socket(tcp)) {
+            // Only the UDP-first path has anywhere to go: drop this number and let
+            // the next bind choose another. On the last go keep the mux anyway —
+            // dialling out still works without a listener.
+            if (!udp_first || attempt + 1 == kPairAttempts) break;
+            utp_.close();
+            continue;
+        }
         const std::uint16_t port = std::uint16_t(get_bound_port(tcp));
         // Keep this TCP socket when the pair came up, when a fixed port leaves us
         // nowhere to move, or when this was the last go — running out of attempts
         // must not cost us a listener we already hold. Only a retry that is really
         // going to happen may throw one away.
-        if (!want_utp || utp_.open(port) || config_.listen_port != 0
+        if (udp_first || !want_utp || utp_.open(port) || config_.listen_port != 0
             || attempt + 1 == kPairAttempts) {
             listener_    = tcp;
             actual_port_ = port;
