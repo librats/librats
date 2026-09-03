@@ -2253,6 +2253,15 @@ TEST(UdpMuxTest, ResetsAreCappedSoTheSocketCannotReflect) {
         send_udp_to(probe, buf, rudp::encode(p, buf), net.addr_b, AddressFamily::IPv4);
     }
 
+    // Let the burst land before the drain starts. Delivery over loopback is not
+    // synchronous everywhere — on Darwin a datagram is handed to the interface's
+    // own input thread, so sendto() returns well before the receiving socket has
+    // it, and a drain that runs first reads an empty socket — which looks exactly
+    // like a mux that answered nothing at all.
+    ASSERT_TRUE(wait_for([&] { return probe_has_data(net.sock_b); }))
+        << "the junk burst never reached the mux";
+    std::this_thread::sleep_for(50ms);   // and the rest of the burst behind it
+
     // Drain the whole burst as fast as the socket will give it up, with no sleeps:
     // three windows' worth of junk delivered inside as little of one window as this
     // machine allows. (The replies are staged, and on_readable() flushes them before
