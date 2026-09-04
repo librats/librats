@@ -74,10 +74,15 @@ std::string local_ip_for_destination(const std::string& dest_ip, uint16_t dest_p
 bool http_request(const std::string& host, uint16_t port, const std::string& method,
                   const std::string& path, const std::string& extra_headers,
                   const std::string& body, int& status_code, std::string& response_body) {
-    socket_t sock = create_tcp_client(host, port, 10000);
+    const auto socket_timeout = 10000;
+    
+    socket_t sock = create_tcp_client(host, port, socket_timeout);
     if (!is_valid_socket(sock)) {
         return false;
     }
+
+    set_read_timeout(sock, socket_timeout);
+    set_send_timeout(sock, socket_timeout);
 
     std::ostringstream req;
     req << method << " " << path << " HTTP/1.1\r\n"

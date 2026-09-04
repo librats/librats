@@ -323,6 +323,10 @@ bool set_socket_buffer_sizes(socket_t socket, int recv_bytes, int send_bytes);
  */
 bool set_tcp_nodelay(socket_t socket);
 
+bool set_read_timeout(socket_t socket, int timeout_ms);
+
+bool set_send_timeout(socket_t socket, int timeout_ms);
+
 /**
  * Send one datagram straight from a raw buffer — no std::vector, no resolution.
  *

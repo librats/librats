@@ -1189,6 +1189,27 @@ bool set_tcp_nodelay(socket_t socket) {
     return true;
 }
 
+
+bool set_read_timeout(socket_t socket, int timeout_ms) {
+    const int on = 1;
+    if (setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&on), sizeof(on)) != 0) {
+        LOG_SOCKET_DEBUG("Could not set read timeout on socket " << socket);
+        return false;
+    }
+    return true;
+}
+
+bool set_send_timeout(socket_t socket, int timeout_ms) {
+    const int on = 1;
+    if (setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const char*>(&on), sizeof(on)) != 0) {
+        LOG_SOCKET_DEBUG("Could not set send timeout on socket " << socket);
+        return false;
+    }
+    return true;
+}
+
 std::ptrdiff_t send_udp_to(socket_t socket, const void* data, size_t len,
                            const Address& dest, AddressFamily af) {
     sockaddr_storage dest_addr;
