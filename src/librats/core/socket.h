@@ -323,8 +323,23 @@ bool set_socket_buffer_sizes(socket_t socket, int recv_bytes, int send_bytes);
  */
 bool set_tcp_nodelay(socket_t socket);
 
+/**
+ * Set the timeout for receive operations on a socket (SO_RCVTIMEO).
+ *
+ * @param socket the socket to configure.
+ * @param timeout_ms the timeout in milliseconds; 0 disables the timeout.
+ * @return true if the option was accepted.
+ */
 bool set_read_timeout(socket_t socket, int timeout_ms);
 
+/**
+ * Set the timeout for send operations on a socket (SO_SNDTIMEO).
+ *
+ *
+ * @param socket the socket to configure.
+ * @param timeout_ms the timeout in milliseconds; 0 disables the timeout.
+ * @return true if the option was accepted.
+ */
 bool set_send_timeout(socket_t socket, int timeout_ms);
 
 /**

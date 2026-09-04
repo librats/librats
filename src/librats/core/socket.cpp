@@ -1191,9 +1191,10 @@ bool set_tcp_nodelay(socket_t socket) {
 
 
 bool set_read_timeout(socket_t socket, int timeout_ms) {
-    const int on = 1;
-    if (setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&on), sizeof(on)) != 0) {
+    struct timeval timeout;
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    if (setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0) {
         LOG_SOCKET_DEBUG("Could not set read timeout on socket " << socket);
         return false;
     }
@@ -1201,9 +1202,10 @@ bool set_read_timeout(socket_t socket, int timeout_ms) {
 }
 
 bool set_send_timeout(socket_t socket, int timeout_ms) {
-    const int on = 1;
-    if (setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO,
-                   reinterpret_cast<const char*>(&on), sizeof(on)) != 0) {
+    struct timeval timeout;
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    if (setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0) {
         LOG_SOCKET_DEBUG("Could not set send timeout on socket " << socket);
         return false;
     }
