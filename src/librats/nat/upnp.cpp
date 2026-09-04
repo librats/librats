@@ -81,8 +81,10 @@ bool http_request(const std::string& host, uint16_t port, const std::string& met
         return false;
     }
 
-    set_read_timeout(sock, socket_timeout);
-    set_send_timeout(sock, socket_timeout);
+    if (!set_read_timeout(sock, socket_timeout) || !set_send_timeout(sock, socket_timeout)) {
+      close_socket(sock);
+      return false;
+    }
 
     std::ostringstream req;
     req << method << " " << path << " HTTP/1.1\r\n"
