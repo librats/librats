@@ -890,7 +890,8 @@ The [`examples/`](examples/) directory holds small, focused programs — one cap
 | `typed_messaging` | `MessageJson` typed JSON messages, keyed by the authenticated sender |
 | `file_transfer` | `FileTransfer` — streaming a file with CRC32 / SHA-256 integrity + progress |
 | `dht_discovery` | `DhtDiscovery` — automatic peer discovery over the Kademlia DHT |
-| `full_chat` | "Batteries-included" chat: DHT + mDNS + PEX discovery, reconnection, ping and pub/sub — peers find each other with no addresses typed in |
+| `backpressure` | Streaming flat out without being dropped: `send()`'s return value, `on_peer_writable`, and what ignoring them costs |
+| `full_chat` | "Batteries-included" chat: DHT + mDNS + PEX discovery, the full NAT ladder (port mapping → hole punching → relay), reconnection, ping and pub/sub — peers find each other with no addresses typed in, from behind a router |
 | `bittorrent_download` | Downloading a magnet link (requires `RATS_SEARCH_FEATURES`) |
 
 ```bash

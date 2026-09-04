@@ -33,7 +33,8 @@ cmake --build build-examples -j
 | `file_transfer` | `04_file_transfer.cpp`      | `FileTransfer` — streaming a file with CRC32/SHA-256 integrity + progress. |
 | `dht_discovery` | `05_dht_discovery.cpp`      | `DhtDiscovery` — automatic peer discovery over the Kademlia DHT. |
 | `bittorrent_download` | `06_bittorrent_download.cpp` | Downloading a magnet link (requires `RATS_SEARCH_FEATURES`). |
-| `full_chat`   | `07_full_chat.cpp`            | "Batteries-included" chat: DHT + mDNS + PEX discovery, reconnection, ping, and pub/sub — peers find each other with no addresses typed in. |
+| `backpressure` | `07_backpressure.cpp`        | Streaming flat out without being dropped: `send()`'s return value, `on_peer_writable`, and what ignoring them costs. |
+| `full_chat`   | `08_full_chat.cpp`            | "Batteries-included" chat: DHT + mDNS + PEX discovery, the full NAT ladder (port mapping → hole punching → relay), reconnection, ping, and pub/sub — peers find each other with no addresses typed in, from behind a router. |
 
 Each source file's header comment documents its command-line usage. A typical
 two-node run:

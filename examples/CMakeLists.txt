@@ -36,7 +36,8 @@ set(RATS_EXAMPLES
     03_typed_messaging.cpp
     04_file_transfer.cpp
     05_dht_discovery.cpp
-    07_full_chat.cpp
+    07_backpressure.cpp
+    08_full_chat.cpp
 )
 
 # Examples that require the BitTorrent subsystem (RATS_SEARCH_FEATURES).
