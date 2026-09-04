@@ -720,9 +720,60 @@ int send_tcp_data(socket_t socket, const std::vector<uint8_t>& data) {
     return static_cast<int>(total_sent);
 }
 
-std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size) {
+std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size, int timeout_ms,
+                                      socket_t interrupt_fd, TcpRecvStatus* status) {
+    auto report = [status](TcpRecvStatus s) { if (status) *status = s; };
+    report(TcpRecvStatus::Data);
+
     if (buffer_size == 0) {
         buffer_size = 1024;
+    }
+
+    // Wait for readability first whenever a deadline or an interrupt socket is in
+    // play. Without one of those this falls straight through to a plain blocking
+    // recv(), which is what every legacy caller expects.
+    const bool have_interrupt = is_valid_socket(interrupt_fd);
+    if (timeout_ms >= 0 || have_interrupt) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(socket, &read_fds);
+        socket_t maxfd = socket;
+        if (have_interrupt) {
+            FD_SET(interrupt_fd, &read_fds);
+            if (interrupt_fd > maxfd) maxfd = interrupt_fd;
+        }
+
+        struct timeval timeout;
+        struct timeval* ptimeout = nullptr; // timeout_ms < 0 => block until readable
+        if (timeout_ms >= 0) {
+            timeout.tv_sec = timeout_ms / 1000;
+            timeout.tv_usec = (timeout_ms % 1000) * 1000;
+            ptimeout = &timeout;
+        }
+
+        int result = select(static_cast<int>(maxfd) + 1, &read_fds, nullptr, nullptr, ptimeout);
+        if (result == 0) {
+            report(TcpRecvStatus::Timeout);
+            return {};
+        }
+        if (result < 0) {
+            const int error = get_last_socket_error();
+#ifndef _WIN32
+            // A signal cut the wait short; nothing is wrong with the socket. Same
+            // classification as receive_udp_data(): report "nothing arrived" and let
+            // the caller re-check its own deadline instead of declaring failure.
+            if (error == EINTR) { report(TcpRecvStatus::Timeout); return {}; }
+#endif
+            LOG_SOCKET_ERROR("Select error while waiting for TCP data on socket " << socket
+                             << ": " << socket_error_string(error));
+            report(TcpRecvStatus::Error);
+            return {};
+        }
+        // Prefer real data: if bytes arrived alongside a wakeup, take them now.
+        if (!FD_ISSET(socket, &read_fds)) {
+            report(TcpRecvStatus::Interrupted);
+            return {};
+        }
     }
 
     std::vector<uint8_t> buffer(buffer_size);
@@ -731,17 +782,20 @@ std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size) {
     if (bytes_received == RATS_SOCKET_ERROR) {
         int error = get_last_socket_error();
 #ifdef _WIN32
-        if (error == WSAEWOULDBLOCK) { return {}; }
+        if (error == WSAEWOULDBLOCK) { report(TcpRecvStatus::Timeout); return {}; }
 #else
-        if (error == EAGAIN || error == EWOULDBLOCK) { return {}; }
+        if (error == EAGAIN || error == EWOULDBLOCK) { report(TcpRecvStatus::Timeout); return {}; }
+        if (error == EINTR) { report(TcpRecvStatus::Timeout); return {}; }
 #endif
         LOG_SOCKET_ERROR("Failed to receive TCP data from socket " << socket
                          << " (error: " << socket_error_string(error) << ")");
+        report(TcpRecvStatus::Error);
         return {};
     }
 
     if (bytes_received == 0) {
         LOG_SOCKET_INFO("Connection closed by peer on socket " << socket);
+        report(TcpRecvStatus::Closed);
         return {};
     }
 

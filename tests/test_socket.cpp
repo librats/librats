@@ -151,6 +151,49 @@ TEST_F(SocketTest, AnExclusivelyHeldUdpPortCannotBeSharedAfterwards) {
     close_socket(owner);
 }
 
+// A bounded receive must be able to say WHY it came back empty: "nothing yet"
+// and "the peer hung up" are the difference between waiting again and giving up,
+// and a reader with a deadline (see util/http.cpp) is built on that distinction.
+TEST_F(SocketTest, ReceiveTcpDataReportsTimeoutThenClose) {
+    socket_t server = create_tcp_server(0, 4, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(server));
+    const int port = get_bound_port(server);
+    ASSERT_GT(port, 0);
+
+    socket_t accepted = RATS_INVALID_SOCKET;
+    std::thread server_thread([&]() { accepted = accept_client(server); });
+
+    socket_t client = create_tcp_client("127.0.0.1", port, 2000);
+    ASSERT_TRUE(is_valid_socket(client));
+    server_thread.join();
+    ASSERT_TRUE(is_valid_socket(accepted));
+
+    // Nobody sent anything: the wait expires and says so, instead of blocking.
+    const auto start = std::chrono::steady_clock::now();
+    TcpRecvStatus status = TcpRecvStatus::Data;
+    auto data = receive_tcp_data(client, 1024, 200, RATS_INVALID_SOCKET, &status);
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start).count();
+    EXPECT_TRUE(data.empty());
+    EXPECT_EQ(status, TcpRecvStatus::Timeout);
+    EXPECT_GE(waited, 150);
+
+    // Real data outranks the deadline.
+    EXPECT_GT(send_tcp_string(accepted, "hi"), 0);
+    data = receive_tcp_data(client, 1024, 2000, RATS_INVALID_SOCKET, &status);
+    EXPECT_EQ(status, TcpRecvStatus::Data);
+    EXPECT_EQ(std::string(data.begin(), data.end()), "hi");
+
+    // An orderly hang-up is Closed, not Error — it is how a length-less HTTP body ends.
+    close_socket(accepted);
+    data = receive_tcp_data(client, 1024, 2000, RATS_INVALID_SOCKET, &status);
+    EXPECT_TRUE(data.empty());
+    EXPECT_EQ(status, TcpRecvStatus::Closed);
+
+    close_socket(client);
+    close_socket(server);
+}
+
 // Test TCP client-server communication
 TEST_F(SocketTest, TCPClientServerCommunicationTest) {
     // Create server

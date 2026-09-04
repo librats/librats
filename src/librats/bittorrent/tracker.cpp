@@ -4,6 +4,7 @@
 #include "librats/bittorrent/byte_io.h"
 #include "librats/bittorrent/log.h"
 #include "librats/core/socket.h"
+#include "librats/util/http.h"
 #include "librats/util/network_utils.h"
 
 #include <algorithm>
@@ -109,51 +110,6 @@ std::vector<Address> parse_dict_peers(const librats::BencodeValue& list) {
     return peers;
 }
 
-/// Blocking HTTP/1.0 GET; returns the response body (headers stripped).
-Bytes http_get(const std::string& url, int timeout_ms) {
-    const std::size_t scheme = url.find("://");
-    if (scheme == std::string::npos) return {};
-    const std::string proto = url.substr(0, scheme);
-    const std::size_t host_start = scheme + 3;
-    const std::size_t path_start = url.find('/', host_start);
-
-    std::string host_port = url.substr(host_start, path_start == std::string::npos ? std::string::npos
-                                                                                   : path_start - host_start);
-    std::string path = (path_start == std::string::npos) ? "/" : url.substr(path_start);
-
-    std::uint16_t port = (proto == "https") ? 443 : 80;
-    if (const std::size_t colon = host_port.find(':'); colon != std::string::npos) {
-        const std::uint16_t parsed = parse_port(host_port.substr(colon + 1));
-        if (parsed == 0) return {};  // malformed port — fail the announce, never crash
-        port = parsed;
-        host_port = host_port.substr(0, colon);
-    }
-
-    socket_t sock = create_tcp_client(host_port, port, timeout_ms);
-    if (!is_valid_socket(sock)) return {};
-
-    std::ostringstream req;
-    req << "GET " << path << " HTTP/1.0\r\nHost: " << host_port
-        << "\r\nUser-Agent: librats\r\nAccept: */*\r\nConnection: close\r\n\r\n";
-    if (send_tcp_string(sock, req.str()) <= 0) { close_socket(sock); return {}; }
-
-    Bytes data;
-    for (;;) {
-        Bytes chunk = receive_tcp_data(sock, 4096);
-        if (chunk.empty()) break;
-        data.insert(data.end(), chunk.begin(), chunk.end());
-    }
-    close_socket(sock);
-
-    // Strip headers (everything up to and including the blank line).
-    static const std::uint8_t sep[4] = {'\r', '\n', '\r', '\n'};
-    for (std::size_t i = 0; i + 4 <= data.size(); ++i) {
-        if (std::memcmp(data.data() + i, sep, 4) == 0)
-            return Bytes(data.begin() + std::ptrdiff_t(i + 4), data.end());
-    }
-    return {};
-}
-
 // Wait for a UDP datagram for up to @p total_timeout_ms, but in short slices so a
 // pending cancellation (e.g. shutdown) aborts the wait within one slice instead
 // of blocking for the whole timeout against an unresponsive tracker. Returns the
@@ -180,9 +136,29 @@ TrackerResponse announce_http(const std::string& url, const TrackerRequest& req,
                               const TrackerCancelPredicate& cancelled) {
     TrackerResponse out;
     if (cancelled && cancelled()) { out.failure_reason = "cancelled"; return out; }
-    const Bytes body = http_get(tracker_detail::build_http_announce_url(url, req), timeout_ms);
-    if (body.empty()) { out.failure_reason = "no response"; return out; }
-    return tracker_detail::parse_http_response(body);
+
+    http::Options opt;
+    opt.connect_timeout_ms = timeout_ms;
+    opt.read_timeout_ms    = timeout_ms;
+    opt.total_timeout_ms   = timeout_ms;
+    // A tracker reply is a short bencoded dict; a "tracker" that streams megabytes
+    // is broken or hostile, and either way must not grow this worker without bound.
+    opt.max_body_bytes     = 1024 * 1024;
+    // Polled during the wait, so shutdown does not have to sit out the timeout —
+    // the UDP path has always honoured this and the HTTP one used to ignore it.
+    opt.cancelled          = cancelled;
+
+    http::Response resp;
+    if (!http::get(tracker_detail::build_http_announce_url(url, req), opt, resp)) {
+        out.failure_reason = "no response";
+        return out;
+    }
+    if (resp.status != 200) {
+        out.failure_reason = "http status " + std::to_string(resp.status);
+        return out;
+    }
+    if (resp.body.empty()) { out.failure_reason = "empty response"; return out; }
+    return tracker_detail::parse_http_response(Bytes(resp.body.begin(), resp.body.end()));
 }
 
 TrackerResponse announce_udp(const std::string& url, const TrackerRequest& req, int timeout_ms,

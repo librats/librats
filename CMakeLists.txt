@@ -174,6 +174,8 @@ set(LIBRARY_SOURCES
 # util/ — networking helpers, OS/filesystem, logging, version
     src/librats/util/network_utils.h
     src/librats/util/network_utils.cpp
+    src/librats/util/http.h
+    src/librats/util/http.cpp
     src/librats/util/network_monitor.h
     src/librats/util/network_monitor.cpp
     src/librats/util/os.h
@@ -667,6 +669,7 @@ if(RATS_BUILD_TESTS)
         tests/test_bencode.cpp
         tests/test_sha1.cpp
         tests/test_network_utils.cpp
+        tests/test_http.cpp
         tests/test_dht.cpp
         tests/test_dht_id.cpp
         tests/test_dht_bootstrap.cpp

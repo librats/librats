@@ -5,6 +5,7 @@
 
 #include "librats/nat/upnp.h"
 #include "librats/core/socket.h"
+#include "librats/util/http.h"
 #include "librats/util/logger.h"
 
 #include <cstring>
@@ -69,55 +70,39 @@ std::string local_ip_for_destination(const std::string& dest_ip, uint16_t dest_p
     return result;
 }
 
-// Perform a blocking HTTP/1.1 request (Connection: close) and return the body.
-// `extra_headers` must each end with CRLF. Returns false on transport failure.
+// One blocking HTTP exchange with an IGD (or, during discovery, with whatever
+// answered our SSDP search). `extra_headers` must each end with CRLF.
+//
+// `interrupt_fd` is watched alongside the socket so a read can be abandoned the
+// moment stop() signals; pass RATS_INVALID_SOCKET for requests that must still
+// complete during shutdown (removing our mappings). Returns false on transport
+// failure.
 bool http_request(const std::string& host, uint16_t port, const std::string& method,
                   const std::string& path, const std::string& extra_headers,
-                  const std::string& body, int& status_code, std::string& response_body) {
-    socket_t sock = create_tcp_client(host, port, 10000);
-    if (!is_valid_socket(sock)) {
-        return false;
-    }
+                  const std::string& body, int& status_code, std::string& response_body,
+                  socket_t interrupt_fd = RATS_INVALID_SOCKET) {
+    http::Request req;
+    req.host = host;
+    req.port = port;
+    req.method = method;
+    req.path = path;
+    req.extra_headers = extra_headers;
+    req.body = body;
 
-    std::ostringstream req;
-    req << method << " " << path << " HTTP/1.1\r\n"
-        << "Host: " << host << ":" << port << "\r\n"
-        << "Connection: close\r\n"
-        << extra_headers;
-    if (!body.empty()) {
-        req << "Content-Length: " << body.size() << "\r\n";
-    }
-    req << "\r\n" << body;
+    // A LAN device that has anything to say says it at once; the generous budget is
+    // only there for a router busy rebuilding its mapping table.
+    http::Options opt;
+    opt.connect_timeout_ms = 10000;
+    opt.read_timeout_ms = 4000;
+    opt.total_timeout_ms = 10000;
+    opt.max_body_bytes = 256 * 1024;  // sanity cap for IGD descriptions
+    opt.interrupt_fd = interrupt_fd;
 
-    if (send_tcp_string(sock, req.str()) < 0) {
-        close_socket(sock);
-        return false;
-    }
+    http::Response resp;
+    if (!http::request(req, opt, resp)) return false;
 
-    std::string raw;
-    while (true) {
-        auto chunk = receive_tcp_data(sock, 4096);
-        if (chunk.empty()) break;
-        raw.append(reinterpret_cast<const char*>(chunk.data()), chunk.size());
-        if (raw.size() > 256 * 1024) break; // sanity cap for IGD descriptions
-    }
-    close_socket(sock);
-
-    if (raw.empty()) return false;
-
-    // Parse status line
-    status_code = 0;
-    size_t sp = raw.find(' ');
-    if (sp != std::string::npos) {
-        status_code = std::atoi(raw.substr(sp + 1, 4).c_str());
-    }
-
-    size_t header_end = raw.find("\r\n\r\n");
-    if (header_end == std::string::npos) {
-        response_body = "";
-    } else {
-        response_body = raw.substr(header_end + 4);
-    }
+    status_code = resp.status;
+    response_body = std::move(resp.body);
     return true;
 }
 
@@ -143,25 +128,14 @@ std::string extract_xml_tag(const std::string& xml, const std::string& tag, size
 }
 
 bool parse_http_url(const std::string& url, std::string& host, uint16_t& port, std::string& path) {
-    std::string lower = to_lower(url);
-    const std::string prefix = "http://";
-    if (lower.compare(0, prefix.size(), prefix) != 0) return false;
-    size_t host_start = prefix.size();
-    size_t path_start = url.find('/', host_start);
-    std::string authority = (path_start == std::string::npos)
-        ? url.substr(host_start)
-        : url.substr(host_start, path_start - host_start);
-    path = (path_start == std::string::npos) ? "/" : url.substr(path_start);
-    size_t colon = authority.find(':');
-    if (colon == std::string::npos) {
-        host = authority;
-        port = 80;
-    } else {
-        host = authority.substr(0, colon);
-        port = static_cast<uint16_t>(std::atoi(authority.substr(colon + 1).c_str()));
-        if (port == 0) port = 80;
-    }
-    return !host.empty();
+    http::Url parsed;
+    // UPnP control URLs are plain http; anything else (an https device description,
+    // a garbled LOCATION header) is not something we can drive.
+    if (!http::parse_url(url, parsed) || parsed.scheme != "http") return false;
+    host = parsed.host;
+    port = parsed.port;
+    path = parsed.path;
+    return true;
 }
 
 std::string resolve_control_url(std::string control_url, std::string url_base,
@@ -356,7 +330,10 @@ bool UpnpClient::fetch_description(const std::string& location, const std::strin
 
     int status = 0;
     std::string body;
-    if (!http_request(host, port, "GET", path, "", "", status, body) || status != 200) {
+    // Watched by the read: SSDP answers come from arbitrary LAN devices (a TV, a
+    // printer, a cast box), and one of those holding the connection open must not
+    // outlive stop().
+    if (!http_request(host, port, "GET", path, "", "", status, body, wakeup_.fd()) || status != 200) {
         LOG_UPNP_DEBUG("Failed to fetch device description from " << location << " (status " << status << ")");
         return false;
     }

@@ -224,12 +224,45 @@ constexpr size_t kMaxSendSlices = 256;
 std::ptrdiff_t send_vectored(socket_t socket, const ByteView* slices, size_t count);
 
 /**
- * Receive data from a TCP socket
+ * Why an empty receive_tcp_data() result came back.
+ *
+ * An empty vector alone cannot be acted on: "nothing arrived yet", "the peer hung
+ * up" and "this socket is dead" call for opposite reactions (wait again / stop
+ * reading / give up), and a reader with a deadline must be able to tell them
+ * apart. Mirrors the error_out flag of receive_udp_data().
+ */
+enum class TcpRecvStatus {
+    Data,        ///< Bytes were received (the only status with a non-empty result).
+    Timeout,     ///< The wait expired with nothing readable. Retry if the budget allows.
+    Interrupted, ///< interrupt_fd became readable — the caller wants out (shutdown).
+    Closed,      ///< The peer closed the connection: an orderly EOF, not an error.
+    Error,       ///< The socket failed; it will never deliver again.
+};
+
+/**
+ * Receive data from a TCP socket, optionally bounded by a deadline.
+ *
+ * With the default timeout_ms == -1 and no interrupt socket this blocks until the
+ * socket is readable, exactly as a bare recv() does. Any caller talking to a host
+ * it does not control MUST pass a timeout: a peer that answers and then simply
+ * holds the connection open (an HTTP/1.1 keep-alive server, say) never produces
+ * the EOF a "read until empty" loop waits for, and the thread parks forever.
+ *
  * @param socket The socket handle
  * @param buffer_size Maximum number of bytes to receive
- * @return Received binary data, empty vector on error
+ * @param timeout_ms How long to wait for readability (-1 blocks, 0 polls, >0 waits)
+ * @param interrupt_fd Optional second socket to watch; when it becomes readable the
+ *                     call returns immediately with TcpRecvStatus::Interrupted (used
+ *                     to break a blocking read on shutdown). RATS_INVALID_SOCKET
+ *                     disables it.
+ * @param status Optional output telling the reason an empty result came back; see
+ *               @ref TcpRecvStatus. Set on every path, including success.
+ * @return Received binary data, empty vector on timeout, interrupt, EOF or error
  */
-std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size = 1024);
+std::vector<uint8_t> receive_tcp_data(socket_t socket, size_t buffer_size = 1024,
+                                      int timeout_ms = -1,
+                                      socket_t interrupt_fd = RATS_INVALID_SOCKET,
+                                      TcpRecvStatus* status = nullptr);
 
 /**
  * Send a length-prefixed framed message through a TCP socket
