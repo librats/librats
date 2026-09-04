@@ -21,6 +21,11 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+/// "No deadline at all". Written with the parentheses the project requires
+/// everywhere: windows.h defines `max` as a function-like macro (we do not define
+/// NOMINMAX), so an unparenthesised time_point::max() does not survive MSVC.
+constexpr Clock::time_point kNever = (Clock::time_point::max)();
+
 /// One recv per call; responses we care about are a few KiB.
 constexpr std::size_t kReadChunk = 4096;
 /// Status line + headers may not exceed this. A peer that streams headers forever
@@ -54,7 +59,7 @@ public:
         : sock_(sock), opt_(opt),
           total_deadline_(opt.total_timeout_ms > 0
                               ? Clock::now() + std::chrono::milliseconds(opt.total_timeout_ms)
-                              : Clock::time_point::max()) {}
+                              : kNever) {}
 
     enum class Fill { Appended, Eof, Aborted };
 
@@ -75,14 +80,14 @@ private:
 Reader::Fill Reader::fill() {
     const Clock::time_point idle_deadline =
         opt_.read_timeout_ms > 0 ? Clock::now() + std::chrono::milliseconds(opt_.read_timeout_ms)
-                                 : Clock::time_point::max();
+                                 : kNever;
 
     for (;;) {
         if (opt_.cancelled && opt_.cancelled()) { stop_ = Stop::Cancelled; return Fill::Aborted; }
 
         const Clock::time_point deadline = (std::min)(idle_deadline, total_deadline_);
         int wait;
-        if (deadline == Clock::time_point::max()) {
+        if (deadline == kNever) {
             wait = -1;  // both limits disabled: block until something happens
         } else {
             const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
