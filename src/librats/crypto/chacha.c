@@ -72,12 +72,35 @@
         (b) = leftRotate((b) ^ (c), 7); \
     } while (0)
 
+/* Words 0..3 of the state hold the "expand NN-byte k" constant. Like every other
+   state word it is defined as the little-endian reading of those 16 ASCII bytes
+   (0x61707865 0x3320646e 0x79622d32 0x6b206574 for the 256-bit tag). A plain
+   memcpy into the uint32_t array only produces that on a little-endian host; on
+   a big-endian one (32-bit PowerPC, for instance) all four words came out
+   byte-swapped, so the whole keystream -- and with it every ChaCha20-Poly1305
+   tag and every Noise handshake against a little-endian peer -- was wrong. Load
+   the constant the way the key, counter and nonce are already loaded. */
+static void rats_chacha_load_tag(rats_chacha_ctx *x, const char *tag)
+{
+#ifdef RATS_CHACHA_USE_VECTOR_MATH
+    /* SSE2-only path, which already assumes a little-endian host (see
+       fromLittleVec above); a byte copy is the little-endian load there. */
+    memcpy(x->input, tag, 16);
+#else
+    const uint8_t *t = (const uint8_t *)tag;
+    x->input[0] = fromLittle(t);
+    x->input[1] = fromLittle(t + 4);
+    x->input[2] = fromLittle(t + 8);
+    x->input[3] = fromLittle(t + 12);
+#endif
+}
+
 void rats_chacha_keysetup(rats_chacha_ctx *x, const uint8_t *k, uint32_t kbits)
 {
     static const char tag128[] = "expand 16-byte k";
     static const char tag256[] = "expand 32-byte k";
     if (kbits == 256) {
-        memcpy(x->input, tag256, 16);
+        rats_chacha_load_tag(x, tag256);
 #ifdef RATS_CHACHA_USE_VECTOR_MATH
         x->input[1] = fromLittleVec(k);
         x->input[2] = fromLittleVec(k + 16);
@@ -92,7 +115,7 @@ void rats_chacha_keysetup(rats_chacha_ctx *x, const uint8_t *k, uint32_t kbits)
         x->input[11] = fromLittle(k + 28);
 #endif
     } else {
-        memcpy(x->input, tag128, 16);
+        rats_chacha_load_tag(x, tag128);
 #ifdef RATS_CHACHA_USE_VECTOR_MATH
         x->input[2] = x->input[1] = fromLittleVec(k);
 #else
