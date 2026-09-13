@@ -751,3 +751,303 @@ TEST(FilexferTest, ControlOpcodesFromAStrangerDoNotTouchAnotherPeersTransfer) {
     delete_file(src.c_str());
     delete_file(dst.c_str());
 }
+
+// -- Resume -------------------------------------------------------------------
+//
+// A multi-gigabyte transfer does not always arrive in one piece, and an ordinary
+// one starts from zero every time: the .part is reclaimed the moment a transfer
+// fails, and its name carries the sender's transfer id, which is a different
+// number on the next offer. accept_resume() takes a partial the *app* owns and
+// asks the sender to start at its length.
+
+// The prefix already on disk is kept, only the tail is streamed, and the file
+// still comes out byte-identical -- which means both ends hashed the whole file,
+// not just the part that crossed the wire.
+TEST(FilexferTest, ResumesFromAPartialFile) {
+    const std::string src = "ft_resume_src.bin", dst = "ft_resume_dst.bin", part = "ft_resume_dst.part";
+    const auto content = make_pattern(3 * 1024 * 1024);
+    const size_t have = 1024 * 1024;
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+    ASSERT_TRUE(create_file_binary(part.c_str(), content.data(), have));
+    delete_file(dst.c_str());
+
+    Pair p = make_pair();
+    std::atomic<bool> rdone{false}, rok{false}, accepted{false};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) {
+        accepted = p.recv->accept_resume(o.from, o.id, dst, part);
+    });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+    EXPECT_TRUE(accepted.load());
+    EXPECT_TRUE(rok.load());
+    EXPECT_EQ(read_all(dst), content) << "a resumed download must still be the whole file";
+    EXPECT_FALSE(file_exists(part.c_str())) << "the partial is what becomes the destination";
+    EXPECT_EQ(p.send->stats().bytes_sent, content.size() - have) << "the prefix must not cross the wire twice";
+
+    delete_file(src.c_str());
+    delete_file(dst.c_str());
+    delete_file(part.c_str());
+}
+
+// The whole point, end to end: a transfer that dies half way leaves its bytes
+// behind, and a *new* transfer -- new nodes, new transfer id -- picks them up.
+TEST(FilexferTest, PartialSurvivesAFailedTransferAndIsContinued) {
+    const std::string src = "ft_cont_src.bin", dst = "ft_cont_dst.bin", part = "ft_cont_dst.part";
+    const auto content = make_pattern(8 * 1024 * 1024);  // large enough to still be in flight
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+    delete_file(dst.c_str());
+    delete_file(part.c_str());
+
+    {
+        Pair p = make_pair();
+        std::atomic<bool> rdone{false}, cancelled{false};
+        p.recv->on_offer([&](const FileTransfer::Offer& o) {
+            EXPECT_TRUE(p.recv->accept_resume(o.from, o.id, dst, part));
+        });
+        p.recv->on_progress([&](const FileTransfer::Progress& pr) {
+            if (pr.direction == FileTransfer::Direction::Receiving && pr.bytes_transferred > 0 &&
+                !cancelled.exchange(true)) {
+                p.recv->cancel(pr.peer, pr.id);
+            }
+        });
+        p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool, const std::string&) { rdone = true; });
+        ASSERT_TRUE(bring_up(p));
+        ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
+        ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+        ASSERT_TRUE(cancelled.load());
+    }
+
+    // An ordinary transfer would have taken these bytes with it.
+    ASSERT_TRUE(wait_for([&] { return file_exists(part.c_str()); }))
+        << "an app-owned partial must survive a failed transfer";
+    const int64_t kept = get_file_size(part.c_str());
+    ASSERT_GT(kept, 0);
+    ASSERT_LT(static_cast<size_t>(kept), content.size());
+    EXPECT_FALSE(file_exists(dst.c_str()));
+
+    {
+        Pair p = make_pair();
+        std::atomic<bool> rdone{false}, rok{false};
+        p.recv->on_offer([&](const FileTransfer::Offer& o) {
+            EXPECT_TRUE(p.recv->accept_resume(o.from, o.id, dst, part));
+        });
+        p.recv->on_complete(
+            [&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+        ASSERT_TRUE(bring_up(p));
+        ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
+        ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+        EXPECT_TRUE(rok.load());
+        EXPECT_EQ(read_all(dst), content);
+        EXPECT_LT(p.send->stats().bytes_sent, content.size()) << "the second attempt re-sent everything";
+    }
+
+    delete_file(src.c_str());
+    delete_file(dst.c_str());
+    delete_file(part.c_str());
+}
+
+// The resume request rides on the RESPONSE, where a sender from before the
+// feature reads the fields it knows and ignores the rest -- so it streams from
+// zero. That must cost the partial, not the transfer. Driven with raw FileChunk
+// frames, the same technique as the hostile-manifest test, because an up-to-date
+// sender cannot produce this.
+TEST(FilexferTest, ResumeFallsBackWhenTheSenderStreamsFromZero) {
+    const std::string dst = "ft_fallback_dst.bin", part = "ft_fallback_dst.part";
+    const auto content = make_pattern(256 * 1024);
+    const size_t have = 64 * 1024;
+    ASSERT_TRUE(create_file_binary(part.c_str(), content.data(), have));
+    delete_file(dst.c_str());
+
+    Pair p = make_pair();
+    std::atomic<bool> offered{false}, rdone{false}, rok{false};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) {
+        EXPECT_TRUE(p.recv->accept_resume(o.from, o.id, dst, part));
+        offered = true;
+    });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    constexpr uint64_t kId = 4242;
+    const std::string name = "raw.bin";
+    std::vector<uint8_t> m;
+    m.push_back(1);                                   // OP_OFFER
+    put_u64(m, kId);
+    m.push_back(0);                                   // is_directory
+    put_u64(m, content.size());                       // total
+    put_u16(m, static_cast<uint16_t>(name.size()));
+    m.insert(m.end(), name.begin(), name.end());
+    put_u32(m, 1);                                    // file_count
+    put_u16(m, static_cast<uint16_t>(name.size()));
+    m.insert(m.end(), name.begin(), name.end());
+    put_u64(m, content.size());
+    p.client->send(p.server->local_id(), MessageType::FileChunk, ByteView(m));
+
+    // accept_resume() runs inside the offer handler, so by the time this fires the
+    // receiver is already waiting for the tail -- and gets the head instead.
+    ASSERT_TRUE(wait_for([&] { return offered.load(); }));
+
+    constexpr size_t kChunk = 32 * 1024;
+    for (size_t off = 0; off < content.size(); off += kChunk) {
+        const size_t n = std::min<size_t>(kChunk, content.size() - off);
+        std::vector<uint8_t> c;
+        c.push_back(3);                               // OP_CHUNK
+        put_u64(c, kId);
+        put_u32(c, 0);                                // file_index
+        put_u64(c, off);
+        c.insert(c.end(), content.begin() + off, content.begin() + off + n);
+        p.client->send(p.server->local_id(), MessageType::FileChunk, ByteView(c));
+    }
+    uint8_t digest[RATS_SHA256_HASH_SIZE];
+    rats_sha256_hash(digest, content.data(), content.size());
+    std::vector<uint8_t> e;
+    e.push_back(4);                                   // OP_FILE_END
+    put_u64(e, kId);
+    put_u32(e, 0);
+    e.insert(e.end(), digest, digest + RATS_SHA256_HASH_SIZE);
+    p.client->send(p.server->local_id(), MessageType::FileChunk, ByteView(e));
+
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+    EXPECT_TRUE(rok.load()) << "a sender that ignores the offset must still be able to deliver the file";
+    EXPECT_EQ(read_all(dst), content) << "the stale prefix must not survive under the restarted stream";
+
+    delete_file(dst.c_str());
+    delete_file(part.c_str());
+}
+
+// A directory has no single position to resume from, so accept_resume() declines
+// rather than guessing -- and declines without consuming the offer, which a plain
+// accept() can still take.
+TEST(FilexferTest, AcceptResumeDeclinesDirectoryOffers) {
+    const std::string dir = "ft_rdir_src", out = "ft_rdir_dst";
+    create_directories(dir.c_str());
+    const auto a = make_pattern(4096);
+    ASSERT_TRUE(create_file_binary(combine_paths(dir, "a.bin").c_str(), a.data(), a.size()));
+
+    Pair p = make_pair();
+    std::atomic<bool> rdone{false}, rok{false}, declined{false};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) {
+        declined = !p.recv->accept_resume(o.from, o.id, out, "ft_rdir_dst.part");
+        p.recv->accept(o.from, o.id, out);
+    });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    ASSERT_NE(p.send->send_directory(p.server->local_id(), dir), 0u);
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+    EXPECT_TRUE(declined.load());
+    EXPECT_TRUE(rok.load());
+    EXPECT_EQ(read_all(combine_paths(out, "a.bin")), a);
+
+    delete_file(combine_paths(dir, "a.bin").c_str());
+    delete_file(combine_paths(out, "a.bin").c_str());
+    EXPECT_FALSE(file_exists("ft_rdir_dst.part"));
+}
+
+// Nothing checks up front that a partial belongs to the file being offered --
+// only the end-to-end SHA-256 does, and only after the tail has been fetched. A
+// partial that fails it must not be kept: continuing from bytes already proven
+// wrong fails the same way on every future attempt.
+TEST(FilexferTest, APartialThatFailsTheHashIsNotKept) {
+    const std::string src = "ft_badpart_src.bin", dst = "ft_badpart_dst.bin", part = "ft_badpart_dst.part";
+    const auto content = make_pattern(1024 * 1024);
+    auto wrong = make_pattern(256 * 1024);
+    for (auto& b : wrong) b = static_cast<uint8_t>(~b);  // same length, different bytes
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+    ASSERT_TRUE(create_file_binary(part.c_str(), wrong.data(), wrong.size()));
+    delete_file(dst.c_str());
+
+    Pair p = make_pair();
+    std::atomic<bool> rdone{false}, rok{true};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) {
+        EXPECT_TRUE(p.recv->accept_resume(o.from, o.id, dst, part));
+    });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+    EXPECT_FALSE(rok.load()) << "a partial of another file must fail the transfer";
+    EXPECT_FALSE(file_exists(dst.c_str()));
+    EXPECT_TRUE(wait_for([&] { return !file_exists(part.c_str()); }))
+        << "a partial that failed the hash must not be left to fail again";
+
+    delete_file(src.c_str());
+    delete_file(dst.c_str());
+    delete_file(part.c_str());
+}
+
+// The partial is a scratch file the verified bytes are moved *out* of, so it
+// cannot also be the destination: finalizing clears whatever sits at the
+// destination first, which with one path for both would delete the very file
+// that just passed the hash. accept_resume() refuses the pair outright.
+TEST(FilexferTest, AcceptResumeDeclinesThePartialAsDestination) {
+    const std::string src = "ft_alias_src.bin", dst = "ft_alias_dst.bin";
+    const auto content = make_pattern(256 * 1024);
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+    delete_file(dst.c_str());
+
+    Pair p = make_pair();
+    std::atomic<bool> rdone{false}, rok{false}, declined{false};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) {
+        declined = !p.recv->accept_resume(o.from, o.id, dst, dst);
+        p.recv->accept(o.from, o.id, dst);
+    });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }));
+    EXPECT_TRUE(declined.load()) << "partial == destination must be refused";
+    EXPECT_TRUE(rok.load());
+    EXPECT_EQ(read_all(dst), content);
+
+    delete_file(src.c_str());
+    delete_file(dst.c_str());
+}
+
+// A resumed send has to hash the prefix it is about to skip before it streams the
+// tail, and that read outlives a pause arriving mid-way. Whatever the pause
+// interrupts, the resumed send must hash the prefix again -- a digest covering
+// only the tail would fail the receiver's whole-file check and, with it, throw
+// away the partial this feature exists to keep.
+//
+// Sizes are chosen so the prefix hash takes long enough for the pause below to
+// land inside it; it passing either way is harmless, it failing is the bug.
+TEST(FilexferTest, PauseDuringThePrefixHashStillVerifies) {
+    const std::string src = "ft_pauseseed_src.bin", dst = "ft_pauseseed_dst.bin",
+                      part = "ft_pauseseed_dst.part";
+    const auto content = make_pattern(28 * 1024 * 1024);
+    const size_t have = 24 * 1024 * 1024;
+    ASSERT_TRUE(create_file_binary(src.c_str(), content.data(), content.size()));
+    ASSERT_TRUE(create_file_binary(part.c_str(), content.data(), have));
+    delete_file(dst.c_str());
+
+    Pair p = make_pair();
+    std::atomic<bool> rdone{false}, rok{false}, accepted{false};
+    std::atomic<uint64_t> offer_id{0};
+    p.recv->on_offer([&](const FileTransfer::Offer& o) {
+        offer_id = o.id;
+        accepted = p.recv->accept_resume(o.from, o.id, dst, part);
+    });
+    p.recv->on_complete([&](const librats::PeerId&, uint64_t, bool ok, const std::string&) { rok = ok; rdone = true; });
+    ASSERT_TRUE(bring_up(p));
+
+    ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
+    ASSERT_TRUE(wait_for([&] { return accepted.load(); }));
+    // Not immediately: a pause the sender sees before it starts is the easy case.
+    std::this_thread::sleep_for(20ms);
+    EXPECT_TRUE(p.recv->pause(p.client->local_id(), offer_id.load()));
+    std::this_thread::sleep_for(50ms);
+    EXPECT_TRUE(p.recv->resume(p.client->local_id(), offer_id.load()));
+
+    ASSERT_TRUE(wait_for([&] { return rdone.load(); }, 60s));
+    EXPECT_TRUE(rok.load()) << "the resumed send must re-hash the prefix it skipped";
+    EXPECT_EQ(read_all(dst), content);
+
+    delete_file(src.c_str());
+    delete_file(dst.c_str());
+    delete_file(part.c_str());
+}

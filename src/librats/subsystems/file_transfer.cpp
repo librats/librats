@@ -284,6 +284,7 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
         size_t      file_index;
         uint64_t    offset, file_size;
         std::string source;
+        bool        seed_hash = false;
         {
             std::unique_lock<std::mutex> lk(t->mtx);
             if (t->status != Status::Active) return;       // paused / cancelled / done
@@ -292,7 +293,53 @@ void FileTransfer::run_send(const std::shared_ptr<Outgoing>& t) {
             offset     = t->cur_offset;
             file_size  = t->files[file_index].size;
             source     = t->sources[file_index];
-            if (offset == 0) rats_sha256_reset(&t->hash);
+            if (t->hash_file != file_index) {
+                rats_sha256_reset(&t->hash);
+                // Resumed: the digest still has to cover the bytes the receiver
+                // already has, which this send is about to skip over. hash_file is
+                // the claim "this context already covers that prefix", so it is
+                // published only once the seed below has actually finished: the
+                // seed loop bails out on a pause, and claiming the file here would
+                // make the resumed send skip the reseed and stream the tail into a
+                // digest that never absorbed the head.
+                seed_hash = offset > 0;
+                if (!seed_hash) t->hash_file = file_index;
+            }
+        }
+
+        if (seed_hash) {
+            // Hashed into a local context and only then handed over: the transfer's
+            // mutex is what the reactor thread takes to deliver acks and cancels, and
+            // a multi-gigabyte prefix read is not something to hold it across.
+            rats_sha256_context_t seed;
+            rats_sha256_reset(&seed);
+            FileStream hp;
+            std::vector<uint8_t> buf(64 * 1024);
+            bool ok = hp.open_read(source.c_str());
+            uint64_t left = offset;
+            while (ok && left > 0) {
+                {
+                    std::lock_guard<std::mutex> lk(t->mtx);
+                    if (t->status != Status::Active) return;
+                    // Hashing a multi-gigabyte prefix outlasts the idle timeout, and
+                    // the maintenance thread cannot tell that work from silence.
+                    t->last_activity = std::chrono::steady_clock::now();
+                }
+                if (!running_.load()) return;
+                const size_t want = static_cast<size_t>(std::min<uint64_t>(buf.size(), left));
+                if (hp.read(buf.data(), want) != want) { ok = false; break; }
+                rats_sha256_update(&seed, buf.data(), want);
+                left -= want;
+            }
+            if (!ok) {
+                LOG_ERROR("filexfer", "cannot hash the first " << offset << " B of " << source);
+                send_complete(t->peer, t->id, false);
+                finish_outgoing(t, false);
+                return;
+            }
+            std::lock_guard<std::mutex> lk(t->mtx);
+            t->hash = seed;
+            t->hash_file = file_index;
         }
 
         // Empty file: no chunks, just the per-file SHA (of the empty input).
@@ -397,12 +444,36 @@ void FileTransfer::finish_outgoing(const std::shared_ptr<Outgoing>& t, bool succ
 // ── Receiver ──────────────────────────────────────────────────────────────────
 
 void FileTransfer::accept(const PeerId& from, uint64_t id, const std::string& dest_path) {
+    accept_impl(from, id, dest_path, std::string());
+}
+
+bool FileTransfer::accept_resume(const PeerId& from, uint64_t id, const std::string& dest_path,
+                                 const std::string& partial_path) {
+    if (partial_path.empty()) return false;
+    // The partial cannot be the destination itself: finalizing clears whatever sits
+    // at the destination before moving the verified bytes into place, which with
+    // one path for both would delete the very file that just passed the hash.
+    if (partial_path == dest_path) return false;
     auto t = find_incoming(from, id);
-    if (!t) return;
-    bool empty_transfer = false;
+    if (!t) return false;
     {
         std::lock_guard<std::mutex> lk(t->mtx);
-        if (t->status != Status::Pending) return;
+        // Single file only: the offset on the wire names one position in the
+        // stream, and only a one-file transfer has an unambiguous one.
+        if (t->is_directory || t->files.size() != 1) return false;
+    }
+    return accept_impl(from, id, dest_path, partial_path);
+}
+
+bool FileTransfer::accept_impl(const PeerId& from, uint64_t id, const std::string& dest_path,
+                               const std::string& partial_path) {
+    auto t = find_incoming(from, id);
+    if (!t) return false;
+    bool empty_transfer = false;
+    uint64_t resume_from = 0;
+    {
+        std::lock_guard<std::mutex> lk(t->mtx);
+        if (t->status != Status::Pending) return false;
         t->dest_root = dest_path;
         for (size_t i = 0; i < t->files.size(); ++i) {
             IncomingFile& f = t->files[i];
@@ -411,24 +482,59 @@ void FileTransfer::accept(const PeerId& from, uint64_t id, const std::string& de
             // id 1), so the sender's PeerId is what keeps two peers' temp files
             // apart. Use the full hex: short_hex() is 32 bits, which a peer could
             // grind a keypair to collide with on purpose.
-            f.temp_path  = combine_paths(config_.temp_directory,
-                                         from.to_hex() + "." + std::to_string(id) + "."
-                                             + std::to_string(i) + ".part");
+            //
+            // A resuming caller supplies the path instead, because the name above
+            // changes with every new offer and so can never be found again.
+            f.temp_path  = partial_path.empty()
+                ? combine_paths(config_.temp_directory,
+                                from.to_hex() + "." + std::to_string(id) + "."
+                                    + std::to_string(i) + ".part")
+                : partial_path;
+            f.keep_partial = !partial_path.empty();
+        }
+        if (!partial_path.empty() && !t->files.empty()) {
+            IncomingFile& f = t->files[0];
+            const int64_t have = get_file_size(partial_path.c_str());
+            // A partial as long as the offered file is not a prefix to continue —
+            // it is a finished download of something else, or wreckage. Start over.
+            if (have > 0 && static_cast<uint64_t>(have) < f.size) {
+                resume_from   = static_cast<uint64_t>(have);
+                f.resume_offset = resume_from;
+                f.enqueued    = resume_from;
+                f.received    = resume_from;
+                f.temp_created = true;
+                t->bytes_done = resume_from;
+                t->last_ack   = resume_from;
+            }
         }
         t->status = Status::Active;
         t->last_activity = std::chrono::steady_clock::now();
         empty_transfer = t->files.empty();
     }
     create_directories(config_.temp_directory.c_str());
+    if (!partial_path.empty()) {
+        const std::string parent = get_parent_directory(partial_path.c_str());
+        if (!parent.empty()) create_directories(parent.c_str());
+    }
     if (t->is_directory) create_directories(dest_path.c_str());
 
-    Bytes m; m.push_back(OP_RESPONSE); put_u64(m, id); m.push_back(1); send_to(from, m);
-    LOG_INFO("filexfer", "Accepted transfer [" << id << "] -> " << dest_path);
+    // The offset rides on the accept, so one round trip still starts the stream.
+    // It is appended rather than always present: a sender from before this existed
+    // reads the three fields it knows and ignores the tail.
+    Bytes m; m.push_back(OP_RESPONSE); put_u64(m, id); m.push_back(1);
+    if (resume_from > 0) put_u64(m, resume_from);
+    send_to(from, m);
+    if (resume_from > 0)
+        LOG_INFO("filexfer", "Accepted transfer [" << id << "] -> " << dest_path
+                 << ", resuming at " << resume_from << " B");
+    else
+        LOG_INFO("filexfer", "Accepted transfer [" << id << "] -> " << dest_path);
 
     if (empty_transfer) {  // e.g. an empty directory: done immediately
         send_complete(from, id, true);
         finish_incoming(t, true, "");
     }
+    return true;
 }
 
 void FileTransfer::reject(const PeerId& from, uint64_t id) {
@@ -452,7 +558,10 @@ void FileTransfer::reject(const PeerId& from, uint64_t id) {
 
 FileTransfer::Incoming::~Incoming() {
     out.close();  // must precede the temp-file delete on Windows (can't unlink an open file)
-    for (auto& f : files) if (f.temp_created && !f.finalized) delete_file(f.temp_path.c_str());
+    // keep_partial is the point of accept_resume(): the bytes received so far are
+    // what the next attempt continues from, so a failure must leave them alone.
+    for (auto& f : files)
+        if (f.temp_created && !f.finalized && !f.keep_partial) delete_file(f.temp_path.c_str());
 }
 
 void FileTransfer::schedule_writer(const std::shared_ptr<Incoming>& t) {
@@ -493,18 +602,61 @@ void FileTransfer::drain_writes(const std::shared_ptr<Incoming>& t) {
     }
 }
 
+// Writer thread: (re)start the running digest for `fidx`. The SHA-256 covers the
+// whole file rather than the session, so a resumed transfer has to fold in the
+// prefix already on disk before the first new chunk is hashed.
+bool FileTransfer::begin_hash(const std::shared_ptr<Incoming>& t, uint32_t fidx,
+                              const std::string& path, uint64_t prefix) {
+    rats_sha256_reset(&t->hash);
+    t->hashing_file = static_cast<int>(fidx);
+    if (prefix == 0) return true;
+
+    FileStream in;
+    if (!in.open_read(path.c_str())) return false;
+    std::vector<uint8_t> buf(64 * 1024);
+    uint64_t left = prefix;
+    while (left > 0) {
+        const size_t want = static_cast<size_t>(std::min<uint64_t>(buf.size(), left));
+        if (in.read(buf.data(), want) != want) return false;
+        rats_sha256_update(&t->hash, buf.data(), want);
+        left -= want;
+        // Same reason as on the send side: this is work, and the maintenance thread
+        // would otherwise read the whole read as a dead link.
+        std::lock_guard<std::mutex> lk(t->mtx);
+        t->last_activity = std::chrono::steady_clock::now();
+    }
+    return true;
+}
+
 void FileTransfer::process_data(const std::shared_ptr<Incoming>& t, WriteJob& job) {
     const uint32_t fidx = job.fidx;
     std::string temp_path;
+    uint64_t resume_offset = 0;
     {
         std::lock_guard<std::mutex> lk(t->mtx);
         if (t->finished || fidx >= t->files.size()) return;
         temp_path = t->files[fidx].temp_path;
+        resume_offset = t->files[fidx].resume_offset;
+    }
+
+    // Seed the digest before anything is written, so a partial that cannot be read
+    // fails here instead of at the SHA check after the whole download. Such a
+    // partial is not worth keeping either — drop it so the next attempt is clean.
+    if (t->hashing_file != static_cast<int>(fidx) && !begin_hash(t, fidx, temp_path, resume_offset)) {
+        LOG_ERROR("filexfer", "transfer " << t->id << ": cannot read the partial " << temp_path);
+        { std::lock_guard<std::mutex> lk(t->mtx); t->files[fidx].keep_partial = false; }
+        send_complete(t->peer, t->id, false);
+        finish_incoming(t, false, "cannot read the partial file");
+        return;
     }
 
     // Open the temp file once per file, then write sequentially at the given offset.
     if (t->out_idx != fidx) {
         t->out.close();
+        // Writes are positioned, never truncating, so anything left at this path
+        // would survive under the new data and be renamed into place with a tail
+        // that is not ours. A transfer starting at zero starts from no file at all.
+        if (resume_offset == 0 && file_exists(temp_path.c_str())) delete_file(temp_path.c_str());
         if (!t->out.open_write(temp_path.c_str())) {
             send_complete(t->peer, t->id, false);
             finish_incoming(t, false, "cannot create temp file");
@@ -513,7 +665,6 @@ void FileTransfer::process_data(const std::shared_ptr<Incoming>& t, WriteJob& jo
         t->out_idx = fidx;
         { std::lock_guard<std::mutex> lk(t->mtx); t->files[fidx].temp_created = true; }
     }
-    if (t->hashing_file != static_cast<int>(fidx)) { rats_sha256_reset(&t->hash); t->hashing_file = static_cast<int>(fidx); }
 
     if (!t->out.write_at(job.offset, job.data.data(), job.data.size())) {
         LOG_ERROR("filexfer", "transfer " << t->id << ": disk write failed");
@@ -548,23 +699,35 @@ void FileTransfer::process_data(const std::shared_ptr<Incoming>& t, WriteJob& jo
 void FileTransfer::process_file_end(const std::shared_ptr<Incoming>& t, WriteJob& job) {
     const uint32_t fidx = job.fidx;
     std::string final_path, temp_path, rel;
-    uint64_t fsize = 0;
+    uint64_t fsize = 0, resume_offset = 0;
     {
         std::lock_guard<std::mutex> lk(t->mtx);
         if (t->finished || fidx >= t->files.size()) return;
         IncomingFile& f = t->files[fidx];
         if (f.finalized) return;
         final_path = f.final_path; temp_path = f.temp_path; rel = f.relative_path; fsize = f.size;
+        resume_offset = f.resume_offset;
     }
 
-    // Whole-file SHA-256 over exactly the bytes written to disk (a file with no
-    // data — an empty file — hashes the empty input).
-    if (t->hashing_file != static_cast<int>(fidx)) { rats_sha256_reset(&t->hash); t->hashing_file = static_cast<int>(fidx); }
+    // Whole-file SHA-256 over exactly the bytes on disk — the ones this session
+    // wrote plus, on a resumed transfer, the prefix it started from (a file with
+    // no data — an empty file — hashes the empty input).
+    if (t->hashing_file != static_cast<int>(fidx) && !begin_hash(t, fidx, temp_path, resume_offset)) {
+        LOG_ERROR("filexfer", "transfer " << t->id << ": cannot read the partial " << temp_path);
+        { std::lock_guard<std::mutex> lk(t->mtx); t->files[fidx].keep_partial = false; }
+        send_complete(t->peer, t->id, false);
+        finish_incoming(t, false, "cannot read the partial file");
+        return;
+    }
     uint8_t local[RATS_SHA256_HASH_SIZE];
     rats_sha256_finish(&t->hash, local);
     t->hashing_file = -1;
     if (config_.verify_integrity && std::memcmp(local, job.sha, RATS_SHA256_HASH_SIZE) != 0) {
         LOG_ERROR("filexfer", "SHA-256 mismatch for " << rel << " on transfer " << t->id);
+        // Whatever is on disk is provably not this file, so a resumable partial is
+        // dropped here rather than kept: continuing from bytes that already failed
+        // the check can only fail it again, every attempt, forever.
+        { std::lock_guard<std::mutex> lk(t->mtx); t->files[fidx].keep_partial = false; }
         send_complete(t->peer, t->id, false);
         finish_incoming(t, false, "SHA-256 mismatch");
         return;
@@ -576,7 +739,10 @@ void FileTransfer::process_file_end(const std::shared_ptr<Incoming>& t, WriteJob
 
     const std::string parent = get_parent_directory(final_path.c_str());
     if (!parent.empty()) create_directories(parent.c_str());
-    if (file_exists(final_path.c_str())) delete_file(final_path.c_str());
+    // Never when the partial IS the destination (accept_resume() refuses that, but
+    // the delete is the one step here that destroys verified bytes).
+    if (temp_path != final_path && file_exists(final_path.c_str()))
+        delete_file(final_path.c_str());
 
     bool ok;
     if (fsize == 0) {
@@ -686,10 +852,28 @@ void FileTransfer::on_message(const Peer& peer, ByteView payload) {
             const uint64_t id = r.u64();
             const uint8_t accepted = r.u8();
             if (!r.ok) return;
+            // A receiver continuing an interrupted download appends the offset it
+            // already has; anything older sends nothing and gets the whole file.
+            uint64_t start = 0;
+            if (r.remaining() >= 8) { const uint64_t v = r.u64(); if (r.ok) start = v; }
             auto t = find_outgoing(from, id);
             if (!t) return;
             if (!accepted) { finish_outgoing(t, false); return; }
-            { std::lock_guard<std::mutex> lk(t->mtx); if (t->status == Status::Pending) t->status = Status::Active; t->last_activity = std::chrono::steady_clock::now(); }
+            {
+                std::lock_guard<std::mutex> lk(t->mtx);
+                if (t->status == Status::Pending) t->status = Status::Active;
+                // Only from a standing start, and only for a single file: a second
+                // RESPONSE arriving mid-transfer must not rewind the stream, and the
+                // offset names a position that only a one-file transfer has.
+                if (start > 0 && !t->is_directory && t->files.size() == 1
+                    && t->cur_file == 0 && t->cur_offset == 0 && start < t->files[0].size) {
+                    t->cur_offset = start;
+                    t->bytes_done = start;
+                    t->acked      = start;
+                    LOG_INFO("filexfer", "Send [" << id << "] resuming at " << start << " B");
+                }
+                t->last_activity = std::chrono::steady_clock::now();
+            }
             queue_send(id);
             return;
         }
@@ -812,6 +996,20 @@ void FileTransfer::handle_chunk(const PeerId& from, uint64_t id, uint32_t fidx, 
             fail = "out-of-order file index";
         } else {
             IncomingFile& f = t->files[fidx];
+            // A sender from before resume existed answers the request by streaming
+            // from the top. Nothing of this session is on disk yet at that point, so
+            // the partial is simply dropped and the file starts over: a resume that
+            // did not happen, not a failed transfer.
+            if (offset == 0 && f.resume_offset > 0 && f.enqueued == f.resume_offset
+                && f.received == f.resume_offset) {
+                LOG_INFO("filexfer", "transfer " << id << ": peer restarted from zero; "
+                         << "discarding the " << f.resume_offset << " B partial");
+                t->bytes_done -= std::min<uint64_t>(t->bytes_done, f.resume_offset);
+                t->last_ack = t->bytes_done;
+                f.resume_offset = 0;
+                f.enqueued = 0;
+                f.received = 0;
+            }
             if (offset != f.enqueued)                fail = "out-of-order chunk offset";
             else if (offset + data.size() > f.size)  fail = "chunk exceeds declared file size";
             else {

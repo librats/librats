@@ -11,6 +11,12 @@
  * ride on MessageType::FileChunk as compact binary opcodes (no JSON), implemented
  * on the Node/Subsystem plugin model.
  *
+ * Continuing an interrupted transfer: accept_resume() takes the partial file the
+ * app kept from an earlier attempt and asks the sender to start at its length,
+ * which rides along on the RESPONSE. A sender that does not understand the
+ * request streams from zero and the receiver quietly starts over, so the feature
+ * degrades to the old behaviour against an older peer instead of failing.
+ *
  * Integrity: every file ends with its SHA-256, verified end-to-end before the temp
  * file is moved into place; a mismatch (or a disk-write failure) fails the whole
  * transfer. In transit the Noise session already AEAD-authenticates every byte, so
@@ -35,7 +41,7 @@
  * Wire (MessageType::FileChunk payload, big-endian):
  *   OFFER    [1][id:u64][flags:u8][total:u64][name_len:u16][name][file_count:u32]
  *                                      { [path_len:u16][path][size:u64] } × file_count
- *   RESPONSE [2][id:u64][accept:u8]
+ *   RESPONSE [2][id:u64][accept:u8]{[start_offset:u64]}   (offset: resume request)
  *   CHUNK    [3][id:u64][file_index:u32][offset:u64][data]
  *   FILE_END [4][id:u64][file_index:u32][sha256:32]
  *   PROGRESS [5][id:u64][received:u64]      (cumulative across all files)
@@ -164,6 +170,31 @@ public:
     void accept(const PeerId& from, uint64_t id, const std::string& dest_path);
     void reject(const PeerId& from, uint64_t id);
 
+    /// Accept a single-file offer, continuing an earlier attempt at the same file.
+    ///
+    /// `partial_path` is both where the bytes already received live and where this
+    /// attempt keeps writing. The app has to own that path: the internal temp names
+    /// are keyed by the sender's transfer id, which is a fresh number on every new
+    /// offer, and an ordinary temp is reclaimed the moment a transfer fails —
+    /// neither survives to be resumed. A partial handed in here is never deleted on
+    /// failure, so the next attempt can pick it up.
+    ///
+    /// The receiver asks the sender to start at the partial's length; a sender that
+    /// ignores the request streams from zero and the partial is discarded (the
+    /// transfer still succeeds, it just costs the whole file again). The partial
+    /// must be a prefix of the offered file: nothing checks that up front, and the
+    /// end-to-end SHA-256 turns a mismatch into a failed transfer after the whole
+    /// download. A partial at least as long as the offered file is discarded.
+    ///
+    /// `partial_path` must differ from `dest_path`: the partial is a scratch file
+    /// the verified bytes are moved out of, not the destination written in place.
+    ///
+    /// Returns false without accepting anything when (from, id) names no offer, the
+    /// offer is a directory, it is not a single-file transfer, or `partial_path`
+    /// equals `dest_path`.
+    bool accept_resume(const PeerId& from, uint64_t id, const std::string& dest_path,
+                       const std::string& partial_path);
+
     /// Control a live transfer (works from either side); (peer, id) names it.
     bool cancel(const PeerId& peer, uint64_t id);
     bool pause(const PeerId& peer, uint64_t id);
@@ -233,6 +264,9 @@ private:
         std::condition_variable  cv;
         size_t                   cur_file = 0;
         uint64_t                 cur_offset = 0;
+        /// Which file `hash` currently covers, so a resumed send knows to seed it
+        /// with the prefix it is about to skip rather than reset it to empty.
+        size_t                   hash_file = SIZE_MAX;
         uint64_t                 bytes_done = 0;
         uint64_t                 acked = 0;
         uint32_t                 files_done = 0;
@@ -251,6 +285,8 @@ private:
         std::string temp_path;
         uint64_t    enqueued = 0;   ///< reactor: bytes handed to the disk writer
         uint64_t    received = 0;   ///< writer: bytes actually written to disk
+        uint64_t    resume_offset = 0;  ///< bytes already on disk when the transfer started
+        bool        keep_partial = false;  ///< app-owned partial: never reclaimed on failure
         bool        temp_created = false;
         bool        finalized = false;
     };
@@ -317,9 +353,18 @@ private:
     // transfer's mutex NOT held — pool lock is always taken after the transfer's).
     void schedule_writer(const std::shared_ptr<Incoming>& t);
     void disk_worker_loop();
+    // Start the whole-file hash for `fidx`, seeding it with the `prefix` bytes a
+    // resumed transfer already has on disk (the digest covers the file, not the
+    // session). Writer thread only; false means the partial could not be read.
+    bool begin_hash(const std::shared_ptr<Incoming>& t, uint32_t fidx, const std::string& path, uint64_t prefix);
     void drain_writes(const std::shared_ptr<Incoming>& t);
     void process_data(const std::shared_ptr<Incoming>& t, WriteJob& job);
     void process_file_end(const std::shared_ptr<Incoming>& t, WriteJob& job);
+
+    // Shared by accept() and accept_resume(): `partial_path` empty means the
+    // ordinary internal temp, non-empty an app-owned partial to continue from.
+    bool accept_impl(const PeerId& from, uint64_t id, const std::string& dest_path,
+                     const std::string& partial_path);
 
     // ── lifecycle helpers ─────────────────────────────────────────────────────
     void maintenance_loop();
