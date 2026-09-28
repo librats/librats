@@ -8,6 +8,16 @@ on:
   release:
     types: [created]
 
+# Toolchain versions. Package ids are as listed by sdkmanager --list;
+# CMDLINE_TOOLS_BUILD is the number in commandlinetools-linux-<build>_latest.zip.
+env:
+  JAVA_VERSION: '17'
+  CMDLINE_TOOLS_BUILD: '16111833'   # cmdline-tools 23.0
+  ANDROID_PLATFORM: 'android-35'
+  BUILD_TOOLS_VERSION: '37.0.0'
+  NDK_VERSION: '30.0.16248370'
+  GRADLE_VERSION: '8.11.1'
+
 jobs:
   android-build:
     runs-on: ubuntu-latest
@@ -23,11 +33,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: ${{ env.JAVA_VERSION }}
 
       - name: Install dependencies
         run: |
@@ -48,7 +58,7 @@ jobs:
           cd $HOME/shared
 
           # Download and setup Android command line tools
-          CMD_TOOLS_ZIP=commandlinetools-linux-11076708_latest.zip
+          CMD_TOOLS_ZIP=commandlinetools-linux-${CMDLINE_TOOLS_BUILD}_latest.zip
           wget https://dl.google.com/android/repository/$CMD_TOOLS_ZIP
           mkdir -p SDK
           unzip -d SDK/cmdline-tools $CMD_TOOLS_ZIP
@@ -57,27 +67,27 @@ jobs:
           # Setup environment variables
           export ANDROID_HOME=$HOME/shared/SDK
           export ANDROID_SDK_ROOT=$ANDROID_HOME
-          export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018
+          export ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/${NDK_VERSION}
           export SDK_MANAGER=${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager
 
           # Accept licenses and install Android SDK components
           yes | ${SDK_MANAGER} --licenses
-          ${SDK_MANAGER} --install "platforms;android-35"
-          ${SDK_MANAGER} --install "build-tools;36.0.0"
-          ${SDK_MANAGER} --install "ndk;27.2.12479018"
+          ${SDK_MANAGER} --install "platforms;${ANDROID_PLATFORM}"
+          ${SDK_MANAGER} --install "build-tools;${BUILD_TOOLS_VERSION}"
+          ${SDK_MANAGER} --install "ndk;${NDK_VERSION}"
 
           # Download and install Gradle
-          wget https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
-          unzip -d gradle gradle-8.11.1-bin.zip
+          wget https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
+          unzip -d gradle gradle-${GRADLE_VERSION}-bin.zip
 
           # Make paths available to subsequent steps
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
-          echo "$ANDROID_SDK_ROOT/build-tools/36.0.0" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_NDK_ROOT" >> $GITHUB_PATH
-          echo "$HOME/shared/gradle/gradle-8.11.1/bin" >> $GITHUB_PATH
+          echo "$HOME/shared/gradle/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
 
       - name: Set Android architecture variables
         run: |
