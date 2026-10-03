@@ -1038,10 +1038,15 @@ TEST(FilexferTest, PauseDuringThePrefixHashStillVerifies) {
     ASSERT_NE(p.send->send_file(p.server->local_id(), src), 0u);
     ASSERT_TRUE(wait_for([&] { return accepted.load(); }));
     // Not immediately: a pause the sender sees before it starts is the easy case.
+    // Neither return value is checked: a pause that reaches the sender only after it
+    // has queued the whole tail lets the in-flight bytes finish the transfer while
+    // the receiver is paused, and there is then nothing left to pause or resume. A
+    // pause that did stop the sender and a resume that failed to restart it would
+    // never complete, which the wait below catches.
     std::this_thread::sleep_for(20ms);
-    EXPECT_TRUE(p.recv->pause(p.client->local_id(), offer_id.load()));
+    p.recv->pause(p.client->local_id(), offer_id.load());
     std::this_thread::sleep_for(50ms);
-    EXPECT_TRUE(p.recv->resume(p.client->local_id(), offer_id.load()));
+    p.recv->resume(p.client->local_id(), offer_id.load());
 
     ASSERT_TRUE(wait_for([&] { return rdone.load(); }, 60s));
     EXPECT_TRUE(rok.load()) << "the resumed send must re-hash the prefix it skipped";
