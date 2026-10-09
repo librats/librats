@@ -8,6 +8,7 @@
 [![Release](https://img.shields.io/github/release/DEgITx/librats.svg)](https://github.com/DEgITx/librats/releases)
 [![npm](https://img.shields.io/npm/v/librats.svg)](https://www.npmjs.com/package/librats)
 [![vcpkg](https://img.shields.io/vcpkg/v/librats)](https://vcpkg.io/en/package/librats)
+[![Conan Center](https://img.shields.io/conan/v/librats)](https://conan.io/center/recipes/librats)
 
 **A high-performance, lightweight peer-to-peer networking library with C++, C, Node.js, Java, Python, React Native, Android, and iOS support**
 
@@ -863,10 +864,36 @@ overlay port with `vcpkg install librats --overlay-ports=<path-to-librats>/ports
 
 #### Method 4: Conan
 
-A [`conanfile.py`](conanfile.py) is included. It is not on Conan Center, so create the package from a checkout (the version is taken from the command line):
+librats is in the official [Conan Center](https://conan.io/center/recipes/librats) repository:
 
 ```bash
-conan create . --version 2.3.7        # options: shared, bindings, search_features, storage
+conan install --requires=librats/2.3.7 --build=missing
+# shared library:
+conan install --requires=librats/2.3.7 -o "librats/*:shared=True" --build=missing
+```
+
+or in your `conanfile.txt`:
+
+```ini
+[requires]
+librats/2.3.7
+
+[generators]
+CMakeDeps
+CMakeToolchain
+```
+
+```cmake
+find_package(rats CONFIG REQUIRED)
+target_link_libraries(my_p2p_app PRIVATE rats::rats)
+```
+
+The Conan Center package has the C API (`bindings`) on and BitTorrent (`search_features`)
+and distributed storage (`storage`) off. To get those, build the package from the
+[`conanfile.py`](conanfile.py) in this repository, which exposes them as options:
+
+```bash
+conan create . --version 2.3.7 -o "librats/*:search_features=True" -o "librats/*:storage=True"
 ```
 
 #### Required System Libraries
