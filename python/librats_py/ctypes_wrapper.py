@@ -57,6 +57,10 @@ class RatsConfig(Structure):
         # message of any size is always queued.
         ("send_queue_limit", c_size_t),
         ("congestion_control", c_int),   # rats_congestion_t (default BBR)
+        # Ceiling a UDP stream's receive window grows to; 0 = default (16 MiB).
+        ("udp_receive_window", c_size_t),
+        # Out-of-order bytes all UDP streams may hold together; 0 = default (64 MiB).
+        ("udp_receive_budget", c_size_t),
     ]
 
 

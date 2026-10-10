@@ -73,7 +73,13 @@
  * and only a Syn that hands the cookie back costs it any memory (see udp_mux.h).
  * Everything else is header-only, and a datagram that pads one is rejected.
  *
- * Flag bits other than AckRanges are reserved: sent as zero, ignored on receipt.
+ * Flag Blocked says the sender has data queued that the receiver's limit is
+ * holding back — QUIC's DATA_BLOCKED, as one bit. It is what a receiver grows its
+ * window on: the one side that can see a window is too small is the one stopped
+ * by it, and a receiver with no traffic of its own to measure a round trip on has
+ * no other way to know.
+ *
+ * Other flag bits are reserved: sent as zero, ignored on receipt.
  *
  * Sequence numbers are 32-bit and wrap; compare them only with seq_less/seq_diff,
  * never with < on the raw value.
@@ -107,6 +113,7 @@ enum class PacketType : uint8_t {
 enum PacketFlags : uint8_t {
     FlagNone      = 0,
     FlagAckRanges = 1 << 0,  ///< (Ack only) a range block follows the header
+    FlagBlocked   = 1 << 1,  ///< the sender has data waiting that the peer's limit holds back
 };
 
 /// Bytes on the wire before the payload (or the range block). Every packet has
@@ -153,25 +160,23 @@ struct AckRange {
 };
 
 /// Packets a receiver will buffer past its cumulative ack — out of order, or in
-/// order but not yet read — and so the furthest past it that it ever sets its
-/// limit. This is the hard ceiling on in-flight data, so it is also the ceiling
-/// on throughput: a window of W packets on a path of RTT R can never exceed
-/// W * kMaxPayload / R, whatever the link underneath can do.
+/// order but not yet read — when a stream starts, and so how far past the ack it
+/// first sets its limit. The window grows from here while the sender says it is
+/// held back by it (FlagBlocked), up to a ceiling the node configures, and it is
+/// the ceiling on throughput while it lasts: a window of W packets on a path of
+/// RTT R can never carry more than W * kMaxPayload / R.
 ///
-/// 1024 * 1200 B ≈ 1.2 MiB, i.e. ~96 Mbit/s at 100 ms and ~48 Mbit/s at 200 ms.
-///
-/// It is also what bounds the memory one peer can make us hold: the reorder
-/// buffer never holds more than this many packets, so ~1.2 MiB per stream in the
-/// worst case. That worst case needs a window's worth of loss to reach, and both
-/// the reorder map and the retransmission queue only ever grow to what is
-/// actually outstanding — an idle or slow stream costs nothing near it.
+/// 1024 * 1200 B ≈ 1.2 MiB, i.e. ~96 Mbit/s at 100 ms — enough for most peers
+/// never to grow at all, which is what keeps an idle or slow stream cheap.
 ///
 /// Purely the receiver's business: nothing on the wire depends on it, so a peer
 /// with a different value interoperates.
-constexpr uint16_t kMaxWindowPackets = 1024;
-static_assert((kMaxWindowPackets & (kMaxWindowPackets - 1)) == 0 && kMaxWindowPackets % 64 == 0,
-              "the receiver indexes its reorder ring by sequence number modulo the window");
-static_assert(kMaxWindowPackets <= kMaxAckReach, "a range must be able to name the whole window");
+constexpr uint32_t kInitialWindowPackets = 1024;
+
+/// The furthest a receive window ever grows: what a range can name past the
+/// cumulative ack. ~78 MB of 1200-byte packets — 6 Gbit/s at 100 ms.
+constexpr uint32_t kMaxWindowPackets = kMaxAckReach - 1;
+static_assert(kInitialWindowPackets <= kMaxWindowPackets, "the window starts inside its ceiling");
 
 // ── Wrapping sequence arithmetic ────────────────────────────────────────────
 //

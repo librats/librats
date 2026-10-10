@@ -69,6 +69,14 @@ Identity load_or_create_identity(const std::string& data_dir) {
     return identity;
 }
 
+/// The datagram transport's limits, as the node is configured (0 = default).
+UdpMuxLimits udp_limits_for(const NodeConfig& config) {
+    UdpMuxLimits limits;
+    if (config.udp_receive_window != 0) limits.receive_window = config.udp_receive_window;
+    if (config.udp_receive_budget != 0) limits.receive_budget = config.udp_receive_budget;
+    return limits;
+}
+
 } // namespace
 
 Node::Node(NodeConfig config)
@@ -135,7 +143,7 @@ bool Node::open_listeners() {
         if (!is_valid_socket(udp_socket_))
             LOG_WARN("node", "Could not open a UDP socket; dials will fall back to TCP");
         else
-            reactors_->listen_udp(udp_socket_, family, config_.congestion_control);
+            reactors_->listen_udp(udp_socket_, family, config_.congestion_control, udp_limits_for(config_));
         return true;
     }
 
@@ -257,7 +265,7 @@ bool Node::open_listeners() {
             transports_ |= PeerTransportTcp;
         }
         if (is_valid_socket(udp)) {
-            reactors_->listen_udp(udp, family, config_.congestion_control);
+            reactors_->listen_udp(udp, family, config_.congestion_control, udp_limits_for(config_));
             transports_ |= PeerTransportUdp;
         }
         return true;

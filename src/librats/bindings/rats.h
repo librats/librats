@@ -150,6 +150,15 @@ typedef struct {
 
     /* Congestion controller of every UDP stream (default RATS_CONGESTION_BBR). */
     rats_congestion_t congestion_control;
+
+    /* Bytes one UDP stream will buffer for its peer, at most: the ceiling its
+     * receive window grows to while the peer reports being held back by it (every
+     * stream starts at ~1.2 MiB). The window bounds throughput at window / round
+     * trip. 0 = the library default (16 MiB, ~1.3 Gbit/s at 100 ms). */
+    size_t           udp_receive_window;
+    /* Bytes all UDP streams together may hold out of order — what peers can make
+     * this node buffer however many there are. 0 = the library default (64 MiB). */
+    size_t           udp_receive_budget;
 } rats_config_t;
 
 /** A config pre-filled with the library defaults (listening, Noise, ephemeral

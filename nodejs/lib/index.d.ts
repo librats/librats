@@ -112,6 +112,14 @@ declare module 'librats' {
     sendQueueLimit?: number;
     /** Congestion controller of every UDP stream. Default `Congestion.BBR`. */
     congestionControl?: CongestionValue;
+    /**
+     * Bytes one UDP stream will buffer for its peer, at most: the ceiling its
+     * receive window grows to while the peer is held back by it. 0 (default)
+     * uses the library's 16 MiB.
+     */
+    udpReceiveWindow?: number;
+    /** Bytes all UDP streams together may hold out of order. 0 (default) = 64 MiB. */
+    udpReceiveBudget?: number;
   }
 
   export type PeerHandler = (peerId: string) => void;

@@ -599,7 +599,7 @@ TEST(UdpLossRecoveryTest, AHoleIsNamedEvenWhenDataCarriesTheAck) {
     syn.type    = rudp::PacketType::Syn;
     syn.conn_id = 11;
     syn.seq     = 1;
-    syn.limit   = rudp::kMaxWindowPackets;
+    syn.limit   = rudp::kInitialWindowPackets;
     feed(rx, syn, now);
     ASSERT_TRUE(rx.connected());
 
@@ -617,7 +617,7 @@ TEST(UdpLossRecoveryTest, AHoleIsNamedEvenWhenDataCarriesTheAck) {
     pkt.conn_id = 11;
     pkt.seq     = 3;   // 2 is the hole
     pkt.ack     = 2;
-    pkt.limit   = 2 + rudp::kMaxWindowPackets;
+    pkt.limit   = 2 + rudp::kInitialWindowPackets;
     pkt.payload = ByteView(payload.data(), payload.size());
     host.out.clear();
     now += 10ms;
@@ -653,7 +653,7 @@ TEST(UdpLossRecoveryTest, AnAckNamesTheNewestRunsAndTheLatestArrival) {
     syn.type    = rudp::PacketType::Syn;
     syn.conn_id = 11;
     syn.seq     = 1;
-    syn.limit   = rudp::kMaxWindowPackets;
+    syn.limit   = rudp::kInitialWindowPackets;
     feed(rx, syn, now);
     ASSERT_TRUE(rx.connected());
 
@@ -666,7 +666,7 @@ TEST(UdpLossRecoveryTest, AnAckNamesTheNewestRunsAndTheLatestArrival) {
         pkt.type    = rudp::PacketType::Data;
         pkt.conn_id = 11;
         pkt.seq     = seq;
-        pkt.limit   = rudp::kMaxWindowPackets;
+        pkt.limit   = rudp::kInitialWindowPackets;
         pkt.payload = ByteView(payload.data(), payload.size());
         now += 1ms;
         feed(rx, pkt, now);
@@ -713,14 +713,14 @@ TEST(UdpLossRecoveryTest, APacketPastTheAdvertisedLimitIsNotHeld) {
     syn.type    = rudp::PacketType::Syn;
     syn.conn_id = 11;
     syn.seq     = 1;
-    syn.limit   = rudp::kMaxWindowPackets;
+    syn.limit   = rudp::kInitialWindowPackets;
     host.out.clear();
     feed(rx, syn, now);
     ASSERT_FALSE(host.out.empty());
     rudp::Packet first;
     ASSERT_TRUE(rudp::decode(host.out.back().data(), host.out.back().size(), first));
     const uint32_t limit = first.limit;
-    ASSERT_EQ(first.room(), rudp::kMaxWindowPackets);
+    ASSERT_EQ(first.room(), rudp::kInitialWindowPackets);
 
     // Ten full packets in order, left unread. The ack moves on by ten and the room
     // shrinks by ten, so the limit stands where it was — now short of everything
@@ -732,7 +732,7 @@ TEST(UdpLossRecoveryTest, APacketPastTheAdvertisedLimitIsNotHeld) {
         pkt.type    = rudp::PacketType::Data;
         pkt.conn_id = 11;
         pkt.seq     = seq;
-        pkt.limit   = rudp::kMaxWindowPackets;
+        pkt.limit   = rudp::kInitialWindowPackets;
         pkt.payload = ByteView(payload.data(), payload.size());
         host.out.clear();
         now += 1ms;
@@ -756,6 +756,251 @@ TEST(UdpLossRecoveryTest, APacketPastTheAdvertisedLimitIsNotHeld) {
     ASSERT_EQ(past.range_count(), 1u);
     EXPECT_EQ(past.ack + 1 + rudp::ack_range(past, 0).offset, limit);
     EXPECT_EQ(rudp::ack_range(past, 0).length, 1u) << "a packet past the limit was held";
+}
+
+// ── Receive window ──────────────────────────────────────────────────────────
+
+namespace {
+
+/// An inbound stream on a Capture host with its Syn already taken, and a way to
+/// hand it Data and read back the acknowledgement it answers with.
+struct Receiver {
+    explicit Receiver(UdpReceiveConfig cfg = {})
+        : rx(host, peer, 11, 10, ConnRole::Inbound, now, DialProfile{},
+             CongestionAlgorithm::Reno, cfg) {
+        rudp::Packet syn;
+        syn.type    = rudp::PacketType::Syn;
+        syn.conn_id = 11;
+        syn.seq     = 1;
+        syn.limit   = rudp::kInitialWindowPackets;
+        feed(rx, syn, now);
+    }
+
+    /// Deliver Data `seq` (full-sized), flagged as held back by our limit or not,
+    /// and return the last thing the stream sent in reply (type Ack with nothing
+    /// in it if it sent nothing).
+    rudp::Packet data(uint32_t seq, bool blocked) {
+        rudp::Packet pkt;
+        pkt.type    = rudp::PacketType::Data;
+        pkt.flags   = blocked ? rudp::FlagBlocked : rudp::FlagNone;
+        pkt.conn_id = 11;
+        pkt.seq     = seq;
+        pkt.limit   = rudp::kInitialWindowPackets;
+        pkt.payload = ByteView(payload.data(), payload.size());
+        host.out.clear();
+        now += 1ms;
+        feed(rx, pkt, now);
+        rudp::Packet reply;
+        reply.conn_id = 0;
+        if (!host.out.empty())
+            rudp::decode(host.out.back().data(), host.out.back().size(), reply);
+        return reply;
+    }
+
+    Capture              host;
+    Address              peer{*IpAddress::parse("10.0.0.1"), 1111};
+    Clock::time_point    now = Clock::time_point{} + 1s;
+    std::vector<uint8_t> payload = std::vector<uint8_t>(rudp::kMaxPayload, 0xAB);
+    UdpStream            rx;
+};
+
+} // namespace
+
+// The receiver cannot see that its window is too small — the sender can, because
+// it is the one stopped by it, and it says so (FlagBlocked). Each report doubles
+// the window, at once and with an acknowledgement of its own (the sender is
+// waiting on it); a report sent against a limit from before the growth is an echo
+// of a stall already answered and changes nothing; and the window never passes
+// what it is configured to grow to.
+TEST(UdpReceiveWindowTest, GrowsWhileThePeerIsHeldBackByIt) {
+    UdpReceiveConfig cfg;
+    cfg.max_window = 3000;
+    Receiver r(cfg);
+    ASSERT_EQ(r.rx.receive_window(), rudp::kInitialWindowPackets);
+
+    // In order, unflagged: nothing changes.
+    rudp::Packet reply = r.data(2, false);
+    EXPECT_EQ(r.rx.receive_window(), rudp::kInitialWindowPackets);
+
+    // The sender reports itself stopped.
+    reply = r.data(3, true);
+    ASSERT_EQ(r.rx.receive_window(), 2 * rudp::kInitialWindowPackets);
+    ASSERT_EQ(reply.type, rudp::PacketType::Ack) << "the stopped sender was not told at once";
+    EXPECT_EQ(reply.room(), 2 * rudp::kInitialWindowPackets - 2)
+        << "the acknowledgement did not carry the larger window";
+    const uint32_t grown_limit = reply.limit;
+
+    // Still flagged, but sent before the sender could have heard: an echo.
+    r.data(4, true);
+    EXPECT_EQ(r.rx.receive_window(), 2 * rudp::kInitialWindowPackets) << "one stall grew the window twice";
+
+    // Stopped again, now at the new limit: it grows again — to the ceiling.
+    r.data(5, false);
+    reply = r.data(grown_limit, true);
+    EXPECT_EQ(r.rx.receive_window(), 3000u);
+    r.data(grown_limit + 1, true);   // whatever arrives, past the ceiling it stays
+    EXPECT_EQ(r.rx.receive_window(), 3000u);
+}
+
+// The ring of held bits is indexed by sequence number modulo its length, so a
+// window that grows moves every packet already held to a new place in it. They
+// must all still be there afterwards — named by the next acknowledgement, and
+// delivered when the hole fills.
+TEST(UdpReceiveWindowTest, HeldPacketsSurviveTheWindowGrowing) {
+    Receiver r;
+    r.data(5, false);
+    r.data(1000, false);   // far enough out to land elsewhere in a longer ring
+    const rudp::Packet reply = r.data(7, true);
+    ASSERT_EQ(r.rx.receive_window(), 2 * rudp::kInitialWindowPackets);
+
+    ASSERT_EQ(reply.type, rudp::PacketType::Ack);
+    ASSERT_EQ(reply.range_count(), 3u);
+    const uint32_t want[3] = {1000, 7, 5};   // newest first
+    for (size_t i = 0; i < 3; ++i) {
+        const rudp::AckRange range = rudp::ack_range(reply, i);
+        EXPECT_EQ(reply.ack + 1 + range.offset, want[i]) << "range " << i;
+        EXPECT_EQ(range.length, 1u) << "range " << i;
+    }
+
+    // Fill 2..4 and 6: everything up to 7 is delivered, 1000 is still held.
+    for (const uint32_t seq : {2u, 3u, 4u, 6u}) r.data(seq, false);
+    std::vector<uint8_t> sink(64 * 1024);
+    size_t got = 0;
+    for (size_t n; (n = r.rx.read(sink.data(), sink.size())) != 0;) got += n;
+    EXPECT_EQ(got, 6 * rudp::kMaxPayload);
+    const rudp::Packet after = r.data(8, false);
+    ASSERT_EQ(after.range_count(), 1u);
+    EXPECT_EQ(after.ack + 1 + rudp::ack_range(after, 0).offset, 1000u);
+}
+
+// A sender held back because the application has stopped reading is flow control
+// doing its job: a larger window would only let the peer park more of what nobody
+// reads in our memory.
+TEST(UdpReceiveWindowTest, DoesNotGrowForAReaderThatHasStopped) {
+    Receiver r;
+    // A third of the window delivered in order and left unread.
+    const uint32_t unread = rudp::kInitialWindowPackets / 3;
+    for (uint32_t i = 0; i < unread; ++i) r.data(2 + i, false);
+
+    r.data(2 + unread, true);
+    EXPECT_EQ(r.rx.receive_window(), rudp::kInitialWindowPackets)
+        << "the window grew for a reader that is not reading";
+
+    // Once the reader catches up, the same report is honoured.
+    std::vector<uint8_t> sink(64 * 1024);
+    while (r.rx.read(sink.data(), sink.size()) != 0) {}
+    r.data(3 + unread, true);
+    EXPECT_EQ(r.rx.receive_window(), 2 * rudp::kInitialWindowPackets);
+}
+
+// A grown window is a promise the budget has to cover if a peer fills it with
+// holes, so once the transfer it was grown for goes quiet it is given back.
+TEST(UdpReceiveWindowTest, ShrinksBackAfterSilence) {
+    Receiver r;
+    r.data(2, true);
+    ASSERT_EQ(r.rx.receive_window(), 2 * rudp::kInitialWindowPackets);
+
+    r.rx.tick(r.now + UdpStream::kWindowDecay / 2);
+    EXPECT_EQ(r.rx.receive_window(), 2 * rudp::kInitialWindowPackets) << "given back too soon";
+    r.rx.tick(r.now + UdpStream::kWindowDecay);
+    EXPECT_EQ(r.rx.receive_window(), rudp::kInitialWindowPackets);
+}
+
+// The other end of it: a sender that has data waiting and is stopped by the peer's
+// limit says so on what it sends — exactly then, not on the packets before.
+TEST(UdpReceiveWindowTest, ASenderStoppedByTheLimitSaysSo) {
+    Capture       host;
+    const Address peer{*IpAddress::parse("10.0.0.1"), 1111};
+    auto          now = Clock::time_point{} + 1s;
+    UdpStream tx(host, peer, 10, 11, ConnRole::Outbound, now, DialProfile{},
+                 CongestionAlgorithm::Reno);
+
+    // The Syn is answered with room for four packets past it.
+    rudp::Packet ack;
+    ack.type    = rudp::PacketType::Ack;
+    ack.conn_id = 10;
+    ack.seq     = 1;
+    ack.ack     = 1;
+    ack.limit   = 1 + 4;
+    now += 10ms;
+    feed(tx, ack, now);
+    ASSERT_TRUE(tx.connected());
+
+    host.out.clear();
+    std::vector<uint8_t> data(10 * rudp::kMaxPayload, 0xCD);
+    const ByteView v(data.data(), data.size());
+    ASSERT_GT(tx.write(&v, 1, now), 0u);
+    for (int i = 0; i < 50; ++i) {   // let the pacer release what the windows allow
+        now += 2ms;
+        tx.tick(now);
+    }
+
+    // First transmissions only: nothing is acknowledged here, so a tail probe of
+    // the last one follows in time.
+    std::vector<rudp::Packet> sent;
+    for (const Bytes& d : host.out) {
+        rudp::Packet p;
+        ASSERT_TRUE(rudp::decode(d.data(), d.size(), p));
+        if (p.type != rudp::PacketType::Data) continue;
+        if (!sent.empty() && !rudp::seq_less(sent.back().seq, p.seq)) continue;
+        sent.push_back(p);
+    }
+    ASSERT_EQ(sent.size(), 4u) << "the sender went past the limit, or stopped short of it";
+    for (size_t i = 0; i + 1 < sent.size(); ++i)
+        EXPECT_FALSE(sent[i].flags & rudp::FlagBlocked) << "packet " << i << " was not yet held back";
+    EXPECT_TRUE(sent.back().flags & rudp::FlagBlocked)
+        << "the packet that reached the limit did not say the sender is held back";
+}
+
+// Holes cost memory, and the budget is what bounds it across streams: a stream
+// filling its window with nothing but holes is refused once the budget is spent,
+// every other stream keeps its guaranteed share regardless, what is held is given
+// back as the holes fill, and a window does not grow on a budget that could not
+// honour it.
+TEST(UdpReceiveWindowTest, TheBudgetBoundsWhatHolesCanHold) {
+    UdpReceiveBudget budget(512 * 1024);
+    UdpReceiveConfig cfg;
+    cfg.budget = &budget;
+
+    Receiver greedy(cfg);
+    // Every other packet, across the whole window: 2 is missing, and so is every
+    // even number after it.
+    for (uint32_t seq = 3; seq < 2 + rudp::kInitialWindowPackets; seq += 2) greedy.data(seq, false);
+    EXPECT_LE(budget.used(), budget.limit()) << "the budget was overspent";
+    EXPECT_GT(budget.used(), budget.limit() - 2 * rudp::kMaxPayload) << "the budget was not used";
+    EXPECT_EQ(greedy.rx.held_bytes(), budget.used());
+
+    // Another stream, with the budget already gone, still holds its share.
+    Receiver other(cfg);
+    size_t held = 0;
+    for (uint32_t seq = 3; seq < 2 + 400; seq += 2) {
+        other.data(seq, false);
+        held = other.rx.held_bytes();
+    }
+    EXPECT_GT(held, UdpReceiveBudget::kGuaranteed - 2 * rudp::kMaxPayload);
+    EXPECT_LE(held, UdpReceiveBudget::kGuaranteed);
+
+    // Nor does a window grow on a spent budget.
+    other.data(500, true);
+    EXPECT_EQ(other.rx.receive_window(), rudp::kInitialWindowPackets);
+
+    // Filling the hole at the front releases what was held behind it.
+    const size_t before = budget.used();
+    greedy.data(2, false);
+    EXPECT_LT(budget.used(), before);
+    EXPECT_EQ(budget.used(), greedy.rx.held_bytes() + other.rx.held_bytes());
+}
+
+// End to end, on a path whose bandwidth-delay product is larger than a starting
+// window: the sender reports itself held back and the receiver's window grows
+// past where it started.
+TEST(UdpReceiveWindowTest, GrowsOnAPathLongerThanTheWindow) {
+    Sim sim(200, 100ms, 4000);   // 2.5 MB in flight would fill it; 1.2 MB is the window
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    f.to_send = SIZE_MAX;
+    sim.run(3s);
+    EXPECT_GT(f.rx.receive_window(), rudp::kInitialWindowPackets);
+    EXPECT_FALSE(f.tx.dead());
 }
 
 // However many acknowledgements report the holes of one loss, the controller is

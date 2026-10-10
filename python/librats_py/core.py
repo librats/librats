@@ -66,6 +66,8 @@ class RatsNode:
         transport_fallback_ms: int = 1200,
         send_queue_limit: int = 0,
         congestion_control: Congestion = Congestion.BBR,
+        udp_receive_window: int = 0,
+        udp_receive_budget: int = 0,
     ):
         """Create a node.
 
@@ -94,6 +96,11 @@ class RatsNode:
             congestion_control: :class:`~librats_py.enums.Congestion` of every
                 UDP stream. BBR (default) holds its rate on lossy links and keeps
                 the bottleneck queue short; Reno backs off on every loss.
+            udp_receive_window: Bytes one UDP stream will buffer for its peer, at
+                most — the ceiling its receive window grows to while the peer is
+                held back by it; 0 = the library default (16 MiB).
+            udp_receive_budget: Bytes all UDP streams together may hold out of
+                order; 0 = the library default (64 MiB).
         """
         self._lib = get_librats()
 
@@ -108,6 +115,8 @@ class RatsNode:
         cfg.transport_fallback_ms = transport_fallback_ms
         cfg.send_queue_limit = send_queue_limit
         cfg.congestion_control = int(congestion_control)
+        cfg.udp_receive_window = udp_receive_window
+        cfg.udp_receive_budget = udp_receive_budget
         # Keep bytes alive for the duration of the create call.
         self._cfg_keepalive = [
             _b(bind_address), _b(data_dir), _b(protocol),

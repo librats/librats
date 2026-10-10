@@ -31,6 +31,7 @@ UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
                UdpMuxLimits limits, CongestionAlgorithm congestion)
     : socket_(socket), family_(family), delegate_(delegate), limits_(limits),
       congestion_(congestion),
+      receive_budget_(limits.receive_budget),
       recv_storage_(kUdpBatchMax * rudp::kMaxDatagram),
       // Only where a batch is really one syscall. Without that, send_datagram()
       // goes straight to the socket and never stages anything, so this would be
@@ -49,6 +50,14 @@ UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
     }
 
     for (CookieSecret& secret : cookie_secret_) fill_random(secret.data(), secret.size());
+}
+
+UdpReceiveConfig UdpMux::receive_config() noexcept {
+    UdpReceiveConfig c;
+    c.max_window = static_cast<uint32_t>((std::min)(limits_.receive_window / rudp::kMaxPayload,
+                                                    size_t{rudp::kMaxWindowPackets}));
+    c.budget     = &receive_budget_;
+    return c;
 }
 
 UdpMux::~UdpMux() {
@@ -416,7 +425,8 @@ void UdpMux::accept_inbound(const rudp::Packet& syn, const Address& from, Clock:
     const uint32_t send_id = syn.conn_id - 1;
 
     auto stream = std::make_unique<UdpStream>(*this, from, recv_id, send_id,
-                                              ConnRole::Inbound, now, DialProfile{}, congestion_);
+                                              ConnRole::Inbound, now, DialProfile{}, congestion_,
+                                              receive_config());
     UdpStream* raw = stream.get();
     streams_.emplace(recv_id, Entry{std::move(stream)});
 
@@ -471,7 +481,7 @@ std::unique_ptr<Link> UdpMux::connect(const Address& remote, DialProfile profile
 
     auto stream = std::make_unique<UdpStream>(*this, remote, recv_id, send_id,
                                               ConnRole::Outbound, Clock::now(), profile,
-                                              congestion_);
+                                              congestion_, receive_config());
     UdpStream* raw = stream.get();
     const auto inserted = streams_.emplace(recv_id, Entry{std::move(stream)});
     arm(recv_id, inserted.first->second);  // the Syn's retransmission timeout

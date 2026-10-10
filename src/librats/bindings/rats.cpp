@@ -162,6 +162,8 @@ rats_config_t rats_config_default(void) {
     c.transport_fallback_ms = 1200;
     c.send_queue_limit      = 0;
     c.congestion_control    = RATS_CONGESTION_BBR;
+    c.udp_receive_window    = 0;
+    c.udp_receive_budget    = 0;
     return c;
 }
 
@@ -201,6 +203,8 @@ rats_t rats_create_config(const rats_config_t* cfg) {
         config.congestion_control    = (cfg->congestion_control == RATS_CONGESTION_RENO)
                                            ? CongestionAlgorithm::Reno
                                            : CongestionAlgorithm::Bbr;
+        config.udp_receive_window    = cfg->udp_receive_window;
+        config.udp_receive_budget    = cfg->udp_receive_budget;
     }
     return make_handle(std::move(config));
 }

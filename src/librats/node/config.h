@@ -60,6 +60,23 @@ struct RATS_API NodeConfig {
     /// by the kernel and ignore this.
     CongestionAlgorithm congestion_control = CongestionAlgorithm::Bbr;
 
+    /// Bytes one UDP stream will buffer for its peer, at most. 0 uses the library
+    /// default (16 MiB). This is the ceiling a stream's receive window grows to,
+    /// not where it starts: every stream starts at ~1.2 MiB and grows only while
+    /// its peer reports being held back by it, which is what a long, fast path
+    /// needs (the window bounds throughput at window / round trip — 16 MiB is
+    /// ~1.3 Gbit/s at 100 ms). A window is a promise of room, not an allocation:
+    /// only what arrives out of order is ever held, and that is bounded across all
+    /// streams by udp_receive_budget.
+    size_t udp_receive_window = 0;
+
+    /// Bytes all UDP streams together may hold out of order. 0 uses the library
+    /// default (64 MiB). The bound on what peers can make this node buffer however
+    /// many there are and however they fill their windows with holes; past it,
+    /// out-of-order packets are refused (their senders repair them and slow
+    /// down), except for a small share every stream keeps regardless.
+    size_t udp_receive_budget = 0;
+
     /// Bytes a peer's send queue may hold before an application that keeps
     /// sending anyway has the peer dropped as a slow consumer. 0 uses the library
     /// default (8 MiB).

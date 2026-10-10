@@ -138,6 +138,16 @@ struct UdpMuxLimits {
     /// node never pays it, and a node under a flood pays it instead of dying.
     /// 0 validates every inbound dial; SIZE_MAX never validates any.
     size_t validate_above = 1024;
+
+    /// Bytes one stream's receive window may grow to (see UdpReceiveConfig). It
+    /// starts at rudp::kInitialWindowPackets and grows only while its peer reports
+    /// being held back by it.
+    size_t receive_window = UdpReceiveConfig::kDefaultWindowBytes;
+
+    /// Bytes every stream on this socket may hold out of order, together (see
+    /// UdpReceiveBudget). What a hostile peer filling its window with holes can
+    /// cost is bounded by this, not by its window times the number of peers.
+    size_t receive_budget = 64 * 1024 * 1024;
 };
 
 class UdpMux final : public UdpStreamHost {
@@ -197,6 +207,9 @@ public:
     /// outside it cannot be carried at all (see family_can_reach), so the reactor
     /// asks before opening a stream rather than after the Syn has run out.
     AddressFamily family() const noexcept { return family_; }
+
+    /// The budget every stream's reorder buffer is charged to (diagnostics, tests).
+    const UdpReceiveBudget& receive_budget() const noexcept { return receive_budget_; }
 
     /// Drain the socket and route what arrives. Returns true if it stopped at
     /// kMaxDatagramsPerRead with more possibly pending.
@@ -294,6 +307,8 @@ private:
     /// Rebuild the heap without the slots lazy deletion left behind, once they
     /// outnumber the live ones badly enough to be worth the pass.
     void        compact_due();
+    /// What each stream's receive side is configured with.
+    UdpReceiveConfig receive_config() noexcept;
 
     // — address validation —
     using CookieSecret = std::array<uint8_t, 32>;
@@ -307,6 +322,9 @@ private:
     UdpMuxLimits    limits_;
     /// The controller every stream on this socket runs.
     CongestionAlgorithm congestion_;
+    /// What their reorder buffers share. Declared ahead of the streams, which hand
+    /// back what they hold when they are destroyed.
+    UdpReceiveBudget    receive_budget_;
 
     std::unordered_map<uint32_t, Entry> streams_;  ///< keyed by our recv id
     std::vector<Due>                    due_;      ///< min-heap of stream deadlines

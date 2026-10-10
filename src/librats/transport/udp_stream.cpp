@@ -46,10 +46,20 @@ int highest_bit(uint64_t v) noexcept {
 
 UdpStream::UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_id,
                      uint32_t send_id, ConnRole role, Clock::time_point now,
-                     DialProfile profile, CongestionAlgorithm algorithm)
+                     DialProfile profile, CongestionAlgorithm algorithm,
+                     UdpReceiveConfig receive)
     : host_(host), remote_(remote), recv_id_(recv_id), send_id_(send_id), role_(role),
       state_(role == ConnRole::Outbound ? State::SynSent : State::Connected),
       last_recv_(now), last_send_(now) {
+    // The receive window, settled before anything is sent: the Syn already carries
+    // the limit it implies.
+    max_window_     = (std::min)((std::max)(receive.max_window, kMinWindowPackets),
+                                 rudp::kMaxWindowPackets);
+    initial_window_ = (std::min)(rudp::kInitialWindowPackets, max_window_);
+    window_         = initial_window_;
+    budget_         = receive.budget;
+    recv_limit_     = (recv_next_ - 1) + window_;
+
     pace_last_   = now;
     pace_tokens_ = kPaceMinBurst;   // nothing to pace against until the first RTT sample
     rtt_.rto     = kInitialRto;
@@ -79,6 +89,10 @@ UdpStream::UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_i
     transmit(sent_.back(), now);
 }
 
+UdpStream::~UdpStream() {
+    if (budget_) budget_->release(held_bytes_);
+}
+
 // ── Outbound ────────────────────────────────────────────────────────────────
 
 UdpStream::OutPacket UdpStream::new_packet(rudp::PacketType type) {
@@ -101,14 +115,63 @@ void UdpStream::recycle(OutPacket& pkt) {
     spare_.push_back(std::move(pkt.buf));
 }
 
+uint32_t UdpStream::unread_packets() const noexcept {
+    return static_cast<uint32_t>((std::min)(inbox_.size() / rudp::kMaxPayload,
+                                            size_t{rudp::kMaxWindowPackets}));
+}
+
 uint32_t UdpStream::receive_room() const noexcept {
     // What we are still willing to buffer past the cumulative ack. Whatever the
     // connection has not read out of the in-order buffer yet sits behind the ack
     // and is taken off; what the reorder buffer holds is not, because all of it
     // already lies inside the span this describes.
-    const size_t unread = inbox_.size() / rudp::kMaxPayload;
-    if (unread >= rudp::kMaxWindowPackets) return 0;
-    return static_cast<uint32_t>(rudp::kMaxWindowPackets - unread);
+    const uint32_t unread = unread_packets();
+    return unread >= window_ ? 0 : window_ - unread;
+}
+
+bool UdpStream::grow_window(const rudp::Packet& p) noexcept {
+    if (window_ >= max_window_) return false;
+    // An echo: sent against a limit the window has already grown past.
+    if (have_grown_ && !rudp::seq_less(grown_mark_, p.seq)) return false;
+    // Held back by our own reader rather than by the window: what it has not read
+    // is what fills the window, and a larger one would only let the peer park more
+    // of it here. The connection drains a stream as fast as it arrives, so this is
+    // an application that has stopped reading, and flow control is doing its job.
+    if (unread_packets() > window_ / 4) return false;
+
+    const uint32_t next = (std::min)(window_ * 2, max_window_);
+    // A larger window is a larger promise of what the peer may make us hold; grow
+    // it only while the budget behind all of them could still honour the growth.
+    if (budget_ && !budget_->has_room(size_t{next - window_} * rudp::kMaxPayload)) return false;
+
+    grown_mark_ = recv_limit_ + 1;
+    have_grown_ = true;
+    window_     = next;
+    if (!held_.empty()) size_ring(window_);   // otherwise sized when first needed
+    // The peer is stopped on the old limit and sends nothing until it hears the
+    // new one, so it is told at once.
+    need_ack_ = true;
+    return true;
+}
+
+void UdpStream::size_ring(uint32_t span) {
+    uint32_t cap = 64;
+    while (cap <= span) cap *= 2;   // strictly more than span: offsets run 1..span
+    if (cap - 1 <= ring_mask_) return;
+
+    // The ring is indexed by sequence number modulo its length, so every held
+    // packet moves when the length changes; it is rebuilt from the reorder buffer,
+    // which is what it mirrors.
+    held_.assign(cap / 64, 0);
+    ring_mask_ = cap - 1;
+    for (const auto& entry : reorder_) set_held(entry.first, true);
+    ranges_dirty_ = true;
+}
+
+size_t UdpStream::held_cost(const InPacket& pkt) noexcept {
+    // The payload, and roughly what the map node and the buffer's own allocation
+    // cost around it — so a flood of tiny packets is not held for free.
+    return pkt.payload.size() + 96;
 }
 
 uint32_t UdpStream::advertise_limit() noexcept {
@@ -127,6 +190,11 @@ void UdpStream::fill_common(rudp::Packet& p, Clock::time_point now) {
     // (0 while nothing has arrived — sequence numbers start at 1).
     p.ack   = recv_next_ - 1;
     p.limit = advertise_limit();
+    // Data waiting that only the peer's limit is holding back: the one thing that
+    // tells the peer its window is too small (see grow_window).
+    if (state_ == State::Connected && have_peer_limit_ && !unsent_.empty() &&
+        rudp::seq_less(peer_limit_, next_seq_))
+        p.flags |= rudp::FlagBlocked;
 
     // How long the newest packet we have received has waited for this one to
     // leave. A peer measuring its round trip off this acknowledgement takes it
@@ -140,24 +208,25 @@ void UdpStream::fill_common(rudp::Packet& p, Clock::time_point now) {
 }
 
 bool UdpStream::is_held(uint32_t seq) const noexcept {
-    const uint32_t idx = seq & (rudp::kMaxWindowPackets - 1);
+    if (held_.empty()) return false;   // nothing has ever been held
+    const uint32_t idx = seq & ring_mask_;
     return (held_[idx / 64] >> (idx % 64)) & 1u;
 }
 
 void UdpStream::set_held(uint32_t seq, bool on) noexcept {
-    const uint32_t idx  = seq & (rudp::kMaxWindowPackets - 1);
+    const uint32_t idx  = seq & ring_mask_;
     const uint64_t mask = uint64_t{1} << (idx % 64);
     if (on) held_[idx / 64] |= mask;
     else    held_[idx / 64] &= ~mask;
 }
 
 uint32_t UdpStream::scan_down(uint32_t off, bool held) const noexcept {
-    // Offsets are past recv_next_, and only 1..kMaxWindowPackets-1 of them can be
-    // held; anything a word reaches below offset 1 is the ring wrapping round to
-    // the far end of the window, and is never the answer.
+    // Offsets are past recv_next_, and only 1..ring_mask_ of them can be held;
+    // anything a word reaches below offset 1 is the ring wrapping round to the far
+    // end of the window, and is never the answer.
     const uint32_t base = recv_next_;
     while (off >= 1) {
-        const uint32_t idx = (base + off) & (rudp::kMaxWindowPackets - 1);
+        const uint32_t idx = (base + off) & ring_mask_;
         const uint32_t bit = idx % 64;
         uint64_t word = held_[idx / 64];
         if (!held) word = ~word;
@@ -595,6 +664,10 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
 
     handle_ack(p, now);
 
+    // The peer is stopped on our limit. A larger window is owed at once if it is
+    // granted at all (and grow_window says the ack is owed).
+    if ((p.flags & rudp::FlagBlocked) && grow_window(p)) ack_now = true;
+
     // The Syn is the first entry in the retransmission queue, so the moment it is
     // no longer there the dial has been answered and the stream is up.
     if (state_ == State::SynSent &&
@@ -1005,8 +1078,29 @@ void UdpStream::handle_sequenced(const rudp::Packet& p, Clock::time_point now) {
     // because no acknowledgement has said so yet.
     if (rudp::seq_less(advertise_limit(), p.seq)) return;
     const int32_t ahead = rudp::seq_diff(p.seq, recv_next_);
-    if (ahead >= rudp::kMaxWindowPackets) return;   // the limit already ensures this
-    if (ahead > 0 && is_held(p.seq)) return;       // a duplicate of one held: news to nobody
+    if (static_cast<uint32_t>(ahead) > rudp::kMaxWindowPackets) return;   // the limit ensures this
+    if (ahead > 0 && is_held(p.seq)) return;   // a duplicate of one held: news to nobody
+
+    // Only Data carries stream content. A Syn occupies a sequence number like any
+    // other packet, but what it carries is the address-validation cookie the mux
+    // has already checked — delivering that as stream bytes would splice four bytes
+    // of nonsense into the front of the peer's handshake.
+    const ByteView body = (p.type == rudp::PacketType::Data) ? p.payload : ByteView{};
+
+    // Out of order, it has to be held — and held memory is charged to the budget
+    // every stream shares. Refused, it is as good as lost: the peer will repair it.
+    InPacket held;
+    if (ahead > 0) {
+        held.payload = body.to_bytes();
+        held.fin     = (p.type == rudp::PacketType::Fin);
+        const size_t cost = held_cost(held);
+        if (budget_ && !budget_->charge(cost, held_bytes_)) return;
+        held_bytes_ += cost;
+        // The ring is allocated the first time anything is held, so a stream that
+        // never sees a hole never pays for it; it covers whatever the limit admits,
+        // which after a window has shrunk back can still be more than the window.
+        size_ring((std::max)(window_, static_cast<uint32_t>(ahead)));
+    }
 
     // Something new arrived. The newest of them is what the ack delay is measured
     // from; the latest, whichever it is, is the run an Ack always names.
@@ -1018,12 +1112,6 @@ void UdpStream::handle_sequenced(const rudp::Packet& p, Clock::time_point now) {
     }
     ranges_dirty_ = true;
 
-    // Only Data carries stream content. A Syn occupies a sequence number like any
-    // other packet, but what it carries is the address-validation cookie the mux
-    // has already checked — delivering that as stream bytes would splice four bytes
-    // of nonsense into the front of the peer's handshake.
-    const ByteView body = (p.type == rudp::PacketType::Data) ? p.payload : ByteView{};
-
     if (ahead == 0) {
         ++unacked_packets_;
         deliver(body, p.type == rudp::PacketType::Fin);
@@ -1033,9 +1121,6 @@ void UdpStream::handle_sequenced(const rudp::Packet& p, Clock::time_point now) {
     }
 
     // Past the gap: hold it until the gap fills.
-    InPacket held;
-    held.payload = body.to_bytes();
-    held.fin     = (p.type == rudp::PacketType::Fin);
     reorder_.emplace(p.seq, std::move(held));
     set_held(p.seq, true);
 }
@@ -1060,6 +1145,9 @@ void UdpStream::drain_reorder() {
         auto it = reorder_.find(recv_next_);
         if (it == reorder_.end()) break;
         deliver(ByteView(it->second.payload), it->second.fin);
+        const size_t cost = held_cost(it->second);
+        held_bytes_ -= cost;
+        if (budget_) budget_->release(cost);
         reorder_.erase(it);
         set_held(recv_next_, false);
         ++recv_next_;
@@ -1350,6 +1438,15 @@ void UdpStream::tick(Clock::time_point now) {
         return;
     }
 
+    // A window grown for a transfer that has since gone quiet goes back to where
+    // it started. The limit already advertised stands — it is a promise — so this
+    // only stops it being carried further once the peer resumes.
+    if (window_ > initial_window_ && reorder_.empty() && have_recv_ &&
+        now - largest_recv_at_ >= kWindowDecay) {
+        window_     = initial_window_;
+        have_grown_ = false;
+    }
+
     if (rto_deadline_ != kNoDeadline && now >= rto_deadline_) {
         on_rto(now);
         if (state_ == State::Dead) { flush_events(); return; }
@@ -1394,6 +1491,8 @@ void UdpStream::die(CloseReason reason) {
     sent_.clear();
     unsent_.clear();
     reorder_.clear();
+    if (budget_) budget_->release(held_bytes_);
+    held_bytes_ = 0;
     spare_.clear();
     flight_bytes_ = 0;
     queued_bytes_ = 0;
@@ -1406,7 +1505,7 @@ void UdpStream::die(CloseReason reason) {
     repairs_head_ = 0;
     sacked_in_queue_ = 0;
     recovery_credit_ = 0;
-    held_.fill(0);
+    std::fill(held_.begin(), held_.end(), 0);
     range_count_     = 0;
     ranges_dirty_    = false;
     window_announces_ = 0;   // nobody is waiting on a window this stream will never serve

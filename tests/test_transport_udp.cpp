@@ -723,8 +723,8 @@ TEST(RudpPacketTest, SequenceComparisonSurvivesTheWrap) {
 
     // A window's worth of packets astride the boundary keeps its order throughout,
     // which is the only span the stream ever compares over.
-    for (uint32_t i = 0; i + 1 < rudp::kMaxWindowPackets; ++i) {
-        const uint32_t a = kLast - rudp::kMaxWindowPackets / 2 + i;
+    for (uint32_t i = 0; i + 1 < rudp::kInitialWindowPackets; ++i) {
+        const uint32_t a = kLast - rudp::kInitialWindowPackets / 2 + i;
         EXPECT_TRUE(rudp::seq_less(a, a + 1)) << "at offset " << i;
         EXPECT_EQ(rudp::seq_diff(a + 1, a), 1) << "at offset " << i;
     }
@@ -1189,7 +1189,7 @@ TEST(UdpStreamTest, SendQueueOutgrowsAFullWindow) {
     // window it — not the window — would silently become the throughput ceiling,
     // and nothing would be queued behind what is in flight to keep the pipe fed.
     static_assert(UdpStream::kSendQueueLimit >
-                      size_t{rudp::kMaxWindowPackets} * rudp::kMaxPayload,
+                      size_t{rudp::kInitialWindowPackets} * rudp::kMaxPayload,
                   "send queue must hold more than one full window");
     SUCCEED();
 }
@@ -1425,7 +1425,7 @@ TEST(UdpStreamTest, AClosedReceiveWindowStopsTheSenderAndResumesOnRead) {
     // More than a full receive window, so the receiver's buffer really does fill
     // while nothing reads it. That the send queue can hold more than one window is
     // exactly what makes this reachable — see SendQueueOutgrowsAFullWindow.
-    constexpr size_t kWindowBytes = size_t{rudp::kMaxWindowPackets} * rudp::kMaxPayload;
+    constexpr size_t kWindowBytes = size_t{rudp::kInitialWindowPackets} * rudp::kMaxPayload;
     std::string      payload(UdpStream::kSendQueueLimit, '\0');
     for (size_t i = 0; i < payload.size(); ++i)
         payload[i] = static_cast<char>((i * 13 + 7) & 0xFF);
@@ -1491,13 +1491,13 @@ TEST(UdpStreamTest, AReopenedWindowIsAnnouncedWithoutPeerTraffic) {
     // through the sender would spend a thousand round trips on setup.
     const Bytes body(rudp::kMaxPayload, 'x');
     const auto  now = std::chrono::steady_clock::now();
-    for (uint32_t i = 0; i < rudp::kMaxWindowPackets; ++i) {
+    for (uint32_t i = 0; i < rudp::kInitialWindowPackets; ++i) {
         rudp::Packet p;
         p.type    = rudp::PacketType::Data;
         p.conn_id = pair.responder->recv_id();
         p.seq     = 2 + i;   // the Syn took sequence number 1
         p.ack     = 0;       // nothing of the responder's is outstanding to retire
-        p.limit   = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kInitialWindowPackets;
         p.payload = ByteView(body);
         pair.responder->on_packet(p, now);
     }
@@ -1510,7 +1510,7 @@ TEST(UdpStreamTest, AReopenedWindowIsAnnouncedWithoutPeerTraffic) {
     // correctly, will not send again until it is told otherwise.
     const size_t before = pair.net.sent();
     EXPECT_EQ(drain(*pair.responder).size(),
-              size_t{rudp::kMaxWindowPackets} * rudp::kMaxPayload);
+              size_t{rudp::kInitialWindowPackets} * rudp::kMaxPayload);
 
     pair.responder->tick(std::chrono::steady_clock::now());
 
@@ -1534,13 +1534,13 @@ TEST(UdpStreamTest, ALostWindowUpdateIsAnnouncedAgain) {
     // Fill the receive buffer by hand, as above: the receiver's own behaviour once
     // it is full is the whole subject.
     const Bytes body(rudp::kMaxPayload, 'x');
-    for (uint32_t i = 0; i < rudp::kMaxWindowPackets; ++i) {
+    for (uint32_t i = 0; i < rudp::kInitialWindowPackets; ++i) {
         rudp::Packet p;
         p.type    = rudp::PacketType::Data;
         p.conn_id = pair.responder->recv_id();
         p.seq     = 2 + i;   // the Syn took sequence number 1
         p.ack     = 0;
-        p.limit   = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kInitialWindowPackets;
         p.payload = ByteView(body);
         pair.responder->on_packet(p, pair.now);
     }
@@ -1591,14 +1591,14 @@ TEST(UdpStreamTest, WindowAnnouncementsStopOnceThePeerSpeaksAgain) {
         p.conn_id = pair.responder->recv_id();
         p.seq     = seq;
         p.ack     = 0;
-        p.limit   = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kInitialWindowPackets;
         p.payload = ByteView(body);
         pair.responder->on_packet(p, pair.now);
     };
 
     // Fill the receive buffer, so that draining it re-opens a window that really
     // was closed — nothing is announced otherwise.
-    for (uint32_t i = 0; i < rudp::kMaxWindowPackets; ++i) deliver_data(2 + i);  // Syn took 1
+    for (uint32_t i = 0; i < rudp::kInitialWindowPackets; ++i) deliver_data(2 + i);  // Syn took 1
     rudp::Packet closed;
     ASSERT_TRUE(pair.net.peek_last(closed));
     ASSERT_EQ(closed.room(), 0u) << "the receive buffer never actually filled";
@@ -1610,7 +1610,7 @@ TEST(UdpStreamTest, WindowAnnouncementsStopOnceThePeerSpeaksAgain) {
     ASSERT_GT(update.room(), 0u) << "the window was never announced in the first place";
 
     // The peer answers with a packet of its own: it is plainly no longer stopped.
-    deliver_data(2 + rudp::kMaxWindowPackets);
+    deliver_data(2 + rudp::kInitialWindowPackets);
 
     // That packet owes an acknowledgement of its own, which is not what is being
     // counted here — let it go out first, and count from after it.
@@ -1645,13 +1645,13 @@ TEST(UdpStreamTest, AKeepAliveIsNotAnAnswerToAWindowAnnouncement) {
     // Fill the receive buffer, as above, so that draining it re-opens a window that
     // really was closed.
     const Bytes body(rudp::kMaxPayload, 'x');
-    for (uint32_t i = 0; i < rudp::kMaxWindowPackets; ++i) {
+    for (uint32_t i = 0; i < rudp::kInitialWindowPackets; ++i) {
         rudp::Packet p;
         p.type    = rudp::PacketType::Data;
         p.conn_id = pair.responder->recv_id();
         p.seq     = 2 + i;   // the Syn took sequence number 1
         p.ack     = 0;
-        p.limit   = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kInitialWindowPackets;
         p.payload = ByteView(body);
         pair.responder->on_packet(p, pair.now);
     }
@@ -1670,9 +1670,9 @@ TEST(UdpStreamTest, AKeepAliveIsNotAnAnswerToAWindowAnnouncement) {
     rudp::Packet keep_alive;
     keep_alive.type    = rudp::PacketType::Ack;
     keep_alive.conn_id = pair.responder->recv_id();
-    keep_alive.seq     = 2 + rudp::kMaxWindowPackets;
+    keep_alive.seq     = 2 + rudp::kInitialWindowPackets;
     keep_alive.ack     = 0;
-    keep_alive.limit   = rudp::kMaxWindowPackets;
+    keep_alive.limit   = rudp::kInitialWindowPackets;
     pair.responder->on_packet(keep_alive, pair.now);
 
     // Nothing else on this stream is due inside the interval below — no delayed
@@ -1830,7 +1830,7 @@ TEST(UdpStreamTest, ASelectiveAckRestartsTheLossTimer) {
     ack.type    = rudp::PacketType::Ack;
     ack.conn_id = pair.initiator->recv_id();
     ack.ack     = last - 2;              // everything before the two
-    ack.limit   = ack.ack + rudp::kMaxWindowPackets;
+    ack.limit   = ack.ack + rudp::kInitialWindowPackets;
     ack.seq     = 1;
     ack.ranges  = ByteView(range, sizeof(range));
     pair.initiator->on_packet(ack, later);
@@ -2273,7 +2273,7 @@ TEST(UdpMuxTest, BurstsCoalesceIntoOneEventPerBatchRatherThanOnePerPacket) {
         p.type    = rudp::PacketType::Data;
         p.conn_id = stream_id;
         p.seq     = static_cast<uint32_t>(2 + i);
-        p.limit   = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kInitialWindowPackets;
         const uint8_t byte = 'x';
         p.payload = ByteView(&byte, 1);
 
@@ -2298,6 +2298,38 @@ TEST(UdpMuxTest, BurstsCoalesceIntoOneEventPerBatchRatherThanOnePerPacket) {
            "to everything the peer sent before the connection is ever told to read";
     EXPECT_LE(net.host_b.dispatches, 6u)
         << "more dispatches than there were receive batches";
+}
+
+// What a stream holds out of order is charged to the one budget its mux keeps for
+// every stream on the socket — so the bound a node configures is the bound it gets.
+TEST(UdpMuxTest, OutOfOrderDataIsChargedToTheMuxBudget) {
+    MuxPair net;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.adopted == 1; }));
+    ASSERT_TRUE(net.pump_until([&] { return stream_of(*dial).connected(); }));
+    Link* accepted = net.host_b.only_link();
+    ASSERT_NE(accepted, nullptr);
+    const UdpStream& stream = stream_of(*accepted);
+    ASSERT_EQ(net.b->receive_budget().used(), 0u);
+
+    // Every other packet past a hole at 2 (the Syn took 1): all of them held. Sent
+    // from A's socket, since a stream only takes datagrams from where it was opened.
+    const std::string body(500, 'x');
+    for (uint32_t seq = 3; seq < 3 + 2 * 20; seq += 2) {
+        rudp::Packet p;
+        p.type    = rudp::PacketType::Data;
+        p.conn_id = stream.recv_id();
+        p.seq     = seq;
+        p.limit   = rudp::kInitialWindowPackets;
+        p.payload = ByteView(body);
+        uint8_t buf[rudp::kMaxDatagram];
+        ASSERT_GT(send_udp_to(net.sock_a, buf, rudp::encode(p, buf), net.addr_b,
+                              AddressFamily::IPv4), 0);
+    }
+    ASSERT_TRUE(net.pump_until([&] { return stream.held_bytes() >= 20 * body.size(); }, 2s));
+    EXPECT_EQ(net.b->receive_budget().used(), stream.held_bytes());
 }
 
 // The mux stages outgoing datagrams so a burst leaves in one syscall instead of
@@ -2343,7 +2375,7 @@ TEST(UdpMuxTest, StagedDatagramsLeaveBeforeTheCallThatMadeThemReturns) {
     ack.conn_id = syn.conn_id - 1;   // the id pairing the dialer chose
     ack.seq     = 1;
     ack.ack     = syn.seq;
-    ack.limit   = rudp::kMaxWindowPackets;
+    ack.limit   = rudp::kInitialWindowPackets;
     uint8_t ack_buf[rudp::kMaxDatagram];
     ASSERT_GT(send_udp_to(probe, ack_buf, rudp::encode(ack, ack_buf), net.addr_a,
                           AddressFamily::IPv4), 0);

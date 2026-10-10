@@ -241,6 +241,15 @@ RatsNode::RatsNode(const Napi::CallbackInfo& info)
             c.congestion_control = static_cast<rats_congestion_t>(
                 cfg.Get("congestionControl").As<Napi::Number>().Int32Value());
 
+        // How far one UDP stream's receive window may grow, and what all of them
+        // may hold out of order together. 0 keeps the library defaults.
+        if (cfg.Has("udpReceiveWindow"))
+            c.udp_receive_window =
+                static_cast<size_t>(cfg.Get("udpReceiveWindow").As<Napi::Number>().Int64Value());
+        if (cfg.Has("udpReceiveBudget"))
+            c.udp_receive_budget =
+                static_cast<size_t>(cfg.Get("udpReceiveBudget").As<Napi::Number>().Int64Value());
+
         node_ = rats_create_config(&c);
     } else {
         int port = 0;

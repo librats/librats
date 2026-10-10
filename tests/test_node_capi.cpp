@@ -477,6 +477,44 @@ TEST(NodeCApiTest, CongestionControlIsConfigurable) {
 }
 
 
+// The UDP receive window's ceiling and the budget all streams share are config
+// fields too: 0 (and so zeroed memory) is the library default, and a node squeezed
+// to a small window and a small budget is slower, never wrong.
+TEST(NodeCApiTest, UdpReceiveLimitsAreConfigurable) {
+    EXPECT_EQ(rats_config_default().udp_receive_window, 0u);
+    EXPECT_EQ(rats_config_default().udp_receive_budget, 0u);
+
+    rats_config_t cfg = rats_config_default();
+    cfg.bind_address       = "127.0.0.1";
+    cfg.enable_tcp         = 0;
+    cfg.udp_receive_window = 64 * 1024;
+    cfg.udp_receive_budget = 256 * 1024;
+    rats_t server = rats_create_config(&cfg);
+    rats_t client = rats_create_config(&cfg);
+
+    BinCtx ctx;
+    rats_on(server, "rw", bin_collect_cb, &ctx);
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    rats_connect(client, "127.0.0.1", rats_listen_port(server));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
+
+    char* server_id = rats_local_id(server);
+    ASSERT_EQ(rats_peer_transport(client, server_id), RATS_TRANSPORT_UDP);
+    std::vector<uint8_t> payload(2 * 1024 * 1024);
+    for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<uint8_t>(i * 131);
+    ASSERT_EQ(rats_send(client, server_id, "rw", payload.data(), payload.size()), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == payload.size(); }));
+    {
+        std::lock_guard<std::mutex> l(ctx.mu);
+        EXPECT_EQ(ctx.got, payload);
+    }
+
+    rats_string_free(server_id);
+    rats_stop(client); rats_stop(server);
+    rats_destroy(client); rats_destroy(server);
+}
+
 // rats_send carries (void*, len) faithfully — a payload with embedded NUL bytes
 // round-trips intact, proving the channel is length-framed, not NUL-terminated.
 TEST(NodeCApiTest, BinaryPayloadWithNuls) {

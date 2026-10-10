@@ -119,7 +119,7 @@ node.start();
 
 ### Two transports, one API
 
-A connection runs over **TCP or UDP**, and nothing above the transport can tell the difference: same framing, same Noise handshake, same guarantees. UDP is not a lossy shortcut here — librats implements ordered, reliable delivery with congestion and flow control on top of datagrams (sequencing, cumulative + selective acks and ack ranges, RFC 6298 retransmission timing, RACK loss detection, and BBRv3 congestion control — Reno on request via `NodeConfig::congestion_control`).
+A connection runs over **TCP or UDP**, and nothing above the transport can tell the difference: same framing, same Noise handshake, same guarantees. UDP is not a lossy shortcut here — librats implements ordered, reliable delivery with congestion and flow control on top of datagrams (sequencing, cumulative + selective acks and ack ranges, RFC 6298 retransmission timing, RACK loss detection, BBRv3 congestion control — Reno on request via `NodeConfig::congestion_control` — and a receive window that grows on demand from ~1.2 MiB to `NodeConfig::udp_receive_window`, under one memory budget for every stream).
 
 Both are enabled by default and bind the **same port**, so one advertised address is dialable either way. A dial tries UDP first and races TCP alongside it if UDP has not come up within `transport_fallback_ms` — the first handshake to complete wins and the other is dropped.
 
@@ -526,6 +526,8 @@ struct NodeConfig {
     size_t      reactor_threads = 1;        // 1 handles thousands of peers; more shards cores
     size_t      max_peers = 0;              // 0 = unlimited (guards inbound only)
     size_t      send_queue_limit = 0;       // per-peer send queue before SlowConsumer; 0 = 8 MiB
+    size_t      udp_receive_window = 0;     // ceiling one UDP stream's receive window grows to; 0 = 16 MiB
+    size_t      udp_receive_budget = 0;     // out-of-order bytes all UDP streams may hold; 0 = 64 MiB
 
     // Identity & security
     enum class Security { Noise, Plaintext };

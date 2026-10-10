@@ -78,6 +78,7 @@
 #include "librats/transport/delivery_rate.h"
 #include "librats/transport/udp_packet.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -111,6 +112,63 @@ public:
     virtual void stream_events(UdpStream& stream, uint32_t events) = 0;
 };
 
+/// What every datagram stream of one mux may hold out of order, together.
+///
+/// A receive window is a promise to one peer; this is the bound across all of
+/// them. Each window is honest only about what its own peer can make us hold, and
+/// a node with thousands of peers — or a few hostile ones each filling its window
+/// with nothing but holes — would otherwise hold the sum. Data in order costs
+/// nothing here: the connection drains it at once.
+///
+/// What is charged is what the reorder buffers actually hold, not what has been
+/// promised, so an idle stream with a large window costs nothing. A packet that
+/// does not fit is simply not held — it is within the peer's limit, so the peer
+/// sees it as lost, repairs it, and backs off, which is the right response to a
+/// receiver running out of room. Every stream may hold kGuaranteed whatever the
+/// others do, so a single greedy one cannot starve the rest of all reordering.
+///
+/// Touched only by the reactor thread that owns the mux, like everything on this
+/// path: no locks, no atomics.
+class UdpReceiveBudget {
+public:
+    /// Held bytes any one stream may have regardless of the budget: a hundred or so
+    /// full packets, enough to ride out an ordinary hole on an ordinary path.
+    static constexpr size_t kGuaranteed = 128 * 1024;
+
+    explicit UdpReceiveBudget(size_t limit) noexcept : limit_(limit) {}
+
+    /// Charge `bytes` for a stream already holding `stream_held`. False, and
+    /// nothing charged, when it fits neither the stream's guarantee nor the budget.
+    bool charge(size_t bytes, size_t stream_held) noexcept {
+        if (stream_held + bytes > kGuaranteed && used_ + bytes > limit_) return false;
+        used_ += bytes;
+        return true;
+    }
+    void release(size_t bytes) noexcept { used_ -= (std::min)(bytes, used_); }
+    /// Whether `bytes` more would still fit — what a window may grow on.
+    bool has_room(size_t bytes) const noexcept { return used_ + bytes <= limit_; }
+
+    size_t used()  const noexcept { return used_; }
+    size_t limit() const noexcept { return limit_; }
+
+private:
+    size_t limit_;
+    size_t used_ = 0;
+};
+
+/// How far one stream's receive window may grow, and what its out-of-order data is
+/// charged to.
+struct UdpReceiveConfig {
+    /// Bytes a receive window grows to by default: ~1.3 Gbit/s at 100 ms.
+    static constexpr size_t kDefaultWindowBytes = 16 * 1024 * 1024;
+
+    /// Ceiling on the window, in packets (clamped to rudp::kMaxWindowPackets). A
+    /// window below rudp::kInitialWindowPackets also starts there.
+    uint32_t          max_window = static_cast<uint32_t>(kDefaultWindowBytes / rudp::kMaxPayload);
+    /// Shared budget, or none (unbounded) — a stream outside a mux, in a test.
+    UdpReceiveBudget* budget = nullptr;
+};
+
 class UdpStream {
 public:
     using Clock = std::chrono::steady_clock;
@@ -122,7 +180,7 @@ public:
     /// high-water mark governs it, so this only bounds what the transport itself
     /// holds — roughly a full window plus room to keep the pipe fed.
     ///
-    /// It has to stay comfortably above a full window (kMaxWindowPackets *
+    /// It has to stay comfortably above a full window (kInitialWindowPackets *
     /// kMaxPayload ≈ 1.2 MiB), because it caps `sent_` and `unsent_` *together*:
     /// set at or below the window it, not the window, becomes the throughput
     /// ceiling, and the pipe drains between acks because nothing is queued behind
@@ -227,6 +285,13 @@ public:
 
     /// Idle gap after which an ack is sent purely to prove we are still here.
     static constexpr std::chrono::seconds kKeepAlive{10};
+    /// Smallest receive window a configuration may ask for, in packets: below a
+    /// few dozen the ack-every-other-packet rhythm and a single hole already fill it.
+    static constexpr uint32_t kMinWindowPackets = 32;
+    /// Silence after which a grown receive window goes back to where it started.
+    /// What it was grown for is over, and a large window is only a promise — but
+    /// it is what the budget has to cover if a peer chooses to fill it with holes.
+    static constexpr std::chrono::seconds kWindowDecay{10};
     /// Silence from the peer that ends the stream. Comfortably more than four
     /// keep-alive intervals, so only real loss of contact trips it.
     static constexpr std::chrono::seconds kIdleTimeout{45};
@@ -235,9 +300,13 @@ public:
     ///        for an inbound stream, which never sends a Syn. The default is the
     ///        ordinary dial; a hole punch passes DialProfile::punch().
     /// @param algorithm The congestion controller this stream runs.
+    /// @param receive How far the receive window may grow, and the budget the
+    ///        reorder buffer is charged to.
     UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_id, uint32_t send_id,
               ConnRole role, Clock::time_point now, DialProfile profile = {},
-              CongestionAlgorithm algorithm = CongestionAlgorithm::Bbr);
+              CongestionAlgorithm algorithm = CongestionAlgorithm::Bbr,
+              UdpReceiveConfig receive = {});
+    ~UdpStream();
 
     UdpStream(const UdpStream&) = delete;
     UdpStream& operator=(const UdpStream&) = delete;
@@ -330,6 +399,11 @@ public:
     uint32_t retransmits()   const noexcept { return retransmits_; }
     /// Tail probes sent since the last acknowledgement (diagnostics, tests).
     int      tail_probes()   const noexcept { return tail_probes_; }
+    /// The receive window, in packets: how far past its cumulative ack the stream
+    /// is currently prepared to set its limit.
+    uint32_t receive_window() const noexcept { return window_; }
+    /// Bytes the reorder buffer holds (and has charged to the budget).
+    size_t   held_bytes()     const noexcept { return held_bytes_; }
     /// Times the controller was told about congestion: once per loss *episode*,
     /// plus once per retransmission timeout. One per episode is the invariant that
     /// keeps a single lost packet from walking the window to the floor over the
@@ -408,6 +482,15 @@ private:
     void fill_common(rudp::Packet& p, Clock::time_point now);
     /// Packets past the cumulative ack we can still buffer (0 = a closed window).
     uint32_t receive_room() const noexcept;
+    /// Packets' worth of in-order data the connection has not read yet.
+    uint32_t unread_packets() const noexcept;
+    /// The peer says our limit is holding it back: double the window if it is the
+    /// window and not our own reader doing so. True if it grew.
+    bool     grow_window(const rudp::Packet& p) noexcept;
+    /// Make the ring of held bits cover at least `span` packets past the ack.
+    void     size_ring(uint32_t span);
+    /// What holding `pkt` is charged: its payload plus the bookkeeping around it.
+    static size_t held_cost(const InPacket& pkt) noexcept;
     /// The limit to advertise: as far as our buffer reaches now, and never short of
     /// any limit already advertised (see recv_limit_).
     uint32_t advertise_limit() noexcept;
@@ -626,7 +709,7 @@ private:
     /// peer may send anything up to it, so it is never lowered — only raised as the
     /// buffer drains. It can only ever be reached by in-order delivery filling the
     /// buffer, which is what keeps everything it admits inside the reorder ring.
-    uint32_t                                  recv_limit_ = rudp::kMaxWindowPackets;
+    uint32_t                                  recv_limit_ = rudp::kInitialWindowPackets;
     /// The highest sequence number received, and when; and the most recent new
     /// arrival, in or out of order. The first dates the ack_delay we report, the
     /// second is the run an Ack always names (see ack_ranges).
@@ -637,8 +720,27 @@ private:
     /// Which sequence numbers past the hole the reorder buffer holds, as a ring of
     /// bits indexed by sequence number. Duplicates the map's keys on purpose: the
     /// ranges are built by scanning it a word at a time, where the map would need
-    /// a hash lookup per packet of the window.
-    std::array<uint64_t, rudp::kMaxWindowPackets / 64> held_{};
+    /// a hash lookup per packet of the window. A power of two at least as long as
+    /// anything the limit can admit; allocated the first time something is held,
+    /// grown with the window, never shrunk (a bit per packet: 8 KiB at the largest
+    /// window there is).
+    std::vector<uint64_t>                     held_;
+    uint32_t                                  ring_mask_ = 0;
+
+    // — receive window —
+    /// The window: how far past the ack the limit is set, in packets. Starts at
+    /// initial_window_, doubles while the peer reports itself held back by it, up
+    /// to max_window_, and drops back after kWindowDecay of silence.
+    uint32_t                                  window_         = rudp::kInitialWindowPackets;
+    uint32_t                                  initial_window_ = rudp::kInitialWindowPackets;
+    uint32_t                                  max_window_     = rudp::kInitialWindowPackets;
+    /// The limit the window last grew past (+1). A Blocked packet at or below it
+    /// was sent against a limit from before that growth — an echo of a stall
+    /// already answered, which must not double the window again.
+    uint32_t                                  grown_mark_  = 0;
+    bool                                      have_grown_  = false;
+    UdpReceiveBudget*                         budget_      = nullptr;
+    size_t                                    held_bytes_  = 0;
     /// Encoded acknowledgement ranges, rebuilt only when the reorder buffer or the
     /// expected sequence number moves.
     mutable std::array<uint8_t, rudp::kMaxAckRanges * rudp::kAckRangeSize> range_buf_{};
