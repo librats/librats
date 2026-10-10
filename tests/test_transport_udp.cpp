@@ -53,7 +53,27 @@ public:
         if (drop_every_ > 0 && (sent_ % drop_every_) == 0) { ++dropped_; return; }
         Bytes bytes(data, data + len);
         if (hook && hook(bytes, to)) { ++dropped_; return; }
-        queue_.push_back({to, std::move(bytes)});
+        queue_.push_back({to, std::move(bytes), clock ? *clock : std::chrono::steady_clock::time_point{}});
+    }
+
+    /// The clock datagrams are stamped with as they are sent, for deliver_due().
+    /// Unset, every datagram is stamped with the epoch (and so is always due).
+    const std::chrono::steady_clock::time_point* clock = nullptr;
+
+    /// Deliver, oldest first, everything sent at least `delay` before `now` — a
+    /// path with that one-way delay. What arrives may send at once; that is
+    /// stamped with the clock and waits its own turn.
+    void deliver_due(std::chrono::steady_clock::time_point now,
+                     std::chrono::steady_clock::duration delay) {
+        while (!queue_.empty() && queue_.front().sent_at + delay <= now) {
+            const Datagram d = std::move(queue_.front());
+            queue_.pop_front();
+            auto it = endpoints_.find(d.to);
+            if (it == endpoints_.end()) continue;
+            rudp::Packet p;
+            if (!rudp::decode(d.bytes.data(), d.bytes.size(), p)) continue;
+            it->second->on_packet(p, now);
+        }
     }
 
     /// Sees (and may rewrite) every datagram as it is sent; true drops it. What a
@@ -159,8 +179,9 @@ public:
 
 private:
     struct Datagram {
-        Address to;
-        Bytes   bytes;
+        Address                               to;
+        Bytes                                 bytes;
+        std::chrono::steady_clock::time_point sent_at{};
     };
 
     std::map<Address, UdpStream*> endpoints_;
@@ -282,15 +303,22 @@ struct TimedPair {
                                                 ConnRole::Inbound, now, DialProfile{}, algo);
         net.attach(kBob, responder.get());
         net.attach(kAlice, initiator.get());
+        net.clock = &now;
         hops(4);   // the Syn, its acknowledgement, and the first round-trip sample
     }
 
-    /// Half a round trip: advance the clock and deliver whatever is on the wire.
+    /// Half a round trip of time, a millisecond at a time: every datagram lands
+    /// exactly half a round trip after it left, and both streams are ticked as
+    /// often as the pacer can use — so a stream sends what its windows allow,
+    /// rather than the two packets one tick per hop would release.
     void hop() {
-        now += rtt / 2;
-        net.deliver_at(now);
-        initiator->tick(now);
-        responder->tick(now);
+        const auto end = now + rtt / 2;
+        while (now < end) {
+            now = (std::min)(now + std::chrono::milliseconds(1), end);
+            net.deliver_due(now, rtt / 2);
+            initiator->tick(now);
+            responder->tick(now);
+        }
     }
     void hops(int n) { for (int i = 0; i < n; ++i) hop(); }
 
@@ -1188,10 +1216,14 @@ TEST(UdpStreamTest, SendQueueOutgrowsAFullWindow) {
     // The send queue bounds `sent_` and `unsent_` together, so at or below a full
     // window it — not the window — would silently become the throughput ceiling,
     // and nothing would be queued behind what is in flight to keep the pipe fed.
-    static_assert(UdpStream::kSendQueueLimit >
+    // Its floor covers the window every stream starts with; past that it tracks the
+    // congestion window, at twice it.
+    static_assert(UdpStream::kSendQueueFloor >
                       size_t{rudp::kInitialWindowPackets} * rudp::kMaxPayload,
-                  "send queue must hold more than one full window");
-    SUCCEED();
+                  "send queue must hold more than one full starting window");
+    Pair pair;
+    EXPECT_GE(pair.initiator->send_queue_limit(), 2 * size_t{pair.initiator->cwnd()});
+    EXPECT_GE(pair.initiator->send_queue_limit(), UdpStream::kSendQueueFloor);
 }
 
 TEST(UdpStreamTest, SendQueueIsBounded) {
@@ -1206,7 +1238,7 @@ TEST(UdpStreamTest, SendQueueIsBounded) {
         accepted += n;
         if (n == 0) break;
     }
-    EXPECT_LE(accepted, UdpStream::kSendQueueLimit);
+    EXPECT_LE(accepted, pair.initiator->send_queue_limit());
     EXPECT_EQ(write_all(*pair.initiator, chunk), 0u) << "queue limit not enforced";
 }
 
@@ -1426,7 +1458,7 @@ TEST(UdpStreamTest, AClosedReceiveWindowStopsTheSenderAndResumesOnRead) {
     // while nothing reads it. That the send queue can hold more than one window is
     // exactly what makes this reachable — see SendQueueOutgrowsAFullWindow.
     constexpr size_t kWindowBytes = size_t{rudp::kInitialWindowPackets} * rudp::kMaxPayload;
-    std::string      payload(UdpStream::kSendQueueLimit, '\0');
+    std::string      payload(UdpStream::kSendQueueFloor, '\0');
     for (size_t i = 0; i < payload.size(); ++i)
         payload[i] = static_cast<char>((i * 13 + 7) & 0xFF);
     ASSERT_GT(payload.size(), kWindowBytes) << "the transfer cannot fill a window";

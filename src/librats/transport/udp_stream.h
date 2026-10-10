@@ -175,17 +175,23 @@ public:
 
     // ── Tunables ────────────────────────────────────────────────────────────
 
-    /// Bytes the stream will take from the connection before it says "no more".
-    /// The connection keeps the rest in its own send queue, where the existing
-    /// high-water mark governs it, so this only bounds what the transport itself
-    /// holds — roughly a full window plus room to keep the pipe fed.
+    /// Bytes the stream will take from the connection before it says "no more" —
+    /// at least. The connection keeps the rest in its own send queue, where the
+    /// existing high-water mark governs it, so this only bounds what the transport
+    /// itself holds. Above this floor the limit is twice the congestion window,
+    /// the way Linux sizes a socket's send buffer — but never more than the peer's
+    /// window plus the floor: nothing past the peer's limit can be sent, so holding
+    /// more than that only parks the connection's data here instead of there.
     ///
-    /// It has to stay comfortably above a full window (kInitialWindowPackets *
-    /// kMaxPayload ≈ 1.2 MiB), because it caps `sent_` and `unsent_` *together*:
-    /// set at or below the window it, not the window, becomes the throughput
-    /// ceiling, and the pipe drains between acks because nothing is queued behind
-    /// what is in flight.
-    static constexpr size_t kSendQueueLimit = 2 * 1024 * 1024;
+    /// It has to stay comfortably above a full window, because it caps `sent_` and
+    /// `unsent_` *together*: at or below the window it, not the window, becomes
+    /// the throughput ceiling, and the pipe drains between acks because nothing is
+    /// queued behind what is in flight. A floor of 2 MiB covers the window every
+    /// stream starts with (kInitialWindowPackets * kMaxPayload ≈ 1.2 MiB); past
+    /// that, twice the congestion window is what keeps a grown window fed — and,
+    /// the window being what the path is measured to hold, what it costs is the
+    /// path's own size, not a guess.
+    static constexpr size_t kSendQueueFloor = 2 * 1024 * 1024;
 
     /// Packet buffers kept for reuse after their packet is acknowledged. The send
     /// path allocates one buffer per packet, and in a bulk transfer that is one
@@ -396,6 +402,9 @@ public:
     const cc::RttEstimate&          rtt()        const noexcept { return rtt_; }
     size_t   bytes_in_flight() const noexcept { return flight_bytes_; }
     size_t   queued_bytes()  const noexcept { return queued_bytes_; }
+    /// What the stream will hold of the connection's data right now (see
+    /// kSendQueueFloor).
+    size_t   send_queue_limit() const noexcept;
     uint32_t retransmits()   const noexcept { return retransmits_; }
     /// Tail probes sent since the last acknowledgement (diagnostics, tests).
     int      tail_probes()   const noexcept { return tail_probes_; }

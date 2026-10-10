@@ -586,10 +586,29 @@ void UdpStream::note_send_limits() {
         sampler_.mark_app_limited(flight_bytes_);
 }
 
+size_t UdpStream::send_queue_limit() const noexcept {
+    // Twice the window: what is in flight, and as much again behind it — which is
+    // also the slack a loss episode needs, when everything selectively acknowledged
+    // past a hole still sits in the queue until the hole is repaired.
+    size_t limit = 2 * size_t{cc_->cwnd()};
+    // But only what the peer could take. Everything in `sent_` lies within its
+    // limit, so a queue longer than the span from our oldest unacknowledged packet
+    // to that limit — plus the floor, to keep it fed — can never be sent sooner
+    // for being here.
+    if (have_peer_limit_) {
+        const uint32_t oldest = sent_.empty() ? next_seq_ : sent_.front().seq;
+        const int32_t  room   = rudp::seq_diff(peer_limit_, oldest) + 1;
+        const size_t   reach  = room > 0 ? size_t(room) * rudp::kMaxPayload : 0;
+        limit = (std::min)(limit, reach + kSendQueueFloor);
+    }
+    return (std::max)(limit, kSendQueueFloor);
+}
+
 size_t UdpStream::write(const ByteView* slices, size_t count, Clock::time_point now) {
     if (state_ != State::Connected || fin_queued_) return 0;
 
-    size_t budget = queued_bytes_ >= kSendQueueLimit ? 0 : kSendQueueLimit - queued_bytes_;
+    const size_t limit = send_queue_limit();
+    size_t budget = queued_bytes_ >= limit ? 0 : limit - queued_bytes_;
     if (budget == 0) return 0;
 
     size_t taken = 0;
@@ -706,7 +725,7 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
 
     // The connection asked to be told when it could write again, and an ack just
     // freed queue space.
-    if (want_write_ && state_ == State::Connected && queued_bytes_ < kSendQueueLimit)
+    if (want_write_ && state_ == State::Connected && queued_bytes_ < send_queue_limit())
         raise(PollOut);
 
     if (need_ack_) {

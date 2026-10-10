@@ -540,7 +540,8 @@ IdleResult bench_idle(TransportKind kind, int peers, std::chrono::milliseconds w
 // structural rather than incidental. On TCP a burst lands in the kernel's send
 // buffer, which on loopback is large and auto-tuned, so Connection's own queue
 // barely grows. On the datagram side there is no kernel buffer to absorb
-// anything: UdpStream::write() takes at most kSendQueueLimit (2 MiB) and drains
+// anything: UdpStream::write() takes at most send_queue_limit() (twice the
+// congestion window, 2 MiB at least) and drains
 // only as fast as cwnd/RTT allows, so the remainder piles up in the connection's
 // ChainedSendBuffer until it crosses Connection::kDefaultSendHighWater (8 MiB)
 // and the peer is dropped.

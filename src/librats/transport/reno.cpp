@@ -80,9 +80,17 @@ void RenoController::on_ack(const AckEvent& ack) {
     // counted when the cumulative acknowledgement reaches them — which keeps a
     // window that is repairing a hole from growing on the far side of it.
     if (ack.newly_cum_acked == 0) return;
-    grow_window(ack.newly_cum_acked);
+    // Only a window that is being used is evidence for a larger one (RFC 7661, and
+    // Linux's tcp_is_cwnd_limited): one the receiver's limit, the pacer or the
+    // application kept from filling says nothing about what the path would take,
+    // and growing it anyway is how a window ends up far above anything ever in
+    // flight. What was in flight when this ack left counts; a window at most twice
+    // that still grows, which is what keeps slow start doubling.
+    const uint64_t in_flight = ack.bytes_in_flight + ack.newly_acked;
+    if (ack.cwnd_limited || 2 * in_flight >= cwnd_) grow_window(ack.newly_cum_acked);
     // After the window moves, not before: the round-trip rise HyStart++ acts on is
-    // only meaningful against the window that produced it.
+    // only meaningful against the window that produced it. Every ack counts toward
+    // its rounds, whether or not this one grew the window.
     hystart_on_ack(ack.cum_ack, ack.next_seq);
 }
 

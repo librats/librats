@@ -158,10 +158,12 @@ struct FlowEnds {
 
 /// One sender and its receiver.
 struct Flow : FlowEnds {
-    Flow(PathSim& path, int index, CongestionAlgorithm algo, Clock::time_point now)
+    Flow(PathSim& path, int index, CongestionAlgorithm algo, Clock::time_point now,
+         UdpReceiveConfig receive = {})
         : FlowEnds(path, index),
           tx(path, B, 100 + 2 * index, 101 + 2 * index, ConnRole::Outbound, now, DialProfile{}, algo),
-          rx(path, A, 101 + 2 * index, 100 + 2 * index, ConnRole::Inbound, now, DialProfile{}, algo) {
+          rx(path, A, 101 + 2 * index, 100 + 2 * index, ConnRole::Inbound, now, DialProfile{}, algo,
+             receive) {
         path.attach(A, &tx, false);
         path.attach(B, &rx, true);
     }
@@ -183,8 +185,10 @@ struct Sim {
                  uint32_t seed = 1)
         : path(mbps, rtt, queue_pkts, fwd_loss, seed), rtt(rtt) {}
 
-    Flow& add(CongestionAlgorithm algo) {
-        flows.push_back(std::make_unique<Flow>(path, static_cast<int>(flows.size()), algo, now));
+    /// `receive` is the receiver's: how far its window may grow.
+    Flow& add(CongestionAlgorithm algo, UdpReceiveConfig receive = {}) {
+        flows.push_back(
+            std::make_unique<Flow>(path, static_cast<int>(flows.size()), algo, now, receive));
         return *flows.back();
     }
 
@@ -225,6 +229,15 @@ struct Sim {
     std::vector<uint8_t>               chunk = std::vector<uint8_t>(64 * 1024, 0xAB);
     std::vector<uint8_t>               sink  = std::vector<uint8_t>(64 * 1024);
 };
+
+/// A receiver whose window stays where every stream starts it: a sender on a path
+/// longer than that is held by the window, with no standing queue — a clean round
+/// trip to time loss recovery by.
+UdpReceiveConfig fixed_window() {
+    UdpReceiveConfig c;
+    c.max_window = rudp::kInitialWindowPackets;
+    return c;
+}
 
 const cc::BbrController& bbr(const UdpStream& s) {
     return static_cast<const cc::BbrController&>(s.congestion());
@@ -421,13 +434,14 @@ struct HoleMaker {
 // becoming visible only when the hole in front of it fills, a round trip per hole,
 // which on a lossy path is what turns a large window into a crawl.
 TEST(UdpLossRecoveryTest, HolesFarApartAreRepairedInTheSameRoundTrip) {
-    // 100 Mbit/s at 100 ms holds more than a receive window, so the sender is
-    // window-limited with no standing queue: a clean round trip to time by.
+    // 100 Mbit/s at 100 ms holds more than a starting receive window, so with the
+    // window held there the sender is window-limited with no standing queue: a
+    // clean round trip to time by.
     Sim sim(100, 100ms, 2000);
     HoleMaker holes;
     holes.install(sim.path);
 
-    Flow& f = sim.add(CongestionAlgorithm::Reno);
+    Flow& f = sim.add(CongestionAlgorithm::Reno, fixed_window());
     f.to_send = SIZE_MAX;
     sim.run(2s);   // a window far wider than the spread of the holes
     ASSERT_GT(f.tx.cwnd(), 400u * rudp::kMaxPayload);
@@ -466,7 +480,7 @@ TEST(UdpLossRecoveryTest, AHoleDoesNotInflateTheRoundTripEstimate) {
     Sim sim(100, 100ms, 2000);   // window-limited: no queue to inflate it either
     HoleMaker holes;
     holes.install(sim.path);
-    Flow& f = sim.add(CongestionAlgorithm::Reno);
+    Flow& f = sim.add(CongestionAlgorithm::Reno, fixed_window());
     f.to_send = SIZE_MAX;
     sim.run(2s);
     ASSERT_LT(f.tx.rtt().srtt, 110ms);
@@ -1040,7 +1054,7 @@ TEST(UdpLossRecoveryTest, AWideCombOfHolesIsRepairedOncePerHole) {
         Sim sim(100, 100ms, 2000);
         HoleMaker holes;
         holes.install(sim.path);
-        Flow& f = sim.add(algo);
+        Flow& f = sim.add(algo, fixed_window());   // no queue: every loss is one of ours
         f.to_send = SIZE_MAX;
         sim.run(2s);
         ASSERT_EQ(f.tx.retransmits(), 0u);
@@ -1056,6 +1070,51 @@ TEST(UdpLossRecoveryTest, AWideCombOfHolesIsRepairedOncePerHole) {
         EXPECT_GT(f.delivered - after_recovery, 5u * 1000 * 1000) << "the stream did not recover";
         EXPECT_FALSE(f.tx.dead());
     }
+}
+
+// ── Long fat paths ──────────────────────────────────────────────────────────
+
+// A path whose bandwidth-delay product is four times what a stream starts with.
+// Every limit on the way grows to meet it — the receiver's window on the sender's
+// reports, the congestion window on the model, the send queue with the congestion
+// window — and the link is filled. At the old fixed 1024-packet window this path
+// topped out near 96 Mbit/s.
+TEST(UdpLongPathTest, FillsAPathFourTimesTheStartingWindow) {
+    Sim sim(400, 100ms, 4200);   // 5 MB in flight to fill it, 1 BDP of buffer
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    f.to_send = SIZE_MAX;
+    sim.run(4s);
+    const size_t at = f.delivered;
+    sim.run(2s);
+
+    const double mbps = mbps_of(f.delivered - at, 2s);
+    EXPECT_GT(mbps, 0.85 * 400 * rudp::kMaxPayload / (rudp::kHeaderSize + rudp::kMaxPayload + 28))
+        << "only " << mbps << " Mbit/s on a 400 Mbit/s path";
+    EXPECT_GT(f.rx.receive_window(), 4 * rudp::kInitialWindowPackets) << "the receive window never grew";
+    EXPECT_GT(f.tx.send_queue_limit(), UdpStream::kSendQueueFloor)
+        << "the send queue stayed at its floor under a window that outgrew it";
+    // Yet no longer than the peer could ever take, plus the floor that keeps it fed.
+    EXPECT_LE(f.tx.send_queue_limit(),
+              size_t{f.rx.receive_window()} * rudp::kMaxPayload + UdpStream::kSendQueueFloor)
+        << "the send queue outgrew the receiver's window";
+    EXPECT_FALSE(f.tx.dead());
+}
+
+// A window held back by the receiver says nothing about what the path would carry,
+// and Reno must not grow on the acks it produces: with nothing above the window
+// but the largest receive window there is, a congestion window grown that way runs
+// off far past anything in flight, and takes a spurious loss with it when it is
+// finally cut.
+TEST(UdpLongPathTest, RenoDoesNotGrowAWindowTheReceiverKeepsFromFilling) {
+    Sim sim(200, 100ms, 2000);   // a BDP twice the receiver's fixed window
+    Flow& f = sim.add(CongestionAlgorithm::Reno, fixed_window());
+    f.to_send = SIZE_MAX;
+    sim.run(5s);
+    EXPECT_LE(f.tx.cwnd(), 2 * rudp::kInitialWindowPackets * rudp::kMaxPayload + 4 * rudp::kMaxPayload)
+        << "the window grew to " << f.tx.cwnd() / rudp::kMaxPayload
+        << " packets with the receiver holding the flight to " << rudp::kInitialWindowPackets;
+    EXPECT_GT(f.tx.cwnd(), rudp::kInitialWindowPackets * rudp::kMaxPayload / 2)
+        << "the window did not even reach what the receiver allows";
 }
 
 // ── BBR ─────────────────────────────────────────────────────────────────────

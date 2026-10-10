@@ -533,6 +533,9 @@ int main(int argc, char** argv) {
     bulk("100 Mbit, 100 ms",            100, 100, 0.0,  1041, 20);
     bulk("100 Mbit,  10 ms",            100,  10, 0.0,   104, 20);
     bulk("1 Gbit,     1 ms",           1000,   1, 0.0,   104, 20);
+    bulk("1 Gbit,   100 ms",           1000, 100, 0.0, 10245, 20);
+    bulk("1 Gbit,   100 ms, 0.1% loss",1000, 100, 0.001, 10245, 20);
+    bulk("300 Mbit, 200 ms",            300, 200, 0.0,  6147, 20);
     bulk("10 Mbit, 100 ms, buffer 0.1", 10, 100, 0.0,     10, 20);
     bulk("10 Mbit, 100 ms, buffer 4",   10, 100, 0.0,    416, 20);
     bulk("10 Mbit, 100 ms, 0.1% loss",  10, 100, 0.001,  104, 20);
@@ -565,9 +568,9 @@ int main(int argc, char** argv) {
     memory("100 Mbit, 100 ms, hole of 64",100, 100, 1041, 64);
     std::printf("  (both ends, so this is a pair rather than a peer — and the two halves are\n"
                 "   not alike: the sender holds the retransmission queue, the receiver the\n"
-                "   reorder buffer. What dominates is neither: it is UdpStream::kSendQueueLimit,\n"
-                "   2 MiB of accepted-but-unsent application data, which is why the hole often\n"
-                "   adds nothing to a peak the send queue had already set.)\n");
+                "   reorder buffer. What dominates is neither: it is the send queue — twice the\n"
+                "   congestion window, 2 MiB at least, of accepted-but-unsent application data —\n"
+                "   which is why the hole often adds little to a peak the queue had already set.)\n");
 
     heading("delay — standing queue a bulk transfer keeps (ms over the base RTT)",
             "median", "p95", "max", "Mbit/s", "");

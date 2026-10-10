@@ -308,8 +308,8 @@ picked to find where that promise is thin.
 Three of these exist mainly because they can fail:
 
 * **`burst`** — on TCP the burst lands in the kernel's send buffer; on the
-  datagram side there is no such buffer, so `UdpStream::kSendQueueLimit` (2 MiB)
-  is all that absorbs it and the rest piles into the connection's queue until it
+  datagram side there is no such buffer, so the stream's send queue (twice the
+  congestion window, 2 MiB at least) is all that absorbs it and the rest piles into the connection's queue until it
   crosses `Connection::kDefaultSendHighWater` (8 MiB). Identical application code
   can therefore survive on one wire and lose its peer on the other, with no
   writable/backpressure callback through which it could have known. The row

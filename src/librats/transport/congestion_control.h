@@ -42,11 +42,14 @@ constexpr uint32_t kMss = static_cast<uint32_t>(rudp::kMaxPayload);
 /// (RFC 3390 territory) — enough to get an RTT sample and trigger fast retransmit
 /// on an early loss, without a burst into an unknown path.
 constexpr uint32_t kInitialWindow = 4 * kMss;
-/// The ceiling on the congestion window: a receive window as every stream starts
-/// it. Growing the congestion window past what the receiver will hold buys
-/// nothing — its limit stops the sender first — and a window that has run away
-/// above the real limit takes a spurious loss with it when it is finally cut.
-constexpr uint32_t kMaxWindow = rudp::kInitialWindowPackets * kMss;
+/// The ceiling on the congestion window: the largest receive window there is.
+/// Below it, what the receiver will hold is the peer's limit to enforce, and that
+/// is enforced separately and absolutely (UdpStream::window_allows) — this only
+/// keeps the arithmetic bounded. A controller must not grow its window on acks
+/// that a full window did not produce (see RenoController::on_ack): with nothing
+/// else above it, a window that runs away past what is really in flight takes a
+/// spurious loss with it when it is finally cut.
+constexpr uint32_t kMaxWindow = rudp::kMaxWindowPackets * kMss;
 
 /// The stream's round-trip estimator, readable by the controller. RFC 6298 state
 /// plus the minimum and the latest sample, which model-based controllers want.
