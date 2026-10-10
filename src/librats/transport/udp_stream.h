@@ -363,6 +363,10 @@ private:
         /// timeout has given up on is no longer occupying the path, and leaving it
         /// counted is what would stop the sender from ever refilling the pipe.
         bool              in_flight = false;
+        /// Once acked: a sequence number past this one such that every packet in
+        /// between is acked too — the link next_unacked() follows (and shortens) to
+        /// step over a run of selectively acknowledged packets in one hop.
+        uint32_t          skip = 0;
 
         /// Payload bytes — what the accounting (flight_bytes_, queued_bytes_) counts.
         size_t size() const noexcept {
@@ -421,6 +425,9 @@ private:
     void on_newly_acked(OutPacket& pkt, Clock::time_point now);
     /// Selectively acknowledge the packet carrying `seq`, if it is still queued.
     void sack_one(uint32_t seq, Clock::time_point now);
+    /// Index of the first packet at or after sent_[idx] not yet acknowledged
+    /// (sent_.size() if there is none), in amortised constant time.
+    size_t next_unacked(size_t idx) noexcept;
     /// Declare lost what the acknowledgements say did not arrive (see
     /// kReorderThreshold), and open a loss episode if anything was.
     void detect_losses(Clock::time_point now);
@@ -517,9 +524,35 @@ private:
     /// acknowledgements. Probes are for a path that is still answering; one that
     /// has just gone silent for a whole timeout is left to the timer's backoff.
     bool                  timeout_recovery_ = false;
-    /// Packets declared lost and not yet sent again — retransmit_lost()'s work
-    /// list, kept as a count so a healthy transfer never scans the queue for it.
+    /// Packets declared lost and not yet sent again. The count is what a healthy
+    /// transfer checks; `lost_` is the work list behind it.
     size_t                lost_pending_ = 0;
+    /// Sequence numbers declared lost, as a min-heap (lowest first, so a hole is
+    /// repaired in the order the receiver needs it filled). Entries are not removed
+    /// when their packet is delivered or re-sent by another route — a stale one is
+    /// recognised and dropped when it reaches the top.
+    std::vector<uint32_t> lost_;
+
+    // Loss detection walks only what it has not judged yet, so its cost per
+    // acknowledgement is the packets it newly condemns — not the window.
+    /// First transmissions leave in sequence order, so both of RACK's tests for
+    /// them (packets delivered behind, time elapsed since) are monotone in the
+    /// sequence number. Everything before this cursor has been judged; the scan
+    /// resumes here and stops at the first packet still in good standing.
+    uint32_t              loss_scan_ = 0;
+    /// A retransmission is judged by time alone, and repairs leave in no particular
+    /// sequence order — so they are kept apart, oldest transmission first, and
+    /// the scan stops at the first one too recent to condemn. Entries are dropped
+    /// lazily: one no longer matching its packet (acked, given up on, or sent again
+    /// since — `sends` tells) is discarded when it reaches the front.
+    struct Repair {
+        uint32_t seq   = 0;
+        int      sends = 0;
+    };
+    /// A queue, held as a vector consumed from `repairs_head_` so an idle stream
+    /// allocates nothing for it (an empty std::deque already holds a block).
+    std::vector<Repair>   repairs_;
+    size_t                repairs_head_ = 0;
     /// Packets still in `sent_` that a selective ack has already covered.
     size_t                sacked_in_queue_ = 0;
     /// Sends earned during this loss episode and not yet spent — proportional

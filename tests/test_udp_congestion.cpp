@@ -686,6 +686,37 @@ TEST(UdpLossRecoveryTest, OneLossEpisodeIsOneCongestionEvent) {
     }
 }
 
+// A comb of holes across most of a full window: every eighth packet. Each Ack
+// repeats every range the receiver holds, the repairs leave in a different order
+// from the packets they repair, and the holes surface over several round trips as
+// the ranges' reach moves up the window — everything that loss detection now walks
+// incrementally rather than from the front of the queue. Each hole is repaired
+// exactly once (nothing condemned twice, nothing left behind a cursor), and the
+// stream comes out of it delivering again.
+TEST(UdpLossRecoveryTest, AWideCombOfHolesIsRepairedOncePerHole) {
+    for (const auto algo : {CongestionAlgorithm::Reno, CongestionAlgorithm::Bbr}) {
+        SCOPED_TRACE(to_string(algo));
+        Sim sim(100, 100ms, 2000);
+        HoleMaker holes;
+        holes.install(sim.path);
+        Flow& f = sim.add(algo);
+        f.to_send = SIZE_MAX;
+        sim.run(2s);
+        ASSERT_EQ(f.tx.retransmits(), 0u);
+
+        for (size_t i = 0; i < 100; ++i) holes.holes.push_back(8 * i);
+        sim.run(3s);
+        const size_t after_recovery = f.delivered;
+        sim.run(1s);
+
+        EXPECT_EQ(f.tx.retransmits(), holes.holes.size());
+        for (size_t h : holes.holes)
+            EXPECT_EQ(holes.sends[holes.base + static_cast<uint32_t>(h)], 2) << "hole " << h;
+        EXPECT_GT(f.delivered - after_recovery, 5u * 1000 * 1000) << "the stream did not recover";
+        EXPECT_FALSE(f.tx.dead());
+    }
+}
+
 // ── BBR ─────────────────────────────────────────────────────────────────────
 
 // The two things BBR is for, on a path with four BDPs of buffer: it finds the

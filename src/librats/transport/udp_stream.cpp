@@ -21,6 +21,11 @@ Clock::duration clamp_duration(Clock::duration v, A lo, B hi) {
     return v < low ? low : (v > high ? high : v);
 }
 
+/// Heap order for UdpStream::lost_: the lowest sequence number on top.
+struct LaterSeq {
+    bool operator()(uint32_t a, uint32_t b) const noexcept { return rudp::seq_less(b, a); }
+};
+
 } // namespace
 
 UdpStream::UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_id,
@@ -239,6 +244,9 @@ void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
     }
 
     pkt.sends++;
+    // A repair (or a probe) is judged by when it left, not by where it sits in the
+    // sequence, so it joins the transmission-ordered list detect_losses() reads.
+    if (pkt.sends > 1) repairs_.push_back(Repair{pkt.seq, pkt.sends});
     last_send_ = now;
     // The delivery-rate snapshot (sent_at included) describes this copy: it is the
     // one an acknowledgement will be answering, if any is.
@@ -384,12 +392,12 @@ UdpStream::Clock::duration UdpStream::pace_wait(size_t bytes) const noexcept {
 }
 
 void UdpStream::retransmit_lost(Clock::time_point now) {
-    // The count keeps this off the hot path entirely: without it the scan below
-    // would walk the whole retransmission queue on every acknowledgement of a
-    // healthy transfer — a window's worth of packets, every time — to discover
-    // that there is nothing to repair. It also ends the scan at the last packet
-    // owed rather than at the end of the queue.
-    if (lost_pending_ == 0) return;
+    // The count keeps this off the hot path entirely: a healthy transfer has
+    // nothing to repair and learns so without touching the work list.
+    if (lost_pending_ == 0) {
+        lost_.clear();   // whatever is left in it is stale
+        return;
+    }
 
     // Packets declared lost — by the acknowledgements around them, or by a
     // timeout: still owed to the peer, no longer counted against the window. They
@@ -400,14 +408,28 @@ void UdpStream::retransmit_lost(Clock::time_point now) {
     // In recovery the window is supplemented by proportional rate reduction (see
     // cwnd_allows), which is what keeps a window just cut below what is in flight
     // from holding every repair back for half a round trip.
-    for (OutPacket& pkt : sent_) {
-        if (lost_pending_ == 0) break;
-        if (pkt.acked || pkt.in_flight || pkt.sends == 0) continue;
-        if (!cwnd_allows(pkt.size())) {   // more still owed: come back with room
+    //
+    // Taken from a heap rather than found by walking the queue: in recovery the
+    // repairs are spread across a window that is mostly in flight or already
+    // acknowledged, and walking it from the front on every acknowledgement would
+    // cost the whole window each time, for the handful the window lets out.
+    while (lost_pending_ > 0 && !lost_.empty()) {
+        const int32_t idx = rudp::seq_diff(lost_.front(), sent_.front().seq);
+        OutPacket* pkt = (idx >= 0 && static_cast<size_t>(idx) < sent_.size())
+                             ? &sent_[static_cast<size_t>(idx)] : nullptr;
+        // Delivered after all, or already re-sent by a probe: nothing owed here.
+        if (!pkt || pkt->acked || pkt->in_flight || pkt->sends == 0) {
+            std::pop_heap(lost_.begin(), lost_.end(), LaterSeq{});
+            lost_.pop_back();
+            continue;
+        }
+        if (!cwnd_allows(pkt->size())) {   // more still owed: come back with room
             cwnd_limited_ = true;
             return;
         }
-        transmit(pkt, now);
+        std::pop_heap(lost_.begin(), lost_.end(), LaterSeq{});
+        lost_.pop_back();
+        transmit(*pkt, now);
         ++retransmits_;
     }
 }
@@ -657,6 +679,12 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
         sent_.pop_front();
         ++retired;
     }
+    // Nothing outstanding: whatever the loss-detection lists still name is stale.
+    if (sent_.empty()) {
+        repairs_.clear();
+        repairs_head_ = 0;
+        lost_.clear();
+    }
 
     // The episode ends once everything that was outstanding when the loss was
     // detected has been acknowledged (the NewReno recovery point). Until then the
@@ -684,10 +712,14 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
         const int32_t lo = (std::max)(rudp::seq_diff(first, sent_.front().seq), int32_t{0});
         const int32_t hi = (std::min)(rudp::seq_diff(first + range.length, sent_.front().seq),
                                       static_cast<int32_t>(sent_.size()));
-        for (int32_t idx = lo; idx < hi; ++idx) {
-            OutPacket& pkt = sent_[static_cast<size_t>(idx)];
-            if (pkt.acked) continue;
-            on_newly_acked(pkt, now);
+        // Every Ack repeats every range the receiver holds, so most of what a range
+        // names was acknowledged by an earlier one. Stepping over those runs rather
+        // than through them is what makes an Ack cost what it newly acknowledges
+        // instead of the size of the window.
+        if (lo >= hi) continue;
+        for (size_t idx = next_unacked(static_cast<size_t>(lo)); idx < static_cast<size_t>(hi);
+             idx = next_unacked(idx + 1)) {
+            on_newly_acked(sent_[idx], now);
             ++sacked_in_queue_;
         }
     }
@@ -825,6 +857,7 @@ void UdpStream::handle_retry(const rudp::Packet& p, Clock::time_point now) {
 
 void UdpStream::on_newly_acked(OutPacket& pkt, Clock::time_point now) {
     pkt.acked = true;
+    pkt.skip  = pkt.seq + 1;
     if (pkt.in_flight) {
         flight_bytes_ -= pkt.size();
         pkt.in_flight  = false;
@@ -867,15 +900,34 @@ void UdpStream::sack_one(uint32_t seq, Clock::time_point now) {
     ++sacked_in_queue_;
 }
 
+size_t UdpStream::next_unacked(size_t idx) noexcept {
+    const size_t   n    = sent_.size();
+    if (idx >= n) return n;
+    const uint32_t base = sent_.front().seq;
+    // A skip always points forward, past the packet holding it, so it is never
+    // before the front; one past the back is "none yet" (and stays right when the
+    // queue grows, since everything it stepped over is still acknowledged).
+    const auto index_of = [&](uint32_t seq) {
+        return (std::min)(static_cast<size_t>(rudp::seq_diff(seq, base)), n);
+    };
+
+    size_t root = idx;
+    while (root < n && sent_[root].acked) root = index_of(sent_[root].skip);
+
+    // Path compression: everything walked through now points straight at the
+    // answer, so the next walk over the same run is a single hop.
+    const uint32_t root_seq = base + static_cast<uint32_t>(root);
+    while (idx < root) {
+        OutPacket&   pkt  = sent_[idx];
+        const size_t next = index_of(pkt.skip);
+        pkt.skip = root_seq;
+        idx      = next;
+    }
+    return root;
+}
+
 void UdpStream::detect_losses(Clock::time_point now) {
     if (sent_.empty() || !have_largest_acked_) return;
-
-    // Nothing past the largest acknowledged packet can be judged: no evidence about
-    // it has come back yet. On a healthy stream that is the front of the queue, so
-    // this costs nothing; only a stream with holes walks anything at all.
-    const int32_t reach = rudp::seq_diff(largest_acked_, sent_.front().seq);
-    if (reach <= 0) return;
-    const size_t limit = (std::min)(sent_.size(), static_cast<size_t>(reach));
 
     // The reordering a path is allowed before a packet counts as lost: a quarter of
     // the minimum round trip (RFC 8985's default), at least a millisecond, never
@@ -885,22 +937,62 @@ void UdpStream::detect_losses(Clock::time_point now) {
         reo_wnd = (std::max)(reo_wnd, Clock::duration(rtt_.min_rtt / 4));
         reo_wnd = (std::min)(reo_wnd, rtt_.srtt);
     }
+    const auto too_old = [&](const OutPacket& pkt) {
+        return have_rack_ && pkt.tx.sent_at + reo_wnd < rack_sent_at_;
+    };
 
-    bool lost_any = false;
-    for (size_t i = 0; i < limit; ++i) {
-        OutPacket& pkt = sent_[i];
-        if (pkt.acked || !pkt.in_flight) continue;   // delivered, or already given up on
+    bool           lost_any = false;
+    const uint32_t front    = sent_.front().seq;
+    const auto     at = [&](uint32_t seq) -> OutPacket* {
+        const int32_t idx = rudp::seq_diff(seq, front);
+        return (idx >= 0 && static_cast<size_t>(idx) < sent_.size())
+                   ? &sent_[static_cast<size_t>(idx)] : nullptr;
+    };
 
-        // A first transmission is lost once kReorderThreshold packets behind it
-        // have arrived — the duplicate-ack rule, read off the selective acks. A
-        // retransmission is judged by time alone: its sequence number is old, so
-        // counting by it would condemn every repair the moment it left.
-        const bool by_count = pkt.sends == 1 &&
-                              rudp::seq_diff(largest_acked_, pkt.seq) >= kReorderThreshold;
-        const bool by_time  = have_rack_ && pkt.tx.sent_at + reo_wnd < rack_sent_at_;
-        if (!by_count && !by_time) continue;
+    // Repairs (and probes) are judged by time alone: their sequence number is old,
+    // so counting by it would condemn every repair the moment it left. They are
+    // listed in the order they left, so the first one sent too recently to judge
+    // ends the scan — everything behind it left later still.
+    for (; repairs_head_ < repairs_.size(); ++repairs_head_) {
+        const Repair r   = repairs_[repairs_head_];
+        OutPacket*   pkt = at(r.seq);
+        if (pkt && !pkt->acked && pkt->in_flight && pkt->sends == r.sends) {
+            if (!too_old(*pkt)) break;
+            mark_lost(*pkt, now);
+            lost_any = true;
+        }
+    }
+    // Give back what has been consumed once it is most of the list, so the copy
+    // is paid for by the entries it drops.
+    if (repairs_head_ == repairs_.size()) {
+        repairs_.clear();
+        repairs_head_ = 0;
+    } else if (repairs_head_ >= 64 && 2 * repairs_head_ >= repairs_.size()) {
+        repairs_.erase(repairs_.begin(), repairs_.begin() + static_cast<std::ptrdiff_t>(repairs_head_));
+        repairs_head_ = 0;
+    }
 
-        mark_lost(pkt, now);
+    // First transmissions, from where the last scan stopped. Nothing past the
+    // largest acknowledged packet can be judged: no evidence about it has come back
+    // yet. On a healthy stream that is the front of the queue, so this costs
+    // nothing; only a stream with holes walks anything at all, and it walks each
+    // packet once.
+    if (rudp::seq_less(loss_scan_, front) || rudp::seq_less(next_seq_, loss_scan_))
+        loss_scan_ = front;
+    for (; rudp::seq_less(loss_scan_, largest_acked_); ++loss_scan_) {
+        OutPacket* pkt = at(loss_scan_);
+        if (!pkt) break;
+        // Delivered, given up on, or a repair (the list above has it): passed over.
+        if (pkt->acked || !pkt->in_flight || pkt->sends != 1) continue;
+
+        // Lost once kReorderThreshold packets behind it have arrived — the
+        // duplicate-ack rule, read off the selective acks — or once something sent
+        // a reordering window after it has. Both only become true of later packets
+        // later, so the first packet in good standing is where the scan stops.
+        const bool by_count = rudp::seq_diff(largest_acked_, pkt->seq) >= kReorderThreshold;
+        if (!by_count && !too_old(*pkt)) break;
+
+        mark_lost(*pkt, now);
         lost_any = true;
     }
     // One window reduction for the whole episode — not one per packet repaired,
@@ -919,6 +1011,8 @@ void UdpStream::mark_lost(OutPacket& pkt, Clock::time_point now) {
         flight_bytes_ -= pkt.size();
     }
     ++lost_pending_;
+    lost_.push_back(pkt.seq);
+    std::push_heap(lost_.begin(), lost_.end(), LaterSeq{});
     declare_lost(pkt, now);
 }
 
@@ -1318,6 +1412,9 @@ void UdpStream::die(CloseReason reason) {
     pace_due_     = kNoDeadline;
     pace_tokens_  = 0;
     lost_pending_    = 0;
+    lost_.clear();
+    repairs_.clear();
+    repairs_head_ = 0;
     sacked_in_queue_ = 0;
     recovery_credit_ = 0;
     held_.fill(0);
