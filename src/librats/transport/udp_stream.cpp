@@ -166,6 +166,18 @@ size_t UdpStream::ack_ranges() const noexcept {
     return count;
 }
 
+bool UdpStream::holes_past_sack() const noexcept {
+    if (!peer_ext_ack_ || reorder_.empty()) return false;
+    // The sack word covers offsets 1..kSackBits past the hole at recv_next_. The
+    // runs come out nearest first, so the last one is the one that reaches furthest.
+    const size_t n = ack_ranges();
+    if (n == 0) return false;
+    rudp::Packet p;
+    p.ranges = ByteView(range_buf_.data(), n * rudp::kAckRangeSize);
+    const rudp::AckRange last = rudp::ack_range(p, n - 1);
+    return size_t{last.offset} + last.length > size_t{rudp::kSackBits} + 1;
+}
+
 void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
     rudp::Packet p;
     p.type = pkt.type;
@@ -216,12 +228,14 @@ void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
         rto_deadline_ = now + loss_timeout();
     } else if (repair && in_recovery_) {
         // A repair is the newest thing the timer is guarding, and it gets a full
-        // timeout of its own to be answered in (RFC 9002 arms from the last packet
+        // interval of its own to be answered in (RFC 9002 arms from the last packet
         // sent, for the same reason). Measured from the last acknowledgement
-        // instead, a repair sent a little after it would be timed out a little
+        // instead, a repair sent a little after it would be given up on a little
         // before its own answer could possibly arrive — on a path whose round trip
-        // is close to the minimum timeout, every time.
-        rto_deadline_ = (std::max)(rto_deadline_, now + rtt_.rto);
+        // is close to the interval, every time. The probe interval where a probe is
+        // still allowed: the timeout here is what kept a lost last repair waiting
+        // kMinRto and more for something a probe asks about in a round trip.
+        rto_deadline_ = (std::max)(rto_deadline_, now + loss_timeout());
     }
 
     pkt.sends++;
@@ -528,6 +542,8 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
     }
 
     bool ack_now = (p.type == rudp::PacketType::Syn || p.type == rudp::PacketType::Fin);
+    // The peer has to hear about a hole only ranges can name (see below).
+    bool ranges_owed = false;
 
     // The peer parses acknowledgement ranges, so our pure acks may carry them.
     if (p.ext_ack()) peer_ext_ack_ = true;
@@ -560,7 +576,12 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
         // did fill it is a repair the peer is waiting on, with everything held
         // behind it now delivered too (RFC 5681 4.2): delaying that ack would only
         // stall a recovery and push it towards its timeout.
-        if (recv_next_ == before || had_hole) ack_now = true;
+        if (recv_next_ == before || had_hole) {
+            ack_now = true;
+            // Decided before pump(): the Data it may send carries the ack too, but
+            // only the sack word, which says nothing past 32 packets.
+            ranges_owed = holes_past_sack();
+        }
     }
 
     pump(now);
@@ -576,6 +597,13 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
         // without a round trip's worth of delay per packet.
         if (ack_now || unacked_packets_ >= 2) send_control(rudp::PacketType::Ack, now);
         else if (ack_due_ == kNoDeadline)     ack_due_ = now + kDelayedAck;
+    } else if (ranges_owed) {
+        // The acknowledgement went out on our own Data, so nothing is owed by the
+        // usual rule — but that Data could not carry the hole. A peer sending to us
+        // while we send to it would otherwise find it only once the hole in front
+        // of it fills, a round trip later; one pure ack, sent only for news about
+        // holes, is what ranges exist for.
+        send_control(rudp::PacketType::Ack, now);
     }
 
     flush_events();
@@ -634,8 +662,9 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     // detected has been acknowledged (the NewReno recovery point). Until then the
     // window has already been reduced for it and must not be reduced again.
     if (in_recovery_ && rudp::seq_le(recover_seq_, p.ack)) {
-        in_recovery_     = false;
-        recovery_credit_ = 0;
+        in_recovery_      = false;
+        timeout_recovery_ = false;
+        recovery_credit_  = 0;
         cc_->on_recovery_exit(now);
     }
 
@@ -679,7 +708,6 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
 
     if (newly_acked > 0) {
         dup_acks_      = 0;
-        tail_probes_   = 0;   // the peer answered; this silence is over
         last_ack_recv_ = p.ack;
         // Progress means the path is alive: drop back to the estimated RTO,
         // undoing any doubling a previous timeout applied.
@@ -749,7 +777,15 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     // packets are counted as well as bytes, because a Syn and a Fin each occupy a
     // sequence number while carrying no payload — a byte count alone would leave
     // the timer running on the deadline the *handshake* set.
-    if (progress) rto_deadline_ = sent_.empty() ? kNoDeadline : now + loss_timeout();
+    //
+    // Progress also ends the silence the probes were counting (RFC 9002 resets its
+    // probe count on any acknowledgement). In recovery the cumulative ack can stand
+    // still behind a hole for rounds on end, and a count only it could reset would
+    // spend the whole episode's probes on its first two silences.
+    if (progress) {
+        tail_probes_  = 0;
+        rto_deadline_ = sent_.empty() ? kNoDeadline : now + loss_timeout();
+    }
 }
 
 void UdpStream::handle_retry(const rudp::Packet& p, Clock::time_point now) {
@@ -1064,10 +1100,18 @@ UdpStream::Clock::duration UdpStream::probe_timeout() const noexcept {
 }
 
 UdpStream::Clock::duration UdpStream::loss_timeout() const noexcept {
-    // No probes during recovery (as Linux, which probes only in the Open state):
-    // the silence a probe asks about is then a repair still on its way, and the
-    // last unacknowledged packet it would re-send is usually that repair.
-    if (state_ != State::Connected || in_recovery_ || tail_probes_ >= kMaxTailProbes)
+    // Probes run in recovery too (RFC 9002 keeps one timer in every state; Linux,
+    // which probes only in Open, leaves the case below to its timeout). The case is
+    // a lost repair with nothing sent after it — the last loss of a message, or of
+    // a transfer — which no acknowledgement can reveal, because RACK needs a later
+    // delivery and there is none. A probe costs one packet where the timeout costs
+    // kMinRto and the window. It does not race a repair that is merely on its way:
+    // every repair re-arms the timer from its own departure (see transmit), and the
+    // probe interval is a round trip plus the peer's ack delay.
+    //
+    // Not after a timeout, though: that episode began with the path silent for a
+    // whole timeout, and backing off is what keeps a dead path from being hammered.
+    if (state_ != State::Connected || timeout_recovery_ || tail_probes_ >= kMaxTailProbes)
         return rtt_.rto;
 
     // Never later than the timeout it stands in front of. A probe exists to ask
@@ -1107,7 +1151,7 @@ void UdpStream::on_rto(Clock::time_point now) {
     //
     // Deliberately not for a dial: a Syn has its own, tighter attempt budget that
     // the transport race depends on (see kSynMaxAttempts).
-    if (state_ == State::Connected && !in_recovery_ && tail_probes_ < kMaxTailProbes) {
+    if (state_ == State::Connected && !timeout_recovery_ && tail_probes_ < kMaxTailProbes) {
         // The LAST unacknowledged packet, not the first (RFC 8985 §7.2). This is
         // the whole mechanism, not a detail of it: the probe's acknowledgement has
         // to land *past* every hole in front of it, so the receiver holds it out of
@@ -1142,8 +1186,9 @@ void UdpStream::on_rto(Clock::time_point now) {
     // flight, so it has to hear of this before the accounting below is undone.)
     ++congestion_events_;
     cc_->on_timeout(now, flight_bytes_);
-    in_recovery_ = true;
-    recover_seq_ = next_seq_ - 1;
+    in_recovery_      = true;
+    timeout_recovery_ = true;
+    recover_seq_      = next_seq_ - 1;
 
     // Everything outstanding has had a full retransmission timeout to arrive and
     // nothing acknowledged it, so it is presumed lost and stops occupying the path.

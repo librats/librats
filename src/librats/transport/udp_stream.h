@@ -433,6 +433,9 @@ private:
     /// Encode the runs of packets held past the hole into range_buf_ (cached
     /// until the reorder buffer moves). Returns how many there are.
     size_t   ack_ranges() const noexcept;
+    /// Something is held past the hole that the sack word cannot reach, so only a
+    /// pure acknowledgement carrying ranges can tell the peer about it.
+    bool     holes_past_sack() const noexcept;
     bool     is_held(uint32_t seq) const noexcept;
     void     set_held(uint32_t seq, bool on) noexcept;
 
@@ -497,8 +500,8 @@ private:
     uint32_t              retransmits_  = 0;
     uint32_t              congestion_events_ = 0;
     /// Consecutive tail probes sent with nothing acknowledged in between. Reset by
-    /// any acknowledgement that covers new data, so it counts a single episode of
-    /// silence rather than the life of the stream.
+    /// any acknowledgement that covers new data, cumulatively or selectively, so it
+    /// counts a single episode of silence rather than the life of the stream.
     int                   tail_probes_  = 0;
 
     // Loss episodes. A window is reduced once per episode, not once per ack that
@@ -510,6 +513,10 @@ private:
     // when the loss was detected.
     bool                  in_recovery_  = false;
     uint32_t              recover_seq_  = 0;
+    /// The episode was opened by a retransmission timeout rather than by the
+    /// acknowledgements. Probes are for a path that is still answering; one that
+    /// has just gone silent for a whole timeout is left to the timer's backoff.
+    bool                  timeout_recovery_ = false;
     /// Packets declared lost and not yet sent again — retransmit_lost()'s work
     /// list, kept as a count so a healthy transfer never scans the queue for it.
     size_t                lost_pending_ = 0;

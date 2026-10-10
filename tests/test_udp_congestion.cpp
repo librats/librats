@@ -527,6 +527,141 @@ TEST(UdpLossRecoveryTest, ALostRepairIsRepairedAgainWithoutATimeout) {
     }
 }
 
+// The other way a repair goes missing: as the last thing the sender has to send.
+// Nothing leaves after it, so nothing can arrive after it to give the loss away —
+// RACK has no later delivery to read — and this is every request/response exchange
+// that loses the same packet twice. A probe has to ask, as it does outside
+// recovery (RFC 9002 keeps the probe timer running in recovery for exactly this);
+// left to the retransmission timeout it costs at least kMinRto — ten round trips
+// here — and the whole window with it.
+TEST(UdpLossRecoveryTest, ALostTailRepairIsProbedRatherThanTimedOut) {
+    for (const auto algo : {CongestionAlgorithm::Reno, CongestionAlgorithm::Bbr}) {
+        SCOPED_TRACE(to_string(algo));
+        Sim sim(100, 10ms, 2000);
+        HoleMaker holes;
+        holes.install(sim.path);
+        Flow& f = sim.add(algo);
+        sim.run(100ms);   // the dial, and a round-trip estimate to time the probe by
+        ASSERT_TRUE(f.tx.connected());
+        const uint32_t events = f.tx.congestion_events();
+
+        // One message; the packet four from its end is lost and so is its repair.
+        // The three behind it are what reveal the first loss — and once the repair
+        // is out there is nothing behind *it*.
+        constexpr size_t   kPackets = 20;
+        constexpr size_t   kHole    = kPackets - 4;
+        holes.holes = {kHole, kHole};
+        f.to_send   = kPackets * rudp::kMaxPayload;
+
+        Clock::time_point repair_lost{}, done{};
+        sim.on_step = [&] {
+            if (repair_lost == Clock::time_point{} && holes.sends[holes.base + kHole] >= 2)
+                repair_lost = sim.now;
+            if (done == Clock::time_point{} && f.delivered == kPackets * rudp::kMaxPayload)
+                done = sim.now;
+        };
+        sim.run(2s);
+        sim.on_step = nullptr;
+
+        ASSERT_NE(repair_lost, Clock::time_point{}) << "the repair was never sent";
+        ASSERT_NE(done, Clock::time_point{}) << "the message never arrived";
+        EXPECT_EQ(holes.sends[holes.base + kHole], 3);
+        EXPECT_LT(done - repair_lost, UdpStream::kMinRto)
+            << "the lost repair waited for the retransmission timeout";
+        EXPECT_EQ(f.tx.congestion_events() - events, 1u)
+            << "a timeout fired (or a second episode opened) over one loss";
+        EXPECT_FALSE(f.tx.dead());
+    }
+}
+
+namespace {
+
+/// Keeps every datagram a stream emits and delivers none: for driving one stream
+/// by hand, packet by packet.
+struct Capture : UdpStreamHost {
+    std::vector<Bytes> out;
+    void send_datagram(const Address&, const uint8_t* data, size_t len) override {
+        out.emplace_back(data, data + len);
+    }
+    void stream_events(UdpStream&, uint32_t) override {}
+};
+
+/// Encode `p` and hand it to `s`, as the mux would.
+void feed(UdpStream& s, const rudp::Packet& p, Clock::time_point now) {
+    uint8_t buf[rudp::kMaxDatagram];
+    rudp::Packet in;
+    ASSERT_TRUE(rudp::decode(buf, rudp::encode(p, buf), in));
+    s.on_packet(in, now);
+}
+
+} // namespace
+
+// Ranges ride only on a pure acknowledgement, and a receiver with data of its own
+// may not send one: when the packet that reveals a hole also opens its window, what
+// it acknowledges goes out on its next Data packet instead — which has room for the
+// sack word and nothing more, and the sack word cannot reach past 32 packets. That
+// is the two-way case (a file one way, requests and gossip the other), and the
+// sender would be left to find such a hole a round trip later, when the one in
+// front of it fills. So a hole the sack word cannot name gets a pure
+// acknowledgement of its own, whatever else is leaving.
+TEST(UdpLossRecoveryTest, AHolePastTheSackWordIsNamedEvenWhenDataCarriesTheAck) {
+    for (const bool ext_peer : {true, false}) {
+        SCOPED_TRACE(ext_peer ? "peer with ranges" : "peer without ranges");
+        Capture       host;
+        const Address peer{*IpAddress::parse("10.0.0.1"), 1111};
+        auto          now = Clock::time_point{} + 1s;
+        const uint8_t ext = ext_peer ? rudp::FlagExtAck : rudp::FlagNone;
+
+        UdpStream rx(host, peer, 11, 10, ConnRole::Inbound, now, DialProfile{},
+                     CongestionAlgorithm::Reno);
+        rudp::Packet syn;
+        syn.type = rudp::PacketType::Syn;
+        syn.flags = ext;
+        syn.conn_id = 11;
+        syn.seq = 1;
+        syn.window = rudp::kMaxWindowPackets;
+        feed(rx, syn, now);
+        ASSERT_TRUE(rx.connected());
+
+        // The receiver has a transfer of its own queued, stopped by its window.
+        std::vector<uint8_t> data(64 * 1024, 0xCD);
+        const ByteView v(data.data(), data.size());
+        ASSERT_GT(rx.write(&v, 1, now), 0u);
+        ASSERT_GT(rx.queued_bytes(), rx.bytes_in_flight()) << "nothing was left waiting";
+
+        // One packet from the peer: it acknowledges two of the receiver's packets —
+        // room for more of its data — and arrives 40 past a hole.
+        const std::vector<uint8_t> payload(100, 0xAB);
+        rudp::Packet pkt;
+        pkt.type = rudp::PacketType::Data;
+        pkt.flags = ext;
+        pkt.conn_id = 11;
+        pkt.seq = 2 + 40;
+        pkt.ack = 2;
+        pkt.window = rudp::kMaxWindowPackets;
+        pkt.payload = ByteView(payload.data(), payload.size());
+        host.out.clear();
+        now += 10ms;
+        feed(rx, pkt, now);
+
+        size_t data_out = 0;
+        bool   named    = false;
+        for (const Bytes& d : host.out) {
+            rudp::Packet p;
+            ASSERT_TRUE(rudp::decode(d.data(), d.size(), p));
+            if (p.type == rudp::PacketType::Data) ++data_out;
+            if (p.type != rudp::PacketType::Ack || p.range_count() == 0) continue;
+            const rudp::AckRange r = rudp::ack_range(p, 0);
+            named = p.ack == 1 && r.offset == 40 && r.length == 1;
+        }
+        ASSERT_GT(data_out, 0u) << "the window did not open, so this tested nothing";
+        if (ext_peer)
+            EXPECT_TRUE(named) << "the hole was acknowledged only on Data, which cannot name it";
+        else
+            EXPECT_FALSE(named) << "ranges sent to a peer that never said it parses them";
+    }
+}
+
 // However many acknowledgements report the holes of one loss, the controller is
 // told about one congestion event — Reno halves once, BBR runs one round of
 // packet conservation.
