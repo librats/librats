@@ -453,28 +453,27 @@ TEST(RudpPacketTest, RoundTripsEveryField) {
     const std::string payload = "the quick brown fox";
 
     rudp::Packet in;
-    in.type    = rudp::PacketType::Data;
-    in.flags   = rudp::FlagSack;
-    in.window  = 123;
-    in.conn_id = 0xDEADBEEF;
-    in.seq     = 0x01020304;
-    in.ack     = 0x05060708;
-    in.sack    = 0xF0F0F0F0;
-    in.payload = ByteView(payload);
+    in.type      = rudp::PacketType::Data;
+    in.ack_delay = 0xBEEF;
+    in.conn_id   = 0xDEADBEEF;
+    in.seq       = 0x01020304;
+    in.ack       = 0x05060708;
+    in.limit     = 0x090A0B0C;
+    in.payload   = ByteView(payload);
 
     uint8_t      buf[rudp::kMaxDatagram];
     const size_t n = rudp::encode(in, buf);
-    EXPECT_EQ(n, rudp::kHeaderSize + rudp::kSackSize + payload.size());
+    EXPECT_EQ(n, rudp::kHeaderSize + payload.size());
 
     rudp::Packet out;
     ASSERT_TRUE(rudp::decode(buf, n, out));
     EXPECT_EQ(out.type, rudp::PacketType::Data);
-    EXPECT_TRUE(out.has_sack());
-    EXPECT_EQ(out.window, 123);
+    EXPECT_EQ(out.ack_delay, 0xBEEF);
     EXPECT_EQ(out.conn_id, 0xDEADBEEFu);
     EXPECT_EQ(out.seq, 0x01020304u);
     EXPECT_EQ(out.ack, 0x05060708u);
-    EXPECT_EQ(out.sack, 0xF0F0F0F0u);
+    EXPECT_EQ(out.limit, 0x090A0B0Cu);
+    EXPECT_EQ(out.range_count(), 0u);
     EXPECT_EQ(std::string(reinterpret_cast<const char*>(out.payload.data()), out.payload.size()),
               payload);
 }
@@ -486,39 +485,32 @@ TEST(RudpPacketTest, EncodeHeaderMatchesEncodeAndDecodesInPlace) {
     // datagram once the two are adjacent.
     const std::string payload(rudp::kMaxPayload, 'p');
 
-    for (const bool with_sack : {false, true}) {
-        rudp::Packet in;
-        in.type    = rudp::PacketType::Data;
-        in.flags   = with_sack ? rudp::FlagSack : rudp::FlagNone;
-        in.window  = 4321;
-        in.conn_id = 0x0BADC0DE;
-        in.seq     = 42;
-        in.ack     = 41;
-        in.sack    = with_sack ? 0x00FF00FFu : 0;
-        in.payload = ByteView(payload);
+    rudp::Packet in;
+    in.type    = rudp::PacketType::Data;
+    in.conn_id = 0x0BADC0DE;
+    in.seq     = 42;
+    in.ack     = 41;
+    in.limit   = 4321;
+    in.payload = ByteView(payload);
 
-        uint8_t reference[rudp::kMaxDatagram];
-        const size_t whole = rudp::encode(in, reference);
+    uint8_t reference[rudp::kMaxDatagram];
+    const size_t whole = rudp::encode(in, reference);
 
-        // Lay the packet out the way the stream does: kMaxHeaderSize of headroom,
-        // payload behind it, header written into the tail of the headroom.
-        uint8_t framed[rudp::kMaxDatagram];
-        std::memcpy(framed + rudp::kMaxHeaderSize, payload.data(), payload.size());
-        const size_t hdr = rudp::header_size(in);
-        EXPECT_EQ(hdr, with_sack ? rudp::kHeaderSize + rudp::kSackSize : rudp::kHeaderSize);
+    // Lay the packet out the way the stream does: kHeaderSize of headroom, payload
+    // behind it, header written into the headroom.
+    uint8_t framed[rudp::kMaxDatagram];
+    std::memcpy(framed + rudp::kHeaderSize, payload.data(), payload.size());
+    const size_t hdr = rudp::encode_header(in, framed);
+    EXPECT_EQ(hdr, rudp::kHeaderSize);
+    ASSERT_EQ(hdr + payload.size(), whole);
+    EXPECT_EQ(std::memcmp(framed, reference, whole), 0);
 
-        uint8_t* const start = framed + (rudp::kMaxHeaderSize - hdr);
-        EXPECT_EQ(rudp::encode_header(in, start), hdr);
-        ASSERT_EQ(hdr + payload.size(), whole);
-        EXPECT_EQ(std::memcmp(start, reference, whole), 0);
-
-        rudp::Packet out;
-        ASSERT_TRUE(rudp::decode(start, whole, out));
-        EXPECT_EQ(out.seq, 42u);
-        EXPECT_EQ(out.has_sack(), with_sack);
-        EXPECT_EQ(std::string(reinterpret_cast<const char*>(out.payload.data()),
-                              out.payload.size()), payload);
-    }
+    rudp::Packet out;
+    ASSERT_TRUE(rudp::decode(framed, whole, out));
+    EXPECT_EQ(out.seq, 42u);
+    EXPECT_EQ(out.limit, 4321u);
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(out.payload.data()),
+                          out.payload.size()), payload);
 }
 
 TEST(RudpPacketTest, RejectsMalformed) {
@@ -534,11 +526,16 @@ TEST(RudpPacketTest, RejectsMalformed) {
 
     // Truncated below the fixed header.
     EXPECT_FALSE(rudp::decode(buf, n - 1, out));
-    // A sack flag with no sack word behind it.
-    uint8_t truncated_sack[rudp::kMaxDatagram];
-    std::memcpy(truncated_sack, buf, n);
-    truncated_sack[1] |= rudp::FlagSack;
-    EXPECT_FALSE(rudp::decode(truncated_sack, n, out));
+    // A range flag with no range block behind it.
+    uint8_t truncated_ranges[rudp::kMaxDatagram];
+    std::memcpy(truncated_ranges, buf, n);
+    truncated_ranges[1] |= rudp::FlagAckRanges;
+    EXPECT_FALSE(rudp::decode(truncated_ranges, n, out));
+    // Reserved flag bits are not an error: they are ignored.
+    uint8_t reserved[rudp::kMaxDatagram];
+    std::memcpy(reserved, buf, n);
+    reserved[1] |= 0x80;
+    EXPECT_TRUE(rudp::decode(reserved, n, out));
     // Unknown version.
     uint8_t bad_version[rudp::kMaxDatagram];
     std::memcpy(bad_version, buf, n);
@@ -590,29 +587,27 @@ TEST(RudpPacketTest, OnlyACookieSizedPayloadRidesOnSynAndRetry) {
     }
 }
 
-// Acknowledgement ranges ride on a pure Ack, after the sack word, and survive the
-// round trip exactly — they are what names the holes past the sack word's reach.
+// Acknowledgement ranges ride on a pure Ack, right after the header, and survive
+// the round trip exactly — they are what names the holes past the cumulative ack.
 TEST(RudpPacketTest, AckRangesRoundTrip) {
     uint8_t entries[3 * rudp::kAckRangeSize];
-    const rudp::AckRange want[3] = {{2, 5}, {40, 1}, {700, 300}};
+    const rudp::AckRange want[3] = {{700, 300}, {40, 1}, {2, 5}};
     for (size_t i = 0; i < 3; ++i) rudp::encode_ack_range(want[i], entries + i * rudp::kAckRangeSize);
 
     rudp::Packet p;
     p.type    = rudp::PacketType::Ack;
-    p.flags   = rudp::FlagSack | rudp::FlagExtAck;
     p.conn_id = 7;
     p.ack     = 1000;
-    p.sack    = 0x5;
+    p.limit   = 3000;
     p.ranges  = ByteView(entries, sizeof(entries));
 
     uint8_t buf[rudp::kMaxDatagram];
     const size_t n = rudp::encode(p, buf);
-    EXPECT_EQ(n, rudp::kHeaderSize + rudp::kSackSize + 1 + sizeof(entries));
+    EXPECT_EQ(n, rudp::kHeaderSize + 1 + sizeof(entries));
 
     rudp::Packet out;
     ASSERT_TRUE(rudp::decode(buf, n, out));
-    EXPECT_TRUE(out.ext_ack());
-    EXPECT_EQ(out.sack, 0x5u);
+    EXPECT_EQ(out.limit, 3000u);
     ASSERT_EQ(out.range_count(), 3u);
     for (size_t i = 0; i < 3; ++i) {
         EXPECT_EQ(rudp::ack_range(out, i).offset, want[i].offset);
@@ -630,9 +625,9 @@ TEST(RudpPacketTest, AHeaderNeverClaimsRangesItDoesNotCarry) {
 
     rudp::Packet p;
     p.type   = rudp::PacketType::Data;
-    p.flags  = rudp::FlagAckRanges | rudp::FlagExtAck;
+    p.flags  = rudp::FlagAckRanges;
     p.ranges = ByteView(entries, sizeof(entries));
-    uint8_t hdr[rudp::kMaxHeaderSize];
+    uint8_t hdr[rudp::kHeaderSize];
     EXPECT_EQ(rudp::encode_header(p, hdr), rudp::kHeaderSize);
     EXPECT_EQ(hdr[1] & rudp::FlagAckRanges, 0);
 }
@@ -640,7 +635,8 @@ TEST(RudpPacketTest, AHeaderNeverClaimsRangesItDoesNotCarry) {
 // Everything a hostile or broken peer could do to a range block is refused before
 // the stream sees it, so the stream never re-validates: ranges anywhere but on an
 // Ack, an empty or oversized block, a truncated one, trailing bytes, a range that
-// names the packet the cumulative ack says is missing, or one past the window.
+// names the packet the cumulative ack says is missing, or one past what a range
+// can reach.
 TEST(RudpPacketTest, MalformedAckRangesAreRejected) {
     const auto build = [](rudp::PacketType type, std::vector<rudp::AckRange> ranges,
                           uint8_t* buf) {
@@ -686,10 +682,10 @@ TEST(RudpPacketTest, MalformedAckRangesAreRejected) {
     EXPECT_FALSE(rudp::decode(buf, n, out)) << "a range naming ack+1";
     n = build(rudp::PacketType::Ack, {{4, 0}}, buf);
     EXPECT_FALSE(rudp::decode(buf, n, out)) << "an empty range";
-    n = build(rudp::PacketType::Ack, {{1000, 25}}, buf);
-    EXPECT_FALSE(rudp::decode(buf, n, out)) << "a range past the receive window";
-    n = build(rudp::PacketType::Ack, {{1000, 24}}, buf);
-    EXPECT_TRUE(rudp::decode(buf, n, out)) << "a range ending exactly at the window edge";
+    n = build(rudp::PacketType::Ack, {{65535, 2}}, buf);
+    EXPECT_FALSE(rudp::decode(buf, n, out)) << "a range past the furthest a range reaches";
+    n = build(rudp::PacketType::Ack, {{65535, 1}}, buf);
+    EXPECT_TRUE(rudp::decode(buf, n, out)) << "a range ending exactly at the edge of reach";
 }
 
 // Sequence numbers advance forever in a 32-bit space and wrap. Every window check
@@ -1121,8 +1117,8 @@ TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
     ASSERT_GT(write_all_at(*pair.initiator, std::string(100, 'B'), pair.now), 0u);
 
     // Meanwhile the peer sends traffic of its own. Every one of these carries the
-    // same cumulative ack, because 'B' has not reached it yet — and well past the
-    // three that the duplicate-ack rule treats as a loss.
+    // same cumulative ack, because 'B' has not reached it yet — well past the
+    // three that a duplicate-ack rule would treat as a loss.
     for (int i = 0; i < 6; ++i) {
         ASSERT_GT(write_all_at(*pair.responder, std::string(200, 'x'), pair.now), 0u);
         pair.net.deliver_to(kAlice, pair.now);  // responder → initiator only
@@ -1501,14 +1497,14 @@ TEST(UdpStreamTest, AReopenedWindowIsAnnouncedWithoutPeerTraffic) {
         p.conn_id = pair.responder->recv_id();
         p.seq     = 2 + i;   // the Syn took sequence number 1
         p.ack     = 0;       // nothing of the responder's is outstanding to retire
-        p.window  = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kMaxWindowPackets;
         p.payload = ByteView(body);
         pair.responder->on_packet(p, now);
     }
 
     rudp::Packet closed;
     ASSERT_TRUE(pair.net.peek_last(closed)) << "the receiver acknowledged nothing at all";
-    ASSERT_EQ(closed.window, 0) << "the receive buffer never actually filled";
+    ASSERT_EQ(closed.room(), 0u) << "the receive buffer never actually filled";
 
     // From here the peer says nothing more — it is stopped on a zero window and,
     // correctly, will not send again until it is told otherwise.
@@ -1521,7 +1517,7 @@ TEST(UdpStreamTest, AReopenedWindowIsAnnouncedWithoutPeerTraffic) {
     ASSERT_GT(pair.net.sent(), before) << "the window re-opened and nobody was told";
     rudp::Packet update;
     ASSERT_TRUE(pair.net.peek_last(update));
-    EXPECT_GT(update.window, 0) << "the update carried the same closed window";
+    EXPECT_GT(update.room(), 0u) << "the update carried the same closed window";
 }
 
 // ...and announced more than once, because nothing retransmits it.
@@ -1544,13 +1540,13 @@ TEST(UdpStreamTest, ALostWindowUpdateIsAnnouncedAgain) {
         p.conn_id = pair.responder->recv_id();
         p.seq     = 2 + i;   // the Syn took sequence number 1
         p.ack     = 0;
-        p.window  = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kMaxWindowPackets;
         p.payload = ByteView(body);
         pair.responder->on_packet(p, pair.now);
     }
     rudp::Packet closed;
     ASSERT_TRUE(pair.net.peek_last(closed));
-    ASSERT_EQ(closed.window, 0) << "the receive buffer never actually filled";
+    ASSERT_EQ(closed.room(), 0u) << "the receive buffer never actually filled";
 
     // Drain it, and lose exactly the datagram that says so.
     EXPECT_GT(drain(*pair.responder).size(), 0u);
@@ -1565,7 +1561,7 @@ TEST(UdpStreamTest, ALostWindowUpdateIsAnnouncedAgain) {
     const auto   opened_at = pair.now;
     rudp::Packet update;
     const bool   told = pump(pair, [&] {
-        return pair.net.peek_last(update) && update.window > 0;
+        return pair.net.peek_last(update) && update.room() > 0;
     }, 2s);
 
     ASSERT_TRUE(told) << "a lost window update was never repeated; the transfer would "
@@ -1595,7 +1591,7 @@ TEST(UdpStreamTest, WindowAnnouncementsStopOnceThePeerSpeaksAgain) {
         p.conn_id = pair.responder->recv_id();
         p.seq     = seq;
         p.ack     = 0;
-        p.window  = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kMaxWindowPackets;
         p.payload = ByteView(body);
         pair.responder->on_packet(p, pair.now);
     };
@@ -1605,13 +1601,13 @@ TEST(UdpStreamTest, WindowAnnouncementsStopOnceThePeerSpeaksAgain) {
     for (uint32_t i = 0; i < rudp::kMaxWindowPackets; ++i) deliver_data(2 + i);  // Syn took 1
     rudp::Packet closed;
     ASSERT_TRUE(pair.net.peek_last(closed));
-    ASSERT_EQ(closed.window, 0) << "the receive buffer never actually filled";
+    ASSERT_EQ(closed.room(), 0u) << "the receive buffer never actually filled";
 
     EXPECT_GT(drain(*pair.responder).size(), 0u);
     pair.responder->tick(pair.now);   // the first announcement, sent at once
     rudp::Packet update;
     ASSERT_TRUE(pair.net.peek_last(update));
-    ASSERT_GT(update.window, 0) << "the window was never announced in the first place";
+    ASSERT_GT(update.room(), 0u) << "the window was never announced in the first place";
 
     // The peer answers with a packet of its own: it is plainly no longer stopped.
     deliver_data(2 + rudp::kMaxWindowPackets);
@@ -1655,19 +1651,19 @@ TEST(UdpStreamTest, AKeepAliveIsNotAnAnswerToAWindowAnnouncement) {
         p.conn_id = pair.responder->recv_id();
         p.seq     = 2 + i;   // the Syn took sequence number 1
         p.ack     = 0;
-        p.window  = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kMaxWindowPackets;
         p.payload = ByteView(body);
         pair.responder->on_packet(p, pair.now);
     }
     rudp::Packet closed;
     ASSERT_TRUE(pair.net.peek_last(closed));
-    ASSERT_EQ(closed.window, 0) << "the receive buffer never actually filled";
+    ASSERT_EQ(closed.room(), 0u) << "the receive buffer never actually filled";
 
     EXPECT_GT(drain(*pair.responder).size(), 0u);
     pair.responder->tick(pair.now);   // the first announcement, sent at once
     rudp::Packet update;
     ASSERT_TRUE(pair.net.peek_last(update));
-    ASSERT_GT(update.window, 0) << "the window was never announced in the first place";
+    ASSERT_GT(update.room(), 0u) << "the window was never announced in the first place";
 
     // The stopped sender's keep-alive: a bare acknowledgement, occupying no
     // sequence number and telling the receiver nothing it did not already know.
@@ -1676,7 +1672,7 @@ TEST(UdpStreamTest, AKeepAliveIsNotAnAnswerToAWindowAnnouncement) {
     keep_alive.conn_id = pair.responder->recv_id();
     keep_alive.seq     = 2 + rudp::kMaxWindowPackets;
     keep_alive.ack     = 0;
-    keep_alive.window  = rudp::kMaxWindowPackets;
+    keep_alive.limit   = rudp::kMaxWindowPackets;
     pair.responder->on_packet(keep_alive, pair.now);
 
     // Nothing else on this stream is due inside the interval below — no delayed
@@ -1691,15 +1687,16 @@ TEST(UdpStreamTest, AKeepAliveIsNotAnAnswerToAWindowAnnouncement) {
            "the peer is waiting for was called off";
 }
 
-// A window from the past does not stop a sender the receiver has made room for.
+// A limit from the past does not stop a sender the receiver has made room for.
 //
 // Nothing on the wire is ordered by arrival: a path may duplicate a datagram or
 // deliver two out of order, and an acknowledgement from when the receiver was full
-// then lands after the one saying it is empty. Latching that stale zero costs more
-// than it used to — there is no probe to discover the mistake with (see
+// then lands after the one saying it is empty. Latching that stale limit would
+// cost the stream everything — there is no probe to discover the mistake with (see
 // window_allows), and the receiver has already said its piece and will not repeat
-// itself, so the stream sits until the next keep-alive. The cumulative
-// acknowledgement is what dates the two apart.
+// itself, so the stream would sit until the next keep-alive. A limit only ever
+// moves forward, so the largest one seen is the current one, and the stale one is
+// simply smaller.
 TEST(UdpStreamTest, AStaleWindowUpdateDoesNotStopTheSender) {
     Pair pair;
 
@@ -1720,12 +1717,12 @@ TEST(UdpStreamTest, AStaleWindowUpdateDoesNotStopTheSender) {
     stale.conn_id = pair.initiator->recv_id();
     stale.seq     = 1;
     stale.ack     = 0;
-    stale.window  = 0;
+    stale.limit   = 0;   // closed, as it was before the receiver had read anything
     pair.initiator->on_packet(stale, pair.now);
 
     // The application writes again. The receiver's buffer is empty and it has
     // nothing to announce, so nothing is coming to correct a sender that believed
-    // the stale zero — the write simply never leaves.
+    // the stale limit — the write simply never leaves.
     const std::string second(20000, 'b');
     ASSERT_EQ(write_all_at(*pair.initiator, second, pair.now), second.size());
 
@@ -1733,27 +1730,24 @@ TEST(UdpStreamTest, AStaleWindowUpdateDoesNotStopTheSender) {
     std::string received;
     ASSERT_TRUE(pump(pair, [&] { received += drain(*pair.responder);
                                  return received.size() >= second.size(); }, 30s))
-        << "a window from the past stopped the sender for good";
+        << "a limit from the past stopped the sender for good";
     EXPECT_EQ(received, second);
     EXPECT_LT(pair.now - wrote_at, UdpStream::kKeepAlive)
-        << "the transfer waited out a keep-alive to undo a window from the past";
+        << "the transfer waited out a keep-alive to undo a limit from the past";
 }
 
-// A hole is repaired from what the selective ack names, not from a timeout.
+// A hole is repaired from what the acknowledgement ranges name, not from a timeout.
 //
-// The sender's queue here is far longer than a selective ack can reach: one word
-// names the 32 packets after the hole, while the queue behind it runs to hundreds.
-// That gap is load-bearing — detect_losses() bounds its search by the largest
-// packet acknowledged rather than by the length of the queue, which is only sound
-// because nothing past it has been reported on. If that bound were ever tightened
-// past the real reach, this is the test that would notice: the repair would silently stop
-// happening and recovery would fall back to waiting out a retransmission timeout,
-// with the transfer still completing and nothing else looking wrong.
+// Several holes at the front of a long burst: the cumulative ack stands at the
+// first of them for as long as it is missing, so every one of them can only be
+// found from the ranges naming what arrived behind it. If that path ever broke,
+// recovery would fall back to waiting out a retransmission timeout, with the
+// transfer still completing and nothing else looking wrong — which is what the
+// clock below rules out.
 TEST(UdpStreamTest, AHoleBehindALongQueueIsRepairedWithoutATimeout) {
     Pair pair;
 
-    // Warm the window up, so the burst that follows is long enough to outrun what
-    // one selective ack can describe.
+    // Warm the window up, so the burst that follows goes out as one.
     const std::string warmup(rudp::kMaxPayload * 64, 'w');
     ASSERT_EQ(write_all(*pair.initiator, warmup), warmup.size());
     pair.net.settle(*pair.initiator, *pair.responder, 128);
@@ -1763,15 +1757,9 @@ TEST(UdpStreamTest, AHoleBehindALongQueueIsRepairedWithoutATimeout) {
     const uint32_t repairs_before = pair.initiator->retransmits();
 
     // Lose the four packets at the front of the next burst; everything behind them
-    // arrives. Four, not one: a single hole is repaired by the duplicate-ack rule
-    // long before the selective ack is consulted — which is exactly what a mutation
-    // test showed, so a one-packet hole proves nothing about this path. The
-    // duplicate-ack rule resends only sent_.front(), and only once per episode, so
-    // the three holes behind it can be closed by nothing but the selective ack (or,
-    // if that fails, by a timeout — which is what the clock below rules out).
+    // arrives.
     constexpr size_t kHoles        = 4;
     constexpr size_t kBurstPackets = 64;
-    ASSERT_GT(kBurstPackets, rudp::kSackBits) << "the queue must outrun one sack word";
     pair.net.drop_next(kHoles);
     const std::string payload(rudp::kMaxPayload * kBurstPackets, 'x');
     ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
@@ -1779,8 +1767,8 @@ TEST(UdpStreamTest, AHoleBehindALongQueueIsRepairedWithoutATimeout) {
     // Watch for the repairs themselves, not for the transfer to finish: a
     // retransmission that happens sooner than the *minimum* retransmission timeout
     // could not have come from a timeout, so it can only have come from the
-    // acknowledgement. All kHoles of them, so the count cannot be satisfied by the
-    // one packet the duplicate-ack rule is entitled to resend.
+    // acknowledgement. All kHoles of them, so the count cannot be satisfied by a
+    // single tail probe.
     const auto started  = std::chrono::steady_clock::now();
     const auto give_up  = started + 5s;
     while (pair.initiator->retransmits() - repairs_before < kHoles &&
@@ -1836,14 +1824,15 @@ TEST(UdpStreamTest, ASelectiveAckRestartsTheLossTimer) {
     // Halfway to that deadline, an acknowledgement arrives that leaves the
     // cumulative number where it was but selectively covers the second packet.
     const auto later = pair.now + (*armed - pair.now) / 2;
+    uint8_t range[rudp::kAckRangeSize];
+    rudp::encode_ack_range(rudp::AckRange{1, 1}, range);   // ack + 2: the second packet
     rudp::Packet ack;
     ack.type    = rudp::PacketType::Ack;
     ack.conn_id = pair.initiator->recv_id();
-    ack.window  = rudp::kMaxWindowPackets;
     ack.ack     = last - 2;              // everything before the two
+    ack.limit   = ack.ack + rudp::kMaxWindowPackets;
     ack.seq     = 1;
-    ack.flags   = rudp::FlagSack;
-    ack.sack    = 1u << 0;               // bit i covers ack + 2 + i: the second packet
+    ack.ranges  = ByteView(range, sizeof(range));
     pair.initiator->on_packet(ack, later);
 
     const auto rearmed = pair.initiator->next_deadline();
@@ -2284,7 +2273,7 @@ TEST(UdpMuxTest, BurstsCoalesceIntoOneEventPerBatchRatherThanOnePerPacket) {
         p.type    = rudp::PacketType::Data;
         p.conn_id = stream_id;
         p.seq     = static_cast<uint32_t>(2 + i);
-        p.window  = rudp::kMaxWindowPackets;
+        p.limit   = rudp::kMaxWindowPackets;
         const uint8_t byte = 'x';
         p.payload = ByteView(&byte, 1);
 
@@ -2354,7 +2343,7 @@ TEST(UdpMuxTest, StagedDatagramsLeaveBeforeTheCallThatMadeThemReturns) {
     ack.conn_id = syn.conn_id - 1;   // the id pairing the dialer chose
     ack.seq     = 1;
     ack.ack     = syn.seq;
-    ack.window  = rudp::kMaxWindowPackets;
+    ack.limit   = rudp::kMaxWindowPackets;
     uint8_t ack_buf[rudp::kMaxDatagram];
     ASSERT_GT(send_udp_to(probe, ack_buf, rudp::encode(ack, ack_buf), net.addr_a,
                           AddressFamily::IPv4), 0);

@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <cstring>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 namespace librats {
 
 namespace {
@@ -25,6 +29,18 @@ Clock::duration clamp_duration(Clock::duration v, A lo, B hi) {
 struct LaterSeq {
     bool operator()(uint32_t a, uint32_t b) const noexcept { return rudp::seq_less(b, a); }
 };
+
+/// Index of the highest set bit of a non-zero word.
+int highest_bit(uint64_t v) noexcept {
+#if defined(_MSC_VER)
+    unsigned long i = 0;
+    if (_BitScanReverse(&i, static_cast<unsigned long>(v >> 32))) return static_cast<int>(i) + 32;
+    _BitScanReverse(&i, static_cast<unsigned long>(v));
+    return static_cast<int>(i);
+#else
+    return 63 - __builtin_clzll(v);
+#endif
+}
 
 } // namespace
 
@@ -75,7 +91,7 @@ UdpStream::OutPacket UdpStream::new_packet(rudp::PacketType type) {
     } else {
         pkt.buf.reserve(rudp::kMaxDatagram);  // headroom + a full payload, allocated once
     }
-    pkt.buf.resize(rudp::kMaxHeaderSize);     // reserve the headroom transmit() writes into
+    pkt.buf.resize(rudp::kHeaderSize);        // reserve the headroom transmit() writes into
     return pkt;
 }
 
@@ -85,47 +101,42 @@ void UdpStream::recycle(OutPacket& pkt) {
     spare_.push_back(std::move(pkt.buf));
 }
 
-uint16_t UdpStream::advertised_window() const noexcept {
-    // What we are still willing to buffer: the reorder slots a gap is holding,
-    // plus whatever the connection has not read out of the in-order buffer yet.
-    const size_t used = reorder_.size() + inbox_.size() / rudp::kMaxPayload;
-    if (used >= rudp::kMaxWindowPackets) return 0;
-    return static_cast<uint16_t>(rudp::kMaxWindowPackets - used);
+uint32_t UdpStream::receive_room() const noexcept {
+    // What we are still willing to buffer past the cumulative ack. Whatever the
+    // connection has not read out of the in-order buffer yet sits behind the ack
+    // and is taken off; what the reorder buffer holds is not, because all of it
+    // already lies inside the span this describes.
+    const size_t unread = inbox_.size() / rudp::kMaxPayload;
+    if (unread >= rudp::kMaxWindowPackets) return 0;
+    return static_cast<uint32_t>(rudp::kMaxWindowPackets - unread);
 }
 
-void UdpStream::fill_common(rudp::Packet& p) const {
+uint32_t UdpStream::advertise_limit() noexcept {
+    // Monotone by construction. Unread data the connection is sitting on moves
+    // the ack forward and the room back by the same amount, so the reach stands
+    // still rather than retreating; reading moves it on.
+    const uint32_t reach = (recv_next_ - 1) + receive_room();
+    if (rudp::seq_less(recv_limit_, reach)) recv_limit_ = reach;
+    return recv_limit_;
+}
+
+void UdpStream::fill_common(rudp::Packet& p, Clock::time_point now) {
     p.conn_id = send_id_;
-    p.window  = advertised_window();
-    // Says we parse acknowledgement ranges. A bit an older peer never looks at,
-    // and the only way a peer learns it may send them to us.
-    p.flags  |= rudp::FlagExtAck;
     // Cumulative: the highest sequence number received with no gap before it.
     // recv_next_ is the first one still missing, so the ack is the one before it
     // (0 while nothing has arrived — sequence numbers start at 1).
-    p.ack = recv_next_ - 1;
+    p.ack   = recv_next_ - 1;
+    p.limit = advertise_limit();
 
-    if (reorder_.empty()) return;
-
-    const uint32_t bits = sack_bitmap();
-    if (bits != 0) {
-        p.flags |= rudp::FlagSack;
-        p.sack = bits;
+    // How long the newest packet we have received has waited for this one to
+    // leave. A peer measuring its round trip off this acknowledgement takes it
+    // back out (see sample_rtt), so a delayed ack reads as the path it crossed
+    // rather than as a slower one.
+    if (have_recv_) {
+        const auto held  = now - largest_recv_at_;
+        const auto units = held <= Clock::duration::zero() ? 0 : held / rudp::kAckDelayUnit;
+        p.ack_delay = static_cast<uint16_t>((std::min<int64_t>)(units, 0xFFFF));
     }
-}
-
-uint32_t UdpStream::sack_bitmap() const noexcept {
-    if (!sack_dirty_) return sack_bits_;
-
-    // Selective ack: bit i covers ack+2+i, i.e. the 32 packets that follow the
-    // hole at recv_next_. Derived from the reorder buffer and recv_next_ alone, so
-    // it is rebuilt only when one of those moves — not on every packet sent.
-    uint32_t bits = 0;
-    for (uint32_t i = 0; i < rudp::kSackBits; ++i)
-        if (is_held(recv_next_ + 1 + i)) bits |= (1u << i);
-
-    sack_bits_  = bits;
-    sack_dirty_ = false;
-    return bits;
 }
 
 bool UdpStream::is_held(uint32_t seq) const noexcept {
@@ -140,30 +151,63 @@ void UdpStream::set_held(uint32_t seq, bool on) noexcept {
     else    held_[idx / 64] &= ~mask;
 }
 
+uint32_t UdpStream::scan_down(uint32_t off, bool held) const noexcept {
+    // Offsets are past recv_next_, and only 1..kMaxWindowPackets-1 of them can be
+    // held; anything a word reaches below offset 1 is the ring wrapping round to
+    // the far end of the window, and is never the answer.
+    const uint32_t base = recv_next_;
+    while (off >= 1) {
+        const uint32_t idx = (base + off) & (rudp::kMaxWindowPackets - 1);
+        const uint32_t bit = idx % 64;
+        uint64_t word = held_[idx / 64];
+        if (!held) word = ~word;
+        if (bit < 63) word &= (uint64_t{1} << (bit + 1)) - 1;   // at or below `off`
+        if (word != 0) {
+            const uint32_t down = bit - static_cast<uint32_t>(highest_bit(word));
+            return down < off ? off - down : 0;
+        }
+        if (off <= bit) return 0;   // this word already reached below offset 1
+        off -= bit + 1;
+    }
+    return 0;
+}
+
 size_t UdpStream::ack_ranges() const noexcept {
     if (!ranges_dirty_) return range_count_;
 
-    // Every run of packets held past the hole, nearest first. The ring is indexed
-    // by sequence number, so the runs fall out of one pass over at most a window
-    // of bits — and a whole word of them at a time where they are all empty,
-    // which is most of the window most of the time.
-    size_t         count = 0;
-    const uint32_t base  = recv_next_;
-    uint32_t       off   = 1;
-    while (off < rudp::kMaxWindowPackets && count < rudp::kMaxAckRanges) {
-        const uint32_t idx = (base + off) & (rudp::kMaxWindowPackets - 1);
-        if (idx % 64 == 0 && off + 64 <= rudp::kMaxWindowPackets && held_[idx / 64] == 0) {
-            off += 64;
-            continue;
+    // Every run of packets held past the hole, newest first: the newest delivery
+    // is what the peer's loss detection reads, and a run the list has no room for
+    // is an old one, which earlier acknowledgements named when it was new. Each
+    // run costs two word-at-a-time scans of the ring, so building the list is
+    // bounded by the runs it names and the window's words, not its packets.
+    size_t   count  = 0;
+    uint32_t lowest = 0;   ///< offset the last run named starts at
+    const auto emit = [&](size_t slot, uint32_t lo, uint32_t hi) {
+        rudp::encode_ack_range(rudp::AckRange{static_cast<uint16_t>(lo),
+                                              static_cast<uint16_t>(hi - lo + 1)},
+                               range_buf_.data() + slot * rudp::kAckRangeSize);
+    };
+    if (!reorder_.empty()) {
+        uint32_t off = static_cast<uint32_t>(rudp::seq_diff(largest_recv_, recv_next_));
+        while (count < rudp::kMaxAckRanges) {
+            const uint32_t hi = scan_down(off, true);
+            if (hi == 0) break;
+            const uint32_t lo = scan_down(hi, false) + 1;
+            emit(count++, lo, hi);
+            lowest = lo;
+            off    = lo - 1;
         }
-        if (!is_held(base + off)) { ++off; continue; }
 
-        const uint32_t start = off;
-        while (off < rudp::kMaxWindowPackets && is_held(base + off)) ++off;
-        rudp::encode_ack_range(rudp::AckRange{static_cast<uint16_t>(start),
-                                              static_cast<uint16_t>(off - start)},
-                               range_buf_.data() + count * rudp::kAckRangeSize);
-        ++count;
+        // The run the newest arrival landed in, if the list ran out before reaching
+        // it — a repair filling a hole deep in the window. It is the one the peer is
+        // waiting to hear about (until it does, the repair looks lost too), so it
+        // takes the place of the oldest run named (RFC 2018's first-block rule).
+        const int32_t latest = rudp::seq_diff(latest_recv_, recv_next_);
+        if (count == rudp::kMaxAckRanges && latest > 0 &&
+            static_cast<uint32_t>(latest) < lowest && is_held(latest_recv_)) {
+            const uint32_t at = static_cast<uint32_t>(latest);
+            emit(count - 1, scan_down(at, false) + 1, at);
+        }
     }
 
     range_count_  = count;
@@ -171,33 +215,18 @@ size_t UdpStream::ack_ranges() const noexcept {
     return count;
 }
 
-bool UdpStream::holes_past_sack() const noexcept {
-    if (!peer_ext_ack_ || reorder_.empty()) return false;
-    // The sack word covers offsets 1..kSackBits past the hole at recv_next_. The
-    // runs come out nearest first, so the last one is the one that reaches furthest.
-    const size_t n = ack_ranges();
-    if (n == 0) return false;
-    rudp::Packet p;
-    p.ranges = ByteView(range_buf_.data(), n * rudp::kAckRangeSize);
-    const rudp::AckRange last = rudp::ack_range(p, n - 1);
-    return size_t{last.offset} + last.length > size_t{rudp::kSackBits} + 1;
-}
-
 void UdpStream::transmit(OutPacket& pkt, Clock::time_point now) {
     rudp::Packet p;
     p.type = pkt.type;
-    fill_common(p);   // may raise FlagSack, which is what decides the header length
+    fill_common(p, now);
     p.seq = pkt.seq;
 
-    // The payload is already sitting in pkt.buf behind kMaxHeaderSize bytes of
+    // The payload is already sitting in pkt.buf behind kHeaderSize bytes of
     // headroom, so the header goes in immediately ahead of it and the datagram
     // leaves as one contiguous range. Nothing is copied here — not on the first
     // transmission, and not on any retransmission.
-    const size_t   hdr   = rudp::header_size(p);
-    uint8_t* const start = pkt.buf.data() + (rudp::kMaxHeaderSize - hdr);
-    rudp::encode_header(p, start);
-
-    host_.send_datagram(remote_, start, hdr + pkt.size());
+    const size_t hdr = rudp::encode_header(p, pkt.buf.data());
+    host_.send_datagram(remote_, pkt.buf.data(), hdr + pkt.size());
     const uint64_t flight_before = flight_bytes_;
 
     // Everything that reaches the wire is metered, retransmissions included: a
@@ -266,15 +295,15 @@ void UdpStream::send_control(rudp::PacketType type, Clock::time_point now) {
 
     rudp::Packet p;
     p.type = type;
-    fill_common(p);
+    fill_common(p, now);
     // A control packet consumes no sequence number: it carries the next one we
     // *will* use, purely so a peer can see where the stream stands. Nothing
     // retransmits it — a lost ack is repaired by the next one.
     p.seq = next_seq_;
 
     // A pure acknowledgement is the one packet with room to name every hole, and
-    // the one place a peer that understands ranges gets them (see udp_packet.h).
-    if (type == rudp::PacketType::Ack && peer_ext_ack_ && !reorder_.empty()) {
+    // the one place the peer learns of them (see udp_packet.h).
+    if (type == rudp::PacketType::Ack && !reorder_.empty()) {
         const size_t n = ack_ranges();
         if (n > 0) p.ranges = ByteView(range_buf_.data(), n * rudp::kAckRangeSize);
     }
@@ -317,8 +346,8 @@ bool UdpStream::window_allows() const noexcept {
     if (state_ != State::Connected) return false;   // nothing may overtake the Syn
     if (unsent_.empty()) return false;
 
-    // A receiver that advertises zero has said it will buffer nothing more, and
-    // that is absolute: it is the only bound on the memory one peer can make
+    // A receiver whose limit we have reached has said it will buffer nothing
+    // more, and that is absolute: it is the only bound on the memory one peer can make
     // another spend on it, so an empty pipe is no licence to send anyway. It would
     // not stay a single probe if it were — the packet is ordinary in-order data,
     // the peer acknowledges it and holds it, the pipe empties, and the next one
@@ -330,16 +359,13 @@ bool UdpStream::window_allows() const noexcept {
     // Nothing is needed from this side to get going again: a receiver whose reader
     // drains a full buffer announces the re-opened window at once and unprompted
     // (see read(), and UdpStreamLink::read for the wake-up that carries it), and
-    // its keep-alive carries the window if that announcement is lost.
-    if (peer_window_ == 0) return false;
-
-    if (sent_.empty()) return true;
-    // The receiver's window already leaves out what it is holding past a hole, and
-    // those are exactly the packets we know as selectively acknowledged — so they
-    // are counted once, there, not a second time here. (Counting them on both
-    // sides halved the usable window under loss, when it is needed most.)
-    if (sent_.size() - sacked_in_queue_ >= peer_window_) return false;
-    if (sent_.size() >= rudp::kMaxWindowPackets) return false;
+    // its keep-alive carries the limit if that announcement is lost.
+    //
+    // The limit is the peer's to set and only ever moves forward, so this is the
+    // whole check: the next packet takes next_seq_, and may go if that is within
+    // it. Repairs are never held by it — every one of them was within the limit
+    // when it first went out, and still is.
+    if (!have_peer_limit_ || rudp::seq_less(peer_limit_, next_seq_)) return false;
     return cwnd_allows(unsent_.front().size());
 }
 
@@ -480,8 +506,8 @@ void UdpStream::note_send_limits() {
 
     // Something is waiting and the window is what keeps it waiting — not the
     // pacer, which time resolves, and not the receiver, which only it can.
-    if (!unsent_.empty() && peer_window_ != 0 && sent_.size() < peer_window_ &&
-        sent_.size() < rudp::kMaxWindowPackets && !cwnd_allows(unsent_.front().size()))
+    if (!unsent_.empty() && have_peer_limit_ && rudp::seq_le(next_seq_, peer_limit_) &&
+        !cwnd_allows(unsent_.front().size()))
         cwnd_limited_ = true;
 
     // Nothing to send, nothing owed, and room in the window: the sender is
@@ -564,11 +590,8 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
     }
 
     bool ack_now = (p.type == rudp::PacketType::Syn || p.type == rudp::PacketType::Fin);
-    // The peer has to hear about a hole only ranges can name (see below).
+    // The peer has to hear about a hole, which only a pure Ack can name (see below).
     bool ranges_owed = false;
-
-    // The peer parses acknowledgement ranges, so our pure acks may carry them.
-    if (p.ext_ack()) peer_ext_ack_ = true;
 
     handle_ack(p, now);
 
@@ -585,13 +608,13 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
         p.type == rudp::PacketType::Fin) {
         // The peer is sending again, so it is not stopped on a window we re-opened
         // and there is nothing left to announce. A bare acknowledgement deliberately
-        // does not count: a sender stuck on a stale zero window still keep-alives,
-        // and taking that as proof would call off the very repeats meant for it.
+        // does not count: a sender stopped at our limit still keep-alives, and
+        // taking that as proof would call off the very repeats meant for it.
         window_announces_ = 0;
 
         const uint32_t before   = recv_next_;
         const bool     had_hole = !reorder_.empty();
-        handle_sequenced(p);
+        handle_sequenced(p, now);
         // A packet that did not fill the gap it was expected to means the peer is
         // missing something: say so at once rather than waiting out the delayed
         // ack, since that ack is what triggers its fast retransmit. And one that
@@ -600,9 +623,9 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
         // stall a recovery and push it towards its timeout.
         if (recv_next_ == before || had_hole) {
             ack_now = true;
-            // Decided before pump(): the Data it may send carries the ack too, but
-            // only the sack word, which says nothing past 32 packets.
-            ranges_owed = holes_past_sack();
+            // Decided before pump(): the Data it may send carries the cumulative
+            // ack too, but nothing about what is held past the hole.
+            ranges_owed = !reorder_.empty();
         }
     }
 
@@ -621,7 +644,7 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
         else if (ack_due_ == kNoDeadline)     ack_due_ = now + kDelayedAck;
     } else if (ranges_owed) {
         // The acknowledgement went out on our own Data, so nothing is owed by the
-        // usual rule — but that Data could not carry the hole. A peer sending to us
+        // usual rule — but that Data could not name the hole. A peer sending to us
         // while we send to it would otherwise find it only once the hole in front
         // of it fills, a round trip later; one pure ack, sent only for news about
         // holes, is what ranges exist for.
@@ -636,28 +659,17 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     // honouring it would retire packets that were never sent.
     if (rudp::seq_less(next_seq_ - 1, p.ack)) return;
 
-    // What the receiver will still buffer — taken only from a packet that is not
-    // from the past. A path that duplicates or reorders a datagram hands back a
-    // window from before the one we are already acting on, and latching that would
-    // stop a sender the receiver has since made room for. With no probe left to
-    // discover the mistake (see window_allows) the stream would then sit until the
-    // peer's next keep-alive, ten seconds of silence bought by one stale packet.
-    //
-    // The cumulative acknowledgement is what dates them: it never moves backwards
-    // at the peer, so one that has moved backwards arrived out of order. Only
-    // *strictly* older is refused — a retransmission carries a header built when it
-    // was sent, so its window is current even though the packet is not, and TCP's
-    // stricter reading of this (SND.WL1) would throw that away. Two packets sharing
-    // an ack are genuinely indistinguishable here, which is what the receiver's
-    // repeated announcement covers from the other end (see read()).
-    //
-    // Deliberately below the check above rather than in on_packet(): a forged or
-    // corrupt ack from the future must not be allowed to set the mark, or every
-    // legitimate update after it would look stale and the window would freeze for
-    // the life of the stream.
-    if (!rudp::seq_less(p.ack, window_ack_)) {
-        peer_window_ = p.window;
-        window_ack_  = p.ack;
+    // How far the receiver will let us go. Its limit only ever moves forward, so
+    // the largest one seen is the current one, and a packet that was reordered or
+    // duplicated on the way — carrying an older, lower limit — changes nothing.
+    // One that is not even ahead of its own cumulative ack, or that claims more
+    // room than any receive buffer has, is corrupt or forged and is not believed:
+    // a limit from the far future would otherwise be latched for good.
+    const int32_t room = rudp::seq_diff(p.limit, p.ack);
+    if (room >= 0 && room <= kMaxPeerRoom &&
+        (!have_peer_limit_ || rudp::seq_less(peer_limit_, p.limit))) {
+        peer_limit_      = p.limit;
+        have_peer_limit_ = true;
     }
 
     size_t newly_acked = 0;   ///< bytes the cumulative ack retired, not already sacked
@@ -697,16 +709,15 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     }
 
     // Selective acknowledgements. Every packet in the queue occupies exactly one
-    // sequence number, so the packet a bit or a range names is found by
-    // subtraction rather than by search.
-    if (p.has_sack() && !sent_.empty()) {
-        const uint32_t base = p.ack + 2;
-        for (uint32_t i = 0; i < rudp::kSackBits; ++i)
-            if (p.sack & (1u << i)) sack_one(base + i, now);
-    }
-    for (size_t r = 0, n = p.range_count(); r < n && !sent_.empty(); ++r) {
+    // sequence number, so the packet a range names is found by subtraction rather
+    // than by search.
+    uint32_t largest = p.ack;   ///< the newest packet this acknowledgement names
+    for (size_t r = 0, n = p.range_count(); r < n; ++r) {
         const rudp::AckRange range = rudp::ack_range(p, r);
         const uint32_t first = p.ack + 1 + range.offset;
+        const uint32_t last  = first + range.length - 1;
+        if (rudp::seq_less(largest, last)) largest = last;
+        if (sent_.empty()) continue;
         // Clipped to the queue once, so a range that reaches past what we sent (or
         // starts before what is left of it) costs nothing per out-of-range packet.
         const int32_t lo = (std::max)(rudp::seq_diff(first, sent_.front().seq), int32_t{0});
@@ -729,7 +740,18 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     // packet it covers waited at the receiver for that one (or for a hole to fill),
     // and measuring them would add the wait to the estimate. Karn's rule on top: a
     // retransmitted packet cannot say which copy is being answered.
-    if (ack_newest_.have && ack_newest_.sends == 1) sample_rtt(now - ack_newest_.sent_at);
+    //
+    // The delay the peer reports is how long the newest packet it holds waited
+    // for this acknowledgement, so it describes our sample only when that is the
+    // packet sampled — and never more than the peer is allowed to hold one for
+    // (RFC 9002 5.3), so a peer cannot talk our estimate down by claiming more.
+    if (ack_newest_.have && ack_newest_.sends == 1) {
+        Clock::duration delay{};
+        if (ack_newest_.seq == largest)
+            delay = (std::min)(Clock::duration(p.ack_delay * rudp::kAckDelayUnit),
+                               Clock::duration(kDelayedAck));
+        sample_rtt(now - ack_newest_.sent_at, delay);
+    }
 
     // What this acknowledgement delivered earns sends in a recovery already under
     // way (one opened by this acknowledgement is credited in enter_recovery).
@@ -738,45 +760,9 @@ void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {
     // What the acknowledgements around a missing packet say about it.
     detect_losses(now);
 
-    if (newly_acked > 0) {
-        dup_acks_      = 0;
-        last_ack_recv_ = p.ack;
-        // Progress means the path is alive: drop back to the estimated RTO,
-        // undoing any doubling a previous timeout applied.
-        if (rtt_.have_rtt)
-            rtt_.rto = estimated_rto();
-    } else if (p.type == rudp::PacketType::Ack && p.ack == last_ack_recv_ && p.ack != 0 &&
-               !sent_.empty()) {
-        // A *pure* ack whose cumulative number stood still: the peer is receiving
-        // packets past a hole and re-reporting the same edge. Three of those is the
-        // classic loss signal, and the fallback for a peer whose acknowledgements
-        // name nothing selectively.
-        //
-        // The type check is what makes this a loss signal rather than a coincidence,
-        // and RFC 5681 defines a duplicate ack that way for exactly this reason. Every
-        // packet here carries the ack field, so on a two-way stream the peer's own
-        // Data rides over the same number until our next packet reaches it — three of
-        // *those* say nothing about loss, they only say the peer had something of its
-        // own to send. Counting them halved the window and re-sent a packet that was
-        // merely still in flight, on a stream where nothing had been dropped at all —
-        // which on a peer-to-peer link (gossip during a transfer, any request while a
-        // response streams back) is the normal case rather than the corner one.
-        //
-        // Nothing is lost by being strict: a hole makes the receiver acknowledge at
-        // once (see on_packet), so a one-way flow still produces the pure acks this
-        // counts, and a two-way one is covered by detect_losses() above, which reads
-        // the missing packets off the selective acknowledgements outright.
-        //
-        // A first transmission only, like the count rule in detect_losses(): once
-        // the front has been repaired, the duplicates keep coming until the repair
-        // lands, and counting them again would re-send a packet that is merely
-        // still on its way. A lost repair is RACK's to find.
-        OutPacket& front = sent_.front();
-        if (++dup_acks_ == 3 && !front.acked && front.in_flight && front.sends == 1) {
-            mark_lost(front, now);
-            enter_recovery(now);
-        }
-    }
+    // Progress means the path is alive: drop back to the estimated RTO, undoing
+    // any doubling a previous timeout applied.
+    if (newly_acked > 0 && rtt_.have_rtt) rtt_.rto = estimated_rto();
 
     // The controller hears the totals once everything the ack implies has been
     // applied — retirements, selective acks, losses, the episode they opened.
@@ -836,7 +822,7 @@ void UdpStream::handle_retry(const rudp::Packet& p, Clock::time_point now) {
     // empty until now, and the send accounting has to learn about the bytes: the
     // cumulative ack that eventually retires this packet subtracts size() from both
     // counters, so anything that grows a queued packet must add to them first.
-    syn.buf.resize(rudp::kMaxHeaderSize);
+    syn.buf.resize(rudp::kHeaderSize);
     syn.buf.insert(syn.buf.end(), p.payload.begin(), p.payload.end());
     queued_bytes_ += rudp::kCookieSize;
     // Only if the packet is currently counted as in flight: if a timeout has just
@@ -871,6 +857,7 @@ void UdpStream::on_newly_acked(OutPacket& pkt, Clock::time_point now) {
     // The newest packet this acknowledgement covers, by transmission time.
     if (!ack_newest_.have || pkt.tx.sent_at > ack_newest_.sent_at) {
         ack_newest_.have    = true;
+        ack_newest_.seq     = pkt.seq;
         ack_newest_.sent_at = pkt.tx.sent_at;
         ack_newest_.sends   = pkt.sends;
     }
@@ -889,15 +876,6 @@ void UdpStream::on_newly_acked(OutPacket& pkt, Clock::time_point now) {
         rack_sent_at_ = pkt.tx.sent_at;
         have_rack_    = true;
     }
-}
-
-void UdpStream::sack_one(uint32_t seq, Clock::time_point now) {
-    const int32_t idx = rudp::seq_diff(seq, sent_.front().seq);
-    if (idx < 0 || static_cast<size_t>(idx) >= sent_.size()) return;
-    OutPacket& pkt = sent_[static_cast<size_t>(idx)];
-    if (pkt.acked) return;
-    on_newly_acked(pkt, now);
-    ++sacked_in_queue_;
 }
 
 size_t UdpStream::next_unacked(size_t idx) noexcept {
@@ -1016,10 +994,29 @@ void UdpStream::mark_lost(OutPacket& pkt, Clock::time_point now) {
     declare_lost(pkt, now);
 }
 
-void UdpStream::handle_sequenced(const rudp::Packet& p) {
+void UdpStream::handle_sequenced(const rudp::Packet& p, Clock::time_point now) {
     need_ack_ = true;
 
     if (rudp::seq_less(p.seq, recv_next_)) return;  // already delivered; just re-ack
+
+    // Past the limit we advertised: a peer ignoring flow control, and buffering
+    // it would let one peer decide how much memory we spend. The limit is brought
+    // up to date first — a packet the buffer has room for is not refused merely
+    // because no acknowledgement has said so yet.
+    if (rudp::seq_less(advertise_limit(), p.seq)) return;
+    const int32_t ahead = rudp::seq_diff(p.seq, recv_next_);
+    if (ahead >= rudp::kMaxWindowPackets) return;   // the limit already ensures this
+    if (ahead > 0 && is_held(p.seq)) return;       // a duplicate of one held: news to nobody
+
+    // Something new arrived. The newest of them is what the ack delay is measured
+    // from; the latest, whichever it is, is the run an Ack always names.
+    latest_recv_ = p.seq;
+    if (!have_recv_ || rudp::seq_less(largest_recv_, p.seq)) {
+        largest_recv_    = p.seq;
+        largest_recv_at_ = now;
+        have_recv_       = true;
+    }
+    ranges_dirty_ = true;
 
     // Only Data carries stream content. A Syn occupies a sequence number like any
     // other packet, but what it carries is the address-validation cookie the mux
@@ -1027,31 +1024,20 @@ void UdpStream::handle_sequenced(const rudp::Packet& p) {
     // of nonsense into the front of the peer's handshake.
     const ByteView body = (p.type == rudp::PacketType::Data) ? p.payload : ByteView{};
 
-    if (p.seq == recv_next_) {
+    if (ahead == 0) {
         ++unacked_packets_;
         deliver(body, p.type == rudp::PacketType::Fin);
         ++recv_next_;
-        // Both selective forms are relative to recv_next_, which just moved.
-        sack_dirty_   = true;
-        ranges_dirty_ = true;
         drain_reorder();
         return;
     }
 
-    // Past the gap: hold it, but only within the window we advertised — anything
-    // beyond that is a peer ignoring flow control, and buffering it would let one
-    // peer decide how much memory we spend.
-    const int32_t ahead = rudp::seq_diff(p.seq, recv_next_);
-    if (ahead <= 0 || ahead >= rudp::kMaxWindowPackets) return;
-    if (is_held(p.seq)) return;
-
+    // Past the gap: hold it until the gap fills.
     InPacket held;
     held.payload = body.to_bytes();
     held.fin     = (p.type == rudp::PacketType::Fin);
     reorder_.emplace(p.seq, std::move(held));
     set_held(p.seq, true);
-    sack_dirty_   = true;
-    ranges_dirty_ = true;
 }
 
 void UdpStream::deliver(ByteView payload, bool fin) {
@@ -1077,8 +1063,6 @@ void UdpStream::drain_reorder() {
         reorder_.erase(it);
         set_held(recv_next_, false);
         ++recv_next_;
-        sack_dirty_   = true;
-        ranges_dirty_ = true;
     }
 }
 
@@ -1087,10 +1071,10 @@ size_t UdpStream::read(uint8_t* into, size_t len) {
     if (n == 0) return 0;
 
     std::memcpy(into, inbox_.data(), n);
-    const uint16_t before = advertised_window();
+    const uint32_t before = receive_room();
     inbox_.consume(n);
     // Draining the buffer may have re-opened a window we had advertised as full.
-    // The peer is waiting on that number, so it has to be told without waiting for
+    // The peer is waiting on that limit, so it has to be told without waiting for
     // traffic that will never come while it is stopped — hence an owed ack with no
     // deadline attached, which the next tick() sends outright rather than holding
     // for company (see there). Leaving ack_due_ unset is the *signal*, not an
@@ -1099,11 +1083,9 @@ size_t UdpStream::read(uint8_t* into, size_t len) {
     // And again after that, a few times, if the peer stays quiet. Nothing
     // retransmits a bare acknowledgement, and the sender this one is for is stopped
     // — so were it dropped, the only thing left to restart the transfer would be
-    // the keep-alive ten seconds out. The repeats also cover the one case the
-    // sender cannot: two packets carrying the same acknowledgement and different
-    // windows, which it has no way to tell apart (see handle_ack). Cleared as soon
-    // as the peer sends anything sequenced, which is proof it heard us.
-    if (before == 0 && advertised_window() > 0) {
+    // the keep-alive ten seconds out. Cleared as soon as the peer sends anything
+    // sequenced, which is proof it heard us.
+    if (before == 0 && receive_room() > 0) {
         need_ack_         = true;
         window_announces_ = kMaxWindowAnnounces;
         window_due_       = kNoDeadline;   // the first one goes at once
@@ -1113,7 +1095,7 @@ size_t UdpStream::read(uint8_t* into, size_t len) {
 
 // ── Timing, congestion control, lifecycle ───────────────────────────────────
 
-void UdpStream::sample_rtt(Clock::duration rtt) {
+void UdpStream::sample_rtt(Clock::duration rtt, Clock::duration ack_delay) {
     if (rtt < Clock::duration::zero()) return;
 
     if (!rtt_.have_rtt) {
@@ -1121,11 +1103,20 @@ void UdpStream::sample_rtt(Clock::duration rtt) {
         rtt_.rttvar   = rtt / 2;
         rtt_.have_rtt = true;
     } else {
+        // RFC 9002 5.3: the peer's ack delay comes off the sample, but never so far
+        // that the result is shorter than the shortest round trip ever seen — a
+        // delay that would is one the clocks cannot account for, and believing it
+        // would put the estimate below anything the path has ever done.
+        auto adjusted = rtt;
+        if (rtt >= rtt_.min_rtt + ack_delay) adjusted -= ack_delay;
         // RFC 6298: rttvar = 3/4 rttvar + 1/4 |srtt - r| ; srtt = 7/8 srtt + 1/8 r.
-        const auto err = rtt_.srtt > rtt ? rtt_.srtt - rtt : rtt - rtt_.srtt;
+        const auto err = rtt_.srtt > adjusted ? rtt_.srtt - adjusted : adjusted - rtt_.srtt;
         rtt_.rttvar = (rtt_.rttvar * 3 + err) / 4;
-        rtt_.srtt   = (rtt_.srtt * 7 + rtt) / 8;
+        rtt_.srtt   = (rtt_.srtt * 7 + adjusted) / 8;
     }
+    // The minimum and the controller see the raw sample: a minimum is only a
+    // floor while nothing has been subtracted from it, and BBR's model of the
+    // path is built from the round trips it actually observed.
     rtt_.latest  = rtt;
     rtt_.min_rtt = (std::min)(rtt_.min_rtt, rtt);
     rtt_.rto     = estimated_rto();
@@ -1404,8 +1395,6 @@ void UdpStream::die(CloseReason reason) {
     unsent_.clear();
     reorder_.clear();
     spare_.clear();
-    sack_bits_    = 0;
-    sack_dirty_   = false;
     flight_bytes_ = 0;
     queued_bytes_ = 0;
     rto_deadline_ = kNoDeadline;

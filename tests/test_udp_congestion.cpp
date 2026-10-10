@@ -383,11 +383,9 @@ namespace {
 
 /// Lose chosen first transmissions of one flow's Data, by offset from the first
 /// Data packet sent after this is installed (an offset listed twice also loses
-/// that packet's first repair). Optionally makes the sender look like a peer from
-/// before acknowledgement ranges, by clearing the flag that says it parses them.
+/// that packet's first repair).
 struct HoleMaker {
     std::vector<size_t>     holes;
-    bool                    hide_ext_ack = false;
     bool                    armed        = false;
     uint32_t                base         = 0;
     std::map<uint32_t, int> sends;
@@ -402,7 +400,6 @@ struct HoleMaker {
                 if (p.range_count() > 0) saw_ranges = true;
                 return false;
             }
-            if (hide_ext_ack) d[1] &= static_cast<uint8_t>(~rudp::FlagExtAck);
             if (p.type != rudp::PacketType::Data || holes.empty()) return false;
             if (!armed) {
                 armed = true;
@@ -419,68 +416,55 @@ struct HoleMaker {
 
 } // namespace
 
-// Holes far apart in one window, each past the sack word's reach of the next.
-// With acknowledgement ranges the receiver names every one of them at once and
-// they are repaired within the same round trip; with only the sack word, each one
-// becomes visible only when the hole in front of it fills — a round trip per hole,
-// which on a lossy path is what turns a large window into a crawl. The second run
-// is also the compatibility test: a peer that never said it parses ranges is never
-// sent one, and still gets its data.
-TEST(UdpLossRecoveryTest, HolesPastTheSackWordAreRepairedInTheSameRoundTrip) {
-    for (const bool old_peer : {false, true}) {
-        SCOPED_TRACE(old_peer ? "peer without ranges" : "peer with ranges");
-        // 100 Mbit/s at 100 ms holds more than a receive window, so the sender is
-        // window-limited with no standing queue: a clean round trip to time by.
-        Sim sim(100, 100ms, 2000);
-        HoleMaker holes;
-        holes.hide_ext_ack = old_peer;
-        holes.install(sim.path);
+// Holes far apart in one window. The receiver names every one of them at once in
+// its ranges, so they are repaired within the same round trip — rather than each
+// becoming visible only when the hole in front of it fills, a round trip per hole,
+// which on a lossy path is what turns a large window into a crawl.
+TEST(UdpLossRecoveryTest, HolesFarApartAreRepairedInTheSameRoundTrip) {
+    // 100 Mbit/s at 100 ms holds more than a receive window, so the sender is
+    // window-limited with no standing queue: a clean round trip to time by.
+    Sim sim(100, 100ms, 2000);
+    HoleMaker holes;
+    holes.install(sim.path);
 
-        Flow& f = sim.add(CongestionAlgorithm::Reno);
-        f.to_send = SIZE_MAX;
-        sim.run(2s);   // a window well past what one sack word can describe
-        ASSERT_GT(f.tx.cwnd(), 400u * rudp::kMaxPayload);
-        ASSERT_EQ(f.tx.retransmits(), 0u);
+    Flow& f = sim.add(CongestionAlgorithm::Reno);
+    f.to_send = SIZE_MAX;
+    sim.run(2s);   // a window far wider than the spread of the holes
+    ASSERT_GT(f.tx.cwnd(), 400u * rudp::kMaxPayload);
+    ASSERT_EQ(f.tx.retransmits(), 0u);
 
-        holes.holes = {0, 60, 120, 180, 240, 300};
-        holes.armed = false;
-        const uint32_t before = f.tx.retransmits();
-        Clock::time_point first{}, last{};
-        uint32_t          seen = 0;
-        sim.on_step = [&] {
-            const uint32_t now_rtx = f.tx.retransmits() - before;
-            if (now_rtx == seen) return;
-            if (seen == 0) first = sim.now;
-            last = sim.now;
-            seen = now_rtx;
-        };
-        sim.run(3s);
-        sim.on_step = nullptr;
+    holes.holes = {0, 60, 120, 180, 240, 300};
+    holes.armed = false;
+    const uint32_t before = f.tx.retransmits();
+    Clock::time_point first{}, last{};
+    uint32_t          seen = 0;
+    sim.on_step = [&] {
+        const uint32_t now_rtx = f.tx.retransmits() - before;
+        if (now_rtx == seen) return;
+        if (seen == 0) first = sim.now;
+        last = sim.now;
+        seen = now_rtx;
+    };
+    sim.run(3s);
+    sim.on_step = nullptr;
 
-        ASSERT_EQ(f.tx.retransmits() - before, holes.holes.size())
-            << "something was repaired that was never lost, or a hole was not";
-        ASSERT_NE(first, Clock::time_point{});
-        if (old_peer) {
-            EXPECT_FALSE(holes.saw_ranges) << "ranges sent to a peer that never said it parses them";
-            EXPECT_GE(last - first, 4 * sim.rtt) << "without ranges the holes surface a round trip apart";
-        } else {
-            EXPECT_TRUE(holes.saw_ranges);
-            EXPECT_LE(last - first, sim.rtt) << "holes named together were repaired rounds apart";
-        }
-        EXPECT_EQ(f.tx.congestion_events(), 1u) << "one episode, and no timeout";
-        EXPECT_FALSE(f.tx.dead());
-    }
+    ASSERT_EQ(f.tx.retransmits() - before, holes.holes.size())
+        << "something was repaired that was never lost, or a hole was not";
+    ASSERT_NE(first, Clock::time_point{});
+    EXPECT_TRUE(holes.saw_ranges);
+    EXPECT_LE(last - first, sim.rtt) << "holes named together were repaired rounds apart";
+    EXPECT_EQ(f.tx.congestion_events(), 1u) << "one episode, and no timeout";
+    EXPECT_FALSE(f.tx.dead());
 }
 
 // The round-trip estimate comes from the newest packet an acknowledgement covers.
-// Without ranges, the packets past the sack word's reach behind a hole are only
-// acknowledged once the hole fills — a round trip late — and measuring every one
-// of them against that acknowledgement used to drag the estimate, the timeout and
-// every pacing rate derived from it up by a round trip per hole.
+// The cumulative acknowledgement that finally retires everything held behind a
+// hole comes a round trip late, and measuring every packet it covers against it
+// used to drag the estimate, the timeout and every pacing rate derived from it up
+// by a round trip per hole.
 TEST(UdpLossRecoveryTest, AHoleDoesNotInflateTheRoundTripEstimate) {
     Sim sim(100, 100ms, 2000);   // window-limited: no queue to inflate it either
     HoleMaker holes;
-    holes.hide_ext_ack = true;   // the late cumulative acknowledgement is the point
     holes.install(sim.path);
     Flow& f = sim.add(CongestionAlgorithm::Reno);
     f.to_send = SIZE_MAX;
@@ -598,68 +582,180 @@ void feed(UdpStream& s, const rudp::Packet& p, Clock::time_point now) {
 
 // Ranges ride only on a pure acknowledgement, and a receiver with data of its own
 // may not send one: when the packet that reveals a hole also opens its window, what
-// it acknowledges goes out on its next Data packet instead — which has room for the
-// sack word and nothing more, and the sack word cannot reach past 32 packets. That
-// is the two-way case (a file one way, requests and gossip the other), and the
-// sender would be left to find such a hole a round trip later, when the one in
-// front of it fills. So a hole the sack word cannot name gets a pure
-// acknowledgement of its own, whatever else is leaving.
-TEST(UdpLossRecoveryTest, AHolePastTheSackWordIsNamedEvenWhenDataCarriesTheAck) {
-    for (const bool ext_peer : {true, false}) {
-        SCOPED_TRACE(ext_peer ? "peer with ranges" : "peer without ranges");
-        Capture       host;
-        const Address peer{*IpAddress::parse("10.0.0.1"), 1111};
-        auto          now = Clock::time_point{} + 1s;
-        const uint8_t ext = ext_peer ? rudp::FlagExtAck : rudp::FlagNone;
+// it acknowledges goes out on its next Data packet instead — which carries the
+// cumulative ack and nothing about what is held past it. That is the two-way case
+// (a file one way, requests and gossip the other), and the sender would be left to
+// find the hole a round trip later, when the one in front of it fills. So a hole
+// gets a pure acknowledgement of its own, whatever else is leaving — even one
+// directly behind the cumulative ack.
+TEST(UdpLossRecoveryTest, AHoleIsNamedEvenWhenDataCarriesTheAck) {
+    Capture       host;
+    const Address peer{*IpAddress::parse("10.0.0.1"), 1111};
+    auto          now = Clock::time_point{} + 1s;
 
-        UdpStream rx(host, peer, 11, 10, ConnRole::Inbound, now, DialProfile{},
-                     CongestionAlgorithm::Reno);
-        rudp::Packet syn;
-        syn.type = rudp::PacketType::Syn;
-        syn.flags = ext;
-        syn.conn_id = 11;
-        syn.seq = 1;
-        syn.window = rudp::kMaxWindowPackets;
-        feed(rx, syn, now);
-        ASSERT_TRUE(rx.connected());
+    UdpStream rx(host, peer, 11, 10, ConnRole::Inbound, now, DialProfile{},
+                 CongestionAlgorithm::Reno);
+    rudp::Packet syn;
+    syn.type    = rudp::PacketType::Syn;
+    syn.conn_id = 11;
+    syn.seq     = 1;
+    syn.limit   = rudp::kMaxWindowPackets;
+    feed(rx, syn, now);
+    ASSERT_TRUE(rx.connected());
 
-        // The receiver has a transfer of its own queued, stopped by its window.
-        std::vector<uint8_t> data(64 * 1024, 0xCD);
-        const ByteView v(data.data(), data.size());
-        ASSERT_GT(rx.write(&v, 1, now), 0u);
-        ASSERT_GT(rx.queued_bytes(), rx.bytes_in_flight()) << "nothing was left waiting";
+    // The receiver has a transfer of its own queued, stopped by its window.
+    std::vector<uint8_t> data(64 * 1024, 0xCD);
+    const ByteView v(data.data(), data.size());
+    ASSERT_GT(rx.write(&v, 1, now), 0u);
+    ASSERT_GT(rx.queued_bytes(), rx.bytes_in_flight()) << "nothing was left waiting";
 
-        // One packet from the peer: it acknowledges two of the receiver's packets —
-        // room for more of its data — and arrives 40 past a hole.
-        const std::vector<uint8_t> payload(100, 0xAB);
+    // One packet from the peer: it acknowledges two of the receiver's packets —
+    // room for more of its data — and arrives one past a hole.
+    const std::vector<uint8_t> payload(100, 0xAB);
+    rudp::Packet pkt;
+    pkt.type    = rudp::PacketType::Data;
+    pkt.conn_id = 11;
+    pkt.seq     = 3;   // 2 is the hole
+    pkt.ack     = 2;
+    pkt.limit   = 2 + rudp::kMaxWindowPackets;
+    pkt.payload = ByteView(payload.data(), payload.size());
+    host.out.clear();
+    now += 10ms;
+    feed(rx, pkt, now);
+
+    size_t data_out = 0;
+    bool   named    = false;
+    for (const Bytes& d : host.out) {
+        rudp::Packet p;
+        ASSERT_TRUE(rudp::decode(d.data(), d.size(), p));
+        if (p.type == rudp::PacketType::Data) ++data_out;
+        if (p.type != rudp::PacketType::Ack || p.range_count() == 0) continue;
+        const rudp::AckRange r = rudp::ack_range(p, 0);
+        named = p.ack == 1 && r.offset == 1 && r.length == 1;
+    }
+    ASSERT_GT(data_out, 0u) << "the window did not open, so this tested nothing";
+    EXPECT_TRUE(named) << "the hole was acknowledged only on Data, which cannot name it";
+}
+
+// A window with more runs held past the hole than one Ack can name. The Ack names
+// the newest ones — what the sender's loss detection reads — and, in place of the
+// oldest, the run the latest arrival joined: here a repair landing deep in the
+// window, below everything else named. Left out, it would look lost to the sender
+// for as long as the runs above it kept the list full, and be repaired again.
+TEST(UdpLossRecoveryTest, AnAckNamesTheNewestRunsAndTheLatestArrival) {
+    Capture       host;
+    const Address peer{*IpAddress::parse("10.0.0.1"), 1111};
+    auto          now = Clock::time_point{} + 1s;
+
+    UdpStream rx(host, peer, 11, 10, ConnRole::Inbound, now, DialProfile{},
+                 CongestionAlgorithm::Reno);
+    rudp::Packet syn;
+    syn.type    = rudp::PacketType::Syn;
+    syn.conn_id = 11;
+    syn.seq     = 1;
+    syn.limit   = rudp::kMaxWindowPackets;
+    feed(rx, syn, now);
+    ASSERT_TRUE(rx.connected());
+
+    // Every other packet from 4 up: 60 runs of one, across more than one word of
+    // the receiver's ring, with 2 (the hole the cumulative ack stands at) and every
+    // odd number between them missing.
+    const std::vector<uint8_t> payload(100, 0xAB);
+    const auto data = [&](uint32_t seq) {
         rudp::Packet pkt;
-        pkt.type = rudp::PacketType::Data;
-        pkt.flags = ext;
+        pkt.type    = rudp::PacketType::Data;
         pkt.conn_id = 11;
-        pkt.seq = 2 + 40;
-        pkt.ack = 2;
-        pkt.window = rudp::kMaxWindowPackets;
+        pkt.seq     = seq;
+        pkt.limit   = rudp::kMaxWindowPackets;
+        pkt.payload = ByteView(payload.data(), payload.size());
+        now += 1ms;
+        feed(rx, pkt, now);
+    };
+    constexpr uint32_t kRuns = 60;
+    for (uint32_t i = 0; i < kRuns; ++i) data(4 + 2 * i);
+    const uint32_t top = 4 + 2 * (kRuns - 1);
+
+    // A repair deep in the window: it joins the second-oldest run.
+    host.out.clear();
+    data(7);
+
+    rudp::Packet ack;
+    ASSERT_FALSE(host.out.empty());
+    ASSERT_TRUE(rudp::decode(host.out.back().data(), host.out.back().size(), ack));
+    ASSERT_EQ(ack.type, rudp::PacketType::Ack);
+    EXPECT_EQ(ack.ack, 1u) << "the hole at 2 is still open";
+    ASSERT_EQ(ack.range_count(), rudp::kMaxAckRanges);
+
+    const auto first_of = [&](const rudp::AckRange& r) { return ack.ack + 1 + r.offset; };
+    // Newest first, one packet each, two apart.
+    for (size_t i = 0; i + 1 < rudp::kMaxAckRanges; ++i) {
+        const rudp::AckRange r = rudp::ack_range(ack, i);
+        EXPECT_EQ(first_of(r), top - 2 * static_cast<uint32_t>(i)) << "range " << i;
+        EXPECT_EQ(r.length, 1u) << "range " << i;
+    }
+    // And the last slot is the latest arrival's run, which the list never reached.
+    const rudp::AckRange last = rudp::ack_range(ack, rudp::kMaxAckRanges - 1);
+    EXPECT_LE(first_of(last), 7u);
+    EXPECT_GE(first_of(last) + last.length - 1, 7u) << "the repair that just landed was not named";
+}
+
+// Flow control is the one bound on what a peer can make us buffer, so a packet
+// past the limit we advertised is not held, however much room there happens to be
+// for it — and the acknowledgement it draws still says where the limit stands.
+TEST(UdpLossRecoveryTest, APacketPastTheAdvertisedLimitIsNotHeld) {
+    Capture       host;
+    const Address peer{*IpAddress::parse("10.0.0.1"), 1111};
+    auto          now = Clock::time_point{} + 1s;
+
+    UdpStream rx(host, peer, 11, 10, ConnRole::Inbound, now, DialProfile{},
+                 CongestionAlgorithm::Reno);
+    rudp::Packet syn;
+    syn.type    = rudp::PacketType::Syn;
+    syn.conn_id = 11;
+    syn.seq     = 1;
+    syn.limit   = rudp::kMaxWindowPackets;
+    host.out.clear();
+    feed(rx, syn, now);
+    ASSERT_FALSE(host.out.empty());
+    rudp::Packet first;
+    ASSERT_TRUE(rudp::decode(host.out.back().data(), host.out.back().size(), first));
+    const uint32_t limit = first.limit;
+    ASSERT_EQ(first.room(), rudp::kMaxWindowPackets);
+
+    // Ten full packets in order, left unread. The ack moves on by ten and the room
+    // shrinks by ten, so the limit stands where it was — now short of everything
+    // the reorder ring could physically hold, which is what makes this a test of
+    // the limit rather than of the ring.
+    const std::vector<uint8_t> payload(rudp::kMaxPayload, 0xAB);
+    const auto data = [&](uint32_t seq) {
+        rudp::Packet pkt;
+        pkt.type    = rudp::PacketType::Data;
+        pkt.conn_id = 11;
+        pkt.seq     = seq;
+        pkt.limit   = rudp::kMaxWindowPackets;
         pkt.payload = ByteView(payload.data(), payload.size());
         host.out.clear();
-        now += 10ms;
+        now += 1ms;
         feed(rx, pkt, now);
+        // Out of order, so acknowledged at once (in order, only every other one is).
+        rudp::Packet ack;
+        if (!host.out.empty()) rudp::decode(host.out.back().data(), host.out.back().size(), ack);
+        return ack;
+    };
+    for (uint32_t seq = 2; seq < 12; ++seq) data(seq);
 
-        size_t data_out = 0;
-        bool   named    = false;
-        for (const Bytes& d : host.out) {
-            rudp::Packet p;
-            ASSERT_TRUE(rudp::decode(d.data(), d.size(), p));
-            if (p.type == rudp::PacketType::Data) ++data_out;
-            if (p.type != rudp::PacketType::Ack || p.range_count() == 0) continue;
-            const rudp::AckRange r = rudp::ack_range(p, 0);
-            named = p.ack == 1 && r.offset == 40 && r.length == 1;
-        }
-        ASSERT_GT(data_out, 0u) << "the window did not open, so this tested nothing";
-        if (ext_peer)
-            EXPECT_TRUE(named) << "the hole was acknowledged only on Data, which cannot name it";
-        else
-            EXPECT_FALSE(named) << "ranges sent to a peer that never said it parses them";
-    }
+    const rudp::Packet at = data(limit);
+    ASSERT_EQ(at.type, rudp::PacketType::Ack) << "a packet past a hole was not acknowledged";
+    EXPECT_EQ(at.limit, limit) << "the limit moved without anything being read";
+    ASSERT_EQ(at.range_count(), 1u) << "a packet at the limit is within it";
+    EXPECT_EQ(at.ack + 1 + rudp::ack_range(at, 0).offset, limit);
+
+    const rudp::Packet past = data(limit + 1);
+    ASSERT_EQ(past.type, rudp::PacketType::Ack);
+    EXPECT_EQ(past.limit, limit);
+    ASSERT_EQ(past.range_count(), 1u);
+    EXPECT_EQ(past.ack + 1 + rudp::ack_range(past, 0).offset, limit);
+    EXPECT_EQ(rudp::ack_range(past, 0).length, 1u) << "a packet past the limit was held";
 }
 
 // However many acknowledgements report the holes of one loss, the controller is

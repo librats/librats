@@ -2,17 +2,18 @@
 
 /**
  * @file udp_packet.h
- * @brief Wire format of the reliable-UDP transport: one fixed 16-byte header.
+ * @brief Wire format of the reliable-UDP transport: one fixed 20-byte header.
  *
- * A datagram is a header, an optional 4-byte selective-ack word, and (for Data)
- * a payload. Everything is big-endian, and every field is fixed-width, so decode
- * is a handful of loads with a single length check — no allocation, no parsing
- * state, and nothing a hostile datagram can make us over-reserve.
+ * A datagram is a header, then (for Data) a payload or (for an Ack) an optional
+ * block of acknowledgement ranges. Everything is big-endian, and every field is
+ * fixed-width, so decode is a handful of loads with a few length checks — no
+ * allocation, no parsing state, and nothing a hostile datagram can make us
+ * over-reserve.
  *
  *      0               1               2               3
  *      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
  *     +-------+-------+---------------+-------------------------------+
- *     |  ver  | type  |     flags     |            window             |
+ *     |  ver  | type  |     flags     |           ack_delay           |
  *     +-------+-------+---------------+-------------------------------+
  *     |                            conn_id                            |
  *     +---------------------------------------------------------------+
@@ -20,44 +21,51 @@
  *     +---------------------------------------------------------------+
  *     |                              ack                              |
  *     +---------------------------------------------------------------+
- *     |                     sack  (only if flag Sack)                 |
+ *     |                             limit                             |
  *     +---------------------------------------------------------------+
  *
- *  - conn_id : the id the *receiver* registered this stream under, so a single
- *              shared socket can demultiplex thousands of streams with one hash
- *              lookup and no per-peer socket. Each side picks its own; see
- *              udp_stream.h for how the pair is derived from the Syn.
- *  - seq     : sequence number of this packet. Syn, Data and Fin each consume
- *              one (so all three are retransmitted until acknowledged); an Ack
- *              carries the next sequence number to be used and consumes nothing,
- *              which is why a pure acknowledgement is never itself acknowledged.
- *  - ack     : the highest sequence number received *in order* — a cumulative
- *              acknowledgement, so a lost Ack costs nothing as long as a later
- *              one arrives. 0 means "nothing received yet" (sequence numbers
- *              start at 1).
- *  - sack    : a bitmap acknowledging the 32 packets after the hole at ack+1
- *              (bit i ⇒ ack+2+i arrived). This is what lets a single loss be
- *              repaired without stalling everything queued behind it.
- *  - window  : how many further packets the sender of this datagram can buffer,
- *              in packets. This is the flow-control signal; 0 stops the peer.
+ *  - conn_id   : the id the *receiver* registered this stream under, so a single
+ *                shared socket can demultiplex thousands of streams with one hash
+ *                lookup and no per-peer socket. Each side picks its own; see
+ *                udp_stream.h for how the pair is derived from the Syn.
+ *  - seq       : sequence number of this packet. Syn, Data and Fin each consume
+ *                one (so all three are retransmitted until acknowledged); an Ack
+ *                carries the next sequence number to be used and consumes nothing,
+ *                which is why a pure acknowledgement is never itself acknowledged.
+ *  - ack       : the highest sequence number received *in order* — a cumulative
+ *                acknowledgement, so a lost Ack costs nothing as long as a later
+ *                one arrives. 0 means "nothing received yet" (sequence numbers
+ *                start at 1).
+ *  - limit     : the highest sequence number the sender of this datagram will
+ *                accept — flow control as an absolute edge rather than a count of
+ *                free slots. The edge never moves backwards, so the receiver of it
+ *                simply keeps the largest one it has seen: a datagram that was
+ *                reordered or duplicated on the way can never shrink a window the
+ *                sender has since been given. limit == ack is a closed window.
+ *  - ack_delay : how long, in kAckDelayUnit, the sender held the newest packet it
+ *                acknowledges before this datagram went out (saturating). It lets
+ *                the peer take a delayed acknowledgement out of its round-trip
+ *                estimate, as QUIC's ACK frame does.
  *
  * ── Acknowledgement ranges ───────────────────────────────────────────────────
- * The sack word reaches only 32 packets past the first hole, and a window holds a
- * thousand. On a path that loses more than one packet per window, everything
- * past that reach is invisible to the sender until the hole in front of it fills,
- * so holes are found — and repaired — one round trip at a time. A pure Ack may
- * therefore also carry a range block (flag AckRanges):
+ * The cumulative ack says nothing about what arrived past a hole, and a window
+ * holds a thousand packets. A pure Ack therefore carries the runs the receiver
+ * holds past it (flag AckRanges):
  *
  *     [count : u8] then count x [offset : u16][length : u16]
  *
- * each entry acknowledging the `length` packets from ack+1+offset on. Ranges
- * name runs of received packets in ascending order, up to kMaxAckRanges of them.
- * They ride only on pure Acks, so a Data packet never grows past kMaxDatagram and
- * the path MTU budget behind kMaxPayload is untouched.
+ * each entry acknowledging the `length` packets from ack+1+offset on. Ranges come
+ * newest first — the peer's loss detection reads the newest delivery — and an Ack
+ * that cannot fit them all leaves out the oldest, which earlier Acks named when
+ * they were new: nothing a sender learns from a range is ever taken back, so an
+ * omission costs nothing. The one exception is a run the newest arrival joined
+ * (a repair landing deep in the window): it is always named, in place of the
+ * oldest, the way TCP's first SACK block is (RFC 2018).
  *
- * A peer from before ranges existed would reject an Ack carrying them, so they
- * are only ever sent to a peer that has said it understands them: every packet
- * carries flag ExtAck ("I parse ranges"), which an older peer simply ignores.
+ * Ranges ride only on pure Acks, so a Data packet never grows past kMaxDatagram
+ * and the path MTU budget behind kMaxPayload is untouched. A receiver holding
+ * anything out of order answers every packet with one, whatever Data it also has
+ * to send.
  *
  * Only three types carry anything after the header. Data carries stream bytes.
  * Retry and Syn carry the kCookieSize address-validation cookie, or nothing —
@@ -65,22 +73,27 @@
  * and only a Syn that hands the cookie back costs it any memory (see udp_mux.h).
  * Everything else is header-only, and a datagram that pads one is rejected.
  *
+ * Flag bits other than AckRanges are reserved: sent as zero, ignored on receipt.
+ *
  * Sequence numbers are 32-bit and wrap; compare them only with seq_less/seq_diff,
  * never with < on the raw value.
  */
 
 #include "librats/core/bytes.h"
 
-#include <cstdint>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 
 namespace librats {
 namespace rudp {
 
 /// Protocol version carried in the high nibble of byte 0. Bumped only for a
 /// change no existing peer could parse; a peer that sees another version drops
-/// the datagram (silently — an unauthenticated sender gets no reply).
-constexpr uint8_t kVersion = 1;
+/// the datagram (silently — an unauthenticated sender gets no reply), and a dial
+/// between the two falls back to TCP. 2: the absolute receive limit, ack_delay,
+/// and ranges on every Ack in place of a selective-ack word.
+constexpr uint8_t kVersion = 2;
 
 enum class PacketType : uint8_t {
     Syn   = 0,  ///< open a stream (initiator → responder); consumes a sequence number
@@ -93,24 +106,18 @@ enum class PacketType : uint8_t {
 
 enum PacketFlags : uint8_t {
     FlagNone      = 0,
-    FlagSack      = 1 << 0,  ///< the 4-byte selective-ack word follows the header
-    FlagExtAck    = 1 << 1,  ///< the sender understands acknowledgement ranges
-    FlagAckRanges = 1 << 2,  ///< (Ack only) a range block follows the sack word
+    FlagAckRanges = 1 << 0,  ///< (Ack only) a range block follows the header
 };
 
-/// Bytes on the wire before the payload, without the selective-ack word.
-constexpr size_t kHeaderSize = 16;
-/// Bytes added by the selective-ack word.
-constexpr size_t kSackSize = 4;
-/// Packets one selective-ack word can name — the 32 that follow the hole at
-/// ack+1. This is a reach as well as a width: from the word alone a sender learns
-/// nothing about a packet further than this past its oldest unacknowledged one,
-/// which is why a pure Ack may also carry ranges (see the file comment).
-constexpr uint32_t kSackBits = 8 * static_cast<uint32_t>(kSackSize);
-/// The largest a header can get. A sender that keeps this much headroom in front
-/// of a payload can write the header directly ahead of the bytes it describes and
-/// hand the socket one contiguous datagram — see encode_header().
-constexpr size_t kMaxHeaderSize = kHeaderSize + kSackSize;
+/// Bytes on the wire before the payload (or the range block). Every packet has
+/// exactly this much, so a sender keeping this much headroom in front of a payload
+/// can write the header directly ahead of the bytes it describes and hand the
+/// socket one contiguous datagram — see encode_header().
+constexpr size_t kHeaderSize = 20;
+
+/// Resolution of the ack_delay field. 8 µs (QUIC's default exponent of 3) puts
+/// the field's ceiling at ~0.5 s, far beyond any delay a receiver is allowed.
+constexpr std::chrono::microseconds kAckDelayUnit{8};
 
 /// Bytes of the address-validation cookie a Retry hands out and a Syn hands back
 /// (see udp_mux.h). Four is the width of the truncated keyed hash it carries: an
@@ -126,13 +133,18 @@ constexpr size_t kCookieSize = 4;
 constexpr size_t kMaxPayload = 1200;
 
 /// Largest datagram this transport ever sends or expects to receive.
-constexpr size_t kMaxDatagram = kHeaderSize + kSackSize + kMaxPayload;
+constexpr size_t kMaxDatagram = kHeaderSize + kMaxPayload;
 
 /// Bytes one acknowledgement range occupies, and the most one Ack carries. 32
-/// ranges is a hole every ~30 packets across a full window — far more than any
-/// path that is still worth sending on — in a 149-byte datagram.
+/// runs is a hole every ~30 packets across a full window — far more than any
+/// path that is still worth sending on — in a 149-byte datagram, and with older
+/// runs dropped first a busier window still loses nothing (see the file comment).
 constexpr size_t kAckRangeSize = 4;
 constexpr size_t kMaxAckRanges = 32;
+
+/// Furthest past the cumulative ack a range can reach: what a u16 offset and
+/// length can name.
+constexpr size_t kMaxAckReach = 65536;
 
 /// One run of packets the receiver holds: [ack+1+offset, ack+1+offset+length).
 struct AckRange {
@@ -140,79 +152,26 @@ struct AckRange {
     uint16_t length = 0;
 };
 
-/// Packets a receiver will hold out of order, and therefore the largest window it
-/// ever advertises. This is the hard ceiling on in-flight data, so it is also the
-/// ceiling on throughput: a window of W packets on a path of RTT R can never
-/// exceed W * kMaxPayload / R, whatever the link underneath can do.
+/// Packets a receiver will buffer past its cumulative ack — out of order, or in
+/// order but not yet read — and so the furthest past it that it ever sets its
+/// limit. This is the hard ceiling on in-flight data, so it is also the ceiling
+/// on throughput: a window of W packets on a path of RTT R can never exceed
+/// W * kMaxPayload / R, whatever the link underneath can do.
 ///
-/// 1024 * 1200 B ≈ 1.2 MiB, i.e. ~96 Mbit/s at 100 ms and ~48 Mbit/s at 200 ms —
-/// enough that an intercontinental path is limited by the path rather than by
-/// this constant. (At the previous 256 it was ~24 Mbit/s at 100 ms, well under
-/// what TCP would have managed on the same path.)
+/// 1024 * 1200 B ≈ 1.2 MiB, i.e. ~96 Mbit/s at 100 ms and ~48 Mbit/s at 200 ms.
 ///
 /// It is also what bounds the memory one peer can make us hold: the reorder
 /// buffer never holds more than this many packets, so ~1.2 MiB per stream in the
 /// worst case. That worst case needs a window's worth of loss to reach, and both
 /// the reorder map and the retransmission queue only ever grow to what is
 /// actually outstanding — an idle or slow stream costs nothing near it.
+///
+/// Purely the receiver's business: nothing on the wire depends on it, so a peer
+/// with a different value interoperates.
 constexpr uint16_t kMaxWindowPackets = 1024;
 static_assert((kMaxWindowPackets & (kMaxWindowPackets - 1)) == 0 && kMaxWindowPackets % 64 == 0,
               "the receiver indexes its reorder ring by sequence number modulo the window");
-
-struct Packet {
-    PacketType type   = PacketType::Ack;
-    uint8_t    flags  = FlagNone;
-    uint16_t   window = 0;
-    uint32_t   conn_id = 0;
-    uint32_t   seq     = 0;
-    uint32_t   ack     = 0;
-    uint32_t   sack    = 0;   ///< meaningful only when (flags & FlagSack)
-    /// The encoded range entries (kAckRangeSize bytes each, no count byte) — on
-    /// decode they point into the receive buffer, on encode into the sender's.
-    /// Only ever on an Ack; see ack_range().
-    ByteView   ranges;
-    ByteView   payload;       ///< points into the caller's receive buffer
-
-    bool   has_sack()    const noexcept { return (flags & FlagSack) != 0; }
-    bool   ext_ack()     const noexcept { return (flags & FlagExtAck) != 0; }
-    size_t range_count() const noexcept { return ranges.size() / kAckRangeSize; }
-};
-
-/// The i-th range of a decoded Ack. decode() has already checked every one of them
-/// is non-empty and lies inside a receive window, so no caller re-validates.
-AckRange ack_range(const Packet& p, size_t i) noexcept;
-
-/// Write one range entry (kAckRangeSize bytes) for Packet::ranges.
-void encode_ack_range(const AckRange& r, uint8_t* out) noexcept;
-
-/// Bytes `p`'s header occupies on the wire: the fixed part, plus the selective-ack
-/// word when one is carried.
-inline size_t header_size(const Packet& p) noexcept {
-    return p.has_sack() ? kHeaderSize + kSackSize : kHeaderSize;
-}
-
-/// Serialise only `p`'s header (and its optional sack word) into `out`, which must
-/// have room for kMaxHeaderSize bytes. Neither the payload nor any range block is
-/// written (and the AckRanges flag is left clear) — this is the Data path.
-///
-/// This is the form used on the send path: a packet buffer carries kMaxHeaderSize
-/// bytes of headroom in front of its payload, so the header is written directly
-/// ahead of the bytes it describes and the whole datagram goes to the socket in
-/// one piece — no second copy of the payload just to prefix a header to it.
-/// @return the number of bytes written (kHeaderSize, or kHeaderSize + kSackSize).
-size_t encode_header(const Packet& p, uint8_t* out);
-
-/// Serialise `p` (header, optional sack word, the range block of an Ack, then
-/// payload) into `out`, which must have room for kMaxDatagram bytes.
-/// @return the number of bytes written.
-size_t encode(const Packet& p, uint8_t* out);
-
-/// Parse one datagram. Returns false for anything malformed: a short buffer, an
-/// unknown version, an unknown type, a payload on a type that cannot carry one, or
-/// a range block that is not exactly well-formed (on anything but an Ack, empty,
-/// past kMaxAckRanges, or reaching outside a receive window).
-/// `out.payload` points into `data` and is valid only while that buffer is.
-bool decode(const uint8_t* data, size_t len, Packet& out);
+static_assert(kMaxWindowPackets <= kMaxAckReach, "a range must be able to name the whole window");
 
 // ── Wrapping sequence arithmetic ────────────────────────────────────────────
 //
@@ -232,6 +191,59 @@ inline bool seq_less(uint32_t a, uint32_t b) noexcept { return seq_diff(a, b) < 
 
 /// True when a precedes or equals b.
 inline bool seq_le(uint32_t a, uint32_t b) noexcept { return seq_diff(a, b) <= 0; }
+
+struct Packet {
+    PacketType type      = PacketType::Ack;
+    uint8_t    flags     = FlagNone;
+    uint16_t   ack_delay = 0;   ///< in kAckDelayUnit
+    uint32_t   conn_id   = 0;
+    uint32_t   seq       = 0;
+    uint32_t   ack       = 0;
+    uint32_t   limit     = 0;
+    /// The encoded range entries (kAckRangeSize bytes each, no count byte) — on
+    /// decode they point into the receive buffer, on encode into the sender's.
+    /// Only ever on an Ack; see ack_range().
+    ByteView   ranges;
+    ByteView   payload;         ///< points into the caller's receive buffer
+
+    size_t range_count() const noexcept { return ranges.size() / kAckRangeSize; }
+    /// Packets past the cumulative ack the sender will still accept (0 = closed).
+    /// What `limit` says, in the shape of a classic window — for diagnostics.
+    uint32_t room() const noexcept {
+        const int32_t d = seq_diff(limit, ack);
+        return d > 0 ? static_cast<uint32_t>(d) : 0;
+    }
+};
+
+/// The i-th range of a decoded Ack. decode() has already checked every one of them
+/// is non-empty and starts past ack+1, so no caller re-validates.
+AckRange ack_range(const Packet& p, size_t i) noexcept;
+
+/// Write one range entry (kAckRangeSize bytes) for Packet::ranges.
+void encode_ack_range(const AckRange& r, uint8_t* out) noexcept;
+
+/// Serialise only `p`'s header into `out`, which must have room for kHeaderSize
+/// bytes. Neither the payload nor any range block is written (and the AckRanges
+/// flag is left clear) — this is the Data path.
+///
+/// This is the form used on the send path: a packet buffer carries kHeaderSize
+/// bytes of headroom in front of its payload, so the header is written directly
+/// ahead of the bytes it describes and the whole datagram goes to the socket in
+/// one piece — no second copy of the payload just to prefix a header to it.
+/// @return kHeaderSize.
+size_t encode_header(const Packet& p, uint8_t* out);
+
+/// Serialise `p` (header, the range block of an Ack, then payload) into `out`,
+/// which must have room for kMaxDatagram bytes.
+/// @return the number of bytes written.
+size_t encode(const Packet& p, uint8_t* out);
+
+/// Parse one datagram. Returns false for anything malformed: a short buffer, an
+/// unknown version, an unknown type, a payload on a type that cannot carry one, or
+/// a range block that is not exactly well-formed (on anything but an Ack, empty,
+/// past kMaxAckRanges, naming ack+1, or reaching past kMaxAckReach).
+/// `out.payload` points into `data` and is valid only while that buffer is.
+bool decode(const uint8_t* data, size_t len, Packet& out);
 
 const char* to_string(PacketType) noexcept;
 

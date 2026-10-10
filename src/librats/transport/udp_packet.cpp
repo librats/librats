@@ -41,22 +41,14 @@ void encode_ack_range(const AckRange& r, uint8_t* out) noexcept {
 }
 
 size_t encode_header(const Packet& p, uint8_t* out) {
-    const uint8_t flags = static_cast<uint8_t>(
-        (p.has_sack() ? p.flags : (p.flags & ~FlagSack)) & ~FlagAckRanges);
-
     out[0] = static_cast<uint8_t>((kVersion << 4) | (static_cast<uint8_t>(p.type) & 0x0F));
-    out[1] = flags;
-    put_u16(out + 2, p.window);
+    out[1] = static_cast<uint8_t>(p.flags & ~FlagAckRanges);
+    put_u16(out + 2,  p.ack_delay);
     put_u32(out + 4,  p.conn_id);
     put_u32(out + 8,  p.seq);
     put_u32(out + 12, p.ack);
-
-    size_t n = kHeaderSize;
-    if (flags & FlagSack) {
-        put_u32(out + n, p.sack);
-        n += kSackSize;
-    }
-    return n;
+    put_u32(out + 16, p.limit);
+    return kHeaderSize;
 }
 
 size_t encode(const Packet& p, uint8_t* out) {
@@ -82,22 +74,15 @@ bool decode(const uint8_t* data, size_t len, Packet& out) {
     const uint8_t type = data[0] & 0x0F;
     if (type > static_cast<uint8_t>(PacketType::Retry)) return false;
 
-    out.type    = static_cast<PacketType>(type);
-    out.flags   = data[1];
-    out.window  = get_u16(data + 2);
-    out.conn_id = get_u32(data + 4);
-    out.seq     = get_u32(data + 8);
-    out.ack     = get_u32(data + 12);
+    out.type      = static_cast<PacketType>(type);
+    out.flags     = data[1];
+    out.ack_delay = get_u16(data + 2);
+    out.conn_id   = get_u32(data + 4);
+    out.seq       = get_u32(data + 8);
+    out.ack       = get_u32(data + 12);
+    out.limit     = get_u32(data + 16);
 
     size_t offset = kHeaderSize;
-    if (out.has_sack()) {
-        if (len < offset + kSackSize) return false;
-        out.sack = get_u32(data + offset);
-        offset += kSackSize;
-    } else {
-        out.sack = 0;
-    }
-
     out.ranges = ByteView{};
     if (out.flags & FlagAckRanges) {
         // Ranges are an acknowledgement's business only, so a Data packet can never
@@ -111,10 +96,9 @@ bool decode(const uint8_t* data, size_t len, Packet& out) {
         offset += count * kAckRangeSize;
         for (size_t i = 0; i < count; ++i) {
             const AckRange r = ack_range(out, i);
-            // Offset 0 is ack+1, the packet the cumulative ack says is missing; and a
-            // receiver holds nothing kMaxWindowPackets or more past it.
+            // Offset 0 is ack+1, the packet the cumulative ack says is missing.
             if (r.length == 0 || r.offset == 0) return false;
-            if (size_t{r.offset} + r.length > kMaxWindowPackets) return false;
+            if (size_t{r.offset} + r.length > kMaxAckReach) return false;
         }
     }
 

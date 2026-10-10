@@ -24,14 +24,15 @@
  *     makes the retransmission queue a plain deque whose i-th entry is always
  *     `front().seq + i`, so a selective ack resolves to an index instead of a
  *     search.
- *   - Cumulative ack + a 32-bit selective-ack bitmap, so one lost packet is
- *     repaired without stalling everything queued behind it — and, on pure
- *     acks to a peer that understands them, ranges naming every hole in the
- *     window, so a window with several holes is repaired in one round trip
- *     rather than one hole per round trip (udp_packet.h).
+ *   - Cumulative ack on every packet, and while anything is held out of order a
+ *     pure Ack per arrival naming the runs held past the hole, newest first —
+ *     so a lost packet is repaired without stalling everything queued behind
+ *     it, and a window with several holes in one round trip rather than one
+ *     hole per round trip (udp_packet.h).
  *   - RFC 6298 retransmission timing (SRTT/RTTVAR → RTO, doubling on each
  *     timeout, Karn's rule so a retransmitted packet never poisons the
- *     estimate), one round-trip sample per ack from the newest packet it covers.
+ *     estimate), one round-trip sample per ack from the newest packet it covers,
+ *     less the delay the peer reports holding it (RFC 9002).
  *   - RACK-style loss detection (RFC 8985): a first transmission is lost once
  *     three packets behind it have arrived, a repair once something sent a
  *     reordering window after it has; declared-lost packets leave the flight
@@ -43,8 +44,8 @@
  *     outstanding, acknowledged or lost, the round-trip estimate and a
  *     delivery-rate sample per acknowledgement — and the controller turns them
  *     into a window and a pacing rate. Flow control is separate and absolute —
- *     the receiver advertises, in packets, how much more it will buffer, and the
- *     sender never exceeds it.
+ *     the receiver advertises the highest sequence number it will buffer, an
+ *     edge that only ever moves forward, and the sender never passes it.
  *   - No Nagle: a partial packet goes out rather than waiting for company, which
  *     is what keeps a request/response exchange from paying a round trip per
  *     turn. What stands in for it is write() itself — it tops up the tail packet
@@ -165,6 +166,10 @@ public:
     /// is what keeps one loss from being repaired twice and a lost repair from
     /// waiting for a timeout.
     static constexpr int32_t kReorderThreshold = 3;
+    /// Most room past its cumulative ack a peer's limit may claim and still be
+    /// believed. Far beyond any receive buffer, far inside the half of the sequence
+    /// space that comparisons are meaningful over.
+    static constexpr int32_t kMaxPeerRoom = 1 << 24;
 
     // ── Pacing ──────────────────────────────────────────────────────────────
     //
@@ -342,9 +347,9 @@ private:
     ///
     /// `buf` is the datagram itself, laid out as
     ///
-    ///     [ kMaxHeaderSize bytes of headroom ][ payload ]
+    ///     [ kHeaderSize bytes of headroom ][ payload ]
     ///
-    /// so transmit() writes the header into the tail of the headroom, directly in
+    /// so transmit() writes the header into the headroom, directly in
     /// front of the payload, and hands the socket one contiguous range. The
     /// alternative — payload in its own buffer, copied into a scratch datagram
     /// behind a freshly built header — costs a full payload copy on every send
@@ -370,7 +375,7 @@ private:
 
         /// Payload bytes — what the accounting (flight_bytes_, queued_bytes_) counts.
         size_t size() const noexcept {
-            return buf.size() > rudp::kMaxHeaderSize ? buf.size() - rudp::kMaxHeaderSize : 0;
+            return buf.size() > rudp::kHeaderSize ? buf.size() - rudp::kHeaderSize : 0;
         }
         /// Room left in a partially filled tail packet (only meaningful while unsent).
         size_t space() const noexcept { return rudp::kMaxPayload - size(); }
@@ -398,8 +403,14 @@ private:
     bool cwnd_allows(size_t bytes) const noexcept;
     /// Recovery credit `delivered` bytes earn (RFC 6937).
     uint64_t prr_share(uint64_t delivered) const noexcept;
-    void fill_common(rudp::Packet& p) const;
-    uint16_t advertised_window() const noexcept;
+    /// The fields every packet carries: ids, the cumulative ack, our limit and the
+    /// ack delay.
+    void fill_common(rudp::Packet& p, Clock::time_point now);
+    /// Packets past the cumulative ack we can still buffer (0 = a closed window).
+    uint32_t receive_room() const noexcept;
+    /// The limit to advertise: as far as our buffer reaches now, and never short of
+    /// any limit already advertised (see recv_limit_).
+    uint32_t advertise_limit() noexcept;
 
     // — pacing —
     /// Hand the token bucket whatever has accrued since it was last topped up.
@@ -423,8 +434,6 @@ private:
     /// First acknowledgement of `pkt`, cumulative or selective: settle its
     /// accounting and feed the delivery-rate and loss-detection state.
     void on_newly_acked(OutPacket& pkt, Clock::time_point now);
-    /// Selectively acknowledge the packet carrying `seq`, if it is still queued.
-    void sack_one(uint32_t seq, Clock::time_point now);
     /// Index of the first packet at or after sent_[idx] not yet acknowledged
     /// (sent_.size() if there is none), in amortised constant time.
     size_t next_unacked(size_t idx) noexcept;
@@ -433,16 +442,15 @@ private:
     void detect_losses(Clock::time_point now);
     /// Take `pkt` off the path and queue its repair.
     void mark_lost(OutPacket& pkt, Clock::time_point now);
-    void handle_sequenced(const rudp::Packet& p);
+    void handle_sequenced(const rudp::Packet& p, Clock::time_point now);
     void deliver(ByteView payload, bool fin);
     void drain_reorder();
-    uint32_t sack_bitmap() const noexcept;
     /// Encode the runs of packets held past the hole into range_buf_ (cached
-    /// until the reorder buffer moves). Returns how many there are.
+    /// until the reorder buffer moves), newest first. Returns how many there are.
     size_t   ack_ranges() const noexcept;
-    /// Something is held past the hole that the sack word cannot reach, so only a
-    /// pure acknowledgement carrying ranges can tell the peer about it.
-    bool     holes_past_sack() const noexcept;
+    /// The highest offset past recv_next_, at or below `off` and at least 1, whose
+    /// held bit is `held` — or 0 if there is none. A word of the ring at a time.
+    uint32_t scan_down(uint32_t off, bool held) const noexcept;
     bool     is_held(uint32_t seq) const noexcept;
     void     set_held(uint32_t seq, bool on) noexcept;
 
@@ -457,7 +465,9 @@ private:
     /// once there are not. One timer, two meanings — which is how RFC 9002 models
     /// it too, and why arming it in one place keeps the two from disagreeing.
     Clock::duration loss_timeout() const noexcept;
-    void sample_rtt(Clock::duration rtt);
+    /// Fold in one round-trip sample, of which `ack_delay` (already capped) is time
+    /// the peer reports having held the acknowledgement back.
+    void sample_rtt(Clock::duration rtt, Clock::duration ack_delay);
     /// The retransmission timeout the current estimate implies (no backoff).
     Clock::duration estimated_rto() const noexcept;
     void enter_recovery(Clock::time_point now);
@@ -497,13 +507,11 @@ private:
     uint32_t              next_seq_     = 1;   ///< sequence number for the next packet created
     size_t                flight_bytes_ = 0;   ///< payload bytes transmitted and not yet acked
     size_t                queued_bytes_ = 0;   ///< payload bytes held by sent_ + unsent_
-    uint16_t              peer_window_  = rudp::kMaxWindowPackets;
-    /// The cumulative acknowledgement `peer_window_` came in on. What orders two
-    /// windows in time: a peer's ack never moves backwards, so a packet carrying
-    /// one that has is a packet from the past, and the window on it with it.
-    uint32_t              window_ack_   = 0;
-    uint32_t              last_ack_recv_ = 0;
-    int                   dup_acks_     = 0;
+    /// The highest sequence number the peer will accept — the largest limit it has
+    /// sent, since its limit never moves backwards. Unset until the peer has said
+    /// anything at all, which a stream that may send has always heard by then.
+    uint32_t              peer_limit_   = 0;
+    bool                  have_peer_limit_ = false;
     uint32_t              retransmits_  = 0;
     uint32_t              congestion_events_ = 0;
     /// Consecutive tail probes sent with nothing acknowledged in between. Reset by
@@ -575,6 +583,7 @@ private:
     /// one round-trip sample comes from.
     struct Newest {
         bool              have = false;
+        uint32_t          seq  = 0;
         Clock::time_point sent_at{};
         int               sends = 0;
     };
@@ -613,25 +622,28 @@ private:
     /// an update to ride on, so this is the only clock either side has for it.
     int                                       window_announces_ = 0;
     Clock::time_point                         window_due_{};
-    /// Cached selective-ack bitmap, rebuilt only when the reorder buffer or the
-    /// expected sequence number moves. Every outgoing packet carries this field,
-    /// so deriving it from 32 hash lookups per *packet* — during loss recovery,
-    /// when packets are at their most frequent — was pure repeated work: it can
-    /// only change when one of the two things it is derived from changes.
-    mutable uint32_t                          sack_bits_  = 0;
-    mutable bool                              sack_dirty_ = false;
+    /// The highest sequence number we have advertised as acceptable. A promise: the
+    /// peer may send anything up to it, so it is never lowered — only raised as the
+    /// buffer drains. It can only ever be reached by in-order delivery filling the
+    /// buffer, which is what keeps everything it admits inside the reorder ring.
+    uint32_t                                  recv_limit_ = rudp::kMaxWindowPackets;
+    /// The highest sequence number received, and when; and the most recent new
+    /// arrival, in or out of order. The first dates the ack_delay we report, the
+    /// second is the run an Ack always names (see ack_ranges).
+    uint32_t                                  largest_recv_    = 0;
+    uint32_t                                  latest_recv_     = 0;
+    Clock::time_point                         largest_recv_at_{};
+    bool                                      have_recv_       = false;
     /// Which sequence numbers past the hole the reorder buffer holds, as a ring of
     /// bits indexed by sequence number. Duplicates the map's keys on purpose: the
-    /// selective forms are built by scanning it a word at a time, where the map
-    /// would need a hash lookup per packet of the window.
+    /// ranges are built by scanning it a word at a time, where the map would need
+    /// a hash lookup per packet of the window.
     std::array<uint64_t, rudp::kMaxWindowPackets / 64> held_{};
     /// Encoded acknowledgement ranges, rebuilt only when the reorder buffer or the
     /// expected sequence number moves.
     mutable std::array<uint8_t, rudp::kMaxAckRanges * rudp::kAckRangeSize> range_buf_{};
     mutable size_t                            range_count_  = 0;
     mutable bool                              ranges_dirty_ = false;
-    /// The peer parses acknowledgement ranges (it said so with FlagExtAck).
-    bool                                      peer_ext_ack_ = false;
 
     // — timing —
     // Declared ahead of the controller, which keeps references to both.
