@@ -64,6 +64,16 @@ const Transport = Object.freeze({
   RELAY: 2, // carried through a third node (see enableRelay)
 });
 
+/**
+ * Congestion controller of every UDP stream (`rats_congestion_t`). BBR holds its
+ * rate on lossy links and keeps the bottleneck queue short; Reno backs off on
+ * every loss. TCP ignores this.
+ */
+const Congestion = Object.freeze({
+  BBR: 0,   // BBRv3 (default)
+  RENO: 1,  // NewReno with HyStart++
+});
+
 /** Bitmask flags used by `node.transports` and `node.peerTransports()`. */
 const TransportMask = Object.freeze({
   TCP: 0x1,
@@ -440,6 +450,7 @@ module.exports = {
   Security,
   Transport,
   TransportMask,
+  Congestion,
   NatMapping,
   LogLevel,
 

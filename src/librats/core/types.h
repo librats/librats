@@ -45,6 +45,20 @@ enum class TransportKind {
     Relay,
 };
 
+/// Which congestion controller a datagram stream runs (see
+/// transport/congestion_control.h). TCP is governed by the kernel and ignores this.
+///
+/// BBR is the default because of what peer-to-peer paths look like: home Wi-Fi,
+/// mobile links and long intercontinental hops all lose packets for reasons that
+/// have nothing to do with congestion, and a loss-based controller reads every
+/// one of those as "slow down". At 1% random loss Reno keeps about a tenth of a
+/// 10 Mbit/s, 100 ms path; BBR, which steers by measured bandwidth and round-trip
+/// time and only backs off once loss passes a threshold, keeps most of it.
+enum class CongestionAlgorithm : uint8_t {
+    Bbr,   ///< BBRv3 (draft-ietf-ccwg-bbr): model-based, paced, loss-tolerant.
+    Reno,  ///< NewReno with HyStart++ (RFC 9406): the classic loss-based controller.
+};
+
 /// How hard an outbound datagram dial tries before it is called failed.
 ///
 /// The default is the ordinary dial: three Syns at a doubling 500 ms timeout, so a
@@ -102,5 +116,7 @@ RATS_API const char* to_string(CloseReason) noexcept;
 /// Exported for the same reason: TransportKind is part of the public surface
 /// (NodeConfig::preferred_transport, PeerInfo::transport).
 RATS_API const char* to_string(TransportKind) noexcept;
+/// Exported: NodeConfig::congestion_control is part of the public surface.
+RATS_API const char* to_string(CongestionAlgorithm) noexcept;
 
 } // namespace librats

@@ -81,8 +81,11 @@ namespace {
 using Clock = UdpStream::Clock;
 using ms    = std::chrono::milliseconds;
 using us    = std::chrono::microseconds;
+using ns    = std::chrono::nanoseconds;
 
 bool g_color = true;
+/// The controller every Rig in the current pass runs.
+CongestionAlgorithm g_algo = CongestionAlgorithm::Bbr;
 const char* col(const char* code) { return g_color ? code : ""; }
 
 // ── The path ────────────────────────────────────────────────────────────────
@@ -108,18 +111,38 @@ struct Direction {
     size_t               drops = 0;
 };
 
+/// Any number of sender/receiver pairs sharing one bottleneck: everything
+/// addressed to a receiver queues in the forward direction, everything addressed
+/// to a sender in the reverse one.
 class Path : public UdpStreamHost {
 public:
-    Path(Direction fwd, Direction rev, Address a, Address b)
-        : fwd_(fwd), rev_(rev), a_(a), b_(b), rng_(12345) {}
+    Path(Direction fwd, Direction rev) : fwd_(fwd), rev_(rev), rng_(12345) {}
+    /// A path between one sender and one receiver, placed from the start.
+    Path(Direction fwd, Direction rev, const Address& sender, const Address& receiver)
+        : Path(fwd, rev) {
+        place(sender, false);
+        place(receiver, true);
+    }
 
-    void attach(const Address& addr, UdpStream* s) { (addr == a_ ? sa_ : sb_) = s; }
+    /// Say which side of the path `addr` is on. Done before the streams exist:
+    /// the dialer's constructor sends the Syn, which must already know its way.
+    void place(const Address& addr, bool receiver) { ends_.push_back(End{addr, nullptr, receiver}); }
+
+    void attach(const Address& addr, UdpStream* s, bool receiver) {
+        for (End& e : ends_)
+            if (e.addr == addr) { e.stream = s; e.receiver = receiver; return; }
+        ends_.push_back(End{addr, s, receiver});
+    }
 
     void send_datagram(const Address& to, const uint8_t* data, size_t len) override {
-        Direction& d = (to == b_) ? fwd_ : rev_;
+        const End* end = find(to);
+        Direction& d = (end && end->receiver) ? fwd_ : rev_;
 
-        const auto serial     = us(static_cast<long long>((len + 28) * 8 * 1e6 / d.rate_bps));
-        const auto pkt_serial = us(static_cast<long long>((1200 + 28) * 8 * 1e6 / d.rate_bps));
+        // Nanoseconds, not microseconds: at a gigabit a full packet serialises in
+        // 9.98 us, and truncating that to 9 makes the link a tenth faster than it
+        // says it is.
+        const auto serial     = ns(static_cast<long long>((len + 28) * 8 * 1e9 / d.rate_bps));
+        const auto pkt_serial = ns(static_cast<long long>((1200 + 28) * 8 * 1e9 / d.rate_bps));
         const auto backlog    = d.busy_until > now_ ? (d.busy_until - now_)
                                                     : Clock::duration::zero();
 
@@ -144,7 +167,7 @@ public:
                 d->wire.pop_front();
                 rudp::Packet p;
                 if (!rudp::decode(f.bytes.data(), f.bytes.size(), p)) continue;
-                if (UdpStream* s = (f.to == a_) ? sa_ : sb_) s->on_packet(p, now);
+                if (const End* end = find(f.to); end && end->stream) end->stream->on_packet(p, now);
             }
         }
     }
@@ -155,10 +178,18 @@ public:
     size_t fwd_drops() const { return fwd_.drops; }
 
 private:
-    Direction  fwd_, rev_;
-    Address    a_, b_;
-    UdpStream* sa_ = nullptr;
-    UdpStream* sb_ = nullptr;
+    struct End {
+        Address    addr;
+        UdpStream* stream;
+        bool       receiver;
+    };
+    const End* find(const Address& a) const {
+        for (const End& e : ends_) if (e.addr == a) return &e;
+        return nullptr;
+    }
+
+    Direction        fwd_, rev_;
+    std::vector<End> ends_;
     Clock::time_point now_{};
     size_t       drop_burst_ = 0;
     std::mt19937 rng_;
@@ -192,14 +223,12 @@ struct Rig {
     size_t delivered = 0;
 
     Rig(double rate_mbps, int rtt_ms, double loss, size_t queue)
-        : path(Direction{rate_mbps * 1e6, ms(rtt_ms / 2), queue, loss, {}, {}, 0},
-               Direction{rate_mbps * 1e6, ms(rtt_ms / 2), queue, loss, {}, {}, 0},
-               Address{*IpAddress::parse("10.0.0.1"), 1111},
-               Address{*IpAddress::parse("10.0.0.2"), 2222}),
-          tx(path, Address{*IpAddress::parse("10.0.0.2"), 2222}, 1, 2, ConnRole::Outbound, {}),
-          rx(path, Address{*IpAddress::parse("10.0.0.1"), 1111}, 2, 1, ConnRole::Inbound, {}) {
-        path.attach(A, &tx);
-        path.attach(B, &rx);
+        : path(Direction{rate_mbps * 1e6, us(rtt_ms * 500), queue, loss, {}, {}, 0},
+               Direction{rate_mbps * 1e6, us(rtt_ms * 500), queue, loss, {}, {}, 0}, A, B),
+          tx(path, B, 1, 2, ConnRole::Outbound, {}, DialProfile{}, g_algo),
+          rx(path, A, 2, 1, ConnRole::Inbound, {}, DialProfile{}, g_algo) {
+        path.attach(A, &tx, false);
+        path.attach(B, &rx, true);
     }
 
     /// Step the model forward by `d`, offering the sender as much as it will take
@@ -254,7 +283,7 @@ void bulk(const char* name, double rate, int rtt, double loss, size_t queue, int
                         + tinted + "\x1b[0m";
 
     std::printf("  %-30s %9.2f %s %9u %9u %9zu\n", name, mbps, tinted.c_str(),
-                r.tx.retransmits(), r.tx.window_reductions(), r.path.drops());
+                r.tx.retransmits(), r.tx.congestion_events(), r.path.drops());
 }
 
 // ── idle ────────────────────────────────────────────────────────────────────
@@ -382,15 +411,109 @@ void loss_row(double rate, int rtt, double loss, size_t queue, int secs) {
     if (g_color) state = std::string(died ? "\x1b[31m" : "\x1b[32m") + state + "\x1b[0m";
 
     std::printf("  %-30s %9.2f %8.1f%% %9u %9u %9s\n", name, mbps,
-                mbps / rate * 100, r.tx.retransmits(), r.tx.window_reductions(),
+                mbps / rate * 100, r.tx.retransmits(), r.tx.congestion_events(),
                 state.c_str());
+}
+
+// ── compete ─────────────────────────────────────────────────────────────────
+
+/// A flow's two addresses, placed on the path before either stream exists — the
+/// dialer's constructor sends the Syn, which must already know its way.
+struct FlowEnds {
+    FlowEnds(Path& path, int index)
+        : A{*IpAddress::parse("10.0.1." + std::to_string(index + 1)), 1111},
+          B{*IpAddress::parse("10.0.2." + std::to_string(index + 1)), 2222} {
+        path.place(A, false);
+        path.place(B, true);
+    }
+    Address A, B;
+};
+
+/// One transfer of several sharing a bottleneck.
+struct Flow : FlowEnds {
+    Flow(Path& path, int index, CongestionAlgorithm algo, Clock::time_point now)
+        : FlowEnds(path, index),
+          tx(path, B, 10 + 2 * index, 11 + 2 * index, ConnRole::Outbound, now, DialProfile{}, algo),
+          rx(path, A, 11 + 2 * index, 10 + 2 * index, ConnRole::Inbound, now, DialProfile{}, algo) {
+        path.attach(A, &tx, false);
+        path.attach(B, &rx, true);
+    }
+    UdpStream tx, rx;
+    size_t    delivered = 0;
+};
+
+/// Two bulk flows through one bottleneck, the second joining after `join` s.
+/// What each gets in the window after both are running — and Jain's fairness
+/// index over the two, where 1.0 is an even split and 0.5 one flow taking it all.
+void compete(const char* name, CongestionAlgorithm a, CongestionAlgorithm b, double rate,
+             int rtt, size_t queue, int join, int secs) {
+    Path path(Direction{rate * 1e6, us(rtt * 500), queue, 0.0, {}, {}, 0},
+              Direction{rate * 1e6, us(rtt * 500), queue, 0.0, {}, {}, 0});
+    Clock::time_point now{};
+    Flow fa(path, 0, a, now);
+    std::unique_ptr<Flow> fb;
+
+    std::vector<uint8_t>& chunk = feed_buffer();
+    std::vector<uint8_t>& sink  = drain_buffer();
+    size_t base_a = 0, base_b = 0;
+    constexpr auto kStep = us(200);
+    const auto measure_from = std::chrono::seconds(join + 5);   // let the newcomer settle
+
+    for (auto t = Clock::duration::zero(); t < std::chrono::seconds(secs); t += kStep) {
+        now += kStep;
+        if (!fb && t >= std::chrono::seconds(join)) fb = std::make_unique<Flow>(path, 1, b, now);
+        if (t == measure_from) { base_a = fa.delivered; base_b = fb->delivered; }
+        path.deliver_until(now);
+        for (Flow* f : {&fa, fb.get()}) {
+            if (!f) continue;
+            for (int i = 0; i < 64; ++i) {
+                ByteView v(chunk.data(), chunk.size());
+                if (f->tx.write(&v, 1, now) == 0) break;
+            }
+            f->tx.tick(now);
+            f->rx.tick(now);
+            for (size_t n; (n = f->rx.read(sink.data(), sink.size())) != 0;) f->delivered += n;
+        }
+    }
+
+    const double window = secs - std::chrono::duration<double>(measure_from).count();
+    const double ma = (fa.delivered - base_a) * 8.0 / (window * 1e6);
+    const double mb = (fb->delivered - base_b) * 8.0 / (window * 1e6);
+    const double jain = (ma + mb) * (ma + mb) / (2 * (ma * ma + mb * mb));
+    std::printf("  %-30s %9.2f %9.2f %8.1f%% %9.3f %9u\n", name, ma, mb,
+                (ma + mb) / rate * 100, jain, fa.tx.retransmits() + fb->tx.retransmits());
+}
+
+// ── delay ───────────────────────────────────────────────────────────────────
+
+/// What a bulk transfer does to everyone else on the path: the queueing delay it
+/// keeps standing at the bottleneck, read off the sender's own round-trip samples
+/// once it has settled. A loss-based controller fills whatever buffer there is;
+/// this is the column a peer's interactive traffic actually waits in.
+void delay(const char* name, double rate, int rtt, size_t queue, int secs) {
+    Rig r(rate, rtt, 0.0, queue);
+    r.run(std::chrono::seconds(5), true);   // past startup
+
+    std::vector<double> samples;
+    for (int i = 0; i < secs * 100; ++i) {
+        r.run(ms(10), true);
+        samples.push_back(std::chrono::duration<double, std::milli>(r.tx.rtt().latest).count() - rtt);
+    }
+    std::sort(samples.begin(), samples.end());
+    const auto q = [&](double f) { return samples[static_cast<size_t>(f * (samples.size() - 1))]; };
+    const double mbps = r.delivered * 8.0 / ((secs + 5) * 1e6);
+    std::printf("  %-30s %9.1f %9.1f %9.1f %9.2f %9s\n", name, q(0.5), q(0.95), samples.back(),
+                mbps, "");
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    for (int i = 1; i < argc; ++i)
+    for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-color") == 0) g_color = false;
+        if (std::strcmp(argv[i], "--cc=reno") == 0) g_algo = CongestionAlgorithm::Reno;
+        if (std::strcmp(argv[i], "--cc=bbr") == 0)  g_algo = CongestionAlgorithm::Bbr;
+    }
 #ifndef _WIN32
     if (!isatty(1)) g_color = false;
 #endif
@@ -399,6 +522,8 @@ int main(int argc, char** argv) {
                 col("\x1b[1m"), col("\x1b[0m"));
     std::printf("a model, not a network: drop-tail queue + serialiser + delay, in virtual time\n");
     std::printf("deterministic by construction — same build, same numbers; compare builds, not networks\n");
+    std::printf("controller: %s%s%s (--cc=bbr | --cc=reno)\n", col("\x1b[1m"), to_string(g_algo),
+                col("\x1b[0m"));
 
     heading("bulk — 20 s one way; buffer = 1 BDP unless the name says otherwise",
             "Mbit/s", "util", "retrans", "cwnd cuts", "dropped");
@@ -443,6 +568,32 @@ int main(int argc, char** argv) {
                 "   reorder buffer. What dominates is neither: it is UdpStream::kSendQueueLimit,\n"
                 "   2 MiB of accepted-but-unsent application data, which is why the hole often\n"
                 "   adds nothing to a peak the send queue had already set.)\n");
+
+    heading("delay — standing queue a bulk transfer keeps (ms over the base RTT)",
+            "median", "p95", "max", "Mbit/s", "");
+    delay("10 Mbit,  50 ms, buffer 4",     10,  50,  208, 15);
+    delay("50 Mbit,  20 ms, buffer 4",     50,  20,  416, 15);
+    delay("10 Mbit, 100 ms, buffer 1",     10, 100,  104, 15);
+    std::printf("  (what any other message to the same peer — or through the same home router —\n"
+                "   waits behind while the transfer runs. A loss-based sender parks at the full\n"
+                "   buffer; a model-based one near zero.)\n");
+
+    heading("compete — two flows, 20 Mbit, 40 ms, 1 BDP; the second joins at 5 s, 40 s",
+            "flow A", "flow B", "util", "Jain", "retrans");
+    compete("bbr  vs bbr",  CongestionAlgorithm::Bbr,  CongestionAlgorithm::Bbr,  20, 40, 83, 5, 40);
+    compete("reno vs reno", CongestionAlgorithm::Reno, CongestionAlgorithm::Reno, 20, 40, 83, 5, 40);
+    compete("bbr  vs reno", CongestionAlgorithm::Bbr,  CongestionAlgorithm::Reno, 20, 40, 83, 5, 40);
+    compete("reno vs bbr",  CongestionAlgorithm::Reno, CongestionAlgorithm::Bbr,  20, 40, 83, 5, 40);
+    compete("bbr  vs reno, buffer 4", CongestionAlgorithm::Bbr, CongestionAlgorithm::Reno,
+            20, 40, 333, 5, 40);
+    compete("bbr  vs bbr,  buffer 2", CongestionAlgorithm::Bbr, CongestionAlgorithm::Bbr,
+            20, 40, 166, 5, 40);
+    compete("bbr  vs bbr,  buffer 4", CongestionAlgorithm::Bbr, CongestionAlgorithm::Bbr,
+            20, 40, 333, 5, 40);
+    std::printf("  (Mbit/s over the last 30 s, once both are running. Fixed per row, whatever\n"
+                "   --cc says. Jain's index: 1.0 an even split, 0.5 one flow starving the other.\n"
+                "   BBR against Reno is expected to be roughly even in a 1 BDP buffer and to give\n"
+                "   ground in a deep one, where Reno's standing queue inflates the BDP BBR sees.)\n");
 
     heading("tail — request/response, delivery time in ms",
             "median", "p90", "p99", "max", "p99-med");

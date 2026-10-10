@@ -61,7 +61,7 @@ cmake --build bench/build
 ./bench/build/bin/bench_transport # two live Nodes on loopback; takes ~1 min
 ./bench/build/bin/bench_transport --serve            # …or the same suite between
 ./bench/build/bin/bench_transport --connect HOST:PORT #   two hosts, over a real path
-./bench/build/bin/bench_path      # congestion control against a modelled path; <1 s
+./bench/build/bin/bench_path      # congestion control against a modelled path; --cc=bbr|reno
 ```
 
 Benchmarks are always compiled `-O3 -DNDEBUG`, whatever the parent tree is
@@ -243,13 +243,16 @@ So this suite uses no network at all. `UdpStream` never reads the clock itself �
 every entry point takes `now` — which makes the congestion controller a pure
 function of its inputs and lets it run in virtual time against a model of the
 thing that actually pushes back: a drop-tail queue, a serialiser at the link
-rate, and a propagation delay. Three experiments:
+rate, and a propagation delay. `--cc=bbr` (the default) or `--cc=reno` picks the
+controller every row runs, except `compete`, whose rows name their own:
 
 | | what it answers |
 |---|---|
 | `bulk` | utilisation on paths of different rate, delay and buffer depth — plus the retransmissions and window reductions that say *how* it got there. A low utilisation with **few** reductions is a sender that never found the path; a low one with **many** is a sender that keeps losing it, and the two want opposite fixes. |
 | `idle` | what the congestion window is worth after nobody has validated it for ten seconds, and what the burst that follows costs. The shape of most peer-to-peer traffic: silence, a burst, silence. |
-| `loss` | one path with loss taken from 0 % to 30 % in both directions. The throughput curve is not the point — Reno's answer to loss is well known — the point is where it turns into a cliff and whether the connection survives it at all. |
+| `loss` | one path with loss taken from 0 % to 30 % in both directions: where the throughput curve turns into a cliff, and whether the connection survives it at all. Reno's curve is the well-known 1/sqrt(p); BBR's is the reason it is the default. |
+| `delay` | the standing queue a bulk transfer keeps at the bottleneck — what every other message to that peer, or through that router, waits behind. |
+| `compete` | two flows through one bottleneck, the second joining late: each one's share and Jain's fairness index, for BBR and Reno against themselves and each other. |
 | `memory` | what one connected pair actually holds, through the allocator rather than resident-set size. `bench_transport` reports resident bytes per *node*, most of which is the mux's fixed batch staging; this is the part that scales with peers. |
 | `tail` | request/response, where the packet that goes missing is the last one and has nothing behind it to reveal the loss. A latency distribution, because the median is untouched by definition and the whole effect is in the tail. |
 

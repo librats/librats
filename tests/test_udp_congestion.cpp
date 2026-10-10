@@ -1,0 +1,787 @@
+// Congestion control and loss recovery of the datagram transport, against a model
+// of a real path.
+//
+// test_transport_udp.cpp drives streams over a path that has no bandwidth and no
+// queue — enough for correctness, useless for anything a congestion controller
+// does. Here the path is the one every loss-based and model-based controller is a
+// response to: a drop-tail queue in front of a serialiser at the link rate, then a
+// propagation delay, in each direction. Time is virtual and fine-grained (the
+// streams take `now` as a parameter and never read a clock), so every test is
+// deterministic and runs in a fraction of the wall time it simulates.
+
+#include <gtest/gtest.h>
+
+#include "librats/transport/bbr.h"
+#include "librats/transport/congestion_control.h"
+#include "librats/transport/delivery_rate.h"
+#include "librats/transport/reno.h"
+#include "librats/transport/udp_packet.h"
+#include "librats/transport/udp_stream.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <map>
+#include <memory>
+#include <random>
+#include <string>
+#include <vector>
+
+using namespace librats;
+using namespace std::chrono_literals;
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+// ── The path ────────────────────────────────────────────────────────────────
+
+struct InFlight {
+    Clock::time_point arrive;
+    Address           to;
+    Bytes             bytes;
+};
+
+/// One direction: a drop-tail queue `queue_pkts` full-size packets deep in front
+/// of a serialiser at `rate_bps`, then `delay` of propagation.
+struct Direction {
+    double               rate_bps   = 0;
+    Clock::duration      delay{};
+    size_t               queue_pkts = 0;
+    double               loss       = 0;
+    Clock::time_point    busy_until{};
+    std::deque<InFlight> wire;
+    size_t               sent  = 0;   ///< datagrams that entered the queue
+    size_t               drops = 0;
+};
+
+class PathSim : public UdpStreamHost {
+public:
+    /// A symmetric path of `mbps`, round trip `rtt`, `queue_pkts` of buffer, and
+    /// `fwd_loss` random loss towards the receivers only (acknowledgements are not
+    /// what is being tested). Seeded, so a test sees the same losses every run.
+    PathSim(double mbps, Clock::duration rtt, size_t queue_pkts, double fwd_loss = 0.0,
+            uint32_t seed = 1)
+        : rng_(seed) {
+        for (Direction* d : {&fwd_, &rev_}) {
+            d->rate_bps   = mbps * 1e6;
+            d->delay      = rtt / 2;
+            d->queue_pkts = queue_pkts;
+        }
+        fwd_.loss = fwd_loss;
+    }
+
+    /// Say which side of the path `addr` is on. Done before the streams exist:
+    /// the dialer's constructor sends the Syn, which must already know its way.
+    void place(const Address& addr, bool receiver) { ends_.push_back(End{addr, nullptr, receiver}); }
+
+    void attach(const Address& addr, UdpStream* s, bool receiver) {
+        for (End& e : ends_)
+            if (e.addr == addr) { e.stream = s; e.receiver = receiver; return; }
+        ends_.push_back(End{addr, s, receiver});
+    }
+
+    void send_datagram(const Address& to, const uint8_t* data, size_t len) override {
+        const End* end     = find(to);
+        const bool forward = end && end->receiver;
+        Direction& d       = forward ? fwd_ : rev_;
+
+        Bytes bytes(data, data + len);
+        if (hook && hook(bytes, to, forward)) { ++d.drops; return; }
+        if (blackout) { ++d.drops; return; }
+
+        const auto serial = std::chrono::nanoseconds(
+            static_cast<long long>((bytes.size() + 28) * 8 * 1e9 / d.rate_bps));
+        const auto full = std::chrono::nanoseconds(
+            static_cast<long long>((rudp::kMaxDatagram + 28) * 8 * 1e9 / d.rate_bps));
+        const auto backlog = d.busy_until > now_ ? d.busy_until - now_ : Clock::duration::zero();
+        if (backlog > full * static_cast<long long>(d.queue_pkts)) { ++d.drops; return; }
+        if (d.loss > 0 && unit_(rng_) < d.loss) { ++d.drops; return; }
+
+        ++d.sent;
+        d.busy_until = (std::max)(now_, d.busy_until) + serial;
+        d.wire.push_back(InFlight{d.busy_until + d.delay, to, std::move(bytes)});
+    }
+
+    void stream_events(UdpStream&, uint32_t) override {}
+
+    void deliver_until(Clock::time_point now) {
+        now_ = now;
+        for (Direction* d : {&fwd_, &rev_}) {
+            while (!d->wire.empty() && d->wire.front().arrive <= now) {
+                InFlight f = std::move(d->wire.front());
+                d->wire.pop_front();
+                rudp::Packet p;
+                if (!rudp::decode(f.bytes.data(), f.bytes.size(), p)) continue;
+                if (const End* e = find(f.to); e && e->stream) e->stream->on_packet(p, now);
+            }
+        }
+    }
+
+    Direction& fwd() { return fwd_; }
+
+    /// Sees (and may rewrite) every datagram before the path does; true drops it.
+    std::function<bool(Bytes& datagram, const Address& to, bool forward)> hook;
+    /// Drop everything, both ways.
+    bool blackout = false;
+
+private:
+    struct End {
+        Address    addr;
+        UdpStream* stream;
+        bool       receiver;
+    };
+    const End* find(const Address& a) const {
+        for (const End& e : ends_) if (e.addr == a) return &e;
+        return nullptr;
+    }
+
+    Direction        fwd_, rev_;
+    std::vector<End> ends_;
+    Clock::time_point now_{};
+    std::mt19937     rng_;
+    std::uniform_real_distribution<double> unit_{0.0, 1.0};
+};
+
+/// A flow's two addresses, placed on the path before either stream exists.
+struct FlowEnds {
+    FlowEnds(PathSim& path, int index)
+        : A{*IpAddress::parse("10.0.1." + std::to_string(index + 1)), 1111},
+          B{*IpAddress::parse("10.0.2." + std::to_string(index + 1)), 2222} {
+        path.place(A, false);
+        path.place(B, true);
+    }
+    Address A, B;
+};
+
+/// One sender and its receiver.
+struct Flow : FlowEnds {
+    Flow(PathSim& path, int index, CongestionAlgorithm algo, Clock::time_point now)
+        : FlowEnds(path, index),
+          tx(path, B, 100 + 2 * index, 101 + 2 * index, ConnRole::Outbound, now, DialProfile{}, algo),
+          rx(path, A, 101 + 2 * index, 100 + 2 * index, ConnRole::Inbound, now, DialProfile{}, algo) {
+        path.attach(A, &tx, false);
+        path.attach(B, &rx, true);
+    }
+
+    UdpStream tx, rx;
+    size_t    delivered = 0;
+    /// Bytes still to offer the sender; it is kept as full as it will take until
+    /// this runs out. SIZE_MAX is a bulk transfer that never ends.
+    size_t    to_send = 0;
+    /// When non-zero, the application produces data at this many bytes per
+    /// second rather than as fast as the sender takes it.
+    double    app_rate   = 0;
+    double    app_credit = 0;
+};
+
+/// The path, its flows, and the clock.
+struct Sim {
+    explicit Sim(double mbps, Clock::duration rtt, size_t queue_pkts, double fwd_loss = 0.0,
+                 uint32_t seed = 1)
+        : path(mbps, rtt, queue_pkts, fwd_loss, seed), rtt(rtt) {}
+
+    Flow& add(CongestionAlgorithm algo) {
+        flows.push_back(std::make_unique<Flow>(path, static_cast<int>(flows.size()), algo, now));
+        return *flows.back();
+    }
+
+    /// Advance by `d` in steps of `step` — well under any timer a stream arms, so
+    /// nothing is resolved coarser than the transport would resolve it.
+    void run(Clock::duration d, Clock::duration step = 250us) {
+        const auto end = now + d;
+        while (now < end) {
+            now += step;
+            path.deliver_until(now);
+            for (auto& f : flows) {
+                size_t allowance = SIZE_MAX;
+                if (f->app_rate > 0) {
+                    f->app_credit += f->app_rate * std::chrono::duration<double>(step).count();
+                    allowance = static_cast<size_t>(f->app_credit);
+                }
+                while (f->to_send > 0 && allowance > 0) {
+                    const size_t n = (std::min)({chunk.size(), f->to_send, allowance});
+                    const ByteView v(chunk.data(), n);
+                    const size_t took = f->tx.write(&v, 1, now);
+                    if (took == 0) break;
+                    if (f->to_send != SIZE_MAX) f->to_send -= took;
+                    if (f->app_rate > 0) { f->app_credit -= took; allowance -= took; }
+                }
+                f->tx.tick(now);
+                f->rx.tick(now);
+                for (size_t n; (n = f->rx.read(sink.data(), sink.size())) != 0;) f->delivered += n;
+            }
+            if (on_step) on_step();
+        }
+    }
+
+    PathSim                            path;
+    Clock::duration                    rtt;
+    Clock::time_point                  now{};
+    std::vector<std::unique_ptr<Flow>> flows;
+    std::function<void()>              on_step;
+    std::vector<uint8_t>               chunk = std::vector<uint8_t>(64 * 1024, 0xAB);
+    std::vector<uint8_t>               sink  = std::vector<uint8_t>(64 * 1024);
+};
+
+const cc::BbrController& bbr(const UdpStream& s) {
+    return static_cast<const cc::BbrController&>(s.congestion());
+}
+
+/// Payload bytes per second a path of `mbps` can carry in full-size packets.
+double payload_rate(double mbps) {
+    const double datagram = rudp::kHeaderSize + rudp::kMaxPayload + 28;
+    return mbps * 1e6 / 8 * rudp::kMaxPayload / datagram;
+}
+
+double mbps_of(size_t bytes, Clock::duration over) {
+    return bytes * 8.0 / std::chrono::duration<double>(over).count() / 1e6;
+}
+
+} // namespace
+
+// ── Arithmetic ──────────────────────────────────────────────────────────────
+
+TEST(CcMathTest, MulDivIsExactWhereTheProductWouldOverflow) {
+    // The cases the transport actually divides: a rate over a nanosecond interval,
+    // a byte count over a rate. Each product overflows 64 bits.
+    EXPECT_EQ(cc::mul_div(uint64_t{1} << 40, 1000000000ull, 1000000000ull), uint64_t{1} << 40);
+    EXPECT_EQ(cc::mul_div(12500000000ull, 4000000000ull, 4000000000ull), 12500000000ull);
+    EXPECT_EQ(cc::mul_div(7, 3, 2), 10u);
+    EXPECT_EQ(cc::mul_div(5, 5, 0), 0u) << "a zero divisor is defined, not a crash";
+#ifdef __SIZEOF_INT128__
+    std::mt19937_64 rng(42);
+    for (int i = 0; i < 100000; ++i) {
+        const uint64_t a = rng() >> (rng() % 40);
+        const uint64_t b = rng() >> (rng() % 40 + 24);
+        const uint64_t c = (rng() >> 33) + 1;   // below 2^31: the exact regime
+        __extension__ typedef unsigned __int128 u128;
+        const u128 want = static_cast<u128>(a) * b / c;
+        if (want >> 64) continue;               // the result itself does not fit
+        ASSERT_EQ(cc::mul_div(a, b, c), static_cast<uint64_t>(want)) << a << "*" << b << "/" << c;
+    }
+#endif
+}
+
+TEST(CcMathTest, APacingRateReleasesWhatItTakesTimeToRelease) {
+    const cc::PacingRate rate = cc::PacingRate::per_second(1250000);   // 10 Mbit/s
+    EXPECT_EQ(rate.bytes_over(1ms), 1250u);
+    EXPECT_EQ(rate.time_for(1250), Clock::duration(1ms));
+    EXPECT_EQ(rate.bytes_over(Clock::duration::zero()), 0u);
+
+    const cc::PacingRate ratio{3600, 40ms};   // a window per round trip
+    EXPECT_EQ(ratio.bytes_over(10ms), 900u);
+    EXPECT_EQ(ratio.time_for(900), Clock::duration(10ms));
+    EXPECT_FALSE(cc::PacingRate{}.paced());
+}
+
+// ── Delivery-rate estimation ────────────────────────────────────────────────
+
+namespace {
+
+/// A sender sending one packet every `gap`, each acknowledged `rtt` after it left.
+struct SamplerRig {
+    cc::DeliveryRateSampler sampler;
+    struct Sent { cc::TxState tx; uint32_t seq; Clock::time_point acked_at; };
+    std::deque<Sent>  flight;
+    Clock::time_point now{};
+    uint64_t          inflight = 0;
+    uint32_t          seq      = 1;
+
+    void send(uint64_t bytes, Clock::duration rtt) {
+        Sent s;
+        s.seq = seq++;
+        sampler.on_sent(s.tx, now, inflight, inflight + bytes);
+        inflight += bytes;
+        s.acked_at = now + rtt;
+        flight.push_back(s);
+    }
+
+    /// Acknowledge everything due by `now`, one acknowledgement per packet.
+    std::vector<cc::RateSample> ack_due(Clock::duration min_rtt, uint64_t bytes) {
+        std::vector<cc::RateSample> out;
+        while (!flight.empty() && flight.front().acked_at <= now) {
+            sampler.on_delivered(flight.front().tx, flight.front().seq, bytes, now);
+            inflight -= bytes;
+            flight.pop_front();
+            out.push_back(sampler.take_sample(min_rtt));
+        }
+        return out;
+    }
+};
+
+} // namespace
+
+TEST(DeliveryRateTest, MeasuresTheRateAPathDelivers) {
+    SamplerRig r;
+    // 1200 bytes every millisecond: 1.2 MB/s, whatever the round trip.
+    std::vector<cc::RateSample> samples;
+    for (int i = 0; i < 400; ++i) {
+        r.send(1200, 50ms);
+        r.now += 1ms;
+        for (const auto& s : r.ack_due(50ms, 1200)) samples.push_back(s);
+    }
+    ASSERT_GT(samples.size(), 300u);
+    for (size_t i = 100; i < samples.size(); ++i) {
+        ASSERT_TRUE(samples[i].rate_valid) << i;
+        EXPECT_NEAR(static_cast<double>(samples[i].delivery_rate), 1.2e6, 1.2e6 * 0.01) << i;
+        EXPECT_FALSE(samples[i].is_app_limited);
+    }
+}
+
+TEST(DeliveryRateTest, AppLimitedSamplesAreFlaggedUntilTheBubbleIsDelivered) {
+    SamplerRig r;
+    for (int i = 0; i < 100; ++i) {
+        r.send(1200, 20ms);
+        r.now += 1ms;
+        r.ack_due(20ms, 1200);
+    }
+    // The application runs dry with 20 packets in flight. Everything sent from here
+    // until those, and these, are delivered measures the application.
+    r.sampler.mark_app_limited(r.inflight);
+    ASSERT_TRUE(r.sampler.app_limited());
+    for (int i = 0; i < 5; ++i) {
+        r.send(1200, 20ms);
+        r.now += 4ms;
+    }
+    bool saw_limited = false;
+    for (int i = 0; i < 100; ++i) {
+        r.now += 1ms;
+        for (const auto& s : r.ack_due(20ms, 1200)) saw_limited |= s.is_app_limited;
+        if (r.flight.empty()) break;
+    }
+    EXPECT_TRUE(saw_limited) << "packets sent inside the bubble were not flagged";
+    EXPECT_FALSE(r.sampler.app_limited()) << "the bubble outlived its own delivery";
+
+    // And the next packet sent is the path's again.
+    r.send(1200, 20ms);
+    r.now += 20ms;
+    const auto after = r.ack_due(20ms, 1200);
+    ASSERT_EQ(after.size(), 1u);
+    EXPECT_FALSE(after[0].is_app_limited);
+}
+
+TEST(DeliveryRateTest, AnIntervalShorterThanTheMinimumRoundTripIsNotTrusted) {
+    SamplerRig r;
+    // A whole window acknowledged at one instant — ack compression. Its "rate" is
+    // whatever the burst size divided by a sliver of time comes to.
+    for (int i = 0; i < 10; ++i) r.send(1200, 5ms);
+    r.now += 5ms;
+    const auto samples = r.ack_due(50ms, 1200);   // the path's real minimum is 50 ms
+    ASSERT_EQ(samples.size(), 10u);
+    for (const auto& s : samples) {
+        EXPECT_TRUE(s.acked);
+        EXPECT_FALSE(s.rate_valid) << "a compressed interval was believed";
+    }
+}
+
+// ── Loss recovery ───────────────────────────────────────────────────────────
+
+namespace {
+
+/// Lose chosen first transmissions of one flow's Data, by offset from the first
+/// Data packet sent after this is installed (an offset listed twice also loses
+/// that packet's first repair). Optionally makes the sender look like a peer from
+/// before acknowledgement ranges, by clearing the flag that says it parses them.
+struct HoleMaker {
+    std::vector<size_t>     holes;
+    bool                    hide_ext_ack = false;
+    bool                    armed        = false;
+    uint32_t                base         = 0;
+    std::map<uint32_t, int> sends;
+    std::map<uint32_t, int> drops_left;
+    bool                    saw_ranges = false;
+
+    void install(PathSim& path) {
+        path.hook = [this](Bytes& d, const Address&, bool forward) {
+            rudp::Packet p;
+            if (!rudp::decode(d.data(), d.size(), p)) return false;
+            if (!forward) {
+                if (p.range_count() > 0) saw_ranges = true;
+                return false;
+            }
+            if (hide_ext_ack) d[1] &= static_cast<uint8_t>(~rudp::FlagExtAck);
+            if (p.type != rudp::PacketType::Data || holes.empty()) return false;
+            if (!armed) {
+                armed = true;
+                base  = p.seq;
+                for (size_t h : holes) drops_left[base + static_cast<uint32_t>(h)] += 1;
+            }
+            ++sends[p.seq];
+            auto it = drops_left.find(p.seq);
+            if (it != drops_left.end() && it->second > 0) { --it->second; return true; }
+            return false;
+        };
+    }
+};
+
+} // namespace
+
+// Holes far apart in one window, each past the sack word's reach of the next.
+// With acknowledgement ranges the receiver names every one of them at once and
+// they are repaired within the same round trip; with only the sack word, each one
+// becomes visible only when the hole in front of it fills — a round trip per hole,
+// which on a lossy path is what turns a large window into a crawl. The second run
+// is also the compatibility test: a peer that never said it parses ranges is never
+// sent one, and still gets its data.
+TEST(UdpLossRecoveryTest, HolesPastTheSackWordAreRepairedInTheSameRoundTrip) {
+    for (const bool old_peer : {false, true}) {
+        SCOPED_TRACE(old_peer ? "peer without ranges" : "peer with ranges");
+        // 100 Mbit/s at 100 ms holds more than a receive window, so the sender is
+        // window-limited with no standing queue: a clean round trip to time by.
+        Sim sim(100, 100ms, 2000);
+        HoleMaker holes;
+        holes.hide_ext_ack = old_peer;
+        holes.install(sim.path);
+
+        Flow& f = sim.add(CongestionAlgorithm::Reno);
+        f.to_send = SIZE_MAX;
+        sim.run(2s);   // a window well past what one sack word can describe
+        ASSERT_GT(f.tx.cwnd(), 400u * rudp::kMaxPayload);
+        ASSERT_EQ(f.tx.retransmits(), 0u);
+
+        holes.holes = {0, 60, 120, 180, 240, 300};
+        holes.armed = false;
+        const uint32_t before = f.tx.retransmits();
+        Clock::time_point first{}, last{};
+        uint32_t          seen = 0;
+        sim.on_step = [&] {
+            const uint32_t now_rtx = f.tx.retransmits() - before;
+            if (now_rtx == seen) return;
+            if (seen == 0) first = sim.now;
+            last = sim.now;
+            seen = now_rtx;
+        };
+        sim.run(3s);
+        sim.on_step = nullptr;
+
+        ASSERT_EQ(f.tx.retransmits() - before, holes.holes.size())
+            << "something was repaired that was never lost, or a hole was not";
+        ASSERT_NE(first, Clock::time_point{});
+        if (old_peer) {
+            EXPECT_FALSE(holes.saw_ranges) << "ranges sent to a peer that never said it parses them";
+            EXPECT_GE(last - first, 4 * sim.rtt) << "without ranges the holes surface a round trip apart";
+        } else {
+            EXPECT_TRUE(holes.saw_ranges);
+            EXPECT_LE(last - first, sim.rtt) << "holes named together were repaired rounds apart";
+        }
+        EXPECT_EQ(f.tx.congestion_events(), 1u) << "one episode, and no timeout";
+        EXPECT_FALSE(f.tx.dead());
+    }
+}
+
+// The round-trip estimate comes from the newest packet an acknowledgement covers.
+// Without ranges, the packets past the sack word's reach behind a hole are only
+// acknowledged once the hole fills — a round trip late — and measuring every one
+// of them against that acknowledgement used to drag the estimate, the timeout and
+// every pacing rate derived from it up by a round trip per hole.
+TEST(UdpLossRecoveryTest, AHoleDoesNotInflateTheRoundTripEstimate) {
+    Sim sim(100, 100ms, 2000);   // window-limited: no queue to inflate it either
+    HoleMaker holes;
+    holes.hide_ext_ack = true;   // the late cumulative acknowledgement is the point
+    holes.install(sim.path);
+    Flow& f = sim.add(CongestionAlgorithm::Reno);
+    f.to_send = SIZE_MAX;
+    sim.run(2s);
+    ASSERT_LT(f.tx.rtt().srtt, 110ms);
+
+    holes.holes = {0, 100, 200};
+    Clock::duration worst{};
+    sim.on_step = [&] { worst = (std::max)(worst, f.tx.rtt().srtt); };
+    sim.run(2s);
+    ASSERT_EQ(f.tx.congestion_events(), 1u);
+    EXPECT_LT(worst, 125ms) << "packets that waited for a hole were measured as a slow path";
+}
+
+// A repair can be lost too. It is not left to the retransmission timeout: once a
+// packet sent after it has arrived, it is overdue by the same reasoning that
+// condemned the original (RACK, RFC 8985), and goes out again.
+TEST(UdpLossRecoveryTest, ALostRepairIsRepairedAgainWithoutATimeout) {
+    for (const auto algo : {CongestionAlgorithm::Reno, CongestionAlgorithm::Bbr}) {
+        SCOPED_TRACE(to_string(algo));
+        // The application sends at half the link rate, so neither the window nor
+        // the receiver's buffer is what stops the sender: new data keeps leaving
+        // after the repair, which is the evidence RACK reads. (With a full receive
+        // window behind a hole nothing new can be sent at all, and a lost repair is
+        // a timeout's to find — in TCP as here.)
+        Sim sim(50, 40ms, 2000);
+        HoleMaker holes;
+        holes.install(sim.path);
+        Flow& f    = sim.add(algo);
+        f.to_send  = SIZE_MAX;
+        f.app_rate = payload_rate(50) / 2;
+        sim.run(2s);
+        const uint32_t events = f.tx.congestion_events();
+        ASSERT_EQ(f.tx.retransmits(), 0u);
+
+        holes.holes = {10, 10};   // the packet, and then its first repair
+        sim.run(2s);
+
+        EXPECT_EQ(holes.sends[holes.base + 10], 3) << "the lost repair was not sent again";
+        EXPECT_EQ(f.tx.retransmits(), 2u) << "something else was repaired";
+        EXPECT_EQ(f.tx.congestion_events() - events, 1u)
+            << "a timeout fired (or a second episode opened) over one loss";
+        EXPECT_FALSE(f.tx.dead());
+    }
+}
+
+// However many acknowledgements report the holes of one loss, the controller is
+// told about one congestion event — Reno halves once, BBR runs one round of
+// packet conservation.
+TEST(UdpLossRecoveryTest, OneLossEpisodeIsOneCongestionEvent) {
+    for (const auto algo : {CongestionAlgorithm::Reno, CongestionAlgorithm::Bbr}) {
+        SCOPED_TRACE(to_string(algo));
+        Sim sim(50, 40ms, 2000);
+        HoleMaker holes;
+        holes.install(sim.path);
+        Flow& f = sim.add(algo);
+        f.to_send = SIZE_MAX;
+        sim.run(2s);
+        const uint32_t events = f.tx.congestion_events();
+        ASSERT_EQ(f.tx.retransmits(), 0u);
+
+        holes.holes.clear();
+        for (size_t i = 0; i < 24; ++i) holes.holes.push_back(i);   // one wide burst
+        sim.run(2s);
+        EXPECT_EQ(f.tx.congestion_events() - events, 1u);
+        EXPECT_EQ(f.tx.retransmits(), 24u);
+        EXPECT_FALSE(f.tx.dead());
+    }
+}
+
+// ── BBR ─────────────────────────────────────────────────────────────────────
+
+// The two things BBR is for, on a path with four BDPs of buffer: it finds the
+// bottleneck rate, and it does so without parking a queue in front of it. Reno on
+// the same path fills the buffer — which is what every other message to that peer,
+// and every other flow through that router, then waits behind.
+TEST(BbrTest, FindsTheBottleneckAndKeepsTheQueueShort) {
+    const auto standing_queue = [](CongestionAlgorithm algo, double& util, Flow*& out,
+                                   std::unique_ptr<Sim>& keep) {
+        keep = std::make_unique<Sim>(20, 40ms, 333);
+        Sim& sim = *keep;
+        Flow& f  = sim.add(algo);
+        f.to_send = SIZE_MAX;
+        sim.run(4s);
+        const size_t start = f.delivered;
+        std::vector<Clock::duration> rtts;
+        sim.on_step = [&] { rtts.push_back(f.tx.rtt().latest); };
+        sim.run(6s);
+        sim.on_step = nullptr;
+        util = (f.delivered - start) / 6.0 / payload_rate(20);
+        out  = &f;
+        std::sort(rtts.begin(), rtts.end());
+        return rtts[rtts.size() / 2] - sim.rtt;
+    };
+
+    double bbr_util = 0, reno_util = 0;
+    Flow*  bf = nullptr;
+    Flow*  rf = nullptr;
+    std::unique_ptr<Sim> keep_b, keep_r;
+    const auto bbr_queue  = standing_queue(CongestionAlgorithm::Bbr, bbr_util, bf, keep_b);
+    const auto reno_queue = standing_queue(CongestionAlgorithm::Reno, reno_util, rf, keep_r);
+
+    EXPECT_GT(bbr_util, 0.85) << "BBR left the path underused";
+    EXPECT_TRUE(bbr(bf->tx).full_bw_reached());
+    EXPECT_NEAR(static_cast<double>(bbr(bf->tx).max_bw()), payload_rate(20), payload_rate(20) * 0.2)
+        << "the bandwidth model is off the bottleneck";
+    EXPECT_LT(bbr_queue, 10ms) << "BBR is keeping a standing queue";
+    // The contrast is the point of the test, so it is asserted too: if the model
+    // stopped producing a full buffer for Reno, the BBR figure would mean nothing.
+    EXPECT_GT(reno_queue, 50ms);
+    EXPECT_GT(reno_util, 0.85);
+}
+
+// Random loss — Wi-Fi, a mobile link — is not congestion. Reno backs off on every
+// one; BBR backs off only once loss passes its threshold, and keeps most of the
+// path at a loss rate that leaves Reno with a fraction of it.
+TEST(BbrTest, HoldsItsRateUnderRandomLoss) {
+    const auto run = [](CongestionAlgorithm algo) {
+        Sim sim(10, 100ms, 104, 0.01, 7);
+        Flow& f = sim.add(algo);
+        f.to_send = SIZE_MAX;
+        sim.run(20s);
+        EXPECT_FALSE(f.tx.dead());
+        return f.delivered;
+    };
+    const size_t bbr_bytes  = run(CongestionAlgorithm::Bbr);
+    const size_t reno_bytes = run(CongestionAlgorithm::Reno);
+    EXPECT_GT(bbr_bytes / 20.0, 0.5 * payload_rate(10)) << "under half the path at 1% loss";
+    EXPECT_GT(bbr_bytes, 3 * reno_bytes) << "BBR held no more of a lossy path than Reno";
+}
+
+// Every 5 s without a fresh minimum, BBR holds inflight to half a BDP long enough
+// for the queue to empty — and then goes back to probing bandwidth.
+TEST(BbrTest, ProbesRttAndComesBack) {
+    Sim sim(20, 40ms, 83);
+    Flow& f   = sim.add(CongestionAlgorithm::Bbr);
+    f.to_send = SIZE_MAX;
+    sim.run(3s);
+    const uint64_t bdp = bbr(f.tx).bdp();
+
+    bool     in_probe_rtt = false, came_back = false;
+    int      entries      = 0;
+    uint32_t worst_cwnd   = 0;
+    sim.on_step = [&] {
+        const bool now_in = bbr(f.tx).state() == cc::BbrController::State::ProbeRtt;
+        if (now_in && !in_probe_rtt) { ++entries; worst_cwnd = 0; }
+        if (now_in) worst_cwnd = (std::max)(worst_cwnd, f.tx.cwnd());
+        if (!now_in && in_probe_rtt) came_back = true;
+        in_probe_rtt = now_in;
+    };
+    sim.run(9s);
+    sim.on_step = nullptr;
+
+    EXPECT_GE(entries, 1) << "no ProbeRTT in nine seconds of saturation";
+    EXPECT_TRUE(came_back) << "ProbeRTT never ended";
+    EXPECT_LE(worst_cwnd, (std::max<uint64_t>)(bdp * 6 / 10, cc::BbrController::kMinPipeCwnd) +
+                              4 * rudp::kMaxPayload)
+        << "ProbeRTT did not hold inflight near half a BDP";
+}
+
+// Two BBR flows through one bottleneck share it, the second one starting late
+// into a buffer of one BDP that the first already keeps busy.
+//
+// They do not converge to an exact split quickly there — and neither do two Reno
+// flows: the newcomer finds the buffer full, its first loss sets where it starts
+// from, and BBRv3 moves shares only as fast as its probes raise one flow's
+// inflight_hi and its loss rounds cut the other's (bench_path's compete section
+// shows Jain 0.95-0.97 for both controllers over 30 s). What is asserted is what
+// holds regardless: the pipe stays full, nobody starves, and the split is at
+// least roughly fair.
+TEST(BbrTest, TwoFlowsShareABottleneckWithoutStarvation) {
+    Sim sim(20, 40ms, 83);
+    Flow& a   = sim.add(CongestionAlgorithm::Bbr);
+    a.to_send = SIZE_MAX;
+    sim.run(3s);
+    Flow& b   = sim.add(CongestionAlgorithm::Bbr);
+    b.to_send = SIZE_MAX;
+    sim.run(30s);
+    const size_t a0 = a.delivered, b0 = b.delivered;
+    sim.run(30s);
+    const double ra   = static_cast<double>(a.delivered - a0);
+    const double rb   = static_cast<double>(b.delivered - b0);
+    const double jain = (ra + rb) * (ra + rb) / (2 * (ra * ra + rb * rb));
+    EXPECT_GT((ra + rb) / 30.0, 0.85 * payload_rate(20)) << "the pipe was not kept full";
+    EXPECT_GT((std::min)(ra, rb) / (ra + rb), 0.25)
+        << "a: " << mbps_of(a.delivered - a0, 30s) << " Mbit/s, b: "
+        << mbps_of(b.delivered - b0, 30s) << " Mbit/s — one flow is starving the other";
+    EXPECT_GT(jain, 0.8);
+}
+
+// A two-second outage — every packet lost both ways — costs a timeout, not the
+// connection, and the model rebuilds from the acknowledgements once the path is
+// back.
+TEST(BbrTest, RecoversFromAnOutage) {
+    Sim sim(20, 40ms, 83);
+    Flow& f   = sim.add(CongestionAlgorithm::Bbr);
+    f.to_send = SIZE_MAX;
+    sim.run(4s);
+    const uint32_t events = f.tx.congestion_events();
+
+    sim.path.blackout = true;
+    sim.run(2s);
+    sim.path.blackout = false;
+    sim.run(3s);
+    const size_t start = f.delivered;
+    sim.run(3s);
+
+    EXPECT_FALSE(f.tx.dead());
+    EXPECT_GT(f.tx.congestion_events(), events) << "the outage went unnoticed";
+    EXPECT_GT((f.delivered - start) / 3.0, 0.8 * payload_rate(20)) << "the rate never came back";
+}
+
+// The controller's randomness (the probe schedule) is seeded from the connection,
+// so a run is a pure function of its inputs — which is what makes every figure in
+// this file and in bench_path reproducible.
+TEST(BbrTest, IsDeterministic) {
+    const auto run = [] {
+        Sim sim(10, 60ms, 50, 0.005, 3);
+        Flow& f   = sim.add(CongestionAlgorithm::Bbr);
+        f.to_send = SIZE_MAX;
+        sim.run(8s);
+        return std::make_pair(f.delivered, f.tx.retransmits());
+    };
+    EXPECT_EQ(run(), run());
+}
+
+// After ten seconds of application silence BBR keeps its model — unlike a
+// window, a bandwidth estimate does not go stale by sitting unused — and lets its
+// pacing rate govern the restart. What must not happen is the whole window going
+// out at once.
+TEST(BbrTest, AnIdleStreamResumesAtItsPacingRateNotInABurst) {
+    Sim sim(50, 40ms, 400);
+    Flow& f   = sim.add(CongestionAlgorithm::Bbr);
+    f.to_send = SIZE_MAX;
+    sim.run(4s);
+    f.to_send = 0;
+    sim.run(10s);
+    ASSERT_EQ(f.tx.bytes_in_flight(), 0u);
+    const uint32_t window = f.tx.cwnd();
+    ASSERT_GT(window, 100u * rudp::kMaxPayload) << "the warm-up never grew the window";
+
+    const size_t before = sim.path.fwd().sent;
+    f.to_send = rudp::kMaxPayload * 2000;
+    sim.run(1ms, 1ms);
+    const size_t burst = sim.path.fwd().sent - before;
+    const auto   rate  = f.tx.congestion().pacing_rate();
+    // A millisecond at the pacing rate, plus the couple of packets an empty pipe
+    // is always allowed.
+    EXPECT_LE(burst * rudp::kMaxPayload, rate.bytes_over(2ms) + 3 * rudp::kMaxPayload)
+        << burst << " packets in the first millisecond after idle";
+    EXPECT_LT(burst * rudp::kMaxPayload, window / 4) << "the window went out in one burst";
+}
+
+// Peer-to-peer traffic is app-limited most of the time. A quiet second sends at
+// whatever the application gives it, and that rate says nothing about the path:
+// it must not pull the bandwidth estimate down to it.
+TEST(BbrTest, AppLimitedTrafficDoesNotLowerTheEstimate) {
+    Sim sim(20, 40ms, 83);
+    Flow& f   = sim.add(CongestionAlgorithm::Bbr);
+    f.to_send = SIZE_MAX;
+    sim.run(5s);
+    const uint64_t estimate = bbr(f.tx).max_bw();
+    ASSERT_GT(estimate, payload_rate(20) * 0.8);
+
+    // Ten small messages a second for eight seconds — long enough for several
+    // probe cycles and a ProbeRTT to come and go.
+    f.to_send = 0;
+    for (int i = 0; i < 80; ++i) {
+        f.to_send = 300;
+        sim.run(100ms);
+    }
+    EXPECT_GT(bbr(f.tx).max_bw(), estimate * 8 / 10)
+        << "an application's pace was taken for the path's";
+}
+
+// BBR fills a real path's BDP: past the old 256-packet ceiling on 100 Mbit/s at
+// 100 ms. (It does not need to on a path with no round trip, which is why the
+// stream test of the same name runs Reno.)
+TEST(BbrTest, FillsAWindowLargerThanTheOldCeiling) {
+    Sim sim(100, 100ms, 1041);
+    Flow& f   = sim.add(CongestionAlgorithm::Bbr);
+    f.to_send = SIZE_MAX;
+    size_t peak = 0;
+    sim.on_step = [&] { peak = (std::max)(peak, f.tx.bytes_in_flight()); };
+    sim.run(4s);
+    EXPECT_GT(peak, 256u * rudp::kMaxPayload);
+    EXPECT_GT(mbps_of(f.delivered, 4s), 50.0);
+}
+
+// A buffer a tenth of a BDP deep overflows long before Startup's bandwidth
+// samples stop growing. The loss is what ends Startup there, and the inflight it
+// happened at becomes the long-term bound the probes then work from.
+TEST(BbrTest, AShallowBufferEndsStartupOnLoss) {
+    Sim sim(10, 100ms, 10);
+    Flow& f   = sim.add(CongestionAlgorithm::Bbr);
+    f.to_send = SIZE_MAX;
+    sim.run(5s);
+    EXPECT_TRUE(bbr(f.tx).full_bw_reached());
+    EXPECT_NE(bbr(f.tx).inflight_hi(), cc::BbrController::kInfinite)
+        << "loss above the threshold never set a long-term bound";
+    const size_t start = f.delivered;
+    sim.run(10s);
+    EXPECT_GT((f.delivered - start) / 10.0, 0.6 * payload_rate(10));
+}

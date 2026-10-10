@@ -74,8 +74,10 @@ public:
 
     /// Adopt an already-bound UDP socket and run the datagram transport on it.
     /// Call before start(). This is what makes the reactor able to accept *and*
-    /// dial over UDP; without it, UDP dials are refused.
-    void listen_udp(socket_t udp_socket, AddressFamily family);
+    /// dial over UDP; without it, UDP dials are refused. Every stream on it runs
+    /// the `congestion` controller.
+    void listen_udp(socket_t udp_socket, AddressFamily family,
+                    CongestionAlgorithm congestion = CongestionAlgorithm::Bbr);
 
     /// Whether this reactor can carry UDP connections (i.e. it owns the mux).
     bool has_udp() const noexcept { return mux_ != nullptr; }

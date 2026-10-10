@@ -135,7 +135,7 @@ bool Node::open_listeners() {
         if (!is_valid_socket(udp_socket_))
             LOG_WARN("node", "Could not open a UDP socket; dials will fall back to TCP");
         else
-            reactors_->listen_udp(udp_socket_, family);
+            reactors_->listen_udp(udp_socket_, family, config_.congestion_control);
         return true;
     }
 
@@ -257,7 +257,7 @@ bool Node::open_listeners() {
             transports_ |= PeerTransportTcp;
         }
         if (is_valid_socket(udp)) {
-            reactors_->listen_udp(udp, family);
+            reactors_->listen_udp(udp, family, config_.congestion_control);
             transports_ |= PeerTransportUdp;
         }
         return true;

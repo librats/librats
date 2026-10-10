@@ -42,8 +42,9 @@ public:
 
     /// Hand the shared UDP socket to the acceptor reactor (index 0), which then
     /// owns every datagram connection. Before start().
-    void listen_udp(socket_t udp_socket, AddressFamily family) {
-        reactors_[0]->listen_udp(udp_socket, family);
+    void listen_udp(socket_t udp_socket, AddressFamily family,
+                    CongestionAlgorithm congestion = CongestionAlgorithm::Bbr) {
+        reactors_[0]->listen_udp(udp_socket, family, congestion);
     }
 
     /// Whether the pool can carry UDP connections at all.

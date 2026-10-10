@@ -188,6 +188,9 @@ double percentile(std::vector<double> v, double p) {
 
 const char* wire(TransportKind k) { return k == TransportKind::Udp ? "UDP" : "TCP"; }
 
+/// The congestion controller every datagram stream in this run uses (--cc).
+CongestionAlgorithm g_cc = CongestionAlgorithm::Bbr;
+
 /// A node configured to speak exactly one wire, so nothing can silently fall
 /// back and measure the other transport under this one's name.
 NodeConfig config_for(TransportKind kind, bool listen) {
@@ -199,6 +202,7 @@ NodeConfig config_for(TransportKind kind, bool listen) {
     c.enable_tcp             = (kind == TransportKind::Tcp);
     c.enable_udp             = (kind == TransportKind::Udp);
     c.preferred_transport    = kind;
+    c.congestion_control     = g_cc;
     c.max_peers              = 0;
     // The host-network monitor is a thread per node that has nothing to do with
     // the transport; it would show up as noise in the idle measurement.
@@ -557,7 +561,7 @@ double bench_burst(TransportKind kind, size_t frame_size, size_t cap_bytes) {
             });
         },
         [&](Node& client) {
-            client.on_peer_disconnected([&](const PeerId&) {
+            client.on_peer_disconnected([&](const PeerId&, CloseReason) {
                 dropped.store(true, std::memory_order_release);
             });
         });
@@ -833,7 +837,7 @@ public:
                 std::printf("  peer up    %s\n", p.id().short_hex().c_str());
             (void)s;
         });
-        node_.on_peer_disconnected([this](const PeerId& id) {
+        node_.on_peer_disconnected([this](const PeerId& id, CloseReason) {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = sessions_.find(id);
             if (it != sessions_.end()) {
@@ -973,6 +977,7 @@ NodeConfig remote_config(const Options& o, bool listen, bool tcp, bool udp) {
     c.enable_tcp             = tcp;
     c.enable_udp             = udp;
     c.preferred_transport    = udp ? TransportKind::Udp : TransportKind::Tcp;
+    c.congestion_control     = g_cc;
     // Only ever one wire is enabled on the measuring side, so there is nothing to
     // race — and a fallback that could quietly switch wires would report one
     // transport's numbers under the other's name.
@@ -1373,6 +1378,7 @@ void usage() {
         "  --port N          listen port for --serve, or target port (default 9977)\n"
         "  --bind ADDR       interface to bind (default: dual-stack wildcard)\n"
         "  --transport WIRE  tcp | udp | both   (default both)\n"
+        "  --cc ALGO         bbr | reno         congestion control of UDP streams (default bbr)\n"
         "  --protocol NAME   must match on both ends (default bench-transport/1)\n"
         "  --bulk-mb N       bytes per bulk direction, MiB      (default 16)\n"
         "  --frame-kb N      bulk frame size, KiB               (default 16)\n"
@@ -1449,6 +1455,17 @@ bool parse_args(int argc, char** argv, Options& o) {
             o.udp = (wire_name == "udp" || wire_name == "both");
             if (!o.tcp && !o.udp) {
                 std::fprintf(stderr, "bench_transport: --transport takes tcp, udp or both\n");
+                return false;
+            }
+        }
+        else if (arg == "--cc") {
+            const char* v = value(i);
+            if (!v) return false;
+            const std::string name = v;
+            if (name == "bbr")       g_cc = CongestionAlgorithm::Bbr;
+            else if (name == "reno") g_cc = CongestionAlgorithm::Reno;
+            else {
+                std::fprintf(stderr, "bench_transport: --cc takes bbr or reno\n");
                 return false;
             }
         }

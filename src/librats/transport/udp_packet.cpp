@@ -30,9 +30,19 @@ uint32_t get_u32(const uint8_t* p) {
 
 } // namespace
 
+AckRange ack_range(const Packet& p, size_t i) noexcept {
+    const uint8_t* e = p.ranges.data() + i * kAckRangeSize;
+    return AckRange{get_u16(e), get_u16(e + 2)};
+}
+
+void encode_ack_range(const AckRange& r, uint8_t* out) noexcept {
+    put_u16(out, r.offset);
+    put_u16(out + 2, r.length);
+}
+
 size_t encode_header(const Packet& p, uint8_t* out) {
-    const uint8_t flags = p.has_sack() ? static_cast<uint8_t>(p.flags)
-                                       : static_cast<uint8_t>(p.flags & ~FlagSack);
+    const uint8_t flags = static_cast<uint8_t>(
+        (p.has_sack() ? p.flags : (p.flags & ~FlagSack)) & ~FlagAckRanges);
 
     out[0] = static_cast<uint8_t>((kVersion << 4) | (static_cast<uint8_t>(p.type) & 0x0F));
     out[1] = flags;
@@ -51,6 +61,13 @@ size_t encode_header(const Packet& p, uint8_t* out) {
 
 size_t encode(const Packet& p, uint8_t* out) {
     size_t n = encode_header(p, out);
+    const size_t count = p.range_count();
+    if (p.type == PacketType::Ack && count > 0) {
+        out[1] |= FlagAckRanges;
+        out[n++] = static_cast<uint8_t>(count);
+        std::memcpy(out + n, p.ranges.data(), count * kAckRangeSize);
+        n += count * kAckRangeSize;
+    }
     if (!p.payload.empty()) {
         std::memcpy(out + n, p.payload.data(), p.payload.size());
         n += p.payload.size();
@@ -79,6 +96,26 @@ bool decode(const uint8_t* data, size_t len, Packet& out) {
         offset += kSackSize;
     } else {
         out.sack = 0;
+    }
+
+    out.ranges = ByteView{};
+    if (out.flags & FlagAckRanges) {
+        // Ranges are an acknowledgement's business only, so a Data packet can never
+        // have its payload's first bytes mistaken for them (or the reverse).
+        if (out.type != PacketType::Ack) return false;
+        if (len < offset + 1) return false;
+        const size_t count = data[offset++];
+        if (count == 0 || count > kMaxAckRanges) return false;
+        if (len < offset + count * kAckRangeSize) return false;
+        out.ranges = ByteView(data + offset, count * kAckRangeSize);
+        offset += count * kAckRangeSize;
+        for (size_t i = 0; i < count; ++i) {
+            const AckRange r = ack_range(out, i);
+            // Offset 0 is ack+1, the packet the cumulative ack says is missing; and a
+            // receiver holds nothing kMaxWindowPackets or more past it.
+            if (r.length == 0 || r.offset == 0) return false;
+            if (size_t{r.offset} + r.length > kMaxWindowPackets) return false;
+        }
     }
 
     out.payload = ByteView(data + offset, len - offset);

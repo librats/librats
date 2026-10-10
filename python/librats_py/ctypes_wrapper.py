@@ -56,6 +56,7 @@ class RatsConfig(Structure):
         # 0 = the library default (8 MiB). Not a maximum message size — one
         # message of any size is always queued.
         ("send_queue_limit", c_size_t),
+        ("congestion_control", c_int),   # rats_congestion_t (default BBR)
     ]
 
 

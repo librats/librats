@@ -236,6 +236,11 @@ RatsNode::RatsNode(const Napi::CallbackInfo& info)
             c.send_queue_limit =
                 static_cast<size_t>(cfg.Get("sendQueueLimit").As<Napi::Number>().Int64Value());
 
+        // Congestion controller of every UDP stream: BBR (default) or Reno.
+        if (cfg.Has("congestionControl"))
+            c.congestion_control = static_cast<rats_congestion_t>(
+                cfg.Get("congestionControl").As<Napi::Number>().Int32Value());
+
         node_ = rats_create_config(&c);
     } else {
         int port = 0;

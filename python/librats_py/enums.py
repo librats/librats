@@ -42,6 +42,17 @@ class Transport(IntEnum):
     RELAY = 2  # carried through a third node (see enable_relay)
 
 
+class Congestion(IntEnum):
+    """``rats_congestion_t`` — congestion controller of every UDP stream.
+
+    BBR holds its rate on links that lose packets for reasons other than
+    congestion (Wi-Fi, mobile, long hops) and keeps the queue it builds at the
+    bottleneck short; Reno backs off on every loss. TCP ignores this.
+    """
+    BBR = 0   # BBRv3 (default)
+    RENO = 1  # NewReno with HyStart++
+
+
 class TransportMask(IntEnum):
     """Bitmask flags used by :attr:`RatsNode.transports` and friends."""
     TCP = 0x1

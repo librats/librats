@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from ctypes import byref, c_size_t, c_int, string_at
 
 from .ctypes_wrapper import get_librats, take_string, RatsConfig
-from .enums import (RatsError as ErrorCode, Security, Transport, NatMapping,
+from .enums import (RatsError as ErrorCode, Security, Transport, Congestion, NatMapping,
                     LogLevel, VersionInfo)
 from .exceptions import RatsError, check_error
 from .callbacks import (
@@ -65,6 +65,7 @@ class RatsNode:
         preferred_transport: Transport = Transport.UDP,
         transport_fallback_ms: int = 1200,
         send_queue_limit: int = 0,
+        congestion_control: Congestion = Congestion.BBR,
     ):
         """Create a node.
 
@@ -90,6 +91,9 @@ class RatsNode:
                 quarter of it is where :meth:`peer_writable` starts saying False,
                 so lowering it makes backpressure felt sooner. It is not a
                 maximum message size — one message of any size is always queued.
+            congestion_control: :class:`~librats_py.enums.Congestion` of every
+                UDP stream. BBR (default) holds its rate on lossy links and keeps
+                the bottleneck queue short; Reno backs off on every loss.
         """
         self._lib = get_librats()
 
@@ -103,6 +107,7 @@ class RatsNode:
         cfg.preferred_transport = int(preferred_transport)
         cfg.transport_fallback_ms = transport_fallback_ms
         cfg.send_queue_limit = send_queue_limit
+        cfg.congestion_control = int(congestion_control)
         # Keep bytes alive for the duration of the create call.
         self._cfg_keepalive = [
             _b(bind_address), _b(data_dir), _b(protocol),

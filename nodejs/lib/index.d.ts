@@ -33,6 +33,17 @@ declare module 'librats' {
     readonly RELAY: 2;
   };
 
+  /**
+   * Congestion controller of every UDP stream. BBR holds its rate on lossy links
+   * and keeps the bottleneck queue short; Reno backs off on every loss.
+   */
+  export const Congestion: {
+    /** BBRv3 (default). */
+    readonly BBR: 0;
+    /** NewReno with HyStart++. */
+    readonly RENO: 1;
+  };
+
   /** Bitmask flags used by `node.transports` and `node.peerTransports()`. */
   export const TransportMask: {
     readonly TCP: 0x1;
@@ -62,6 +73,7 @@ declare module 'librats' {
   export type SecurityValue = 0 | 1;
   /** A wire a dial can choose: TCP or UDP. A relay is never dialed. */
   export type TransportValue = 0 | 1;
+  export type CongestionValue = 0 | 1;
   /** What a connected peer's link actually runs on, relays included. */
   export type PeerTransportValue = TransportValue | 2;
   export type NatMappingValue = 0 | 1 | 2 | 3;
@@ -98,6 +110,8 @@ declare module 'librats' {
      * returning false. Not a maximum message size.
      */
     sendQueueLimit?: number;
+    /** Congestion controller of every UDP stream. Default `Congestion.BBR`. */
+    congestionControl?: CongestionValue;
   }
 
   export type PeerHandler = (peerId: string) => void;

@@ -51,8 +51,9 @@ void Reactor::listen(socket_t server_socket) {
     server_socket_ = server_socket;
 }
 
-void Reactor::listen_udp(socket_t udp_socket, AddressFamily family) {
-    mux_ = std::make_unique<UdpMux>(udp_socket, family, *this);
+void Reactor::listen_udp(socket_t udp_socket, AddressFamily family,
+                         CongestionAlgorithm congestion) {
+    mux_ = std::make_unique<UdpMux>(udp_socket, family, *this, UdpMuxLimits{}, congestion);
 }
 
 void Reactor::start() {

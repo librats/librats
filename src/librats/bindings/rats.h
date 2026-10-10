@@ -53,6 +53,16 @@ typedef enum {
     RATS_TRANSPORT_RELAY = 2
 } rats_transport_t;
 
+/* Congestion controller every datagram (UDP) stream runs; TCP is governed by the
+ * kernel and ignores this. BBR holds its rate on links that lose packets for
+ * reasons other than congestion (Wi-Fi, mobile, long hops) and keeps the queue
+ * it builds at the bottleneck short; Reno backs off on every loss. Zero is BBR,
+ * so a zeroed config gets the default. */
+typedef enum {
+    RATS_CONGESTION_BBR  = 0,  /* BBRv3 (default) */
+    RATS_CONGESTION_RENO = 1   /* NewReno with HyStart++ */
+} rats_congestion_t;
+
 /* Why a peer connection ended, handed to rats_on_peer_disconnected(). The
  * reason is what tells "I was sending too fast" apart from "the peer left" —
  * without it both look the same and the usual answer to either is to reconnect
@@ -137,6 +147,9 @@ typedef struct {
      * It is NOT a maximum message size: one message is always queued whatever its
      * size. */
     size_t           send_queue_limit;
+
+    /* Congestion controller of every UDP stream (default RATS_CONGESTION_BBR). */
+    rats_congestion_t congestion_control;
 } rats_config_t;
 
 /** A config pre-filled with the library defaults (listening, Noise, ephemeral

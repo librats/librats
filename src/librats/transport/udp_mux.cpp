@@ -28,8 +28,9 @@ void fill_random(uint8_t* out, size_t len) {
 } // namespace
 
 UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
-               UdpMuxLimits limits)
+               UdpMuxLimits limits, CongestionAlgorithm congestion)
     : socket_(socket), family_(family), delegate_(delegate), limits_(limits),
+      congestion_(congestion),
       recv_storage_(kUdpBatchMax * rudp::kMaxDatagram),
       // Only where a batch is really one syscall. Without that, send_datagram()
       // goes straight to the socket and never stages anything, so this would be
@@ -415,7 +416,7 @@ void UdpMux::accept_inbound(const rudp::Packet& syn, const Address& from, Clock:
     const uint32_t send_id = syn.conn_id - 1;
 
     auto stream = std::make_unique<UdpStream>(*this, from, recv_id, send_id,
-                                              ConnRole::Inbound, now);
+                                              ConnRole::Inbound, now, DialProfile{}, congestion_);
     UdpStream* raw = stream.get();
     streams_.emplace(recv_id, Entry{std::move(stream)});
 
@@ -469,7 +470,8 @@ std::unique_ptr<Link> UdpMux::connect(const Address& remote, DialProfile profile
     }
 
     auto stream = std::make_unique<UdpStream>(*this, remote, recv_id, send_id,
-                                              ConnRole::Outbound, Clock::now(), profile);
+                                              ConnRole::Outbound, Clock::now(), profile,
+                                              congestion_);
     UdpStream* raw = stream.get();
     const auto inserted = streams_.emplace(recv_id, Entry{std::move(stream)});
     arm(recv_id, inserted.first->second);  // the Syn's retransmission timeout

@@ -3,6 +3,8 @@
 
 #include "librats/core/socket.h"
 #include "librats/node/node.h"
+#include "librats/transport/bbr.h"
+#include "librats/transport/reno.h"
 #include "librats/transport/udp_mux.h"
 #include "librats/transport/udp_packet.h"
 #include "librats/transport/udp_stream.h"
@@ -11,6 +13,7 @@
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -48,8 +51,15 @@ public:
         ++sent_;
         if (drop_next_ > 0) { --drop_next_; ++dropped_; return; }
         if (drop_every_ > 0 && (sent_ % drop_every_) == 0) { ++dropped_; return; }
-        queue_.push_back({to, Bytes(data, data + len)});
+        Bytes bytes(data, data + len);
+        if (hook && hook(bytes, to)) { ++dropped_; return; }
+        queue_.push_back({to, std::move(bytes)});
     }
+
+    /// Sees (and may rewrite) every datagram as it is sent; true drops it. What a
+    /// test uses to lose one particular packet, or to make a peer look older than
+    /// it is by clearing a flag it would have set.
+    std::function<bool(Bytes& datagram, const Address& to)> hook;
 
     void stream_events(UdpStream&, uint32_t) override {}
 
@@ -198,15 +208,15 @@ struct Pair {
     /// two streams already recorded.
     std::chrono::steady_clock::time_point now;
 
-    Pair() {
+    explicit Pair(CongestionAlgorithm algo = CongestionAlgorithm::Bbr) {
         const auto start = std::chrono::steady_clock::now();
         // Alice dials Bob. The id pairing mirrors the mux: the dialer keeps
         // `base` and sends under `base + 1`; the responder is the mirror image.
         constexpr uint32_t kBase = 0x11223344;
         initiator = std::make_unique<UdpStream>(net, kBob, kBase, kBase + 1,
-                                                ConnRole::Outbound, start);
+                                                ConnRole::Outbound, start, DialProfile{}, algo);
         responder = std::make_unique<UdpStream>(net, kAlice, kBase + 1, kBase,
-                                                ConnRole::Inbound, start);
+                                                ConnRole::Inbound, start, DialProfile{}, algo);
         net.attach(kBob, responder.get());
         net.attach(kAlice, initiator.get());
         net.settle(*initiator, *responder);
@@ -262,12 +272,14 @@ struct TimedPair {
     Clock::time_point          now{};
     Clock::duration            rtt;
 
-    explicit TimedPair(Clock::duration round_trip = 40ms) : rtt(round_trip) {
+    explicit TimedPair(Clock::duration round_trip = 40ms,
+                       CongestionAlgorithm algo = CongestionAlgorithm::Bbr)
+        : rtt(round_trip) {
         constexpr uint32_t kBase = 0x11223344;
         initiator = std::make_unique<UdpStream>(net, kBob, kBase, kBase + 1,
-                                                ConnRole::Outbound, now);
+                                                ConnRole::Outbound, now, DialProfile{}, algo);
         responder = std::make_unique<UdpStream>(net, kAlice, kBase + 1, kBase,
-                                                ConnRole::Inbound, now);
+                                                ConnRole::Inbound, now, DialProfile{}, algo);
         net.attach(kBob, responder.get());
         net.attach(kAlice, initiator.get());
         hops(4);   // the Syn, its acknowledgement, and the first round-trip sample
@@ -297,6 +309,11 @@ struct TimedPair {
         return got;
     }
 };
+
+/// The controller of a stream known to run Reno.
+const cc::RenoController& reno(const UdpStream& s) {
+    return static_cast<const cc::RenoController&>(s.congestion());
+}
 
 NodeConfig base_config() {
     NodeConfig c;
@@ -573,6 +590,108 @@ TEST(RudpPacketTest, OnlyACookieSizedPayloadRidesOnSynAndRetry) {
     }
 }
 
+// Acknowledgement ranges ride on a pure Ack, after the sack word, and survive the
+// round trip exactly — they are what names the holes past the sack word's reach.
+TEST(RudpPacketTest, AckRangesRoundTrip) {
+    uint8_t entries[3 * rudp::kAckRangeSize];
+    const rudp::AckRange want[3] = {{2, 5}, {40, 1}, {700, 300}};
+    for (size_t i = 0; i < 3; ++i) rudp::encode_ack_range(want[i], entries + i * rudp::kAckRangeSize);
+
+    rudp::Packet p;
+    p.type    = rudp::PacketType::Ack;
+    p.flags   = rudp::FlagSack | rudp::FlagExtAck;
+    p.conn_id = 7;
+    p.ack     = 1000;
+    p.sack    = 0x5;
+    p.ranges  = ByteView(entries, sizeof(entries));
+
+    uint8_t buf[rudp::kMaxDatagram];
+    const size_t n = rudp::encode(p, buf);
+    EXPECT_EQ(n, rudp::kHeaderSize + rudp::kSackSize + 1 + sizeof(entries));
+
+    rudp::Packet out;
+    ASSERT_TRUE(rudp::decode(buf, n, out));
+    EXPECT_TRUE(out.ext_ack());
+    EXPECT_EQ(out.sack, 0x5u);
+    ASSERT_EQ(out.range_count(), 3u);
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(rudp::ack_range(out, i).offset, want[i].offset);
+        EXPECT_EQ(rudp::ack_range(out, i).length, want[i].length);
+    }
+    EXPECT_TRUE(out.payload.empty());
+}
+
+// The Data path writes headers on its own (encode_header, straight into the
+// packet's headroom). It must never claim ranges it does not carry — a peer would
+// read the payload's first bytes as a range block.
+TEST(RudpPacketTest, AHeaderNeverClaimsRangesItDoesNotCarry) {
+    uint8_t entries[rudp::kAckRangeSize];
+    rudp::encode_ack_range(rudp::AckRange{3, 2}, entries);
+
+    rudp::Packet p;
+    p.type   = rudp::PacketType::Data;
+    p.flags  = rudp::FlagAckRanges | rudp::FlagExtAck;
+    p.ranges = ByteView(entries, sizeof(entries));
+    uint8_t hdr[rudp::kMaxHeaderSize];
+    EXPECT_EQ(rudp::encode_header(p, hdr), rudp::kHeaderSize);
+    EXPECT_EQ(hdr[1] & rudp::FlagAckRanges, 0);
+}
+
+// Everything a hostile or broken peer could do to a range block is refused before
+// the stream sees it, so the stream never re-validates: ranges anywhere but on an
+// Ack, an empty or oversized block, a truncated one, trailing bytes, a range that
+// names the packet the cumulative ack says is missing, or one past the window.
+TEST(RudpPacketTest, MalformedAckRangesAreRejected) {
+    const auto build = [](rudp::PacketType type, std::vector<rudp::AckRange> ranges,
+                          uint8_t* buf) {
+        uint8_t entries[rudp::kMaxAckRanges * rudp::kAckRangeSize];
+        for (size_t i = 0; i < ranges.size(); ++i)
+            rudp::encode_ack_range(ranges[i], entries + i * rudp::kAckRangeSize);
+        rudp::Packet p;
+        p.type   = type;
+        p.ranges = ByteView(entries, ranges.size() * rudp::kAckRangeSize);
+        return rudp::encode(p, buf);
+    };
+    uint8_t      buf[rudp::kMaxDatagram + 64];
+    rudp::Packet out;
+
+    // Sanity: the baseline is accepted.
+    size_t n = build(rudp::PacketType::Ack, {{1, 1}}, buf);
+    ASSERT_TRUE(rudp::decode(buf, n, out));
+
+    // Ranges on Data: the flag is set by hand, since encode() only ever writes them
+    // on an Ack.
+    n = build(rudp::PacketType::Ack, {{1, 1}}, buf);
+    buf[0] = static_cast<uint8_t>((rudp::kVersion << 4) | static_cast<uint8_t>(rudp::PacketType::Data));
+    EXPECT_FALSE(rudp::decode(buf, n, out)) << "ranges on a Data packet";
+
+    // An empty block.
+    n = build(rudp::PacketType::Ack, {{1, 1}}, buf);
+    buf[rudp::kHeaderSize] = 0;
+    EXPECT_FALSE(rudp::decode(buf, rudp::kHeaderSize + 1, out)) << "zero ranges";
+
+    // More than kMaxAckRanges.
+    n = build(rudp::PacketType::Ack, {{1, 1}}, buf);
+    buf[rudp::kHeaderSize] = static_cast<uint8_t>(rudp::kMaxAckRanges + 1);
+    EXPECT_FALSE(rudp::decode(buf, n, out)) << "too many ranges";
+
+    // Truncated, and with trailing bytes.
+    n = build(rudp::PacketType::Ack, {{1, 1}, {5, 2}}, buf);
+    EXPECT_FALSE(rudp::decode(buf, n - 1, out)) << "truncated";
+    buf[n] = 0;
+    EXPECT_FALSE(rudp::decode(buf, n + 1, out)) << "trailing bytes";
+
+    // Semantically impossible ranges.
+    n = build(rudp::PacketType::Ack, {{0, 1}}, buf);
+    EXPECT_FALSE(rudp::decode(buf, n, out)) << "a range naming ack+1";
+    n = build(rudp::PacketType::Ack, {{4, 0}}, buf);
+    EXPECT_FALSE(rudp::decode(buf, n, out)) << "an empty range";
+    n = build(rudp::PacketType::Ack, {{1000, 25}}, buf);
+    EXPECT_FALSE(rudp::decode(buf, n, out)) << "a range past the receive window";
+    n = build(rudp::PacketType::Ack, {{1000, 24}}, buf);
+    EXPECT_TRUE(rudp::decode(buf, n, out)) << "a range ending exactly at the window edge";
+}
+
 // Sequence numbers advance forever in a 32-bit space and wrap. Every window check
 // in the stream — "has this been acknowledged", "is this past the gap", "is this
 // ack ahead of anything we sent" — goes through these three functions, so the wrap
@@ -743,12 +862,15 @@ TEST(UdpStreamTest, ATimeoutReleasesTheWindowItGaveUpOn) {
 
     ASSERT_TRUE(done) << "the transfer never recovered from the outage";
     EXPECT_EQ(received, payload) << "the transfer never recovered from the outage";
-    EXPECT_GT(pair.initiator->cwnd(), UdpStream::kMinCwnd)
+    EXPECT_GT(pair.initiator->cwnd(), cc::RenoController::kMinCwnd)
         << "the window never grew back after the outage";
 }
 
 TEST(UdpStreamTest, ReducesTheWindowOnceForOneLossEpisode) {
-    Pair pair;
+    // Reno, because "reduced" means a halving there; BBR answers one episode with a
+    // round of packet conservation and restores the window after it (its own test
+    // below checks the episode count, which is the invariant both share).
+    Pair pair(CongestionAlgorithm::Reno);
 
     // Warm the window up so a whole burst can go out at once — a hole is only
     // interesting when there is enough behind it to selectively acknowledge.
@@ -758,22 +880,17 @@ TEST(UdpStreamTest, ReducesTheWindowOnceForOneLossEpisode) {
     ASSERT_EQ(drain(*pair.responder).size(), warmup.size());
 
     const uint32_t before      = pair.initiator->cwnd();
-    const uint32_t before_cuts = pair.initiator->window_reductions();
-    ASSERT_GT(before, UdpStream::kMinCwnd * 8) << "the warm-up never grew the window";
+    const uint32_t before_cuts = pair.initiator->congestion_events();
+    ASSERT_GT(before, cc::RenoController::kMinCwnd * 8) << "the warm-up never grew the window";
 
     // One loss episode, but a wide one: 24 consecutive packets go missing and the
     // 40 behind them arrive. The receiver answers each of those with a selective
-    // ack naming the same 24 holes, and the sender repairs at most
-    // kMaxRepairsPerAck of them per ack — so the repair spans several acks.
+    // ack naming the same 24 holes, and the repairs go out under the window the
+    // first of them cut — so they span several acks, each of which reports loss.
     constexpr size_t kHoles = 24;
     const std::string payload(rudp::kMaxPayload * 64, 'x');
     pair.net.drop_next(kHoles);
     ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
-
-    // Let the repair-spacing floor expire before any ack is seen, so every hole is
-    // eligible at once and the repair really does spread across acks rather than
-    // being skipped as "re-sent very recently".
-    std::this_thread::sleep_for(UdpStream::kMinRepairSpacing + 5ms);
 
     std::string received;
     const auto  deadline = std::chrono::steady_clock::now() + 20s;
@@ -789,10 +906,9 @@ TEST(UdpStreamTest, ReducesTheWindowOnceForOneLossEpisode) {
     ASSERT_EQ(received, payload);
 
     // The whole point: one episode costs one reduction. Reducing per repairing
-    // ack instead — kHoles / kMaxRepairsPerAck of them here — halves the window
-    // three times over for a loss that warranted one halving, and on a longer
-    // recovery walks it all the way to kMinCwnd.
-    const uint32_t cuts = pair.initiator->window_reductions() - before_cuts;
+    // ack instead halves the window several times over for a loss that warranted
+    // one halving, and on a longer recovery walks it all the way to kMinCwnd.
+    const uint32_t cuts = pair.initiator->congestion_events() - before_cuts;
     EXPECT_EQ(cuts, 1u) << "the window was reduced " << cuts << " times for one loss episode";
     EXPECT_LT(pair.initiator->cwnd(), before) << "the loss was not accounted for at all";
 }
@@ -837,8 +953,11 @@ TEST(UdpStreamTest, AWindowIsReleasedOverTimeRatherThanAllAtOnce) {
     EXPECT_GT(pair.net.sent(), before + burst) << "the pacer never let go";
 }
 
+// RFC 2861 is a rule about windows, so it is Reno's: BBR keeps its model through
+// an idle period and lets its pacing rate, not a halved window, govern the restart
+// (BbrTest.AnIdleStreamResumesAtItsPacingRateNotInABurst).
 TEST(UdpStreamTest, AWindowThatWentUnusedIsGivenBack) {
-    TimedPair pair(40ms);
+    TimedPair pair(40ms, CongestionAlgorithm::Reno);
 
     for (int round = 0; round < 8; ++round)
         ASSERT_GT(pair.transfer(rudp::kMaxPayload * 40), 0u) << "round " << round;
@@ -873,11 +992,11 @@ TEST(UdpStreamTest, AWindowThatWentUnusedIsGivenBack) {
 }
 
 TEST(UdpStreamTest, SlowStartEndsOnARisingRoundTripWithoutALoss) {
-    TimedPair pair(20ms);
+    TimedPair pair(20ms, CongestionAlgorithm::Reno);
 
     // A steady path: slow start doubles away, and nothing has told it to stop.
     for (int round = 0; round < 6; ++round) pair.transfer(rudp::kMaxPayload * 40);
-    ASSERT_EQ(pair.initiator->ssthresh(), UdpStream::kMaxCwnd)
+    ASSERT_EQ(reno(*pair.initiator).ssthresh(), UdpStream::kMaxCwnd)
         << "slow start ended before the path gave any reason to";
 
     // The path starts queueing — the round trip quadruples. No packet is lost;
@@ -885,9 +1004,9 @@ TEST(UdpStreamTest, SlowStartEndsOnARisingRoundTripWithoutALoss) {
     pair.rtt = 80ms;
     for (int round = 0; round < 14; ++round) pair.transfer(rudp::kMaxPayload * 40);
 
-    EXPECT_LT(pair.initiator->ssthresh(), UdpStream::kMaxCwnd)
+    EXPECT_LT(reno(*pair.initiator).ssthresh(), UdpStream::kMaxCwnd)
         << "slow start kept doubling into a queue that was visibly building";
-    EXPECT_EQ(pair.initiator->window_reductions(), 0u)
+    EXPECT_EQ(pair.initiator->congestion_events(), 0u)
         << "the exit from slow start cost a loss — which is exactly what watching "
            "the round-trip time is supposed to avoid";
     EXPECT_EQ(pair.initiator->retransmits(), 0u) << "nothing should have been lost";
@@ -904,7 +1023,7 @@ TEST(UdpStreamTest, ALostTailIsProbedRatherThanTimedOut) {
     ASSERT_EQ(pair.initiator->bytes_in_flight(), 0u);
 
     const uint32_t cwnd_before = pair.initiator->cwnd();
-    const uint32_t cuts_before = pair.initiator->window_reductions();
+    const uint32_t cuts_before = pair.initiator->congestion_events();
     ASSERT_GT(cwnd_before, UdpStream::kInitialCwnd * 2) << "the warm-up never grew the window";
 
     // A single small message whose one packet is lost. This is the case nothing
@@ -928,7 +1047,7 @@ TEST(UdpStreamTest, ALostTailIsProbedRatherThanTimedOut) {
         << "a lost tail packet was not recovered inside a retransmission timeout — "
            "which is the whole point of probing for it";
     EXPECT_GE(pair.initiator->tail_probes(), 1) << "nothing probed";
-    EXPECT_EQ(pair.initiator->window_reductions(), cuts_before)
+    EXPECT_EQ(pair.initiator->congestion_events(), cuts_before)
         << "the probe was treated as congestion and cost the window, which is what "
            "it exists to avoid";
     EXPECT_EQ(pair.initiator->cwnd(), cwnd_before) << "the window moved on a probe";
@@ -943,7 +1062,7 @@ TEST(UdpStreamTest, AProbeNamesTheHolesBehindItSoALostBurstStillCostsTheWindow) 
     ASSERT_EQ(pair.initiator->bytes_in_flight(), 0u);
 
     const uint32_t cwnd_before = pair.initiator->cwnd();
-    const uint32_t cuts_before = pair.initiator->window_reductions();
+    const uint32_t cuts_before = pair.initiator->congestion_events();
     ASSERT_GT(cwnd_before, UdpStream::kInitialCwnd * 2) << "the warm-up never grew the window";
 
     // A whole burst lost at the tail — the shape a queue that has just overflowed
@@ -969,7 +1088,7 @@ TEST(UdpStreamTest, AProbeNamesTheHolesBehindItSoALostBurstStillCostsTheWindow) 
         << "a lost burst at the tail was not repaired — probing the front of the "
            "queue recovers one packet at a time, because that acknowledgement names "
            "no hole and resets the probe budget before the timeout can escalate";
-    EXPECT_GT(pair.initiator->window_reductions(), cuts_before)
+    EXPECT_GT(pair.initiator->congestion_events(), cuts_before)
         << "eight packets were lost and the window was never reduced: the probe "
            "answered every silence and the stream never noticed the congestion";
     EXPECT_LT(pair.initiator->cwnd(), cwnd_before)
@@ -995,7 +1114,7 @@ TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
 
     const uint32_t cwnd_before = pair.initiator->cwnd();
     ASSERT_EQ(pair.initiator->retransmits(), 0u);
-    ASSERT_EQ(pair.initiator->window_reductions(), 0u);
+    ASSERT_EQ(pair.initiator->congestion_events(), 0u);
 
     // Our next packet stays in flight: queued on the path, neither delivered nor
     // dropped, exactly as a packet mid-flight on a real link.
@@ -1011,7 +1130,7 @@ TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
 
     EXPECT_EQ(pair.initiator->retransmits(), 0u)
         << "the peer's own data was mistaken for a duplicate ack";
-    EXPECT_EQ(pair.initiator->window_reductions(), 0u)
+    EXPECT_EQ(pair.initiator->congestion_events(), 0u)
         << "the window was reduced for a loss that never happened";
     EXPECT_GE(pair.initiator->cwnd(), cwnd_before);
 
@@ -1025,8 +1144,12 @@ TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
     EXPECT_EQ(rest, std::string(100, 'B'));
 }
 
+// Reno, on a path with no round trip to speak of: slow start alone grows the
+// window, so the receiver's ceiling is the only thing that can stop it. BBR keeps
+// what such a path holds — next to nothing — and fills a real one instead
+// (BbrTest.FillsAWindowLargerThanTheOldCeiling).
 TEST(UdpStreamTest, FillsAWindowLargerThanTheOldCeiling) {
-    Pair pair;
+    Pair pair(CongestionAlgorithm::Reno);
 
     // Slow start doubles the window every round trip, so a transfer long enough
     // to keep the pipe full runs it up until something stops it. Nothing is lost
@@ -1620,10 +1743,10 @@ TEST(UdpStreamTest, AStaleWindowUpdateDoesNotStopTheSender) {
 //
 // The sender's queue here is far longer than a selective ack can reach: one word
 // names the 32 packets after the hole, while the queue behind it runs to hundreds.
-// That gap is load-bearing — repair_sacked_holes() bounds its search by the reach
-// of the ack rather than by the length of the queue, which is only sound because a
-// bit cannot mark anything further out. If that bound were ever tightened past the
-// real reach, this is the test that would notice: the repair would silently stop
+// That gap is load-bearing — detect_losses() bounds its search by the largest
+// packet acknowledged rather than by the length of the queue, which is only sound
+// because nothing past it has been reported on. If that bound were ever tightened
+// past the real reach, this is the test that would notice: the repair would silently stop
 // happening and recovery would fall back to waiting out a retransmission timeout,
 // with the transfer still completing and nothing else looking wrong.
 TEST(UdpStreamTest, AHoleBehindALongQueueIsRepairedWithoutATimeout) {
@@ -1635,7 +1758,7 @@ TEST(UdpStreamTest, AHoleBehindALongQueueIsRepairedWithoutATimeout) {
     ASSERT_EQ(write_all(*pair.initiator, warmup), warmup.size());
     pair.net.settle(*pair.initiator, *pair.responder, 128);
     ASSERT_EQ(drain(*pair.responder).size(), warmup.size());
-    ASSERT_EQ(pair.initiator->window_reductions(), 0u) << "the warm-up lost something";
+    ASSERT_EQ(pair.initiator->congestion_events(), 0u) << "the warm-up lost something";
 
     const uint32_t repairs_before = pair.initiator->retransmits();
 
@@ -1652,11 +1775,6 @@ TEST(UdpStreamTest, AHoleBehindALongQueueIsRepairedWithoutATimeout) {
     pair.net.drop_next(kHoles);
     const std::string payload(rudp::kMaxPayload * kBurstPackets, 'x');
     ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
-
-    // Let the repair-spacing floor expire before any ack lands, so the repair is
-    // not skipped as "re-sent very recently" and the clock below measures the
-    // decision rather than the floor.
-    std::this_thread::sleep_for(UdpStream::kMinRepairSpacing + 5ms);
 
     // Watch for the repairs themselves, not for the transfer to finish: a
     // retransmission that happens sooner than the *minimum* retransmission timeout
@@ -1686,7 +1804,51 @@ TEST(UdpStreamTest, AHoleBehindALongQueueIsRepairedWithoutATimeout) {
     // flowing. One episode, either way — but only one of them leaves room to send.
     EXPECT_GT(pair.initiator->cwnd(), rudp::kMaxPayload)
         << "the window collapsed as it would on a timeout";
-    EXPECT_EQ(pair.initiator->window_reductions(), 1u);
+    EXPECT_EQ(pair.initiator->congestion_events(), 1u);
+}
+
+// A selective acknowledgement is progress, and restarts the loss timer like a
+// cumulative one (RFC 9002 6.2.1). During recovery the cumulative ack stands
+// still behind the hole for a couple of round trips while the selective ones keep
+// reporting deliveries; a timer only the cumulative ack could restart would fire
+// in the middle of a recovery that is going fine and collapse the window.
+TEST(UdpStreamTest, ASelectiveAckRestartsTheLossTimer) {
+    TimedPair pair(40ms, CongestionAlgorithm::Reno);
+    for (int round = 0; round < 3; ++round) ASSERT_GT(pair.transfer(rudp::kMaxPayload * 4), 0u);
+    pair.hops(6);
+    ASSERT_EQ(pair.initiator->bytes_in_flight(), 0u);
+
+    // Two packets out, and the pacer given the time to release both, so the only
+    // deadline left is the loss timer. Neither is delivered: the path holds them.
+    const size_t before = pair.net.sent();
+    ASSERT_GT(write_all_at(*pair.initiator, std::string(rudp::kMaxPayload * 2, 's'), pair.now), 0u);
+    for (int i = 0; i < 50 && pair.net.sent() - before < 2; ++i) {
+        pair.now += 1ms;
+        pair.initiator->tick(pair.now);
+    }
+    ASSERT_EQ(pair.net.sent() - before, 2u);
+    rudp::Packet sent;
+    ASSERT_TRUE(pair.net.peek_last(sent));
+    const uint32_t last = sent.seq;   // the second of them
+    const auto armed = pair.initiator->next_deadline();
+    ASSERT_TRUE(armed.has_value());
+
+    // Halfway to that deadline, an acknowledgement arrives that leaves the
+    // cumulative number where it was but selectively covers the second packet.
+    const auto later = pair.now + (*armed - pair.now) / 2;
+    rudp::Packet ack;
+    ack.type    = rudp::PacketType::Ack;
+    ack.conn_id = pair.initiator->recv_id();
+    ack.window  = rudp::kMaxWindowPackets;
+    ack.ack     = last - 2;              // everything before the two
+    ack.seq     = 1;
+    ack.flags   = rudp::FlagSack;
+    ack.sack    = 1u << 0;               // bit i covers ack + 2 + i: the second packet
+    pair.initiator->on_packet(ack, later);
+
+    const auto rearmed = pair.initiator->next_deadline();
+    ASSERT_TRUE(rearmed.has_value());
+    EXPECT_GT(*rearmed, *armed) << "selective progress left the loss timer where it was";
 }
 
 // A pure acknowledgement is worth a datagram of its own only when it has to be.

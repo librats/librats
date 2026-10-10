@@ -444,6 +444,39 @@ void bin_collect_cb(void* user, const char*, const void* data, size_t len) {
 }
 } // namespace
 
+// The congestion controller is a config field like any other: BBR unless asked,
+// and zeroed memory reads as BBR too. Two Reno nodes still talk over UDP — the
+// controller decides how fast, never whether.
+TEST(NodeCApiTest, CongestionControlIsConfigurable) {
+    EXPECT_EQ(rats_config_default().congestion_control, RATS_CONGESTION_BBR);
+    EXPECT_EQ(static_cast<int>(RATS_CONGESTION_BBR), 0) << "zeroed memory must mean the default";
+
+    rats_config_t cfg = rats_config_default();
+    cfg.bind_address        = "127.0.0.1";
+    cfg.enable_tcp          = 0;   // UDP only, or the controller would not be in play
+    cfg.congestion_control  = RATS_CONGESTION_RENO;
+    rats_t server = rats_create_config(&cfg);
+    rats_t client = rats_create_config(&cfg);
+
+    BinCtx ctx;
+    rats_on(server, "cc", bin_collect_cb, &ctx);
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    rats_connect(client, "127.0.0.1", rats_listen_port(server));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
+
+    char* server_id = rats_local_id(server);
+    ASSERT_EQ(rats_peer_transport(client, server_id), RATS_TRANSPORT_UDP);
+    const std::vector<uint8_t> payload(200 * 1024, 0x5A);
+    ASSERT_EQ(rats_send(client, server_id, "cc", payload.data(), payload.size()), RATS_OK);
+    ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == payload.size(); }));
+
+    rats_string_free(server_id);
+    rats_stop(client); rats_stop(server);
+    rats_destroy(client); rats_destroy(server);
+}
+
+
 // rats_send carries (void*, len) faithfully — a payload with embedded NUL bytes
 // round-trips intact, proving the channel is length-framed, not NUL-terminated.
 TEST(NodeCApiTest, BinaryPayloadWithNuls) {

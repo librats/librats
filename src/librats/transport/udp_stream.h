@@ -25,14 +25,26 @@
  *     `front().seq + i`, so a selective ack resolves to an index instead of a
  *     search.
  *   - Cumulative ack + a 32-bit selective-ack bitmap, so one lost packet is
- *     repaired without stalling everything queued behind it.
+ *     repaired without stalling everything queued behind it — and, on pure
+ *     acks to a peer that understands them, ranges naming every hole in the
+ *     window, so a window with several holes is repaired in one round trip
+ *     rather than one hole per round trip (udp_packet.h).
  *   - RFC 6298 retransmission timing (SRTT/RTTVAR → RTO, doubling on each
- *     timeout, Karn's rule so a retransmitted packet never poisons the estimate),
- *     plus fast retransmit on the third duplicate ack.
- *   - Reno-style congestion control: slow start to `ssthresh`, then additive
- *     increase; multiplicative decrease on loss. Flow control is separate and
- *     absolute — the receiver advertises, in packets, how much more it will
- *     buffer, and the sender never exceeds it.
+ *     timeout, Karn's rule so a retransmitted packet never poisons the
+ *     estimate), one round-trip sample per ack from the newest packet it covers.
+ *   - RACK-style loss detection (RFC 8985): a first transmission is lost once
+ *     three packets behind it have arrived, a repair once something sent a
+ *     reordering window after it has; declared-lost packets leave the flight
+ *     and are repaired under the window — supplemented in recovery, for a
+ *     controller that asks for it (Reno), by proportional rate reduction
+ *     (RFC 6937).
+ *   - Pluggable congestion control (congestion_control.h): BBRv3 by default,
+ *     NewReno with HyStart++ on request. The stream owns the facts — what is
+ *     outstanding, acknowledged or lost, the round-trip estimate and a
+ *     delivery-rate sample per acknowledgement — and the controller turns them
+ *     into a window and a pacing rate. Flow control is separate and absolute —
+ *     the receiver advertises, in packets, how much more it will buffer, and the
+ *     sender never exceeds it.
  *   - No Nagle: a partial packet goes out rather than waiting for company, which
  *     is what keeps a request/response exchange from paying a round trip per
  *     turn. What stands in for it is write() itself — it tops up the tail packet
@@ -42,10 +54,8 @@
  *     aggregates a turn's frames and writes them once rather than flushing each
  *     — which is where most of the per-message cost used to go.
  *   - Paced: the window says how much may be outstanding, not how fast it may
- *     leave, so transmissions are metered at `gain * cwnd / srtt` rather than
- *     released in a burst. HyStart++ ends slow start on a rising round trip
- *     instead of on a loss, and a window nobody has validated for a round trip
- *     is given back (RFC 2861) rather than believed.
+ *     leave, so transmissions are metered at the controller's pacing rate
+ *     rather than released in a burst.
  *   - A tail loss is probed, not timed out: the last packet of a burst has
  *     nothing behind it to produce duplicate acknowledgements, so silence is
  *     answered with a question (RFC 8985) before it is treated as congestion.
@@ -63,11 +73,15 @@
 #include "librats/core/bytes.h"
 #include "librats/core/receive_buffer.h"
 #include "librats/core/types.h"
+#include "librats/transport/congestion_control.h"
+#include "librats/transport/delivery_rate.h"
 #include "librats/transport/udp_packet.h"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -122,16 +136,10 @@ public:
     /// idle stream should not sit on memory it is not using.
     static constexpr size_t kMaxSpareBuffers = 8;
 
-    /// Initial congestion window. Four packets is the classic conservative start
-    /// (RFC 3390 territory) — enough to get an RTT sample and trigger fast
-    /// retransmit on an early loss, without a burst into an unknown path.
-    static constexpr uint32_t kInitialCwnd = 4 * rudp::kMaxPayload;
-    static constexpr uint32_t kMinCwnd     = 2 * rudp::kMaxPayload;
-    /// A full window. Growing the congestion window past what the receiver will
-    /// ever hold buys nothing: the packet-count check in can_transmit() would stop
-    /// the sender first, and a cwnd that has run away above the real limit takes a
-    /// spurious loss with it when it is finally halved.
-    static constexpr uint32_t kMaxCwnd     = rudp::kMaxWindowPackets * rudp::kMaxPayload;
+    /// The congestion window every controller starts from, and the one none of
+    /// them exceeds (see congestion_control.h).
+    static constexpr uint32_t kInitialCwnd = cc::kInitialWindow;
+    static constexpr uint32_t kMaxCwnd     = cc::kMaxWindow;
 
     static constexpr std::chrono::milliseconds kInitialRto{500};
     static constexpr std::chrono::milliseconds kMinRto{100};
@@ -150,17 +158,13 @@ public:
     /// ever delays a *pure* ack: an out-of-order packet, a Syn or a Fin is
     /// acknowledged at once, and any outgoing packet carries the ack for free.
     static constexpr std::chrono::milliseconds kDelayedAck{20};
-    /// Packets a single acknowledgement may repair. Bounds the burst one ack can
-    /// provoke, so a window that was mostly lost is rebuilt over a few acks
-    /// instead of being dumped back onto a path that just proved it is congested.
-    static constexpr int kMaxRepairsPerAck = 8;
-
-    /// Minimum gap between two transmissions of the same packet. Selective acks
-    /// arrive several times per round trip, and without this floor each of them
-    /// would re-send the same not-yet-repaired packet — turning a single loss into
-    /// a flood. It also stands in for the round-trip estimate on a path (loopback,
-    /// LAN) whose RTT is too small to space anything out.
-    static constexpr std::chrono::milliseconds kMinRepairSpacing{10};
+    /// Packets that must arrive behind a first transmission before it counts as
+    /// lost — the classic duplicate-ack threshold, read off the selective acks.
+    /// Retransmissions are judged by time instead (RACK, RFC 8985): a repair is
+    /// lost once something sent a reordering window after it has arrived, which
+    /// is what keeps one loss from being repaired twice and a lost repair from
+    /// waiting for a timeout.
+    static constexpr int32_t kReorderThreshold = 3;
 
     // ── Pacing ──────────────────────────────────────────────────────────────
     //
@@ -170,18 +174,8 @@ public:
     // dropped a hundred packets at once — and it happens even when the window is
     // well under what the path can hold, because the burst arrives faster than
     // the bottleneck can drain it. So transmissions are released at the rate the
-    // window implies rather than as fast as the loop can produce them.
-    //
-    // The rate is `gain * cwnd / srtt`. The gain is above 1 on purpose: slow
-    // start has to deliver a *doubling* window within one round trip, so pacing
-    // it at exactly cwnd/srtt would hold growth back by a factor of two, and in
-    // congestion avoidance a little headroom keeps an ack-clocked sender from
-    // being throttled by its own estimate. These are the gains RFC 9002 (7.7)
-    // recommends and Linux uses.
-    static constexpr uint32_t kPaceGainSlowStartNum = 2;
-    static constexpr uint32_t kPaceGainSlowStartDen = 1;
-    static constexpr uint32_t kPaceGainSteadyNum    = 5;   ///< 1.25x
-    static constexpr uint32_t kPaceGainSteadyDen    = 4;
+    // controller sets (CongestionController::pacing_rate) rather than as fast as
+    // the loop can produce them.
 
     /// Burst the pacer tolerates, expressed as time rather than packets: it is
     /// what accrues at the current rate over one wake-up of the reactor. Below
@@ -195,25 +189,6 @@ public:
     /// releases two at a time), and it keeps a stream on a very slow path from
     /// pacing itself below one packet per round trip.
     static constexpr size_t kPaceMinBurst = 2 * rudp::kMaxPayload;
-
-    // ── HyStart++ (RFC 9406): leaving slow start before the loss ─────────────
-    //
-    // Slow start doubles the window every round trip and, left alone, stops only
-    // when something is dropped — which means it always overshoots the path by
-    // roughly a factor of two and pays for the discovery with a lost window.
-    // HyStart++ watches the *minimum* round-trip time per round instead: a queue
-    // building in front of the bottleneck raises it well before it overflows.
-    // When it rises past a threshold the sender leaves exponential growth for a
-    // cautious phase (CSS), and if the rise turns out to be noise it goes back.
-    static constexpr std::chrono::milliseconds kHyMinRttThresh{4};
-    static constexpr std::chrono::milliseconds kHyMaxRttThresh{16};
-    /// Round-trip samples a round needs before its minimum is worth comparing.
-    static constexpr int kHyRttSamples = 8;
-    /// Growth divisor in the cautious phase: a quarter of slow start, so the
-    /// window still probes upward but cannot double while the verdict is out.
-    static constexpr uint32_t kHyCssGrowthDivisor = 4;
-    /// Rounds the cautious phase lasts before the exit is believed.
-    static constexpr int kHyCssRounds = 5;
 
     // ── Tail loss probe (RFC 8985 / RFC 9002 §6.2) ──────────────────────────
     //
@@ -254,8 +229,10 @@ public:
     /// @param profile How hard an OUTBOUND dial tries (see DialProfile). Ignored
     ///        for an inbound stream, which never sends a Syn. The default is the
     ///        ordinary dial; a hole punch passes DialProfile::punch().
+    /// @param algorithm The congestion controller this stream runs.
     UdpStream(UdpStreamHost& host, const Address& remote, uint32_t recv_id, uint32_t send_id,
-              ConnRole role, Clock::time_point now, DialProfile profile = {});
+              ConnRole role, Clock::time_point now, DialProfile profile = {},
+              CongestionAlgorithm algorithm = CongestionAlgorithm::Bbr);
 
     UdpStream(const UdpStream&) = delete;
     UdpStream& operator=(const UdpStream&) = delete;
@@ -338,20 +315,21 @@ public:
     bool flushed() const noexcept { return sent_.empty() && unsent_.empty(); }
 
     // — diagnostics (tests, logging) —
-    uint32_t cwnd()          const noexcept { return cwnd_; }
-    /// Where slow start stops. Starts at the ceiling and comes down either when
-    /// HyStart++ sees the round-trip time rise or when something is lost — which
-    /// of the two happened is the whole question F2 asks.
-    uint32_t ssthresh()      const noexcept { return ssthresh_; }
+    uint32_t cwnd()          const noexcept { return cc_->cwnd(); }
+    /// The controller itself, for a test or a benchmark that wants to look inside
+    /// it (cast to the class algorithm() names).
+    const cc::CongestionController& congestion() const noexcept { return *cc_; }
+    const cc::RttEstimate&          rtt()        const noexcept { return rtt_; }
     size_t   bytes_in_flight() const noexcept { return flight_bytes_; }
     size_t   queued_bytes()  const noexcept { return queued_bytes_; }
     uint32_t retransmits()   const noexcept { return retransmits_; }
     /// Tail probes sent since the last acknowledgement (diagnostics, tests).
     int      tail_probes()   const noexcept { return tail_probes_; }
-    /// Times the congestion window has been reduced. One per loss *episode* is the
-    /// invariant that keeps a single lost packet from walking the window to the
-    /// floor over the many acks that report it — see enter_recovery().
-    uint32_t window_reductions() const noexcept { return window_reductions_; }
+    /// Times the controller was told about congestion: once per loss *episode*,
+    /// plus once per retransmission timeout. One per episode is the invariant that
+    /// keeps a single lost packet from walking the window to the floor over the
+    /// many acks that report it — see enter_recovery().
+    uint32_t congestion_events() const noexcept { return congestion_events_; }
 
 private:
     enum class State {
@@ -375,7 +353,8 @@ private:
         Bytes             buf;              ///< headroom + payload; only headroom for Syn/Fin
         uint32_t          seq  = 0;
         rudp::PacketType  type = rudp::PacketType::Data;
-        Clock::time_point sent_at{};
+        /// The delivery-rate snapshot of its latest transmission, `sent_at` included.
+        cc::TxState       tx;
         int               sends = 0;        ///< transmissions so far (0 = still unsent)
         bool              acked = false;    ///< selectively acknowledged, awaiting the cumulative ack
         /// This packet's bytes are counted in flight_bytes_ right now. Set by the
@@ -413,15 +392,12 @@ private:
     /// which only an acknowledgement can.
     bool window_allows() const noexcept;
     bool cwnd_allows(size_t bytes) const noexcept;
+    /// Recovery credit `delivered` bytes earn (RFC 6937).
+    uint64_t prr_share(uint64_t delivered) const noexcept;
     void fill_common(rudp::Packet& p) const;
     uint16_t advertised_window() const noexcept;
 
     // — pacing —
-    /// The window the pacer meters against: cwnd scaled by the phase's gain.
-    /// Zero means "not pacing" (no round-trip estimate yet, so no rate to pace at).
-    uint64_t pace_window() const noexcept;
-    /// Bytes the pacer may release over `dt` at the current rate.
-    uint64_t pace_bytes_over(Clock::duration dt) const noexcept;
     /// Hand the token bucket whatever has accrued since it was last topped up.
     void     pace_accrue(Clock::time_point now);
     /// Whether `bytes` may go out now. Always true when nothing is in flight —
@@ -433,23 +409,32 @@ private:
     /// How long until `bytes` could be released. Zero when they can go now.
     Clock::duration pace_wait(size_t bytes) const noexcept;
 
-    // — window validation after an idle period (RFC 2861) —
-    void restart_after_idle(Clock::time_point now);
-
-    // — HyStart++ (RFC 9406) —
-    void hystart_reset();
-    void hystart_sample(Clock::duration rtt);
-    void hystart_on_ack(uint32_t ack);
-    bool in_slow_start() const noexcept { return cwnd_ < ssthresh_; }
+    /// After a pump: record whether the window held the sender back, and whether
+    /// the application ran out of data (which makes the next samples app-limited).
+    void note_send_limits();
 
     // — inbound —
     void handle_ack(const rudp::Packet& p, Clock::time_point now);
     void handle_retry(const rudp::Packet& p, Clock::time_point now);
-    void repair_sacked_holes(Clock::time_point now);
+    /// First acknowledgement of `pkt`, cumulative or selective: settle its
+    /// accounting and feed the delivery-rate and loss-detection state.
+    void on_newly_acked(OutPacket& pkt, Clock::time_point now);
+    /// Selectively acknowledge the packet carrying `seq`, if it is still queued.
+    void sack_one(uint32_t seq, Clock::time_point now);
+    /// Declare lost what the acknowledgements say did not arrive (see
+    /// kReorderThreshold), and open a loss episode if anything was.
+    void detect_losses(Clock::time_point now);
+    /// Take `pkt` off the path and queue its repair.
+    void mark_lost(OutPacket& pkt, Clock::time_point now);
     void handle_sequenced(const rudp::Packet& p);
     void deliver(ByteView payload, bool fin);
     void drain_reorder();
     uint32_t sack_bitmap() const noexcept;
+    /// Encode the runs of packets held past the hole into range_buf_ (cached
+    /// until the reorder buffer moves). Returns how many there are.
+    size_t   ack_ranges() const noexcept;
+    bool     is_held(uint32_t seq) const noexcept;
+    void     set_held(uint32_t seq, bool on) noexcept;
 
     // — timing / congestion —
     void on_rto(Clock::time_point now);
@@ -463,9 +448,12 @@ private:
     /// it too, and why arming it in one place keeps the two from disagreeing.
     Clock::duration loss_timeout() const noexcept;
     void sample_rtt(Clock::duration rtt);
-    void enter_recovery();
-    void on_loss(bool timeout);
-    void grow_window(size_t acked_bytes);
+    /// The retransmission timeout the current estimate implies (no backoff).
+    Clock::duration estimated_rto() const noexcept;
+    void enter_recovery(Clock::time_point now);
+    /// `pkt` is given up on and about to be sent again: account the loss and tell
+    /// the controller, before the retransmission overwrites its send snapshot.
+    void declare_lost(const OutPacket& pkt, Clock::time_point now);
 
     void die(CloseReason reason);
     void raise(uint32_t events) noexcept { events_ |= events; }
@@ -499,8 +487,6 @@ private:
     uint32_t              next_seq_     = 1;   ///< sequence number for the next packet created
     size_t                flight_bytes_ = 0;   ///< payload bytes transmitted and not yet acked
     size_t                queued_bytes_ = 0;   ///< payload bytes held by sent_ + unsent_
-    uint32_t              cwnd_         = kInitialCwnd;
-    uint32_t              ssthresh_     = kMaxCwnd;
     uint16_t              peer_window_  = rudp::kMaxWindowPackets;
     /// The cumulative acknowledgement `peer_window_` came in on. What orders two
     /// windows in time: a peer's ack never moves backwards, so a packet carrying
@@ -509,7 +495,7 @@ private:
     uint32_t              last_ack_recv_ = 0;
     int                   dup_acks_     = 0;
     uint32_t              retransmits_  = 0;
-    uint32_t              window_reductions_ = 0;
+    uint32_t              congestion_events_ = 0;
     /// Consecutive tail probes sent with nothing acknowledged in between. Reset by
     /// any acknowledgement that covers new data, so it counts a single episode of
     /// silence rather than the life of the stream.
@@ -524,10 +510,35 @@ private:
     // when the loss was detected.
     bool                  in_recovery_  = false;
     uint32_t              recover_seq_  = 0;
-    /// A retransmission timeout has given up on packets still sitting in `sent_`,
-    /// so retransmit_lost() has work to do. Purely a hint that keeps it from
-    /// scanning the whole queue on every acknowledgement of a healthy transfer.
-    bool                  have_lost_    = false;
+    /// Packets declared lost and not yet sent again — retransmit_lost()'s work
+    /// list, kept as a count so a healthy transfer never scans the queue for it.
+    size_t                lost_pending_ = 0;
+    /// Packets still in `sent_` that a selective ack has already covered.
+    size_t                sacked_in_queue_ = 0;
+    /// Sends earned during this loss episode and not yet spent — proportional
+    /// rate reduction (RFC 6937), which lets repairs and new data out while the
+    /// window has just been cut below what is still in flight.
+    uint64_t              recovery_credit_ = 0;
+    /// PRR's RecoverFS: bytes outstanding when the episode began (0 after a
+    /// timeout, which earns no credit at all).
+    uint64_t              recover_fs_      = 0;
+    /// Bytes in flight when the acknowledgement being processed arrived.
+    uint64_t              ack_prior_flight_ = 0;
+
+    // Loss detection. The largest sequence number known delivered, and the send
+    // time of the newest transmission known delivered (RACK's reference point).
+    uint32_t              largest_acked_ = 0;
+    bool                  have_largest_acked_ = false;
+    Clock::time_point     rack_sent_at_{};
+    bool                  have_rack_ = false;
+    /// The newest packet the acknowledgement being processed covers — where its
+    /// one round-trip sample comes from.
+    struct Newest {
+        bool              have = false;
+        Clock::time_point sent_at{};
+        int               sends = 0;
+    };
+    Newest                ack_newest_;
 
     // — pacing —
     /// Bytes the pacer will currently let through, and when the bucket was last
@@ -539,27 +550,16 @@ private:
     /// (epoch = it is holding nothing). This is a deadline like any other: the
     /// mux wakes the stream on it, and pump() re-arms or clears it.
     Clock::time_point     pace_due_{};
-    /// When data — not a bare acknowledgement — last went out. The keep-alive
-    /// writes last_send_ every ten seconds, so it cannot answer "has this stream
-    /// been sending?", which is exactly what the idle-restart rule needs to know.
-    Clock::time_point     last_data_send_{};
 
-    // — HyStart++ —
-    /// Cautious phase: slow start has seen the round-trip time rise and is
-    /// probing gently until the rise is confirmed or withdrawn.
-    bool                  css_          = false;
-    int                   css_rounds_   = 0;
-    Clock::duration       css_baseline_rtt_{};
-    /// Lowest round-trip time seen in this round and in the one before it. The
-    /// *minimum* is what matters: a queue building in front of the bottleneck
-    /// lifts even the luckiest packet's round trip, where an average would just
-    /// as easily be moved by one straggler.
-    Clock::duration       round_min_rtt_{};
-    Clock::duration       prev_round_min_rtt_{};
-    int                   round_samples_ = 0;
-    /// Highest sequence number outstanding when this round began; the round ends
-    /// when the cumulative acknowledgement reaches it.
-    uint32_t              round_end_    = 0;
+    // — what the controller is told —
+    /// Payload bytes declared lost since the controller last heard about an ack —
+    /// by repairs during one, or by a timeout in between.
+    uint64_t              lost_since_ack_  = 0;
+    /// Payload bytes newly acknowledged by the ack being processed (zero outside
+    /// one): what a loss episode opened mid-ack reports to the controller.
+    uint64_t              ack_newly_acked_ = 0;
+    /// The window held the sender back at some point since the last ack.
+    bool                  cwnd_limited_    = false;
 
     // — receive side —
     ReceiveBuffer                             inbox_;    ///< in-order bytes awaiting read()
@@ -580,12 +580,24 @@ private:
     /// only change when one of the two things it is derived from changes.
     mutable uint32_t                          sack_bits_  = 0;
     mutable bool                              sack_dirty_ = false;
+    /// Which sequence numbers past the hole the reorder buffer holds, as a ring of
+    /// bits indexed by sequence number. Duplicates the map's keys on purpose: the
+    /// selective forms are built by scanning it a word at a time, where the map
+    /// would need a hash lookup per packet of the window.
+    std::array<uint64_t, rudp::kMaxWindowPackets / 64> held_{};
+    /// Encoded acknowledgement ranges, rebuilt only when the reorder buffer or the
+    /// expected sequence number moves.
+    mutable std::array<uint8_t, rudp::kMaxAckRanges * rudp::kAckRangeSize> range_buf_{};
+    mutable size_t                            range_count_  = 0;
+    mutable bool                              ranges_dirty_ = false;
+    /// The peer parses acknowledgement ranges (it said so with FlagExtAck).
+    bool                                      peer_ext_ack_ = false;
 
     // — timing —
-    Clock::duration   srtt_{};
-    Clock::duration   rttvar_{};
-    bool              have_rtt_ = false;
-    Clock::duration   rto_ = kInitialRto;
+    // Declared ahead of the controller, which keeps references to both.
+    cc::RttEstimate                          rtt_;
+    cc::DeliveryRateSampler                  sampler_;
+    std::unique_ptr<cc::CongestionController> cc_;
     // How the dial (and only the dial) is retried — see DialProfile. Kept as plain
     // members rather than a stored profile so the SynSent path costs no indirection,
     // and clamped in the constructor so a caller cannot ask for zero attempts or an

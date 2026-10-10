@@ -41,6 +41,24 @@
  *  - window  : how many further packets the sender of this datagram can buffer,
  *              in packets. This is the flow-control signal; 0 stops the peer.
  *
+ * ── Acknowledgement ranges ───────────────────────────────────────────────────
+ * The sack word reaches only 32 packets past the first hole, and a window holds a
+ * thousand. On a path that loses more than one packet per window, everything
+ * past that reach is invisible to the sender until the hole in front of it fills,
+ * so holes are found — and repaired — one round trip at a time. A pure Ack may
+ * therefore also carry a range block (flag AckRanges):
+ *
+ *     [count : u8] then count x [offset : u16][length : u16]
+ *
+ * each entry acknowledging the `length` packets from ack+1+offset on. Ranges
+ * name runs of received packets in ascending order, up to kMaxAckRanges of them.
+ * They ride only on pure Acks, so a Data packet never grows past kMaxDatagram and
+ * the path MTU budget behind kMaxPayload is untouched.
+ *
+ * A peer from before ranges existed would reject an Ack carrying them, so they
+ * are only ever sent to a peer that has said it understands them: every packet
+ * carries flag ExtAck ("I parse ranges"), which an older peer simply ignores.
+ *
  * Only three types carry anything after the header. Data carries stream bytes.
  * Retry and Syn carry the kCookieSize address-validation cookie, or nothing —
  * a responder under load answers a Syn with a Retry rather than opening a stream,
@@ -74,8 +92,10 @@ enum class PacketType : uint8_t {
 };
 
 enum PacketFlags : uint8_t {
-    FlagNone = 0,
-    FlagSack = 1 << 0,  ///< the 4-byte selective-ack word follows the header
+    FlagNone      = 0,
+    FlagSack      = 1 << 0,  ///< the 4-byte selective-ack word follows the header
+    FlagExtAck    = 1 << 1,  ///< the sender understands acknowledgement ranges
+    FlagAckRanges = 1 << 2,  ///< (Ack only) a range block follows the sack word
 };
 
 /// Bytes on the wire before the payload, without the selective-ack word.
@@ -83,10 +103,9 @@ constexpr size_t kHeaderSize = 16;
 /// Bytes added by the selective-ack word.
 constexpr size_t kSackSize = 4;
 /// Packets one selective-ack word can name — the 32 that follow the hole at
-/// ack+1. This is a reach as well as a width: a sender learns nothing about a
-/// packet further than this past its oldest unacknowledged one, which is what
-/// bounds how far into the retransmission queue an acknowledgement can ever mark
-/// anything (see UdpStream::repair_sacked_holes).
+/// ack+1. This is a reach as well as a width: from the word alone a sender learns
+/// nothing about a packet further than this past its oldest unacknowledged one,
+/// which is why a pure Ack may also carry ranges (see the file comment).
 constexpr uint32_t kSackBits = 8 * static_cast<uint32_t>(kSackSize);
 /// The largest a header can get. A sender that keeps this much headroom in front
 /// of a payload can write the header directly ahead of the bytes it describes and
@@ -109,6 +128,18 @@ constexpr size_t kMaxPayload = 1200;
 /// Largest datagram this transport ever sends or expects to receive.
 constexpr size_t kMaxDatagram = kHeaderSize + kSackSize + kMaxPayload;
 
+/// Bytes one acknowledgement range occupies, and the most one Ack carries. 32
+/// ranges is a hole every ~30 packets across a full window — far more than any
+/// path that is still worth sending on — in a 149-byte datagram.
+constexpr size_t kAckRangeSize = 4;
+constexpr size_t kMaxAckRanges = 32;
+
+/// One run of packets the receiver holds: [ack+1+offset, ack+1+offset+length).
+struct AckRange {
+    uint16_t offset = 0;
+    uint16_t length = 0;
+};
+
 /// Packets a receiver will hold out of order, and therefore the largest window it
 /// ever advertises. This is the hard ceiling on in-flight data, so it is also the
 /// ceiling on throughput: a window of W packets on a path of RTT R can never
@@ -125,6 +156,8 @@ constexpr size_t kMaxDatagram = kHeaderSize + kSackSize + kMaxPayload;
 /// the reorder map and the retransmission queue only ever grow to what is
 /// actually outstanding — an idle or slow stream costs nothing near it.
 constexpr uint16_t kMaxWindowPackets = 1024;
+static_assert((kMaxWindowPackets & (kMaxWindowPackets - 1)) == 0 && kMaxWindowPackets % 64 == 0,
+              "the receiver indexes its reorder ring by sequence number modulo the window");
 
 struct Packet {
     PacketType type   = PacketType::Ack;
@@ -134,10 +167,23 @@ struct Packet {
     uint32_t   seq     = 0;
     uint32_t   ack     = 0;
     uint32_t   sack    = 0;   ///< meaningful only when (flags & FlagSack)
+    /// The encoded range entries (kAckRangeSize bytes each, no count byte) — on
+    /// decode they point into the receive buffer, on encode into the sender's.
+    /// Only ever on an Ack; see ack_range().
+    ByteView   ranges;
     ByteView   payload;       ///< points into the caller's receive buffer
 
-    bool has_sack() const noexcept { return (flags & FlagSack) != 0; }
+    bool   has_sack()    const noexcept { return (flags & FlagSack) != 0; }
+    bool   ext_ack()     const noexcept { return (flags & FlagExtAck) != 0; }
+    size_t range_count() const noexcept { return ranges.size() / kAckRangeSize; }
 };
+
+/// The i-th range of a decoded Ack. decode() has already checked every one of them
+/// is non-empty and lies inside a receive window, so no caller re-validates.
+AckRange ack_range(const Packet& p, size_t i) noexcept;
+
+/// Write one range entry (kAckRangeSize bytes) for Packet::ranges.
+void encode_ack_range(const AckRange& r, uint8_t* out) noexcept;
 
 /// Bytes `p`'s header occupies on the wire: the fixed part, plus the selective-ack
 /// word when one is carried.
@@ -146,7 +192,8 @@ inline size_t header_size(const Packet& p) noexcept {
 }
 
 /// Serialise only `p`'s header (and its optional sack word) into `out`, which must
-/// have room for kMaxHeaderSize bytes. The payload is NOT copied.
+/// have room for kMaxHeaderSize bytes. Neither the payload nor any range block is
+/// written (and the AckRanges flag is left clear) — this is the Data path.
 ///
 /// This is the form used on the send path: a packet buffer carries kMaxHeaderSize
 /// bytes of headroom in front of its payload, so the header is written directly
@@ -155,13 +202,15 @@ inline size_t header_size(const Packet& p) noexcept {
 /// @return the number of bytes written (kHeaderSize, or kHeaderSize + kSackSize).
 size_t encode_header(const Packet& p, uint8_t* out);
 
-/// Serialise `p` (header, optional sack word, then payload) into `out`, which must
-/// have room for kMaxHeaderSize + p.payload.size() bytes.
+/// Serialise `p` (header, optional sack word, the range block of an Ack, then
+/// payload) into `out`, which must have room for kMaxDatagram bytes.
 /// @return the number of bytes written.
 size_t encode(const Packet& p, uint8_t* out);
 
 /// Parse one datagram. Returns false for anything malformed: a short buffer, an
-/// unknown version, an unknown type, or a payload on a type that cannot carry one.
+/// unknown version, an unknown type, a payload on a type that cannot carry one, or
+/// a range block that is not exactly well-formed (on anything but an Ack, empty,
+/// past kMaxAckRanges, or reaching outside a receive window).
 /// `out.payload` points into `data` and is valid only while that buffer is.
 bool decode(const uint8_t* data, size_t len, Packet& out);
 

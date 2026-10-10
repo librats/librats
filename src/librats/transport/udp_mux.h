@@ -184,7 +184,8 @@ public:
     static constexpr int kSocketBufferBytes = 4 * 1024 * 1024;
 
     UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
-           UdpMuxLimits limits = {});
+           UdpMuxLimits limits = {},
+           CongestionAlgorithm congestion = CongestionAlgorithm::Bbr);
     ~UdpMux() override;
 
     UdpMux(const UdpMux&) = delete;
@@ -304,6 +305,8 @@ private:
     AddressFamily   family_;
     UdpMuxDelegate& delegate_;
     UdpMuxLimits    limits_;
+    /// The controller every stream on this socket runs.
+    CongestionAlgorithm congestion_;
 
     std::unordered_map<uint32_t, Entry> streams_;  ///< keyed by our recv id
     std::vector<Due>                    due_;      ///< min-heap of stream deadlines

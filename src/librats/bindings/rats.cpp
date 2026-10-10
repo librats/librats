@@ -161,6 +161,7 @@ rats_config_t rats_config_default(void) {
     c.preferred_transport   = RATS_TRANSPORT_UDP;
     c.transport_fallback_ms = 1200;
     c.send_queue_limit      = 0;
+    c.congestion_control    = RATS_CONGESTION_BBR;
     return c;
 }
 
@@ -197,6 +198,9 @@ rats_t rats_create_config(const rats_config_t* cfg) {
                                          : TransportKind::Udp;
         config.transport_fallback_ms = cfg->transport_fallback_ms;
         config.send_queue_limit      = cfg->send_queue_limit;
+        config.congestion_control    = (cfg->congestion_control == RATS_CONGESTION_RENO)
+                                           ? CongestionAlgorithm::Reno
+                                           : CongestionAlgorithm::Bbr;
     }
     return make_handle(std::move(config));
 }

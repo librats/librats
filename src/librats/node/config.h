@@ -6,7 +6,7 @@
  */
 
 #include "librats/util/rats_export.h"
-#include "librats/core/types.h"   // TransportKind
+#include "librats/core/types.h"   // TransportKind, CongestionAlgorithm
 
 #include <cstdint>
 #include <string>
@@ -51,6 +51,14 @@ struct RATS_API NodeConfig {
     /// is dropped, so a UDP-blocking network costs this delay rather than a failed
     /// connection. 0 disables the fallback: only the preferred transport is tried.
     uint32_t transport_fallback_ms = 1200;
+
+    /// Congestion controller every datagram stream runs. BBRv3 by default: it
+    /// keeps its rate on links that lose packets for reasons other than
+    /// congestion (Wi-Fi, mobile, long hops), where a loss-based controller backs
+    /// off on every one of them; Reno is there for comparison and for paths where
+    /// a loss-based sender is specifically wanted. TCP connections are governed
+    /// by the kernel and ignore this.
+    CongestionAlgorithm congestion_control = CongestionAlgorithm::Bbr;
 
     /// Bytes a peer's send queue may hold before an application that keeps
     /// sending anyway has the peer dropped as a slow consumer. 0 uses the library

@@ -206,6 +206,13 @@ set(LIBRARY_SOURCES
     src/librats/transport/udp_packet.cpp
     src/librats/transport/udp_stream.h
     src/librats/transport/udp_stream.cpp
+    src/librats/transport/delivery_rate.h
+    src/librats/transport/congestion_control.h
+    src/librats/transport/congestion_control.cpp
+    src/librats/transport/reno.h
+    src/librats/transport/reno.cpp
+    src/librats/transport/bbr.h
+    src/librats/transport/bbr.cpp
     src/librats/transport/udp_mux.h
     src/librats/transport/udp_mux.cpp
     src/librats/transport/relay_link.h
@@ -709,6 +716,7 @@ if(RATS_BUILD_TESTS)
         tests/test_frame.cpp
         tests/test_reactor.cpp
         tests/test_transport_udp.cpp
+        tests/test_udp_congestion.cpp
         tests/test_relay_link.cpp
         tests/test_dialer.cpp
         tests/test_peer_table.cpp

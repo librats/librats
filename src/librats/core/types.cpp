@@ -40,4 +40,12 @@ const char* to_string(TransportKind t) noexcept {
     return "?";
 }
 
+const char* to_string(CongestionAlgorithm a) noexcept {
+    switch (a) {
+        case CongestionAlgorithm::Bbr:  return "bbr";
+        case CongestionAlgorithm::Reno: return "reno";
+    }
+    return "?";
+}
+
 } // namespace librats
