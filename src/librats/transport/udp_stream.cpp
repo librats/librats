@@ -168,10 +168,10 @@ void UdpStream::size_ring(uint32_t span) {
     ranges_dirty_ = true;
 }
 
-size_t UdpStream::held_cost(const InPacket& pkt) noexcept {
+size_t UdpStream::held_cost(size_t payload) noexcept {
     // The payload, and roughly what the map node and the buffer's own allocation
     // cost around it — so a flood of tiny packets is not held for free.
-    return pkt.payload.size() + 96;
+    return payload + 96;
 }
 
 uint32_t UdpStream::advertise_limit() noexcept {
@@ -1108,13 +1108,15 @@ void UdpStream::handle_sequenced(const rudp::Packet& p, Clock::time_point now) {
 
     // Out of order, it has to be held — and held memory is charged to the budget
     // every stream shares. Refused, it is as good as lost: the peer will repair it.
+    // It is priced before the payload is copied, so a refusal — likeliest exactly
+    // when the budget is under pressure — costs no allocation.
     InPacket held;
     if (ahead > 0) {
-        held.payload = body.to_bytes();
-        held.fin     = (p.type == rudp::PacketType::Fin);
-        const size_t cost = held_cost(held);
+        const size_t cost = held_cost(body.size());
         if (budget_ && !budget_->charge(cost, held_bytes_)) return;
         held_bytes_ += cost;
+        held.payload = body.to_bytes();
+        held.fin     = (p.type == rudp::PacketType::Fin);
         // The ring is allocated the first time anything is held, so a stream that
         // never sees a hole never pays for it; it covers whatever the limit admits,
         // which after a window has shrunk back can still be more than the window.
@@ -1164,7 +1166,7 @@ void UdpStream::drain_reorder() {
         auto it = reorder_.find(recv_next_);
         if (it == reorder_.end()) break;
         deliver(ByteView(it->second.payload), it->second.fin);
-        const size_t cost = held_cost(it->second);
+        const size_t cost = held_cost(it->second.payload.size());
         held_bytes_ -= cost;
         if (budget_) budget_->release(cost);
         reorder_.erase(it);

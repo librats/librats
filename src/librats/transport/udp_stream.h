@@ -498,8 +498,10 @@ private:
     bool     grow_window(const rudp::Packet& p) noexcept;
     /// Make the ring of held bits cover at least `span` packets past the ack.
     void     size_ring(uint32_t span);
-    /// What holding `pkt` is charged: its payload plus the bookkeeping around it.
-    static size_t held_cost(const InPacket& pkt) noexcept;
+    /// What holding a packet of `payload` bytes is charged: the payload plus the
+    /// bookkeeping around it. Takes the size, not the packet, so a packet can be
+    /// priced before anything is copied for it.
+    static size_t held_cost(size_t payload) noexcept;
     /// The limit to advertise: as far as our buffer reaches now, and never short of
     /// any limit already advertised (see recv_limit_).
     uint32_t advertise_limit() noexcept;

@@ -553,7 +553,7 @@ TEST(UdpLossRecoveryTest, ALostTailRepairIsProbedRatherThanTimedOut) {
 
         Clock::time_point repair_lost{}, done{};
         sim.on_step = [&] {
-            if (repair_lost == Clock::time_point{} && holes.sends[holes.base + kHole] >= 2)
+            if (repair_lost == Clock::time_point{} && holes.sends[holes.base + static_cast<uint32_t>(kHole)] >= 2)
                 repair_lost = sim.now;
             if (done == Clock::time_point{} && f.delivered == kPackets * rudp::kMaxPayload)
                 done = sim.now;
@@ -563,7 +563,7 @@ TEST(UdpLossRecoveryTest, ALostTailRepairIsProbedRatherThanTimedOut) {
 
         ASSERT_NE(repair_lost, Clock::time_point{}) << "the repair was never sent";
         ASSERT_NE(done, Clock::time_point{}) << "the message never arrived";
-        EXPECT_EQ(holes.sends[holes.base + kHole], 3);
+        EXPECT_EQ(holes.sends[holes.base + static_cast<uint32_t>(kHole)], 3);
         EXPECT_LT(done - repair_lost, UdpStream::kMinRto)
             << "the lost repair waited for the retransmission timeout";
         EXPECT_EQ(f.tx.congestion_events() - events, 1u)
