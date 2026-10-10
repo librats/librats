@@ -464,8 +464,17 @@ void UdpStream::pace_accrue(Clock::time_point now) {
     }
 
     pace_tokens_ += rate.bytes_over(dt);
-    const uint64_t burst = (std::max)(static_cast<uint64_t>(kPaceMinBurst),
-                                      rate.bytes_over(kPaceQuantum));
+    uint64_t burst = (std::max)(static_cast<uint64_t>(kPaceMinBurst),
+                                rate.bytes_over(kPaceQuantum));
+    // Woken late for a packet the pacer was holding: what accrued since the moment
+    // it asked for is the host's timer slop, not a burst the stream chose, and
+    // capping it away would make the clock, not the controller, set the rate. A
+    // virtualised or power-managed host routinely sleeps 2-15 ms on a 1 ms timeout
+    // (Windows rounds to 15.6 ms), which at a one-quantum bucket sent a fraction of
+    // the pacing rate — and BBR, reading that as the path, paced lower each round
+    // until the stream crawled at two packets per wake-up. So the lateness is kept,
+    // as Chromium's pacer does; the window still bounds what it can release.
+    if (pace_due_ != kNoDeadline && now > pace_due_) burst += rate.bytes_over(now - pace_due_);
     if (pace_tokens_ > burst) pace_tokens_ = burst;
 }
 

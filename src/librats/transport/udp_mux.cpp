@@ -316,11 +316,19 @@ bool UdpMux::on_readable() {
         // peer on it. The loop is bounded, so a persistent error cannot spin.
         if (got == kUdpRecvError) { ++drained; continue; }
 
+        // Each batch is stamped when it is read, not when the drain began. A drain
+        // runs the connections' handlers between batches (below), and they send:
+        // a drain of thousands of datagrams lasts tens of milliseconds on a slow
+        // host, so an acknowledgement read at its end, stamped with its start,
+        // measured a 33 ms path at 2 ms: a minimum round trip that then held
+        // BBR's window (a multiple of bandwidth x that minimum) to a fraction of
+        // the path for ten seconds. Delivery-rate samples and RACK read it too.
+        const auto at = Clock::now();
         for (std::ptrdiff_t i = 0; i < got; ++i) {
             const UdpBatchSlot& slot = recv_slots_[static_cast<size_t>(i)];
             rudp::Packet p;
             if (!rudp::decode(slot.data, slot.len, p)) continue;
-            handle_datagram(p, slot.endpoint, now);
+            handle_datagram(p, slot.endpoint, at);
         }
         drained += static_cast<size_t>(got);
 

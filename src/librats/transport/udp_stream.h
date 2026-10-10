@@ -252,7 +252,8 @@ public:
     /// it can wake — and pacing every packet against a 1 ms clock would cap a
     /// stream at one packet per millisecond. Above it the smoothing is thrown
     /// away. So the pacer does not remove bursts, it bounds them to one clock
-    /// tick's worth of data, which is what the queue can absorb.
+    /// tick's worth of data, which is what the queue can absorb — plus however
+    /// late the host's timer woke it (see pace_accrue), which it cannot help.
     static constexpr std::chrono::milliseconds kPaceQuantum{1};
     /// Floor for that burst. Two packets is the classic allowance (a delayed ack
     /// releases two at a time), and it keeps a stream on a very slow path from

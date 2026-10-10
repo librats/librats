@@ -1117,6 +1117,34 @@ TEST(UdpLongPathTest, RenoDoesNotGrowAWindowTheReceiverKeepsFromFilling) {
         << "the window did not even reach what the receiver allows";
 }
 
+// ── A coarse host clock ─────────────────────────────────────────────────────
+
+// Everything else here wakes the streams every 250 us. A virtualised or
+// power-managed host does not: a 1 ms poll timeout sleeps 2-15 ms there (Windows
+// rounds every one to 15.6 ms), and arrivals are taken in the same late batches.
+// The pacer must still release the rate it was given. When it kept only one
+// quantum of tokens across a late wake-up, the stream sent a fraction of its
+// pacing rate, BBR took that fraction for the path, and each round paced lower
+// than the last — a real 100 Mbit/s upload ended at half a megabyte a second.
+TEST(UdpCoarseClockTest, APacedSenderKeepsItsRateWhenTheHostWakesLate) {
+    for (const auto algo : {CongestionAlgorithm::Bbr, CongestionAlgorithm::Reno}) {
+        for (const auto wake : {Clock::duration(4ms), Clock::duration(15ms)}) {
+            Sim sim(100, 40ms, 400);   // 1 BDP of buffer
+            Flow& f = sim.add(algo);
+            f.to_send = SIZE_MAX;
+            sim.run(6s, wake);
+            const size_t at = f.delivered;
+            sim.run(4s, wake);
+
+            const double util = (f.delivered - at) / 4.0 / payload_rate(100);
+            EXPECT_GT(util, 0.8) << (algo == CongestionAlgorithm::Bbr ? "BBR" : "Reno")
+                                 << " used " << util * 100 << "% of the path on a host that wakes every "
+                                 << std::chrono::duration_cast<std::chrono::milliseconds>(wake).count()
+                                 << " ms";
+        }
+    }
+}
+
 // ── BBR ─────────────────────────────────────────────────────────────────────
 
 // The two things BBR is for, on a path with four BDPs of buffer: it finds the
