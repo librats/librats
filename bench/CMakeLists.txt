@@ -61,7 +61,9 @@ configure_file(
 # STATIC_RUNTIME is for suites that override the global operator new/delete: the
 # override must be the only one in the program, so the C++ runtime is linked in
 # rather than shared (a shared libstdc++ has its own, and blocks allocated here
-# would be freed across a DLL boundary).
+# would be freed across a DLL boundary). Only Windows needs it: on ELF the
+# executable's definitions interpose on libstdc++.so's, and a fully static link
+# would demand glibc-static / libstdc++-static (and is impossible on macOS).
 function(add_bench name)
     cmake_parse_arguments(A "STATIC_RUNTIME" "" "SOURCES;DEFS;INCLUDES;WIN_LIBS" ${ARGN})
 
@@ -76,7 +78,7 @@ function(add_bench name)
     if(WIN32 AND A_WIN_LIBS)
         target_link_libraries(${name} PRIVATE ${A_WIN_LIBS})
     endif()
-    if(A_STATIC_RUNTIME AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    if(A_STATIC_RUNTIME AND WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_link_options(${name} PRIVATE -static)
     endif()
     set_target_properties(${name} PROPERTIES
