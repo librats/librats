@@ -262,6 +262,15 @@ public:
     /// releases two at a time), and it keeps a stream on a very slow path from
     /// pacing itself below one packet per round trip.
     static constexpr size_t kPaceMinBurst = 2 * rudp::kMaxPayload;
+    /// Ceiling for that burst, whatever the rate. One release leaves at line rate,
+    /// and the queue in front of the bottleneck must hold all of it that arrives
+    /// faster than it drains. On a real path (a VPS 33 ms away) a back-to-back
+    /// train of 96 datagrams arrived whole and one of 128 lost everything past the
+    /// ~120th, while a millisecond at BBR's startup gain was 150 of them there.
+    /// 64 KiB is also the most one segmentation-offload send carries, and what
+    /// Linux holds a TCP burst to. A host whose timer cannot wake often enough to
+    /// pace in steps this small is allowed more (see pace_accrue).
+    static constexpr size_t kPaceMaxBurst = 64 * 1024;
 
     // ── Tail loss probe (RFC 8985 / RFC 9002 §6.2) ──────────────────────────
     //
@@ -710,6 +719,10 @@ private:
     /// (epoch = it is holding nothing). This is a deadline like any other: the
     /// mux wakes the stream on it, and pump() re-arms or clears it.
     Clock::time_point     pace_due_{};
+    /// How late the stream typically gets to a release it was holding (a moving
+    /// average over the late ones): what tells a host whose timer is coarse from
+    /// one that was late once. See pace_accrue.
+    Clock::duration       pace_late_{};
 
     // — what the controller is told —
     /// Payload bytes declared lost since the controller last heard about an ack —

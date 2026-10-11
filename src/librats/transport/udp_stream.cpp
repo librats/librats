@@ -474,7 +474,21 @@ void UdpStream::pace_accrue(Clock::time_point now) {
     // the pacing rate — and BBR, reading that as the path, paced lower each round
     // until the stream crawled at two packets per wake-up. So the lateness is kept,
     // as Chromium's pacer does; the window still bounds what it can release.
-    if (pace_due_ != kNoDeadline && now > pace_due_) burst += rate.bytes_over(now - pace_due_);
+    Clock::duration late{};
+    if (pace_due_ != kNoDeadline && now > pace_due_) late = now - pace_due_;
+    burst += rate.bytes_over(late);
+
+    // But one release is one line-rate burst, and past kPaceMaxBurst that is what a
+    // shallow queue drops. Only a host that is late *typically* (pace_late_) gets
+    // more — there a smaller ceiling would be the spiral above again — while one
+    // late once (a long reactor turn) does not. The first millisecond of lateness is
+    // what a millisecond-resolution timeout costs every host, so only what lies past
+    // it counts, doubled to cover a timer whose lateness varies around it.
+    uint64_t ceiling = kPaceMaxBurst;
+    if (pace_late_ > kPaceQuantum)
+        ceiling = (std::max)(ceiling, rate.bytes_over(2 * (pace_late_ - kPaceQuantum)));
+    if (late > Clock::duration::zero()) pace_late_ += (late - pace_late_) / 8;
+    if (burst > ceiling) burst = (std::max)(ceiling, static_cast<uint64_t>(kPaceMinBurst));
     if (pace_tokens_ > burst) pace_tokens_ = burst;
 }
 

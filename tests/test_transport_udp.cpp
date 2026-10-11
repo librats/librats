@@ -1173,36 +1173,23 @@ TEST(UdpStreamTest, PeerDataIsNotADuplicateAck) {
 // what such a path holds — next to nothing — and fills a real one instead
 // (BbrTest.FillsAWindowLargerThanTheOldCeiling).
 TEST(UdpStreamTest, FillsAWindowLargerThanTheOldCeiling) {
-    Pair pair(CongestionAlgorithm::Reno);
+    // A path with a round trip to fill, in virtual time: what is in flight is the
+    // window spread over that round trip, not one burst. (On a path with no delay
+    // there is nothing to fill — everything sent is back before the next release,
+    // and the pacer rightly keeps each release to one line-rate burst.)
+    TimedPair pair(40ms, CongestionAlgorithm::Reno);
 
     // Slow start doubles the window every round trip, so a transfer long enough
     // to keep the pipe full runs it up until something stops it. Nothing is lost
-    // here and the receiver is drained every round, so the only thing that can
+    // here and the receiver is drained every hop, so the only thing that can
     // stop it is the window ceiling itself.
     const std::string payload(1400 * 1024, 'z');
-    ASSERT_EQ(write_all(*pair.initiator, payload), payload.size());
+    ASSERT_EQ(write_all_at(*pair.initiator, payload, pair.now), payload.size());
 
     size_t peak = 0;
-    // An empty queue means the pacer is holding the next burst, not that the
-    // transfer is over — and the pace rate comes off a wall-clock round-trip
-    // sample, so on a loaded machine it collapses and this loop would stop with
-    // the window barely off the floor. Run until the sender has genuinely nothing
-    // left, giving the clock the chance to move whenever the pacer is what is in
-    // the way, and bound the waiting so the test cannot hang.
-    for (int round = 0, stalled = 0; round < 256 && stalled < 400;) {
-        if (pair.net.queued() == 0) {
-            if (pair.initiator->flushed()) break;
-            ++stalled;
-            std::this_thread::sleep_for(500us);
-        } else {
-            stalled = 0;
-            ++round;
-        }
-        pair.net.deliver();
+    for (int i = 0; i < 200 && !pair.initiator->flushed(); ++i) {
+        pair.hop();
         peak = (std::max)(peak, pair.initiator->bytes_in_flight());
-        const auto now = std::chrono::steady_clock::now();
-        pair.initiator->tick(now);
-        pair.responder->tick(now);
         drain(*pair.responder);  // keep the receiver's advertised window open
     }
 
@@ -2499,6 +2486,47 @@ TEST(UdpMuxTest, StagedDatagramsLeaveBeforeTheCallThatMadeThemReturns) {
     rudp::Packet bye;
     ASSERT_TRUE(next_packet(bye)) << "the stream went away without saying so";
     EXPECT_EQ(bye.type, rudp::PacketType::Fin);
+
+    close_socket(probe);
+}
+
+// What one flush hands the socket leaves at line rate, so a batch must not keep
+// collecting past what one pacer release may put on the wire. A reactor turn
+// writes every application send it runs — each releasing what the pacer had
+// accrued by then — and a batch that waited for the end of the turn sent all of
+// them as one burst: 200 datagrams at once on a busy single-core host, and a loss
+// round on a real path each time. So reaching kPaceMaxBurst is itself a flush.
+TEST(UdpMuxTest, ABatchLeavesOnItsOwnOnceItHoldsOnePacerRelease) {
+    MuxPair net;
+
+    socket_t probe = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    ASSERT_TRUE(is_valid_socket(probe));
+    set_socket_nonblocking(probe);
+    const Address probe_addr{"127.0.0.1", static_cast<uint16_t>(get_bound_port(probe))};
+
+    uint8_t    into[rudp::kMaxDatagram];
+    const auto drain_probe = [&](std::chrono::milliseconds within) {
+        size_t     got = 0;
+        const auto end = std::chrono::steady_clock::now() + within;
+        while (std::chrono::steady_clock::now() < end) {
+            Address from;
+            if (recv_udp_from(probe, into, sizeof(into), from) > 0) ++got;
+            else std::this_thread::sleep_for(1ms);
+        }
+        return got;
+    };
+
+    const std::vector<uint8_t> datagram(rudp::kMaxDatagram, 0x5A);
+    const auto stage = [&] { net.a->send_datagram(probe_addr, datagram.data(), datagram.size()); };
+
+    // One short of the ceiling stays staged: nothing goes behind the caller's back.
+    const size_t release = UdpStream::kPaceMaxBurst / datagram.size() + 1;
+    for (size_t i = 0; i + 1 < release; ++i) stage();
+    EXPECT_EQ(drain_probe(50ms), 0u) << "a batch under one release left before it was flushed";
+
+    // The datagram that reaches it sends the batch, with no flush_output() call.
+    stage();
+    EXPECT_EQ(drain_probe(200ms), release) << "a full release waited for the next flush";
 
     close_socket(probe);
 }

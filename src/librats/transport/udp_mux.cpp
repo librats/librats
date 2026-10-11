@@ -66,9 +66,20 @@ void UdpMux::send_datagram(const Address& to, const uint8_t* data, size_t len) {
     // back to back, and handing each one to the kernel separately is where most of
     // this transport's CPU used to go. They leave together in flush_output(), which
     // every entry point calls before it returns — so nothing waits on a timer.
-    if (send_.add(to, data, len)) return;
-    flush_output();
-    send_.add(to, data, len);   // an empty batch always has room for one datagram
+    //
+    // But never more of them at once than one release of the pacer. What one flush
+    // hands the socket leaves at line rate, and the pacer bounds each release to
+    // kPaceMaxBurst for exactly that reason; a batch that kept collecting would
+    // glue releases the pacer spread over time back into one burst. That is what a
+    // reactor turn does — every application send in it is encrypted on this thread
+    // and then written, each write releasing what the pacer accrued by then — and on
+    // a busy single-core host it was 200 datagrams at once, and a loss round each
+    // time.
+    if (!send_.add(to, data, len)) {
+        flush_output();
+        send_.add(to, data, len);   // an empty batch always has room for one datagram
+    }
+    if (send_.bytes() >= UdpStream::kPaceMaxBurst) flush_output();
 }
 
 void UdpMux::flush_output() {

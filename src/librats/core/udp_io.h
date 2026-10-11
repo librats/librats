@@ -143,6 +143,8 @@ public:
     bool   empty() const noexcept { return runs_.empty(); }
     /// Datagrams staged, counting every segment of every run.
     size_t datagrams() const noexcept { return datagrams_; }
+    /// Bytes staged, every datagram's whole length.
+    size_t bytes() const noexcept { return used_; }
     const std::vector<Run>& runs() const noexcept { return runs_; }
     const uint8_t* data() const noexcept { return buffer_.get(); }
 

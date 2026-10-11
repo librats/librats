@@ -299,7 +299,8 @@ void Reactor::run() {
         // The mux batches its datagrams; the ones it collected inside a readable
         // event or a tick have already gone out, but an application send reaches a
         // UDP stream from a task, outside any batch of its own. Flushing once here
-        // covers those without giving any of them a timer to wait on.
+        // covers those without giving any of them a timer to wait on (and the mux
+        // never lets such a batch grow past one pacer release before it goes).
         if (mux_) mux_->flush_output();
     }
 

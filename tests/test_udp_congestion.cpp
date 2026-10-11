@@ -1145,6 +1145,38 @@ TEST(UdpCoarseClockTest, APacedSenderKeepsItsRateWhenTheHostWakesLate) {
     }
 }
 
+// ── What one release puts on the wire ───────────────────────────────────────
+
+// The pacer's tokens are a rate, but each release leaves at line rate, and the
+// queue in front of the bottleneck has to hold whatever of it arrives faster than
+// it drains. A real path (a VPS 33 ms away) took a back-to-back train of 96
+// datagrams whole and lost everything of one of 128 past the ~120th — while a
+// millisecond at BBR's startup gain was 150 datagrams there. Each such burst cost
+// a loss round, and BBR cut its bandwidth bound by 0.7 per round. So no step may
+// put more than one kPaceMaxBurst of a stream on the wire, even in a startup at a
+// gigabit, where a millisecond of the pacing rate is several times that.
+TEST(UdpPacingTest, NoReleasePutsMoreThanOneBurstOnTheWire) {
+    for (const auto algo : {CongestionAlgorithm::Bbr, CongestionAlgorithm::Reno}) {
+        Sim sim(1000, 20ms, 1700);
+        Flow& f = sim.add(algo);
+        f.to_send = SIZE_MAX;
+
+        // Every step is one moment: what arrives in it is handed over at the same
+        // instant, so whatever the sender emits in it is one release.
+        size_t step = 0, worst = 0;
+        sim.path.hook = [&](Bytes& datagram, const Address&, bool forward) {
+            if (forward) step += datagram.size();
+            return false;
+        };
+        sim.on_step = [&] { worst = (std::max)(worst, step); step = 0; };
+        sim.run(3s);
+
+        EXPECT_LE(worst, UdpStream::kPaceMaxBurst + rudp::kMaxDatagram)
+            << (algo == CongestionAlgorithm::Bbr ? "BBR" : "Reno") << " put " << worst
+            << " bytes on the wire at once";
+    }
+}
+
 // ── BBR ─────────────────────────────────────────────────────────────────────
 
 // The two things BBR is for, on a path with four BDPs of buffer: it finds the
