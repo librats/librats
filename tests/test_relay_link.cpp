@@ -393,9 +393,15 @@ public:
         });
     }
 
-    void circuit_released(uint32_t) override {}
+    /// Forget the circuit, as the relay subsystem does. That is what breaks the
+    /// ownership cycle — this carrier holds each circuit, each circuit holds its
+    /// carrier — once the circuit's Link is gone; doing nothing here leaked both
+    /// circuits and the relay with them. Arrives on the released end's own
+    /// reactor (its Link dies there), the only thread that touches that End.
+    void circuit_released(uint32_t id) override { own(id).circuit.reset(); }
 
 private:
+    End& own(uint32_t id) { return id == kLeftId ? left : right; }
     End& other(uint32_t id) { return id == kLeftId ? right : left; }
 
     /// Run `fn` against the far end on ITS reactor thread, then hand the events it
@@ -405,6 +411,7 @@ private:
         End& dst = other(id);
         if (!dst.reactor) return;
         dst.reactor->post([&dst, fn = std::move(fn)] {
+            if (!dst.circuit) return;   // that end's link is gone (circuit_released)
             dst.reactor->wake(dst.conn, fn(dst));
         });
     }
