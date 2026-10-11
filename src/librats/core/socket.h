@@ -384,83 +384,18 @@ constexpr std::ptrdiff_t kUdpRecvWouldBlock = -1;
 constexpr std::ptrdiff_t kUdpRecvError      = -2;
 std::ptrdiff_t recv_udp_from(socket_t socket, void* buffer, size_t len, Address& from);
 
-// ── Batched datagram I/O ────────────────────────────────────────────────────
-//
-// A reliability layer built on datagrams moves one packet per call, so a bulk
-// transfer at a 1200-byte payload costs tens of thousands of syscalls per
-// megabyte — measurably the single largest cost on that path, well above the
-// framing, the congestion control and the encryption put together. Linux (and
-// the BSDs that copied it) can carry a whole array of datagrams per call;
-// everywhere else these fall back to a loop over the single-datagram forms, so
-// callers need no #ifdef and no second code path.
-
 /**
- * Datagrams one batched call moves. 32 is enough to make the syscall a rounding
- * error against the work of building the packets, while keeping the per-call
- * scratch (one message header, one iovec and one address per slot) small enough
- * to live on the stack.
+ * The socket address a datagram socket of family `af` sends to `to` with: an IPv4
+ * address is written IPv4-mapped on an IPv6 or dual-stack socket. Numeric only —
+ * no resolution. False for an unspecified address, which has nowhere to go.
  */
-constexpr size_t kUdpBatchMax = 32;
+bool to_sockaddr(const Address& to, AddressFamily af, sockaddr_storage& addr, socklen_t& len);
 
-// recvmmsg/sendmmsg — one syscall for a whole array of datagrams. Linux has had
-// both since 2.6.33 (bionic exposes them from API 21); everything else takes the
-// loop fallback below. FreeBSD has them too, but only as of 11, and the version
-// guard is not worth the cost of being wrong there.
-#if defined(__linux__) && (!defined(__ANDROID__) || __ANDROID_API__ >= 21)
-    #define RATS_HAVE_MMSG 1
-#endif
+/// The inverse of to_sockaddr(): who a received datagram came from, IPv4-mapped
+/// addresses unwrapped. An unknown family yields an unspecified Address.
+Address address_from_sockaddr(const sockaddr_storage& addr);
 
-/**
- * Whether a batched call really is one syscall here, or a loop wearing the same
- * interface.
- *
- * Both forms are correct everywhere, so this is not needed to *use* them. It
- * matters to a caller deciding whether to stage datagrams for later: staging pays
- * a copy per datagram to save syscalls, and where the loop fallback is in force
- * there are no syscalls to save — so the copy would be pure loss and the caller
- * should hand each datagram over as it is produced instead.
- */
-#ifdef RATS_HAVE_MMSG
-constexpr bool kUdpBatchIsOneSyscall = true;
-#else
-constexpr bool kUdpBatchIsOneSyscall = false;
-#endif
-
-/**
- * One datagram in a batch. The payload buffer belongs to the caller — a receive
- * loop reuses the same storage every round and a send path stages into it — so a
- * batch of any size costs no allocation.
- */
-struct UdpBatchSlot {
-    uint8_t* data = nullptr;  ///< caller-owned payload buffer
-    size_t   len  = 0;        ///< receive in: capacity, out: bytes filled; send: bytes to send
-    Address  endpoint;        ///< receive out: the sender; send in: the destination
-};
-
-/**
- * Receive up to `count` datagrams, in one syscall where the platform has one.
- *
- * Each slot must point at a buffer with `len` bytes of room; on return `len` is
- * what actually arrived and `endpoint` is who sent it. A datagram larger than the
- * slot is truncated, exactly as recvfrom() would truncate it.
- *
- * @return Datagrams filled (> 0), kUdpRecvWouldBlock when nothing is pending, or
- *         kUdpRecvError. A result shorter than `count` does NOT prove the queue is
- *         empty — a per-datagram error truncates the batch too — so a caller that
- *         must drain (an edge-triggered poller) loops until kUdpRecvWouldBlock.
- */
-std::ptrdiff_t recv_udp_batch(socket_t socket, UdpBatchSlot* slots, size_t count);
-
-/**
- * Send `count` datagrams, in one syscall where the platform has one.
- *
- * @return How many the socket accepted. The caller must treat the whole batch as
- *         spent regardless: a datagram the socket refused (a full send buffer) is
- *         indistinguishable from one the path dropped, and retransmission covers
- *         both — so the count is for diagnostics, not for a retry.
- */
-size_t send_udp_batch(socket_t socket, const UdpBatchSlot* slots, size_t count,
-                      AddressFamily af = AddressFamily::DualStack);
+// Batched and offloaded datagram I/O lives in librats/core/udp_io.h.
 
 /**
  * Receive UDP data with optional timeout

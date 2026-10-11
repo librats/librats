@@ -37,7 +37,8 @@
 //               throughput on loopback flatters a user-space stack, CPU per byte
 //               does not.
 //   small       many small frames. Per-packet costs dominate, which is where
-//               syscall batching (sendmmsg/recvmmsg, kUdpBatchMax) pays off.
+//               syscall batching (sendmmsg/recvmmsg, kUdpBatchMax) and
+//               segmentation offload (udp_io.h; --no-offload to compare) pay off.
 //   idle        N connected peers doing nothing. The datagram side schedules
 //               each stream at its own deadline rather than sweeping them, so
 //               this is what a connected-but-silent stream still costs.
@@ -191,6 +192,9 @@ const char* wire(TransportKind k) { return k == TransportKind::Udp ? "UDP" : "TC
 /// The congestion controller every datagram stream in this run uses (--cc).
 CongestionAlgorithm g_cc = CongestionAlgorithm::Bbr;
 
+/// Whether datagram sockets use segmentation offload (--no-offload turns it off).
+bool g_offload = true;
+
 /// A node configured to speak exactly one wire, so nothing can silently fall
 /// back and measure the other transport under this one's name.
 NodeConfig config_for(TransportKind kind, bool listen) {
@@ -203,6 +207,7 @@ NodeConfig config_for(TransportKind kind, bool listen) {
     c.enable_udp             = (kind == TransportKind::Udp);
     c.preferred_transport    = kind;
     c.congestion_control     = g_cc;
+    c.udp_offload            = g_offload;
     c.max_peers              = 0;
     // The host-network monitor is a thread per node that has nothing to do with
     // the transport; it would show up as noise in the idle measurement.
@@ -484,11 +489,11 @@ SmallResult bench_small(TransportKind kind, int count, size_t size, int credit_m
 //
 // Also reports resident memory. Each peer here is a whole Node, so the figure
 // covers both ends — and on the datagram side most of the difference is not
-// per-stream at all but per-*node*: UdpMux allocates its batch staging up front
-// and keeps it for life (recv_storage_ + send_storage_, 2 x kUdpBatchMax x
-// kMaxDatagram ~ 76 KiB), so even a dial-only node pays it just for having a UDP
-// socket. A stream itself starts nearly empty — its queues and reorder map only
-// grow to what is actually outstanding.
+// per-stream at all but per-*node*: UdpMux allocates its batches up front and
+// keeps them for life (UdpSendBatch + UdpRecvBatch, udp_io.h). Neither is zeroed,
+// so what is resident is only what traffic has written — even the 2 MiB a
+// coalescing receive batch reserves. A stream itself starts nearly empty — its
+// queues and reorder map only grow to what is actually outstanding.
 
 struct IdleResult { double cpu_percent_core = 0, bytes_per_peer = 0; };
 
@@ -979,6 +984,7 @@ NodeConfig remote_config(const Options& o, bool listen, bool tcp, bool udp) {
     c.enable_udp             = udp;
     c.preferred_transport    = udp ? TransportKind::Udp : TransportKind::Tcp;
     c.congestion_control     = g_cc;
+    c.udp_offload            = g_offload;
     // Only ever one wire is enabled on the measuring side, so there is nothing to
     // race — and a fallback that could quietly switch wires would report one
     // transport's numbers under the other's name.
@@ -1380,6 +1386,7 @@ void usage() {
         "  --bind ADDR       interface to bind (default: dual-stack wildcard)\n"
         "  --transport WIRE  tcp | udp | both   (default both)\n"
         "  --cc ALGO         bbr | reno         congestion control of UDP streams (default bbr)\n"
+        "  --no-offload      UDP without segmentation offload (UDP_SEGMENT/GRO, USO/URO)\n"
         "  --protocol NAME   must match on both ends (default bench-transport/1)\n"
         "  --bulk-mb N       bytes per bulk direction, MiB      (default 16)\n"
         "  --frame-kb N      bulk frame size, KiB               (default 16)\n"
@@ -1470,6 +1477,7 @@ bool parse_args(int argc, char** argv, Options& o) {
                 return false;
             }
         }
+        else if (arg == "--no-offload")   { g_offload = false; }
         else if (arg == "--bulk-mb")      { if (!number(i, o.bulk_bytes, 1024 * 1024)) return false; }
         else if (arg == "--frame-kb")     { if (!number(i, o.frame_bytes, 1024)) return false; }
         else if (arg == "--credit-kb")    { if (!number(i, o.credit_bytes, 1024)) return false; }

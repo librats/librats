@@ -61,6 +61,7 @@ cmake --build bench/build
 ./bench/build/bin/bench_transport # two live Nodes on loopback; takes ~1 min
 ./bench/build/bin/bench_transport --serve            # …or the same suite between
 ./bench/build/bin/bench_transport --connect HOST:PORT #   two hosts, over a real path
+                                                     # (--no-offload: UDP without GSO/GRO, USO/URO)
 ./bench/build/bin/bench_path      # congestion control against a modelled path; --cc=bbr|reno
 ```
 
@@ -253,7 +254,7 @@ controller every row runs, except `compete`, whose rows name their own:
 | `loss` | one path with loss taken from 0 % to 30 % in both directions: where the throughput curve turns into a cliff, and whether the connection survives it at all. Reno's curve is the well-known 1/sqrt(p); BBR's is the reason it is the default. |
 | `delay` | the standing queue a bulk transfer keeps at the bottleneck — what every other message to that peer, or through that router, waits behind. |
 | `compete` | two flows through one bottleneck, the second joining late: each one's share and Jain's fairness index, for BBR and Reno against themselves and each other. |
-| `memory` | what one connected pair actually holds, through the allocator rather than resident-set size. `bench_transport` reports resident bytes per *node*, most of which is the mux's fixed batch staging; this is the part that scales with peers. |
+| `memory` | what one connected pair actually holds, through the allocator rather than resident-set size. `bench_transport` reports resident bytes per *node*, part of which is the mux's batch buffers (allocated once, resident only as far as traffic fills them); this is the part that scales with peers. |
 | `tail` | request/response, where the packet that goes missing is the last one and has nothing behind it to reveal the loss. A latency distribution, because the median is untouched by definition and the whole effect is in the tail. |
 
 The memory rows deserve a word on method. Counting goes through the global
@@ -322,7 +323,9 @@ Three of these exist mainly because they can fail:
   builds. The real cost is that `Connection::send()` flushes write-through, so
   every frame makes its own trip into the kernel on either wire — the datagram
   side only partly escapes it, by topping up the tail packet in
-  `UdpStream::write()` and batching `kUdpBatchMax` datagrams per syscall.
+  `UdpStream::write()`, batching datagrams per syscall and, where the kernel
+  has segmentation offload, sending a run of them as one buffer (`--no-offload`
+  turns that off for comparison).
   Deferring the flush to the end of a reactor turn brings the two wires to
   ~1.1–1.3x of each other. Read it together with `rtt`, which has one frame in
   flight and so can show none of this.

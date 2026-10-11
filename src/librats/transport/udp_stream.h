@@ -223,6 +223,9 @@ public:
     /// ever delays a *pure* ack: an out-of-order packet, a Syn or a Fin is
     /// acknowledged at once, and any outgoing packet carries the ack for free.
     static constexpr std::chrono::milliseconds kDelayedAck{20};
+    /// Packets one burst may hold its acknowledgement for (see begin_burst): one
+    /// coalesced receive's worth.
+    static constexpr int kMaxBurstAck = 64;
     /// Packets that must arrive behind a first transmission before it counts as
     /// lost — the classic duplicate-ack threshold, read off the selective acks.
     /// Retransmissions are judged by time instead (RACK, RFC 8985): a repair is
@@ -335,6 +338,19 @@ public:
 
     /// Feed one decoded datagram addressed to this stream.
     void on_packet(const rudp::Packet& p, Clock::time_point now);
+
+    /// Datagrams that arrived together are about to be handed over one by one —
+    /// a coalesced run, or one receive batch. Until end_burst(), the ack those
+    /// packets owe (every second one, a hole, a Syn or Fin) is held and sent
+    /// once, at the end, naming everything: the sender learns the same and
+    /// processes one ack where it would have processed thirty, which on a fast
+    /// path is most of what the sender spends per packet received. Nothing waits
+    /// on a timer: the run is already here, and the ack leaves the moment it has
+    /// been read. Held past kMaxBurstAck packets it goes anyway, so a long burst
+    /// still keeps the sender's window opening.
+    void begin_burst() noexcept { in_burst_ = true; }
+    bool in_burst() const noexcept { return in_burst_; }
+    void end_burst(Clock::time_point now);
 
     /// Periodic work: retransmission, delayed acks, keep-alive, idle death.
     void tick(Clock::time_point now);
@@ -711,6 +727,8 @@ private:
     uint32_t                                  recv_next_ = 1;  ///< next sequence number expected
     bool                                      need_ack_  = false;
     int                                       unacked_packets_ = 0;
+    bool                                      in_burst_        = false;  ///< see begin_burst
+    bool                                      burst_ack_owed_  = false;  ///< an ack held for end_burst
     /// Announcements left of a receive window that has just re-opened, and when the
     /// next one is due (the epoch = at once). Zero means there is nothing to
     /// announce, which is what arms this: the peer is stopped and sends nothing for

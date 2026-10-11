@@ -74,6 +74,7 @@ UdpMuxLimits udp_limits_for(const NodeConfig& config) {
     UdpMuxLimits limits;
     if (config.udp_receive_window != 0) limits.receive_window = config.udp_receive_window;
     if (config.udp_receive_budget != 0) limits.receive_budget = config.udp_receive_budget;
+    limits.offload = config.udp_offload;
     return limits;
 }
 

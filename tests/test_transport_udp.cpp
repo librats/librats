@@ -2332,6 +2332,66 @@ TEST(UdpMuxTest, BurstsCoalesceIntoOneEventPerBatchRatherThanOnePerPacket) {
         << "more dispatches than there were receive batches";
 }
 
+// The same burst, seen from the sender's side: what it gets back. Acknowledging
+// every second packet would answer it with dozens of acks — each a datagram the
+// sender's kernel delivers and its stream processes — that all say the same thing
+// a moment apart. A run read together is acknowledged once, after its last packet,
+// and that one ack names everything.
+TEST(UdpMuxTest, ABurstReadTogetherIsAcknowledgedOnceNotEveryOtherPacket) {
+    MuxPair net;
+
+    auto dial = net.dial();
+    ASSERT_TRUE(dial);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.adopted == 1; }));
+    ASSERT_TRUE(net.pump_until([&] { return stream_of(*dial).connected(); }));
+    Link* accepted = net.host_b.only_link();
+    ASSERT_NE(accepted, nullptr);
+    const uint32_t stream_id = stream_of(*accepted).recv_id();
+    const uint32_t a_id      = stream_of(*dial).recv_id();
+
+    // Whatever A's mux has not read yet would be counted below; start clean.
+    std::this_thread::sleep_for(20ms);
+    net.a->on_readable();
+
+    constexpr size_t kPackets = kUdpBatchMax * 2 + 6;   // 3 receive batches on B
+    for (size_t i = 0; i < kPackets; ++i) {
+        rudp::Packet p;
+        p.type    = rudp::PacketType::Data;
+        p.conn_id = stream_id;
+        p.seq     = static_cast<uint32_t>(2 + i);
+        p.limit   = rudp::kInitialWindowPackets;
+        const uint8_t byte = 'x';
+        p.payload = ByteView(&byte, 1);
+        uint8_t buf[rudp::kMaxDatagram];
+        ASSERT_GT(send_udp_to(net.sock_a, buf, rudp::encode(p, buf), net.addr_b,
+                              AddressFamily::IPv4), 0);
+    }
+    std::this_thread::sleep_for(100ms);
+    net.b->on_readable();
+    std::this_thread::sleep_for(20ms);
+
+    // Read A's socket directly, so A's mux cannot swallow what B sent — through a
+    // receive batch like the mux's own, since the acks may well arrive as one
+    // coalesced run (and a plain recvfrom would hand that back as one blob).
+    size_t       acks = 0;
+    uint32_t     last = 0;
+    UdpRecvBatch in(rudp::kMaxDatagram, net.a->offload().coalesced_receive);
+    for (std::ptrdiff_t n; (n = in.receive(net.sock_a, kUdpBatchMax)) > 0;) {
+        for (std::ptrdiff_t i = 0; i < n; ++i) {
+            in.for_each_datagram(static_cast<size_t>(i), [&](const uint8_t* data, size_t len) {
+                rudp::Packet p;
+                if (!rudp::decode(data, len, p) || p.conn_id != a_id) return;
+                if (p.type != rudp::PacketType::Ack) return;
+                ++acks;
+                last = p.ack;
+            });
+        }
+    }
+    EXPECT_GE(acks, 1u) << "the burst was never acknowledged";
+    EXPECT_LE(acks, 6u) << "one ack per two packets — the burst was not acknowledged as one";
+    EXPECT_EQ(last, 1 + kPackets) << "the last ack does not cover the whole burst";
+}
+
 // What a stream holds out of order is charged to the one budget its mux keeps for
 // every stream on the socket — so the bound a node configures is the bound it gets.
 TEST(UdpMuxTest, OutOfOrderDataIsChargedToTheMuxBudget) {

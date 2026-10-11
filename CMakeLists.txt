@@ -149,6 +149,8 @@ set(LIBRARY_SOURCES
 # core/ — sockets, async I/O buffers, platform I/O multiplexing, reactor primitives
     src/librats/core/socket.h
     src/librats/core/socket.cpp
+    src/librats/core/udp_io.h
+    src/librats/core/udp_io.cpp
     src/librats/core/receive_buffer.h
     src/librats/core/receive_buffer.cpp
     src/librats/core/chained_send_buffer.h

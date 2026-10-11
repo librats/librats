@@ -737,11 +737,17 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
     if (want_write_ && state_ == State::Connected && queued_bytes_ < send_queue_limit())
         raise(PollOut);
 
+    // Inside a burst an owed ack is held for end_burst(), which names everything
+    // the burst brought (see begin_burst) — unless it has held enough already.
+    const auto ack = [&] {
+        if (in_burst_ && unacked_packets_ < kMaxBurstAck) burst_ack_owed_ = true;
+        else                                               send_control(rudp::PacketType::Ack, now);
+    };
     if (need_ack_) {
         // Acknowledge every second packet even without a hole (the classic
         // ack-every-other-segment rule), so a bulk sender's window keeps opening
         // without a round trip's worth of delay per packet.
-        if (ack_now || unacked_packets_ >= 2) send_control(rudp::PacketType::Ack, now);
+        if (ack_now || unacked_packets_ >= 2) ack();
         else if (ack_due_ == kNoDeadline)     ack_due_ = now + kDelayedAck;
     } else if (ranges_owed) {
         // The acknowledgement went out on our own Data, so nothing is owed by the
@@ -749,10 +755,20 @@ void UdpStream::on_packet(const rudp::Packet& p, Clock::time_point now) {
         // while we send to it would otherwise find it only once the hole in front
         // of it fills, a round trip later; one pure ack, sent only for news about
         // holes, is what ranges exist for.
-        send_control(rudp::PacketType::Ack, now);
+        ack();
     }
 
     flush_events();
+}
+
+void UdpStream::end_burst(Clock::time_point now) {
+    in_burst_ = false;
+    if (!burst_ack_owed_) return;
+    burst_ack_owed_ = false;
+    // Data of ours may have carried the cumulative ack since it was owed; what it
+    // cannot carry is the holes, so a pure ack is still owed while any are held.
+    if (state_ != State::Dead && (need_ack_ || !reorder_.empty()))
+        send_control(rudp::PacketType::Ack, now);
 }
 
 void UdpStream::handle_ack(const rudp::Packet& p, Clock::time_point now) {

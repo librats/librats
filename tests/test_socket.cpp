@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include "librats/core/socket.h"
+#include "librats/core/udp_io.h"
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -349,79 +350,90 @@ TEST_F(SocketTest, EdgeCasesTest) {
 
 // ── Batched datagram I/O ────────────────────────────────────────────────────
 //
-// One syscall per datagram is the dominant cost of a user-space reliability layer,
-// so recv_udp_batch/send_udp_batch move a whole array at a time (recvmmsg/sendmmsg
-// where the platform has them, a loop where it does not). What matters at the call
-// site is that the two shapes are indistinguishable: same datagrams, same order,
-// same senders — which is what these tests pin down.
+// One trip through the kernel per datagram is the dominant cost of a user-space
+// reliability layer, so UdpSendBatch/UdpRecvBatch move many at a time: batched
+// syscalls (sendmmsg/recvmmsg) where the platform has them, and segmentation
+// offload (a run of equal-size datagrams as one buffer the kernel cuts up, and
+// the same coming back) where the running kernel has that. What matters at the
+// call site is that every shape is indistinguishable: same datagrams, same
+// order, same senders — which is what these tests pin down.
 
 namespace {
 
-/// Storage for one batch, with the slots already pointed at their slices.
-struct BatchBuffers {
-    static constexpr size_t kSlotSize = 1500;
+/// A datagram whose every byte names its index, so a reordered, merged, split or
+/// mis-sized result cannot pass.
+std::vector<uint8_t> numbered(size_t index, size_t len) {
+    return std::vector<uint8_t>(len, static_cast<uint8_t>('a' + index % 26));
+}
 
-    std::vector<uint8_t>      storage = std::vector<uint8_t>(kUdpBatchMax * kSlotSize);
-    std::vector<UdpBatchSlot> slots   = std::vector<UdpBatchSlot>(kUdpBatchMax);
-
-    BatchBuffers() {
-        for (size_t i = 0; i < kUdpBatchMax; ++i) {
-            slots[i].data = storage.data() + i * kSlotSize;
-            slots[i].len  = kSlotSize;
+/// Everything `socket` receives within ~2 s or until `want` datagrams arrived,
+/// split back into datagrams. `runs` counts buffers that held more than one.
+std::vector<std::vector<uint8_t>> receive_datagrams(socket_t socket, UdpRecvBatch& in,
+                                                    size_t want, size_t* runs = nullptr,
+                                                    Address* from = nullptr) {
+    std::vector<std::vector<uint8_t>> out;
+    for (int attempt = 0; attempt < 2000 && out.size() < want; ++attempt) {
+        const std::ptrdiff_t n = in.receive(socket, kUdpBatchMax);
+        if (n <= 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        for (std::ptrdiff_t i = 0; i < n; ++i) {
+            size_t here = 0;
+            in.for_each_datagram(static_cast<size_t>(i), [&](const uint8_t* data, size_t len) {
+                out.emplace_back(data, data + len);
+                ++here;
+            });
+            if (runs && here > 1) ++*runs;
+            if (from) *from = in[static_cast<size_t>(i)].from;
         }
     }
+    return out;
+}
 
-    void reset_capacities() {
-        for (auto& slot : slots) slot.len = kSlotSize;
+struct UdpPair {
+    socket_t sender   = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    socket_t receiver = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
+    Address  sender_addr;
+    Address  dest;
+
+    UdpPair() {
+        set_socket_nonblocking(receiver);
+        sender_addr = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sender))};
+        dest        = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(receiver))};
     }
+    ~UdpPair() {
+        close_socket(sender);
+        close_socket(receiver);
+    }
+    bool ok() const { return is_valid_socket(sender) && is_valid_socket(receiver); }
 };
 
 } // namespace
 
 TEST_F(SocketTest, UdpBatchRoundTripsEveryDatagramInOrder) {
-    socket_t sender   = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
-    socket_t receiver = create_udp_socket(0, "127.0.0.1", AddressFamily::IPv4);
-    ASSERT_TRUE(is_valid_socket(sender));
-    ASSERT_TRUE(is_valid_socket(receiver));
-    set_socket_nonblocking(receiver);
+    UdpPair net;
+    ASSERT_TRUE(net.ok());
 
-    const Address sender_addr{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sender))};
-    const Address dest{"127.0.0.1", static_cast<uint16_t>(get_bound_port(receiver))};
-
-    // A batch of datagrams of differing lengths, each carrying its own index, so a
-    // reordered or mis-sized result cannot pass.
+    // Lengths that grow, so no two datagrams can share a run whatever the offload:
+    // this is the one-datagram-per-message shape every platform has.
     constexpr size_t kCount = 8;
-    BatchBuffers out;
+    UdpSendBatch out(kUdpMaxSegments);
     for (size_t i = 0; i < kCount; ++i) {
-        out.slots[i].endpoint = dest;
-        out.slots[i].len      = 16 + i * 7;
-        std::memset(out.slots[i].data, static_cast<int>('a' + i), out.slots[i].len);
+        const auto d = numbered(i, 16 + i * 7);
+        ASSERT_TRUE(out.add(net.dest, d.data(), d.size()));
     }
-    ASSERT_EQ(send_udp_batch(sender, out.slots.data(), kCount, AddressFamily::IPv4), kCount);
+    EXPECT_EQ(out.runs().size(), kCount);
+    ASSERT_EQ(out.flush(net.sender, AddressFamily::IPv4), kCount);
+    EXPECT_TRUE(out.empty());
 
-    // Loopback delivery is prompt but not instantaneous; collect until we have them.
-    BatchBuffers in;
-    size_t       got = 0;
-    for (int attempt = 0; attempt < 200 && got < kCount; ++attempt) {
-        in.reset_capacities();
-        const std::ptrdiff_t n = recv_udp_batch(receiver, in.slots.data() + got, kCount - got);
-        if (n > 0) {
-            got += static_cast<size_t>(n);
-            continue;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    ASSERT_EQ(got, kCount) << "only " << got << " of " << kCount << " datagrams arrived";
-
-    for (size_t i = 0; i < kCount; ++i) {
-        EXPECT_EQ(in.slots[i].len, 16 + i * 7) << "datagram " << i << " has the wrong length";
-        EXPECT_EQ(in.slots[i].endpoint.port, sender_addr.port) << "wrong sender on datagram " << i;
-        for (size_t b = 0; b < in.slots[i].len; ++b)
-            ASSERT_EQ(in.slots[i].data[b], 'a' + i) << "datagram " << i << " is not itself";
-    }
-
-    close_socket(sender);
-    close_socket(receiver);
+    UdpRecvBatch in(1500, /*coalesced=*/false);
+    Address      from;
+    const auto   got = receive_datagrams(net.receiver, in, kCount, nullptr, &from);
+    ASSERT_EQ(got.size(), kCount) << "only " << got.size() << " of " << kCount << " arrived";
+    for (size_t i = 0; i < kCount; ++i)
+        EXPECT_EQ(got[i], numbered(i, 16 + i * 7)) << "datagram " << i << " is not itself";
+    EXPECT_EQ(from.port, net.sender_addr.port);
 }
 
 TEST_F(SocketTest, UdpBatchReceiveReportsWouldBlockOnAnEmptySocket) {
@@ -429,8 +441,146 @@ TEST_F(SocketTest, UdpBatchReceiveReportsWouldBlockOnAnEmptySocket) {
     ASSERT_TRUE(is_valid_socket(sock));
     set_socket_nonblocking(sock);
 
-    BatchBuffers in;
-    EXPECT_EQ(recv_udp_batch(sock, in.slots.data(), kUdpBatchMax), kUdpRecvWouldBlock);
+    UdpRecvBatch plain(1500, false);
+    EXPECT_EQ(plain.receive(sock, kUdpBatchMax), kUdpRecvWouldBlock);
+    UdpRecvBatch coalescing(1500, true);
+    EXPECT_EQ(coalescing.receive(sock, kUdpBatchMax), kUdpRecvWouldBlock);
 
     close_socket(sock);
 }
+
+// The staging rules are what segmentation offload demands of a send: one
+// destination, every segment the same size, only the last one shorter.
+TEST(UdpSendBatchTest, CoalescesOnlyWhatOneSegmentedSendCanCarry) {
+    const Address a{"10.0.0.1", 1000};
+    const Address b{"10.0.0.2", 1000};
+    const std::vector<uint8_t> full(1220, 'x'), short_one(300, 'y'), tiny(20, 'z');
+
+    UdpSendBatch batch(kUdpMaxSegments);
+    ASSERT_TRUE(batch.add(a, full.data(), full.size()));
+    ASSERT_TRUE(batch.add(a, full.data(), full.size()));
+    ASSERT_TRUE(batch.add(a, short_one.data(), short_one.size()));  // ends the run
+    ASSERT_TRUE(batch.add(a, tiny.data(), tiny.size()));            // so this starts one
+    ASSERT_TRUE(batch.add(a, full.data(), full.size()));            // longer: new run
+    ASSERT_TRUE(batch.add(b, full.data(), full.size()));            // elsewhere: new run
+    ASSERT_TRUE(batch.add(a, full.data(), full.size()));            // not adjacent: new run
+
+    const auto& runs = batch.runs();
+    ASSERT_EQ(runs.size(), 5u);
+    EXPECT_EQ(runs[0].count, 3u);
+    EXPECT_EQ(runs[0].segment, 1220u);
+    EXPECT_EQ(runs[0].bytes, 2 * 1220u + 300u);
+    EXPECT_FALSE(runs[0].open);
+    EXPECT_EQ(runs[1].count, 1u);
+    EXPECT_EQ(runs[1].segment, 20u);
+    EXPECT_EQ(runs[2].count, 1u);
+    EXPECT_EQ(runs[3].to, b);
+    EXPECT_EQ(runs[4].to, a);
+    EXPECT_EQ(batch.datagrams(), 7u);
+
+    // Laid out back to back, so a run is one contiguous buffer.
+    EXPECT_EQ(runs[1].offset, runs[0].offset + runs[0].bytes);
+    EXPECT_EQ(std::memcmp(batch.data() + runs[0].offset + 2 * 1220, short_one.data(), 300), 0);
+}
+
+TEST(UdpSendBatchTest, RunsStopAtTheSegmentAndByteLimits) {
+    const Address a{"10.0.0.1", 1000};
+    const std::vector<uint8_t> full(1220, 'x'), small(100, 's');
+
+    // Bytes: 52 x 1220 fits in one send, the 53rd does not.
+    UdpSendBatch bytes(kUdpMaxSegments);
+    for (int i = 0; i < 53; ++i) ASSERT_TRUE(bytes.add(a, full.data(), full.size()));
+    ASSERT_EQ(bytes.runs().size(), 2u);
+    EXPECT_EQ(bytes.runs()[0].count, kUdpMaxSendBytes / 1220);
+    EXPECT_LE(bytes.runs()[0].bytes, kUdpMaxSendBytes);
+
+    // Segments: 64 small datagrams are well under the byte limit, but one run.
+    UdpSendBatch segments(kUdpMaxSegments);
+    for (size_t i = 0; i < kUdpMaxSegments + 1; ++i)
+        ASSERT_TRUE(segments.add(a, small.data(), small.size()));
+    ASSERT_EQ(segments.runs().size(), 2u);
+    EXPECT_EQ(segments.runs()[0].count, kUdpMaxSegments);
+
+    // Without offload every datagram is a run of its own.
+    UdpSendBatch single(1);
+    for (int i = 0; i < 3; ++i) ASSERT_TRUE(single.add(a, full.data(), full.size()));
+    EXPECT_EQ(single.runs().size(), 3u);
+
+    // Full is reported, not overrun; nothing oversized or empty is taken.
+    UdpSendBatch cap(kUdpMaxSegments);
+    size_t taken = 0;
+    while (cap.add(a, full.data(), full.size())) ++taken;
+    EXPECT_EQ(taken, UdpSendBatch::kCapacity / 1220);
+    const std::vector<uint8_t> huge(kUdpMaxSendBytes + 1, 'h');
+    UdpSendBatch empty(kUdpMaxSegments);
+    EXPECT_FALSE(empty.add(a, huge.data(), huge.size()));
+    EXPECT_FALSE(empty.add(a, full.data(), 0));
+}
+
+// The two receive shapes a segmented send can meet: a socket that takes the
+// run whole, and one that has the kernel cut it up first. Both must yield the
+// same datagrams, in order, with the short last one intact.
+TEST_F(SocketTest, UdpSegmentedSendArrivesAsTheSameDatagramsEitherWay) {
+    for (const bool coalescing_receiver : {false, true}) {
+        SCOPED_TRACE(coalescing_receiver ? "receiver coalesces" : "receiver does not coalesce");
+        UdpPair net;
+        ASSERT_TRUE(net.ok());
+
+        const UdpOffload tx = enable_udp_offload(net.sender);
+        if (tx.max_segments == 1) GTEST_SKIP() << "no segmentation offload on this system";
+        bool coalesced = false;
+        if (coalescing_receiver) {
+            coalesced = enable_udp_offload(net.receiver).coalesced_receive;
+            if (!coalesced) GTEST_SKIP() << "no coalesced receive on this system";
+        }
+
+        constexpr size_t kCount = 41;   // 40 of 1000 bytes, then a short one
+        UdpSendBatch out(tx.max_segments);
+        for (size_t i = 0; i < kCount; ++i) {
+            const auto d = numbered(i, i + 1 < kCount ? 1000 : 123);
+            ASSERT_TRUE(out.add(net.dest, d.data(), d.size()));
+        }
+        ASSERT_EQ(out.runs().size(), 1u) << "the datagrams should have formed one run";
+        ASSERT_EQ(out.flush(net.sender, AddressFamily::IPv4), kCount);
+        EXPECT_GT(out.max_segments(), 1u) << "the kernel refused a segmented send";
+
+        UdpRecvBatch in(1500, coalesced);
+        size_t       runs = 0;
+        const auto   got  = receive_datagrams(net.receiver, in, kCount, &runs);
+        ASSERT_EQ(got.size(), kCount);
+        for (size_t i = 0; i < kCount; ++i)
+            ASSERT_EQ(got[i], numbered(i, i + 1 < kCount ? 1000 : 123)) << "datagram " << i;
+        if (coalesced) EXPECT_GE(runs, 1u) << "nothing arrived coalesced; the split went untested";
+        else           EXPECT_EQ(runs, 0u);
+    }
+}
+
+#ifdef __linux__
+// A device that cannot segment refuses the send outright (EIO; EINVAL for a
+// socket that skips checksums, which is how this test provokes it). Losing the
+// run would be dozens of packets gone at once, so the batch must notice, turn
+// segmentation off for good and send the same datagrams one apiece.
+TEST_F(SocketTest, UdpSegmentedSendThatTheKernelRefusesGoesOutUnsegmented) {
+    UdpPair net;
+    ASSERT_TRUE(net.ok());
+    const UdpOffload tx = enable_udp_offload(net.sender);
+    if (tx.max_segments == 1) GTEST_SKIP() << "no segmentation offload on this system";
+
+    const int on = 1;   // SO_NO_CHECK: the kernel will not segment without a checksum
+    ASSERT_EQ(setsockopt(net.sender, SOL_SOCKET, SO_NO_CHECK, &on, sizeof(on)), 0);
+
+    constexpr size_t kCount = 30;
+    UdpSendBatch out(tx.max_segments);
+    for (size_t i = 0; i < kCount; ++i) {
+        const auto d = numbered(i, 900);
+        ASSERT_TRUE(out.add(net.dest, d.data(), d.size()));
+    }
+    EXPECT_EQ(out.flush(net.sender, AddressFamily::IPv4), kCount);
+    EXPECT_EQ(out.max_segments(), 1u) << "segmentation should be off after a refusal";
+
+    UdpRecvBatch in(1500, false);
+    const auto   got = receive_datagrams(net.receiver, in, kCount);
+    ASSERT_EQ(got.size(), kCount);
+    for (size_t i = 0; i < kCount; ++i) EXPECT_EQ(got[i], numbered(i, 900));
+}
+#endif

@@ -32,22 +32,15 @@ UdpMux::UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
     : socket_(socket), family_(family), delegate_(delegate), limits_(limits),
       congestion_(congestion),
       receive_budget_(limits.receive_budget),
-      recv_storage_(kUdpBatchMax * rudp::kMaxDatagram),
-      // Only where a batch is really one syscall. Without that, send_datagram()
-      // goes straight to the socket and never stages anything, so this would be
-      // 39 KiB per node that is allocated and never touched.
-      send_storage_(kUdpBatchIsOneSyscall ? kUdpBatchMax * rudp::kMaxDatagram : 0),
+      // Probed before the socket buffers are sized or anything is read, so the
+      // receive batch is built for what the socket will actually hand it: once
+      // coalescing is on, any receive may be a 64 KiB run.
+      offload_(limits.offload ? enable_udp_offload(socket) : UdpOffload{}),
+      send_(offload_.max_segments),
+      recv_(rudp::kMaxDatagram, offload_.coalesced_receive),
       secret_rotated_at_(Clock::now()),
       rng_(std::random_device{}()) {
     set_socket_buffer_sizes(socket_, kSocketBufferBytes, kSocketBufferBytes);
-
-    // Point each slot at its slice of the storage, once. From here on a batch only
-    // ever moves lengths and endpoints around — the buffers never move.
-    for (size_t i = 0; i < kUdpBatchMax; ++i) {
-        recv_slots_[i].data = recv_storage_.data() + i * rudp::kMaxDatagram;
-        if (kUdpBatchIsOneSyscall)
-            send_slots_[i].data = send_storage_.data() + i * rudp::kMaxDatagram;
-    }
 
     for (CookieSecret& secret : cookie_secret_) fill_random(secret.data(), secret.size());
 }
@@ -69,34 +62,20 @@ UdpMux::~UdpMux() {
 void UdpMux::send_datagram(const Address& to, const uint8_t* data, size_t len) {
     if (len == 0 || len > rudp::kMaxDatagram) return;  // nothing this class produces
 
-    // Where the socket cannot take a batch in one call, staging buys nothing:
-    // flush_output() would make exactly the per-datagram calls this makes here, and
-    // the copy into the staging buffer on the way there would be pure loss — it
-    // would also undo the headroom trick in OutPacket, whose whole purpose is to
-    // hand the socket the packet where it already lies. So go straight to the wire.
-    if constexpr (!kUdpBatchIsOneSyscall) {
-        send_udp_to(socket_, data, len, to, family_);
-        return;
-    }
-
     // Staged, not sent: a full congestion window is dozens of datagrams produced
     // back to back, and handing each one to the kernel separately is where most of
     // this transport's CPU used to go. They leave together in flush_output(), which
     // every entry point calls before it returns — so nothing waits on a timer.
-    if (staged_ == kUdpBatchMax) flush_output();
-
-    UdpBatchSlot& slot = send_slots_[staged_++];
-    slot.endpoint      = to;
-    slot.len           = len;
-    std::memcpy(slot.data, data, len);
+    if (send_.add(to, data, len)) return;
+    flush_output();
+    send_.add(to, data, len);   // an empty batch always has room for one datagram
 }
 
 void UdpMux::flush_output() {
-    if (staged_ == 0) return;
-    const size_t staged = staged_;
-    staged_ = 0;  // spent either way: what the socket refused is a dropped datagram
-
-    const size_t sent = send_udp_batch(socket_, send_slots_.data(), staged, family_);
+    if (send_.empty()) return;
+    const size_t staged = send_.datagrams();
+    // Spent either way: what the socket refused is a dropped datagram.
+    const size_t sent = send_.flush(socket_, family_);
     if (sent < staged)
         LOG_DEBUG("udp", "Socket took " << sent << "/" << staged
                   << " datagrams; the rest are dropped (retransmission covers them)");
@@ -298,17 +277,19 @@ bool UdpMux::on_readable() {
     // node a flood of Syns arrives at.
     rotate_cookie_secret(now);
 
-    size_t drained = 0;
-    bool   more    = false;
+    size_t drained        = 0;   // datagrams, however many buffers they came in
+    size_t since_dispatch = 0;
+    bool   more           = false;
     for (;;) {
         if (drained >= kMaxDatagramsPerRead) { more = true; break; }
 
-        // Never ask for more than the cap allows, so the bound on how long one
-        // flood can hold the loop stays exact rather than approximate.
-        const size_t want = (std::min)(kUdpBatchMax, kMaxDatagramsPerRead - drained);
-        for (size_t i = 0; i < want; ++i) recv_slots_[i].len = rudp::kMaxDatagram;
+        // Never ask for more than the cap allows, so one flood holds the loop for
+        // a bounded time — counted in datagrams, though only buffers can be asked
+        // for, so it is exact to within one coalesced buffer.
+        const size_t room = (kMaxDatagramsPerRead - drained) / recv_.max_datagrams_per_buffer();
+        const size_t want = (std::max)(size_t{1}, (std::min)(kUdpBatchMax, room));
 
-        const std::ptrdiff_t got = recv_udp_batch(socket_, recv_slots_.data(), want);
+        const std::ptrdiff_t got = recv_.receive(socket_, want);
         if (got == kUdpRecvWouldBlock) break;
         // A per-destination error (an ICMP unreachable for an earlier datagram,
         // which Windows in particular reports on the *next* receive) says nothing
@@ -317,7 +298,7 @@ bool UdpMux::on_readable() {
         if (got == kUdpRecvError) { ++drained; continue; }
 
         // Each batch is stamped when it is read, not when the drain began. A drain
-        // runs the connections' handlers between batches (below), and they send:
+        // runs the connections' handlers as it goes (below), and they send:
         // a drain of thousands of datagrams lasts tens of milliseconds on a slow
         // host, so an acknowledgement read at its end, stamped with its start,
         // measured a 33 ms path at 2 ms: a minimum round trip that then held
@@ -325,26 +306,32 @@ bool UdpMux::on_readable() {
         // the path for ten seconds. Delivery-rate samples and RACK read it too.
         const auto at = Clock::now();
         for (std::ptrdiff_t i = 0; i < got; ++i) {
-            const UdpBatchSlot& slot = recv_slots_[static_cast<size_t>(i)];
-            rudp::Packet p;
-            if (!rudp::decode(slot.data, slot.len, p)) continue;
-            handle_datagram(p, slot.endpoint, at);
-        }
-        drained += static_cast<size_t>(got);
+            const Address& from = recv_[static_cast<size_t>(i)].from;
+            recv_.for_each_datagram(static_cast<size_t>(i), [&](const uint8_t* data, size_t len) {
+                ++drained;
+                rudp::Packet p;
+                if (rudp::decode(data, len, p)) handle_datagram(p, from, at);
 
-        // Hand this batch's events over before reading the next one, rather than
-        // saving them all for the end of the drain. What a stream delivers sits in
-        // its in-order buffer until its connection reads it out, so deferring the
-        // whole drain let that buffer grow to everything one peer managed to send
-        // in it — a megabyte and more, written and then read back through main
-        // memory, and enough to close the receive window mid-drain. Draining per
-        // batch keeps it to one batch's worth, which stays in cache.
-        //
-        // Safe here and nowhere earlier: the slot loop above has finished, so no
-        // reference into streams_ is live, and a handler that closes its connection
-        // only marks it — the teardown that would free a stream runs later, on the
-        // reactor.
-        dispatch_pending();
+                // Hand the events over every kUdpBatchMax datagrams rather than
+                // saving them all for the end of the drain. What a stream delivers
+                // sits in its in-order buffer until its connection reads it out, so
+                // deferring the whole drain let that buffer grow to everything one
+                // peer managed to send in it — a megabyte and more, written and
+                // then read back through main memory, and enough to close the
+                // receive window mid-drain. Counted in datagrams, not receive
+                // calls, because one coalesced buffer alone can be fifty of them.
+                //
+                // Safe between any two datagrams: handle_datagram() keeps no
+                // reference into streams_ once it returns, and a handler that
+                // closes its connection only marks it — the teardown that would
+                // free a stream runs later, on the reactor.
+                if (++since_dispatch == kUdpBatchMax) {
+                    dispatch_pending();
+                    since_dispatch = 0;
+                }
+            });
+        }
+        end_bursts();
         // A short batch usually means the queue is empty, but not always (a
         // per-datagram error truncates one too), and the kqueue backend is
         // edge-triggered — so keep going until the socket says would-block.
@@ -366,6 +353,12 @@ void UdpMux::handle_datagram(const rudp::Packet& p, const Address& from, Clock::
         // not follow a peer across a NAT rebind — the peer redials, which the
         // handshake makes cheap and safe.)
         if (stream.remote() != from) return;
+        // Everything this receive brings the stream is one burst: its acks leave
+        // once, after the last of it (end_bursts()).
+        if (!stream.in_burst()) {
+            stream.begin_burst();
+            bursts_.push_back(it->first);
+        }
         stream.on_packet(p, now);
         arm(it->first, it->second);   // the packet may have brought a deadline forward
         return;
@@ -391,6 +384,20 @@ void UdpMux::handle_datagram(const rudp::Packet& p, const Address& from, Clock::
     // retransmitting for a minute — but never more than a bounded rate, so a flood
     // of garbage cannot turn this socket into a reflector.
     if (spend_reply_budget(now)) send_reset(from, p.conn_id);
+}
+
+void UdpMux::end_bursts() {
+    if (bursts_.empty()) return;
+    // One clock read for all of them: the acks go out now, and the delay they
+    // report is how long the burst actually took to read.
+    const auto now = Clock::now();
+    for (const uint32_t id : bursts_) {
+        const auto it = streams_.find(id);
+        if (it == streams_.end()) continue;
+        it->second.stream->end_burst(now);
+        arm(it->first, it->second);
+    }
+    bursts_.clear();
 }
 
 bool UdpMux::admit_syn(const rudp::Packet& syn, const Address& from, Clock::time_point now) {

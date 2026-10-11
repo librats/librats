@@ -77,6 +77,14 @@ struct RATS_API NodeConfig {
     /// down), except for a small share every stream keeps regardless.
     size_t udp_receive_budget = 0;
 
+    /// Whether UDP uses the kernel's segmentation offload where the running
+    /// system has it (Linux UDP_SEGMENT/UDP_GRO, Windows USO/URO): a run of
+    /// packets to one peer then crosses the network stack as one buffer, which is
+    /// most of the CPU difference between a user-space stream and kernel TCP.
+    /// Probed per socket and dropped on its own if the kernel refuses a send, so
+    /// turning it off is for comparison and for hosts where it misbehaves.
+    bool udp_offload = true;
+
     /// Bytes a peer's send queue may hold before an application that keeps
     /// sending anyway has the peer dropped as a slow consumer. 0 uses the library
     /// default (8 MiB).

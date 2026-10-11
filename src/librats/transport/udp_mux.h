@@ -50,41 +50,51 @@
  *
  * ── Why the socket is worked in batches ─────────────────────────────────────
  * A datagram transport emits one packet per call, so at a 1200-byte payload a
- * bulk transfer costs tens of thousands of syscalls per megabyte — far more than
- * the framing, the congestion control and the encryption above it put together,
- * and the reason a user-space stream costs measurably more CPU per byte than the
- * kernel's TCP. So the mux does not hand each datagram to the socket as it is
- * produced: outgoing datagrams are staged and leave together (kUdpBatchMax per
- * syscall), and incoming ones are collected the same way.
+ * bulk transfer costs tens of thousands of trips through the kernel per megabyte
+ * — far more than the framing, the congestion control and the encryption above it
+ * put together, and the whole reason a user-space stream costs more CPU per byte
+ * than the kernel's TCP. So the mux does not hand each datagram to the socket as
+ * it is produced: outgoing datagrams are staged in a UdpSendBatch and leave
+ * together, and incoming ones are collected in a UdpRecvBatch (udp_io.h).
+ *
+ * Batching saves the syscall; segmentation offload saves the stack. Where the
+ * kernel has it (Linux UDP_SEGMENT/UDP_GRO, Windows USO/URO — probed per socket,
+ * see enable_udp_offload), a run of equal-size datagrams to one peer goes down as
+ * one buffer the kernel or the NIC cuts up, and a run from one peer comes back up
+ * as one buffer this class cuts up. A paced window is exactly such a run, so a
+ * bulk sender's packets travel the stack fifty at a time. UdpMuxLimits::offload
+ * turns it off, for comparison and for hosts where it misbehaves. Once coalesced
+ * receive is on, this socket must only ever be read through the UdpRecvBatch: a
+ * plain recvfrom would get a run back as one datagram.
+ *
+ * The acknowledgements follow the same shape. Everything one receive brings a
+ * stream is a burst (UdpStream::begin_burst): the acks it owes are held until the
+ * last of it has been read and then sent once, so the sender's side handles one
+ * ack per run instead of one per two packets.
  *
  * Staging is deliberately *not* deferred past the work that produced it. Every
  * entry point flushes before it returns, and the Reactor flushes once more at the
  * end of each loop turn to cover datagrams produced by application sends — so a
  * packet never waits on a timer, and batching costs no latency, only syscalls.
  *
- * All of that is conditional on the platform actually having a batched send
- * (kUdpBatchIsOneSyscall). Where it does not — Windows, macOS — staging would pay
- * a copy per datagram to save syscalls that cannot be saved, so send_datagram()
- * hands each datagram to the socket as it is produced and the staging path is
- * compiled out entirely. The receive side has no such split: its fallback fills
- * the caller's slots directly, so it costs nothing extra either way.
- *
  * Threading follows the rest of the transport: the mux belongs to exactly one
  * Reactor and is touched only by that reactor's thread.
  *
- * Events are never delivered from inside the datagram loop. A stream records what
- * its connection should see, and the mux dispatches once the batch it is standing
- * in is finished — so a handler that tears its connection down can never free a
- * stream the loop is still walking. Per batch, not per drain: what a stream
- * delivers waits in its in-order buffer until the connection reads it out, so
- * holding every event to the end of the drain would let that buffer grow to
- * everything one peer could send in it. Events for the same connection coalesce,
- * because a bulk sender raises one per packet and only the first has work to do.
+ * Events are never delivered from inside a stream's packet handling. A stream
+ * records what its connection should see, and the mux dispatches between
+ * datagrams — so a handler that tears its connection down can never free a
+ * stream that is still being worked on. Every kUdpBatchMax datagrams, not per
+ * drain (nor per receive call, now that one buffer may be a run of fifty): what a
+ * stream delivers waits in its in-order buffer until the connection reads it out,
+ * so holding the events back longer would let that buffer grow to everything one
+ * peer could send meanwhile. Events for the same connection coalesce, because a
+ * bulk sender raises one per packet and only the first has work to do.
  */
 
 #include "librats/core/address.h"
 #include "librats/core/socket.h"
 #include "librats/core/types.h"
+#include "librats/core/udp_io.h"
 #include "librats/transport/link.h"
 #include "librats/transport/udp_stream.h"
 
@@ -148,6 +158,12 @@ struct UdpMuxLimits {
     /// UdpReceiveBudget). What a hostile peer filling its window with holes can
     /// cost is bounded by this, not by its window times the number of peers.
     size_t receive_budget = 64 * 1024 * 1024;
+
+    /// Whether to use the kernel's segmentation offload where it has one (see
+    /// the file comment). Not a limit, but it belongs with the other knobs on what
+    /// the mux asks of its host. Off moves exactly the same datagrams, one per
+    /// trip through the stack.
+    bool offload = true;
 };
 
 class UdpMux final : public UdpStreamHost {
@@ -255,6 +271,9 @@ public:
 
     size_t stream_count() const noexcept { return streams_.size(); }
 
+    /// What segmentation offload this mux's socket turned out to have.
+    const UdpOffload& offload() const noexcept { return offload_; }
+
     // — UdpStreamHost —
     void send_datagram(const Address& to, const uint8_t* data, size_t len) override;
     void stream_events(UdpStream& stream, uint32_t events) override;
@@ -298,6 +317,9 @@ private:
     UdpStream*  find_for_reset(uint32_t conn_id, const Address& from);
     bool        allocate_ids(uint32_t& recv_id, uint32_t& send_id);
     void        dispatch_pending();
+    /// Close the burst of every stream the current receive reached, sending the
+    /// acknowledgements they held (UdpStream::begin_burst).
+    void        end_bursts();
 
     // — deadline scheduling —
     /// Give `entry` a heap slot for its next deadline, unless the one it already
@@ -329,16 +351,15 @@ private:
     std::unordered_map<uint32_t, Entry> streams_;  ///< keyed by our recv id
     std::vector<Due>                    due_;      ///< min-heap of stream deadlines
     std::vector<std::pair<ConnId, uint32_t>> pending_events_;
+    std::vector<uint32_t>               bursts_;   ///< streams the current receive reached
 
-    // Batch scratch. Both directions keep kUdpBatchMax datagrams' worth of storage
-    // for the life of the mux — allocated once, never grown, so neither the receive
-    // loop nor the send path allocates. The slots point into the storage and are
-    // set up in the constructor; only their lengths and endpoints move afterwards.
-    std::vector<uint8_t>                      recv_storage_;
-    std::vector<uint8_t>                      send_storage_;
-    std::array<UdpBatchSlot, kUdpBatchMax>    recv_slots_{};
-    std::array<UdpBatchSlot, kUdpBatchMax>    send_slots_{};
-    size_t                                    staged_ = 0;  ///< datagrams awaiting flush_output()
+    // What the kernel does for this socket, then the two batches sized by it.
+    // Both are allocated once for the life of the mux and never grown, so neither
+    // the receive loop nor the send path allocates. Declared in this order because
+    // the batches are built from offload_.
+    UdpOffload   offload_;
+    UdpSendBatch send_;
+    UdpRecvBatch recv_;
 
     // Cookie secrets: [0] is current, [1] the one it replaced. A cookie is checked
     // against both, so one that was handed out just before a rotation still works.
