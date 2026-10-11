@@ -2751,6 +2751,68 @@ TEST(TransportUdpTest, AnApplicationThatHeedsBackpressureKeepsItsPeer) {
     server.stop();
 }
 
+// Path samples reach the application: a handler sees every connected peer's
+// estimate on a cadence, and path_stats() answers the same from any thread.
+// Over UDP the figures are the stream's own; over TCP (Linux) the kernel's.
+TEST(TransportUdpTest, PathSamplesReachTheApplication) {
+    std::vector<TransportKind> wires{TransportKind::Udp};
+#if defined(__linux__)
+    wires.push_back(TransportKind::Tcp);
+#endif
+    for (const TransportKind wire : wires) {
+        SCOPED_TRACE(to_string(wire));
+        NodeConfig server_cfg = base_config();
+        NodeConfig client_cfg = base_config();
+        client_cfg.enable_listen       = false;
+        client_cfg.preferred_transport = wire;
+        client_cfg.transport_fallback_ms = 0;
+
+        Node server(server_cfg), client(client_cfg);
+        std::atomic<size_t> got{0};
+        server.on("bulk", [&](Peer, ByteView payload) { got += payload.size(); });
+
+        std::mutex           mu;
+        std::vector<PathStats> samples;
+        client.on_peer_path([&](const Peer&, const PathStats& st) {
+            std::lock_guard<std::mutex> lock(mu);
+            samples.push_back(st);
+        });
+        ASSERT_TRUE(server.start());
+        ASSERT_TRUE(client.start());
+
+        client.connect("127.0.0.1", server.listen_port());
+        ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1; }));
+        const PeerInfo info = client.peers().front();
+        ASSERT_EQ(info.transport, wire);
+
+        const std::string chunk(64 * 1024, 'b');
+        constexpr size_t  kTotal = 4 * 1024 * 1024;
+        for (size_t sent = 0; sent < kTotal; sent += chunk.size()) {
+            while (!client.peer_writable(info.id)) std::this_thread::sleep_for(1ms);
+            client.send(info.id, "bulk", ByteView(chunk));
+        }
+        ASSERT_TRUE(wait_for([&] { return got.load() == kTotal; }, 30s));
+        ASSERT_TRUE(wait_for([&] {
+            const auto st = client.path_stats(info.id);
+            return st && st->bytes_delivered >= kTotal;
+        })) << "no sample saw the transfer delivered";
+
+        const auto st = client.path_stats(info.id);
+        ASSERT_TRUE(st);
+        EXPECT_TRUE(st->valid);
+        EXPECT_GT(st->bandwidth_bps, 0u);
+        EXPECT_GT(st->srtt_us, 0u);
+        EXPECT_TRUE(wait_for([&] {
+            std::lock_guard<std::mutex> lock(mu);
+            return samples.size() >= 3;
+        })) << "the handler is not called on a cadence";
+        EXPECT_FALSE(server.path_stats(client.local_id())) << "nobody asked the server to sample";
+
+        client.stop();
+        server.stop();
+    }
+}
+
 // A message larger than the whole send queue is not a slow consumer, and must not
 // be answered with a disconnection.
 //

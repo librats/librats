@@ -445,6 +445,13 @@ public:
     /// many acks that report it — see enter_recovery().
     uint32_t congestion_events() const noexcept { return congestion_events_; }
 
+    /// What this stream knows about the path, for an application that sizes its
+    /// own sending to it (see PathStats). `queued_bytes` counts only what the
+    /// stream holds unsent, and `loss` is left at 0: both need what the stream
+    /// cannot see — the connection's own queue above it, and the moment the last
+    /// sample was taken — and are filled in by whoever samples it.
+    PathStats path_stats() const noexcept;
+
 private:
     enum class State {
         SynSent,    ///< outbound: the Syn is in flight, nothing else may go yet
@@ -627,6 +634,7 @@ private:
     uint32_t              next_seq_     = 1;   ///< sequence number for the next packet created
     size_t                flight_bytes_ = 0;   ///< payload bytes transmitted and not yet acked
     size_t                queued_bytes_ = 0;   ///< payload bytes held by sent_ + unsent_
+    size_t                unsent_bytes_ = 0;   ///< payload bytes held by unsent_ alone
     /// The highest sequence number the peer will accept — the largest limit it has
     /// sent, since its limit never moves backwards. Unset until the peer has said
     /// anything at all, which a stream that may send has always heard by then.

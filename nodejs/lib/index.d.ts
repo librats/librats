@@ -120,6 +120,40 @@ declare module 'librats' {
     udpReceiveWindow?: number;
     /** Bytes all UDP streams together may hold out of order. 0 (default) = 64 MiB. */
     udpReceiveBudget?: number;
+    /**
+     * How often each connected peer's path is sampled for `pathStats()` and
+     * `onPeerPath`, in ms. 0 (default) samples only while an `onPeerPath`
+     * handler is registered, and then every 100 ms.
+     */
+    pathSampleMs?: number;
+  }
+
+  /**
+   * What the transport knows about the path to one peer. Rates are bits per
+   * second; anything past `bandwidthBps` waits in `queuedBytes`, so
+   * `queuedBytes * 8 / bandwidthBps` is the wait in seconds.
+   */
+  export interface PathStats {
+    /** The congestion controller's estimate; 0 = none yet. */
+    bandwidthBps: number;
+    /** The sender was not filling the path, so the estimate is a floor, not the path. */
+    appLimited: boolean;
+    /** Current release rate; 0 = unpaced. */
+    pacingBps: number;
+    /** Smoothed round trip, µs. */
+    srttUs: number;
+    /** Lowest round trip seen — the path without queues, µs. */
+    minRttUs: number;
+    /** Accepted for the peer, not yet sent. */
+    queuedBytes: number;
+    /** Sent, not yet acknowledged. */
+    bytesInFlight: number;
+    /** Share of bytes lost over the last sample interval, 0..1. */
+    loss: number;
+    /** Acknowledged since the connection opened. */
+    bytesDelivered: number;
+    /** Declared lost since the connection opened. */
+    bytesLost: number;
   }
 
   export type PeerHandler = (peerId: string) => void;
@@ -131,6 +165,7 @@ declare module 'librats' {
    */
   export type PeerDisconnectHandler = (peerId: string, reason: string) => void;
   export type MessageHandler = (peerId: string, data: Buffer) => void;
+  export type PathHandler = (peerId: string, stats: PathStats) => void;
   export type TopicHandler = (peerId: string, topic: string, data: Buffer) => void;
   export type JsonHandler = (peerId: string, value: any) => void;
   export type FileOfferHandler = (
@@ -233,6 +268,13 @@ declare module 'librats' {
      * this. Not a size limit — one message of any size is always queued.
      */
     peerWritable(peerId: string): boolean;
+    /**
+     * The latest path sample for a peer, or `null` if it is not connected or
+     * nothing has been sampled yet — sampling runs only with `pathSampleMs` set
+     * or an `onPeerPath` handler registered. Over TCP the figures are the
+     * kernel's, on Linux only.
+     */
+    pathStats(peerId: string): PathStats | null;
     /** Register a handler for a named channel. Additive; register before `start()`. */
     on(channel: string, handler: MessageHandler): void;
 
@@ -242,6 +284,11 @@ declare module 'librats' {
     onPeerDisconnected(handler: PeerDisconnectHandler): void;
     /** A peer whose queue had filled has drained back under its mark. */
     onPeerWritable(handler: PeerHandler): void;
+    /**
+     * A path sample of every connected peer, every `pathSampleMs` (100 ms if 0).
+     * Registering one turns sampling on. Keep it cheap.
+     */
+    onPeerPath(handler: PathHandler): void;
 
     // ---- discovery (enable before start) ----
 

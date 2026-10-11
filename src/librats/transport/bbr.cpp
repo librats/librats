@@ -39,7 +39,8 @@ BbrController::BbrController(const RttEstimate& rtt, const DeliveryRateSampler& 
                                      ? rtt_.srtt
                                      : std::chrono::duration_cast<Clock::duration>(
                                            std::chrono::milliseconds(1));
-    pacing_rate_ = mul_div(kInitialWindow, kNsPerSec, to_ns(srtt)) * kStartupPacingGain / kUnit;
+    pacing_rate_     = mul_div(kInitialWindow, kNsPerSec, to_ns(srtt)) * kStartupPacingGain / kUnit;
+    pacing_from_rtt_ = rtt_.have_rtt;
 
     enter_startup();
 }
@@ -455,6 +456,17 @@ void BbrController::update_control_parameters() {
 }
 
 void BbrController::set_pacing_rate_with_gain(uint64_t gain) {
+    // The first round trip replaces the 1 ms stand-in the initial rate was set
+    // from (as Linux does). It has to be replaced rather than outgrown: the rule
+    // below only ever raises the rate until the pipe is found full, and a flow
+    // that never fills it — live video, anything app-limited — never finds it
+    // so. On a 40 ms path the stand-in is a rate forty times the real one, and it
+    // would stay the rate for the life of such a flow: every burst it sends, a
+    // keyframe, goes out at 13 MB/s into whatever the path is.
+    if (!pacing_from_rtt_ && rtt_.have_rtt && rtt_.srtt > Clock::duration::zero()) {
+        pacing_from_rtt_ = true;
+        pacing_rate_ = mul_div(kInitialWindow, kNsPerSec, to_ns(rtt_.srtt)) * kStartupPacingGain / kUnit;
+    }
     if (bw_ == 0) return;   // nothing measured: keep the initial rate
     const uint64_t rate = bw_ * gain / kUnit * (kUnit - kPacingMargin) / kUnit;
     // Until the pipe is known to be full, never pace slower than before — an early

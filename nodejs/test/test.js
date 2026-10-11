@@ -160,6 +160,7 @@ describe('librats Node.js bindings', { timeout: 10_000 }, function () {
       node.start();
       assert.strictEqual(node.peerTransport('0'.repeat(64)), null);
       assert.strictEqual(node.peerTransports('0'.repeat(64)), null);
+      assert.strictEqual(node.pathStats('0'.repeat(64)), null);
     });
   });
 

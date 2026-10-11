@@ -40,6 +40,7 @@ from .enums import (
     LogLevel,
     FileTransferStatus,
     VersionInfo,
+    PathStats,
 )
 from .exceptions import (
     RatsError,
@@ -54,6 +55,7 @@ from .exceptions import (
 from .callbacks import (
     PeerCallback,
     PeerDisconnectCallback,
+    PathCallback,
     MessageCallback,
     TopicCallback,
     JsonCallback,
@@ -86,6 +88,7 @@ __all__ = [
     "LogLevel",
     "FileTransferStatus",
     "VersionInfo",
+    "PathStats",
     # exceptions
     "RatsError",
     "RatsConnectionError",
@@ -98,6 +101,7 @@ __all__ = [
     # callback type aliases
     "PeerCallback",
     "PeerDisconnectCallback",
+    "PathCallback",
     "MessageCallback",
     "TopicCallback",
     "JsonCallback",

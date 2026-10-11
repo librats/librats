@@ -156,6 +156,33 @@ jobject toFileTransferStatus(JNIEnv* env, int status) {
     return value;
 }
 
+// Build a com.librats.PathStats from one C path sample. Null (with the JNI error
+// cleared) only on a Java/native version skew.
+jobject toPathStats(JNIEnv* env, const rats_path_stats_t& s) {
+    jclass cls = env->FindClass("com/librats/PathStats");
+    if (!cls) { env->ExceptionClear(); return nullptr; }
+    jmethodID ctor = env->GetMethodID(cls, "<init>", "(JZJIIJJDJJ)V");
+    jobject value = nullptr;
+    if (ctor) {
+        value = env->NewObject(cls, ctor,
+                               static_cast<jlong>(s.bandwidth_bps),
+                               s.app_limited ? JNI_TRUE : JNI_FALSE,
+                               static_cast<jlong>(s.pacing_bps),
+                               static_cast<jint>(s.srtt_us),
+                               static_cast<jint>(s.min_rtt_us),
+                               static_cast<jlong>(s.queued_bytes),
+                               static_cast<jlong>(s.bytes_in_flight),
+                               static_cast<jdouble>(s.loss),
+                               static_cast<jlong>(s.bytes_delivered),
+                               static_cast<jlong>(s.bytes_lost));
+    } else {
+        env->ExceptionClear();
+        LOGE("com/librats/PathStats has no (JZJIIJJDJJ)V constructor");
+    }
+    env->DeleteLocalRef(cls);
+    return value;
+}
+
 } // namespace
 
 // One bridge serves both peer events: rats_peer_cb has one C signature, and
@@ -191,6 +218,25 @@ static void peer_disconnect_bridge(void* user, const char* peer_id_hex,
     clearPendingException(env, "peer disconnect");
     env->DeleteLocalRef(jwhy);
     env->DeleteLocalRef(jid);
+    env->DeleteLocalRef(cls);
+}
+
+// A path sample: the C struct is valid only for this call, so it becomes a Java
+// PathStats before the callback sees it.
+static void peer_path_bridge(void* user, const char* peer_id_hex,
+                             const rats_path_stats_t* stats) {
+    JNIEnv* env = getEnv();
+    if (!env || !stats) return;
+    jobject obj = static_cast<jobject>(user);
+    jclass cls; jmethodID m;
+    if (!resolveMethod(env, obj, "onPeerPath",
+                       "(Ljava/lang/String;Lcom/librats/PathStats;)V", &cls, &m)) return;
+    jstring jid = toJString(env, peer_id_hex);
+    jobject jstats = toPathStats(env, *stats);
+    env->CallVoidMethod(obj, m, jid, jstats);
+    clearPendingException(env, "peer path");
+    env->DeleteLocalRef(jid);
+    if (jstats) env->DeleteLocalRef(jstats);
     env->DeleteLocalRef(cls);
 }
 
@@ -319,7 +365,7 @@ JNIEXPORT jlong JNICALL
 Java_com_librats_RatsNode_nativeCreateConfig(JNIEnv* env, jobject, jint listen_port,
         jboolean enable_listen, jstring bind_address, jint security, jstring data_dir,
         jstring protocol, jlong max_peers, jboolean enable_tcp, jboolean enable_udp,
-        jint preferred_transport, jint transport_fallback_ms) {
+        jint preferred_transport, jint transport_fallback_ms, jint path_sample_ms) {
     // Start from the defaults: a zeroed rats_config_t would ask for a dial-only
     // node with no transports.
     rats_config_t cfg = rats_config_default();
@@ -331,6 +377,7 @@ Java_com_librats_RatsNode_nativeCreateConfig(JNIEnv* env, jobject, jint listen_p
     cfg.enable_udp = enable_udp ? 1 : 0;
     cfg.preferred_transport = static_cast<rats_transport_t>(preferred_transport);
     cfg.transport_fallback_ms = static_cast<uint32_t>(transport_fallback_ms);
+    cfg.path_sample_ms = static_cast<uint32_t>(path_sample_ms);
 
     // The struct borrows these only for the duration of the create call.
     std::string bind = toCString(env, bind_address);
@@ -471,6 +518,22 @@ Java_com_librats_RatsNode_nativePeerWritable(JNIEnv* env, jobject, jlong ptr, js
     return rats_peer_writable(node_of(ptr), id.c_str()) ? JNI_TRUE : JNI_FALSE;
 }
 
+// Returns the rats_error_t; on RATS_OK out[0] holds the sample. The Java side
+// turns NO_SUCH_PEER into null and anything else into a RatsException.
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsNode_nativePathStats(JNIEnv* env, jobject, jlong ptr, jstring peerId,
+                                            jobjectArray out) {
+    std::string id = toCString(env, peerId);
+    rats_path_stats_t s{};
+    rats_error_t rc = rats_path_stats(node_of(ptr), id.c_str(), &s);
+    if (rc != RATS_OK) return rc;
+    jobject jstats = toPathStats(env, s);
+    if (!jstats) return RATS_ERR_INTERNAL;
+    env->SetObjectArrayElement(out, 0, jstats);
+    env->DeleteLocalRef(jstats);
+    return RATS_OK;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_librats_RatsNode_nativeOn(JNIEnv* env, jobject, jlong ptr, jstring channel,
                                      jobject callback) {
@@ -501,6 +564,13 @@ Java_com_librats_RatsNode_nativeOnPeerWritable(JNIEnv* env, jobject, jlong ptr, 
     rats_t node = node_of(ptr);
     jobject ref = trackRef(env, node, cb);
     return rats_on_peer_writable(node, peer_bridge, ref);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_librats_RatsNode_nativeOnPeerPath(JNIEnv* env, jobject, jlong ptr, jobject cb) {
+    rats_t node = node_of(ptr);
+    jobject ref = trackRef(env, node, cb);
+    return rats_on_peer_path(node, peer_path_bridge, ref);
 }
 
 // ---- discovery / NAT ----

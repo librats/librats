@@ -159,6 +159,11 @@ typedef struct {
     /* Bytes all UDP streams together may hold out of order — what peers can make
      * this node buffer however many there are. 0 = the library default (64 MiB). */
     size_t           udp_receive_budget;
+
+    /* How often each connected peer's path is sampled for rats_path_stats() and
+     * rats_on_peer_path(), in ms. 0 = only when an rats_on_peer_path() callback is
+     * registered, and then every 100 ms (default 0). */
+    uint32_t         path_sample_ms;
 } rats_config_t;
 
 /** A config pre-filled with the library defaults (listening, Noise, ephemeral
@@ -234,6 +239,31 @@ RATS_API rats_error_t rats_broadcast(rats_t node, const char* channel,
  *  accepted; only sending more on top of a full queue drops a peer. */
 RATS_API int rats_peer_writable(rats_t node, const char* peer_id_hex);
 
+/** What the transport currently knows about the path to one peer — for a sender
+ *  that sizes its own output to the path (a live encoder) instead of letting the
+ *  queue find the limit. Rates are bits per second. Anything past bandwidth_bps
+ *  waits in queued_bytes; divided by bandwidth_bps that is the wait in seconds. */
+typedef struct {
+    uint64_t bandwidth_bps;    /* the congestion controller's estimate; 0 = none yet */
+    int      app_limited;      /* 1: the sender was not filling the path, so the
+                                * estimate is a floor (what was used), not the path */
+    uint64_t pacing_bps;       /* current release rate; 0 = unpaced */
+    uint32_t srtt_us;          /* smoothed round trip */
+    uint32_t min_rtt_us;       /* lowest round trip seen: the path without queues */
+    uint64_t queued_bytes;     /* accepted for the peer, not yet sent */
+    uint64_t bytes_in_flight;  /* sent, not yet acknowledged */
+    double   loss;             /* share of bytes lost over the last sample interval, 0..1 */
+    uint64_t bytes_delivered;  /* acknowledged since the connection opened */
+    uint64_t bytes_lost;       /* declared lost since the connection opened */
+} rats_path_stats_t;
+
+/** The latest path sample for a peer, from any thread. RATS_ERR_NO_SUCH_PEER if the
+ *  peer is not connected or nothing has been sampled yet — sampling runs only with
+ *  path_sample_ms set or an rats_on_peer_path() callback registered. Over TCP the
+ *  figures are the kernel's, on Linux only. */
+RATS_API rats_error_t rats_path_stats(rats_t node, const char* peer_id_hex,
+                                      rats_path_stats_t* out);
+
 /* — callbacks (register before start; invoked on a reactor thread) — */
 
 typedef void (*rats_peer_cb)(void* user, const char* peer_id_hex);
@@ -249,6 +279,11 @@ RATS_API rats_error_t rats_on_peer_disconnected(rats_t node, rats_peer_disconnec
  *  reporting 0; an application that never asks never needs this. */
 RATS_API rats_error_t rats_on_peer_writable(rats_t node, rats_peer_cb cb, void* user);
 RATS_API rats_error_t rats_on(rats_t node, const char* channel, rats_message_cb cb, void* user);
+/** A path sample of every connected peer, every path_sample_ms (100 ms if 0).
+ *  Registering one turns sampling on. Keep it cheap: it runs once per peer per
+ *  interval, on a reactor thread. `stats` is valid only for the call. */
+typedef void (*rats_path_cb)(void* user, const char* peer_id_hex, const rats_path_stats_t* stats);
+RATS_API rats_error_t rats_on_peer_path(rats_t node, rats_path_cb cb, void* user);
 
 /* — optional subsystems (enable before start) — */
 

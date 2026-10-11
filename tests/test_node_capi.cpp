@@ -434,6 +434,48 @@ TEST(NodeCApiTest, PeerWritableAndTheWritableCallback) {
     rats_destroy(client); rats_destroy(server);
 }
 
+// Path samples cross the C ABI both ways an application can ask for them: the
+// callback that turns sampling on, and the getter that answers from any thread.
+TEST(NodeCApiTest, PathStatsReachAnApplication) {
+    rats_config_t cfg = rats_config_default();
+    cfg.enable_listen = 0;
+    rats_t server = rats_create(0);
+    rats_t client = rats_create_config(&cfg);
+
+    std::atomic<int> samples{0};
+    ASSERT_EQ(rats_on_peer_path(client, [](void* u, const char* id, const rats_path_stats_t* st) {
+        if (id && st && st->srtt_us > 0) static_cast<std::atomic<int>*>(u)->fetch_add(1);
+    }, &samples), RATS_OK);
+    EXPECT_EQ(rats_on_peer_path(client, nullptr, nullptr), RATS_ERR_INVALID_ARG);
+
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    rats_connect(client, "127.0.0.1", rats_listen_port(server));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1; }));
+
+    char* server_id = rats_local_id(server);
+    ASSERT_NE(server_id, nullptr);
+    const std::vector<uint8_t> chunk(32 * 1024, 'p');
+    for (int i = 0; i < 16; ++i) rats_send(client, server_id, "bulk", chunk.data(), chunk.size());
+
+    ASSERT_TRUE(wait_for([&] { return samples.load() >= 2; })) << "no samples reached the callback";
+    rats_path_stats_t st{};
+    ASSERT_EQ(rats_path_stats(client, server_id, &st), RATS_OK);
+    EXPECT_GT(st.srtt_us, 0u);
+    EXPECT_GT(st.bandwidth_bps, 0u);
+    EXPECT_EQ(rats_path_stats(client, "not-a-peer-id", &st), RATS_ERR_INVALID_ARG);
+    EXPECT_EQ(rats_path_stats(client, server_id, nullptr), RATS_ERR_INVALID_ARG);
+
+    char* client_id = rats_local_id(client);
+    EXPECT_EQ(rats_path_stats(server, client_id, &st), RATS_ERR_NO_SUCH_PEER)
+        << "the server never asked for samples";
+
+    rats_string_free(client_id);
+    rats_string_free(server_id);
+    rats_stop(client); rats_stop(server);
+    rats_destroy(client); rats_destroy(server);
+}
+
 namespace {
 struct BinCtx { std::mutex mu; std::vector<uint8_t> got; };
 void bin_collect_cb(void* user, const char*, const void* data, size_t len) {

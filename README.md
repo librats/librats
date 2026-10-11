@@ -470,11 +470,13 @@ bool   peer_limit_reached() const;
 bool send(const PeerId& to, std::string_view channel, ByteView payload);
 bool broadcast(std::string_view channel, ByteView payload);
 bool peer_writable(const PeerId& id) const;      // the same question, without sending
+std::optional<PathStats> path_stats(const PeerId& id) const;  // latest path sample, any thread
 
 // Events (additive; run on a reactor thread)
 void on_peer_connected(PeerEventHandler cb);     // (const Peer&)
 void on_peer_disconnected(PeerDisconnectHandler cb);  // (const PeerId&, CloseReason)
 void on_peer_writable(PeerEventHandler cb);      // (const Peer&) — room again
+void on_peer_path(PeerPathHandler cb);           // (const Peer&, const PathStats&) — see Path statistics
 void on_dial_failed(DialFailedHandler cb);       // (const Address&) — a connect() that never came up
 void on(std::string_view channel, MessageRouter::Handler cb);  // (const Peer&, ByteView)
 
@@ -507,6 +509,33 @@ its queue growing. Three things bound that, and they are the whole contract:
 The same three are in the C ABI: `rats_peer_writable()`, `rats_on_peer_writable()`,
 and the `rats_close_reason_t` handed to `rats_on_peer_disconnected()`.
 
+#### Path statistics
+
+Backpressure tells a sender it *has* outrun the link. A live sender — an encoder
+choosing a bitrate — needs to know *before*, and to size itself to the path rather
+than let the queue find the limit: for a frame with a deadline, waiting in a queue
+is losing. `PathStats` is what the transport knows about the path to one peer:
+
+| field | |
+|---|---|
+| `bandwidth_bps` | the congestion controller's estimate (BBR's model; a window per round trip for Reno; the kernel's delivery rate on TCP) — what to size a sender to |
+| `app_limited` | the sender was not filling the path, so the estimate is a floor (what was used), not the path's capacity — the normal state of a sender that keeps to it |
+| `queued_bytes` | accepted for the peer and not yet sent: what a new message waits behind. `queued_bytes * 8 / bandwidth_bps` is that wait in seconds |
+| `srtt_us`, `min_rtt_us` | smoothed and lowest round trip; their difference is the queue standing on the path |
+| `loss` | share of bytes lost over the last sampling interval |
+| `pacing_bps`, `bytes_in_flight`, `bytes_delivered`, `bytes_lost` | the rest of the sender's state |
+
+`on_peer_path` delivers a sample of every connected peer each
+`NodeConfig::path_sample_ms` (100 ms when 0) on a reactor thread, and registering
+it is what turns sampling on; `path_stats()` answers the latest sample from any
+thread. Sampling costs nothing when nobody asks. Over UDP the figures are the
+stream's own; over TCP they come from the kernel (`TCP_INFO`, Linux only — a TCP
+peer elsewhere, like a relayed one, is never sampled and `path_stats()` stays
+`nullopt`). C ABI:
+`rats_path_stats()`, `rats_on_peer_path()`, `rats_config_t::path_sample_ms`.
+`bench_path --realtime` measures live video against a modelled path, with a source
+that steers by these figures and one that does not.
+
 ### `NodeConfig`
 
 ```cpp
@@ -528,6 +557,7 @@ struct NodeConfig {
     size_t      send_queue_limit = 0;       // per-peer send queue before SlowConsumer; 0 = 8 MiB
     size_t      udp_receive_window = 0;     // ceiling one UDP stream's receive window grows to; 0 = 16 MiB
     size_t      udp_receive_budget = 0;     // out-of-order bytes all UDP streams may hold; 0 = 64 MiB
+    uint32_t    path_sample_ms = 0;         // path sampling period; 0 = only with on_peer_path (100 ms)
 
     // Identity & security
     enum class Security { Noise, Plaintext };

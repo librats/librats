@@ -83,6 +83,11 @@ public:
     /// Whether this reactor can carry UDP connections (i.e. it owns the mux).
     bool has_udp() const noexcept { return mux_ != nullptr; }
 
+    /// Sample every established connection's path this often and hand each
+    /// sample to ConnectionDelegate::on_path_sample (see PathStats). Zero — the
+    /// default — samples nothing and arms no timer. Call before start().
+    void sample_paths(std::chrono::milliseconds every) noexcept { path_sample_interval_ = every; }
+
     void start();  ///< spawn the reactor thread
     void stop();   ///< signal shutdown and join; closes all connections
 
@@ -192,6 +197,7 @@ private:
     void dispatch_events(ConnId id, uint32_t events);
     void do_accept();
     void schedule_maintenance();
+    void schedule_path_sample();
     void start_dial(ConnId id, const std::string& host, int port, TransportKind kind,
                     DialProfile profile);
     void abort_dial(ConnId id, const std::string& host, int port);
@@ -226,6 +232,7 @@ private:
 
     uint8_t                   index_;
     ConnectionDelegate&       delegate_;
+    std::chrono::milliseconds path_sample_interval_{0};   ///< 0 = no path sampling
     SecurityProvider&         security_;
     std::unique_ptr<IOPoller> poller_;
     Notifier                  wakeup_;

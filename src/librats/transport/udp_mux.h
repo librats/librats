@@ -393,6 +393,7 @@ public:
 
     void        attach(ConnId id) override { stream_.set_conn_id(id); }
     CloseReason error_reason() const override { return stream_.close_reason(); }
+    PathStats   path_stats() const override { return stream_.path_stats(); }
     void        close(CloseReason reason) override;
 
     UdpStream& stream() noexcept { return stream_; }

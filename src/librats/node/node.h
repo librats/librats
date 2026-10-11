@@ -245,6 +245,16 @@ public:
     /// half of send() returning false; an application that never checks that
     /// return never needs this. The handler runs on a reactor thread.
     void on_peer_writable(PeerNetwork::PeerEventHandler cb) override { peer_writable_.push_back(std::move(cb)); }
+    /// Subscribe to periodic path samples of every connected peer (see PathStats):
+    /// the estimate to size a live sender to, the queue in front of its next
+    /// message, round trip and loss. Registering turns sampling on, every
+    /// NodeConfig::path_sample_ms (100 ms if that is 0). The handler runs on a
+    /// reactor thread, once per peer per interval, so keep it cheap.
+    void on_peer_path(PeerNetwork::PeerPathHandler cb) override { peer_path_.push_back(std::move(cb)); }
+    /// The latest path sample for a peer — safe from any thread. nullopt when the
+    /// peer is not connected, no sample has been taken yet, or sampling is off
+    /// (NodeConfig::path_sample_ms == 0 and no on_peer_path handler).
+    std::optional<PathStats> path_stats(const PeerId& id) const override { return peers_.path(id); }
     /// Register a handler for inbound messages on a named channel. Additive:
     /// multiple handlers may coexist. The handler runs on a reactor thread.
     void on(std::string_view channel, MessageRouter::Handler cb) { router_.on_channel(channel, std::move(cb)); }
@@ -276,6 +286,7 @@ private:
     void on_frame(Connection& conn, const Frame& frame) override;
     void on_closed(Connection& conn, CloseReason reason) override;
     void on_writable_changed(Connection& conn, bool writable) override;
+    void on_path_sample(Connection& conn, const PathStats& stats) override;
     void on_dial_aborted(uint8_t reactor_index, ConnId id,
                          const std::string& host, uint16_t port) override;
 
@@ -342,6 +353,7 @@ private:
     std::vector<PeerNetwork::PeerDisconnectHandler> peer_disconnected_;
     std::vector<PeerNetwork::DialFailedHandler>     dial_failed_;
     std::vector<PeerNetwork::PeerEventHandler>      peer_writable_;
+    std::vector<PeerNetwork::PeerPathHandler>       peer_path_;
 
     // Our own addresses as peers observe us (their reported IP + our listen port).
     mutable std::mutex   observed_mutex_;

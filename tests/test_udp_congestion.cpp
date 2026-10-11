@@ -1411,3 +1411,63 @@ TEST(BbrTest, AShallowBufferEndsStartupOnLoss) {
     sim.run(10s);
     EXPECT_GT((f.delivered - start) / 10.0, 0.6 * payload_rate(10));
 }
+
+// ── Path statistics ─────────────────────────────────────────────────────────
+
+// What PathStats reports has to be what the stream is actually doing: under bulk,
+// the bottleneck it found and a queue in front of the next write; once the
+// application stops, an empty queue, nothing in flight and an app-limited
+// estimate. A live encoder sizes itself from these, so a figure that is merely
+// plausible is worse than none.
+TEST(UdpPathStatsTest, ReportsTheBottleneckAndTheQueueInFrontOfIt) {
+    for (const auto algo : {CongestionAlgorithm::Bbr, CongestionAlgorithm::Reno}) {
+        SCOPED_TRACE(to_string(algo));
+        Sim sim(20, 40ms, 83);
+        Flow& f   = sim.add(algo);
+        f.to_send = SIZE_MAX;
+        sim.run(5s);
+
+        PathStats st = f.tx.path_stats();
+        ASSERT_TRUE(st.valid);
+        const double link = payload_rate(20) * 8;
+        EXPECT_GT(st.bandwidth_bps, link * 0.7);
+        EXPECT_LT(st.bandwidth_bps, link * 2.0);
+        EXPECT_GT(st.queued_bytes, 0u) << "a sender kept full has nothing waiting?";
+        EXPECT_GT(st.bytes_in_flight, 0u);
+        EXPECT_FALSE(st.app_limited);
+        EXPECT_GE(st.min_rtt_us, 40'000u);
+        EXPECT_LT(st.min_rtt_us, 45'000u);
+        EXPECT_GE(st.srtt_us, st.min_rtt_us);
+        EXPECT_GT(st.pacing_bps, 0u);
+
+        f.to_send = 0;
+        sim.run(2s);
+        st = f.tx.path_stats();
+        EXPECT_EQ(st.queued_bytes, 0u);
+        EXPECT_EQ(st.bytes_in_flight, 0u);
+        EXPECT_TRUE(st.app_limited) << "an idle sender's estimate is a floor, and must say so";
+        EXPECT_EQ(st.bytes_delivered, f.delivered);
+    }
+}
+
+// An app-limited flow — live video, anything that sends less than the path holds
+// — never fills the pipe, so BBR never leaves Startup, and Startup only ever
+// raises its pacing rate. Whatever the rate was before the first round trip is
+// therefore a floor for the life of such a flow and the speed every burst it
+// sends (a keyframe) goes out at. That rate used to be set from a 1 ms stand-in
+// for the round trip: four packets a millisecond, 106 Mbit/s, on this 10 Mbit/s
+// path. Linux replaces it at the first measured round trip; so must we.
+TEST(BbrTest, AnAppLimitedFlowIsPacedFromTheMeasuredRoundTrip) {
+    Sim sim(10, 40ms, 41);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    for (int i = 0; i < 90; ++i) {   // 15 KB thirty times a second: 3.6 Mbit/s
+        f.to_send = 15'000;
+        sim.run(33ms);
+    }
+    const PathStats st = f.tx.path_stats();
+    EXPECT_LT(st.pacing_bps, 4 * 10e6)
+        << "pacing at " << st.pacing_bps / 1e6 << " Mbit/s on a 10 Mbit/s path — the "
+           "stand-in rate outlived the first round trip";
+    EXPECT_GT(st.pacing_bps, 10e6) << "Startup paces above the estimate, not below it";
+}

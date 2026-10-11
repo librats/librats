@@ -115,6 +115,7 @@ field has a working default.
 | `enableTcp` / `enableUdp` | `true` | which wires to accept and dial on |
 | `preferredTransport(Transport)` | `UDP` | which one a dial tries first |
 | `transportFallbackMs(int)` | `1200` | delay before racing the other; 0 disables |
+| `pathSampleMs(int)` | `0` | path sampling interval for `pathStats` / `onPeerPath`; 0 = only while an `onPeerPath` callback is registered (then 100 ms) |
 
 ### Messaging
 
@@ -209,7 +210,7 @@ node.removeReconnect("192.168.1.100", 8080);
 **Raw channel messaging** — `send(peerId, channel, data)`,
 `broadcast(channel, data)`, `on(channel, MessageCallback)`
 
-**Peer events** — `onPeerConnected(PeerCallback)`, `onPeerDisconnected(PeerDisconnectCallback)` (the callback is told *why*: `"RATS_CLOSE_SLOW_CONSUMER"` means this node was sending faster than the link drained), `onPeerWritable(PeerCallback)` plus `peerWritable(String)`
+**Peer events** — `onPeerConnected(PeerCallback)`, `onPeerDisconnected(PeerDisconnectCallback)` (the callback is told *why*: `"RATS_CLOSE_SLOW_CONSUMER"` means this node was sending faster than the link drained), `onPeerWritable(PeerCallback)` plus `peerWritable(String)`, `onPeerPath(PathCallback)` plus `pathStats(String)` → `PathStats` or null (bandwidth estimate, pacing rate, RTT, queued / in-flight bytes, loss)
 
 **Subsystems** *(enable before start)*
 

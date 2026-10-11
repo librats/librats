@@ -22,17 +22,26 @@ from typing import Any, Dict, List, Optional
 
 from ctypes import byref, c_size_t, c_int, string_at
 
-from .ctypes_wrapper import get_librats, take_string, RatsConfig
+from .ctypes_wrapper import get_librats, take_string, RatsConfig, RatsPathStats
 from .enums import (RatsError as ErrorCode, Security, Transport, Congestion, NatMapping,
-                    LogLevel, VersionInfo)
+                    LogLevel, VersionInfo, PathStats)
 from .exceptions import RatsError, check_error
 from .callbacks import (
-    PeerCallback, PeerDisconnectCallback, MessageCallback, TopicCallback, JsonCallback,
-    FileOfferCallback, FileProgressCallback, FileCompleteCallback,
-    PeerCallbackType, PeerDisconnectCallbackType,
+    PeerCallback, PeerDisconnectCallback, PathCallback, MessageCallback, TopicCallback,
+    JsonCallback, FileOfferCallback, FileProgressCallback, FileCompleteCallback,
+    PeerCallbackType, PeerDisconnectCallbackType, PathCallbackType,
     MessageCallbackType, TopicCallbackType, JsonCallbackType,
     FileOfferCallbackType, FileProgressCallbackType, FileCompleteCallbackType,
 )
+
+
+def _path_stats(c: RatsPathStats) -> PathStats:
+    """Copy a ``rats_path_stats_t`` out into a :class:`PathStats`."""
+    return PathStats(
+        bandwidth_bps=c.bandwidth_bps, app_limited=bool(c.app_limited),
+        pacing_bps=c.pacing_bps, srtt_us=c.srtt_us, min_rtt_us=c.min_rtt_us,
+        queued_bytes=c.queued_bytes, bytes_in_flight=c.bytes_in_flight, loss=c.loss,
+        bytes_delivered=c.bytes_delivered, bytes_lost=c.bytes_lost)
 
 
 def _b(s: Optional[str]) -> Optional[bytes]:
@@ -68,6 +77,7 @@ class RatsNode:
         congestion_control: Congestion = Congestion.BBR,
         udp_receive_window: int = 0,
         udp_receive_budget: int = 0,
+        path_sample_ms: int = 0,
     ):
         """Create a node.
 
@@ -101,6 +111,9 @@ class RatsNode:
                 held back by it; 0 = the library default (16 MiB).
             udp_receive_budget: Bytes all UDP streams together may hold out of
                 order; 0 = the library default (64 MiB).
+            path_sample_ms: How often each peer's path is sampled for
+                :meth:`path_stats` and :meth:`on_peer_path`; 0 = only while an
+                :meth:`on_peer_path` callback is registered, then every 100 ms.
         """
         self._lib = get_librats()
 
@@ -117,6 +130,7 @@ class RatsNode:
         cfg.congestion_control = int(congestion_control)
         cfg.udp_receive_window = udp_receive_window
         cfg.udp_receive_budget = udp_receive_budget
+        cfg.path_sample_ms = path_sample_ms
         # Keep bytes alive for the duration of the create call.
         self._cfg_keepalive = [
             _b(bind_address), _b(data_dir), _b(protocol),
@@ -300,6 +314,20 @@ class RatsNode:
         """
         return bool(self._lib.lib.rats_peer_writable(self._h, _b(peer_id)))
 
+    def path_stats(self, peer_id: str) -> Optional[PathStats]:
+        """The latest path sample for a peer (see :class:`PathStats`), or ``None``.
+
+        ``None`` when the peer is not connected or nothing has been sampled yet:
+        sampling runs only with ``path_sample_ms`` set or an :meth:`on_peer_path`
+        callback registered. Over TCP the figures are the kernel's, Linux only.
+        """
+        out = RatsPathStats()
+        err = self._lib.lib.rats_path_stats(self._h, _b(peer_id), byref(out))
+        if err == ErrorCode.NO_SUCH_PEER:
+            return None
+        check_error(err, f"Reading path stats of {peer_id}")
+        return _path_stats(out)
+
     def broadcast(self, channel: str, data: bytes) -> None:
         """Broadcast raw ``data`` on a named ``channel`` to all peers."""
         check_error(
@@ -359,6 +387,25 @@ class RatsNode:
         that never checks that never needs this.
         """
         self._register_peer_cb("writable", "rats_on_peer_writable", callback)
+
+    def on_peer_path(self, callback: PathCallback) -> None:
+        """Register a ``callback(peer_id: str, stats: PathStats)`` for path samples.
+
+        Every connected peer is sampled each ``path_sample_ms`` (100 ms if 0);
+        registering turns sampling on. Runs on a reactor thread once per peer per
+        interval, so keep it cheap. Register before :meth:`start`.
+        """
+        def trampoline(user, peer_id_ptr, stats_ptr):
+            try:
+                stats = _path_stats(RatsPathStats.from_address(stats_ptr))
+                callback(peer_id_ptr.decode('utf-8') if peer_id_ptr else "", stats)
+            except Exception as exc:
+                _report(exc, "peer path callback")
+        c_cb = PathCallbackType(trampoline)
+        self._c_callbacks["peer:path"] = c_cb
+        check_error(
+            self._lib.lib.rats_on_peer_path(self._h, c_cb, None),
+            "Registering peer path handler")
 
     def _register_peer_cb(self, slot: str, c_func_name: str, callback: PeerCallback):
         def trampoline(user, peer_id_ptr):

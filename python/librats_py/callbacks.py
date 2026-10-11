@@ -16,6 +16,8 @@ hex ids and copy payload bytes.
 from typing import Any, Callable, Optional
 from ctypes import CFUNCTYPE, c_void_p, c_char_p, c_size_t, c_int, c_uint64
 
+from .enums import PathStats
+
 # --- Raw C callback prototypes (must mirror rats.h exactly) ---
 
 # rats_peer_cb(user, peer_id_hex)
@@ -25,6 +27,10 @@ PeerCallbackType = CFUNCTYPE(None, c_void_p, c_char_p)
 # PeerCallbackType: the C side really does push a third argument, and a ctypes
 # trampoline declared with two would be called through a mismatched signature.
 PeerDisconnectCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_int)
+
+# rats_path_cb(user, peer_id_hex, const rats_path_stats_t*) — the struct pointer
+# arrives as a plain void* and is read through RatsPathStats in core.py.
+PathCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_void_p)
 
 # rats_message_cb(user, peer_id_hex, data, len)
 MessageCallbackType = CFUNCTYPE(None, c_void_p, c_char_p, c_void_p, c_size_t)
@@ -55,6 +61,8 @@ FileCompleteCallbackType = CFUNCTYPE(None, c_void_p, c_uint64, c_char_p, c_int, 
 PeerCallback = Optional[Callable[[str], None]]
 # callback(peer_id, reason) — reason is a name like "RATS_CLOSE_SLOW_CONSUMER"
 PeerDisconnectCallback = Optional[Callable[[str, str], None]]
+# (peer_id: str, stats: PathStats) -> None
+PathCallback = Optional[Callable[[str, PathStats], None]]
 # (peer_id: str, data: bytes) -> None
 MessageCallback = Optional[Callable[[str, bytes], None]]
 # (peer_id: str, topic: str, data: bytes) -> None

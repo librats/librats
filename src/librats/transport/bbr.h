@@ -157,6 +157,7 @@ public:
     bool on_send_opportunity(Clock::time_point now, uint64_t bytes_in_flight, bool has_data,
                              bool app_limited) override;
     bool wants_app_limited() const noexcept override { return state_ == State::ProbeRtt; }
+    uint64_t bandwidth() const noexcept override { return bw_; }
 
     // — diagnostics (tests, benchmarks) —
     State           state()           const noexcept { return state_; }
@@ -278,6 +279,9 @@ private:
     uint64_t pacing_gain_ = kStartupPacingGain;
     uint64_t cwnd_gain_   = kStartupCwndGain;
     uint64_t pacing_rate_ = 0;   ///< bytes/s
+    /// Whether the initial pacing rate was taken from a measured round trip. One
+    /// set before the first sample uses a 1 ms stand-in (see the constructor).
+    bool     pacing_from_rtt_ = false;
     uint64_t cwnd_        = kInitialWindow;
     uint64_t prior_cwnd_  = 0;
     uint64_t max_inflight_ = kInitialWindow;

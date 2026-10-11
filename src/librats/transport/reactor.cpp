@@ -255,6 +255,7 @@ void Reactor::run() {
     std::vector<Task> task_batch;
 
     schedule_maintenance();
+    if (path_sample_interval_.count() > 0) schedule_path_sample();
 
     while (running_.load(std::memory_order_relaxed)) {
         int timeout = timers_.next_timeout_ms(kMaxPollMs);
@@ -425,6 +426,25 @@ void Reactor::schedule_maintenance() {
         // read-only with respect to the map, and on_maintenance_tick() never closes.
         for (auto& [id, conn] : conns_) conn->on_maintenance_tick();
         schedule_maintenance();
+    });
+}
+
+void Reactor::schedule_path_sample() {
+    timers_.schedule(path_sample_interval_, [this] {
+        // By id rather than over the map: the delegate hands each sample to
+        // application callbacks, and what they do — a send that trips the slow-
+        // consumer mark, a disconnect — must not invalidate the walk.
+        std::vector<ConnId> ids;
+        ids.reserve(conns_.size());
+        for (const auto& [id, conn] : conns_)
+            if (conn->state() == ConnState::Established) ids.push_back(id);
+        for (ConnId id : ids) {
+            auto it = conns_.find(id);
+            if (it == conns_.end() || it->second->state() != ConnState::Established) continue;
+            const PathStats stats = it->second->sample_path();
+            if (stats.valid) delegate_.on_path_sample(*it->second, stats);
+        }
+        schedule_path_sample();
     });
 }
 

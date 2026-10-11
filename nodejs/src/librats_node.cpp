@@ -83,6 +83,7 @@ private:
     std::unique_ptr<CbContext> on_connected_;
     std::unique_ptr<CbContext> on_disconnected_;
     std::unique_ptr<CbContext> on_writable_;
+    std::unique_ptr<CbContext> on_path_;
     std::unique_ptr<CbContext> on_file_offer_;
     std::unique_ptr<CbContext> on_file_progress_;
     std::unique_ptr<CbContext> on_file_complete_;
@@ -122,12 +123,14 @@ private:
     Napi::Value Send(const Napi::CallbackInfo& info);
     Napi::Value Broadcast(const Napi::CallbackInfo& info);
     Napi::Value PeerWritable(const Napi::CallbackInfo& info);
+    Napi::Value PathStats(const Napi::CallbackInfo& info);
     void On(const Napi::CallbackInfo& info);
 
     // ---- peer events ----
     void OnPeerConnected(const Napi::CallbackInfo& info);
     void OnPeerDisconnected(const Napi::CallbackInfo& info);
     void OnPeerWritable(const Napi::CallbackInfo& info);
+    void OnPeerPath(const Napi::CallbackInfo& info);
 
     // ---- discovery / NAT ----
     void EnableDht(const Napi::CallbackInfo& info);
@@ -250,6 +253,11 @@ RatsNode::RatsNode(const Napi::CallbackInfo& info)
             c.udp_receive_budget =
                 static_cast<size_t>(cfg.Get("udpReceiveBudget").As<Napi::Number>().Int64Value());
 
+        // How often each peer's path is sampled for pathStats() / onPeerPath().
+        // 0 samples only while an onPeerPath() callback is registered (every 100 ms).
+        if (cfg.Has("pathSampleMs"))
+            c.path_sample_ms = cfg.Get("pathSampleMs").As<Napi::Number>().Uint32Value();
+
         node_ = rats_create_config(&c);
     } else {
         int port = 0;
@@ -284,6 +292,7 @@ void RatsNode::Teardown() {
     if (on_connected_) on_connected_->release();
     if (on_disconnected_) on_disconnected_->release();
     if (on_writable_) on_writable_->release();
+    if (on_path_) on_path_->release();
     if (on_file_offer_) on_file_offer_->release();
     if (on_file_progress_) on_file_progress_->release();
     if (on_file_complete_) on_file_complete_->release();
@@ -473,6 +482,40 @@ Napi::Value RatsNode::PeerWritable(const Napi::CallbackInfo& info) {
     return Napi::Boolean::New(env, rats_peer_writable(node_, peer.c_str()) != 0);
 }
 
+// One path sample as a plain JS object. uint64 counters become Numbers, exact to
+// 2^53 bytes / bits per second.
+static Napi::Object path_stats_to_js(Napi::Env env, const rats_path_stats_t& s) {
+    Napi::Object o = Napi::Object::New(env);
+    o.Set("bandwidthBps",   Napi::Number::New(env, static_cast<double>(s.bandwidth_bps)));
+    o.Set("appLimited",     Napi::Boolean::New(env, s.app_limited != 0));
+    o.Set("pacingBps",      Napi::Number::New(env, static_cast<double>(s.pacing_bps)));
+    o.Set("srttUs",         Napi::Number::New(env, s.srtt_us));
+    o.Set("minRttUs",       Napi::Number::New(env, s.min_rtt_us));
+    o.Set("queuedBytes",    Napi::Number::New(env, static_cast<double>(s.queued_bytes)));
+    o.Set("bytesInFlight",  Napi::Number::New(env, static_cast<double>(s.bytes_in_flight)));
+    o.Set("loss",           Napi::Number::New(env, s.loss));
+    o.Set("bytesDelivered", Napi::Number::New(env, static_cast<double>(s.bytes_delivered)));
+    o.Set("bytesLost",      Napi::Number::New(env, static_cast<double>(s.bytes_lost)));
+    return o;
+}
+
+// What the transport knows about the path to a peer; null if it is not connected
+// or nothing has been sampled yet (sampling needs pathSampleMs or onPeerPath).
+Napi::Value RatsNode::PathStats(const Napi::CallbackInfo& info) {
+    RATS_REQUIRE_NODE(info.Env().Undefined());
+    Napi::Env env = info.Env();
+    if (info.Length() < 1 || !info[0].IsString()) {
+        Napi::TypeError::New(env, "Expected peerId (string)").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+    std::string peer = info[0].As<Napi::String>().Utf8Value();
+    rats_path_stats_t s{};
+    rats_error_t err = rats_path_stats(node_, peer.c_str(), &s);
+    if (err == RATS_ERR_NO_SUCH_PEER) return env.Null();
+    if (throw_on_error(env, err)) return env.Undefined();
+    return path_stats_to_js(env, s);
+}
+
 Napi::Value RatsNode::Broadcast(const Napi::CallbackInfo& info) {
     RATS_REQUIRE_NODE(info.Env().Undefined());
     Napi::Env env = info.Env();
@@ -577,6 +620,28 @@ void RatsNode::OnPeerWritable(const Napi::CallbackInfo& info) {
         });
     };
     throw_on_error(env, rats_on_peer_writable(node_, trampoline, on_writable_.get()));
+}
+
+// rats_path_cb(user, peer_id_hex, stats) -> JS (peerId, stats). `stats` is valid
+// only for the C call, so it is copied before it crosses to the JS thread.
+void RatsNode::OnPeerPath(const Napi::CallbackInfo& info) {
+    RATS_REQUIRE_NODE();
+    Napi::Env env = info.Env();
+    if (info.Length() < 1 || !info[0].IsFunction()) {
+        Napi::TypeError::New(env, "Expected callback function").ThrowAsJavaScriptException();
+        return;
+    }
+    on_path_ = std::make_unique<CbContext>();
+    on_path_->init(env, info[0].As<Napi::Function>(), "on_peer_path");
+    auto trampoline = [](void* user, const char* peer_id, const rats_path_stats_t* stats) {
+        auto* c = static_cast<CbContext*>(user);
+        std::string peer = peer_id ? peer_id : "";
+        rats_path_stats_t s = stats ? *stats : rats_path_stats_t{};
+        c->tsfn.BlockingCall([peer, s](Napi::Env env, Napi::Function js) {
+            js.Call({Napi::String::New(env, peer), path_stats_to_js(env, s)});
+        });
+    };
+    throw_on_error(env, rats_on_peer_path(node_, trampoline, on_path_.get()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,11 +1132,13 @@ Napi::Object RatsNode::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("send", &RatsNode::Send),
         InstanceMethod("broadcast", &RatsNode::Broadcast),
         InstanceMethod("peerWritable", &RatsNode::PeerWritable),
+        InstanceMethod("pathStats", &RatsNode::PathStats),
         InstanceMethod("on", &RatsNode::On),
         // peer events
         InstanceMethod("onPeerConnected", &RatsNode::OnPeerConnected),
         InstanceMethod("onPeerDisconnected", &RatsNode::OnPeerDisconnected),
         InstanceMethod("onPeerWritable", &RatsNode::OnPeerWritable),
+        InstanceMethod("onPeerPath", &RatsNode::OnPeerPath),
         // discovery / NAT
         InstanceMethod("enableDht", &RatsNode::EnableDht),
         InstanceMethod("enableMdns", &RatsNode::EnableMdns),

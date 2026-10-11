@@ -74,6 +74,7 @@ public class RatsNode implements AutoCloseable {
         boolean enableUdp = true;
         Transport preferredTransport = Transport.UDP;
         int transportFallbackMs = 1200;
+        int pathSampleMs = 0;
 
         /** Inbound port shared by both transports; 0 (the default) = ephemeral. */
         public Config listenPort(int port) {
@@ -151,6 +152,17 @@ public class RatsNode implements AutoCloseable {
             this.transportFallbackMs = ms;
             return this;
         }
+
+        /**
+         * How often each connected peer's path is sampled for
+         * {@link RatsNode#pathStats(String)} and {@link RatsNode#onPeerPath(PathCallback)},
+         * in ms. 0 (the default) samples only while an {@code onPeerPath} callback is
+         * registered, and then every 100 ms.
+         */
+        public Config pathSampleMs(int ms) {
+            this.pathSampleMs = ms;
+            return this;
+        }
     }
 
     // ===================== construction =====================
@@ -182,7 +194,8 @@ public class RatsNode implements AutoCloseable {
                 config.enableTcp,
                 config.enableUdp,
                 config.preferredTransport.value(),
-                config.transportFallbackMs);
+                config.transportFallbackMs,
+                config.pathSampleMs);
         if (nativePtr == 0) {
             throw new RatsException("Failed to create the native rats node");
         }
@@ -344,6 +357,24 @@ public class RatsNode implements AutoCloseable {
         return nativePeerWritable(ptr(), peerId);
     }
 
+    /**
+     * What the transport currently knows about the path to one peer — for a
+     * sender that sizes its own output to the path instead of letting the queue
+     * find the limit. Sampling runs only with {@link Config#pathSampleMs(int)} set
+     * or an {@link #onPeerPath(PathCallback)} callback registered.
+     *
+     * @return the latest sample, or null if the peer is not connected or nothing
+     *         has been sampled yet
+     * @throws RatsException with {@link ErrorCode#INVALID_ARG} for a malformed peer id
+     */
+    public PathStats pathStats(String peerId) {
+        PathStats[] out = new PathStats[1];
+        int code = nativePathStats(ptr(), peerId, out);
+        if (code == ErrorCode.NO_SUCH_PEER.code()) return null;
+        check(code, "path stats for " + peerId);
+        return out[0];
+    }
+
     /** Registers an additive handler for a named channel. Call before start. */
     public void on(String channel, MessageCallback callback) {
         check(nativeOn(ptr(), channel, callback), "register handler for '" + channel + "'");
@@ -371,6 +402,15 @@ public class RatsNode implements AutoCloseable {
      */
     public void onPeerWritable(PeerCallback callback) {
         check(nativeOnPeerWritable(ptr(), callback), "register peer-writable callback");
+    }
+
+    /**
+     * Sets the callback handed a path sample of every connected peer, every
+     * {@link Config#pathSampleMs(int)} (100 ms if 0). Registering one turns
+     * sampling on. Call before start.
+     */
+    public void onPeerPath(PathCallback callback) {
+        check(nativeOnPeerPath(ptr(), callback), "register peer-path callback");
     }
 
     // ===================== discovery (enable before start) =====================
@@ -712,7 +752,8 @@ public class RatsNode implements AutoCloseable {
     private native long nativeCreateConfig(int listenPort, boolean enableListen, String bindAddress,
                                            int security, String dataDir, String protocol,
                                            long maxPeers, boolean enableTcp, boolean enableUdp,
-                                           int preferredTransport, int transportFallbackMs);
+                                           int preferredTransport, int transportFallbackMs,
+                                           int pathSampleMs);
     private native void nativeDestroy(long ptr);
     private native int nativeStart(long ptr);
     private native void nativeStop(long ptr);
@@ -733,11 +774,13 @@ public class RatsNode implements AutoCloseable {
     private native int nativeSend(long ptr, String peerId, String channel, byte[] data);
     private native int nativeBroadcast(long ptr, String channel, byte[] data);
     private native boolean nativePeerWritable(long ptr, String peerId);
+    private native int nativePathStats(long ptr, String peerId, PathStats[] out);
     private native int nativeOn(long ptr, String channel, MessageCallback callback);
 
     private native int nativeOnPeerConnected(long ptr, PeerCallback callback);
     private native int nativeOnPeerDisconnected(long ptr, PeerDisconnectCallback callback);
     private native int nativeOnPeerWritable(long ptr, PeerCallback callback);
+    private native int nativeOnPeerPath(long ptr, PathCallback callback);
 
     private native int nativeEnableDht(long ptr, int dhtPort, String discoveryKey);
     private native int nativeEnableMdns(long ptr);

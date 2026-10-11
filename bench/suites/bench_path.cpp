@@ -41,6 +41,10 @@
 //            one and has nothing behind it to reveal the loss. Reported as a
 //            latency distribution, because the median is unaffected and the
 //            whole effect lives in the tail.
+//   realtime — live video over one stream: frame latency and the share of
+//            frames that miss an interactive deadline, with a fixed-rate source
+//            and with one that retargets itself from PathStats. `--realtime`
+//            runs only this section.
 //
 // ── Reading the numbers ─────────────────────────────────────────────────────
 //
@@ -174,6 +178,10 @@ public:
 
     /// Swallow the next `n` packets travelling towards the receiver.
     void   drop_next(size_t n) { drop_burst_ = n; }
+    /// Change the link rate both ways from now on — a path that loses capacity
+    /// mid-transfer (a Wi-Fi rate step, a cross-traffic burst upstream). The queue
+    /// keeps its depth in packets, so it now holds proportionally more time.
+    void   set_rate(double bps) { fwd_.rate_bps = rev_.rate_bps = bps; }
     size_t drops()     const { return fwd_.drops + rev_.drops; }
     size_t fwd_drops() const { return fwd_.drops; }
 
@@ -506,13 +514,177 @@ void delay(const char* name, double rate, int rtt, size_t queue, int secs) {
                 mbps, "");
 }
 
+// ── realtime ────────────────────────────────────────────────────────────────
+
+/// What a live video source puts next to the transport.
+enum class Source {
+    Fixed,      ///< encodes at its configured rate whatever the path does
+    Adaptive,   ///< retargets its encoder from the stream's PathStats every 100 ms
+};
+/// What else the path is doing while the video runs.
+enum class Besides {
+    Nothing,
+    PathBulk,     ///< another peer's bulk transfer through the same bottleneck
+    StreamBulk,   ///< a bulk transfer to the SAME peer, on the same stream
+    RateDrop,     ///< the link loses most of its capacity at 10 s
+};
+
+/// A live video source over one stream: 30 frames a second, each written whole
+/// the moment it is captured, a keyframe five times the size of the others every
+/// two seconds. A frame counts once its last byte has been read out at the far
+/// end; its latency is that moment minus its capture. A frame is *late* when it
+/// lands more than 100 ms after it could have — the path's one-way delay — which
+/// is the whole jitter budget an interactive call has: past it the frame is
+/// either dropped by the player or freezes it.
+///
+/// This is what a byte stream gives video today: everything reliable and in
+/// order, nothing ever dropped. The rows are the measuring stick for whatever
+/// replaces that, and the Adaptive ones for what PathStats alone already buys.
+void realtime(const char* name, double link, int rtt, double loss, double buffer_bdp,
+              double video, Source source, Besides besides) {
+    const size_t bdp_pkts = static_cast<size_t>(link * 1e6 / 8 * rtt / 1000.0 / 1228);
+    const size_t queue    = (std::max<size_t>)(static_cast<size_t>(bdp_pkts * buffer_bdp), 8);
+    Path path(Direction{link * 1e6, us(rtt * 500), queue, loss, {}, {}, 0},
+              Direction{link * 1e6, us(rtt * 500), queue, loss, {}, {}, 0});
+    Clock::time_point now{};
+    Flow fv(path, 0, g_algo, now);
+    std::unique_ptr<Flow> other;
+    if (besides == Besides::PathBulk) other = std::make_unique<Flow>(path, 1, g_algo, now);
+
+    std::vector<uint8_t>& chunk = feed_buffer();
+    std::vector<uint8_t>& sink  = drain_buffer();
+
+    struct Frame {
+        Clock::time_point captured;
+        size_t            owed;          ///< bytes the stream has not accepted yet
+        uint64_t          end = 0;       ///< stream offset of its last byte, once accepted
+    };
+    std::deque<Frame>   frames;          // captured, not yet delivered
+    std::vector<double> latency;         // ms, one per measured frame
+    uint64_t written = 0, delivered = 0, video_bytes = 0;
+
+    constexpr int    kFps = 30, kGop = 60, kKeyWeight = 5;
+    constexpr auto   kStep  = us(200);
+    const auto       start  = std::chrono::seconds(1);    // handshake and first estimate
+    const auto       finish = std::chrono::seconds(31);
+    const auto       frame_every = std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1)) / kFps;
+    double           target = video * 1e6;                 // bits/s the encoder runs at
+    if (source == Source::Adaptive) target = (std::min)(target, 1e6);   // calls start low
+    Clock::time_point next_frame = Clock::time_point{} + start, next_retarget = next_frame;
+    int               frame_no = 0;
+    uint64_t          prev_delivered = 0, prev_lost = 0;
+
+    for (auto t = Clock::duration::zero(); t < finish + std::chrono::seconds(2); t += kStep) {
+        now += kStep;
+        if (besides == Besides::RateDrop && t == std::chrono::seconds(10)) path.set_rate(link * 0.3e6);
+        path.deliver_until(now);
+
+        // The encoder: one frame per tick of its clock, sized from the rate it was
+        // last told. Nothing is captured after `finish`; the tail drains.
+        if (now >= next_frame && t < finish) {
+            const double gop_bytes = target / 8 * kGop / kFps;
+            const double p_bytes   = gop_bytes / (kGop - 1 + kKeyWeight);
+            const size_t bytes = static_cast<size_t>(frame_no % kGop == 0 ? p_bytes * kKeyWeight : p_bytes);
+            frames.push_back(Frame{next_frame, bytes});
+            video_bytes += bytes;
+            ++frame_no;
+            next_frame += frame_every;
+        }
+        // Frames go to the stream as fast as it takes them, oldest first.
+        for (Frame& f : frames) {
+            while (f.owed > 0) {
+                ByteView v(chunk.data(), (std::min)(f.owed, chunk.size()));
+                const size_t n = fv.tx.write(&v, 1, now);
+                f.owed  -= n;
+                written += n;
+                if (n == 0) break;
+            }
+            if (f.owed > 0) break;
+            if (f.end == 0) f.end = written;
+        }
+        if (besides == Besides::StreamBulk && t < finish) {
+            for (int i = 0; i < 64; ++i) {
+                ByteView v(chunk.data(), chunk.size());
+                const size_t n = fv.tx.write(&v, 1, now);
+                written += n;
+                if (n == 0) break;
+            }
+        }
+        if (other) {
+            for (int i = 0; i < 64; ++i) {
+                ByteView v(chunk.data(), chunk.size());
+                if (other->tx.write(&v, 1, now) == 0) break;
+            }
+        }
+
+        for (Flow* f : {&fv, other.get()}) {
+            if (!f) continue;
+            f->tx.tick(now);
+            f->rx.tick(now);
+        }
+        for (size_t n; (n = fv.rx.read(sink.data(), sink.size())) != 0;) delivered += n;
+        if (other) while (other->rx.read(sink.data(), sink.size()) != 0) {}
+
+        while (!frames.empty() && frames.front().end != 0 && frames.front().end <= delivered) {
+            latency.push_back(std::chrono::duration<double, std::milli>(now - frames.front().captured).count());
+            frames.pop_front();
+        }
+
+        // The adaptive encoder: what any application can do with PathStats and
+        // nothing else. Back off while a queue stands in front of the frames — in
+        // the stream or on the path — and creep up while none does: the estimate
+        // alone cannot be followed upwards, because a source that keeps to it is
+        // app-limited and the estimate is then only a floor.
+        if (source == Source::Adaptive && now >= next_retarget) {
+            next_retarget += ms(100);
+            const PathStats st = fv.tx.path_stats();
+            uint64_t backlog = st.queued_bytes;
+            for (const Frame& f : frames) backlog += f.owed;
+            if (st.bandwidth_bps > 0) {
+                const double wait  = backlog * 8.0 / st.bandwidth_bps * 1000 +
+                                     (st.srtt_us - st.min_rtt_us) / 1000.0;
+                const uint64_t dl  = st.bytes_delivered - prev_delivered;
+                const uint64_t ls  = st.bytes_lost - prev_lost;
+                const double   lr  = dl + ls ? double(ls) / double(dl + ls) : 0.0;
+                if (wait > 40)
+                    target = (std::min)(target, st.bandwidth_bps * 1.0) * 0.85;
+                else if (wait < 15 && lr < 0.1)
+                    target *= 1.08;
+                target = (std::max)(150e3, (std::min)(target, video * 1e6));
+            }
+            prev_delivered = st.bytes_delivered;
+            prev_lost      = st.bytes_lost;
+        }
+    }
+
+    // A frame still undelivered when the run ends never arrived in time either.
+    const double cap = 2000;
+    for (size_t i = 0; i < frames.size(); ++i) latency.push_back(cap);
+    std::sort(latency.begin(), latency.end());
+    const auto q = [&](double f) { return latency[static_cast<size_t>(f * (latency.size() - 1))]; };
+    const double base = rtt / 2.0;
+    const double late = std::count_if(latency.begin(), latency.end(),
+                                      [&](double l) { return l > base + 100; }) * 100.0 / latency.size();
+    const double secs = std::chrono::duration<double>(finish - start).count();
+
+    char late_s[32];
+    std::snprintf(late_s, sizeof(late_s), "%8.1f%%", late);
+    std::string tinted = late_s;
+    if (g_color) tinted = std::string(late <= 1 ? "\x1b[32m" : late <= 5 ? "" : "\x1b[33m")
+                        + tinted + "\x1b[0m";
+    std::printf("  %-30s %9.1f %9.1f %9.1f %s %9.2f\n", name, q(0.5) - base, q(0.99) - base,
+                latency.back() - base, tinted.c_str(), video_bytes * 8.0 / secs / 1e6);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    bool realtime_only = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-color") == 0) g_color = false;
         if (std::strcmp(argv[i], "--cc=reno") == 0) g_algo = CongestionAlgorithm::Reno;
         if (std::strcmp(argv[i], "--cc=bbr") == 0)  g_algo = CongestionAlgorithm::Bbr;
+        if (std::strcmp(argv[i], "--realtime") == 0) realtime_only = true;
     }
 #ifndef _WIN32
     if (!isatty(1)) g_color = false;
@@ -525,6 +697,7 @@ int main(int argc, char** argv) {
     std::printf("controller: %s%s%s (--cc=bbr | --cc=reno)\n", col("\x1b[1m"), to_string(g_algo),
                 col("\x1b[0m"));
 
+    if (!realtime_only) {
     heading("bulk — 20 s one way; buffer = 1 BDP unless the name says otherwise",
             "Mbit/s", "util", "retrans", "cwnd cuts", "dropped");
     bulk("10 Mbit,  20 ms",              10,  20, 0.0,    21, 20);
@@ -611,6 +784,31 @@ int main(int argc, char** argv) {
     std::printf("  (the 24 KB rows are the ones that separate probing the LAST unacknowledged\n"
                 "   packet from probing the first: with one packet in flight they are the same\n"
                 "   packet. A max at 1000.0 means the round never recovered inside the cap.)\n");
+
+    }
+
+    heading("realtime — 30 s of live video (30 fps, keyframe every 2 s), ms over one-way delay",
+            "median", "p99", "max", "late", "video");
+    using S = Source;
+    using X = Besides;
+    realtime("4 of 10 Mbit, 40 ms",          10,  40, 0.0,  1, 4, S::Fixed,    X::Nothing);
+    realtime("4 of 10 Mbit, 40 ms, 1%",      10,  40, 0.01, 1, 4, S::Fixed,    X::Nothing);
+    realtime("4 of 10 Mbit, 40 ms, 5%",      10,  40, 0.05, 1, 4, S::Fixed,    X::Nothing);
+    realtime("4 of 10 Mbit, 200 ms, 1%",     10, 200, 0.01, 1, 4, S::Fixed,    X::Nothing);
+    realtime("4 of 10 Mbit, 40 ms, buffer 4",10,  40, 0.0,  4, 4, S::Fixed,    X::Nothing);
+    realtime("  + bulk flow on the path",    10,  40, 0.0,  1, 4, S::Fixed,    X::PathBulk);
+    realtime("  + bulk on the same stream",  10,  40, 0.0,  1, 4, S::Fixed,    X::StreamBulk);
+    realtime("  + link drops to 3 Mbit",     10,  40, 0.0,  1, 4, S::Fixed,    X::RateDrop);
+    realtime("adaptive <=8 of 10, 40 ms",    10,  40, 0.0,  1, 8, S::Adaptive, X::Nothing);
+    realtime("  1%",                         10,  40, 0.01, 1, 8, S::Adaptive, X::Nothing);
+    realtime("  5%",                         10,  40, 0.05, 1, 8, S::Adaptive, X::Nothing);
+    realtime("  + bulk flow on the path",    10,  40, 0.0,  1, 8, S::Adaptive, X::PathBulk);
+    realtime("  + link drops to 3 Mbit",     10,  40, 0.0,  1, 8, S::Adaptive, X::RateDrop);
+    std::printf("  (video is the Mbit/s the encoder produced. \"late\" is the share of frames that\n"
+                "   landed more than 100 ms after the path allowed — dropped or frozen in a call.\n"
+                "   Every frame here is reliable and in order: a loss holds back all that follows\n"
+                "   it, and nothing stale is ever dropped. \"adaptive\" rows retarget the encoder\n"
+                "   from PathStats every 100 ms, starting from 1 Mbit/s.)\n");
 
     std::printf("\nnote: no reordering, no ack compression, no competing traffic, no variable\n"
                 "delay. These are not predictions about a real network — they are a comparison\n"

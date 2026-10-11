@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,6 +42,7 @@ public:
     /// and repeat whatever caused it.
     using PeerDisconnectHandler  = std::function<void(const PeerId&, CloseReason)>;
     using DialFailedHandler      = std::function<void(const Address&)>;
+    using PeerPathHandler        = std::function<void(const Peer&, const PathStats&)>;
 
     virtual const PeerId&       local_id() const = 0;
     virtual uint16_t            listen_port() const = 0;     ///< our advertised listen port (shared by both transports)
@@ -89,6 +91,14 @@ public:
     /// poll — it weighs those in-flight bytes too. False for an unknown peer.
     /// Default: always writable, all a mock that merely moves messages can claim.
     virtual bool                peer_writable(const PeerId& /*id*/) const { return true; }
+    /// A periodic sample of each connected peer's path (see PathStats) — what a
+    /// sender that sizes its own output to the path, a live encoder above all,
+    /// steers by. Registering one turns sampling on. Runs on a reactor thread.
+    /// Default: not offered (nothing subscribes).
+    virtual void                on_peer_path(PeerPathHandler /*handler*/) {}
+    /// The latest path sample for a peer, from any thread; nullopt if the peer is
+    /// not connected, sampling is off, or no sample has been taken yet.
+    virtual std::optional<PathStats> path_stats(const PeerId& /*id*/) const { return std::nullopt; }
 };
 
 struct NodeContext;  // node/node_context.h — bundles network + events + services

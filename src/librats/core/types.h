@@ -81,6 +81,40 @@ struct DialProfile {
     static DialProfile punch() noexcept { return DialProfile{8, 200, false}; }
 };
 
+/// What a connection's transport currently knows about the path to its peer —
+/// for an application that sizes its own sending to the path rather than letting
+/// the queue find the limit for it. A live encoder is the case it exists for: the
+/// transport will carry whatever it is given, but anything past `bandwidth_bps`
+/// waits in `queued_bytes`, and for a frame with a deadline waiting is losing.
+///
+/// Only the fields the transport can actually measure are filled; `valid` is false
+/// when it measures nothing at all (a relayed link, TCP off Linux). Rates are bits
+/// per second, the unit an encoder is configured in.
+struct PathStats {
+    bool     valid = false;
+    /// What the congestion controller believes the path delivers — the figure to
+    /// size a sender to. 0 until there is an estimate.
+    uint64_t bandwidth_bps = 0;
+    /// The sender was not filling the path when the estimate was last taken, so
+    /// `bandwidth_bps` is a floor (what was used) rather than what the path holds.
+    /// The normal state of a sender that keeps to the estimate; finding out how
+    /// much more there is takes sending more.
+    bool     app_limited = false;
+    /// How fast the transport is releasing packets right now; 0 when unpaced.
+    uint64_t pacing_bps = 0;
+    uint32_t srtt_us    = 0;   ///< smoothed round trip
+    uint32_t min_rtt_us = 0;   ///< lowest round trip seen: the path without queues
+    /// Accepted for the peer and not yet sent: what a new message waits behind.
+    /// Divided by `bandwidth_bps` it is that wait in seconds.
+    uint64_t queued_bytes    = 0;
+    uint64_t bytes_in_flight = 0;   ///< sent and not yet acknowledged
+    /// Share of the bytes resolved over the last sampling interval that were
+    /// declared lost, 0..1 (a spurious loss counts too: it is what the sender saw).
+    double   loss = 0;
+    uint64_t bytes_delivered = 0;   ///< acknowledged since the connection opened
+    uint64_t bytes_lost      = 0;   ///< declared lost since the connection opened
+};
+
 /// Connection lifecycle. A connection moves strictly forward through these.
 enum class ConnState {
     Connecting,   ///< Outbound transport connect in flight (TCP connect / UDP SYN).

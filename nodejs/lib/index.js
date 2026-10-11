@@ -212,6 +212,19 @@ class RatsNode {
   peerWritable(peerId) { return this._native.peerWritable(peerId); }
 
   /**
+   * What the transport currently knows about the path to one peer — for a sender
+   * that sizes its own output to the path instead of letting the queue find the
+   * limit. Rates are bits per second; anything past `bandwidthBps` waits in
+   * `queuedBytes`. Sampling runs only with `pathSampleMs` set or an
+   * `onPeerPath` handler registered. Over TCP the figures are the kernel's, on
+   * Linux only.
+   * @param {string} peerId
+   * @returns {PathStats|null} null if the peer is not connected or nothing has
+   *   been sampled yet.
+   */
+  pathStats(peerId) { return this._native.pathStats(peerId); }
+
+  /**
    * Register a handler for a named channel. Additive; register before `start()`.
    * @param {string} channel
    * @param {(peerId: string, data: Buffer) => void} handler
@@ -232,6 +245,14 @@ class RatsNode {
 
   /** @param {(peerId: string) => void} handler fired when a full queue drained. */
   onPeerWritable(handler) { this._native.onPeerWritable(handler); }
+
+  /**
+   * @param {(peerId: string, stats: PathStats) => void} handler fired with a path
+   * sample of every connected peer, every `pathSampleMs` (100 ms if 0).
+   * Registering one turns sampling on. Keep it cheap: it runs once per peer per
+   * interval.
+   */
+  onPeerPath(handler) { this._native.onPeerPath(handler); }
 
   // ---- discovery (enable before start) ----
 

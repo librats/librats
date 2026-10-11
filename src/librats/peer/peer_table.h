@@ -106,6 +106,16 @@ public:
     /// when the mark is actually crossed, which is rare.
     void set_writable(const PeerId& id, PeerRoute route, bool writable);
 
+    /// Record the latest path sample of a peer's connection. Applies only while
+    /// `route` is still the peer's live route, so a superseded connection's last
+    /// sample cannot stand in for the link now in use; returns whether it did.
+    /// Write lock.
+    bool set_path(const PeerId& id, PeerRoute route, const PathStats& stats);
+
+    /// The latest path sample recorded for a peer, if it is connected and one has
+    /// been taken. Read lock.
+    std::optional<PathStats> path(const PeerId& id) const;
+
     /// Upper bound on stored addresses per peer — caps memory and stops a peer
     /// from flooding us with bogus addresses via the identify/PEX path.
     static constexpr size_t kMaxAddressesPerPeer = 32;
@@ -138,6 +148,8 @@ private:
         /// by the reactor task, so the answer covers both halves.
         std::shared_ptr<std::atomic<size_t>> owed =
             std::make_shared<std::atomic<size_t>>(0);
+        /// Latest path sample of the live route; `valid` false until one arrives.
+        PathStats path{};
     };
 
     mutable std::shared_mutex mutex_;

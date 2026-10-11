@@ -103,6 +103,13 @@ struct RATS_API NodeConfig {
     /// warning at all.
     size_t send_queue_limit = 0;
 
+    /// How often each established peer's path is sampled for on_peer_path and
+    /// path_stats() (see PathStats). 0 samples nothing — unless an on_peer_path
+    /// handler is registered, which asks for samples and gets them every 100 ms:
+    /// about as often as an encoder can usefully change its rate, and still a
+    /// fraction of a round trip on most paths.
+    uint32_t path_sample_ms = 0;
+
     /// Interface to bind the listener to. The address family is derived from it:
     ///   - ""  or "::"      → dual-stack wildcard: reachable over both IPv6 and IPv4
     ///                        (IPv4-mapped) on all interfaces. This is the default.

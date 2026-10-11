@@ -75,6 +75,11 @@ public:
     /// block. Default: ignore.
     virtual void on_writable_changed(Connection& /*conn*/, bool /*writable*/) {}
 
+    /// A periodic sample of an established connection's path, when the Reactor
+    /// was asked for them (Reactor::sample_paths). Runs on the reactor thread, so
+    /// a handler must not block. Default: ignore.
+    virtual void on_path_sample(Connection& /*conn*/, const PathStats& /*stats*/) {}
+
     /// An outbound dial died before there was ever a Connection to report it on —
     /// an unresolvable host, no route, no socket. Without this a dial policy that
     /// reserved the ConnId (see Reactor::connect) would wait out a timeout for an
@@ -210,6 +215,14 @@ public:
     /// of the connection. Reactor thread; never closes the connection.
     void on_maintenance_tick() { rx_.decay(); }
 
+    /// What the path to this peer looks like now (see PathStats): the link's own
+    /// figures, with this connection's queue — and what is still on its way to it
+    /// — added to what a new message waits behind, and the loss share taken over
+    /// the interval since the previous call. Reactor thread; called by the
+    /// Reactor's path sampler, the one caller, which is what gives "since the
+    /// previous call" its meaning.
+    PathStats sample_path();
+
     /// Record the address this outbound connection was dialed at (so the peer's
     /// reconnect address is known). Set by the Reactor after adopt(); reactor thread.
     void set_dial_address(std::string host, uint16_t port) {
@@ -288,6 +301,9 @@ private:
     TimerId           establish_timer_ = kInvalidTimerId;  ///< connect+handshake deadline
     std::string       dial_host_;                          ///< address we dialed (outbound)
     uint16_t          dial_port_ = 0;
+    /// The link's delivered/lost totals at the previous sample_path().
+    uint64_t          sampled_delivered_ = 0;
+    uint64_t          sampled_lost_      = 0;
 };
 
 } // namespace librats

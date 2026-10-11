@@ -88,6 +88,13 @@ public:
     /// answered, a peer that went silent — say so.
     virtual CloseReason error_reason() const { return CloseReason::PeerReset; }
 
+    /// What the transport underneath knows about the path (see PathStats).
+    /// `queued_bytes` is only what the link itself holds unsent and `loss` is left
+    /// at 0 — the Connection adds its own queue and the sampling interval.
+    /// Default: nothing measured, which is all a link with no congestion control of
+    /// its own (a relayed circuit) can say.
+    virtual PathStats path_stats() const { return {}; }
+
     /// Begin an orderly shutdown. Called by the Reactor as it tears the connection
     /// down; the Link may still linger internally to flush what it owes the peer.
     virtual void close(CloseReason reason) = 0;

@@ -46,6 +46,21 @@ IpAddress Connection::remote_ip() const {
 
 uint8_t Connection::reactor_index() const noexcept { return reactor_.index(); }
 
+PathStats Connection::sample_path() {
+    PathStats s = link_->path_stats();
+    if (!s.valid) return s;
+    // The queue above the link is as much in front of a new message as the one in
+    // it — on TCP far more, the kernel's own buffer being small next to ours.
+    s.queued_bytes += tx_.size() + (in_transit_ ? in_transit_->load(std::memory_order_relaxed) : 0);
+
+    const uint64_t delivered = s.bytes_delivered - (std::min)(sampled_delivered_, s.bytes_delivered);
+    const uint64_t lost      = s.bytes_lost - (std::min)(sampled_lost_, s.bytes_lost);
+    s.loss = delivered + lost ? static_cast<double>(lost) / static_cast<double>(delivered + lost) : 0.0;
+    sampled_delivered_ = s.bytes_delivered;
+    sampled_lost_      = s.bytes_lost;
+    return s;
+}
+
 // ── Outbound application frames ─────────────────────────────────────────────
 
 bool Connection::send(FrameHeader header, ByteView payload) {

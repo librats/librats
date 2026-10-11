@@ -29,8 +29,9 @@
 }
 
 # Callback interfaces are invoked from native code via GetMethodID (onPeer /
-# onMessage / onTopicMessage / onJsonMessage / onFileOffer / onFileProgress /
-# onFileComplete), so their method names must survive obfuscation.
+# onPeerPath / onMessage / onTopicMessage / onJsonMessage / onFileOffer /
+# onFileProgress / onFileComplete), so their method names must survive
+# obfuscation. PathStats is constructed from native code too (kept above).
 -keep interface com.librats.*Callback { *; }
 
 # FileTransferStatus.fromValue(int) is called from native code via

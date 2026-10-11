@@ -124,6 +124,21 @@ void PeerTable::set_writable(const PeerId& id, PeerRoute route, bool writable) {
     it->second.writable = writable;
 }
 
+bool PeerTable::set_path(const PeerId& id, PeerRoute route, const PathStats& stats) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    auto it = peers_.find(id);
+    if (it == peers_.end() || it->second.route != route) return false;
+    it->second.path = stats;
+    return true;
+}
+
+std::optional<PathStats> PeerTable::path(const PeerId& id) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    auto it = peers_.find(id);
+    if (it == peers_.end() || !it->second.path.valid) return std::nullopt;
+    return it->second.path;
+}
+
 void PeerTable::set_supported_transports(const PeerId& id, PeerRoute route, uint8_t mask) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     auto it = peers_.find(id);

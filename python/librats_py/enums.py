@@ -4,6 +4,7 @@ Enumerations and constants for librats Python bindings.
 These mirror the enums declared in the C ABI (``src/librats/bindings/rats.h``).
 """
 
+from dataclasses import dataclass
 from enum import IntEnum
 
 
@@ -91,6 +92,27 @@ class FileTransferStatus(IntEnum):
     COMPLETED = 3
     FAILED = 4
     CANCELLED = 5
+
+
+@dataclass(frozen=True)
+class PathStats:
+    """What the transport knows about the path to one peer (``rats_path_stats_t``).
+
+    For a sender that sizes its own output to the path — a live encoder — rather
+    than letting the queue find the limit. Rates are bits per second. Anything
+    past ``bandwidth_bps`` waits in ``queued_bytes``; divided by
+    ``bandwidth_bps`` that is the wait in seconds.
+    """
+    bandwidth_bps: int     # the congestion controller's estimate; 0 = none yet
+    app_limited: bool      # the sender was not filling the path: the estimate is a floor
+    pacing_bps: int        # current release rate; 0 = unpaced
+    srtt_us: int           # smoothed round trip
+    min_rtt_us: int        # lowest round trip seen: the path without queues
+    queued_bytes: int      # accepted for the peer, not yet sent
+    bytes_in_flight: int   # sent, not yet acknowledged
+    loss: float            # share of bytes lost over the last sample interval, 0..1
+    bytes_delivered: int   # acknowledged since the connection opened
+    bytes_lost: int        # declared lost since the connection opened
 
 
 class VersionInfo:

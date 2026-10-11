@@ -300,6 +300,13 @@ bool Node::start() {
     NodeContext ctx{*this, events_, services_};
     for (auto& s : subsystems_) s->attach(ctx);
 
+    // Path sampling costs a timer and a look at every peer each interval, so it
+    // runs only when asked for: by the config, or by someone listening (a
+    // subsystem may have subscribed in attach() just above).
+    uint32_t sample_ms = config_.path_sample_ms;
+    if (sample_ms == 0 && !peer_path_.empty()) sample_ms = 100;
+    reactors_->for_each([&](Reactor& r) { r.sample_paths(std::chrono::milliseconds(sample_ms)); });
+
     reactors_->start();
 
     for (auto& s : subsystems_) s->start();
@@ -715,6 +722,16 @@ void Node::on_writable_changed(Connection& conn, bool writable) {
     if (!writable) return;
     Peer handle = make_peer(conn.remote_id(), route);
     for (auto& cb : peer_writable_) cb(handle);
+}
+
+void Node::on_path_sample(Connection& conn, const PathStats& stats) {
+    if (conn.remote_id().is_zero()) return;
+    const PeerRoute route{conn.reactor_index(), conn.id()};
+    // A connection that lost the duplicate race is still sampled until it is
+    // gone; only the peer's live route speaks for the peer.
+    if (!peers_.set_path(conn.remote_id(), route, stats) || peer_path_.empty()) return;
+    Peer handle = make_peer(conn.remote_id(), route);
+    for (auto& cb : peer_path_) cb(handle, stats);
 }
 
 void Node::on_dial_aborted(uint8_t reactor_index, ConnId id,

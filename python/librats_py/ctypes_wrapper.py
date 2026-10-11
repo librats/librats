@@ -15,12 +15,12 @@ import os
 import platform
 from ctypes import (
     CDLL, POINTER, Structure, c_void_p, c_char_p, c_int, c_size_t,
-    c_uint16, c_uint32, c_uint64, c_int64, string_at,
+    c_uint16, c_uint32, c_uint64, c_int64, c_double, string_at,
 )
 from typing import Optional
 
 from .callbacks import (
-    PeerCallbackType, PeerDisconnectCallbackType,
+    PeerCallbackType, PeerDisconnectCallbackType, PathCallbackType,
     MessageCallbackType, TopicCallbackType, JsonCallbackType,
     FileOfferCallbackType, FileProgressCallbackType, FileCompleteCallbackType,
 )
@@ -61,6 +61,25 @@ class RatsConfig(Structure):
         ("udp_receive_window", c_size_t),
         # Out-of-order bytes all UDP streams may hold together; 0 = default (64 MiB).
         ("udp_receive_budget", c_size_t),
+        # How often each peer's path is sampled, ms; 0 = only while an
+        # on_peer_path callback is registered, and then every 100 ms.
+        ("path_sample_ms", c_uint32),
+    ]
+
+
+class RatsPathStats(Structure):
+    """ctypes mirror of ``rats_path_stats_t``."""
+    _fields_ = [
+        ("bandwidth_bps", c_uint64),
+        ("app_limited", c_int),
+        ("pacing_bps", c_uint64),
+        ("srtt_us", c_uint32),
+        ("min_rtt_us", c_uint32),
+        ("queued_bytes", c_uint64),
+        ("bytes_in_flight", c_uint64),
+        ("loss", c_double),
+        ("bytes_delivered", c_uint64),
+        ("bytes_lost", c_uint64),
     ]
 
 
@@ -221,6 +240,9 @@ class LibratsCtypes:
         lib.rats_peer_writable.argtypes = [c_void_p, c_char_p]
         lib.rats_peer_writable.restype = c_int
 
+        lib.rats_path_stats.argtypes = [c_void_p, c_char_p, POINTER(RatsPathStats)]
+        lib.rats_path_stats.restype = c_int
+
         lib.rats_close_reason_str.argtypes = [c_int]
         lib.rats_close_reason_str.restype = c_char_p
 
@@ -233,6 +255,9 @@ class LibratsCtypes:
 
         lib.rats_on_peer_writable.argtypes = [c_void_p, PeerCallbackType, c_void_p]
         lib.rats_on_peer_writable.restype = c_int
+
+        lib.rats_on_peer_path.argtypes = [c_void_p, PathCallbackType, c_void_p]
+        lib.rats_on_peer_path.restype = c_int
 
         lib.rats_on.argtypes = [c_void_p, c_char_p, MessageCallbackType, c_void_p]
         lib.rats_on.restype = c_int

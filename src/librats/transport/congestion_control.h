@@ -187,6 +187,13 @@ public:
     /// not get it on top — it would be throttled twice, which is also why Linux
     /// bypasses PRR for any controller with its own cong_control.
     virtual bool uses_rate_reduction() const noexcept { return false; }
+
+    /// The rate, in bytes per second, this controller believes the path delivers —
+    /// what an application sizing its own output to the path is told (PathStats).
+    /// A model-based controller has the figure; a window-based one has only a
+    /// window, and returns 0 for the stream to read it as one window per round
+    /// trip instead.
+    virtual uint64_t bandwidth() const noexcept { return 0; }
 };
 
 /// Build the controller `algorithm` names. `rtt` and `sampler` belong to the stream

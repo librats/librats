@@ -164,6 +164,7 @@ rats_config_t rats_config_default(void) {
     c.congestion_control    = RATS_CONGESTION_BBR;
     c.udp_receive_window    = 0;
     c.udp_receive_budget    = 0;
+    c.path_sample_ms        = 0;
     return c;
 }
 
@@ -205,6 +206,7 @@ rats_t rats_create_config(const rats_config_t* cfg) {
                                            : CongestionAlgorithm::Bbr;
         config.udp_receive_window    = cfg->udp_receive_window;
         config.udp_receive_budget    = cfg->udp_receive_budget;
+        config.path_sample_ms        = cfg->path_sample_ms;
     }
     return make_handle(std::move(config));
 }
@@ -309,6 +311,42 @@ rats_error_t rats_on_peer_writable(rats_t node, rats_peer_cb cb, void* user) {
     if (!cb) return RATS_ERR_INVALID_ARG;
     node_of(node)->on_peer_writable([cb, user](const Peer& peer) {
         cb(user, peer.id().to_hex().c_str());
+    });
+    return RATS_OK;
+}
+
+namespace {
+rats_path_stats_t to_c(const PathStats& s) {
+    rats_path_stats_t c{};
+    c.bandwidth_bps   = s.bandwidth_bps;
+    c.app_limited     = s.app_limited ? 1 : 0;
+    c.pacing_bps      = s.pacing_bps;
+    c.srtt_us         = s.srtt_us;
+    c.min_rtt_us      = s.min_rtt_us;
+    c.queued_bytes    = s.queued_bytes;
+    c.bytes_in_flight = s.bytes_in_flight;
+    c.loss            = s.loss;
+    c.bytes_delivered = s.bytes_delivered;
+    c.bytes_lost      = s.bytes_lost;
+    return c;
+}
+} // namespace
+
+rats_error_t rats_path_stats(rats_t node, const char* peer_id_hex, rats_path_stats_t* out) {
+    if (!peer_id_hex || !out) return RATS_ERR_INVALID_ARG;
+    auto id = PeerId::from_hex(peer_id_hex);
+    if (!id) return RATS_ERR_INVALID_ARG;
+    const auto stats = node_of(node)->path_stats(*id);
+    if (!stats) return RATS_ERR_NO_SUCH_PEER;
+    *out = to_c(*stats);
+    return RATS_OK;
+}
+
+rats_error_t rats_on_peer_path(rats_t node, rats_path_cb cb, void* user) {
+    if (!cb) return RATS_ERR_INVALID_ARG;
+    node_of(node)->on_peer_path([cb, user](const Peer& peer, const PathStats& stats) {
+        const rats_path_stats_t c = to_c(stats);
+        cb(user, peer.id().to_hex().c_str(), &c);
     });
     return RATS_OK;
 }

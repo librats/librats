@@ -572,6 +572,7 @@ void UdpStream::pump(Clock::time_point now) {
     while (can_transmit()) {
         OutPacket pkt = std::move(unsent_.front());
         unsent_.pop_front();
+        unsent_bytes_ -= pkt.size();
         pkt.seq = next_seq_++;
 
         sent_.push_back(std::move(pkt));
@@ -627,6 +628,35 @@ size_t UdpStream::send_queue_limit() const noexcept {
     return (std::max)(limit, kSendQueueFloor);
 }
 
+PathStats UdpStream::path_stats() const noexcept {
+    using std::chrono::duration_cast;
+    using std::chrono::microseconds;
+    using std::chrono::nanoseconds;
+
+    PathStats s;
+    s.valid = state_ == State::Connected;
+    const auto per_second = [](uint64_t bytes, Clock::duration per) -> uint64_t {
+        const auto ns = duration_cast<nanoseconds>(per).count();
+        return ns > 0 ? static_cast<uint64_t>(bytes * 8.0 * 1e9 / static_cast<double>(ns)) : 0;
+    };
+
+    if (rtt_.have_rtt) {
+        s.srtt_us    = static_cast<uint32_t>(duration_cast<microseconds>(rtt_.srtt).count());
+        s.min_rtt_us = static_cast<uint32_t>(duration_cast<microseconds>(rtt_.min_rtt).count());
+    }
+    if (const uint64_t bw = cc_->bandwidth()) s.bandwidth_bps = bw * 8;
+    else if (rtt_.have_rtt) s.bandwidth_bps = per_second(cc_->cwnd(), rtt_.srtt);
+    const cc::PacingRate rate = cc_->pacing_rate();
+    if (rate.paced()) s.pacing_bps = per_second(rate.bytes, rate.per);
+    s.app_limited = sampler_.app_limited();
+
+    s.queued_bytes    = unsent_bytes_;
+    s.bytes_in_flight = flight_bytes_;
+    s.bytes_delivered = sampler_.delivered();
+    s.bytes_lost      = sampler_.lost();
+    return s;
+}
+
 size_t UdpStream::write(const ByteView* slices, size_t count, Clock::time_point now) {
     if (state_ != State::Connected || fin_queued_) return 0;
 
@@ -656,6 +686,7 @@ size_t UdpStream::write(const ByteView* slices, size_t count, Clock::time_point 
             budget        -= n;
             taken         += n;
             queued_bytes_ += n;
+            unsent_bytes_ += n;
         }
     }
 
@@ -1550,6 +1581,7 @@ void UdpStream::die(CloseReason reason) {
     close_reason_ = reason;
     sent_.clear();
     unsent_.clear();
+    unsent_bytes_ = 0;
     reorder_.clear();
     if (budget_) budget_->release(held_bytes_);
     held_bytes_ = 0;
