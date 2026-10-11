@@ -43,8 +43,11 @@
 //            whole effect lives in the tail.
 //   realtime — live video over one stream: frame latency and the share of
 //            frames that miss an interactive deadline, with a fixed-rate source
-//            and with one that retargets itself from PathStats. `--realtime`
-//            runs only this section.
+//            and with one that retargets itself from PathStats; then the same
+//            against source shapes — keyframe size, intra refresh, noisy
+//            frames, a slow rate control, temporal layers — since how an
+//            encoder spreads its rate is all a codec changes for the path.
+//            `--realtime` runs only this section.
 //
 // ── Reading the numbers ─────────────────────────────────────────────────────
 //
@@ -65,6 +68,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -529,19 +533,47 @@ enum class Besides {
     RateDrop,     ///< the link loses most of its capacity at 10 s
 };
 
+/// The shape of what an encoder emits — which is all of a codec the transport
+/// ever sees. AV1 and H.264 differ in how good a picture a given rate buys, not
+/// in anything a path reacts to; what a path reacts to is how the rate is spread
+/// over frames, and that is set by the encoder's configuration far more than by
+/// its codec. These are the properties that move the numbers:
+struct Profile {
+    const char* name;
+    double key_weight;   ///< keyframe size over a mean frame, one per GOP; 0 = none (intra refresh)
+    double noise;        ///< every frame scaled by a factor uniform in [1 - noise, 1 + noise]
+    int    scene_every;  ///< mean frames between scene cuts, a frame four times its budget; 0 = none
+    double lag_s;        ///< time constant with which output follows a new target; 0 = at once
+    int    layers;       ///< temporal layers: 1, or 3 (L1T3: T0 T2 T1 T2, T0 frames twice the rest)
+};
+/// Steady frames and a keyframe five times their size every two seconds: the
+/// simplest shape that still has the one burst every codec with GOPs produces.
+constexpr Profile kSteady{"5x keyframe, steady", 5, 0, 0, 0, 1};
+
+/// What one realtime run measured: frame latency over the one-way delay (ms), the
+/// share of frames late (%) and the rate the encoder actually produced (Mbit/s).
+struct RealtimeResult {
+    double median, p99, max, late, video;
+};
+
 /// A live video source over one stream: 30 frames a second, each written whole
-/// the moment it is captured, a keyframe five times the size of the others every
-/// two seconds. A frame counts once its last byte has been read out at the far
-/// end; its latency is that moment minus its capture. A frame is *late* when it
-/// lands more than 100 ms after it could have — the path's one-way delay — which
-/// is the whole jitter budget an interactive call has: past it the frame is
-/// either dropped by the player or freezes it.
+/// the moment it is captured, sized by `profile`. A frame counts once its last
+/// byte has been read out at the far end; its latency is that moment minus its
+/// capture. A frame is *late* when it lands more than 100 ms after it could
+/// have — the path's one-way delay — which is the whole jitter budget an
+/// interactive call has: past it the frame is either dropped by the player or
+/// freezes it.
+///
+/// The encoder's rate control keeps the produced rate on target whatever the
+/// profile's noise and scene cuts do — an overshoot is paid back over the next
+/// half second, as a VBV buffer would — so rows with the same target produce the
+/// same video rate and differ only in how it is spread.
 ///
 /// This is what a byte stream gives video today: everything reliable and in
 /// order, nothing ever dropped. The rows are the measuring stick for whatever
 /// replaces that, and the Adaptive ones for what PathStats alone already buys.
-void realtime(const char* name, double link, int rtt, double loss, double buffer_bdp,
-              double video, Source source, Besides besides) {
+RealtimeResult realtime(double link, int rtt, double loss, double buffer_bdp, double video,
+                        Source source, Besides besides, const Profile& profile = kSteady) {
     const size_t bdp_pkts = static_cast<size_t>(link * 1e6 / 8 * rtt / 1000.0 / 1228);
     const size_t queue    = (std::max<size_t>)(static_cast<size_t>(bdp_pkts * buffer_bdp), 8);
     Path path(Direction{link * 1e6, us(rtt * 500), queue, loss, {}, {}, 0},
@@ -563,7 +595,7 @@ void realtime(const char* name, double link, int rtt, double loss, double buffer
     std::vector<double> latency;         // ms, one per measured frame
     uint64_t written = 0, delivered = 0, video_bytes = 0;
 
-    constexpr int    kFps = 30, kGop = 60, kKeyWeight = 5;
+    constexpr int    kFps = 30, kGop = 60;
     constexpr auto   kStep  = us(200);
     const auto       start  = std::chrono::seconds(1);    // handshake and first estimate
     const auto       finish = std::chrono::seconds(31);
@@ -574,6 +606,20 @@ void realtime(const char* name, double link, int rtt, double loss, double buffer
     int               frame_no = 0;
     uint64_t          prev_delivered = 0, prev_lost = 0;
 
+    // The encoder's view of a frame: its share of the GOP before noise.
+    const auto weight = [&](int n) {
+        if (profile.key_weight > 0 && n % kGop == 0) return profile.key_weight;
+        return profile.layers == 3 && n % 4 == 0 ? 2.0 : 1.0;
+    };
+    double gop_weight = 0;
+    for (int n = 0; n < kGop; ++n) gop_weight += weight(n);
+    // Fixed seed and raw draws: std's distributions are not the same on every
+    // standard library, and the figures must be.
+    std::mt19937 rng(1);
+    const auto uniform = [&] { return rng() / 4294967296.0; };
+    double encoder_rate = target;    // what the rate control is currently producing
+    double debt = 0;                 // bytes produced over budget, still to be paid back
+
     for (auto t = Clock::duration::zero(); t < finish + std::chrono::seconds(2); t += kStep) {
         now += kStep;
         if (besides == Besides::RateDrop && t == std::chrono::seconds(10)) path.set_rate(link * 0.3e6);
@@ -582,9 +628,16 @@ void realtime(const char* name, double link, int rtt, double loss, double buffer
         // The encoder: one frame per tick of its clock, sized from the rate it was
         // last told. Nothing is captured after `finish`; the tail drains.
         if (now >= next_frame && t < finish) {
-            const double gop_bytes = target / 8 * kGop / kFps;
-            const double p_bytes   = gop_bytes / (kGop - 1 + kKeyWeight);
-            const size_t bytes = static_cast<size_t>(frame_no % kGop == 0 ? p_bytes * kKeyWeight : p_bytes);
+            if (profile.lag_s > 0)
+                encoder_rate += (target - encoder_rate) * (1 - std::exp(-1.0 / kFps / profile.lag_s));
+            else
+                encoder_rate = target;
+            const double budget = encoder_rate / 8 * kGop / kFps / gop_weight * weight(frame_no);
+            double factor = 1 + profile.noise * (2 * uniform() - 1);
+            if (profile.scene_every > 0 && uniform() * profile.scene_every < 1) factor *= 4;
+            const double size = (std::max)(budget * factor - debt / 15, budget * 0.25);
+            debt += size - budget;
+            const size_t bytes = static_cast<size_t>(size);
             frames.push_back(Frame{next_frame, bytes});
             video_bytes += bytes;
             ++frame_no;
@@ -667,13 +720,41 @@ void realtime(const char* name, double link, int rtt, double loss, double buffer
                                       [&](double l) { return l > base + 100; }) * 100.0 / latency.size();
     const double secs = std::chrono::duration<double>(finish - start).count();
 
-    char late_s[32];
-    std::snprintf(late_s, sizeof(late_s), "%8.1f%%", late);
-    std::string tinted = late_s;
-    if (g_color) tinted = std::string(late <= 1 ? "\x1b[32m" : late <= 5 ? "" : "\x1b[33m")
-                        + tinted + "\x1b[0m";
-    std::printf("  %-30s %9.1f %9.1f %9.1f %s %9.2f\n", name, q(0.5) - base, q(0.99) - base,
-                latency.back() - base, tinted.c_str(), video_bytes * 8.0 / secs / 1e6);
+    return {q(0.5) - base, q(0.99) - base, latency.back() - base, late,
+            video_bytes * 8.0 / secs / 1e6};
+}
+
+/// A share of frames late, as a column: green within what a call shrugs off,
+/// yellow past what it visibly freezes on.
+std::string late_cell(double late) {
+    char s[32];
+    std::snprintf(s, sizeof(s), "%8.1f%%", late);
+    if (!g_color) return s;
+    return std::string(late <= 1 ? "\x1b[32m" : late <= 5 ? "" : "\x1b[33m") + s + "\x1b[0m";
+}
+
+void realtime_row(const char* name, double link, int rtt, double loss, double buffer_bdp,
+                  double video, Source source, Besides besides) {
+    const RealtimeResult r = realtime(link, rtt, loss, buffer_bdp, video, source, besides);
+    std::printf("  %-30s %9.1f %9.1f %9.1f %s %9.2f\n", name, r.median, r.p99, r.max,
+                late_cell(r.late).c_str(), r.video);
+}
+
+/// One source shape across the conditions it is most sensitive to: a clean path
+/// and a lossy one, a buffer too shallow to absorb a burst, and an adaptive
+/// encoder on a clean path and through a capacity drop — which is where a rate
+/// control that answers slowly, or overshoots, pays.
+void profile_row(const Profile& p) {
+    const double cells[] = {
+        realtime(10, 40, 0.0,  1,   4, Source::Fixed,    Besides::Nothing,  p).late,
+        realtime(10, 40, 0.01, 1,   4, Source::Fixed,    Besides::Nothing,  p).late,
+        realtime(10, 40, 0.0,  0.5, 4, Source::Fixed,    Besides::Nothing,  p).late,
+        realtime(10, 40, 0.0,  1,   8, Source::Adaptive, Besides::Nothing,  p).late,
+        realtime(10, 40, 0.0,  1,   8, Source::Adaptive, Besides::RateDrop, p).late,
+    };
+    std::printf("  %-30s", p.name);
+    for (double c : cells) std::printf(" %s", late_cell(c).c_str());
+    std::printf("\n");
 }
 
 } // namespace
@@ -791,24 +872,39 @@ int main(int argc, char** argv) {
             "median", "p99", "max", "late", "video");
     using S = Source;
     using X = Besides;
-    realtime("4 of 10 Mbit, 40 ms",          10,  40, 0.0,  1, 4, S::Fixed,    X::Nothing);
-    realtime("4 of 10 Mbit, 40 ms, 1%",      10,  40, 0.01, 1, 4, S::Fixed,    X::Nothing);
-    realtime("4 of 10 Mbit, 40 ms, 5%",      10,  40, 0.05, 1, 4, S::Fixed,    X::Nothing);
-    realtime("4 of 10 Mbit, 200 ms, 1%",     10, 200, 0.01, 1, 4, S::Fixed,    X::Nothing);
-    realtime("4 of 10 Mbit, 40 ms, buffer 4",10,  40, 0.0,  4, 4, S::Fixed,    X::Nothing);
-    realtime("  + bulk flow on the path",    10,  40, 0.0,  1, 4, S::Fixed,    X::PathBulk);
-    realtime("  + bulk on the same stream",  10,  40, 0.0,  1, 4, S::Fixed,    X::StreamBulk);
-    realtime("  + link drops to 3 Mbit",     10,  40, 0.0,  1, 4, S::Fixed,    X::RateDrop);
-    realtime("adaptive <=8 of 10, 40 ms",    10,  40, 0.0,  1, 8, S::Adaptive, X::Nothing);
-    realtime("  1%",                         10,  40, 0.01, 1, 8, S::Adaptive, X::Nothing);
-    realtime("  5%",                         10,  40, 0.05, 1, 8, S::Adaptive, X::Nothing);
-    realtime("  + bulk flow on the path",    10,  40, 0.0,  1, 8, S::Adaptive, X::PathBulk);
-    realtime("  + link drops to 3 Mbit",     10,  40, 0.0,  1, 8, S::Adaptive, X::RateDrop);
+    realtime_row("4 of 10 Mbit, 40 ms",          10,  40, 0.0,  1, 4, S::Fixed,    X::Nothing);
+    realtime_row("4 of 10 Mbit, 40 ms, 1%",      10,  40, 0.01, 1, 4, S::Fixed,    X::Nothing);
+    realtime_row("4 of 10 Mbit, 40 ms, 5%",      10,  40, 0.05, 1, 4, S::Fixed,    X::Nothing);
+    realtime_row("4 of 10 Mbit, 200 ms, 1%",     10, 200, 0.01, 1, 4, S::Fixed,    X::Nothing);
+    realtime_row("4 of 10 Mbit, 40 ms, buffer 4",10,  40, 0.0,  4, 4, S::Fixed,    X::Nothing);
+    realtime_row("  + bulk flow on the path",    10,  40, 0.0,  1, 4, S::Fixed,    X::PathBulk);
+    realtime_row("  + bulk on the same stream",  10,  40, 0.0,  1, 4, S::Fixed,    X::StreamBulk);
+    realtime_row("  + link drops to 3 Mbit",     10,  40, 0.0,  1, 4, S::Fixed,    X::RateDrop);
+    realtime_row("adaptive <=8 of 10, 40 ms",    10,  40, 0.0,  1, 8, S::Adaptive, X::Nothing);
+    realtime_row("  1%",                         10,  40, 0.01, 1, 8, S::Adaptive, X::Nothing);
+    realtime_row("  5%",                         10,  40, 0.05, 1, 8, S::Adaptive, X::Nothing);
+    realtime_row("  + bulk flow on the path",    10,  40, 0.0,  1, 8, S::Adaptive, X::PathBulk);
+    realtime_row("  + link drops to 3 Mbit",     10,  40, 0.0,  1, 8, S::Adaptive, X::RateDrop);
     std::printf("  (video is the Mbit/s the encoder produced. \"late\" is the share of frames that\n"
                 "   landed more than 100 ms after the path allowed — dropped or frozen in a call.\n"
                 "   Every frame here is reliable and in order: a loss holds back all that follows\n"
                 "   it, and nothing stale is ever dropped. \"adaptive\" rows retarget the encoder\n"
                 "   from PathStats every 100 ms, starting from 1 Mbit/s.)\n");
+
+    heading("realtime by source shape — % of frames late; 10 Mbit, 40 ms",
+            "clean", "1% loss", "buf 0.5", "adaptive", "adapt drop");
+    profile_row(kSteady);
+    profile_row({"10x keyframe",                 10,   0,    0, 0, 1});
+    profile_row({"intra refresh, no keyframes",   0,   0,    0, 0, 1});
+    profile_row({"noisy frames, scene cuts",      5, 0.5, 120, 0, 1});
+    profile_row({"slow rate control (1 s)",       5,   0,    0, 1, 1});
+    profile_row({"3 temporal layers",             5,   0,    0, 0, 3});
+    std::printf("  (the first three columns are a fixed 4 Mbit/s source, buffer 1 BDP unless\n"
+                "   \"buf 0.5\"; the last two the adaptive one of the table above, the second of\n"
+                "   them through the drop to 3 Mbit. Every row produces the same rate — only its\n"
+                "   spread over frames differs, which is all a codec changes for the path.\n"
+                "   Temporal layers matter once a late frame can be dropped: a top-layer frame is\n"
+                "   needed by nothing. Here every frame is still delivered, so they only reshape.)\n");
 
     std::printf("\nnote: no reordering, no ack compression, no competing traffic, no variable\n"
                 "delay. These are not predictions about a real network — they are a comparison\n"
