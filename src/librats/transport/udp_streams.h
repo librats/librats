@@ -167,8 +167,10 @@ public:
     /// Copy [offset, offset + len) out. Every byte of it must still be held.
     void copy(uint64_t offset, size_t len, uint8_t* out) const noexcept;
     /// Whether any of [offset, offset + len) is still unacknowledged — what a
-    /// probe repeating an older packet checks before copying it.
-    bool unacked(uint64_t offset, size_t len) const noexcept;
+    /// probe repeating an older packet checks before copying it. If so, the range
+    /// is narrowed to start at the first byte not yet acknowledged in order: what
+    /// lies below that may no longer be held, so copy() must not be asked for it.
+    bool unacked_part(uint64_t& offset, size_t& len) const noexcept;
 
     void on_acked(uint64_t offset, size_t len);
     void on_lost(uint64_t offset, size_t len);

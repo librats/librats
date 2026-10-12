@@ -861,10 +861,16 @@ uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end) {
     std::vector<SentFrame> frames;
     frames.reserve(count);
     for (size_t i = 0; i < count; ++i) frames.push_back(recovery_.frames()[first + i]);
-    for (const SentFrame& f : frames) {
+    for (SentFrame f : frames) {
         if (f.kind != SentFrame::Stream) continue;
         Lane* lane = lane_for(static_cast<MessageType>(f.stream), false);
-        if (!lane || !lane->send.unacked(f.offset, f.length)) continue;
+        // Only what is still unacknowledged: the front of the frame may have been
+        // delivered since by another packet, and its bytes released.
+        uint64_t offset = f.offset;
+        size_t   length = f.length;
+        if (!lane || !lane->send.unacked_part(offset, length)) continue;
+        f.offset = offset;
+        f.length = static_cast<uint32_t>(length);
         const size_t room = static_cast<size_t>(end - p);
         const size_t hdr  = stream_header_size(f.stream, f.offset, f.length, true);
         if (hdr + f.length > room) break;

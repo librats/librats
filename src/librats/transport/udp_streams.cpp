@@ -148,10 +148,15 @@ void SendStream::copy(uint64_t offset, size_t len, uint8_t* out) const noexcept 
     }
 }
 
-bool SendStream::unacked(uint64_t offset, size_t len) const noexcept {
+bool SendStream::unacked_part(uint64_t& offset, size_t& len) const noexcept {
+    // Below base_ the chunks may already be gone, so that part is cut off; above
+    // it every byte is still held, acknowledged or not.
     const uint64_t lo = (std::max)(offset, base_);
     const uint64_t hi = offset + len;
-    return lo < hi && !acked_.covers(lo, hi);
+    if (lo >= hi || acked_.covers(lo, hi)) return false;
+    offset = lo;
+    len    = static_cast<size_t>(hi - lo);
+    return true;
 }
 
 void SendStream::on_acked(uint64_t offset, size_t len) {

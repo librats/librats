@@ -270,9 +270,13 @@ bool Recovery::on_ack(const AckFrame& ack, Clock::time_point now, FrameSink& sin
     // is news (RFC 9002 §5.1): every other packet it covers waited at the receiver
     // for that one. The delay the peer reports comes off it — but never more than
     // it may hold an acknowledgement for, so it cannot talk the estimate down.
+    // Capped while still a count of units: the field is a 62-bit varint, and a
+    // large one multiplied out first would overflow into a negative duration.
     if (sample) {
-        const auto delay = (std::min)(Clock::duration(ack.delay * kAckDelayUnit),
-                                      Clock::duration(kMaxAckDelay));
+        constexpr uint64_t kMaxDelayUnits = kMaxAckDelay / kAckDelayUnit;
+        const uint64_t units = (std::min)(ack.delay, kMaxDelayUnits);
+        const auto delay = std::chrono::duration_cast<Clock::duration>(
+            kAckDelayUnit * static_cast<int64_t>(units));
         sample_rtt(now - sample_sent, delay);
     }
 

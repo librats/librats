@@ -470,6 +470,38 @@ TEST(UdpConnectionTest, ATimeoutWritesOffTheFlightAndTheTransferRecovers) {
     EXPECT_TRUE(p.a.conn->established());
 }
 
+TEST(UdpConnectionTest, AnAbsurdAckDelayCannotBreakTheRoundTripEstimate) {
+    // The delay field is a 62-bit varint the peer fills in. Multiplied out before
+    // it was capped, some values overflowed into a negative delay, which the
+    // estimator then added to the sample (and 2^57 overflowed it outright).
+    struct NullSink final : udp::FrameSink {
+        void frames_acked(const RingBuffer<udp::SentFrame>&, size_t, size_t) override {}
+        void frames_lost(const RingBuffer<udp::SentFrame>&, size_t, size_t) override {}
+        bool repairs_pending() const override { return false; }
+    } sink;
+    for (const uint64_t delay : {uint64_t{1} << 57, udp::kMaxVarint, uint64_t{1152921504606847}}) {
+        Clock::time_point now{};
+        udp::Recovery r(CongestionAlgorithm::Reno, now, 1);
+        const auto exchange = [&](uint64_t ack_delay) {
+            const uint64_t pn = r.next_pn();
+            r.add_frame(udp::SentFrame{udp::SentFrame::Ping});
+            r.on_packet_sent(now, 100, /*ack_eliciting=*/true, false, false, false);
+            now += 50ms;
+            udp::AckFrame ack;
+            ack.largest = pn;
+            ack.delay   = ack_delay;
+            ASSERT_TRUE(r.on_ack(ack, now, sink));
+        };
+        exchange(0);   // the first sample takes no delay off
+        exchange(delay);
+        exchange(delay);
+        SCOPED_TRACE(delay);
+        EXPECT_GT(r.rtt().srtt, Clock::duration::zero());
+        EXPECT_LE(r.rtt().srtt, Clock::duration(50ms));
+        EXPECT_LT(r.rtt().rttvar, Clock::duration(50ms));
+    }
+}
+
 TEST(UdpConnectionTest, APacketOfDataIsAcknowledgedLateAndTwoAtOnce) {
     Pair p(false, 10ms);
     ASSERT_TRUE(p.connect());
@@ -683,6 +715,36 @@ TEST(UdpStreamsTest, ASendStreamOwesWhatWasLostAndForgetsWhatArrived) {
     s.on_acked(0, 50000);
     EXPECT_TRUE(s.flushed());
     EXPECT_EQ(s.allocated(), 0u) << "a delivered stream holds memory";
+}
+
+TEST(UdpStreamsTest, ARepeatIsCutToWhatIsStillHeld) {
+    // A probe repeats an older frame. If the front of it was delivered since by
+    // another packet and the chunk it sat in was released, copying the frame
+    // whole read freed memory; only the part from the acknowledged edge may go.
+    udp::SendStream s;
+    std::string data(20000, '\0');
+    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<char>(i * 7);
+    s.write(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+    s.take(udp::SendStream::Piece{0, data.size(), false}, data.size());
+    s.on_acked(0, 16700);   // past the first 16 KiB chunk, which goes back
+    ASSERT_LT(s.allocated(), 2 * udp::SendStream::kChunk);
+
+    uint64_t offset = 16300;
+    size_t   len    = 1190;
+    ASSERT_TRUE(s.unacked_part(offset, len));
+    EXPECT_EQ(offset, 16700u);
+    EXPECT_EQ(len, 790u);
+    std::string out(len, '\0');
+    s.copy(offset, len, reinterpret_cast<uint8_t*>(&out[0]));
+    EXPECT_EQ(out, data.substr(16700, 790));
+
+    offset = 15000;
+    len    = 1000;
+    EXPECT_FALSE(s.unacked_part(offset, len)) << "a frame delivered whole is not repeated";
+    s.on_acked(17000, 500);
+    offset = 17000;
+    len    = 500;
+    EXPECT_FALSE(s.unacked_part(offset, len)) << "nor one acknowledged above the edge";
 }
 
 TEST(UdpStreamsTest, ARecvStreamReassemblesOverlappingRepairs) {
