@@ -15,6 +15,9 @@
  *     up only that one: a ping is not stuck behind a lost piece of a file.
  *   - Which lane goes next is decided as each packet is built, not when the
  *     message was queued, so priority holds however deep the backlog is.
+ *   - Live messages (SendOptions::lifetime) travel outside the streams, repaired
+ *     only while they can still arrive in time and dropped whole once they
+ *     cannot (udp_live.h). They go at Priority::Live, nearest deadline first.
  *
  * ── The handshake ────────────────────────────────────────────────────────────
  * Noise XX is three messages, carried in long-header packets (udp_wire.h):
@@ -53,6 +56,8 @@
 #include "librats/core/types.h"
 #include "librats/peer/peer_id.h"
 #include "librats/security/handshaker.h"
+#include "librats/transport/priority.h"
+#include "librats/transport/udp_live.h"
 #include "librats/transport/udp_recovery.h"
 #include "librats/transport/udp_streams.h"
 #include "librats/transport/udp_wire.h"
@@ -223,13 +228,17 @@ public:
 
     /// Queue one message on its lane. False, queueing nothing, unless established.
     bool send_message(FrameHeader header, ByteView payload);
+    /// Queue one live message, worth delivering until `deadline`; its payload is no
+    /// larger than SendOptions::kMaxLivePayload. False, queueing nothing, unless
+    /// established.
+    bool send_live(FrameHeader header, ByteView payload, Clock::time_point deadline);
 
     /// Send what the windows and the pacer allow.
     void flush(Clock::time_point now);
 
-    /// Hand every complete message to `fn(const Frame&)`, lanes in priority order,
-    /// until it returns false. False when one is malformed — the connection then
-    /// tells the peer and is dead with ProtocolError.
+    /// Hand every complete message to `fn(const Frame&)`, lanes in priority order
+    /// and live messages at theirs, until it returns false. False when one is
+    /// malformed — the connection then tells the peer and is dead with ProtocolError.
     template <typename Fn>
     bool deliver(Clock::time_point now, Fn&& fn);
 
@@ -262,7 +271,7 @@ public:
     /// for, has gone — what the mux lingers a released connection until.
     bool flushed() const noexcept;
 
-    /// Bytes queued and not yet sent, first time or again.
+    /// Bytes queued and not yet sent, first time or again, live messages included.
     size_t queued_bytes() const noexcept;
     PathStats path_stats() const noexcept;
     void      release_memory();
@@ -271,7 +280,8 @@ public:
     /// The flow-control window this side currently grants.
     uint64_t receive_window() const noexcept { return recv_window_; }
     size_t   held_bytes() const noexcept { return account_.held; }
-    /// Bytes arrived in order and not yet delivered, all streams.
+    /// Bytes arrived and not yet delivered: in order on every stream, and live
+    /// messages complete or being put together.
     size_t   buffered_bytes() const noexcept;
 
 private:
@@ -305,6 +315,7 @@ private:
     bool apply_frames(const uint8_t* payload, size_t len, Clock::time_point now,
                       bool& ack_eliciting, bool& refused);
     bool on_stream(const udp::StreamFrame& f, Clock::time_point now, bool& refused);
+    bool on_live(const udp::LiveFrame& f, Clock::time_point now, bool& refused);
     void on_data_blocked(uint64_t limit);
 
     // — acknowledgements we owe —
@@ -325,8 +336,12 @@ private:
     size_t send_packet(Clock::time_point now, bool data, bool probe, bool force_ack,
                        bool keepalive = false);
     uint8_t* write_control(uint8_t* p, uint8_t* end, bool& eliciting);
-    uint8_t* write_streams(uint8_t* p, uint8_t* end, bool& repair);
-    uint8_t* write_repeat(uint8_t* p, uint8_t* end);
+    /// Stream data and live messages, in priority order.
+    uint8_t* write_data(uint8_t* p, uint8_t* end, Clock::time_point now, bool& repair);
+    uint8_t* write_lanes(uint8_t* p, uint8_t* end, size_t from, size_t to, bool& repair);
+    /// `first`: nothing else of the packet's data is in it yet.
+    uint8_t* write_live(uint8_t* p, uint8_t* end, Clock::time_point now, bool first, bool& repair);
+    uint8_t* write_repeat(uint8_t* p, uint8_t* end, Clock::time_point now);
     bool   has_control() const noexcept;
     bool   has_sendable_data() const noexcept;
     bool   has_repairs() const noexcept;
@@ -352,7 +367,11 @@ private:
 
     // — lanes —
     Lane*  lane_for(MessageType type, bool create);
-    uint64_t total_unsent() const noexcept;
+    /// Stream bytes never sent, all lanes: what the peer's window holds back.
+    uint64_t stream_unsent() const noexcept;
+    /// What the one-way delay is taken to be: half the smoothed round trip. A live
+    /// message that cannot arrive by its deadline at that is no longer sent.
+    Clock::duration one_way() const noexcept;
     /// The unfinished-message bounds of every lane: their sum, the largest, the
     /// next largest, and whose is the largest (see max_unfinished).
     struct Spread {
@@ -426,7 +445,8 @@ private:
     /// when another is added — which a message handler can do in the middle of a
     /// delivery, by sending something of a type not seen before.
     std::vector<std::unique_ptr<Lane>> lanes_;
-    std::array<size_t, 4> rr_{};           ///< per priority: the lane that goes first next
+    std::array<size_t, kPriorityCount> rr_{};   ///< per priority: the lane that goes first next
+    udp::LiveSender   live_send_;
     uint64_t          sent_new_total_ = 0; ///< new stream bytes ever sent, all lanes
     uint64_t          peer_max_data_  = kInitialWindow;
     uint64_t          blocked_at_     = 0; ///< the limit a DATA_BLOCKED was sent for
@@ -458,6 +478,8 @@ private:
     bool              in_burst_       = false;
     bool              burst_ack_owed_ = false;
 
+    udp::LiveReceiver live_recv_;
+
     // — flow control, receive side —
     udp::HoldAccount  account_;
     uint64_t          recv_window_;
@@ -483,11 +505,31 @@ bool UdpConnection::deliver(Clock::time_point now, Fn&& fn) {
     Lane* lanes[256];
     size_t n = 0;
     for (const auto& lane : lanes_) lanes[n++] = lane.get();
-    for (size_t i = 0; i < n; ++i) {
+    // Live messages go where their priority puts them: after the lanes ahead of it.
+    size_t live_at = 0;
+    while (live_at < n && lanes[live_at]->priority < static_cast<uint8_t>(Priority::Live)) ++live_at;
+
+    bool bad = false;
+    const auto protocol_error = [&] {
+        fail(now, CloseReason::ProtocolError, kCloseProtocol);
+        flush_events();
+        return false;
+    };
+    for (size_t i = 0; i <= n; ++i) {
+        if (i == live_at && live_recv_.has_messages()) {
+            bool stopped = false;
+            live_recv_.deliver([&](ByteView inner) {
+                const auto msg = framer::parse_message(inner);
+                if (!msg.ok) { bad = true; return false; }
+                return fn(msg.frame);
+            }, stopped);
+            if (bad) return protocol_error();
+            if (stopped || dead()) return true;
+        }
+        if (i == n) break;
         Lane& lane = *lanes[i];
         if (!lane.recv.has_messages()) continue;
         bool stopped = false;
-        bool bad     = false;
         const bool ok = lane.recv.deliver(framer::kMaxBlockSize, [&](ByteView inner) {
             const auto msg = framer::parse_message(inner);
             // A message on another type's lane would be one a subsystem was never
@@ -495,11 +537,7 @@ bool UdpConnection::deliver(Clock::time_point now, Fn&& fn) {
             if (!msg.ok || msg.frame.header.type != lane.type) { bad = true; return false; }
             return fn(msg.frame);
         }, stopped);
-        if (!ok || bad) {
-            fail(now, CloseReason::ProtocolError, kCloseProtocol);
-            flush_events();
-            return false;
-        }
+        if (!ok || bad) return protocol_error();
         if (stopped || dead()) return true;
     }
     return true;

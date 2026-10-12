@@ -251,6 +251,25 @@ bool FrameReader::next(Frame& out) noexcept {
             return true;
         }
 
+        if (type == kLive || type == (kLive | kLivePieceBit)) {
+            out.type = kLive;
+            LiveFrame& l = out.live;
+            l.offset = 0;
+            uint64_t len = 0;
+            if (!r_.varint(l.id) || !r_.varint(l.lifetime)) return fail();
+            if ((type & kLivePieceBit) && (!r_.varint(l.size) || !r_.varint(l.offset))) return fail();
+            if (!r_.varint(len) || len > r_.left()) return fail();
+            if (!(type & kLivePieceBit)) l.size = len;
+            // A piece names its message's size so the receiver can hold the whole of
+            // it from the first piece in; one that cannot be part of such a message
+            // is not a piece of anything.
+            if (l.size < kInnerHeaderSize || l.size > kMaxLiveMessage || l.offset > l.size ||
+                len > l.size - l.offset)
+                return fail();
+            r_.bytes(static_cast<size_t>(len), l.data);
+            return true;
+        }
+
         switch (type) {
             case kPing:
                 return true;
@@ -324,6 +343,26 @@ uint8_t* put_stream_header(uint8_t* out, uint64_t stream, uint64_t offset, size_
     if (offset)      out = put_varint(out, offset);
     if (with_length) out = put_varint(out, len);
     return out;
+}
+
+size_t live_header_size(uint64_t id, uint64_t lifetime, uint64_t size, uint64_t offset,
+                        size_t len) noexcept {
+    const bool piece = offset != 0 || len != size;
+    return 1 + varint_size(id) + varint_size(lifetime) +
+           (piece ? varint_size(size) + varint_size(offset) : 0) + varint_size(len);
+}
+
+uint8_t* put_live_header(uint8_t* out, uint64_t id, uint64_t lifetime, uint64_t size,
+                         uint64_t offset, size_t len) noexcept {
+    const bool piece = offset != 0 || len != size;
+    *out++ = static_cast<uint8_t>(piece ? kLive | kLivePieceBit : kLive);
+    out = put_varint(out, id);
+    out = put_varint(out, lifetime);
+    if (piece) {
+        out = put_varint(out, size);
+        out = put_varint(out, offset);
+    }
+    return put_varint(out, len);
 }
 
 uint8_t* put_value_frame(uint8_t* out, FrameType type, uint64_t value) noexcept {

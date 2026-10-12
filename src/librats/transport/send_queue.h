@@ -21,6 +21,12 @@
  * the order it was sent in — code that sends a "done" on one channel after data on
  * another is entitled to have it arrive last, and did before lanes existed.
  *
+ * Live messages (SendOptions::lifetime) are the exception, by request: a type's
+ * live messages are a lane of their own, scheduled at Priority::Live and outside
+ * the order of the type's reliable ones. One whose deadline has passed by the time
+ * its turn comes is dropped there and then, unsealed — the one point in a byte
+ * stream where a message can still vanish without a trace.
+ *
  * What makes the scheduling worth anything is *when* a message is sealed. A
  * stream's nonces run in lockstep at both ends, so a message encrypted early can
  * no longer be overtaken — or dropped — without breaking every one behind it. So
@@ -41,7 +47,10 @@
 
 #include "librats/core/bytes.h"
 #include "librats/core/chained_send_buffer.h"
+#include "librats/core/ring_buffer.h"
+#include "librats/core/types.h"
 #include "librats/security/session.h"
+#include "librats/transport/priority.h"
 #include "librats/wire/frame.h"
 
 #include <array>
@@ -50,19 +59,6 @@
 #include <vector>
 
 namespace librats {
-
-/// How urgently a lane's messages should leave, ahead of others on the same
-/// connection. Lower values go first.
-enum class Priority : uint8_t {
-    Control     = 0,  ///< the connection's own plane (identify)
-    Interactive = 1,  ///< small and latency-bound: ping, hole-punch rendezvous
-    Normal      = 2,  ///< everything else
-    Bulk        = 3,  ///< file transfer, which would otherwise crowd the rest out
-};
-constexpr size_t kPriorityCount = 4;
-
-/// The priority every lane of `type` is scheduled at.
-Priority priority_of(MessageType type) noexcept;
 
 class SendQueue {
 public:
@@ -86,8 +82,9 @@ public:
     /// Set once the session exists, before the first push().
     void set_seal_room(size_t bytes) noexcept { seal_room_ = bytes; }
 
-    /// Queue one message on its lane.
-    void push(FrameHeader header, ByteView payload);
+    /// Queue one message on its lane: the reliable lane of its type, or — with a
+    /// deadline — the type's live one.
+    void push(FrameHeader header, ByteView payload, Deadline deadline = {});
 
     bool   empty()     const noexcept { return count_ == 0; }
     /// Messages queued.
@@ -99,21 +96,31 @@ public:
 
     /// Frame and seal the next message in scheduling order as one block —
     /// `[u32 length][sealed message]` — onto the end of `out`, under `nonce`.
-    /// The queue must not be empty, and `session` must append no more than the
-    /// seal room.
-    void seal_next(const Session& session, uint64_t nonce, ChainedSendBuffer& out);
+    /// Live messages whose deadline is at or before `now` are dropped on the way.
+    /// False when that left nothing to seal; `nonce` is then unused. `session`
+    /// must append no more than the seal room.
+    bool seal_next(const Session& session, uint64_t nonce, ChainedSendBuffer& out, Deadline now);
+
+    /// Whether any live message is queued — whether seal_next() needs a `now`.
+    bool has_live() const noexcept { return live_queued_ > 0; }
+    /// Live messages pushed, and dropped as expired, since the queue was made.
+    uint64_t live_sent()    const noexcept { return live_sent_; }
+    uint64_t live_expired() const noexcept { return live_expired_; }
 
 private:
     static constexpr uint32_t kNone = UINT32_MAX;
 
     struct Lane {
         MessageType        type = MessageType::App;
+        bool               live = false;
         Priority           priority = Priority::Normal;
-        /// Chunks holding this lane's messages, oldest first; live from `head`.
+        /// Chunks holding this lane's messages, oldest first; in use from `head`.
         std::vector<Bytes> chunks;
         size_t             head   = 0;
         size_t             offset = 0;      ///< read position in chunks[head]
         bool               tail_packs = false;  ///< chunks.back() takes small messages
+        /// A live lane: each queued message's deadline, in queue order.
+        RingBuffer<Deadline> deadlines;
         /// Its place in its priority's ring of lanes with something queued.
         bool               active = false;
         uint32_t           next   = kNone;
@@ -121,23 +128,30 @@ private:
         bool empty() const noexcept { return head == chunks.size(); }
     };
 
-    uint32_t lane_for(MessageType type);                ///< its slot in lanes_, made on first use
+    uint32_t lane_for(MessageType type, bool live);     ///< its slot in lanes_, made on first use
     uint8_t* reserve_packed(Lane& lane, size_t bytes);  ///< room at the tail of a pack chunk
     void     retire_front(Lane& lane);   ///< drop a drained pack chunk, pooling it for re-use
+    void     next_chunk(Lane& lane) noexcept;   ///< step past a chunk of its own, handed on
+    void     seal_front(Lane& lane, const Session& session, uint64_t nonce, ChainedSendBuffer& out);
+    void     drop_front(Lane& lane);     ///< an expired live message, never sealed
 
     void     activate(uint32_t index) noexcept;   ///< append to its priority's ring
     uint32_t next_lane() noexcept;                ///< pop the ring front of the most urgent priority
 
-    /// One per type that has ever queued anything here — a handful, so found by a
-    /// scan rather than a map.
+    /// One per type that has ever queued anything here, and one more for each type
+    /// that has queued a live message — a handful, so found by a scan rather than a
+    /// map.
     std::vector<Lane>                      lanes_;
     uint32_t                               last_ = kNone;  ///< the lane push() last used
-    std::array<uint32_t, kPriorityCount>   ring_head_{kNone, kNone, kNone, kNone};
-    std::array<uint32_t, kPriorityCount>   ring_tail_{kNone, kNone, kNone, kNone};
+    std::array<uint32_t, kPriorityCount>   ring_head_{kNone, kNone, kNone, kNone, kNone};
+    std::array<uint32_t, kPriorityCount>   ring_tail_{kNone, kNone, kNone, kNone, kNone};
     size_t                                 seal_room_ = 0;
     size_t                                 count_     = 0;
     size_t                                 bytes_     = 0;
     size_t                                 allocated_ = 0;
+    size_t                                 live_queued_  = 0;
+    uint64_t                               live_sent_    = 0;
+    uint64_t                               live_expired_ = 0;
 };
 
 } // namespace librats

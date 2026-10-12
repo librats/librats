@@ -1,6 +1,5 @@
 #include "librats/transport/udp_connection.h"
 #include "librats/core/io_poller.h"   // PollIn / PollOut / PollErr
-#include "librats/transport/send_queue.h"   // priority_of
 #include "librats/util/logger.h"
 
 #include <algorithm>
@@ -14,6 +13,20 @@ namespace {
 
 using Clock = UdpConnection::Clock;
 constexpr Clock::time_point kNever{};
+
+/// Below this much room another frame is not worth its header.
+constexpr size_t kMinFrameRoom = 16;
+/// Milliseconds a live message has left at `now`, rounded up: what its LIVE frames
+/// carry, and the receiver must never give up on it early.
+uint64_t ms_left(Clock::time_point deadline, Clock::time_point now) {
+    if (deadline <= now) return 0;
+    return static_cast<uint64_t>(std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count());
+}
+
+/// A live message this small is not split behind other data: one that does not fit
+/// what is left of a packet waits for the next, which costs nothing and spares the
+/// receiver an assembly.
+constexpr size_t kMaxUnsplitLive = 1024;
 
 template <typename A, typename B>
 Clock::duration clamp_duration(Clock::duration v, A lo, B hi) {
@@ -50,6 +63,7 @@ UdpConnection::UdpConnection(UdpConnectionHost& host, SecurityProvider& security
 
 UdpConnection::~UdpConnection() {
     for (auto& lane : lanes_) lane->recv.clear(account_);
+    live_recv_.clear(account_);
 }
 
 std::unique_ptr<UdpConnection> UdpConnection::dial(UdpConnectionHost& host, SecurityProvider& security,
@@ -389,6 +403,10 @@ bool UdpConnection::apply_frames(const uint8_t* payload, size_t len, Clock::time
                 eliciting = true;
                 if (!on_stream(f.stream, now, refused)) return false;
                 break;
+            case kLive:
+                eliciting = true;
+                if (!on_live(f.live, now, refused)) return false;
+                break;
             case kMaxData:
                 eliciting = true;
                 peer_max_data_ = (std::max)(peer_max_data_, f.value);
@@ -464,6 +482,28 @@ bool UdpConnection::on_stream(const StreamFrame& f, Clock::time_point now, bool&
     return true;
 }
 
+bool UdpConnection::on_live(const LiveFrame& f, Clock::time_point now, bool& refused) {
+    // Nobody reads it, or the packet will come again whole: acknowledged or not,
+    // there is nothing to keep.
+    if (!reading_ || refused) return true;
+    last_data_recv_ = now;
+    // What is being put together is given up a probe timeout after its sender
+    // stopped repairing it: slack for a repair that left just in time.
+    switch (live_recv_.on_frame(f, now, recovery_.probe_timeout(), account_)) {
+        case LiveReceiver::Result::Taken:
+            if (live_recv_.has_messages()) raise(PollIn);
+            return true;
+        case LiveReceiver::Result::Refused:
+            refused = true;
+            return true;
+        case LiveReceiver::Result::Invalid:
+            LOG_DEBUG("udp", "Connection " << local_cid_ << ": " << remote_.to_string()
+                      << " sent pieces of one live message that disagree");
+            return false;
+    }
+    return false;
+}
+
 bool UdpConnection::unfinished_ok(const Lane& lane) const noexcept {
     // Only the lane that just grew can have pushed the total over.
     const uint64_t mine = lane.recv.unfinished();
@@ -511,10 +551,11 @@ void UdpConnection::stop_reading() {
     if (!reading_) return;
     reading_ = false;
     for (auto& lane : lanes_) lane->recv.stop(account_);
+    live_recv_.clear(account_);
 }
 
 size_t UdpConnection::buffered_bytes() const noexcept {
-    size_t n = 0;
+    size_t n = live_recv_.buffered();
     for (const auto& lane : lanes_) n += lane->recv.buffered();
     return n;
 }
@@ -700,12 +741,16 @@ bool UdpConnection::has_control() const noexcept {
 }
 
 bool UdpConnection::has_repairs() const noexcept {
+    if (live_send_.lost_bytes() > 0) return true;
     for (const auto& lane : lanes_)
         if (lane->send.lost_bytes() > 0) return true;
     return false;
 }
 
 bool UdpConnection::has_sendable_data() const noexcept {
+    // Live messages are not under the peer's window: what bounds them is how long
+    // they live, and what the receiver will hold of them (udp_live.h).
+    if (live_send_.has_pending()) return true;
     const bool budget = new_data_budget() > 0;
     const Spread s = spread();
     for (const auto& lane : lanes_)
@@ -715,10 +760,15 @@ bool UdpConnection::has_sendable_data() const noexcept {
     return false;
 }
 
-uint64_t UdpConnection::total_unsent() const noexcept {
+uint64_t UdpConnection::stream_unsent() const noexcept {
     uint64_t n = 0;
     for (const auto& lane : lanes_) n += lane->send.unsent();
     return n;
+}
+
+Clock::duration UdpConnection::one_way() const noexcept {
+    const cc::RttEstimate& rtt = recovery_.rtt();
+    return rtt.have_rtt ? rtt.srtt / 2 : Clock::duration::zero();
 }
 
 size_t UdpConnection::estimate_packet(Clock::time_point now) const noexcept {
@@ -727,6 +777,10 @@ size_t UdpConnection::estimate_packet(Clock::time_point now) const noexcept {
     // of a full one.
     size_t n = kShortHeaderSize + kMaxPnLength + session_->overhead() + 24;
     if (ack_owed_) n += ack_size(now);
+    if (const uint64_t live = live_send_.unsent() + live_send_.lost_bytes(); live > 0) {
+        n += static_cast<size_t>((std::min<uint64_t>)(live, kMaxDatagram)) + 12;
+        if (n >= kMaxDatagram) return kMaxDatagram;
+    }
     uint64_t budget = new_data_budget();
     for (const auto& lane : lanes_) {
         const uint64_t fresh = (std::min)(lane->send.unsent(), budget);
@@ -802,7 +856,7 @@ size_t UdpConnection::send_packet(Clock::time_point now, bool data, bool probe, 
     bool data_sent = false;
     if (data) {
         uint8_t* before = p;
-        p = write_streams(p, end, repair);
+        p = write_data(p, end, now, repair);
         data_sent = p != before;
         eliciting |= data_sent;
     }
@@ -810,7 +864,7 @@ size_t UdpConnection::send_packet(Clock::time_point now, bool data, bool probe, 
         // Nothing new to say: repeat the newest packet still out, so the probe's
         // acknowledgement lands past every hole in front of it — or just ask.
         uint8_t* before = p;
-        p = write_repeat(p, end);
+        p = write_repeat(p, end, now);
         data_sent = p != before;
         if (p == before && p < end) {
             *p++ = kPing;
@@ -882,18 +936,28 @@ uint8_t* UdpConnection::write_control(uint8_t* p, uint8_t* end, bool& eliciting)
     return p;
 }
 
-uint8_t* UdpConnection::write_streams(uint8_t* p, uint8_t* end, bool& repair) {
-    // Below this much room another frame is not worth its header.
-    constexpr size_t kMinFrameRoom = 16;
+uint8_t* UdpConnection::write_data(uint8_t* p, uint8_t* end, Clock::time_point now, bool& repair) {
+    // The most urgent priority first. Lanes are sorted by it, and none is ever at
+    // Priority::Live, so the live messages go between the lanes ahead of them and
+    // those behind.
+    uint8_t* const start = p;
+    size_t split = 0;
+    while (split < lanes_.size() && lanes_[split]->priority < static_cast<uint8_t>(Priority::Live)) ++split;
+    p = write_lanes(p, end, 0, split, repair);
+    p = write_live(p, end, now, /*first=*/p == start, repair);
+    return write_lanes(p, end, split, lanes_.size(), repair);
+}
+
+uint8_t* UdpConnection::write_lanes(uint8_t* p, uint8_t* end, size_t from, size_t to, bool& repair) {
     uint64_t budget = new_data_budget();
 
-    // The most urgent priority first; within one, the lanes take turns, one packet
-    // each, starting a little further round every packet.
-    size_t lo = 0;
-    while (lo < lanes_.size()) {
+    // A priority at a time; within one, the lanes take turns, one packet each,
+    // starting a little further round every packet.
+    size_t lo = from;
+    while (lo < to) {
         const uint8_t prio = lanes_[lo]->priority;
         size_t hi = lo;
-        while (hi < lanes_.size() && lanes_[hi]->priority == prio) ++hi;
+        while (hi < to && lanes_[hi]->priority == prio) ++hi;
         const size_t n     = hi - lo;
         const size_t start = rr_[prio] % n;
         bool rotated = false;
@@ -928,7 +992,7 @@ uint8_t* UdpConnection::write_streams(uint8_t* p, uint8_t* end, bool& repair) {
                 SentFrame f;
                 f.kind   = SentFrame::Stream;
                 f.stream = static_cast<uint8_t>(id);
-                f.length = static_cast<uint32_t>(len);
+                f.length = static_cast<uint16_t>(len);
                 f.offset = piece.offset;
                 recovery_.add_frame(f);
                 if (!rotated) {
@@ -942,7 +1006,46 @@ uint8_t* UdpConnection::write_streams(uint8_t* p, uint8_t* end, bool& repair) {
     return p;
 }
 
-uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end) {
+uint8_t* UdpConnection::write_live(uint8_t* p, uint8_t* end, Clock::time_point now, bool first,
+                                   bool& repair) {
+    LiveSender::Piece piece;
+    for (; live_send_.peek(piece); first = false) {
+        if (p >= end || static_cast<size_t>(end - p) < kMinFrameRoom) return p;
+        const size_t room = static_cast<size_t>(end - p);
+        const uint64_t lifetime = ms_left(piece.deadline, now);
+
+        size_t len = piece.len;
+        size_t hdr = live_header_size(piece.id, lifetime, piece.size, piece.offset, len);
+        if (hdr + len > room) {
+            // A small message waits for a packet it fits whole — unless this one has
+            // no data in it yet, when waiting would only send it without any.
+            if (!first && piece.offset == 0 && piece.len == piece.size && piece.size <= kMaxUnsplitLive)
+                return p;
+            // Cut to fit: as a piece the header may grow (it names the size and
+            // offset), and with a shorter length it can only shrink again.
+            hdr = live_header_size(piece.id, lifetime, piece.size, piece.offset, (std::min)(len, room));
+            if (hdr >= room) return p;
+            len = room - hdr;
+            hdr = live_header_size(piece.id, lifetime, piece.size, piece.offset, len);
+        }
+
+        p = put_live_header(p, piece.id, lifetime, piece.size, piece.offset, len);
+        std::memcpy(p, live_send_.bytes(piece.id, piece.offset), len);
+        p += len;
+        live_send_.take(piece, len);
+        if (piece.repair) repair = true;
+
+        SentFrame f;
+        f.kind   = SentFrame::Live;
+        f.length = static_cast<uint16_t>(len);
+        f.at     = piece.offset;
+        f.offset = piece.id;
+        recovery_.add_frame(f);
+    }
+    return p;
+}
+
+uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end, Clock::time_point now) {
     size_t first = 0, count = 0;
     if (!recovery_.newest_in_flight(first, count)) return p;
     // Copied out first: the frames are recorded again below, which may move the log.
@@ -950,6 +1053,19 @@ uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end) {
     frames.reserve(count);
     for (size_t i = 0; i < count; ++i) frames.push_back(recovery_.frames()[first + i]);
     for (SentFrame f : frames) {
+        if (f.kind == SentFrame::Live) {
+            LiveSender::Piece piece;
+            if (!live_send_.repeat(f.offset, f.at, f.length, now + one_way(), piece)) continue;
+            const uint64_t lifetime = ms_left(piece.deadline, now);
+            if (p >= end) break;
+            const size_t hdr = live_header_size(piece.id, lifetime, piece.size, piece.offset, piece.len);
+            if (hdr + piece.len > static_cast<size_t>(end - p)) break;
+            p = put_live_header(p, piece.id, lifetime, piece.size, piece.offset, piece.len);
+            std::memcpy(p, live_send_.bytes(piece.id, piece.offset), piece.len);
+            p += piece.len;
+            recovery_.add_frame(f);
+            continue;
+        }
         if (f.kind != SentFrame::Stream) continue;
         Lane* lane = lane_for(static_cast<MessageType>(f.stream), false);
         // Only what is still unacknowledged: the front of the frame may have been
@@ -958,7 +1074,7 @@ uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end) {
         size_t   length = f.length;
         if (!lane || !lane->send.unacked_part(offset, length)) continue;
         f.offset = offset;
-        f.length = static_cast<uint32_t>(length);
+        f.length = static_cast<uint16_t>(length);
         if (p >= end) break;
         const size_t room = static_cast<size_t>(end - p);
         const size_t hdr  = stream_header_size(f.stream, f.offset, f.length, true);
@@ -974,7 +1090,11 @@ uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end) {
 void UdpConnection::pump(Clock::time_point now) {
     // A responder says nothing before its answer to the Initial is out.
     if (!established() || (role_ == ConnRole::Inbound && !answered_)) return;
-    const uint64_t queued_before = total_unsent();
+    // Nothing goes out that can no longer arrive in time, and while something
+    // still can, a path gone quiet is probed without backing off.
+    live_send_.expire(now, one_way());
+    recovery_.set_impatient(live_send_.has_pending());
+    const size_t queued_before = queued_bytes();
     recovery_.begin_sending(now, has_sendable_data());
     recovery_.clear_pacer_hold();
 
@@ -982,7 +1102,7 @@ void UdpConnection::pump(Clock::time_point now) {
     for (;;) {
         // Stopped by the peer's window with data waiting: say so, once per limit —
         // it is the only way a receiver learns its window is what holds us back.
-        if (new_data_budget() == 0 && total_unsent() > 0 && blocked_at_ != peer_max_data_) {
+        if (new_data_budget() == 0 && stream_unsent() > 0 && blocked_at_ != peer_max_data_) {
             blocked_at_   = peer_max_data_;
             blocked_owed_ = true;
         }
@@ -1010,9 +1130,11 @@ void UdpConnection::pump(Clock::time_point now) {
         // expected, a packet that should have carried data did not.
         if (!with_data || queued_bytes() == owed_before) break;
     }
-    recovery_.note_send_limits(total_unsent() > 0, window_stopped, !has_sendable_data());
+    recovery_.note_send_limits(stream_unsent() + live_send_.unsent() > 0, window_stopped,
+                               !has_sendable_data());
 
-    if (want_write_ && total_unsent() < queued_before) raise(PollOut);
+    // Sending — or dropping what expired — made room.
+    if (want_write_ && queued_bytes() < queued_before) raise(PollOut);
     // An orderly close finishes once everything is delivered.
     if (closing_ && flushed()) {
         send_close(now, kCloseOrderly);
@@ -1083,6 +1205,12 @@ bool UdpConnection::send_message(FrameHeader header, ByteView payload) {
     return true;
 }
 
+bool UdpConnection::send_live(FrameHeader header, ByteView payload, Clock::time_point deadline) {
+    if (!established() || closing_) return false;
+    live_send_.push(header, payload, deadline);
+    return true;
+}
+
 void UdpConnection::flush(Clock::time_point now) {
     pump(now);
     flush_events();
@@ -1102,13 +1230,16 @@ void UdpConnection::close(CloseReason reason, Clock::time_point now) {
 }
 
 bool UdpConnection::flushed() const noexcept {
+    // A live message is settled within its lifetime either way, so waiting for one
+    // never holds a close up for long.
+    if (!live_send_.empty()) return false;
     for (const auto& lane : lanes_)
         if (!lane->send.flushed()) return false;
     return true;
 }
 
 size_t UdpConnection::queued_bytes() const noexcept {
-    uint64_t n = 0;
+    uint64_t n = live_send_.unsent() + live_send_.lost_bytes();
     for (const auto& lane : lanes_) n += lane->send.unsent() + lane->send.lost_bytes();
     return static_cast<size_t>(n);
 }
@@ -1139,11 +1270,15 @@ PathStats UdpConnection::path_stats() const noexcept {
     s.bytes_in_flight = recovery_.bytes_in_flight();
     s.bytes_delivered = recovery_.sampler().delivered();
     s.bytes_lost      = recovery_.sampler().lost();
+    s.live_sent       = live_send_.sent();
+    s.live_expired    = live_send_.expired();
     return s;
 }
 
 void UdpConnection::release_memory() {
     recovery_.release_memory();
+    live_send_.release_memory();
+    live_recv_.decay();
     for (auto& lane : lanes_) lane->recv.decay();
 }
 
@@ -1161,6 +1296,11 @@ std::optional<Clock::time_point> UdpConnection::next_deadline() const noexcept {
         if (ack_due_ != kNever) due = (std::min)(due, ack_due_);
     }
     if (const auto r = recovery_.deadline()) due = (std::min)(due, *r);
+    // A live message that runs out while it waits is dropped then, not at the next
+    // packet: what it holds counts against the queue's marks. One being put
+    // together is given up the same way.
+    if (const auto e = live_send_.next_expiry(one_way())) due = (std::min)(due, *e);
+    if (const auto e = live_recv_.next_expiry())          due = (std::min)(due, *e);
     // Keep-alive: proof we are here, and a NAT mapping kept open.
     due = (std::min)(due, last_send_ + kKeepAlive);
     return due;
@@ -1183,7 +1323,10 @@ void UdpConnection::tick(Clock::time_point now) {
     // it being carried further.
     if (recv_window_ > initial_window_ && account_.held == 0 && now - last_data_recv_ >= kWindowDecay)
         recv_window_ = initial_window_;
+    live_recv_.expire(now, account_);
 
+    live_send_.expire(now, one_way());
+    recovery_.set_impatient(live_send_.has_pending());
     switch (recovery_.on_timer(now, *this)) {
         case Recovery::Timeout::Probe:
             send_probe(now);
@@ -1224,6 +1367,9 @@ void UdpConnection::frames_acked(const RingBuffer<SentFrame>& log, size_t first,
                 if (Lane* lane = lane_for(static_cast<MessageType>(f.stream), false))
                     lane->send.on_acked(f.offset, f.length);
                 break;
+            case SentFrame::Live:
+                live_send_.on_acked(f.offset, f.at, f.length);
+                break;
             case SentFrame::Ack: {
                 // The peer has our ACK naming everything up to f.offset, so those
                 // numbers need never be named again (RFC 9000 §13.2.4).
@@ -1251,6 +1397,9 @@ void UdpConnection::frames_lost(const RingBuffer<SentFrame>& log, size_t first, 
                 if (Lane* lane = lane_for(static_cast<MessageType>(f.stream), false))
                     lane->send.on_lost(f.offset, f.length);
                 break;
+            case SentFrame::Live:
+                live_send_.on_lost(f.offset, f.at, f.length);
+                break;
             // Control frames are repeated only while what they said still holds:
             // a later window update supersedes a lost one.
             case SentFrame::MaxData:
@@ -1275,12 +1424,14 @@ void UdpConnection::die(CloseReason reason, bool keep_inbox) {
     phase_        = Phase::Dead;
     close_reason_ = reason;
     recovery_.clear();
+    live_send_.clear();
     for (auto& lane : lanes_) {
         lane->send.clear();
         // An orderly close leaves what has arrived to be delivered; the transport
         // reports the end once it has been.
         if (!keep_inbox) lane->recv.clear(account_);
     }
+    if (!keep_inbox) live_recv_.clear(account_);
     early_.clear();
     handshaker_.reset();
     hs_deadline_ = kNever;

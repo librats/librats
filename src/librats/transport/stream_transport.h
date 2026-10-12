@@ -24,6 +24,11 @@
  * good — the nonces are in lockstep — and a ping queued behind megabytes of file
  * would wait for all of them.
  *
+ * It is also the last moment a live message can be dropped: once sealed it has a
+ * nonce the peer is counting on, so one past its deadline is dropped by the queue
+ * as its turn comes rather than sealed (send_queue.h). What the kernel has already
+ * taken still arrives, late or not.
+ *
  * For that to reach the network rather than end in a kernel queue, the kernel's
  * own backlog has to stay short too: a TCP socket is given TCP_NOTSENT_LOWAT (see
  * Reactor::adopt), so it accepts more only once what it has not sent yet runs low.
@@ -78,7 +83,7 @@ public:
     CloseReason error_reason() const override { return error_; }
 
     size_t max_payload() const noexcept override;
-    bool   send(FrameHeader header, ByteView payload) override;
+    bool   send(FrameHeader header, ByteView payload, Deadline deadline) override;
     bool   flush() override;
     size_t backlog() const noexcept override { return queue_.allocated() + tx_.allocated(); }
 

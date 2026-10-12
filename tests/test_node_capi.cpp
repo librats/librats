@@ -28,7 +28,7 @@ bool wait_for(Pred pred, std::chrono::milliseconds timeout = 10s) {
 struct EchoCtx { rats_t node; };
 void echo_cb(void* user, const char* peer_id, const void* data, size_t len) {
     auto* ctx = static_cast<EchoCtx*>(user);
-    rats_send(ctx->node, peer_id, "chat", data, len);  // bounce back to sender
+    rats_send(ctx->node, peer_id, "chat", data, len, 0);  // bounce back to sender
 }
 
 struct CollectCtx {
@@ -103,7 +103,7 @@ TEST(NodeCApiTest, ConnectSendAndEcho) {
     EXPECT_EQ(std::strlen(server_id), 64u);
 
     const char* msg = "hello capi";
-    rats_send(client, server_id, "chat", msg, std::strlen(msg));
+    rats_send(client, server_id, "chat", msg, std::strlen(msg), 0);
 
     ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(client_ctx.mu); return client_ctx.got == msg; }))
         << "no echo via C API";
@@ -419,7 +419,7 @@ TEST(NodeCApiTest, PeerWritableAndTheWritableCallback) {
     const std::vector<uint8_t> chunk(32 * 1024, 'c');
     bool told_to_stop = false;
     for (int i = 0; i < 64 && !told_to_stop; ++i) {
-        ASSERT_EQ(rats_send(client, server_id, "bulk", chunk.data(), chunk.size()), RATS_OK);
+        ASSERT_EQ(rats_send(client, server_id, "bulk", chunk.data(), chunk.size(), 0), RATS_OK);
         told_to_stop = rats_peer_writable(client, server_id) == 0;
     }
     EXPECT_TRUE(told_to_stop) << "the queue never reported filling up";
@@ -456,7 +456,7 @@ TEST(NodeCApiTest, PathStatsReachAnApplication) {
     char* server_id = rats_local_id(server);
     ASSERT_NE(server_id, nullptr);
     const std::vector<uint8_t> chunk(32 * 1024, 'p');
-    for (int i = 0; i < 16; ++i) rats_send(client, server_id, "bulk", chunk.data(), chunk.size());
+    for (int i = 0; i < 16; ++i) rats_send(client, server_id, "bulk", chunk.data(), chunk.size(), 0);
 
     ASSERT_TRUE(wait_for([&] { return samples.load() >= 2; })) << "no samples reached the callback";
     rats_path_stats_t st{};
@@ -510,7 +510,7 @@ TEST(NodeCApiTest, CongestionControlIsConfigurable) {
     char* server_id = rats_local_id(server);
     ASSERT_EQ(rats_peer_transport(client, server_id), RATS_TRANSPORT_UDP);
     const std::vector<uint8_t> payload(200 * 1024, 0x5A);
-    ASSERT_EQ(rats_send(client, server_id, "cc", payload.data(), payload.size()), RATS_OK);
+    ASSERT_EQ(rats_send(client, server_id, "cc", payload.data(), payload.size(), 0), RATS_OK);
     ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == payload.size(); }));
 
     rats_string_free(server_id);
@@ -545,7 +545,7 @@ TEST(NodeCApiTest, UdpReceiveLimitsAreConfigurable) {
     ASSERT_EQ(rats_peer_transport(client, server_id), RATS_TRANSPORT_UDP);
     std::vector<uint8_t> payload(2 * 1024 * 1024);
     for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<uint8_t>(i * 131);
-    ASSERT_EQ(rats_send(client, server_id, "rw", payload.data(), payload.size()), RATS_OK);
+    ASSERT_EQ(rats_send(client, server_id, "rw", payload.data(), payload.size(), 0), RATS_OK);
     ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == payload.size(); }));
     {
         std::lock_guard<std::mutex> l(ctx.mu);
@@ -573,7 +573,7 @@ TEST(NodeCApiTest, BinaryPayloadWithNuls) {
 
     const uint8_t payload[] = {0x00, 0x01, 0xFF, 0x00, 0x42};
     char* server_id = rats_local_id(server);
-    rats_send(client, server_id, "bin", payload, sizeof(payload));
+    rats_send(client, server_id, "bin", payload, sizeof(payload), 0);
 
     ASSERT_TRUE(wait_for([&] { std::lock_guard<std::mutex> l(ctx.mu); return ctx.got.size() == sizeof(payload); }));
     {
@@ -630,7 +630,7 @@ TEST(NodeCApiTest, BroadcastRawAndTyped) {
 
     const char* raw = "via-broadcast";
     ASSERT_TRUE(wait_for([&] {
-        rats_broadcast(server, "raw", raw, std::strlen(raw));
+        rats_broadcast(server, "raw", raw, std::strlen(raw), 0);
         std::lock_guard<std::mutex> l(raw_ctx.mu);
         return raw_ctx.got == raw;
     })) << "raw broadcast not delivered";
@@ -731,4 +731,43 @@ TEST(NodeCApiTest, RelayingIsReachableFromTheCApi) {
 
     rats_stop(a); rats_stop(b); rats_stop(hub);
     rats_destroy(a); rats_destroy(b); rats_destroy(hub);
+}
+
+// A lifetime makes a message live through the C ABI as it does in C++: it arrives
+// at the same callback, the path stats count it, and one past the size a live
+// message may carry is refused at the call.
+TEST(NodeCApiTest, ALiveMessageArrivesAtTheChannelCallback) {
+    rats_config_t cfg = rats_config_default();
+    cfg.enable_listen  = 0;
+    cfg.path_sample_ms = 20;
+    rats_t server = rats_create(0);
+    rats_t client = rats_create_config(&cfg);
+    BinCtx ctx;
+    ASSERT_EQ(rats_on(server, "video", bin_collect_cb, &ctx), RATS_OK);
+    ASSERT_EQ(rats_start(server), RATS_OK);
+    ASSERT_EQ(rats_start(client), RATS_OK);
+    rats_connect(client, "127.0.0.1", rats_listen_port(server));
+    ASSERT_TRUE(wait_for([&] { return rats_peer_count(client) == 1 && rats_peer_count(server) == 1; }));
+
+    char* server_id = rats_local_id(server);
+    const std::vector<uint8_t> frame(20000, 'k');
+    ASSERT_EQ(rats_send(client, server_id, "video", frame.data(), frame.size(), 500), RATS_OK);
+    ASSERT_TRUE(wait_for([&] {
+        std::lock_guard<std::mutex> l(ctx.mu);
+        return ctx.got == frame;
+    })) << "the live message never reached the callback";
+
+    const std::vector<uint8_t> too_big(1024 * 1024 + 1, 'x');
+    EXPECT_EQ(rats_send(client, server_id, "video", too_big.data(), too_big.size(), 500), RATS_ERR_INVALID_ARG);
+    EXPECT_EQ(rats_broadcast(client, "video", too_big.data(), too_big.size(), 500), RATS_ERR_INVALID_ARG);
+
+    rats_path_stats_t st{};
+    EXPECT_TRUE(wait_for([&] {
+        return rats_path_stats(client, server_id, &st) == RATS_OK && st.live_sent == 1;
+    })) << "the live message was not counted";
+    EXPECT_EQ(st.live_expired, 0u);
+
+    rats_string_free(server_id);
+    rats_stop(client); rats_stop(server);
+    rats_destroy(client); rats_destroy(server);
 }

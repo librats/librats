@@ -132,9 +132,9 @@ TEST(StreamTransportTest, HandshakesAndCarriesMessagesBothWays) {
     EXPECT_EQ(p.b_sink.remote, alice.id);
     EXPECT_TRUE(p.a->is_secure());
 
-    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 9}, ByteView(std::string("hello"))));
-    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 9}, ByteView(std::string(70000, 'z'))));
-    ASSERT_TRUE(p.b->send(FrameHeader{MessageType::Gossip, 0, 0}, ByteView(std::string("back"))));
+    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 9}, ByteView(std::string("hello")), {}));
+    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 9}, ByteView(std::string(70000, 'z')), {}));
+    ASSERT_TRUE(p.b->send(FrameHeader{MessageType::Gossip, 0, 0}, ByteView(std::string("back")), {}));
     p.pump();
 
     ASSERT_EQ(p.b_sink.frames.size(), 2u);
@@ -162,10 +162,10 @@ TEST(StreamTransportTest, AnUrgentMessageOvertakesABacklogTheLinkHasNotTaken) {
     constexpr size_t kChunk  = 16 * 1024;
     for (int i = 0; i < kChunks; ++i)
         ASSERT_TRUE(p.a->send(FrameHeader{MessageType::FileChunk, 0, 0},
-                              ByteView(std::string(kChunk, static_cast<char>('0' + i % 10)))));
+                              ByteView(std::string(kChunk, static_cast<char>('0' + i % 10))), {}));
     ASSERT_TRUE(p.a->flush());
     EXPECT_TRUE(p.a_wire->wants_write) << "a refused write must ask to be told when to retry";
-    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::Ping, 0, 0}, ByteView(std::string("ping"))));
+    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::Ping, 0, 0}, ByteView(std::string("ping")), {}));
 
     p.a_wire->budget = SIZE_MAX;   // and reads again
     ASSERT_TRUE(p.a->on_writable());
@@ -201,9 +201,9 @@ TEST(StreamTransportTest, AMarkerOnAnotherChannelArrivesBehindTheDataBeforeIt) {
     p.a_wire->budget = 4096;   // the kernel takes a little, then stops
     constexpr int kData = 2000;
     for (int i = 0; i < kData; ++i)
-        ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string(256, 'd'))));
+        ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string(256, 'd')), {}));
     ASSERT_TRUE(p.a->flush());
-    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 2}, ByteView(std::string("flush"))));
+    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 2}, ByteView(std::string("flush")), {}));
     ASSERT_TRUE(p.a->flush());
 
     p.a_wire->budget = SIZE_MAX;
@@ -220,8 +220,8 @@ TEST(StreamTransportTest, ACorruptedBlockBreaksTheTransportAsAProtocolError) {
     Pair p(a_sec, b_sec);
     p.connect();
 
-    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 0}, ByteView(std::string("intact"))));
-    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 0}, ByteView(std::string("tampered"))));
+    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 0}, ByteView(std::string("intact")), {}));
+    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 0}, ByteView(std::string("tampered")), {}));
     ASSERT_TRUE(p.a->flush());
     // The second block still frames, but one byte of its tag is wrong.
     p.ab->bytes.back() ^= 0x01;
@@ -239,7 +239,7 @@ TEST(StreamTransportTest, DeliversWhatArrivedBeforeTheFinAndThenReportsTheClose)
     p.connect();
     EXPECT_FALSE(p.a->is_secure());
 
-    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 0}, ByteView(std::string("last words"))));
+    ASSERT_TRUE(p.a->send(FrameHeader{MessageType::App, 0, 0}, ByteView(std::string("last words")), {}));
     ASSERT_TRUE(p.a->flush());
     p.a->close(CloseReason::LocalClose);
 

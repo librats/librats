@@ -8,16 +8,21 @@
 // joined by a model of a path and run through hours of simulated time in
 // milliseconds, deterministically. An End is one side — the host of one
 // connection, a responder that accepts the first Initial it is sent the way the
-// mux would. The path between two Ends is the test's (a Wire).
+// mux would. The path between two Ends is the test's (a Wire); Net is the plain
+// one — a fixed delay and a hook — and Pair two Ends joined by it.
 
 #include "librats/security/noise_security.h"
 #include "librats/security/plaintext_security.h"
 #include "librats/transport/udp_connection.h"
 #include "librats/transport/udp_wire.h"
 
+#include <gtest/gtest.h>
+
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,6 +30,7 @@
 namespace udptest {
 
 using namespace librats;
+using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 
 /// What carries datagrams between Ends.
@@ -95,6 +101,12 @@ public:
         return conn && conn->send_message(FrameHeader{type, 0, channel}, payload);
     }
 
+    /// A live message, worth delivering until `deadline`.
+    bool send_live(MessageType type, const std::string& payload, Clock::time_point deadline,
+                   uint16_t channel = 0) {
+        return conn && conn->send_live(FrameHeader{type, 0, channel}, ByteView(payload), deadline);
+    }
+
     bool established() const { return conn && conn->established(); }
 
     // — UdpConnectionHost —
@@ -132,5 +144,134 @@ private:
 /// The two addresses every pair uses.
 inline Address addr_a() { return Address{*IpAddress::parse("10.0.0.1"), 1111}; }
 inline Address addr_b() { return Address{*IpAddress::parse("10.0.0.2"), 2222}; }
+
+/// A path with a fixed one-way delay, a hook that may drop or rewrite any
+/// datagram, and nothing else.
+class Net final : public Wire {
+public:
+    explicit Net(Clock::duration delay) : delay_(delay) {}
+
+    void carry(const Address& from, const Address& to, const uint8_t* data, size_t len) override {
+        Bytes bytes(data, data + len);
+        if (blackout || (hook && hook(bytes, from, to))) { ++dropped; return; }
+        queue_.push_back({now_ + delay_, from, to, std::move(bytes)});
+    }
+
+    /// Put a datagram on the path as if `from` had just sent it.
+    void inject(const Address& from, const Address& to, Bytes bytes) {
+        queue_.push_back({now_ + delay_, from, to, std::move(bytes)});
+    }
+
+    void deliver_until(Clock::time_point now) {
+        now_ = now;
+        while (!queue_.empty() && queue_.front().arrive <= now) {
+            Datagram d = std::move(queue_.front());
+            queue_.pop_front();
+            for (End* end : ends)
+                if (end->addr() == d.to) end->receive(d.bytes.data(), d.bytes.size(), d.from, now);
+        }
+    }
+
+    void set_now(Clock::time_point now) { now_ = now; }
+
+    std::vector<End*> ends;
+    /// Sees every datagram as it is sent; true drops it. May rewrite it.
+    std::function<bool(Bytes& datagram, const Address& from, const Address& to)> hook;
+    bool   blackout = false;
+    size_t dropped  = 0;
+
+private:
+    struct Datagram {
+        Clock::time_point arrive;
+        Address           from, to;
+        Bytes             bytes;
+    };
+    Clock::duration      delay_;
+    Clock::time_point    now_{};
+    std::deque<Datagram> queue_;
+};
+
+/// The frames of a short packet sent under plaintext security, where the header
+/// mask is zeros and nothing is sealed: what lets a hook see what a packet carries.
+inline std::vector<udp::Frame> frames_of(const Bytes& d) {
+    std::vector<udp::Frame> out;
+    if (d.empty() || udp::is_long_header(d[0])) return out;
+    const size_t header = udp::kShortHeaderSize + (d[0] & 0x03) + 1;
+    udp::FrameReader r(d.data() + header, d.size() - header);
+    udp::Frame f;
+    while (r.next(f)) out.push_back(f);
+    return out;
+}
+
+inline bool carries_stream(const Bytes& d, MessageType type) {
+    for (const auto& f : frames_of(d))
+        if (f.type == udp::kStream && f.stream.stream == static_cast<uint8_t>(type)) return true;
+    return false;
+}
+
+inline bool is_short(const Bytes& d) { return !d.empty() && !udp::is_long_header(d[0]); }
+
+inline bool is_handshake(const Bytes& d, udp::LongType type) {
+    udp::LongPacket p;
+    return !d.empty() && udp::is_long_header(d[0]) && udp::decode_long(d.data(), d.size(), p) && p.type == type;
+}
+
+struct Pair {
+    explicit Pair(bool noise = true, Clock::duration one_way = 10ms, UdpConnectionConfig a_cfg = {},
+                  UdpConnectionConfig b_cfg = {})
+        : id_a(Identity::generate()), id_b(Identity::generate()),
+          sec_a(noise ? std::unique_ptr<SecurityProvider>(new NoiseSecurity(id_a))
+                      : std::unique_ptr<SecurityProvider>(new PlaintextSecurity(id_a))),
+          sec_b(noise ? std::unique_ptr<SecurityProvider>(new NoiseSecurity(id_b))
+                      : std::unique_ptr<SecurityProvider>(new PlaintextSecurity(id_b))),
+          net(one_way), a(net, addr_a(), *sec_a, a_cfg), b(net, addr_b(), *sec_b, b_cfg) {
+        net.ends = {&a, &b};
+        a.listening = false;
+    }
+
+    void dial() { a.dial(b.addr(), 0x1000, now); }
+
+    bool connect() {
+        dial();
+        return run_until([&] { return a.established() && b.established(); });
+    }
+
+    void step(Clock::duration dt = 1ms) {
+        now += dt;
+        net.deliver_until(now);
+        a.tick(now);
+        b.tick(now);
+        a.read(now);
+        b.read(now);
+    }
+
+    template <typename Pred>
+    bool run_until(Pred pred, Clock::duration limit = 10s, Clock::duration dt = 1ms) {
+        const auto end = now + limit;
+        while (now < end) {
+            if (pred()) return true;
+            step(dt);
+        }
+        return pred();
+    }
+
+    void run(Clock::duration d, Clock::duration dt = 1ms) {
+        const auto end = now + d;
+        while (now < end) step(dt);
+    }
+
+    /// Queue on a, and let it send what it may.
+    void send(MessageType type, const std::string& payload, uint16_t channel = 0) {
+        ASSERT_TRUE(a.send(type, payload, channel));
+        a.conn->flush(now);
+    }
+
+    Identity id_a, id_b;
+    std::unique_ptr<SecurityProvider> sec_a, sec_b;
+    Net net;
+    End a, b;
+    Clock::time_point now{};
+};
+
 
 } // namespace udptest

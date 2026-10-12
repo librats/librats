@@ -161,7 +161,7 @@ jobject toFileTransferStatus(JNIEnv* env, int status) {
 jobject toPathStats(JNIEnv* env, const rats_path_stats_t& s) {
     jclass cls = env->FindClass("com/librats/PathStats");
     if (!cls) { env->ExceptionClear(); return nullptr; }
-    jmethodID ctor = env->GetMethodID(cls, "<init>", "(JZJIIJJDJJ)V");
+    jmethodID ctor = env->GetMethodID(cls, "<init>", "(JZJIIJJDJJJJ)V");
     jobject value = nullptr;
     if (ctor) {
         value = env->NewObject(cls, ctor,
@@ -174,10 +174,12 @@ jobject toPathStats(JNIEnv* env, const rats_path_stats_t& s) {
                                static_cast<jlong>(s.bytes_in_flight),
                                static_cast<jdouble>(s.loss),
                                static_cast<jlong>(s.bytes_delivered),
-                               static_cast<jlong>(s.bytes_lost));
+                               static_cast<jlong>(s.bytes_lost),
+                               static_cast<jlong>(s.live_sent),
+                               static_cast<jlong>(s.live_expired));
     } else {
         env->ExceptionClear();
-        LOGE("com/librats/PathStats has no (JZJIIJJDJJ)V constructor");
+        LOGE("com/librats/PathStats has no (JZJIIJJDJJJJ)V constructor");
     }
     env->DeleteLocalRef(cls);
     return value;
@@ -491,23 +493,25 @@ Java_com_librats_RatsNode_nativePeerTransports(JNIEnv* env, jobject, jlong ptr, 
 
 JNIEXPORT jint JNICALL
 Java_com_librats_RatsNode_nativeSend(JNIEnv* env, jobject, jlong ptr, jstring peer_id,
-                                       jstring channel, jbyteArray data) {
+                                       jstring channel, jbyteArray data, jint lifetime_ms) {
     std::string pid = toCString(env, peer_id);
     std::string ch = toCString(env, channel);
     jbyte* bytes = data ? env->GetByteArrayElements(data, nullptr) : nullptr;
     jsize len = data ? env->GetArrayLength(data) : 0;
-    rats_error_t rc = rats_send(node_of(ptr), pid.c_str(), ch.c_str(), bytes, len);
+    rats_error_t rc = rats_send(node_of(ptr), pid.c_str(), ch.c_str(), bytes, len,
+                                static_cast<uint32_t>(lifetime_ms));  // >= 0: checked in Java
     if (bytes) env->ReleaseByteArrayElements(data, bytes, JNI_ABORT);
     return rc;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_librats_RatsNode_nativeBroadcast(JNIEnv* env, jobject, jlong ptr, jstring channel,
-                                            jbyteArray data) {
+                                            jbyteArray data, jint lifetime_ms) {
     std::string ch = toCString(env, channel);
     jbyte* bytes = data ? env->GetByteArrayElements(data, nullptr) : nullptr;
     jsize len = data ? env->GetArrayLength(data) : 0;
-    rats_error_t rc = rats_broadcast(node_of(ptr), ch.c_str(), bytes, len);
+    rats_error_t rc = rats_broadcast(node_of(ptr), ch.c_str(), bytes, len,
+                                     static_cast<uint32_t>(lifetime_ms));
     if (bytes) env->ReleaseByteArrayElements(data, bytes, JNI_ABORT);
     return rc;
 }

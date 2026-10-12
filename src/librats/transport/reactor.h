@@ -156,10 +156,11 @@ public:
     /// the one thread that can read the connection's state without racing it.
     void cancel_dial(ConnId id, CloseReason reason);
 
-    /// Send a frame to every Established connection on this reactor. Thread-safe:
-    /// the iteration runs on the reactor thread. The payload is shared across
-    /// connections (the per-peer encryption still happens in each one's transport).
-    void broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload);
+    /// Send a frame to every Established connection on this reactor — live until
+    /// `deadline`, if it has one (see Connection::send). Thread-safe: the iteration
+    /// runs on the reactor thread. The payload is shared across connections (the
+    /// per-peer encryption still happens in each one's transport).
+    void broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload, Deadline deadline = {});
 
     // — timers (reactor thread, or via post/execute) —
     TimerId schedule(std::chrono::milliseconds delay, Task on_fire);

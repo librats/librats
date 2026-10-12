@@ -99,15 +99,18 @@ public:
 
     // ── Messages ────────────────────────────────────────────────────────────
 
-    /// Largest payload send() can carry, once established. A larger message can
-    /// never be sent whole, so the connection refuses it rather than queue it.
+    /// Largest payload send() can carry reliably, once established. A larger
+    /// message can never be sent whole, so the connection refuses it rather than
+    /// queue it. (A live one is bounded by SendOptions::kMaxLivePayload instead.)
     virtual size_t max_payload() const noexcept = 0;
 
     /// Queue one message for the peer: only once established, and no larger than
-    /// max_payload(). Never drops what it is given. May write at once when enough is
-    /// queued that waiting for the end of the reactor turn would only cost memory —
-    /// which is the one way it can fail: false means that write broke the transport.
-    virtual bool send(FrameHeader header, ByteView payload) = 0;
+    /// max_payload(). A reliable message (no `deadline`) is never dropped; a live
+    /// one is, once it can no longer arrive by its deadline (see SendOptions), and
+    /// that is the only thing ever dropped. May write at once when enough is queued
+    /// that waiting for the end of the reactor turn would only cost memory — which
+    /// is the one way it can fail: false means that write broke the transport.
+    virtual bool send(FrameHeader header, ByteView payload, Deadline deadline) = 0;
 
     /// Write out what is queued, as far as the path will take it. Called by the
     /// reactor at the end of every turn that queued something.

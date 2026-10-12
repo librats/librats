@@ -60,10 +60,12 @@ public:
     /// consumer. Also false if the peer is not connected. Wait on the event and
     /// not on a poll of the queue's state: the answer is re-derived on the reactor
     /// thread, so a caller that spins instead of yielding never lets it change.
-    virtual bool                send(const PeerId& to, MessageType type, ByteView payload) = 0;
+    /// `options` can make it a live message (see SendOptions).
+    virtual bool                send(const PeerId& to, MessageType type, ByteView payload,
+                                     SendOptions options = {}) = 0;
     /// Send to every connected peer. @return whether *every* one of them still
     /// has room, so a subsystem that fans out can pause on the slowest.
-    virtual bool                broadcast(MessageType type, ByteView payload) = 0;
+    virtual bool                broadcast(MessageType type, ByteView payload, SendOptions options = {}) = 0;
     virtual std::vector<PeerId>  connected_peers() const = 0;
     virtual std::vector<PeerInfo> peers() const = 0;  ///< snapshot incl. dialable addresses
     virtual void                on(MessageType type, MessageHandler handler) = 0;

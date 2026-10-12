@@ -249,9 +249,9 @@ TEST(UdpMuxTest, DialsAndCarriesMessagesOverTheSharedSocket) {
     EXPECT_EQ(a.local_cid() % 2, 0u);
     EXPECT_EQ(b.local_cid(), udp::paired_cid(a.local_cid()));
 
-    ASSERT_TRUE(net.out(id).transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("dialer speaking"))));
+    ASSERT_TRUE(net.out(id).transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("dialer speaking")), {}));
     ASSERT_TRUE(net.out(id).transport->flush());
-    ASSERT_TRUE(in.transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("and the other end"))));
+    ASSERT_TRUE(in.transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("and the other end")), {}));
     ASSERT_TRUE(in.transport->flush());
     EXPECT_TRUE(net.pump_until([&] { return in.sink->frames.size() == 1 && net.out(id).sink->frames.size() == 1; }));
     EXPECT_EQ(in.sink->frames[0], "dialer speaking");
@@ -292,7 +292,7 @@ TEST(UdpMuxTest, ARestartedNodeResetsWhatItForgot) {
     net.sock_b = loopback_socket(port);
     net.b = std::make_unique<UdpMux>(net.sock_b, AddressFamily::IPv4, net.host_b, net.sec_b, keyed);
 
-    ASSERT_TRUE(net.out(id).transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("still there?"))));
+    ASSERT_TRUE(net.out(id).transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("still there?")), {}));
     ASSERT_TRUE(net.out(id).transport->flush());
     ASSERT_TRUE(net.pump_until([&] { return net.out(id).broken; }, 3s))
         << "the reset never reached the connection it was for";
@@ -309,7 +309,7 @@ TEST(UdpMuxTest, LingersLongEnoughToDeliverTheLastMessage) {
     Side::Held& in = *net.host_b.side.only();
 
     const std::string farewell(40000, 'f');
-    ASSERT_TRUE(net.out(id).transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(farewell)));
+    ASSERT_TRUE(net.out(id).transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(farewell), {}));
     net.out(id).transport->close(CloseReason::LocalClose);
     net.host_a.side.held.erase(id);   // gone before a byte is acknowledged
     EXPECT_EQ(net.a->stream_count(), 1u) << "the connection was dropped with data still owed";
@@ -482,7 +482,7 @@ TEST(UdpMuxTest, ABurstIsDispatchedOncePerBatchRatherThanPerDatagram) {
     ASSERT_TRUE(net.connect(id));
     Side::Held& in = *net.host_b.side.only();
     for (int i = 0; i < 200; ++i)
-        ASSERT_TRUE(net.out(id).transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string(1000, 'm'))));
+        ASSERT_TRUE(net.out(id).transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string(1000, 'm')), {}));
     ASSERT_TRUE(net.out(id).transport->flush());
     const size_t before = net.host_b.side.dispatches;
     ASSERT_TRUE(net.pump_until([&] { return in.sink->frames.size() == 200; }));
@@ -1181,3 +1181,64 @@ TEST(TransportUdpTest, BothTransportsShareOnePort) {
     client.stop();
     server.stop();
 }
+
+// ── Live messages through a Node ────────────────────────────────────────────
+//
+// The same call on either wire: a lifetime makes a message live, and the far end
+// receives it on the channel's handler like any other. Over UDP it travels as
+// LIVE frames; over TCP it waits unsealed in a live lane and is dropped there if
+// it expires first.
+class NodeLiveTest : public ::testing::TestWithParam<TransportKind> {};
+
+TEST_P(NodeLiveTest, ArrivesOnTheChannelsHandlerAndIsCounted) {
+    NodeConfig server_cfg = base_config();
+    NodeConfig client_cfg = base_config();
+    client_cfg.enable_listen       = false;
+    client_cfg.preferred_transport = GetParam();
+    client_cfg.path_sample_ms      = 20;
+    Node server(server_cfg), client(client_cfg);
+
+    std::mutex mutex;
+    std::vector<std::string> got;
+    server.on("video", [&](Peer, ByteView payload) {
+        std::lock_guard<std::mutex> lock(mutex);
+        got.emplace_back(payload.begin(), payload.end());
+    });
+    std::atomic<int> replies{0};
+    client.on("ack", [&](Peer, ByteView) { ++replies; });
+    server.on("ask", [&](Peer peer, ByteView) { peer.send("ack", ByteView(std::string("ok")), {200ms}); });
+
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", server.listen_port());
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+    ASSERT_EQ(client.peers().front().transport, GetParam());
+    const PeerId peer = client.peers().front().id;
+
+    constexpr int kFrames = 20;
+    for (int i = 0; i < kFrames; ++i)
+        client.send(peer, "video", ByteView(std::to_string(i) + std::string(i % 5 ? 500 : 40000, 'v')), {1s});
+    client.broadcast("video", ByteView(std::string("to everyone")), {1s});
+    client.send(peer, "ask", ByteView(std::string("?")), {1s});
+
+    ASSERT_TRUE(wait_for([&] {
+        std::lock_guard<std::mutex> lock(mutex);
+        return got.size() == kFrames + 1;
+    }, 5s));
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (int i = 0; i < kFrames; ++i) {
+            const std::string want = std::to_string(i) + std::string(i % 5 ? 500 : 40000, 'v');
+            EXPECT_EQ(std::count(got.begin(), got.end(), want), 1) << i;
+        }
+        EXPECT_EQ(std::count(got.begin(), got.end(), std::string("to everyone")), 1);
+    }
+    EXPECT_TRUE(wait_for([&] { return replies.load() == 1; }, 5s)) << "a live reply through Peer::send";
+    EXPECT_TRUE(wait_for([&] {
+        const auto st = client.path_stats(peer);
+        return st && st->live_sent == kFrames + 2 && st->live_expired == 0;
+    }, 5s)) << "the counters do not add up";
+}
+
+INSTANTIATE_TEST_SUITE_P(BothWires, NodeLiveTest, ::testing::Values(TransportKind::Udp, TransportKind::Tcp),
+                         [](const auto& info) { return std::string(to_string(info.param)); });

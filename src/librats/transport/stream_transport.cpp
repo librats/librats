@@ -178,8 +178,8 @@ size_t StreamTransport::max_payload() const noexcept {
     return framer::kMaxBlockSize - framing;
 }
 
-bool StreamTransport::send(FrameHeader header, ByteView payload) {
-    queue_.push(header, payload);
+bool StreamTransport::send(FrameHeader header, ByteView payload, Deadline deadline) {
+    queue_.push(header, payload, deadline);
 
     // Enough for a write already: send it now rather than hold it to the end of the
     // turn. Not while the link has said it is full, though — its writable event is
@@ -189,11 +189,15 @@ bool StreamTransport::send(FrameHeader header, ByteView payload) {
 }
 
 bool StreamTransport::flush() {
+    // What live messages are judged against; the clock is read only if there are any.
+    const Deadline now = queue_.has_live() ? std::chrono::steady_clock::now() : Deadline{};
     for (;;) {
         // Seal only just ahead of the link. What it has not taken yet stays in the
         // queue unsealed, so a more urgent lane can still go first.
-        while (tx_.size() < kSealAhead && !queue_.empty())
-            queue_.seal_next(*session_, send_nonce_++, tx_);
+        while (tx_.size() < kSealAhead && !queue_.empty()) {
+            if (!queue_.seal_next(*session_, send_nonce_, tx_, now)) break;
+            ++send_nonce_;
+        }
         if (tx_.empty()) break;
 
         // The whole of tx_ in one write: a burst of blocks leaves in a single
@@ -234,6 +238,8 @@ PathStats StreamTransport::path_stats() const {
     // Everything queued here waits in front of a new message as surely as what
     // the link holds — on TCP far more, the kernel's own backlog being kept short.
     if (s.valid) s.queued_bytes += queue_.size() + tx_.size();
+    s.live_sent    = queue_.live_sent();
+    s.live_expired = queue_.live_expired();
     return s;
 }
 

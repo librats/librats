@@ -23,11 +23,13 @@ public final class PathStats {
     private final double loss;
     private final long bytesDelivered;
     private final long bytesLost;
+    private final long liveSent;
+    private final long liveExpired;
 
-    // Built by librats_jni.cpp; the signature there is (JZJIIJJDJJ)V.
+    // Built by librats_jni.cpp; the signature there is (JZJIIJJDJJJJ)V.
     PathStats(long bandwidthBps, boolean appLimited, long pacingBps, int srttUs, int minRttUs,
               long queuedBytes, long bytesInFlight, double loss, long bytesDelivered,
-              long bytesLost) {
+              long bytesLost, long liveSent, long liveExpired) {
         this.bandwidthBps = bandwidthBps;
         this.appLimited = appLimited;
         this.pacingBps = pacingBps;
@@ -38,6 +40,8 @@ public final class PathStats {
         this.loss = loss;
         this.bytesDelivered = bytesDelivered;
         this.bytesLost = bytesLost;
+        this.liveSent = liveSent;
+        this.liveExpired = liveExpired;
     }
 
     /** @return the congestion controller's bandwidth estimate; 0 = none yet. */
@@ -91,5 +95,19 @@ public final class PathStats {
     /** @return bytes declared lost since the connection opened. */
     public long bytesLost() {
         return bytesLost;
+    }
+
+    /** @return live messages (a lifetime above 0) sent since the connection opened. */
+    public long liveSent() {
+        return liveSent;
+    }
+
+    /**
+     * @return of those, how many were dropped because their lifetime ran out —
+     *         the first thing a source asking for more than the path carries
+     *         will see
+     */
+    public long liveExpired() {
+        return liveExpired;
     }
 }

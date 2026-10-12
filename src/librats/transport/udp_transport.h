@@ -42,7 +42,7 @@ public:
     CloseReason error_reason() const override;
 
     size_t max_payload() const noexcept override;
-    bool   send(FrameHeader header, ByteView payload) override;
+    bool   send(FrameHeader header, ByteView payload, Deadline deadline) override;
     bool   flush() override;
     size_t backlog() const noexcept override;
 

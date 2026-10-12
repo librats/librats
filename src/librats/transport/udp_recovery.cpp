@@ -116,8 +116,8 @@ void Recovery::on_packet_sent(Clock::time_point now, size_t bytes, bool ack_elic
     // packet sent for the same reason): measured from the last acknowledgement, a
     // repair sent a little after it would be given up on a little before its own
     // answer could possibly arrive.
-    if (loss_deadline_ == kNever)          loss_deadline_ = now + loss_timeout();
-    else if (repair && in_recovery_)       loss_deadline_ = (std::max)(loss_deadline_, now + loss_timeout());
+    if (loss_deadline_ == kNever)                                      arm_loss_timer(now);
+    else if (repair && in_recovery_ && now + loss_timeout() > loss_deadline_) arm_loss_timer(now);
     // An episode lasts until its repairs are answered (see on_ack).
     if (repair && in_recovery_) last_repair_pn_ = pn;
 
@@ -515,11 +515,15 @@ Clock::duration Recovery::estimated_rto() const noexcept {
                           kMinRto, kMaxRto);
 }
 
-Clock::duration Recovery::probe_timeout() const noexcept {
+Clock::duration Recovery::base_probe_timeout() const noexcept {
     if (!rtt_.have_rtt) return kInitialRto;
     const auto granularity = std::chrono::duration_cast<Clock::duration>(kMinProbeTimeout) / 8;
-    auto pto = rtt_.srtt + (std::max)(4 * rtt_.rttvar, granularity) +
-               std::chrono::duration_cast<Clock::duration>(kMaxAckDelay);
+    return rtt_.srtt + (std::max)(4 * rtt_.rttvar, granularity) +
+           std::chrono::duration_cast<Clock::duration>(kMaxAckDelay);
+}
+
+Clock::duration Recovery::probe_timeout() const noexcept {
+    auto pto = base_probe_timeout();
     // Doubled per consecutive probe: if the first went unanswered the path is worse
     // than the estimate says, and asking again at the same spacing is asking twice.
     for (int i = 0; i < tail_probes_ && pto < std::chrono::duration_cast<Clock::duration>(kMaxRto); ++i)
@@ -534,12 +538,33 @@ Clock::duration Recovery::loss_timeout() const noexcept {
     // window. Not after a timeout until the path answers again, though: it has
     // just been silent for a whole timeout, and backing off is what keeps a dead
     // path from being hammered. Never later than the timeout it stands in front of.
-    if (timeout_recovery_ || tail_probes_ >= kMaxTailProbes) return rtt_.rto;
-    return (std::min)(probe_timeout(), rtt_.rto);
+    if (timeout_recovery_ || tail_probes_ >= kMaxTailProbes) return timeout_wait();
+    return (std::min)(probe_timeout(), timeout_wait());
+}
+
+Clock::duration Recovery::impatient_wait() const noexcept {
+    return (std::max)(base_probe_timeout(), std::chrono::duration_cast<Clock::duration>(kMinRto));
+}
+
+Clock::duration Recovery::timeout_wait() const noexcept {
+    return impatient_ ? (std::min)(rtt_.rto, impatient_wait()) : rtt_.rto;
+}
+
+void Recovery::set_impatient(bool impatient) noexcept {
+    if (impatient == impatient_) return;
+    impatient_ = impatient;
+    // The timer running now was set for the other case.
+    if (loss_deadline_ != kNever) loss_deadline_ = loss_armed_at_ + loss_timeout();
+}
+
+void Recovery::arm_loss_timer(Clock::time_point from) noexcept {
+    loss_armed_at_ = from;
+    loss_deadline_ = from + loss_timeout();
 }
 
 void Recovery::rearm(Clock::time_point now) noexcept {
-    loss_deadline_ = in_flight_packets_ > 0 ? now + loss_timeout() : kNever;
+    if (in_flight_packets_ > 0) arm_loss_timer(now);
+    else                        loss_deadline_ = kNever;
 }
 
 std::optional<Clock::time_point> Recovery::deadline() const noexcept {
@@ -570,18 +595,26 @@ Recovery::Timeout Recovery::on_timer(Clock::time_point now, FrameSink& sink) {
     // nothing else changed, and let the answer decide.
     if (!timeout_recovery_ && tail_probes_ < kMaxTailProbes) {
         ++tail_probes_;
-        loss_deadline_ = now + loss_timeout();
+        arm_loss_timer(now);
         return Timeout::Probe;
     }
 
-    if (++timeouts_ > kMaxTimeouts) return Timeout::GiveUp;
+    // An impatient timeout with no answer since the last one is the same silence,
+    // asked about sooner (set_impatient). It is not news to the controller, which
+    // would otherwise cut its model again at every probe of one outage, and it does
+    // not count towards giving up — silence that long is the idle timeout's to
+    // judge (UdpConnection::kIdleTimeout).
+    const bool asked_sooner = impatient_ && timeout_recovery_;
+    if (!asked_sooner && ++timeouts_ > kMaxTimeouts) return Timeout::GiveUp;
 
     // A timeout always collapses the window, even mid-episode, and starts an
     // episode of its own so the acknowledgements that come back as the pipe
     // refills do not each take another reduction. The controller reads what was
     // in flight, so it hears of this before the flight is written off.
-    ++congestion_events_;
-    cc_->on_timeout(now, flight_bytes_);
+    if (!asked_sooner) {
+        ++congestion_events_;
+        cc_->on_timeout(now, flight_bytes_);
+    }
     in_recovery_      = true;
     timeout_recovery_ = true;
     timeout_episode_  = true;
@@ -597,15 +630,16 @@ Recovery::Timeout Recovery::on_timer(Clock::time_point now, FrameSink& sink) {
     recovery_credit_ = 0;
     recover_fs_      = 0;   // what follows is slow start, not PRR
 
-    // Exponential backoff, so a path that is down is probed ever more cheaply.
-    rtt_.rto       = clamp_duration(rtt_.rto * 2, kMinRto, kMaxRto);
-    loss_deadline_ = now + rtt_.rto;
+    // Exponential backoff, so a path that is down is probed ever more cheaply —
+    // unless what is waiting will not keep (set_impatient).
+    rtt_.rto = clamp_duration(rtt_.rto * 2, kMinRto, kMaxRto);
+    arm_loss_timer(now);
     retire_front();
     return Timeout::Collapsed;
 }
 
 bool Recovery::newest_in_flight(size_t& first, size_t& count) const noexcept {
-    // The newest packet that carried stream data: a window update or a PING sent
+    // The newest packet that carried data: a window update or a PING sent
     // after it has nothing worth repeating, and a probe that only asks costs the
     // round trip its answer takes before the data can follow.
     for (size_t i = sent_.size(); i-- > 0;) {
@@ -613,7 +647,7 @@ bool Recovery::newest_in_flight(size_t& first, size_t& count) const noexcept {
         if (!pkt.in_flight || pkt.frame_count == 0) continue;
         const size_t at = static_cast<size_t>(pkt.frames_at - frames_base_);
         for (size_t f = 0; f < pkt.frame_count; ++f) {
-            if (frames_[at + f].kind != SentFrame::Stream) continue;
+            if (!frames_[at + f].carries_data()) continue;
             first = at;
             count = pkt.frame_count;
             return true;

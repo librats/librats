@@ -206,6 +206,7 @@ set(LIBRARY_SOURCES
     src/librats/transport/transport.h
     src/librats/transport/stream_transport.h
     src/librats/transport/stream_transport.cpp
+    src/librats/transport/priority.h
     src/librats/transport/send_queue.h
     src/librats/transport/send_queue.cpp
     src/librats/transport/link.h
@@ -217,6 +218,8 @@ set(LIBRARY_SOURCES
     src/librats/transport/udp_recovery.cpp
     src/librats/transport/udp_streams.h
     src/librats/transport/udp_streams.cpp
+    src/librats/transport/udp_live.h
+    src/librats/transport/udp_live.cpp
     src/librats/transport/udp_connection.h
     src/librats/transport/udp_connection.cpp
     src/librats/transport/udp_transport.h
@@ -734,6 +737,7 @@ if(RATS_BUILD_TESTS)
         tests/test_reactor.cpp
         tests/test_udp_wire.cpp
         tests/test_udp_connection.cpp
+        tests/test_udp_live.cpp
         tests/test_transport_udp.cpp
         tests/test_udp_congestion.cpp
         tests/test_relay_link.cpp

@@ -14,6 +14,7 @@
 
 #include "librats/util/rats_export.h"
 #include "librats/core/bytes.h"
+#include "librats/core/types.h"   // SendOptions
 #include "librats/peer/peer_id.h"
 #include "librats/peer/peer_info.h"
 #include "librats/peer/peer_table.h"  // PeerRoute
@@ -39,7 +40,8 @@ public:
     ///         it has to be able to feel backpressure like any other sender; while
     ///         this returned void it could not, and the bytes it queued were
     ///         invisible to peer_writable() into the bargain.
-    bool send(std::string_view channel, ByteView payload) const;
+    /// `options` as for Node::send().
+    bool send(std::string_view channel, ByteView payload, SendOptions options = {}) const;
 
     /// Request this peer be disconnected.
     void disconnect() const;

@@ -50,7 +50,9 @@
 //            against source shapes — keyframe size, intra refresh, noisy
 //            frames, a slow rate control, temporal layers — since how an
 //            encoder spreads its rate is all a codec changes for the path.
-//            `--realtime` runs only this section.
+//            Every frame is a live message (SendOptions::lifetime), dropped
+//            when it cannot make the player's deadline; `--reliable-video`
+//            sends them reliably instead. `--realtime` runs only this section.
 //
 // ── Reading the numbers ─────────────────────────────────────────────────────
 //
@@ -105,6 +107,9 @@ using ns    = std::chrono::nanoseconds;
 bool g_color = true;
 /// The controller every Rig in the current pass runs.
 CongestionAlgorithm g_algo = CongestionAlgorithm::Bbr;
+/// The realtime section sends each frame reliably, on its lane, instead of as a
+/// live message — what every build before live messages did (--reliable-video).
+bool g_reliable_video = false;
 const char* col(const char* code) { return g_color ? code : ""; }
 
 // ── The path ────────────────────────────────────────────────────────────────
@@ -189,12 +194,36 @@ public:
         return bytes;
     }
 
+    /// The channel live messages are sent on, so the far end can tell them apart.
+    static constexpr uint16_t kLiveChannel = 1;
+
+    /// Queue one live message of `bytes`, worth delivering until `deadline`, whose
+    /// first four bytes are `tag` — delivery is in no order and not certain, so the
+    /// far end needs to know which one it got. Always taken.
+    bool write_live(size_t bytes, uint32_t tag, Clock::time_point deadline, Clock::time_point now) {
+        if (!conn_ || !conn_->established()) return false;
+        static std::vector<uint8_t> payload(1 << 20, 0xAB);
+        bytes = (std::max)(sizeof(tag), (std::min)(bytes, payload.size()));
+        std::memcpy(payload.data(), &tag, sizeof(tag));
+        if (!conn_->send_live(FrameHeader{MessageType::App, 0, kLiveChannel},
+                              ByteView(payload.data(), bytes), deadline))
+            return false;
+        conn_->flush(now);
+        return true;
+    }
+
     void tick(Clock::time_point now) {
         if (!conn_) return;
         const auto due = conn_->next_deadline();
         if (due && *due <= now) conn_->tick(now);
         conn_->deliver(now, [&](const Frame& f) {
-            if (f.header.type == MessageType::App) ++app_messages;
+            if (f.header.type == MessageType::App && f.header.channel == kLiveChannel) {
+                uint32_t tag = 0;
+                std::memcpy(&tag, f.payload.data(), sizeof(tag));
+                live_arrivals.push_back(tag);
+            } else if (f.header.type == MessageType::App) {
+                ++app_messages;
+            }
             delivered += f.payload.size();
             return true;
         });
@@ -219,7 +248,8 @@ public:
     }
 
     uint64_t delivered    = 0;   ///< payload bytes of every message handed over
-    uint64_t app_messages = 0;
+    uint64_t app_messages = 0;   ///< reliable App messages handed over
+    std::vector<uint32_t> live_arrivals;   ///< tags of live messages handed over, not yet looked at
 
 private:
     Path&                                  path_;
@@ -683,7 +713,8 @@ struct Scene {
 /// What one realtime run measured.
 struct RealtimeResult {
     double median, p99;     ///< frame latency over the one-way delay, ms
-    double late;            ///< % of frames past the deadline
+    double late;            ///< % of frames past the deadline, or never there
+    double dropped;         ///< % of frames that never arrived
     double freeze_max;      ///< longest the picture stood still, ms
     double frozen;          ///< all the time it stood still, s
     double recover;         ///< ms from the event's end to a second of on-time frames; <0 no event, inf never
@@ -694,20 +725,27 @@ struct RealtimeResult {
 /// second, each sent as one message the moment it is captured, sized by the
 /// scene's profile. A frame is complete once its message has been delivered.
 ///
+/// Each frame is a live message whose deadline is the player's: captured + the
+/// one-way delay (half the minimum round trip the connection has measured, which
+/// is what any application can know) + 100 ms. One that cannot make it is dropped
+/// by the transport rather than delivered late, and frames arrive in no order.
+/// With --reliable-video each is instead a reliable message on the App lane,
+/// handed over as soon as the connection takes it, arriving in capture order.
+///
 /// The encoder's rate control keeps the produced rate on target whatever the
 /// profile's noise and scene cuts do — an overshoot is paid back over the next
 /// half second, as a VBV buffer would — so rows with the same target produce the
 /// same video rate and differ only in how it is spread.
 struct Video {
     static constexpr int kFps = 30, kGop = 60;
+    /// The player's patience: how far past the one-way delay a frame may land.
+    static constexpr auto kJitterBudget = ms(100);
 
     struct Frame {
         Clock::time_point captured;
         size_t            bytes;
-        bool              queued = false;   ///< handed to the connection
-    };
-    struct Played {
-        Clock::time_point captured, arrived;
+        bool              arrived = false;
+        Clock::time_point arrived_at{};
     };
 
     Video(Peer& tx, Peer& rx, const Scene& scene)
@@ -750,19 +788,28 @@ struct Video {
 
     /// Frames go to the connection as soon as it takes them, oldest first.
     void feed(Clock::time_point now) {
-        for (Frame& f : frames) {
-            if (f.queued) continue;
-            if (tx.write(f.bytes, now) == 0) break;
-            f.queued = true;
+        for (; fed < frames.size(); ++fed) {
+            const Frame& f = frames[fed];
+            if (g_reliable_video) {
+                if (tx.write(f.bytes, now) == 0) break;
+                continue;
+            }
+            const auto one_way = us(tx.path_stats().min_rtt_us / 2);
+            tx.write_live(f.bytes, static_cast<uint32_t>(fed), f.captured + one_way + kJitterBudget, now);
         }
     }
 
-    /// One lane, so the messages arrive in the order the frames were captured.
+    /// What has been delivered: by tag for live frames, and for reliable ones in
+    /// the order they were sent — one lane.
     void play(Clock::time_point now) {
-        while (played_messages < rx.app_messages && !frames.empty()) {
-            played.push_back(Played{frames.front().captured, now});
-            frames.pop_front();
-            ++played_messages;
+        for (const uint32_t tag : rx.live_arrivals) {
+            frames[tag].arrived    = true;
+            frames[tag].arrived_at = now;
+        }
+        rx.live_arrivals.clear();
+        for (; played_messages < rx.app_messages && played_messages < frames.size(); ++played_messages) {
+            frames[played_messages].arrived    = true;
+            frames[played_messages].arrived_at = now;
         }
     }
 
@@ -776,7 +823,7 @@ struct Video {
         next_retarget += ms(100);
         const PathStats st = tx.path_stats();
         uint64_t backlog = st.queued_bytes;
-        for (const Frame& f : frames) if (!f.queued) backlog += f.bytes;
+        for (size_t i = fed; i < frames.size(); ++i) backlog += frames[i].bytes;
         if (st.bandwidth_bps > 0) {
             const double wait  = backlog * 8.0 / st.bandwidth_bps * 1000 +
                                  (st.srtt_us - st.min_rtt_us) / 1000.0;
@@ -797,8 +844,8 @@ struct Video {
     Peer&             rx;
     const Scene&      scene;
     std::mt19937      rng;
-    std::deque<Frame> frames;            // captured, not yet complete at the far end
-    std::vector<Played> played;          // complete, in capture order
+    std::vector<Frame> frames;           // every frame captured, by number
+    size_t            fed = 0;           // frames handed to the connection
     uint64_t          played_messages = 0, video_bytes = 0;
     double            target = 0;        // bits/s the encoder is told to run at
     double            encoder_rate = 0;  // what its rate control currently produces
@@ -823,10 +870,12 @@ struct Video {
 /// before the damage it does has reached the far end. "never" means no such
 /// second followed it.
 ///
-/// Every frame is still reliable and in order on its lane: a loss holds back the
-/// frames behind it, and nothing stale is dropped. The rows are the measuring
-/// stick for what deadline messages will change, and the Adaptive ones for what
-/// PathStats alone already buys.
+/// Every frame is a live message: never late by more than the transport's guess
+/// at the path is wrong, but possibly not there at all — "dropped" is the share
+/// that never arrived. A missing frame counts against nothing after it: what a
+/// decoder makes of a gap (intra refresh, layers, asking for a keyframe) is its
+/// own business. --reliable-video sends each frame reliably instead, where a loss
+/// holds back the frames behind it and nothing stale is ever dropped.
 RealtimeResult realtime(const Scene& sc) {
     const size_t bdp_pkts = static_cast<size_t>(sc.link * 1e6 / 8 * sc.rtt / 1000.0 / 1228);
     const size_t queue    = (std::max<size_t>)(static_cast<size_t>(bdp_pkts * sc.buffer_bdp), 8);
@@ -893,14 +942,23 @@ RealtimeResult realtime(const Scene& sc) {
 
     const double base  = sc.rtt / 2.0;
     const auto   to_ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
-    const auto   deadline = ms(static_cast<long long>(base + 100));
+    const auto   deadline = ms(static_cast<long long>(base)) + Video::kJitterBudget;
+    const auto   on_time = [&](const Video::Frame& f) { return f.arrived && f.arrived_at - f.captured <= deadline; };
 
-    // A frame still undelivered when the run ends never arrived in time either.
+    // A frame that never arrived — dropped, or still undelivered when the run
+    // ends — was not in time either.
+    // Latency is of the frames that arrived; "late" counts the rest too.
     std::vector<double> latency;
-    for (const Video::Played& p : video.played) latency.push_back(to_ms(p.arrived - p.captured));
-    for (size_t i = 0; i < video.frames.size(); ++i) latency.push_back(2000);
+    size_t missing = 0, late_frames = 0;
+    for (const Video::Frame& f : video.frames) {
+        if (f.arrived) latency.push_back(to_ms(f.arrived_at - f.captured));
+        else           ++missing;
+        if (!on_time(f)) ++late_frames;
+    }
+    if (latency.empty()) latency.push_back(2000);
 
-    // The player: each frame shown at its deadline, or on arrival when later.
+    // The player: each frame shown at its deadline, or on arrival when later; a
+    // frame that never came is never shown.
     const Clock::duration frame_every =
         std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1)) / Video::kFps;
     const Clock::duration freeze_at = (std::max)(frame_every * 3, frame_every + ms(150));
@@ -911,10 +969,13 @@ RealtimeResult realtime(const Scene& sc) {
             freeze_max = (std::max)(freeze_max, to_ms(shown - shown_prev));
             frozen    += to_ms(shown - shown_prev) / 1000;
         }
-        shown_prev = shown;
+        shown_prev = (std::max)(shown_prev, shown);
     };
-    for (const Video::Played& p : video.played) freeze((std::max)(p.arrived, p.captured + deadline));
-    if (!video.frames.empty()) freeze(Clock::time_point{} + until);
+    for (const Video::Frame& f : video.frames)
+        if (f.arrived) freeze((std::max)(f.arrived_at, f.captured + deadline));
+    // A stream whose last frames never came stands still until the last was due.
+    if (!video.frames.empty() && !video.frames.back().arrived)
+        freeze(video.frames.back().captured + deadline);
 
     double recover = -1;
     if (sc.has_event()) {
@@ -922,12 +983,12 @@ RealtimeResult realtime(const Scene& sc) {
         constexpr size_t kSettled = Video::kFps;
         const auto from = Clock::time_point{} + event_end;
         size_t run = 0;
-        for (size_t i = 0; i < video.played.size(); ++i) {
-            const Video::Played& p = video.played[i];
-            if (p.captured < from) continue;
-            run = p.arrived - p.captured <= deadline ? run + 1 : 0;
+        for (size_t i = 0; i < video.frames.size(); ++i) {
+            const Video::Frame& f = video.frames[i];
+            if (f.captured < from) continue;
+            run = on_time(f) ? run + 1 : 0;
             if (run == kSettled) {
-                recover = to_ms(video.played[i + 1 - kSettled].captured - from);
+                recover = to_ms(video.frames[i + 1 - kSettled].captured - from);
                 break;
             }
         }
@@ -935,11 +996,11 @@ RealtimeResult realtime(const Scene& sc) {
 
     std::sort(latency.begin(), latency.end());
     const auto q = [&](double f) { return latency[static_cast<size_t>(f * (latency.size() - 1))]; };
-    const double late = std::count_if(latency.begin(), latency.end(),
-                                      [&](double l) { return l > base + 100; }) * 100.0 / latency.size();
-    const double secs = std::chrono::duration<double>(finish - start).count();
-    return {q(0.5) - base, q(0.99) - base, late, freeze_max, frozen, recover,
-            video.video_bytes * 8.0 / secs / 1e6};
+    const double frames = static_cast<double>((std::max<size_t>)(video.frames.size(), 1));
+    const double late   = late_frames * 100.0 / frames;
+    const double secs   = std::chrono::duration<double>(finish - start).count();
+    return {q(0.5) - base, q(0.99) - base, late, missing * 100.0 / frames, freeze_max, frozen,
+            recover, video.video_bytes * 8.0 / secs / 1e6};
 }
 
 /// A share of frames late, as a column: green within what a call shrugs off,
@@ -957,8 +1018,8 @@ void realtime_row(const char* name, const Scene& sc) {
     if (r.recover < 0)                  std::snprintf(recover, sizeof(recover), "%9s", "-");
     else if (std::isinf(r.recover))     std::snprintf(recover, sizeof(recover), "%9s", "never");
     else                                std::snprintf(recover, sizeof(recover), "%9.0f", r.recover);
-    std::printf("  %-30s %9.1f %9.1f %s %9.0f %9.1f %s %9.2f\n", name, r.median, r.p99,
-                late_cell(r.late).c_str(), r.freeze_max, r.frozen, recover, r.video);
+    std::printf("  %-30s %9.1f %9.1f %s %8.1f%% %9.0f %9.1f %s %9.2f\n", name, r.median, r.p99,
+                late_cell(r.late).c_str(), r.dropped, r.freeze_max, r.frozen, recover, r.video);
 }
 
 /// One source shape across the conditions it is most sensitive to: a clean path
@@ -987,6 +1048,7 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--cc=reno") == 0) g_algo = CongestionAlgorithm::Reno;
         if (std::strcmp(argv[i], "--cc=bbr") == 0)  g_algo = CongestionAlgorithm::Bbr;
         if (std::strcmp(argv[i], "--realtime") == 0) realtime_only = true;
+        if (std::strcmp(argv[i], "--reliable-video") == 0) g_reliable_video = true;
     }
 #ifndef _WIN32
     if (!isatty(1)) g_color = false;
@@ -1089,8 +1151,10 @@ int main(int argc, char** argv) {
 
     }
 
-    heading("realtime — 30 s of live video (30 fps, keyframe every 2 s), ms over one-way delay",
-            {"median", "p99", "late", "freeze ms", "frozen s", "recover", "video"});
+    heading(g_reliable_video
+                ? "realtime — 30 s of video (30 fps, keyframe every 2 s), every frame reliable, ms over one-way delay"
+                : "realtime — 30 s of live video (30 fps, keyframe every 2 s), ms over one-way delay",
+            {"median", "p99", "late", "dropped", "freeze ms", "frozen s", "recover", "video"});
     using X = Besides;
     realtime_row("4 of 10 Mbit, 40 ms",            Scene{});
     realtime_row("  1%",                           Scene{}.lossy(0.01));
@@ -1121,18 +1185,26 @@ int main(int argc, char** argv) {
     realtime_row("  + 1 s outage",                 Scene{}.adaptive().outage(1000));
     realtime_row("  + 3 s outage",                 Scene{}.adaptive().outage(3000));
     std::printf("  (\"late\" is the share of frames that landed more than 100 ms after the path\n"
-                "   allowed — dropped or frozen in a call. \"freeze\" is the longest the picture\n"
-                "   stood still and \"frozen\" all the time it did, by WebRTC's rule: two shown\n"
-                "   frames more than max(3 frames, 1 frame + 150 ms) apart. \"late\" is delay,\n"
-                "   \"freeze\" stutter: a stream can be smooth and still a second behind. Events\n"
-                "   start at 10 s; \"recover\" is how long after one ended it took until a full\n"
-                "   second of frames was on time again (\"never\": it was not). Loss is both\n"
-                "   ways; in bursts or fades the same mean loss comes as spells that lose\n"
-                "   everything, that long on average. Every frame here is reliable and in\n"
-                "   order on its lane: a loss holds back the frames that follow it, and\n"
-                "   nothing stale is ever dropped; a file to the same peer has a lane of\n"
-                "   its own. \"adaptive\" rows retarget the encoder from PathStats every\n"
-                "   100 ms, starting from 1 Mbit/s; video is what it produced.)\n");
+                "   allowed, or never landed — a call shows neither; \"dropped\" is the share\n"
+                "   that never did, and median and p99 are of the ones that did. \"freeze\" is\n"
+                "   the longest the picture stood still and \"frozen\" all the time it did, by\n"
+                "   WebRTC's rule: two shown frames more than max(3 frames, 1 frame + 150 ms)\n"
+                "   apart. \"late\" is delay, \"freeze\" stutter: a stream can be smooth and\n"
+                "   still a second behind. Events start at 10 s; \"recover\" is how long after\n"
+                "   one ended it took until a full second of frames was on time again\n"
+                "   (\"never\": it was not). Loss is both ways; in bursts or fades the same\n"
+                "   mean loss comes as spells that lose everything, that long on average.\n");
+    if (g_reliable_video)
+        std::printf("   Every frame here is reliable and in order on its lane: a loss holds back\n"
+                    "   the frames that follow it, and nothing stale is ever dropped.\n");
+    else
+        std::printf("   Every frame is a live message due at capture + min RTT/2 + 100 ms: what\n"
+                    "   cannot make that is dropped, whole, and frames arrive in no order. A\n"
+                    "   dropped frame spoils nothing after it here — what a decoder does with a\n"
+                    "   gap is the codec's business. --reliable-video for every frame reliable.\n");
+    std::printf("   A file to the same peer has a lane of its own. \"adaptive\" rows retarget\n"
+                "   the encoder from PathStats every 100 ms, starting from 1 Mbit/s; video is\n"
+                "   what it produced.)\n");
 
     heading("realtime by source shape — % of frames late; 10 Mbit, 40 ms",
             "clean", "1% loss", "buf 0.5", "adaptive", "adapt drop");
@@ -1147,7 +1219,8 @@ int main(int argc, char** argv) {
                 "   them through the drop to 3 Mbit. Every row produces the same rate — only its\n"
                 "   spread over frames differs, which is all a codec changes for the path.\n"
                 "   Temporal layers matter once a late frame can be dropped: a top-layer frame is\n"
-                "   needed by nothing. Here every frame is still delivered, so they only reshape.)\n");
+                "   needed by nothing — but here a dropped frame of any layer costs the same, so\n"
+                "   they only reshape.)\n");
 
     std::printf("\nnote: no reordering, no ack compression, no competing traffic, no variable\n"
                 "delay. These are not predictions about a real network — they are a comparison\n"

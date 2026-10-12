@@ -51,7 +51,7 @@ std::vector<Sent> parse(const Bytes& wire) {
 std::vector<Sent> seal_all(SendQueue& q, const Session& session) {
     ChainedSendBuffer out;
     uint64_t nonce = 0;
-    while (!q.empty()) q.seal_next(session, nonce++, out);
+    while (!q.empty()) q.seal_next(session, nonce++, out, Deadline{});
     return parse(drain(out));
 }
 
@@ -145,10 +145,10 @@ TEST(SendQueueTest, InterleavedPushesAndSealsKeepEveryLaneInOrder) {
             payload.append(rng() % 4 == 0 ? 1500 + rng() % 3000 : rng() % 200, 'x');
             q.push(h, ByteView(payload));
         } else if (!q.empty()) {
-            q.seal_next(kPlain, nonce++, out);
+            q.seal_next(kPlain, nonce++, out, Deadline{});
         }
     }
-    while (!q.empty()) q.seal_next(kPlain, nonce++, out);
+    while (!q.empty()) q.seal_next(kPlain, nonce++, out, Deadline{});
 
     std::map<uint32_t, uint32_t> next;
     size_t total = 0;
@@ -192,7 +192,7 @@ TEST(SendQueueTest, SealsEachMessageUnderTheNonceItLeavesWith) {
     q.push(lane(MessageType::App), ByteView(std::string("tail")));
 
     ChainedSendBuffer out;
-    for (uint64_t nonce = 0; !q.empty(); ++nonce) q.seal_next(session, nonce, out);
+    for (uint64_t nonce = 0; !q.empty(); ++nonce) q.seal_next(session, nonce, out, Deadline{});
     Bytes wire = drain(out);
 
     std::vector<std::string> got;
@@ -226,4 +226,67 @@ TEST(SendQueueTest, PacksSmallMessagesAndGivesTheMemoryBack) {
 
     seal_all(q, kPlain);
     EXPECT_EQ(q.allocated(), 0u) << "an empty queue still holds memory of its own";
+}
+
+// ── Live messages ───────────────────────────────────────────────────────────
+
+// A type's live messages are a lane of their own, at Priority::Live: behind ping,
+// ahead of everything ordinary — and outside the order of the type's reliable
+// messages, which keep theirs.
+TEST(SendQueueTest, LiveMessagesGoBetweenInteractiveAndNormal) {
+    const Deadline later = std::chrono::steady_clock::now() + std::chrono::hours(1);
+    SendQueue q;
+    q.push(lane(MessageType::App), ByteView(std::string("reliable 1")));
+    q.push(lane(MessageType::FileChunk), ByteView(std::string(2000, 'f')));
+    q.push(lane(MessageType::App), ByteView(std::string("live")), later);
+    q.push(lane(MessageType::App), ByteView(std::string("reliable 2")));
+    q.push(lane(MessageType::Ping), ByteView(std::string("ping")));
+    EXPECT_TRUE(q.has_live());
+
+    std::vector<std::string> order;
+    for (const auto& f : seal_all(q, kPlain)) order.push_back(f.payload.size() > 20 ? "file" : f.payload);
+    const std::vector<std::string> expected = {"ping", "live", "reliable 1", "reliable 2", "file"};
+    EXPECT_EQ(order, expected);
+    EXPECT_FALSE(q.has_live());
+    EXPECT_EQ(q.live_sent(), 1u);
+    EXPECT_EQ(q.live_expired(), 0u);
+}
+
+// A byte stream's nonces run in lockstep, so the one place a message can still be
+// dropped is before it is sealed. One whose deadline has passed is dropped there,
+// whatever its size, and the nonce goes to the next message instead.
+TEST(SendQueueTest, AnExpiredLiveMessageIsDroppedUnsealedAndCostsNoNonce) {
+    const Deadline now = std::chrono::steady_clock::now();
+    SendQueue q;
+    q.set_seal_room(kPlain.overhead());
+    q.push(lane(MessageType::App), ByteView(std::string("stale small")), now - std::chrono::milliseconds(1));
+    q.push(lane(MessageType::App), ByteView(std::string(6000, 's')), now);
+    q.push(lane(MessageType::App), ByteView(std::string("fresh")), now + std::chrono::seconds(1));
+    q.push(lane(MessageType::Gossip), ByteView(std::string("reliable")));
+
+    ChainedSendBuffer out;
+    uint64_t nonce = 0;
+    while (q.seal_next(kPlain, nonce, out, now)) ++nonce;
+    EXPECT_EQ(nonce, 2u) << "an expired message took a nonce";
+    const auto frames = parse(drain(out));
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_EQ(frames[0].payload, "fresh");
+    EXPECT_EQ(frames[1].payload, "reliable");
+    EXPECT_TRUE(q.empty());
+    EXPECT_EQ(q.size(), 0u);
+    EXPECT_EQ(q.live_sent(), 3u);
+    EXPECT_EQ(q.live_expired(), 2u);
+    EXPECT_FALSE(q.has_live());
+}
+
+// Nothing but expired messages: seal_next() says so rather than sealing nothing.
+TEST(SendQueueTest, AQueueOfOnlyExpiredMessagesSealsNothing) {
+    const Deadline now = std::chrono::steady_clock::now();
+    SendQueue q;
+    for (int i = 0; i < 3; ++i) q.push(lane(MessageType::App), ByteView(std::string("old")), now);
+    ChainedSendBuffer out;
+    EXPECT_FALSE(q.seal_next(kPlain, 0, out, now));
+    EXPECT_TRUE(q.empty());
+    EXPECT_TRUE(out.empty());
+    EXPECT_EQ(q.live_expired(), 3u);
 }

@@ -154,6 +154,13 @@ declare module 'librats' {
     bytesDelivered: number;
     /** Declared lost since the connection opened. */
     bytesLost: number;
+    /** Live messages (`lifetimeMs` > 0) sent since the connection opened. */
+    liveSent: number;
+    /**
+     * Of those, dropped because their lifetime ran out — the first thing a
+     * source asking for more than the path carries will see.
+     */
+    liveExpired: number;
   }
 
   export type PeerHandler = (peerId: string) => void;
@@ -256,10 +263,16 @@ declare module 'librats' {
      * Send raw bytes on a named channel to one peer. Returning means the message
      * was queued, never that it arrived — if you send in bulk, follow it with
      * `peerWritable()`.
+     *
+     * `lifetimeMs` 0 (the default) sends reliably. Anything else makes it a live
+     * message, worth delivering only within that many milliseconds (30000 at
+     * most): repaired while it can still arrive in time, dropped whole once it
+     * cannot, never delivered in part or twice, and ordered with nothing. For
+     * video and audio frames; at most 1 MiB. The receiver needs nothing new.
      */
-    send(peerId: string, channel: string, data: string | Buffer): void;
-    /** Broadcast raw bytes on a named channel to every connected peer. */
-    broadcast(channel: string, data: string | Buffer): void;
+    send(peerId: string, channel: string, data: string | Buffer, lifetimeMs?: number): void;
+    /** Broadcast raw bytes on a named channel to every connected peer; `lifetimeMs` as for `send()`. */
+    broadcast(channel: string, data: string | Buffer, lifetimeMs?: number): void;
     /**
      * Whether this peer's send queue still has room (false also when it is not
      * connected). False means stop: what you just sent was queued like anything

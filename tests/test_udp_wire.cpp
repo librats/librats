@@ -87,7 +87,7 @@ TEST(UdpWireTest, LongPacketsOfAnotherVersionOrShapeAreRefused) {
     LongPacket p;
 
     Bytes other(buf, buf + n);
-    other[4] ^= 0x01;   // version 3 -> 2
+    other[4] ^= 0x01;   // another version
     EXPECT_FALSE(decode_long(other.data(), other.size(), p)) << "another version was parsed";
 
     other.assign(buf, buf + n);
@@ -212,6 +212,43 @@ TEST(UdpWireTest, AStreamFrameWithoutALengthRunsToTheEnd) {
     EXPECT_FALSE(r.error());
 }
 
+TEST(UdpWireTest, ALiveFrameIsAWholeMessageOrAPieceOfOne) {
+    uint8_t buf[128];
+    const char whole[] = "\x01\x00\x00\x00ping";        // an inner message: header + payload
+    const char piece[] = "middle of a frame";
+    uint8_t* p = put_live_header(buf, 7, 150, sizeof(whole), 0, sizeof(whole));
+    EXPECT_EQ(static_cast<size_t>(p - buf), live_header_size(7, 150, sizeof(whole), 0, sizeof(whole)));
+    std::memcpy(p, whole, sizeof(whole));
+    p += sizeof(whole);
+    uint8_t* q = put_live_header(p, 70000, 30000, 100000, 4000, sizeof(piece));
+    EXPECT_EQ(static_cast<size_t>(q - p), live_header_size(70000, 30000, 100000, 4000, sizeof(piece)));
+    EXPECT_GT(q - p, p - buf - static_cast<std::ptrdiff_t>(sizeof(whole))) << "a piece names its size and offset";
+    std::memcpy(q, piece, sizeof(piece));
+    q += sizeof(piece);
+
+    FrameReader r(buf, static_cast<size_t>(q - buf));
+    Frame f;
+    ASSERT_TRUE(r.next(f));
+    ASSERT_EQ(f.type, kLive);
+    EXPECT_EQ(f.live.id, 7u);
+    EXPECT_EQ(f.live.lifetime, 150u);
+    EXPECT_TRUE(f.live.whole());
+    EXPECT_EQ(f.live.size, sizeof(whole));
+    EXPECT_EQ(std::memcmp(f.live.data.data(), whole, sizeof(whole)), 0);
+
+    ASSERT_TRUE(r.next(f));
+    ASSERT_EQ(f.type, kLive);
+    EXPECT_EQ(f.live.id, 70000u);
+    EXPECT_EQ(f.live.lifetime, 30000u);
+    EXPECT_FALSE(f.live.whole());
+    EXPECT_EQ(f.live.size, 100000u);
+    EXPECT_EQ(f.live.offset, 4000u);
+    ASSERT_EQ(f.live.data.size(), sizeof(piece));
+    EXPECT_EQ(std::memcmp(f.live.data.data(), piece, sizeof(piece)), 0);
+    EXPECT_FALSE(r.next(f));
+    EXPECT_FALSE(r.error());
+}
+
 TEST(UdpWireTest, MalformedFramesAreErrors) {
     const auto rejects = [](std::vector<uint8_t> bytes) {
         FrameReader r(bytes.data(), bytes.size());
@@ -228,5 +265,15 @@ TEST(UdpWireTest, MalformedFramesAreErrors) {
     EXPECT_TRUE(rejects({kAck, 0x0a, 0x00}))         << "a truncated ACK";
     EXPECT_TRUE(rejects({kResetToken, 1, 2, 3}))     << "a short reset token";
     EXPECT_TRUE(rejects({kMaxData}))                 << "a value frame with no value";
+    // LIVE: id, lifetime, [size, offset], length, data.
+    EXPECT_TRUE(rejects({kLive, 0x01, 0x05, 0x03, 'a', 'b', 'c'})) << "a live message shorter than a header";
+    EXPECT_TRUE(rejects({kLive, 0x01, 0x05, 0x05, 'a', 'b', 'c', 'd'})) << "a live length past the packet";
+    EXPECT_TRUE(rejects({kLive | kLivePieceBit, 0x01, 0x05, 0x08, 0x06, 0x03, 'a', 'b', 'c'}))
+        << "a piece reaching past the end of its message";
+    EXPECT_TRUE(rejects({kLive | kLivePieceBit, 0x01, 0x05, 0x08, 0x09, 0x00}))
+        << "a piece starting past the end of its message";
+    EXPECT_TRUE(rejects({kLive | kLivePieceBit, 0x01, 0x05, 0x80, 0x20, 0x00, 0x00, 0x00, 0x01, 'a'}))
+        << "a live message past the size limit";
+    EXPECT_FALSE(rejects({kLive | kLivePieceBit, 0x01, 0x05, 0x08, 0x05, 0x03, 'a', 'b', 'c'}));
     EXPECT_FALSE(rejects({kPadding, kPadding, kPing}));
 }

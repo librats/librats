@@ -113,6 +113,8 @@ class PathStats:
     loss: float            # share of bytes lost over the last sample interval, 0..1
     bytes_delivered: int   # acknowledged since the connection opened
     bytes_lost: int        # declared lost since the connection opened
+    live_sent: int = 0     # live messages (lifetime_ms > 0) sent since it opened
+    live_expired: int = 0  # of those, dropped because their lifetime ran out
 
 
 class VersionInfo:

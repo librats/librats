@@ -134,14 +134,19 @@ public:
     ///
     /// Messages of one MessageType reach the peer in the order they were sent —
     /// all of an application's channels included; different types may overtake
-    /// each other, by priority (see send_queue.h).
+    /// each other, by priority (see priority.h).
+    ///
+    /// With a `deadline` the message is live instead (see SendOptions): ordered
+    /// with nothing, dropped by the transport once it can no longer arrive in time,
+    /// and refused if its payload is past SendOptions::kMaxLivePayload. It weighs
+    /// on the marks below like any other until it is sent or dropped.
     ///
     /// @return whether there is still room for more. False means the queue is
     ///         past its low-water mark — this frame is queued like any other,
     ///         nothing is dropped, but the caller should stop and wait for
     ///         ConnectionDelegate::on_writable_changed rather than keep piling on
     ///         until the connection is dropped as a slow consumer.
-    bool send(FrameHeader header, ByteView payload);
+    bool send(FrameHeader header, ByteView payload, Deadline deadline = {});
 
     /// Convenience: send raw bytes on an application channel.
     bool send(uint16_t channel, ByteView payload) {

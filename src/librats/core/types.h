@@ -7,6 +7,8 @@
 
 #include "librats/util/rats_export.h"
 
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 
 namespace librats {
@@ -81,6 +83,51 @@ struct DialProfile {
     static DialProfile punch() noexcept { return DialProfile{8, 200, false}; }
 };
 
+/// How one message is to be delivered.
+///
+/// The default is reliable: the message arrives whatever it takes, in order with
+/// every other message of its lane (see Connection::send). That is right for
+/// anything that must arrive, and wrong for anything that is only worth having
+/// while it is fresh — a video frame a second late is no use to anyone, yet a
+/// reliable transport would keep re-sending it and hold every fresher frame
+/// behind it.
+///
+/// A message with a `lifetime` is *live* instead: worth delivering only within
+/// that long of the send call. The transport still repairs what the path loses,
+/// for as long as the repair can arrive in time, and drops the message — whole —
+/// as soon as it cannot. So a live message arrives in time or not at all: never
+/// in part, never twice, and never late by more than the transport's estimate of
+/// the path is wrong. It is ordered with nothing, not even other live messages on
+/// the same channel: it is handed over the moment it is complete, so a sender that
+/// needs the order (a decoder does) numbers what it sends. Live messages go ahead
+/// of ordinary traffic and are dropped before it is, which is what lets fresh
+/// frames through a queue that a burst or an outage has filled.
+///
+/// The receiving side needs nothing: a live message arrives at the same handler
+/// as any other on its channel.
+struct SendOptions {
+    /// Longest lifetime a live message may have; a longer one is shortened to it.
+    /// Past this a message is not live, it is late.
+    static constexpr std::chrono::milliseconds kMaxLifetime{30000};
+    /// Largest payload a live message may carry — a 4K keyframe with room to
+    /// spare. A message is only ever delivered whole, so the receiver holds all
+    /// of one until its last piece is in, and this bounds that.
+    static constexpr size_t kMaxLivePayload = 1024 * 1024;
+
+    /// Zero (or less): reliable. Otherwise live, for this long from the call.
+    std::chrono::milliseconds lifetime{0};
+
+    bool live() const noexcept { return lifetime.count() > 0; }
+};
+
+/// When a queued message stops being worth sending: the moment a live message's
+/// lifetime runs out (see SendOptions). The clock's epoch, the default, means
+/// never — a reliable message.
+using Deadline = std::chrono::steady_clock::time_point;
+
+/// Whether a message with this deadline is live.
+inline bool is_live(Deadline deadline) noexcept { return deadline != Deadline{}; }
+
 /// What a connection's transport currently knows about the path to its peer —
 /// for an application that sizes its own sending to the path rather than letting
 /// the queue find the limit for it. A live encoder is the case it exists for: the
@@ -113,6 +160,12 @@ struct PathStats {
     double   loss = 0;
     uint64_t bytes_delivered = 0;   ///< acknowledged since the connection opened
     uint64_t bytes_lost      = 0;   ///< declared lost since the connection opened
+    /// Live messages (SendOptions::lifetime) accepted since the connection opened,
+    /// and how many of them were dropped because their lifetime ran out before
+    /// they could be delivered — what a live encoder that is asking for more than
+    /// the path carries sees first.
+    uint64_t live_sent    = 0;
+    uint64_t live_expired = 0;
 };
 
 /// Connection lifecycle. A connection moves strictly forward through these.

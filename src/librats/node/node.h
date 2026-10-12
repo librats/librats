@@ -188,6 +188,9 @@ public:
     /// @param to      destination peer id
     /// @param channel application channel name (interned to a 16-bit id)
     /// @param payload message bytes (copied)
+    /// @param options how it is delivered: reliably by default, or as a live
+    ///                message with a lifetime — `node.send(peer, "video", frame, {150ms})`
+    ///                (see SendOptions)
     /// @return whether that peer's queue still has room. <b>False means stop</b>:
     ///         this message is queued like any other, but the queue is past its
     ///         low-water mark, and an application that keeps going regardless
@@ -201,7 +204,7 @@ public:
     ///         back into send() therefore starves the very thread that would tell
     ///         it to stop — the queue keeps growing while the signal it is waiting
     ///         for never gets a turn to be produced.
-    bool send(const PeerId& to, std::string_view channel, ByteView payload);
+    bool send(const PeerId& to, std::string_view channel, ByteView payload, SendOptions options = {});
     /// Send raw bytes on a named channel to every connected peer.
     /// @return whether *every* one of them still has room — a fan-out can only
     ///         usefully be paced by its slowest recipient.
@@ -211,7 +214,7 @@ public:
     /// broadcast is dispatched per reactor rather than per peer. Good enough to
     /// pace a periodic fan-out; when precise backpressure matters — a file
     /// transfer, a large stream — address peers individually with send().
-    bool broadcast(std::string_view channel, ByteView payload);
+    bool broadcast(std::string_view channel, ByteView payload, SendOptions options = {});
 
     /// Whether a peer's send queue has room for more. False for a peer that is
     /// not connected.
@@ -272,8 +275,9 @@ public:
     MessageJson* json() noexcept;
 
     // — PeerNetwork (for subsystems) —
-    bool                send(const PeerId& to, MessageType type, ByteView payload) override;
-    bool                broadcast(MessageType type, ByteView payload) override;
+    bool                send(const PeerId& to, MessageType type, ByteView payload,
+                             SendOptions options = {}) override;
+    bool                broadcast(MessageType type, ByteView payload, SendOptions options = {}) override;
     std::vector<PeerId> connected_peers() const override;
     void                on(MessageType type, PeerNetwork::MessageHandler cb) override { router_.on_type(type, std::move(cb)); }
 
@@ -297,8 +301,13 @@ private:
     void report_dial_failed(const std::string& host, uint16_t port);
 
     Peer make_peer(const PeerId& id, PeerRoute route) { return Peer(id, route, *this); }
-    void route_send(PeerRoute route, FrameHeader header, Bytes payload,
-                    std::shared_ptr<std::atomic<size_t>> owed = nullptr);
+    /// Queue one message on a peer's route, from any thread: `owed` is the peer's
+    /// in-transit counter, already charged for it.
+    void route_send(PeerRoute route, FrameHeader header, Bytes payload, Deadline deadline,
+                    std::shared_ptr<std::atomic<size_t>> owed);
+    /// The send behind both public overloads.
+    bool send_to(const PeerId& to, FrameHeader header, ByteView payload, SendOptions options);
+    bool broadcast_all(FrameHeader header, ByteView payload, SendOptions options);
     /// Bytes a peer may have queued (in the connection) or in transit to its
     /// reactor before send() starts answering "no room". Derived from the same
     /// config knob that sets the hard limit, so the two cannot drift apart.

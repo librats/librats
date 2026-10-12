@@ -62,10 +62,12 @@
 namespace librats {
 namespace udp {
 
-/// What one sent packet carried that its fate decides. Opaque to Recovery.
+/// What one sent packet carried that its fate decides. Opaque to Recovery, and
+/// kept small: there is one for every frame in flight.
 struct SentFrame {
     enum Kind : uint8_t {
         Stream,       ///< `length` bytes of stream `stream` at `offset`
+        Live,         ///< `length` bytes of live message `offset`, `at` bytes into it
         MaxData,      ///< a window update for `offset` bytes
         DataBlocked,  ///< "stopped at `offset`"
         ResetToken,
@@ -74,9 +76,14 @@ struct SentFrame {
     };
     Kind     kind   = Stream;
     uint8_t  stream = 0;
-    uint32_t length = 0;
+    uint16_t length = 0;   ///< never more than a packet
+    uint32_t at     = 0;
     uint64_t offset = 0;
+
+    /// Whether it carried data a probe may repeat.
+    bool carries_data() const noexcept { return kind == Stream || kind == Live; }
 };
+static_assert(sizeof(SentFrame) == 16, "one per frame in flight: keep it small");
 
 /// Where a packet's frames go once its fate is known.
 class FrameSink {
@@ -211,7 +218,17 @@ public:
     std::optional<Clock::time_point> deadline() const noexcept;
     Timeout on_timer(Clock::time_point now, FrameSink& sink);
 
-    /// Frames of the newest packet still in flight that carried stream data — what
+    /// Something is waiting to be sent that will not keep — a live message — so
+    /// the moment a dead path comes back matters more than how cheaply it is
+    /// probed while it is gone. After a timeout the loss timer then waits no more
+    /// than a probe timeout (and kMinRto) however far it has backed off: one
+    /// packet that often, where backing off would leave a path that returned after
+    /// a one-second outage unnoticed for up to as long again — every live message
+    /// in that time lost for nothing. Such a timeout does not count towards giving
+    /// up; the connection's idle timeout still ends a path that never answers.
+    void set_impatient(bool impatient) noexcept;
+
+    /// Frames of the newest packet still in flight that carried data — what
     /// a probe with nothing new to say repeats, so its acknowledgement lands past
     /// every hole in front of it. False when there is none.
     bool newest_in_flight(size_t& first, size_t& count) const noexcept;
@@ -272,7 +289,14 @@ private:
     void     pace_accrue(Clock::time_point now);
     Clock::duration pace_wait(size_t bytes) const noexcept;
     Clock::duration estimated_rto() const noexcept;
+    /// The probe timeout before any doubling.
+    Clock::duration base_probe_timeout() const noexcept;
     Clock::duration loss_timeout() const noexcept;
+    /// What the loss timer waits once probing is over: the backed-off timeout, or
+    /// less when impatient.
+    Clock::duration timeout_wait() const noexcept;
+    Clock::duration impatient_wait() const noexcept;
+    void            arm_loss_timer(Clock::time_point from) noexcept;
     void            rearm(Clock::time_point now) noexcept;
 
     cc::RttEstimate                           rtt_;
@@ -324,6 +348,8 @@ private:
 
     // — the loss timer —
     Clock::time_point loss_deadline_{};    ///< epoch = not running
+    Clock::time_point loss_armed_at_{};    ///< what loss_deadline_ was measured from
+    bool              impatient_ = false;
     Clock::time_point last_eliciting_sent_{};
     int               tail_probes_ = 0;
     int               timeouts_    = 0;    ///< consecutive, with no progress between

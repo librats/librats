@@ -331,14 +331,52 @@ public class RatsNode implements AutoCloseable {
 
     // ===================== raw channel messaging =====================
 
-    /** Sends raw bytes to one peer over a named channel. */
+    /** Sends raw bytes to one peer over a named channel, reliably. */
     public void send(String peerId, String channel, byte[] data) {
-        check(nativeSend(ptr(), peerId, channel, data), "send on '" + channel + "'");
+        send(peerId, channel, data, 0);
     }
 
-    /** Sends raw bytes over a named channel to every connected peer. */
+    /**
+     * Sends raw bytes to one peer over a named channel.
+     *
+     * <p>{@code lifetimeMs} 0 sends reliably: the message arrives whatever it
+     * takes, in order with the rest of this node's channel traffic. Anything else
+     * makes it a live message, worth delivering only within that many
+     * milliseconds (30000 at most): repaired while it can still arrive in time,
+     * dropped whole once it cannot, never delivered in part or twice, and ordered
+     * with nothing — number what you send if order matters. For video and audio
+     * frames. A live message carries at most 1 MiB. The receiver needs nothing:
+     * it arrives at the channel's {@link MessageCallback} like any other.</p>
+     *
+     * @param lifetimeMs 0 for reliable, otherwise the live message's lifetime
+     * @throws IllegalArgumentException if {@code lifetimeMs} is negative
+     */
+    public void send(String peerId, String channel, byte[] data, int lifetimeMs) {
+        requireLifetime(lifetimeMs);
+        check(nativeSend(ptr(), peerId, channel, data, lifetimeMs), "send on '" + channel + "'");
+    }
+
+    /** Sends raw bytes over a named channel to every connected peer, reliably. */
     public void broadcast(String channel, byte[] data) {
-        check(nativeBroadcast(ptr(), channel, data), "broadcast on '" + channel + "'");
+        broadcast(channel, data, 0);
+    }
+
+    /**
+     * Sends raw bytes over a named channel to every connected peer;
+     * {@code lifetimeMs} as for {@link #send(String, String, byte[], int)}.
+     *
+     * @throws IllegalArgumentException if {@code lifetimeMs} is negative
+     */
+    public void broadcast(String channel, byte[] data, int lifetimeMs) {
+        requireLifetime(lifetimeMs);
+        check(nativeBroadcast(ptr(), channel, data, lifetimeMs),
+              "broadcast on '" + channel + "'");
+    }
+
+    private static void requireLifetime(int lifetimeMs) {
+        if (lifetimeMs < 0) {
+            throw new IllegalArgumentException("lifetimeMs must be >= 0, got " + lifetimeMs);
+        }
     }
 
     /**
@@ -771,8 +809,9 @@ public class RatsNode implements AutoCloseable {
     private native int nativePeerTransport(long ptr, String peerId);
     private native int nativePeerTransports(long ptr, String peerId);
 
-    private native int nativeSend(long ptr, String peerId, String channel, byte[] data);
-    private native int nativeBroadcast(long ptr, String channel, byte[] data);
+    private native int nativeSend(long ptr, String peerId, String channel, byte[] data,
+                                  int lifetimeMs);
+    private native int nativeBroadcast(long ptr, String channel, byte[] data, int lifetimeMs);
     private native boolean nativePeerWritable(long ptr, String peerId);
     private native int nativePathStats(long ptr, String peerId, PathStats[] out);
     private native int nativeOn(long ptr, String channel, MessageCallback callback);

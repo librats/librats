@@ -31,24 +31,9 @@ Bytes take_pooled_chunk(size_t capacity) {
 
 } // namespace
 
-Priority priority_of(MessageType type) noexcept {
-    switch (type) {
-        case MessageType::Control:   return Priority::Control;
-        // Both measure or exploit timing — a ping queued behind a file measures the
-        // file, and a punch Sync that waits misses the window it was timed for —
-        // and both are a handful of bytes.
-        case MessageType::Ping:
-        case MessageType::Punch:     return Priority::Interactive;
-        // A file is the one thing here that is all bulk. Storage stays Normal: its
-        // lane carries a store's small requests as well as its snapshots, and the
-        // requests must not wait out everything else that is queued.
-        case MessageType::FileChunk: return Priority::Bulk;
-        default:                     return Priority::Normal;
-    }
-}
-
-void SendQueue::push(FrameHeader header, ByteView payload) {
-    const uint32_t index = lane_for(header.type);
+void SendQueue::push(FrameHeader header, ByteView payload, Deadline deadline) {
+    const bool live = is_live(deadline);
+    const uint32_t index = lane_for(header.type, live);
     Lane& lane = lanes_[index];
 
     const size_t inner = framer::kHeaderSize + payload.size();
@@ -73,15 +58,35 @@ void SendQueue::push(FrameHeader header, ByteView payload) {
     if (!payload.empty())
         std::memcpy(record + kRecordHeader + framer::kHeaderSize, payload.data(), payload.size());
 
+    if (live) {
+        lane.deadlines.push_back(deadline);
+        ++live_queued_;
+        ++live_sent_;
+    }
     ++count_;
     bytes_ += inner;
     if (!lane.active) activate(index);
 }
 
-void SendQueue::seal_next(const Session& session, uint64_t nonce, ChainedSendBuffer& out) {
-    assert(!empty());
-    const uint32_t index = next_lane();
-    Lane& lane = lanes_[index];
+bool SendQueue::seal_next(const Session& session, uint64_t nonce, ChainedSendBuffer& out, Deadline now) {
+    while (!empty()) {
+        const uint32_t index = next_lane();
+        Lane& lane = lanes_[index];
+        // What can no longer arrive in time goes now, before it costs a nonce and
+        // a place on the wire.
+        if (lane.live)
+            while (!lane.empty() && lane.deadlines.front() <= now) drop_front(lane);
+        if (lane.empty()) continue;   // and out of its ring: next_lane() took it off
+        seal_front(lane, session, nonce, out);
+        // Back of its ring, behind the other lanes of its priority: that is the turn-
+        // taking. A lane that is the only one simply comes straight round again.
+        if (!lane.empty()) activate(index);
+        return true;
+    }
+    return false;
+}
+
+void SendQueue::seal_front(Lane& lane, const Session& session, uint64_t nonce, ChainedSendBuffer& out) {
     Bytes& chunk = lane.chunks[lane.head];
     const uint8_t* record = chunk.data() + lane.offset;
 
@@ -99,11 +104,7 @@ void SendQueue::seal_next(const Session& session, uint64_t nonce, ChainedSendBuf
         session.seal(nonce, {}, own.data() + kRecordHeader, inner);
         framer::encode_block_header(own.data(), body);
         out.append(std::move(own));
-        if (++lane.head == lane.chunks.size()) {
-            lane.chunks.clear();
-            lane.head = 0;
-            lane.tail_packs = false;
-        }
+        next_chunk(lane);
     } else {
         // Packed with others: copied into the send buffer and sealed there.
         uint8_t* block = out.append_slot(kRecordHeader + body);
@@ -114,23 +115,55 @@ void SendQueue::seal_next(const Session& session, uint64_t nonce, ChainedSendBuf
         if (lane.offset == chunk.size()) retire_front(lane);
     }
 
+    if (lane.live) {
+        lane.deadlines.pop_front();
+        --live_queued_;
+    }
     --count_;
     bytes_ -= inner;
-    // Back of its ring, behind the other lanes of its priority: that is the turn-
-    // taking. A lane that is the only one simply comes straight round again.
-    if (!lane.empty()) activate(index);
 }
 
-uint32_t SendQueue::lane_for(MessageType type) {
+void SendQueue::drop_front(Lane& lane) {
+    Bytes& chunk = lane.chunks[lane.head];
+    uint32_t size = 0;
+    std::memcpy(&size, chunk.data() + lane.offset, sizeof size);
+    const size_t inner = size;
+
+    if (inner > kPackLimit) {
+        allocated_ -= chunk.capacity();
+        Bytes().swap(chunk);
+        next_chunk(lane);
+    } else {
+        lane.offset += kRecordHeader + inner;
+        if (lane.offset == chunk.size()) retire_front(lane);
+    }
+
+    lane.deadlines.pop_front();
+    --live_queued_;
+    ++live_expired_;
+    --count_;
+    bytes_ -= inner;
+}
+
+void SendQueue::next_chunk(Lane& lane) noexcept {
+    if (++lane.head == lane.chunks.size()) {
+        lane.chunks.clear();
+        lane.head = 0;
+        lane.tail_packs = false;
+    }
+}
+
+uint32_t SendQueue::lane_for(MessageType type, bool live) {
     // Most pushes go to the lane the previous one did — one subsystem streaming.
-    if (last_ != kNone && lanes_[last_].type == type) return last_;
+    if (last_ != kNone && lanes_[last_].type == type && lanes_[last_].live == live) return last_;
 
     for (uint32_t i = 0; i < lanes_.size(); ++i)
-        if (lanes_[i].type == type) return last_ = i;
+        if (lanes_[i].type == type && lanes_[i].live == live) return last_ = i;
 
     Lane lane;
     lane.type     = type;
-    lane.priority = priority_of(type);
+    lane.live     = live;
+    lane.priority = live ? Priority::Live : priority_of(type);
     lanes_.push_back(std::move(lane));
     return last_ = static_cast<uint32_t>(lanes_.size() - 1);
 }
@@ -163,11 +196,7 @@ void SendQueue::retire_front(Lane& lane) {
         Bytes().swap(chunk);
     }
     lane.offset = 0;
-    if (++lane.head == lane.chunks.size()) {
-        lane.chunks.clear();
-        lane.head = 0;
-        lane.tail_packs = false;
-    }
+    next_chunk(lane);
 }
 
 void SendQueue::activate(uint32_t index) noexcept {

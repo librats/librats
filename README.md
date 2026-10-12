@@ -407,7 +407,23 @@ if (auto rtt = ping->last_rtt(peer_id))
     std::cout << "rtt = " << rtt->count() << "ms\n";
 ```
 
-### 10. Distributed storage (requires `RATS_STORAGE`)
+### 10. Live messages (video, audio, anything worth having only while fresh)
+
+```cpp
+using namespace std::chrono_literals;
+node.send(peer, "video", ByteView(frame), {150ms});   // live: worth delivering within 150 ms
+node.broadcast("video", ByteView(frame), {150ms});
+node.on("video", [](const Peer&, ByteView frame) { /* same handler as any message */ });
+```
+
+A message with a lifetime is repaired while the repair can still arrive in time and dropped — whole — once
+it cannot: it arrives in time or not at all, never in part or twice. It is ordered with nothing (number
+your frames), goes ahead of ordinary traffic, and is what keeps a stale backlog from standing in front of
+fresh frames after a loss burst or an outage. Over TCP the same call drops a message that expires before
+it is sealed. `PathStats::live_sent` / `live_expired` say how many the sender had to drop. From C:
+`rats_send(node, peer, "video", data, len, 150)`; a lifetime of 0 is the ordinary reliable send.
+
+### 11. Distributed storage (requires `RATS_STORAGE`)
 
 ```cpp
 #include <librats/storage/storage.h>
@@ -467,8 +483,9 @@ bool   peer_limit_reached() const;
 
 // Messaging (raw bytes on a named channel). The bool is backpressure: false means
 // "queued, but stop and wait for on_peer_writable" — see Backpressure below.
-bool send(const PeerId& to, std::string_view channel, ByteView payload);
-bool broadcast(std::string_view channel, ByteView payload);
+// SendOptions{lifetime} makes a message live — see Live messages below.
+bool send(const PeerId& to, std::string_view channel, ByteView payload, SendOptions options = {});
+bool broadcast(std::string_view channel, ByteView payload, SendOptions options = {});
 bool peer_writable(const PeerId& id) const;      // the same question, without sending
 std::optional<PathStats> path_stats(const PeerId& id) const;  // latest path sample, any thread
 
@@ -650,7 +667,7 @@ int main(void) {
     if (rats_start(node) != RATS_OK) return 1;
 
     rats_connect(node, "127.0.0.1", 8081);
-    rats_broadcast(node, "chat", "hello", 5);
+    rats_broadcast(node, "chat", "hello", 5, 0);   // lifetime 0: reliable
 
     /* ... run ... */
     rats_stop(node);

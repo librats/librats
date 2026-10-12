@@ -41,8 +41,17 @@ PathStats Connection::sample_path() {
 
 // ── Outbound application frames ─────────────────────────────────────────────
 
-bool Connection::send(FrameHeader header, ByteView payload) {
+bool Connection::send(FrameHeader header, ByteView payload, Deadline deadline) {
     if (state_ != ConnState::Established) return false;  // frames only flow post-handshake
+
+    // A live message is only ever delivered whole, so the receiver holds all of one
+    // until its last piece is in; this is the bound both ends agree on.
+    if (is_live(deadline) && payload.size() > SendOptions::kMaxLivePayload) {
+        LOG_WARN("connection", "Peer " << remote_id_.short_hex() << " refused a "
+                 << payload.size() << " B live message: past the " << SendOptions::kMaxLivePayload
+                 << " B a live message may carry");
+        return false;
+    }
 
     // The one thing that is refused outright rather than queued: a message too
     // large for the transport to carry at all. Queueing it would spend the link only
@@ -80,7 +89,7 @@ bool Connection::send(FrameHeader header, ByteView payload) {
         return false;
     }
 
-    if (!transport_->send(header, payload)) {
+    if (!transport_->send(header, payload, deadline)) {
         fail(transport_->error_reason());
         reactor_.close(id_, close_reason_);
         return false;

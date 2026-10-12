@@ -41,7 +41,8 @@ def _path_stats(c: RatsPathStats) -> PathStats:
         bandwidth_bps=c.bandwidth_bps, app_limited=bool(c.app_limited),
         pacing_bps=c.pacing_bps, srtt_us=c.srtt_us, min_rtt_us=c.min_rtt_us,
         queued_bytes=c.queued_bytes, bytes_in_flight=c.bytes_in_flight, loss=c.loss,
-        bytes_delivered=c.bytes_delivered, bytes_lost=c.bytes_lost)
+        bytes_delivered=c.bytes_delivered, bytes_lost=c.bytes_lost,
+        live_sent=c.live_sent, live_expired=c.live_expired)
 
 
 def _b(s: Optional[str]) -> Optional[bytes]:
@@ -291,17 +292,24 @@ class RatsNode:
     # ------------------------------------------------------------------ #
     # Raw channel messaging
     # ------------------------------------------------------------------ #
-    def send(self, peer_id: str, channel: str, data: bytes) -> None:
+    def send(self, peer_id: str, channel: str, data: bytes, lifetime_ms: int = 0) -> None:
         """Send raw ``data`` on a named ``channel`` to one peer.
 
         Returning normally means the message was queued, never that it arrived.
         If you send in bulk, check :meth:`peer_writable` afterwards — that is the
         only way to learn you are outrunning the link before the peer is dropped
         for it.
+
+        ``lifetime_ms`` 0 sends reliably. Anything else makes it a *live*
+        message, worth delivering only within that many milliseconds (30000 at
+        most, 1 MiB of payload at most): repaired while it can still arrive in
+        time, dropped whole once it cannot, and ordered with nothing — for video
+        and audio frames, which are no use late. The receiver's handler is the
+        same either way.
         """
         check_error(
             self._lib.lib.rats_send(self._h, _b(peer_id), _b(channel),
-                                    data, len(data)),
+                                    data, len(data), lifetime_ms),
             f"Sending on channel {channel} to {peer_id}")
 
     def peer_writable(self, peer_id: str) -> bool:
@@ -328,10 +336,13 @@ class RatsNode:
         check_error(err, f"Reading path stats of {peer_id}")
         return _path_stats(out)
 
-    def broadcast(self, channel: str, data: bytes) -> None:
-        """Broadcast raw ``data`` on a named ``channel`` to all peers."""
+    def broadcast(self, channel: str, data: bytes, lifetime_ms: int = 0) -> None:
+        """Broadcast raw ``data`` on a named ``channel`` to all peers.
+
+        ``lifetime_ms`` as for :meth:`send`.
+        """
         check_error(
-            self._lib.lib.rats_broadcast(self._h, _b(channel), data, len(data)),
+            self._lib.lib.rats_broadcast(self._h, _b(channel), data, len(data), lifetime_ms),
             f"Broadcasting on channel {channel}")
 
     def on(self, channel: str, callback: MessageCallback) -> None:

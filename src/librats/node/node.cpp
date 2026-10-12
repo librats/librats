@@ -496,7 +496,27 @@ std::optional<Peer> Node::peer(const PeerId& id) {
 
 // ── Application messaging ────────────────────────────────────────────────────
 
-bool Node::send(const PeerId& to, std::string_view channel, ByteView payload) {
+namespace {
+
+/// When a message sent now with `options` stops being worth sending; none for a
+/// reliable one. Taken at the call, so the time it spends reaching its reactor
+/// counts against it like any other wait.
+Deadline deadline_of(const SendOptions& options) {
+    if (!options.live()) return Deadline{};
+    return std::chrono::steady_clock::now() + (std::min)(options.lifetime, SendOptions::kMaxLifetime);
+}
+
+} // namespace
+
+bool Node::send(const PeerId& to, std::string_view channel, ByteView payload, SendOptions options) {
+    return send_to(to, FrameHeader{MessageType::App, 0, MessageRouter::channel_id(channel)}, payload, options);
+}
+
+bool Node::broadcast(std::string_view channel, ByteView payload, SendOptions options) {
+    return broadcast_all(FrameHeader{MessageType::App, 0, MessageRouter::channel_id(channel)}, payload, options);
+}
+
+bool Node::send_to(const PeerId& to, FrameHeader header, ByteView payload, SendOptions options) {
     // Route and writability in one lookup. The answer is the queue's state as of
     // now rather than after this message lands — the send itself is handed to the
     // owning reactor and completes there — which is all a backpressure hint can
@@ -508,9 +528,15 @@ bool Node::send(const PeerId& to, std::string_view channel, ByteView payload) {
     // what the reactor has managed to look at so far.
     const size_t in_transit =
         dest->owed->fetch_add(payload.size(), std::memory_order_relaxed) + payload.size();
-    route_send(dest->route, FrameHeader{MessageType::App, 0, MessageRouter::channel_id(channel)},
-               payload.to_bytes(), dest->owed);
+    route_send(dest->route, header, payload.to_bytes(), deadline_of(options), dest->owed);
     return dest->writable && in_transit <= send_low_water();
+}
+
+bool Node::broadcast_all(FrameHeader header, ByteView payload, SendOptions options) {
+    auto data = std::make_shared<const Bytes>(payload.to_bytes());
+    const Deadline deadline = deadline_of(options);
+    reactors_->for_each([&](Reactor& r) { r.broadcast(header, data, deadline); });
+    return peers_.all_writable();
 }
 
 bool Node::peer_writable(const PeerId& id) const {
@@ -526,29 +552,14 @@ bool Node::peer_writable(const PeerId& id) const {
            dest->owed->load(std::memory_order_relaxed) <= send_low_water();
 }
 
-bool Node::broadcast(std::string_view channel, ByteView payload) {
-    auto data = std::make_shared<const Bytes>(payload.to_bytes());
-    FrameHeader header{MessageType::App, 0, MessageRouter::channel_id(channel)};
-    reactors_->for_each([&](Reactor& r) { r.broadcast(header, data); });
-    return peers_.all_writable();
-}
-
 // ── PeerNetwork (subsystems) ─────────────────────────────────────────────────
 
-bool Node::send(const PeerId& to, MessageType type, ByteView payload) {
-    auto dest = peers_.destination(to);
-    if (!dest) return false;
-    const size_t in_transit =
-        dest->owed->fetch_add(payload.size(), std::memory_order_relaxed) + payload.size();
-    route_send(dest->route, FrameHeader{type, 0, 0}, payload.to_bytes(), dest->owed);
-    return dest->writable && in_transit <= send_low_water();
+bool Node::send(const PeerId& to, MessageType type, ByteView payload, SendOptions options) {
+    return send_to(to, FrameHeader{type, 0, 0}, payload, options);
 }
 
-bool Node::broadcast(MessageType type, ByteView payload) {
-    auto data = std::make_shared<const Bytes>(payload.to_bytes());
-    FrameHeader header{type, 0, 0};
-    reactors_->for_each([&](Reactor& r) { r.broadcast(header, data); });
-    return peers_.all_writable();
+bool Node::broadcast(MessageType type, ByteView payload, SendOptions options) {
+    return broadcast_all(FrameHeader{type, 0, 0}, payload, options);
 }
 
 std::vector<PeerId> Node::connected_peers() const {
@@ -559,13 +570,13 @@ std::vector<PeerId> Node::connected_peers() const {
 
 // ── Routed send/close (used by Node and Peer) ───────────────────────────────
 
-void Node::route_send(PeerRoute route, FrameHeader header, Bytes payload,
+void Node::route_send(PeerRoute route, FrameHeader header, Bytes payload, Deadline deadline,
                       std::shared_ptr<std::atomic<size_t>> owed) {
     Reactor& reactor = reactors_->by_index(route.reactor);
     ConnId conn = route.conn;
     auto data = std::make_shared<Bytes>(std::move(payload));
     const size_t weight = data->size();
-    reactor.execute([&reactor, conn, header, data, owed, weight] {
+    reactor.execute([&reactor, conn, header, data, deadline, owed, weight] {
         // Discharged whether or not the connection is still there, and *before*
         // the frame is queued rather than after: from here on these bytes are
         // counted by the send queue instead, and the connection weighs both
@@ -573,7 +584,7 @@ void Node::route_send(PeerRoute route, FrameHeader header, Bytes payload,
         // window where they were counted twice — and, worse, one where they were
         // counted by neither, which is what an opening must never be reported on.
         if (owed) owed->fetch_sub(weight, std::memory_order_relaxed);
-        if (auto* c = reactor.find(conn)) c->send(header, ByteView(*data));
+        if (auto* c = reactor.find(conn)) c->send(header, ByteView(*data), deadline);
     });
 }
 
@@ -899,7 +910,7 @@ std::vector<Address> Node::observed_addresses() const {
 
 // ── Peer handle methods (defined here for the full Node type) ────────────────
 
-bool Peer::send(std::string_view channel, ByteView payload) const {
+bool Peer::send(std::string_view channel, ByteView payload, SendOptions options) const {
     // Deliberately by id, not by this handle's route. The route existed to skip the
     // directory lookup on the reply path — but answering "is there room?" needs the
     // peer's writability and its in-transit counter, both of which live in the
@@ -908,7 +919,7 @@ bool Peer::send(std::string_view channel, ByteView payload) const {
     // only be wrong: a handle outlives its connection (a relayed link superseded by
     // a direct one, a dial race, a reconnect), and sending on the superseded one
     // drops the message with nothing said. The peer is what the caller means.
-    return node_->send(id_, channel, payload);
+    return node_->send(id_, channel, payload, options);
 }
 
 void Peer::disconnect() const {

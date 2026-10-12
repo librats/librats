@@ -14,6 +14,7 @@
  */
 
 #include <napi.h>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -453,6 +454,22 @@ static bool to_bytes(Napi::Env env, const Napi::Value& v, std::vector<uint8_t>& 
     return false;
 }
 
+// The optional trailing lifetimeMs of send()/broadcast(): absent or undefined is
+// 0 (reliable); otherwise a non-negative integer number of milliseconds, which
+// makes the message live (the core caps it at 30000).
+static bool to_lifetime(Napi::Env env, const Napi::CallbackInfo& info, size_t i, uint32_t& out) {
+    out = 0;
+    if (info.Length() <= i || info[i].IsUndefined()) return true;
+    double v = info[i].IsNumber() ? info[i].As<Napi::Number>().DoubleValue() : -1;
+    if (!(v >= 0 && v <= 4294967295.0) || v != std::floor(v)) {
+        Napi::TypeError::New(env, "Expected lifetimeMs (non-negative integer)")
+            .ThrowAsJavaScriptException();
+        return false;
+    }
+    out = static_cast<uint32_t>(v);
+    return true;
+}
+
 Napi::Value RatsNode::Send(const Napi::CallbackInfo& info) {
     RATS_REQUIRE_NODE(info.Env().Undefined());
     Napi::Env env = info.Env();
@@ -465,7 +482,10 @@ Napi::Value RatsNode::Send(const Napi::CallbackInfo& info) {
     std::string channel = info[1].As<Napi::String>().Utf8Value();
     std::vector<uint8_t> data;
     if (!to_bytes(env, info[2], data)) return env.Undefined();
-    throw_on_error(env, rats_send(node_, peer.c_str(), channel.c_str(), data.data(), data.size()));
+    uint32_t lifetime_ms = 0;
+    if (!to_lifetime(env, info, 3, lifetime_ms)) return env.Undefined();
+    throw_on_error(env, rats_send(node_, peer.c_str(), channel.c_str(), data.data(), data.size(),
+                                  lifetime_ms));
     return env.Undefined();
 }
 
@@ -496,6 +516,8 @@ static Napi::Object path_stats_to_js(Napi::Env env, const rats_path_stats_t& s) 
     o.Set("loss",           Napi::Number::New(env, s.loss));
     o.Set("bytesDelivered", Napi::Number::New(env, static_cast<double>(s.bytes_delivered)));
     o.Set("bytesLost",      Napi::Number::New(env, static_cast<double>(s.bytes_lost)));
+    o.Set("liveSent",       Napi::Number::New(env, static_cast<double>(s.live_sent)));
+    o.Set("liveExpired",    Napi::Number::New(env, static_cast<double>(s.live_expired)));
     return o;
 }
 
@@ -527,7 +549,10 @@ Napi::Value RatsNode::Broadcast(const Napi::CallbackInfo& info) {
     std::string channel = info[0].As<Napi::String>().Utf8Value();
     std::vector<uint8_t> data;
     if (!to_bytes(env, info[1], data)) return env.Undefined();
-    throw_on_error(env, rats_broadcast(node_, channel.c_str(), data.data(), data.size()));
+    uint32_t lifetime_ms = 0;
+    if (!to_lifetime(env, info, 2, lifetime_ms)) return env.Undefined();
+    throw_on_error(env, rats_broadcast(node_, channel.c_str(), data.data(), data.size(),
+                                       lifetime_ms));
     return env.Undefined();
 }
 

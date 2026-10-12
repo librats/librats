@@ -2,7 +2,7 @@
 
 /**
  * @file udp_wire.h
- * @brief Wire format of the datagram transport (v3): packets, frames, varints.
+ * @brief Wire format of the datagram transport (v4): packets, frames, varints.
  *
  * The shape is QUIC's (RFC 9000), cut down to what a peer-to-peer node on Noise
  * needs. It is not QUIC on the wire — there is no TLS, no version negotiation
@@ -64,14 +64,22 @@
  *                         will accept
  *      DATA_BLOCKED 0x14  the limit the sender is stopped at
  *      CLOSE        0x1c  error code (varint); 0 is an orderly close
+ *      LIVE         0x20-0x21  message id, lifetime, [size, offset], length, data —
+ *                         a live message (see udp_live.h) or a piece of one. Bit
+ *                         0x01 says it is a piece: `size` is the whole message's,
+ *                         `offset` where this piece begins; without it the frame
+ *                         is the whole message. `lifetime` is the milliseconds the
+ *                         message had left when this packet was sent.
  *      RESET_TOKEN  0x30  kResetTokenSize bytes: what a stateless reset for the
  *                         sender's connection id will end with
  *
  * A stream is one lane of messages — one per MessageType, so its id is the type —
  * and each message on it is a varint length and the inner message of wire/frame.h.
+ * A live message is an inner message of its own, outside every stream.
  */
 
 #include "librats/core/bytes.h"
+#include "librats/core/types.h"
 
 #include <chrono>
 #include <cstddef>
@@ -82,8 +90,9 @@ namespace udp {
 
 /// Wire version, in every long header. A peer that sees another one drops the
 /// datagram unanswered, and a dial between the two falls back to TCP. 3: the
-/// packet-numbered, frame-based protocol of this file (v1/v2 were a byte stream).
-constexpr uint32_t kVersion = 3;
+/// packet-numbered, frame-based protocol of this file (v1/v2 were a byte stream);
+/// 4: LIVE frames, which a v3 peer would take for a protocol error.
+constexpr uint32_t kVersion = 4;
 
 /// Largest datagram this transport sends, and every Initial's size. 1220 keeps it
 /// inside IPv6's 1280-byte minimum MTU with room for a tunnel header, so nothing
@@ -118,6 +127,12 @@ constexpr size_t kResetTokenSize = 16;
 /// Largest handshake message a packet can carry: what an Initial has room for
 /// once its header, a token and the length fields are in.
 constexpr size_t kMaxHandshakeMessage = kMaxDatagram - kLongHeaderSize - 1 - kTokenSize - 2;
+
+/// What a live message is on the wire: an inner message of wire/frame.h, its
+/// header ([type][flags][channel], framer::kHeaderSize — not included here, where
+/// `Frame` means this file's) and a payload of at most SendOptions::kMaxLivePayload.
+constexpr size_t kInnerHeaderSize = 4;
+constexpr size_t kMaxLiveMessage  = kInnerHeaderSize + SendOptions::kMaxLivePayload;
 
 /// Resolution of an ACK's delay field: 8 us, QUIC's default exponent of 3.
 constexpr std::chrono::microseconds kAckDelayUnit{8};
@@ -220,12 +235,14 @@ enum FrameType : uint8_t {
     kMaxData     = 0x10,
     kDataBlocked = 0x14,
     kClose       = 0x1c,
+    kLive        = 0x20,   ///< 0x20 and 0x21, the low bit a flag
     kResetToken  = 0x30,
 };
 
 constexpr uint8_t kStreamOffBit = 0x04;
 constexpr uint8_t kStreamLenBit = 0x02;
 constexpr uint8_t kStreamFinBit = 0x01;
+constexpr uint8_t kLivePieceBit = 0x01;
 
 /// An ACK as it arrived. The ranges after the first are left encoded in `more`
 /// and walked with AckRanges; the reader has already checked every one of them.
@@ -257,11 +274,24 @@ struct StreamFrame {
     ByteView data;
 };
 
+/// A live message, or one piece of it. The reader has checked that the piece lies
+/// within the message and that the message is not past kMaxLiveMessage.
+struct LiveFrame {
+    uint64_t id       = 0;
+    uint64_t lifetime = 0;   ///< milliseconds left when it was sent
+    uint64_t size     = 0;   ///< the whole message
+    uint64_t offset   = 0;   ///< where `data` begins in it
+    ByteView data;
+
+    bool whole() const noexcept { return offset == 0 && data.size() == size; }
+};
+
 /// One decoded frame. Only the fields of its type are meaningful.
 struct Frame {
     uint8_t     type = kPadding;
     AckFrame    ack;
     StreamFrame stream;
+    LiveFrame   live;
     uint64_t    value = 0;   ///< MAX_DATA, DATA_BLOCKED, CLOSE
     ByteView    token;       ///< RESET_TOKEN
 };
@@ -294,6 +324,14 @@ uint8_t* put_ack(uint8_t* out, const uint64_t* los, const uint64_t* his, size_t 
 size_t   stream_header_size(uint64_t stream, uint64_t offset, size_t len, bool with_length) noexcept;
 uint8_t* put_stream_header(uint8_t* out, uint64_t stream, uint64_t offset, size_t len,
                            bool with_length) noexcept;
+
+/// Header of a LIVE frame carrying `len` bytes at `offset` of message `id`, which
+/// is `size` bytes in all and has `lifetime` milliseconds left. A piece that is the
+/// whole message is written without its size and offset.
+size_t   live_header_size(uint64_t id, uint64_t lifetime, uint64_t size, uint64_t offset,
+                          size_t len) noexcept;
+uint8_t* put_live_header(uint8_t* out, uint64_t id, uint64_t lifetime, uint64_t size,
+                         uint64_t offset, size_t len) noexcept;
 
 uint8_t* put_value_frame(uint8_t* out, FrameType type, uint64_t value) noexcept;  ///< MAX_DATA, DATA_BLOCKED, CLOSE
 uint8_t* put_reset_token(uint8_t* out, const uint8_t* token) noexcept;

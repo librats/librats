@@ -163,8 +163,11 @@ new RatsNode(config)   // full config
 
 ### Raw channel messaging
 
-`send(peerId, channel, data)` · `broadcast(channel, data)` ·
-`on(channel, (peerId, data) => …)` — `data` is a `Buffer` in, `string | Buffer` out
+`send(peerId, channel, data, lifetimeMs?)` · `broadcast(channel, data, lifetimeMs?)` ·
+`on(channel, (peerId, data) => …)` — `data` is a `Buffer` in, `string | Buffer` out.
+A non-zero `lifetimeMs` (30000 at most) makes it a *live* message — delivered
+within that many ms or dropped whole, unordered, at most 1 MiB — for video and
+audio frames; the default 0 is reliable and ordered.
 
 ### Peer events *(before start)*
 

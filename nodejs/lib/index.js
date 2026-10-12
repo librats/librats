@@ -193,15 +193,26 @@ class RatsNode {
 
   /**
    * Send raw bytes on a named channel to one peer.
+   *
+   * With `lifetimeMs` 0 (the default) the message is reliable: it arrives
+   * whatever it takes, in order with the rest of this node's channel traffic.
+   * Anything else makes it a live message, worth delivering only within that
+   * many milliseconds (30000 at most): repaired while it can still arrive in
+   * time, dropped whole once it cannot, never delivered in part or twice, and
+   * ordered with nothing — number what you send if order matters. For video and
+   * audio frames. A live message carries at most 1 MiB. The receiver needs
+   * nothing: it arrives at the channel's `on()` handler like any other.
    * @param {string} peerId @param {string} channel @param {string|Buffer} data
+   * @param {number} [lifetimeMs=0]
    */
-  send(peerId, channel, data) { this._native.send(peerId, channel, data); }
+  send(peerId, channel, data, lifetimeMs) { this._native.send(peerId, channel, data, lifetimeMs); }
 
   /**
-   * Broadcast raw bytes on a named channel to every connected peer.
-   * @param {string} channel @param {string|Buffer} data
+   * Broadcast raw bytes on a named channel to every connected peer; `lifetimeMs`
+   * as for `send()`.
+   * @param {string} channel @param {string|Buffer} data @param {number} [lifetimeMs=0]
    */
-  broadcast(channel, data) { this._native.broadcast(channel, data); }
+  broadcast(channel, data, lifetimeMs) { this._native.broadcast(channel, data, lifetimeMs); }
 
   /**
    * Whether this peer's send queue still has room. False means pause and wait for

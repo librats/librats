@@ -711,6 +711,10 @@ FallbackResult bench_fallback(uint32_t fallback_ms) {
 //   dial      now counts *round trips*, not microseconds of node setup. TCP
 //             spends connect + Noise_XX; the datagram side Noise_XX alone, its
 //             Initial carrying the first Noise message — one RTT less per dial.
+//   live      only means anything here: 30 fps of video as live messages
+//             (SendOptions::lifetime) over a path that can lose and delay them.
+//             How many frames arrive, how many the sender had to drop, and how
+//             long a whole frame takes there and an echo of it back.
 //   rtt       min is the path itself, median is the path plus this stack, and
 //             the gap between median and p99 is queueing — either the network's
 //             or ours. A p99 near 20 ms on an otherwise fast path is
@@ -728,13 +732,16 @@ FallbackResult bench_fallback(uint32_t fallback_ms) {
 //
 // ── The wire between the two copies ─────────────────────────────────────────
 //
-// Four application channels, deliberately tiny:
+// Six application channels, deliberately tiny:
 //
 //   "echo"  responder returns the payload verbatim               → rtt
 //   "data"  bulk/small payload in either direction; the receiver counts it
 //   "ack"   [u64 bytes][u64 msgs] LE, cumulative, from the receiver of "data"
 //   "ctl"   ASCII: "flush" (ack now), "push <bytes> <frame> <credit>" (send that
 //           much back to me), "push-done"
+//   "live"  a live video frame: [u32 frame][u64 sent, sender's clock, us] then
+//           padding; the responder returns those 12 bytes, reliably, on
+//   "live-ack"                                                    → live
 //
 // The acks are what make a one-way measurement honest over a path with delay.
 // They serve two purposes at once: they pace the sender (never more than
@@ -767,6 +774,9 @@ struct Options {
     size_t small_bytes   = 256;
     int    small_credit  = 512;
     int    dials         = 8;
+    int    live_secs     = 10;     ///< 0 skips the live phase
+    double live_mbps     = 4;
+    int    live_ms       = 150;
 
     bool   help          = false;
 };
@@ -792,6 +802,15 @@ uint64_t get_u64(const uint8_t* p) {
     return v;
 }
 
+/// The part of a live frame the responder echoes: [u32 frame][u64 sent us].
+constexpr size_t kLiveHeader = 12;
+
+/// The measuring side's clock, in microseconds, for live frames' send stamps.
+/// Only ever compared with itself: the echo comes back to the clock that stamped it.
+double now_us() {
+    return std::chrono::duration<double, std::micro>(Clock::now().time_since_epoch()).count();
+}
+
 // ── Per-peer state ──────────────────────────────────────────────────────────
 //
 // Both ends run the same endpoint: the responder may be receiving an upload
@@ -805,6 +824,11 @@ struct Session {
     std::atomic<uint64_t> acked_msgs{0};
     std::atomic<uint64_t> echoes{0};        ///< "echo" replies seen
     std::atomic<bool>     alive{true};
+
+    /// Round trips of live frames whose echo came back, ms: sent → delivered
+    /// whole → echoed.
+    std::mutex            live_mutex;
+    std::vector<double>   live_rtts;
 
     // Reactor thread only: the last counters we sent an ack for.
     uint64_t sent_ack_bytes = 0;
@@ -855,6 +879,20 @@ public:
             const uint64_t msgs  = s->in_msgs.fetch_add(1, std::memory_order_release) + 1;
             if (bytes - s->sent_ack_bytes >= kAckBytes || msgs - s->sent_ack_msgs >= kAckMsgs)
                 send_ack(p, *s, bytes, msgs);
+        });
+
+        node_.on("live", [this](const Peer& p, ByteView payload) {
+            if (responder_ && payload.size() >= kLiveHeader) p.send("live-ack", ByteView(payload.data(), kLiveHeader));
+        });
+
+        node_.on("live-ack", [this](const Peer& p, ByteView payload) {
+            if (payload.size() < kLiveHeader) return;
+            uint64_t sent_us = 0;
+            for (int i = 0; i < 8; ++i) sent_us |= static_cast<uint64_t>(payload.data()[4 + i]) << (8 * i);
+            const double ms = (now_us() - static_cast<double>(sent_us)) / 1000.0;
+            auto s = session(p.id());
+            std::lock_guard<std::mutex> lock(s->live_mutex);
+            s->live_rtts.push_back(ms);
         });
 
         node_.on("ack", [this](const Peer& p, ByteView payload) {
@@ -981,6 +1019,8 @@ NodeConfig remote_config(const Options& o, bool listen, bool tcp, bool udp) {
     c.transport_fallback_ms  = 0;
     c.max_peers              = 0;
     c.enable_network_monitor = false;
+    // The measuring side reads what its sender dropped of the live frames.
+    if (!listen) c.path_sample_ms = 100;
     return c;
 }
 
@@ -1040,6 +1080,8 @@ struct Run {
     double up_mb_s = 0, up_cpu_s_gb = 0;
     double down_mb_s = 0, down_cpu_s_gb = 0;
     double small_msgs_s = 0;
+    double live_delivered = 0, live_expired = 0;   ///< % of frames
+    double live_rtt_median_ms = 0, live_rtt_p99_ms = 0;
 };
 
 /// One connected client node, plus the endpoint whose handlers it runs.
@@ -1228,6 +1270,50 @@ void measure_small(const Options& o, Wire& w, Run& run) {
     run.small_msgs_s  = o.small_count / secs;
 }
 
+/// Video as live messages: 30 frames a second at --live-mbps, a keyframe five
+/// times a frame's size every two seconds, each frame a live message of
+/// --live-ms. The responder echoes every frame that arrives, so the round trip
+/// is measured on one clock: sent → delivered whole → echo back.
+void measure_live(const Options& o, Wire& w, Run& run) {
+    if (o.live_secs <= 0) return;
+    constexpr int kFps = 30, kGop = 60, kKeyWeight = 5;
+    const double unit   = o.live_mbps * 1e6 / 8 * kGop / kFps / (kGop - 1 + kKeyWeight);
+    const int    frames = o.live_secs * kFps;
+    SendOptions live;
+    live.lifetime = std::chrono::milliseconds(o.live_ms);
+    {
+        std::lock_guard<std::mutex> lock(w.session->live_mutex);
+        w.session->live_rtts.clear();
+    }
+    const auto before = w.node->path_stats(w.remote);
+
+    std::string frame;
+    auto next = Clock::now();
+    for (int n = 0; n < frames; ++n) {
+        std::this_thread::sleep_until(next);
+        next += std::chrono::microseconds(1000000 / kFps);
+        const size_t bytes = static_cast<size_t>(unit * (n % kGop == 0 ? kKeyWeight : 1));
+        frame.assign((std::max)(bytes, kLiveHeader), 'v');
+        const uint64_t sent = static_cast<uint64_t>(now_us());
+        for (int i = 0; i < 4; ++i) frame[i] = static_cast<char>((static_cast<uint32_t>(n) >> (8 * i)) & 0xff);
+        for (int i = 0; i < 8; ++i) frame[4 + i] = static_cast<char>((sent >> (8 * i)) & 0xff);
+        w.node->send(w.remote, "live", ByteView(frame), live);
+    }
+    // Long enough for the last frame's lifetime, its echo, and a sample of the path.
+    std::this_thread::sleep_for(std::chrono::milliseconds(o.live_ms) + 1s);
+
+    std::vector<double> rtts;
+    {
+        std::lock_guard<std::mutex> lock(w.session->live_mutex);
+        rtts = w.session->live_rtts;
+    }
+    run.live_delivered     = rtts.size() * 100.0 / frames;
+    run.live_rtt_median_ms = percentile(rtts, 0.50);
+    run.live_rtt_p99_ms    = percentile(rtts, 0.99);
+    const auto after = w.node->path_stats(w.remote);
+    if (after) run.live_expired = (after->live_expired - (before ? before->live_expired : 0)) * 100.0 / frames;
+}
+
 Run measure_wire(TransportKind kind, const Options& o) {
     Run run;
     run.attempted = true;
@@ -1254,6 +1340,11 @@ Run measure_wire(TransportKind kind, const Options& o) {
     std::printf(" small ...");
     std::fflush(stdout);
     measure_small(o, w, run);
+    if (o.live_secs > 0) {
+        std::printf(" live ...");
+        std::fflush(stdout);
+        measure_live(o, w, run);
+    }
     std::printf(" dial ...");
     std::fflush(stdout);
 
@@ -1349,6 +1440,23 @@ int connect_and_measure(const Options& o) {
                 "   frames in one go (StreamTransport); the datagram side also packs frames\n"
                 "   into shared datagrams. See the note above bench_small().)\n");
 
+    if (o.live_secs > 0) {
+        char title[128];
+        std::snprintf(title, sizeof(title), "live — %d s of 30 fps video at %.1f Mbit/s, %d ms lifetime",
+                      o.live_secs, o.live_mbps, o.live_ms);
+        table.head(title);
+        table.line("frames delivered",       tcp.live_delivered,     udp.live_delivered,     "%", false, "%8.1f");
+        table.line("dropped by the sender",  tcp.live_expired,       udp.live_expired,       "%", true,  "%8.1f");
+        table.line("frame round trip, median", tcp.live_rtt_median_ms, udp.live_rtt_median_ms, "ms", true);
+        table.line("frame round trip, p99",  tcp.live_rtt_p99_ms,    udp.live_rtt_p99_ms,    "ms", true);
+        std::printf("  (each frame is a live message: repaired while it can still arrive in time,\n"
+                    "   dropped whole once it cannot. The round trip is sent -> delivered whole ->\n"
+                    "   echoed back, so it is the frame's delivery plus one small message the other\n"
+                    "   way; read it against rtt min. A frame that arrived but whose echo was lost\n"
+                    "   with the connection does not count. Over TCP nothing already in the socket\n"
+                    "   can be dropped, so there a loss delays the frames behind it instead.)\n");
+    }
+
     std::printf("\nconfiguration: bulk %.0f MiB in %.0f KiB frames, %.0f KiB credit; "
                 "rtt %d x %zu B; small %d x %zu B, %d in flight; %d dials\n",
                 o.bulk_bytes / (1024.0 * 1024.0), o.frame_bytes / 1024.0,
@@ -1386,6 +1494,9 @@ void usage() {
         "  --small-bytes N   small message size                 (default 256)\n"
         "  --small-credit N  small messages in flight           (default 512)\n"
         "  --dials N         dial samples                       (default 8)\n"
+        "  --live-s N        seconds of live video, 0 to skip   (default 10)\n"
+        "  --live-mbps N     its rate, Mbit/s                   (default 4)\n"
+        "  --live-ms N       each frame's lifetime, ms          (default 150)\n"
         "  -h, --help        this text\n"
         "\n"
         "both ends must run the same --protocol; the responder must be reachable on\n"
@@ -1476,6 +1587,9 @@ bool parse_args(int argc, char** argv, Options& o) {
         else if (arg == "--small-bytes")  { if (!number(i, o.small_bytes, 1)) return false; }
         else if (arg == "--small-credit") { if (!number(i, n, 1)) return false; o.small_credit = static_cast<int>(n); }
         else if (arg == "--dials")        { if (!number(i, n, 1)) return false; o.dials = static_cast<int>(n); }
+        else if (arg == "--live-s")       { if (!number(i, n, 1)) return false; o.live_secs = static_cast<int>(n); }
+        else if (arg == "--live-mbps")    { if (!number(i, n, 1)) return false; o.live_mbps = static_cast<double>(n); }
+        else if (arg == "--live-ms")      { if (!number(i, n, 1)) return false; o.live_ms = static_cast<int>(n); }
         else {
             std::fprintf(stderr, "bench_transport: unknown option '%s' (try --help)\n", arg.c_str());
             return false;

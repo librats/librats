@@ -80,6 +80,8 @@ class RatsPathStats(Structure):
         ("loss", c_double),
         ("bytes_delivered", c_uint64),
         ("bytes_lost", c_uint64),
+        ("live_sent", c_uint64),
+        ("live_expired", c_uint64),
     ]
 
 
@@ -231,10 +233,10 @@ class LibratsCtypes:
         lib.rats_max_peers.restype = c_size_t
 
         # --- messaging (named channel, raw bytes) ---
-        lib.rats_send.argtypes = [c_void_p, c_char_p, c_char_p, c_void_p, c_size_t]
+        lib.rats_send.argtypes = [c_void_p, c_char_p, c_char_p, c_void_p, c_size_t, c_uint32]
         lib.rats_send.restype = c_int
 
-        lib.rats_broadcast.argtypes = [c_void_p, c_char_p, c_void_p, c_size_t]
+        lib.rats_broadcast.argtypes = [c_void_p, c_char_p, c_void_p, c_size_t, c_uint32]
         lib.rats_broadcast.restype = c_int
 
         lib.rats_peer_writable.argtypes = [c_void_p, c_char_p]

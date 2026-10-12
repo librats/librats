@@ -268,13 +268,23 @@ size_t rats_max_peers(rats_t node) { return node_of(node)->max_peers(); }
 
 /* — messaging — */
 
-rats_error_t rats_send(rats_t node, const char* peer_id_hex,
-                       const char* channel, const void* data, size_t len) {
+namespace {
+SendOptions send_options(uint32_t lifetime_ms) {
+    SendOptions options;
+    options.lifetime = std::chrono::milliseconds(lifetime_ms);
+    return options;
+}
+} // namespace
+
+rats_error_t rats_send(rats_t node, const char* peer_id_hex, const char* channel,
+                       const void* data, size_t len, uint32_t lifetime_ms) {
     if (!peer_id_hex || !channel) return RATS_ERR_INVALID_ARG;
+    if (lifetime_ms > 0 && len > SendOptions::kMaxLivePayload) return RATS_ERR_INVALID_ARG;
     auto id = PeerId::from_hex(peer_id_hex);
     if (!id) return RATS_ERR_INVALID_ARG;
     if (!node_of(node)->peer(*id)) return RATS_ERR_NO_SUCH_PEER;
-    node_of(node)->send(*id, channel, ByteView(static_cast<const uint8_t*>(data), len));
+    node_of(node)->send(*id, channel, ByteView(static_cast<const uint8_t*>(data), len),
+                        send_options(lifetime_ms));
     return RATS_OK;
 }
 
@@ -285,9 +295,12 @@ int rats_peer_writable(rats_t node, const char* peer_id_hex) {
     return node_of(node)->peer_writable(*id) ? 1 : 0;
 }
 
-rats_error_t rats_broadcast(rats_t node, const char* channel, const void* data, size_t len) {
+rats_error_t rats_broadcast(rats_t node, const char* channel, const void* data, size_t len,
+                            uint32_t lifetime_ms) {
     if (!channel) return RATS_ERR_INVALID_ARG;
-    node_of(node)->broadcast(channel, ByteView(static_cast<const uint8_t*>(data), len));
+    if (lifetime_ms > 0 && len > SendOptions::kMaxLivePayload) return RATS_ERR_INVALID_ARG;
+    node_of(node)->broadcast(channel, ByteView(static_cast<const uint8_t*>(data), len),
+                             send_options(lifetime_ms));
     return RATS_OK;
 }
 
@@ -328,6 +341,8 @@ rats_path_stats_t to_c(const PathStats& s) {
     c.loss            = s.loss;
     c.bytes_delivered = s.bytes_delivered;
     c.bytes_lost      = s.bytes_lost;
+    c.live_sent       = s.live_sent;
+    c.live_expired    = s.live_expired;
     return c;
 }
 } // namespace

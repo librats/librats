@@ -218,11 +218,22 @@ RATS_API size_t rats_max_peers(rats_t node);
 /** Queue bytes for one peer on a named channel. RATS_OK means accepted and
  *  queued, never that it arrived. Pair it with rats_peer_writable() below if you
  *  send in bulk — that is the only way to learn you are outrunning the link
- *  before the peer is dropped for it. */
-RATS_API rats_error_t rats_send(rats_t node, const char* peer_id_hex,
-                                          const char* channel, const void* data, size_t len);
-RATS_API rats_error_t rats_broadcast(rats_t node, const char* channel,
-                                               const void* data, size_t len);
+ *  before the peer is dropped for it.
+ *
+ *  lifetime_ms 0 sends reliably: the message arrives whatever it takes, in order
+ *  with the rest of what this node sends on its channels. Anything else makes it
+ *  a LIVE message, worth delivering only within that many milliseconds of this
+ *  call (30000 at most): repaired while it can still arrive in time, dropped
+ *  whole once it cannot, never delivered in part or twice, and ordered with
+ *  nothing — it is handed over the moment it is complete, so number what you send
+ *  if order matters. For video and audio frames, which are no use late. A live
+ *  message carries at most 1 MiB. The receiver needs nothing: it arrives at the
+ *  channel's rats_on() callback like any other. */
+RATS_API rats_error_t rats_send(rats_t node, const char* peer_id_hex, const char* channel,
+                                const void* data, size_t len, uint32_t lifetime_ms);
+/** rats_send() to every connected peer. */
+RATS_API rats_error_t rats_broadcast(rats_t node, const char* channel, const void* data,
+                                     size_t len, uint32_t lifetime_ms);
 
 /** Whether this peer's send queue still has room — the same question rats_send()
  *  answers, asked without sending. Returns 1 for room, 0 for none (and 0 for a
@@ -255,6 +266,10 @@ typedef struct {
     double   loss;             /* share of bytes lost over the last sample interval, 0..1 */
     uint64_t bytes_delivered;  /* acknowledged since the connection opened */
     uint64_t bytes_lost;       /* declared lost since the connection opened */
+    uint64_t live_sent;        /* live messages (lifetime_ms > 0) sent since it opened */
+    uint64_t live_expired;     /* of those, dropped because their lifetime ran out: the
+                                * first thing a source asking for more than the path
+                                * carries will see */
 } rats_path_stats_t;
 
 /** The latest path sample for a peer, from any thread. RATS_ERR_NO_SUCH_PEER if the

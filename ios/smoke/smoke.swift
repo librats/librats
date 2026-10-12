@@ -71,7 +71,7 @@ let client = Harness(node: clientNode)
 // peer id it replies to comes from the callback, so no lookup is needed.
 check(rats_on(serverNode, "chat", { user, peerId, data, len in
     guard let h = Harness.from(user), let peerId = peerId, let data = data else { return }
-    _ = rats_send(h.node, peerId, "chat", data, len)
+    _ = rats_send(h.node, peerId, "chat", data, len, 0)
 }, server.opaque), "rats_on(server)")
 
 check(rats_on(clientNode, "chat", { user, _, data, len in
@@ -109,7 +109,7 @@ guard client.connected.wait(timeout: .now() + 15) == .success else {
 print("handshake complete")
 
 let message = "hello from swift on ios"
-check(rats_send(clientNode, serverId, "chat", Array(message.utf8), message.utf8.count),
+check(rats_send(clientNode, serverId, "chat", Array(message.utf8), message.utf8.count, 0),
       "rats_send")
 
 guard client.echoed.wait(timeout: .now() + 15) == .success else {

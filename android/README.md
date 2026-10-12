@@ -208,9 +208,12 @@ node.removeReconnect("192.168.1.100", 8080);
 `peerTransports(peerId)` → `EnumSet<Transport>` or null
 
 **Raw channel messaging** — `send(peerId, channel, data)`,
-`broadcast(channel, data)`, `on(channel, MessageCallback)`
+`broadcast(channel, data)`, `on(channel, MessageCallback)`; the
+`send(…, int lifetimeMs)` / `broadcast(…, int lifetimeMs)` overloads make it a
+*live* message (delivered within that many ms — 30000 at most — or dropped
+whole, unordered, at most 1 MiB) for video and audio frames; 0 is reliable
 
-**Peer events** — `onPeerConnected(PeerCallback)`, `onPeerDisconnected(PeerDisconnectCallback)` (the callback is told *why*: `"RATS_CLOSE_SLOW_CONSUMER"` means this node was sending faster than the link drained), `onPeerWritable(PeerCallback)` plus `peerWritable(String)`, `onPeerPath(PathCallback)` plus `pathStats(String)` → `PathStats` or null (bandwidth estimate, pacing rate, RTT, queued / in-flight bytes, loss)
+**Peer events** — `onPeerConnected(PeerCallback)`, `onPeerDisconnected(PeerDisconnectCallback)` (the callback is told *why*: `"RATS_CLOSE_SLOW_CONSUMER"` means this node was sending faster than the link drained), `onPeerWritable(PeerCallback)` plus `peerWritable(String)`, `onPeerPath(PathCallback)` plus `pathStats(String)` → `PathStats` or null (bandwidth estimate, pacing rate, RTT, queued / in-flight bytes, loss, live messages sent / expired)
 
 **Subsystems** *(enable before start)*
 

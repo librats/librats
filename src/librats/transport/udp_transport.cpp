@@ -79,8 +79,10 @@ size_t UdpTransport::max_payload() const noexcept {
     return framer::kMaxBlockSize - framer::kHeaderSize;
 }
 
-bool UdpTransport::send(FrameHeader header, ByteView payload) {
-    if (!conn_.send_message(header, payload)) return false;
+bool UdpTransport::send(FrameHeader header, ByteView payload, Deadline deadline) {
+    const bool queued = is_live(deadline) ? conn_.send_live(header, payload, deadline)
+                                          : conn_.send_message(header, payload);
+    if (!queued) return false;
     conn_.want_write(true);
     // Enough for a burst of packets already: send it now rather than at the end of
     // the turn, which would only hold memory.
