@@ -660,7 +660,14 @@ void UdpConnection::ack_sent() noexcept {
 }
 
 void UdpConnection::send_ack(Clock::time_point now) {
-    if (!established() || received_.empty()) return;
+    if (!established()) return;
+    // Owed, but everything it would name has been pruned since — an ack-of-ack in
+    // a packet that was itself refused, so never recorded. Nothing left to say:
+    // the debt is settled, or next_deadline() would keep asking for it at once.
+    if (received_.empty()) {
+        ack_sent();
+        return;
+    }
     send_packet(now, /*data=*/false, /*probe=*/false, /*force_ack=*/true);
 }
 
