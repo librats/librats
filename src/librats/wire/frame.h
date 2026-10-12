@@ -11,11 +11,11 @@
  *   │   4 bytes    │       length bytes         │
  *   └──────────────┴───────────────────────────┘
  *
- * A block's body is opaque at this layer. The Connection uses it for two things:
+ * A block's body is opaque at this layer. StreamTransport uses it for two things:
  *
  *   - during the handshake, the body is a raw handshake message (Noise / id);
- *   - once established, the body is the Session-encrypted bytes of an inner
- *     **message**, which has its own fixed 4-byte header:
+ *   - once established, the body is one inner **message**, sealed by the
+ *     Session, which has its own fixed 4-byte header:
  *
  *       ┌──────┬───────┬─────────┬───────────────┐
  *       │ type │ flags │ channel │   payload …   │
@@ -95,6 +95,9 @@ struct RATS_API Block {
 RATS_API Block try_take_block(const uint8_t* data, size_t size);
 
 // ── Inner message (fixed header + payload, no length prefix) ─────────────────
+
+/// Write the kHeaderSize-byte `[type][flags][channel]` header at `out`.
+RATS_API void encode_header(uint8_t* out, FrameHeader header);
 
 /// Append `[type][flags][channel][payload]` to `out` (no length prefix).
 RATS_API void encode_message(Bytes& out, FrameHeader header, ByteView payload);

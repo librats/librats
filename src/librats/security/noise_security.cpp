@@ -21,37 +21,35 @@ const char* noise_error_name(librats::NoiseError e) {
     return "unknown";
 }
 
-/// Session backed by a completed librats::NoiseSession (owns its transport ciphers).
+/// Session over the two transport ciphers a completed Noise handshake split into.
+/// The handshake state itself is dropped with its handshaker once this exists.
 class NoiseSessionAdapter final : public Session {
 public:
-    NoiseSessionAdapter(std::unique_ptr<librats::NoiseSession> session, PeerId remote)
-        : session_(std::move(session)), remote_id_(remote) {}
-
-    bool encrypt(ByteView plain, Bytes& out) override {
-        out.resize(plain.size() + librats::NOISE_TAG_SIZE);
-        const size_t n = session_->encrypt(plain.data(), plain.size(), out.data());
-        if (n == 0 && plain.size() != 0) return false;
-        out.resize(n);
-        return true;
-    }
-
-    bool decrypt(ByteView cipher, Bytes& out) override {
-        if (cipher.size() < librats::NOISE_TAG_SIZE) return false;
-        out.resize(cipher.size());  // plaintext is always shorter than ciphertext
-        const size_t n = session_->decrypt(cipher.data(), cipher.size(), out.data());
-        if (n == librats::NOISE_DECRYPT_FAILED) return false;  // 0 is a valid (empty) frame
-        out.resize(n);
-        return true;
+    NoiseSessionAdapter(librats::NoiseSession& done, PeerId remote) : remote_id_(remote) {
+        done.take_transport(send_, recv_);
     }
 
     size_t overhead() const noexcept override { return librats::NOISE_TAG_SIZE; }
+
+    void seal(uint64_t nonce, ByteView ad, uint8_t* data, size_t len) const noexcept override {
+        send_.seal(nonce, ad.data(), ad.size(), data, len);
+    }
+
+    std::optional<size_t> open(uint64_t nonce, ByteView ad, uint8_t* data,
+                               size_t len) const noexcept override {
+        if (len < librats::NOISE_TAG_SIZE) return std::nullopt;
+        const size_t n = recv_.open(nonce, ad.data(), ad.size(), data, len);
+        if (n == librats::NOISE_DECRYPT_FAILED) return std::nullopt;
+        return n;
+    }
 
     const PeerId& remote_id() const override { return remote_id_; }
     bool is_secure() const override { return true; }
 
 private:
-    std::unique_ptr<librats::NoiseSession> session_;
-    PeerId                              remote_id_;
+    librats::NoiseCipherState send_;
+    librats::NoiseCipherState recv_;
+    PeerId                    remote_id_;
 };
 
 /// Drives the Noise XX message exchange via librats::NoiseSession::handshake_step.
@@ -77,7 +75,7 @@ public:
         if (session_->is_handshake_complete()) {
             oc.remote_id = PeerId::from_public_key(session_->get_remote_static_public(),
                                                    librats::NOISE_DH_SIZE);
-            oc.session   = std::make_unique<NoiseSessionAdapter>(std::move(session_), oc.remote_id);
+            oc.session   = std::make_unique<NoiseSessionAdapter>(*session_, oc.remote_id);
             oc.status    = Outcome::Done;
         }
         return oc;

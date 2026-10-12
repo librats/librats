@@ -92,6 +92,9 @@ public:
     // ── Read side (parsing) ─────────────────────────────────────────────────
 
     const uint8_t* data()  const noexcept { return buf_.get() + start_; }
+    /// The live bytes, writable — for a parser that transforms a message where it
+    /// lies (decrypting it in place) before consuming it.
+    uint8_t*       data()        noexcept { return buf_.get() + start_; }
     size_t         size()  const noexcept { return end_ - start_; }
     bool           empty() const noexcept { return start_ == end_; }
     ByteView       view()  const noexcept { return ByteView(data(), size()); }

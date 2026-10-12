@@ -1,4 +1,5 @@
 #include "librats/transport/reactor.h"
+#include "librats/transport/stream_transport.h"
 #include "librats/transport/tcp_link.h"
 #include "librats/core/ip_address.h"
 #include "librats/util/logger.h"
@@ -135,7 +136,8 @@ void Reactor::start_dial(ConnId id, const std::string& host, int port, Transport
         std::unique_ptr<Link> link = mux_->connect(*target, profile);
         if (!link) { abort_dial(id, host, port); return; }
 
-        Connection* conn = adopt(std::move(link), ConnRole::Outbound, id);
+        Connection* conn = adopt(over_stream(std::move(link), ConnRole::Outbound),
+                                 ConnRole::Outbound, id);
         if (conn) conn->set_dial_address(host, static_cast<uint16_t>(port));
         return;
     }
@@ -146,7 +148,8 @@ void Reactor::start_dial(ConnId id, const std::string& host, int port, Transport
         abort_dial(id, host, port);
         return;
     }
-    Connection* conn = adopt(std::make_unique<TcpLink>(sock, *this), ConnRole::Outbound, id);
+    Connection* conn = adopt(over_stream(std::make_unique<TcpLink>(sock, *this), ConnRole::Outbound),
+                             ConnRole::Outbound, id);
     if (!conn) { close_socket(sock); return; }   // the dial was cancelled while queued
     conn->set_dial_address(host, static_cast<uint16_t>(port));
 }
@@ -158,7 +161,7 @@ void Reactor::adopt_link(ConnId id, std::unique_ptr<Link> link, ConnRole role, b
     // dies with it and takes the link with it, which is the right outcome.
     auto holder = std::make_shared<std::unique_ptr<Link>>(std::move(link));
     execute([this, id, holder, role, connected] {
-        Connection* conn = adopt(std::move(*holder), role, id);
+        Connection* conn = adopt(over_stream(std::move(*holder), role), role, id);
         if (!conn) return;
         // Already-connected links skip the Connecting state entirely, exactly as an
         // accepted socket does; the rest wait for the PollOut that wake() will bring
@@ -466,8 +469,8 @@ void Reactor::do_accept() {
             continue;
         }
 
-        Connection* conn = adopt(std::make_unique<TcpLink>(client, *this), ConnRole::Inbound,
-                                 next_conn_id_.fetch_add(1, std::memory_order_relaxed));
+        Connection* conn = adopt(over_stream(std::make_unique<TcpLink>(client, *this), ConnRole::Inbound),
+                                 ConnRole::Inbound, next_conn_id_.fetch_add(1, std::memory_order_relaxed));
         if (!conn) { close_socket(client); continue; }
         conn->start_handshake();  // accepted sockets are already connected
     }
@@ -479,7 +482,7 @@ ConnId Reactor::adopt_inbound_link(std::unique_ptr<Link> link) {
     if (!delegate_.admit_inbound()) return kInvalidConnId;
 
     const ConnId id = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
-    Connection* conn = adopt(std::move(link), ConnRole::Inbound, id);
+    Connection* conn = adopt(over_stream(std::move(link), ConnRole::Inbound), ConnRole::Inbound, id);
     if (!conn) return kInvalidConnId;
     conn->start_handshake();  // an accepted stream is already connected
     return id;
@@ -490,23 +493,30 @@ bool Reactor::resolve_dial(ConnId id) {
     return cancelled_dials_.erase(id) > 0;
 }
 
-Connection* Reactor::adopt(std::unique_ptr<Link> link, ConnRole role, ConnId id) {
+std::unique_ptr<Transport> Reactor::over_stream(std::unique_ptr<Link> link, ConnRole role) {
+    return std::make_unique<StreamTransport>(std::move(link), role, security_);
+}
+
+Connection* Reactor::adopt(std::unique_ptr<Transport> transport, ConnRole role, ConnId id) {
     // A dial cancelled while its task sat in the queue never becomes a connection;
-    // dropping `link` here is what actually calls the attempt off.
+    // dropping `transport` here is what actually calls the attempt off.
     if (resolve_dial(id)) return nullptr;
 
-    const socket_t fd = link->fd();
+    const socket_t fd = transport->fd();
     if (is_valid_socket(fd)) {
         set_socket_nonblocking(fd);
         // Only a TCP link has a socket of its own, so this reaches exactly the
-        // sockets Nagle applies to. Safe to do here and nowhere else because the
-        // send queue now aggregates on our side — see set_tcp_nodelay().
+        // sockets these two apply to. Nagle can go because the transport already
+        // aggregates a turn's messages into one write (see set_tcp_nodelay); the low
+        // mark keeps the kernel from taking more than it is about to send, so the
+        // transport's queue — where messages are still reordered by priority — is
+        // where the backlog waits.
         set_tcp_nodelay(fd);
+        set_tcp_notsent_lowat(fd, kTcpNotsentLowat);
     }
 
-    auto conn = std::make_unique<Connection>(id, std::move(link), role, *this, delegate_);
+    auto conn = std::make_unique<Connection>(id, std::move(transport), role, *this, delegate_);
     Connection* raw = conn.get();
-    raw->link().attach(id);
 
     conns_.emplace(id, std::move(conn));
     conn_count_.fetch_add(1, std::memory_order_relaxed);

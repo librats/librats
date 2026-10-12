@@ -27,13 +27,15 @@
 
 namespace librats {
 
-/// Passthrough session: encrypt/decrypt just copy the bytes.
+/// Passthrough session: nothing is encrypted and nothing is appended.
 class PlaintextSession final : public Session {
 public:
     explicit PlaintextSession(PeerId remote) : remote_id_(remote) {}
-    bool encrypt(ByteView plain, Bytes& out) override { out.assign(plain.begin(), plain.end()); return true; }
     size_t overhead() const noexcept override { return 0; }
-    bool decrypt(ByteView cipher, Bytes& out) override { out.assign(cipher.begin(), cipher.end()); return true; }
+    void seal(uint64_t, ByteView, uint8_t*, size_t) const noexcept override {}
+    std::optional<size_t> open(uint64_t, ByteView, uint8_t*, size_t len) const noexcept override {
+        return len;
+    }
     const PeerId& remote_id() const override { return remote_id_; }
     bool is_secure() const override { return false; }
 private:

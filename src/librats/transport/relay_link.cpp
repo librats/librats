@@ -14,7 +14,7 @@ namespace {
 /// Slices one data message gathers from the caller's list. The send buffer hands
 /// out a length prefix and a body per queued frame, so this covers a run of frames
 /// rather than a single one; a longer backlog than this simply comes back on the
-/// next turn of Connection::flush.
+/// next turn of StreamTransport::flush.
 constexpr size_t kMaxParts = 16;
 
 } // namespace
@@ -164,7 +164,7 @@ Link::IoResult Circuit::write(const ByteView* slices, size_t count) {
     }
 
     // One data message per call, gathered across as many of the caller's slices as
-    // fit. Connection::flush loops while a link keeps reporting Ok, so a backlog
+    // fit. StreamTransport::flush loops while a link keeps reporting Ok, so a backlog
     // larger than one chunk simply comes back around — no loop is needed here, and
     // each turn of that loop re-checks the credit and the carrier.
     ByteView parts[kMaxParts];

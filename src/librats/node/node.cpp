@@ -650,6 +650,17 @@ void Node::on_established(Connection& conn) {
     if (const auto dest = peers_.destination(conn.remote_id()); dest && dest->route == route)
         conn.set_in_transit(dest->owed);
 
+    // Tell the peer how to reach us, and what address we see it at. Skipped for a
+    // rejected duplicate (its connection was just closed above); sent on the
+    // surviving link otherwise — including the winner of a cross-connect race.
+    //
+    // Queued before any handler below can queue anything, so it is the first
+    // message on the connection. Its lane (Control) would put it ahead of what is
+    // still waiting anyway, but a handler sending enough to be written at once
+    // would otherwise beat it to the wire.
+    if (outcome.result != PeerTable::AddResult::Rejected)
+        send_identify(conn);
+
     // Fire "connected" only on the 0→1 transition. A reconnect/duplicate that
     // merely swapped the live route keeps the peer connected from the app's view.
     if (outcome.result == PeerTable::AddResult::NewPeer) {
@@ -659,12 +670,6 @@ void Node::on_established(Connection& conn) {
         Peer handle = make_peer(conn.remote_id(), route);
         for (auto& cb : peer_connected_) cb(handle);
     }
-
-    // Tell the peer how to reach us, and what address we see it at. Skipped for a
-    // rejected duplicate (its connection was just closed above); sent on the
-    // surviving link otherwise — including the winner of a cross-connect race.
-    if (outcome.result != PeerTable::AddResult::Rejected)
-        send_identify(conn);
 }
 
 void Node::on_frame(Connection& conn, const Frame& frame) {

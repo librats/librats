@@ -2,28 +2,27 @@
 
 /**
  * @file connection.h
- * @brief A single peer connection: byte-stream link, secure handshake, framing.
+ * @brief A single peer connection: lifecycle, backpressure, and the Transport under it.
  *
  * A Connection is owned by exactly one Reactor and is only ever touched by that
  * reactor's thread. Because of that single-threaded ownership it holds NO locks
  * and uses NO atomics — all synchronisation lives at the reactor boundary (the
  * task queue). This is the heart of the shared-nothing model.
  *
- * It is also transport-agnostic: everything here needs is an ordered, reliable,
- * non-blocking byte stream, which is exactly what a Link is (see link.h). A
- * connection over a kernel TCP socket and one over the library's reliable-UDP
- * stream run the *same* code — same framing, same handshake, same backpressure —
- * and differ only in which Link they hold.
+ * It is a peer as the reactor sees it, and no more: an id, a lifecycle, a send
+ * queue whose marks a caller is told about, and the events its delegate hears.
+ * Everything about how messages reach the peer — handshake, encryption, framing,
+ * the order queued messages leave in — belongs to its Transport (transport.h),
+ * which hands it whole messages and takes whole messages from it. A connection
+ * over a TCP socket, a UDP stream or a relayed circuit runs this same code.
  *
  * Lifecycle: Connecting → Handshaking → Established → Closing/Closed.
  *   - Connecting:  outbound transport connect in flight (inbound skips this).
- *   - Handshaking: a Handshaker (from the reactor's SecurityProvider) runs to
- *                  completion, yielding a Session and the remote PeerId.
- *   - Established: inbound blocks are decrypted into inner frames and delivered;
- *                  outbound frames are encrypted and queued.
+ *   - Handshaking: the transport's handshake is running.
+ *   - Established: the peer's identity is proven; messages flow both ways.
  *
- * The Connection reports events through a ConnectionDelegate and asks its Link
- * to (dis)arm write-interest; it never touches the poller directly.
+ * The Connection reports events through a ConnectionDelegate and never touches
+ * the poller directly.
  */
 
 #include "librats/util/rats_export.h"
@@ -31,14 +30,12 @@
 #include "librats/core/bytes.h"
 #include "librats/wire/frame.h"
 #include "librats/peer/peer_id.h"
-#include "librats/security/handshaker.h"
-#include "librats/core/receive_buffer.h"
-#include "librats/core/chained_send_buffer.h"
 #include "librats/core/socket.h"
-#include "librats/transport/link.h"
+#include "librats/transport/transport.h"
 
 #include <atomic>
 #include <memory>
+#include <string>
 
 namespace librats {
 
@@ -88,7 +85,7 @@ public:
                                  const std::string& /*host*/, uint16_t /*port*/) {}
 };
 
-class Connection {
+class Connection final : private TransportSink {
 public:
     /// High-water mark for the memory held by the send queue. A caller that offers
     /// another message while the queue is *still* over it has the connection closed
@@ -104,15 +101,9 @@ public:
     /// can be used correctly and one that merely disconnects you.
     static constexpr size_t kDefaultSendLowWater = kDefaultSendHighWater / 4;
 
-    /// Queued bytes past which send() stops holding the batch back and writes
-    /// immediately. Aggregating below this is what turns a burst of small frames
-    /// into one system call; above it there is already enough to fill a write, so
-    /// waiting would only cost memory and delay.
-    static constexpr size_t kCoalesceLimit = 64 * 1024;
-
-    Connection(ConnId id, std::unique_ptr<Link> link, ConnRole role,
+    Connection(ConnId id, std::unique_ptr<Transport> transport, ConnRole role,
                Reactor& reactor, ConnectionDelegate& delegate);
-    ~Connection();
+    ~Connection() override;
 
     Connection(const Connection&) = delete;
     Connection& operator=(const Connection&) = delete;
@@ -120,32 +111,42 @@ public:
     // — identity / state (reactor thread) —
     ConnId        id() const noexcept        { return id_; }
     uint8_t       reactor_index() const noexcept;  ///< index of the owning reactor
-    Link&         link() const noexcept      { return *link_; }
     /// The kernel socket behind this connection, or RATS_INVALID_SOCKET when the
     /// transport has none of its own (UDP streams share the mux's socket).
-    socket_t      socket() const noexcept    { return link_->fd(); }
-    TransportKind transport() const noexcept { return link_->kind(); }
+    socket_t      socket() const noexcept    { return transport_->fd(); }
+    TransportKind transport() const noexcept { return transport_->kind(); }
     ConnRole      role() const noexcept      { return role_; }
     ConnState     state() const noexcept     { return state_; }
     CloseReason   close_reason() const noexcept { return close_reason_; }
     const PeerId& remote_id() const noexcept { return remote_id_; }
-    bool          is_secure() const noexcept { return session_ && session_->is_secure(); }
+    bool          is_secure() const noexcept { return transport_->is_secure(); }
 
     /// Queue an application frame for the peer. No-op unless Established.
     ///
-    /// Never refuses and never drops: whatever it is handed is queued, however
-    /// large. The size of a single message is not what the high-water mark is
-    /// about — a message cannot be queued by halves, so a connection that is
-    /// draining perfectly well must not be torn down over one big frame. What
-    /// closes a connection is offering *another* message while the queue is still
-    /// over the mark, which is the actual evidence that the peer is not keeping up.
+    /// Never drops: whatever it is handed is queued, however large — except a
+    /// message too large for the transport to carry at all, which is refused with
+    /// nothing queued and the connection untouched. The size of a single message is
+    /// not what the high-water mark is about — a message cannot be queued by halves,
+    /// so a connection that is draining perfectly well must not be torn down over
+    /// one big frame. What closes a connection is offering *another* message while
+    /// the queue is still over the mark, which is the actual evidence that the peer
+    /// is not keeping up.
+    ///
+    /// Messages of one MessageType reach the peer in the order they were sent —
+    /// all of an application's channels included; different types may overtake
+    /// each other, by priority (see send_queue.h).
     ///
     /// @return whether there is still room for more. False means the queue is
     ///         past its low-water mark — this frame is queued like any other,
     ///         nothing is dropped, but the caller should stop and wait for
-    ///         ConnectionDelegate::on_writable rather than keep piling on until
-    ///         the connection is dropped as a slow consumer.
+    ///         ConnectionDelegate::on_writable_changed rather than keep piling on
+    ///         until the connection is dropped as a slow consumer.
     bool send(FrameHeader header, ByteView payload);
+
+    /// Convenience: send raw bytes on an application channel.
+    bool send(uint16_t channel, ByteView payload) {
+        return send(FrameHeader{MessageType::App, 0, channel}, payload);
+    }
 
     /// Whether the send queue currently has room (see send()).
     bool writable() const noexcept { return !over_low_water_; }
@@ -154,21 +155,19 @@ public:
     /// reactor that have not reached send() yet (see PeerTable::Entry::owed).
     ///
     /// They are as much of the backlog as the queue itself — held in the reactor's
-    /// task queue rather than in tx_, and on their way here — so the marks below
-    /// weigh them together with what is queued. Without that the two halves would
-    /// answer separately: a caller told "no room" because its charge crossed the
-    /// mark would be waiting for an opening from a queue that never crossed
+    /// task queue rather than in the transport, and on their way here — so the marks
+    /// below weigh them together with what is queued. Without that the two halves
+    /// would answer separately: a caller told "no room" because its charge crossed
+    /// the mark would be waiting for an opening from a queue that never crossed
     /// anything, and so would never be told the room came back.
     void set_in_transit(std::shared_ptr<const std::atomic<size_t>> owed) noexcept {
         in_transit_ = std::move(owed);
     }
 
-    /// What this connection is carrying: queued here plus still on its way.
+    /// What this connection is carrying: queued in the transport plus still on its
+    /// way to it.
     size_t backlog() const noexcept {
-        // Watch the memory the queue actually holds, not just the bytes still owed
-        // to the socket: a partially sent chunk keeps its whole allocation, so
-        // allocated() is what a peer that stops reading can make us carry.
-        return tx_.allocated() +
+        return transport_->backlog() +
                (in_transit_ ? in_transit_->load(std::memory_order_relaxed) : 0);
     }
 
@@ -186,18 +185,13 @@ public:
     /// Reactor at the end of the turn; false ⇒ the connection must be torn down.
     bool flush_pending();
 
-    /// Convenience: send raw bytes on an application channel.
-    bool send(uint16_t channel, ByteView payload) {
-        return send(FrameHeader{MessageType::App, 0, channel}, payload);
-    }
-
     // — reactor-driven I/O callbacks. Return false to request teardown. —
     bool on_readable();
     bool on_writable();
     bool on_error();
 
-    /// Bring an accepted (inbound) socket up: it is already connected, so begin
-    /// the handshake immediately. Called by the Reactor right after adopt().
+    /// Bring an accepted (inbound) path up: it is already connected, so begin the
+    /// handshake immediately. Called by the Reactor right after adopt().
     void start_handshake();
 
     /// Associate the establishment-timeout timer so it can be cancelled once the
@@ -205,22 +199,19 @@ public:
     void set_establish_timer(TimerId id) noexcept { establish_timer_ = id; }
 
     /// Cancel the establishment-timeout timer if still armed; idempotent. Called
-    /// both on success (complete_established) and on teardown (Reactor::remove) so
-    /// the reaper can never outlive the connection and fire against a reused fd.
+    /// both on success and on teardown (Reactor::remove) so the reaper can never
+    /// outlive the connection and fire against a reused fd.
     void cancel_establish_timer();
 
-    /// Periodic housekeeping, driven by the Reactor's maintenance timer. Hands back
-    /// the receive buffer of a peer that has gone quiet — a peer that sent one big
-    /// frame and then fell silent would otherwise sit on that allocation for the life
-    /// of the connection. Reactor thread; never closes the connection.
-    void on_maintenance_tick() { rx_.decay(); }
+    /// Periodic housekeeping, driven by the Reactor's maintenance timer: lets the
+    /// transport hand back buffers a quiet peer no longer needs. Never closes.
+    void on_maintenance_tick() { transport_->on_maintenance_tick(); }
 
-    /// What the path to this peer looks like now (see PathStats): the link's own
-    /// figures, with this connection's queue — and what is still on its way to it
-    /// — added to what a new message waits behind, and the loss share taken over
-    /// the interval since the previous call. Reactor thread; called by the
-    /// Reactor's path sampler, the one caller, which is what gives "since the
-    /// previous call" its meaning.
+    /// What the path to this peer looks like now (see PathStats): the transport's
+    /// own figures, with what is still on its way to this connection added to what
+    /// a new message waits behind, and the loss share taken over the interval since
+    /// the previous call. Reactor thread; called by the Reactor's path sampler, the
+    /// one caller, which is what gives "since the previous call" its meaning.
     PathStats sample_path();
 
     /// Record the address this outbound connection was dialed at (so the peer's
@@ -233,65 +224,55 @@ public:
     const std::string& dial_host() const noexcept { return dial_host_; }
     uint16_t           dial_port() const noexcept { return dial_port_; }
 
-    /// The peer's IP as the link sees it, without the source port (ephemeral on
+    /// The peer's IP as the path sees it, without the source port (ephemeral on
     /// TCP, NAT-rewritten on UDP). Combined with the peer's advertised listen port
     /// by the node's identify exchange to form a dialable address — the only way
     /// to learn the dialable address of an *inbound* peer. Unspecified on error.
     IpAddress          remote_ip() const;
 
-    /// The peer's source endpoint as the link sees it, port included.
+    /// The peer's source endpoint as the path sees it, port included.
     ///
     /// The port is meaningless on TCP (an ephemeral one the peer's OS picked for an
-    /// outbound socket) but is NOT on a datagram link: there every peer shares one
+    /// outbound socket) but is NOT on a datagram path: there every peer shares one
     /// socket, so what a NAT rewrote the source port to is exactly the port a third
     /// party would have to aim at to reach this peer. That is what identify carries
-    /// on to it, and what a hole punch is aimed at. nullopt if the link cannot say.
-    std::optional<Address> remote_endpoint() const { return link_->remote_endpoint(); }
+    /// on to it, and what a hole punch is aimed at. nullopt if the path cannot say.
+    std::optional<Address> remote_endpoint() const { return transport_->remote_endpoint(); }
 
-    /// Tell the link the connection is going away, so a transport that owes the
-    /// peer a goodbye (or a last flush) can arrange it. Called by the Reactor
-    /// during teardown, before the Connection is destroyed.
-    void shutdown_link(CloseReason reason) { link_->close(reason); }
+    /// Tell the transport the connection is going away, so one that owes the peer
+    /// a goodbye (or a last flush) can arrange it. Called by the Reactor during
+    /// teardown, before the Connection is destroyed.
+    void shutdown_link(CloseReason reason) { transport_->close(reason); }
 
 private:
-    void begin_handshake();             ///< transport up → Handshaking
-    size_t read_size() const;           ///< bytes to offer the next recv() (see rx_need_)
-    bool process_blocks();              ///< decode every complete block in rx_; false ⇒ teardown
-    bool drive_handshake(ByteView body);///< feed one handshake block; false ⇒ teardown
-    bool deliver_frame(ByteView body);  ///< decrypt+parse+dispatch; false ⇒ teardown
-    void complete_established();         ///< handshake done → Established
-    void queue_block(Bytes body);       ///< length-prefix `body` into the send buffer
-    bool flush();                       ///< drain tx_ to the socket; false ⇒ teardown
-    void arm_write();
-    void disarm_write();
+    // — TransportSink —
+    void transport_connected() override;
+    void transport_established(const PeerId& remote) override;
+    bool transport_frame(const Frame& frame) override;
+
+    /// A transport entry point returned `ok`; turn a failure into teardown, and
+    /// tell a stopped caller if the call let the queue drain.
+    bool settle(bool ok);
+    /// The queue has drained back under the low-water mark: say so, once.
+    void note_drained();
     bool fail(CloseReason);             ///< record reason, return false (teardown)
 
-    ConnId                id_;
-    std::unique_ptr<Link> link_;
-    ConnRole              role_;
-    ConnState           state_ = ConnState::Connecting;
-    CloseReason         close_reason_ = CloseReason::PeerClosed;
-    Reactor&            reactor_;
-    ConnectionDelegate& delegate_;
+    ConnId                     id_;
+    std::unique_ptr<Transport> transport_;
+    ConnRole                   role_;
+    ConnState                  state_ = ConnState::Connecting;
+    CloseReason                close_reason_ = CloseReason::PeerClosed;
+    Reactor&                   reactor_;
+    ConnectionDelegate&        delegate_;
+    PeerId                     remote_id_;
 
-    std::unique_ptr<Handshaker> handshaker_;  ///< non-null only while Handshaking
-    std::unique_ptr<Session>    session_;      ///< non-null once Established
-    PeerId                      remote_id_;
-
-    ReceiveBuffer     rx_;  ///< allocates on first read, shrinks back when idle
-    /// Wire size of the block rx_ is mid-way through, once its length prefix has been
-    /// read; 0 when no block is in flight. Lets the next recv() size rx_ for the whole
-    /// block in one go instead of growing into it. Peer-declared, hence capped.
-    size_t            rx_need_ = 0;
-    ChainedSendBuffer tx_;
-    bool              want_write_ = false;
     /// A flush is already booked for the end of this reactor turn, so further
     /// frames only need to join the queue rather than book another one.
     bool              flush_queued_ = false;
     /// The queue went past its low-water mark and the caller has been told to
     /// stop; cleared, with a notification, once it drains back under.
     bool              over_low_water_ = false;
-    /// Inside the on_writable callback — see flush().
+    /// Inside the on_writable_changed callback — see note_drained().
     bool              in_writable_ = false;
     /// Charged by send() callers on any thread, discharged by the reactor task
     /// just before the frame reaches send() — see set_in_transit().
@@ -301,7 +282,7 @@ private:
     TimerId           establish_timer_ = kInvalidTimerId;  ///< connect+handshake deadline
     std::string       dial_host_;                          ///< address we dialed (outbound)
     uint16_t          dial_port_ = 0;
-    /// The link's delivered/lost totals at the previous sample_path().
+    /// The transport's delivered/lost totals at the previous sample_path().
     uint64_t          sampled_delivered_ = 0;
     uint64_t          sampled_lost_      = 0;
 };

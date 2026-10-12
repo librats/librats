@@ -345,7 +345,7 @@ bool set_socket_buffer_sizes(socket_t socket, int recv_bytes, int send_bytes);
  * several of them can be coalesced into one segment. That is the kernel doing —
  * late, and with no knowledge of what is coming — the batching a sender is
  * better placed to do itself. With the send queue aggregating whole batches of
- * frames into one write (see Connection::send), the coalescing has already
+ * frames into one write (see StreamTransport), the coalescing has already
  * happened by the time the kernel sees the bytes, and all Nagle can still add is
  * the delay.
  *
@@ -355,6 +355,22 @@ bool set_socket_buffer_sizes(socket_t socket, int recv_bytes, int send_bytes);
  * @return true if the option was accepted.
  */
 bool set_tcp_nodelay(socket_t socket);
+
+/**
+ * Keep a TCP socket's not-yet-sent backlog short (TCP_NOTSENT_LOWAT).
+ *
+ * By default the kernel accepts writes until its send buffer is full, which on a
+ * fast path is megabytes — and whatever sits in it is committed, in order, beyond
+ * any reprioritising. With this the socket reports writable, and accepts more, only
+ * while less than `bytes` of what it holds is still unsent. Bytes in flight do not
+ * count, so the congestion window is untouched: only the queue in front of it
+ * shrinks, and the order of everything else is decided by the sender instead.
+ *
+ * Linux and macOS; elsewhere a no-op.
+ *
+ * @return true if the option was accepted (false where it does not exist).
+ */
+bool set_tcp_notsent_lowat(socket_t socket, int bytes);
 
 /**
  * Send one datagram straight from a raw buffer — no std::vector, no resolution.

@@ -151,6 +151,28 @@ size_t NoiseCipherState::decrypt_with_ad(
     return NOISE_DECRYPT_FAILED;
 }
 
+void NoiseCipherState::seal(uint64_t nonce, const uint8_t* ad, size_t ad_len,
+                            uint8_t* data, size_t len) const {
+    uint8_t n[12];
+    make_nonce(n, nonce);
+    rats_chachapoly_encrypt_inplace(key_, n, ad, ad_len, data, len);
+}
+
+size_t NoiseCipherState::open(uint64_t nonce, const uint8_t* ad, size_t ad_len,
+                              uint8_t* data, size_t len) const {
+    uint8_t n[12];
+    make_nonce(n, nonce);
+    const size_t result = rats_chachapoly_decrypt_inplace(key_, n, ad, ad_len, data, len);
+    return result == RATS_CHACHAPOLY_DECRYPT_FAILED ? NOISE_DECRYPT_FAILED : result;
+}
+
+void NoiseCipherState::take(NoiseCipherState& other) {
+    memcpy(key_, other.key_, NOISE_KEY_SIZE);
+    nonce_   = other.nonce_;
+    has_key_ = other.has_key_;
+    other.clear();
+}
+
 void NoiseCipherState::clear() {
     secure_zero(key_, NOISE_KEY_SIZE);
     nonce_ = 0;
@@ -760,6 +782,14 @@ size_t NoiseSession::decrypt(const uint8_t* ciphertext, size_t ct_len, uint8_t* 
         LOG_NOISE_ERROR("Session decrypt failed for " << ct_len << " bytes");
     }
     return result;
+}
+
+NoiseError NoiseSession::take_transport(NoiseCipherState& send, NoiseCipherState& recv) {
+    if (!transport_ready_) return NoiseError::HANDSHAKE_NOT_COMPLETE;
+    send.take(send_cipher_);
+    recv.take(recv_cipher_);
+    transport_ready_ = false;
+    return NoiseError::OK;
 }
 
 const uint8_t* NoiseSession::get_remote_static_public() const {

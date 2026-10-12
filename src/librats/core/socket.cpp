@@ -1239,6 +1239,21 @@ bool set_tcp_nodelay(socket_t socket) {
     return true;
 }
 
+bool set_tcp_notsent_lowat(socket_t socket, int bytes) {
+#ifdef TCP_NOTSENT_LOWAT
+    if (setsockopt(socket, IPPROTO_TCP, TCP_NOTSENT_LOWAT,
+                   reinterpret_cast<const char*>(&bytes), sizeof(bytes)) != 0) {
+        LOG_SOCKET_DEBUG("Could not set TCP_NOTSENT_LOWAT on socket " << socket);
+        return false;
+    }
+    return true;
+#else
+    (void)socket;
+    (void)bytes;
+    return false;
+#endif
+}
+
 std::ptrdiff_t send_udp_to(socket_t socket, const void* data, size_t len,
                            const Address& dest, AddressFamily af) {
     sockaddr_storage dest_addr;

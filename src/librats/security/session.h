@@ -2,18 +2,32 @@
 
 /**
  * @file session.h
- * @brief Post-handshake symmetric session: encrypts/decrypts transport frames.
+ * @brief The keys of an established secure channel: AEAD with explicit nonces.
  *
- * A Session is produced by a Handshaker once the secure channel is established.
- * The Connection holds it and runs every outbound frame through encrypt() and
- * every inbound frame through decrypt(). The plaintext mode supplies a
- * passthrough Session so the Connection code path is identical with or without
- * encryption — no `if (encrypted)` scattered through the hot path.
+ * A Session is produced by a Handshaker once the secure channel is established,
+ * and the transport above it runs every outbound message through seal() and every
+ * inbound one through open(). The plaintext mode supplies a passthrough Session,
+ * so the transport's code path is identical with or without encryption — no
+ * `if (encrypted)` scattered through the hot path.
+ *
+ * The nonce belongs to the caller, not to the Session. A transport over an ordered
+ * byte stream numbers its messages 0, 1, 2… at both ends; one over datagrams uses
+ * the packet number, which is what lets a packet that never arrives be skipped
+ * instead of breaking every one after it. Either way the one rule is that a nonce
+ * is never used twice in one direction of one session.
+ *
+ * Both calls work in place: the transport already holds the bytes in the buffer
+ * they leave from or arrived in, so encrypting into a second one would only add an
+ * allocation and a copy per message.
  */
 
 #include "librats/util/rats_export.h"
 #include "librats/core/bytes.h"
 #include "librats/peer/peer_id.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <optional>
 
 namespace librats {
 
@@ -21,21 +35,22 @@ class RATS_API Session {
 public:
     virtual ~Session() = default;
 
-    /// Encrypt `plain` into `out` (resized to fit). Returns false on failure.
-    virtual bool encrypt(ByteView plain, Bytes& out) = 0;
+    /// Bytes seal() appends to what it encrypts (an AEAD tag; 0 for plaintext).
+    virtual size_t overhead() const noexcept = 0;
 
-    /// Decrypt `cipher` into `out` (resized to fit). Returns false on failure.
-    virtual bool decrypt(ByteView cipher, Bytes& out) = 0;
+    /// Encrypt `data[0, len)` in place and write overhead() bytes of tag right
+    /// behind it, so the buffer must have room for len + overhead(). `ad` is
+    /// authenticated but not encrypted. `nonce` must never repeat for this session.
+    virtual void seal(uint64_t nonce, ByteView ad, uint8_t* data, size_t len) const noexcept = 0;
+
+    /// Authenticate and decrypt `data[0, len)` — ciphertext, then tag — in place.
+    /// Returns the plaintext length (len - overhead()), or nullopt when the bytes
+    /// do not authenticate under `nonce` and `ad`.
+    virtual std::optional<size_t> open(uint64_t nonce, ByteView ad,
+                                       uint8_t* data, size_t len) const noexcept = 0;
 
     /// The remote peer's identity, proven during the handshake.
     virtual const PeerId& remote_id() const = 0;
-
-    /// Bytes encrypt() adds to a plaintext of any size (an AEAD tag, typically).
-    /// The send path needs the ciphertext's size *before* encrypting it, because
-    /// a message it turns out it cannot frame must be refused without a nonce
-    /// having been spent on it — the counters run in lockstep at both ends, so a
-    /// message encrypted and then not sent would break every one after it.
-    virtual size_t overhead() const noexcept = 0;
 
     /// True if traffic is actually encrypted (false for the plaintext passthrough).
     virtual bool is_secure() const = 0;

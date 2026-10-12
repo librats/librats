@@ -36,6 +36,7 @@
  */
 
 #include "librats/core/types.h"
+#include "librats/security/handshaker.h"
 #include "librats/transport/connection.h"
 #include "librats/transport/udp_mux.h"
 #include "librats/core/mpsc_queue.h"
@@ -156,7 +157,7 @@ public:
 
     /// Send a frame to every Established connection on this reactor. Thread-safe:
     /// the iteration runs on the reactor thread. The payload is shared across
-    /// connections (the per-peer encryption still happens in each Connection).
+    /// connections (the per-peer encryption still happens in each one's transport).
     void broadcast(FrameHeader header, std::shared_ptr<const Bytes> payload);
 
     // — timers (reactor thread, or via post/execute) —
@@ -171,7 +172,7 @@ public:
 
     /// Book a flush for the end of this turn: `id` has frames queued that have
     /// not been written yet. Called by Connection::send, which aggregates rather
-    /// than writing through — see the note there. Reactor thread; each connection
+    /// than writing through (see StreamTransport). Reactor thread; each connection
     /// books at most one flush per turn.
     void mark_dirty(ConnId id) { dirty_.push_back(id); }
 
@@ -201,7 +202,9 @@ private:
     void start_dial(ConnId id, const std::string& host, int port, TransportKind kind,
                     DialProfile profile);
     void abort_dial(ConnId id, const std::string& host, int port);
-    Connection* adopt(std::unique_ptr<Link> link, ConnRole role, ConnId id);
+    /// The transport every byte-stream link runs: TCP sockets, UDP streams, circuits.
+    std::unique_ptr<Transport> over_stream(std::unique_ptr<Link> link, ConnRole role);
+    Connection* adopt(std::unique_ptr<Transport> transport, ConnRole role, ConnId id);
     bool resolve_dial(ConnId id);
     /// Body of close()/cancel_dial(); `spare_established` makes it a no-op for a
     /// connection that has already finished its handshake.
@@ -229,6 +232,11 @@ private:
     /// timer per reactor rather than one per connection: the work is a few pointer
     /// comparisons per peer, so a sweep is cheaper than N timer entries.
     static constexpr std::chrono::milliseconds kMaintenanceInterval{10000};
+    /// TCP_NOTSENT_LOWAT for every TCP connection: how much the kernel may hold
+    /// unsent. One reactor wake-up's worth at a gigabit and then some, so the socket
+    /// never runs dry between writes — while a message queued behind a bulk transfer
+    /// waits behind this much of it on the host, not behind the whole send buffer.
+    static constexpr int kTcpNotsentLowat = 128 * 1024;
 
     uint8_t                   index_;
     ConnectionDelegate&       delegate_;

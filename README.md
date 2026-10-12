@@ -509,6 +509,36 @@ its queue growing. Three things bound that, and they are the whole contract:
 The same three are in the C ABI: `rats_peer_writable()`, `rats_on_peer_writable()`,
 and the `rats_close_reason_t` handed to `rats_on_peer_disconnected()`.
 
+#### Ordering and priority
+
+A connection carries every subsystem's traffic at once, so it keeps one queue per
+**lane** — your application's messages are one lane, and each subsystem (gossip,
+file transfer, ping, …) is another. That sets the ordering guarantee:
+
+- **Everything you send with `send()`/`broadcast()` arrives in the order you sent
+  it**, across all channels — a "done" on one channel sent after data on another
+  arrives after that data.
+- **Subsystem traffic is scheduled around it.** A subsystem's own messages keep
+  their order, but may overtake yours or fall behind them.
+
+Which lane goes next is decided by priority, and within a priority by turns:
+
+| Priority | Lanes |
+|----------|-------|
+| 1 (first) | the node's own control plane (`identify`) |
+| 2 | ping, hole-punch rendezvous — small and timing-sensitive |
+| 3 | your messages, gossip, typed messages, peer exchange, storage, relayed circuits |
+| 4 (last) | file transfer |
+
+Lanes of the same priority take turns, one message each, so a subsystem with a
+deep backlog cannot starve your messages (or the other way round). A message is
+encrypted only at the moment it is written, which is what keeps everything still
+queued free to be overtaken, and TCP sockets hold no more than `TCP_NOTSENT_LOWAT`
+(128 KiB) unsent for the same reason — so a ping queued behind a file transfer
+waits behind that much of it, not behind the whole send buffer. Over UDP the stream
+underneath still takes up to twice its congestion window ahead of time, so there
+the reordering is coarser.
+
 #### Path statistics
 
 Backpressure tells a sender it *has* outrun the link. A live sender — an encoder

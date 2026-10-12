@@ -6,6 +6,7 @@
 #include "librats/security/plaintext_security.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 
 using namespace librats;
@@ -63,16 +64,25 @@ HandshakeResult drive(SecurityProvider& a_provider, SecurityProvider& b_provider
     return result;
 }
 
+// Seal `text` under `nonce` into a fresh buffer with room for the tag.
+Bytes seal(const Session& s, uint64_t nonce, const std::string& text, ByteView ad = {}) {
+    Bytes out(text.begin(), text.end());
+    out.resize(text.size() + s.overhead());
+    s.seal(nonce, ad, out.data(), text.size());
+    return out;
+}
+
+// Open a sealed buffer; nullopt when it does not authenticate.
+std::optional<std::string> open(const Session& s, uint64_t nonce, Bytes sealed, ByteView ad = {}) {
+    const auto n = s.open(nonce, ad, sealed.data(), sealed.size());
+    if (!n) return std::nullopt;
+    return std::string(sealed.begin(), sealed.begin() + static_cast<std::ptrdiff_t>(*n));
+}
+
 // Both sessions can talk to each other after the handshake.
 void expect_bidirectional(Session& a, Session& b) {
-    Bytes ct, pt;
-    ASSERT_TRUE(a.encrypt(ByteView(std::string("ping")), ct));
-    ASSERT_TRUE(b.decrypt(ct, pt));
-    EXPECT_EQ(to_str(pt), "ping");
-
-    ASSERT_TRUE(b.encrypt(ByteView(std::string("pong")), ct));
-    ASSERT_TRUE(a.decrypt(ct, pt));
-    EXPECT_EQ(to_str(pt), "pong");
+    EXPECT_EQ(open(b, 0, seal(a, 0, "ping")), "ping");
+    EXPECT_EQ(open(a, 0, seal(b, 0, "pong")), "pong");
 }
 
 // Drive two handshakers, tolerating failure; true iff both reach a Session.
@@ -192,10 +202,9 @@ TEST(HandshakeTest, NoiseCiphertextDiffersFromPlaintext) {
     auto r = drive(a, b);
     ASSERT_TRUE(r.initiator_session && r.responder_session);
 
-    Bytes ct;
     const std::string secret = "the password is hunter2";
-    ASSERT_TRUE(r.initiator_session->encrypt(ByteView(secret), ct));
-    EXPECT_NE(to_str(ct), secret);
+    const Bytes ct = seal(*r.initiator_session, 0, secret);
+    EXPECT_NE(to_str(ct).substr(0, secret.size()), secret);
     EXPECT_GT(ct.size(), secret.size());  // AEAD tag adds overhead
 }
 
@@ -210,4 +219,46 @@ TEST(HandshakeTest, PlaintextExchangesIdsButDoesNotEncrypt) {
     EXPECT_EQ(r.responder_view_of_remote, alice.id);
     EXPECT_FALSE(r.initiator_session->is_secure());
     expect_bidirectional(*r.initiator_session, *r.responder_session);
+}
+
+// The nonce is the caller's: a message opens only under the nonce it was sealed
+// with, and messages need not be opened in the order they were sealed — which is
+// what lets a datagram transport lose one packet without losing the rest.
+TEST(HandshakeTest, NoiseSessionTakesTheNonceFromTheCaller) {
+    Identity alice = Identity::generate(), bob = Identity::generate();
+    NoiseSecurity a(alice), b(bob);
+    auto r = drive(a, b);
+    ASSERT_TRUE(r.initiator_session && r.responder_session);
+    const Session& tx = *r.initiator_session;
+    const Session& rx = *r.responder_session;
+
+    const Bytes first = seal(tx, 7, "first"), second = seal(tx, 8, "second");
+    EXPECT_EQ(open(rx, 8, second), "second") << "out of order";
+    EXPECT_EQ(open(rx, 7, first), "first");
+    EXPECT_FALSE(open(rx, 8, first)) << "opened under a nonce it was not sealed with";
+
+    // The same nonce in the other direction is a different key, not a reuse.
+    EXPECT_EQ(open(tx, 7, seal(rx, 7, "back")), "back");
+}
+
+TEST(HandshakeTest, NoiseSessionAuthenticatesTheAssociatedDataAndEveryByte) {
+    Identity alice = Identity::generate(), bob = Identity::generate();
+    NoiseSecurity a(alice), b(bob);
+    auto r = drive(a, b);
+    ASSERT_TRUE(r.initiator_session && r.responder_session);
+    const Session& tx = *r.initiator_session;
+    const Session& rx = *r.responder_session;
+
+    const std::string header = "packet header";
+    const Bytes sealed = seal(tx, 1, "payload", ByteView(header));
+    EXPECT_EQ(open(rx, 1, sealed, ByteView(header)), "payload");
+    EXPECT_FALSE(open(rx, 1, sealed, ByteView(std::string("packet heaDer"))));
+    EXPECT_FALSE(open(rx, 1, sealed)) << "dropping the associated data went unnoticed";
+
+    for (size_t i = 0; i < sealed.size(); ++i) {
+        Bytes tampered = sealed;
+        tampered[i] ^= 0x01;
+        EXPECT_FALSE(open(rx, 1, tampered, ByteView(header))) << "byte " << i;
+    }
+    EXPECT_FALSE(rx.open(1, ByteView(header), Bytes(3).data(), 3)) << "shorter than a tag";
 }

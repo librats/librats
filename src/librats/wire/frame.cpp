@@ -44,17 +44,20 @@ Block try_take_block(const uint8_t* data, size_t size) {
 
 // ── Inner message ───────────────────────────────────────────────────────────
 
+void encode_header(uint8_t* out, FrameHeader header) {
+    out[0] = static_cast<uint8_t>(header.type);
+    out[1] = header.flags;
+    const uint16_t net_ch = htons(header.channel);
+    std::memcpy(out + 2, &net_ch, 2);
+}
+
 void encode_message(Bytes& out, FrameHeader header, ByteView payload) {
     const size_t at = out.size();
     out.resize(at + kHeaderSize + payload.size());
 
     uint8_t* p = out.data() + at;
-    *p++ = static_cast<uint8_t>(header.type);
-    *p++ = header.flags;
-    const uint16_t net_ch = htons(header.channel);
-    std::memcpy(p, &net_ch, 2);
-    p += 2;
-    if (!payload.empty()) std::memcpy(p, payload.data(), payload.size());
+    encode_header(p, header);
+    if (!payload.empty()) std::memcpy(p + kHeaderSize, payload.data(), payload.size());
 }
 
 Message parse_message(ByteView inner) {

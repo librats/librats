@@ -199,8 +199,14 @@ set(LIBRARY_SOURCES
     src/librats/wire/message_router.h
     src/librats/wire/message_router.cpp
 
-# transport/ — shared-nothing reactor, per-connection state machine,
-#              interchangeable TCP / reliable-UDP links
+# transport/ — shared-nothing reactor, per-connection state machine, the
+#              secure message transport under it, and interchangeable TCP /
+#              reliable-UDP / relayed byte-stream links
+    src/librats/transport/transport.h
+    src/librats/transport/stream_transport.h
+    src/librats/transport/stream_transport.cpp
+    src/librats/transport/send_queue.h
+    src/librats/transport/send_queue.cpp
     src/librats/transport/link.h
     src/librats/transport/tcp_link.h
     src/librats/transport/tcp_link.cpp
@@ -716,6 +722,8 @@ if(RATS_BUILD_TESTS)
         tests/test_chained_send_buffer.cpp
 # Wire framing, reactor transport, node + subsystems
         tests/test_frame.cpp
+        tests/test_send_queue.cpp
+        tests/test_stream_transport.cpp
         tests/test_reactor.cpp
         tests/test_transport_udp.cpp
         tests/test_udp_congestion.cpp

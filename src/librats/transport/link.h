@@ -2,26 +2,27 @@
 
 /**
  * @file link.h
- * @brief The byte-stream a Connection runs on, independent of how it is carried.
+ * @brief The byte stream a StreamTransport runs on, independent of how it is carried.
  *
- * Everything above this line — block framing, the Noise handshake, the Session,
- * backpressure, the establish deadline — only ever needs an ordered, reliable,
+ * The transport above this line (StreamTransport — block framing, the Noise
+ * handshake, the Session, the send queue) only ever needs an ordered, reliable,
  * non-blocking byte stream. A Link is exactly that and nothing more, so the same
- * Connection code drives a kernel TCP socket (TcpLink) and the library's own
- * reliability layer over datagrams (UdpStreamLink → UdpStream). Neither transport
- * is a special case of the other: both are first-class, and a peer connected over
- * either is indistinguishable to every layer above.
+ * code drives a kernel TCP socket (TcpLink), the library's own reliability layer
+ * over datagrams (UdpStreamLink → UdpStream) and a relayed circuit (RelayLink).
+ * None of them is a special case of another: a peer connected over any of them
+ * is indistinguishable to every layer above.
  *
  * Ownership and threading follow the rest of the transport layer: a Link belongs
- * to exactly one Connection, which belongs to exactly one Reactor, and is touched
- * only by that reactor's thread. It therefore holds no locks and no atomics.
+ * to exactly one StreamTransport, which belongs to one Connection and one
+ * Reactor, and is touched only by that reactor's thread. It therefore holds no
+ * locks and no atomics.
  *
  * The read/write calls mirror non-blocking socket semantics deliberately, because
  * that is what the reactor loop is built around:
  *   - read()  fills the caller's span and reports WouldBlock once the link has no
  *             more data ready, or Closed when the peer has finished sending.
  *   - write() takes what it can and reports WouldBlock when it can take no more;
- *             the Connection keeps the remainder queued and calls want_write(true)
+ *             the transport keeps the remainder queued and calls want_write(true)
  *             so it is told when to retry.
  */
 
@@ -63,7 +64,7 @@ public:
     /// connecting. Returns false if the connect attempt failed.
     virtual bool connect_completed() = 0;
 
-    /// Ask to be woken (via Connection::on_writable) when more can be written.
+    /// Ask to be woken (via a writable event) when more can be written.
     /// Called only when the state actually changes, so an implementation may
     /// treat it as an unconditional set.
     virtual void want_write(bool on) = 0;
@@ -90,7 +91,7 @@ public:
 
     /// What the transport underneath knows about the path (see PathStats).
     /// `queued_bytes` is only what the link itself holds unsent and `loss` is left
-    /// at 0 — the Connection adds its own queue and the sampling interval.
+    /// at 0 — the transport adds its own queue, and the sampler the interval.
     /// Default: nothing measured, which is all a link with no congestion control of
     /// its own (a relayed circuit) can say.
     virtual PathStats path_stats() const { return {}; }

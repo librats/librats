@@ -51,7 +51,7 @@
  *     turn. What stands in for it is write() itself — it tops up the tail packet
  *     while it has room, so consecutive small frames share one datagram anyway,
  *     and UdpMux then hands the socket a whole batch of them per syscall. The
- *     packing catches everything a reactor turn produced, because Connection
+ *     packing catches everything a reactor turn produced, because the transport
  *     aggregates a turn's frames and writes them once rather than flushing each
  *     — which is where most of the per-message cost used to go.
  *   - Paced: the window says how much may be outstanding, not how fast it may

@@ -264,7 +264,7 @@ public:
 
     /// Put every staged datagram on the wire. Called by each of the entry points
     /// above before it returns, and by the Reactor at the end of a loop turn to
-    /// cover the ones an application send produced (Connection::send → the stream's
+    /// cover the ones an application send produced (a transport flush → the stream's
     /// write path, which reaches this class from outside any datagram batch).
     /// Cheap and idempotent when nothing is staged.
     void flush_output();
@@ -371,7 +371,7 @@ private:
     int               replies_in_window_ = 0;
 };
 
-/// The Link a Connection holds for a UDP stream.
+/// The Link a connection's transport holds for a UDP stream.
 ///
 /// The stream itself belongs to the mux, not to the connection: it has to outlive
 /// the connection briefly so the last bytes still get delivered, and it has to be

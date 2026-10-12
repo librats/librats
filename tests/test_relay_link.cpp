@@ -78,7 +78,7 @@ Bytes pattern(size_t n, uint8_t seed = 0) {
     return b;
 }
 
-/// Write `data` the way Connection::flush does: keep going while the link reports
+/// Write `data` the way StreamTransport::flush does: keep going while the link reports
 /// Ok, stop on WouldBlock. Returns how much the link took.
 size_t write_all(Circuit& circuit, const Bytes& data) {
     size_t written = 0;
@@ -92,7 +92,7 @@ size_t write_all(Circuit& circuit, const Bytes& data) {
     return written;
 }
 
-/// Read the way Connection::on_readable does: drain to would-block (or the end).
+/// Read the way StreamTransport::on_readable does: drain to would-block (or the end).
 Bytes read_all(Circuit& circuit, Link::Status& final_status) {
     Bytes out;
     uint8_t buffer[4096];

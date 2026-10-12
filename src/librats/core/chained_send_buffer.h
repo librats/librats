@@ -93,6 +93,14 @@ public:
     /// when they fit, so headers and short control messages don't each cost a malloc.
     void append(ByteView bytes);
 
+    /// Queue `bytes` of space and return where it starts, for a caller that builds
+    /// the bytes in place (framing and sealing a message where it will be sent)
+    /// rather than building them elsewhere to be copied in. Packed into the tail
+    /// chunk exactly as a copy-append is. The space counts as queued at once, so it
+    /// must be filled before the next gather(); the pointer stays valid until the
+    /// bytes are popped.
+    uint8_t* append_slot(size_t bytes);
+
     // ── Draining ────────────────────────────────────────────────────────────
 
     /// Bytes gather() will describe in one go unless told otherwise. A socket accepts

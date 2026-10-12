@@ -19,6 +19,8 @@
 #include <vector>
 
 #ifndef _WIN32
+#include <netinet/in.h>
+#include <netinet/tcp.h>   // TCP_NOTSENT_LOWAT
 #include <sys/resource.h>
 #endif
 
@@ -205,6 +207,47 @@ TEST_F(ReactorTest, EncryptedEchoWithNoise) {
     client.stop();
     server.stop();
 }
+
+#ifdef TCP_NOTSENT_LOWAT
+// The kernel's unsent backlog is kept short on every TCP connection, so a
+// message the transport has not written yet can still be overtaken by a more
+// urgent one, instead of waiting behind a send buffer it has already filled.
+TEST_F(ReactorTest, TcpConnectionsKeepTheKernelsUnsentBacklogShort) {
+    auto [server_sock, port] = make_server();
+
+    Identity sid = Identity::generate(), cid = Identity::generate();
+    PlaintextSecurity ssec(sid), csec(cid);
+
+    EchoDelegate echo;
+    Reactor server(0, echo, ssec);
+    server.listen(server_sock);
+    server.start();
+
+    CollectDelegate collect;
+    Reactor client(1, collect, csec);
+    client.start();
+
+    client.connect("127.0.0.1", port);
+    ASSERT_TRUE(wait_for([&] { return collect.established_.load() == 1; }));
+
+    const ConnId conn = collect.last_conn_id_.load();
+    std::atomic<int> lowat{-1};
+    client.execute([&, conn] {
+        auto* c = client.find(conn);
+        ASSERT_NE(c, nullptr);
+        int value = 0;
+        socklen_t len = sizeof(value);
+        if (getsockopt(c->socket(), IPPROTO_TCP, TCP_NOTSENT_LOWAT, &value, &len) == 0) lowat = value;
+        else lowat = 0;
+    });
+    ASSERT_TRUE(wait_for([&] { return lowat.load() >= 0; }));
+    EXPECT_GT(lowat.load(), 0) << "TCP_NOTSENT_LOWAT was not set";
+    EXPECT_LE(lowat.load(), 256 * 1024) << "the kernel may hold a long unsent backlog";
+
+    client.stop();
+    server.stop();
+}
+#endif
 
 // Many frames on one connection arrive in order and intact.
 TEST_F(ReactorTest, EchoesManyFramesInOrder) {

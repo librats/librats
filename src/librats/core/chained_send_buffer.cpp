@@ -47,6 +47,25 @@ void ChainedSendBuffer::append(ByteView bytes) {
     append(std::move(chunk));
 }
 
+uint8_t* ChainedSendBuffer::append_slot(size_t bytes) {
+    if (bytes == 0) return nullptr;
+
+    // Same rule as the copy-append: inside the tail's spare capacity the resize
+    // cannot reallocate, so outstanding gather() slices stay valid.
+    if (Bytes* tail = coalescable_tail(bytes)) {
+        const size_t at = tail->size();
+        tail->resize(at + bytes);
+        pending_ += bytes;
+        return tail->data() + at;
+    }
+
+    Bytes chunk = take_chunk(bytes);
+    chunk.resize(bytes);
+    uint8_t* at = chunk.data();   // the heap buffer moves with the chunk, unchanged
+    append(std::move(chunk));
+    return at;
+}
+
 Bytes* ChainedSendBuffer::coalescable_tail(size_t bytes) noexcept {
     if (head_ == chunks_.size()) return nullptr;  // no live chunk to pack into
     Bytes& tail = chunks_.back().data;

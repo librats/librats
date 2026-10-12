@@ -541,19 +541,17 @@ IdleResult bench_idle(TransportKind kind, int peers, std::chrono::milliseconds w
 // How much an application can hand the connection in one unpaced go before it is
 // dropped with CloseReason::SlowConsumer.
 //
-// This is the sharpest place the two wires stop being interchangeable, and it is
-// structural rather than incidental. On TCP a burst lands in the kernel's send
-// buffer, which on loopback is large and auto-tuned, so Connection's own queue
-// barely grows. On the datagram side there is no kernel buffer to absorb
-// anything: UdpStream::write() takes at most send_queue_limit() (twice the
-// congestion window, 2 MiB at least) and drains
-// only as fast as cwnd/RTT allows, so the remainder piles up in the connection's
-// ChainedSendBuffer until it crosses Connection::kDefaultSendHighWater (8 MiB)
-// and the peer is dropped.
-//
-// The consequence is worth stating plainly: identical application code can
-// survive on TCP and lose its peer on UDP, with no API through which the
-// application could have known. What this row reports is where that line sits.
+// Neither wire lets the kernel absorb a burst any more. On TCP the socket holds
+// no more than TCP_NOTSENT_LOWAT unsent (see Reactor::adopt), so that queued
+// messages stay where they can still be reordered by priority; on the datagram
+// side UdpStream::write() takes at most send_queue_limit() (twice the congestion
+// window, 2 MiB at least) and drains only as fast as cwnd/RTT allows. Either way
+// the remainder waits in the transport's queue until it crosses
+// Connection::kDefaultSendHighWater (8 MiB) and the peer is dropped — unless the
+// application heeds send()'s answer and on_peer_writable, which is what they are
+// for. What this row reports is how far an application that ignores both gets.
+// It is a race between the offering thread and the reactor, so read it as an
+// order of magnitude.
 
 double bench_burst(TransportKind kind, size_t frame_size, size_t cap_bytes) {
     std::atomic<bool>   dropped{false};
@@ -1355,10 +1353,9 @@ int connect_and_measure(const Options& o) {
 
     table.head("small — many small frames, message-paced");
     table.line("messages", tcp.small_msgs_s, udp.small_msgs_s, "msg/s", false, "%10.0f");
-    std::printf("  (as on loopback, read this next to rtt. The gap is not Nagle — it is one\n"
-                "   syscall per frame on both wires (Connection::send flushes write-through),\n"
-                "   which the datagram side partly escapes by packing and batching. See the\n"
-                "   note above bench_small().)\n");
+    std::printf("  (as on loopback, read this next to rtt. Both wires write a reactor turn's\n"
+                "   frames in one go (StreamTransport); the datagram side also packs frames\n"
+                "   into shared datagrams. See the note above bench_small().)\n");
 
     std::printf("\nconfiguration: bulk %.0f MiB in %.0f KiB frames, %.0f KiB credit; "
                 "rtt %d x %zu B; small %d x %zu B, %d in flight; %d dials\n",
@@ -1570,11 +1567,10 @@ int run_loopback_suite() {
         header("small — 200k x 256 B, 512 messages in flight");
         row("messages",   tcp.msgs_per_s,     udp.msgs_per_s,     "msg/s", false, "%10.0f");
         row("CPU per msg", tcp.cpu_us_per_msg, udp.cpu_us_per_msg, "us",   true, "%8.3f");
-        std::printf("  (this gap is NOT the datagram stack being fast, and it is NOT Nagle —\n"
-                    "   setting TCP_NODELAY makes this row 3.2x worse, measured. Connection::send()\n"
-                    "   flushes write-through, so every frame costs its own syscall on both wires;\n"
-                    "   the datagram side only partly escapes that, by packing frames into one\n"
-                    "   datagram and batching datagrams per send. See the note above bench_small().)\n");
+        std::printf("  (a turn's frames leave in one write on both wires (StreamTransport), which\n"
+                    "   is what lets TCP run with Nagle off; the datagram side also packs frames\n"
+                    "   into shared datagrams and batches those per syscall. See the note above\n"
+                    "   bench_small() for how the two got here.)\n");
     }
 
     // ── idle ────────────────────────────────────────────────────────────────
@@ -1602,9 +1598,8 @@ int run_loopback_suite() {
         const double udp = bench_burst(TransportKind::Udp, kFrame, kCap);
         header("burst — unpaced offer until SlowConsumer (cap 512 MiB)");
         row("survived", tcp / (1024.0 * 1024.0), udp / (1024.0 * 1024.0), "MiB", false, "%8.1f");
-        std::printf("  (0.0 = never dropped inside the cap. A gap here means identical application\n"
-                    "   code survives on one wire and loses its peer on the other — there is no\n"
-                    "   writable/backpressure callback through which it could have known.)\n");
+        std::printf("  (0.0 = never dropped inside the cap. This application ignores send()'s\n"
+                    "   answer and on_peer_writable; one that heeds them is never dropped.)\n");
     }
 
     // ── fallback ────────────────────────────────────────────────────────────

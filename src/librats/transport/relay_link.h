@@ -9,7 +9,7 @@
  * thing left is to route their bytes through a node they can both reach. The
  * question is *where* in the stack to do that, and this file is the answer: at the
  * very bottom, as one more way of obtaining the ordered, reliable byte stream a
- * Connection runs on (see link.h).
+ * connection's transport runs on (see link.h).
  *
  * That choice is what makes a relayed peer indistinguishable from a direct one
  * everywhere above:
@@ -32,8 +32,8 @@
  * ── The two halves ──────────────────────────────────────────────────────────
  * `Circuit` is the state of one relayed connection: the bytes in flight in each
  * direction and the credit windows that bound them. `RelayLink` is the paper-thin
- * adapter that presents that state to a Connection as a Link. They are separate
- * because the Connection owns its Link outright (unique_ptr, destroyed on the
+ * adapter that presents that state to a connection as a Link. They are separate
+ * because the connection's transport owns its Link outright (unique_ptr, destroyed on the
  * reactor thread) while the module driving the relay protocol has to keep hold of
  * the same circuit to feed it — so the state is shared and only the adapter is
  * owned.
@@ -260,10 +260,10 @@ private:
     bool     carrier_blocked_ = false;///< a write stopped on the carrier's queue
 };
 
-/// The Link a Connection holds for a relayed circuit.
+/// The Link a connection's transport holds for a relayed circuit.
 ///
 /// Deliberately empty of logic: the state has to be reachable by the module that
-/// drives the relay protocol, which the Connection's unique_ptr would not allow,
+/// drives the relay protocol, which the transport's unique_ptr would not allow,
 /// so everything lives in the shared Circuit and this is the handle.
 class RATS_API RelayLink final : public Link {
 public:

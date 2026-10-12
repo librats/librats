@@ -100,6 +100,22 @@ public:
         uint8_t* plaintext
     );
     
+    /**
+     * Explicit-nonce AEAD, in place, for a transport that numbers its messages
+     * itself (a stream counts them, a datagram transport numbers its packets).
+     * Neither reads nor advances the internal nonce, and both require a key.
+     *
+     * seal() encrypts data[0, len) and writes the NOISE_TAG_SIZE tag at data + len,
+     * so the buffer must have room for it. open() authenticates and decrypts
+     * data[0, len) — ciphertext then tag — and returns the plaintext length, or
+     * NOISE_DECRYPT_FAILED.
+     */
+    void   seal(uint64_t nonce, const uint8_t* ad, size_t ad_len, uint8_t* data, size_t len) const;
+    size_t open(uint64_t nonce, const uint8_t* ad, size_t ad_len, uint8_t* data, size_t len) const;
+
+    /* Take over `other`'s key and nonce, leaving it cleared. */
+    void take(NoiseCipherState& other);
+
     /* Clear sensitive data */
     void clear();
 
@@ -374,6 +390,14 @@ public:
      */
     size_t decrypt(const uint8_t* ciphertext, size_t ct_len, uint8_t* plaintext);
     
+    /**
+     * Move the two transport ciphers out of a completed session, for a caller
+     * that numbers its own messages (NoiseCipherState::seal/open). The session
+     * keeps neither, so encrypt()/decrypt() fail afterwards. Fails with
+     * HANDSHAKE_NOT_COMPLETE before the split.
+     */
+    NoiseError take_transport(NoiseCipherState& send, NoiseCipherState& recv);
+
     /**
      * Get remote peer's static public key
      */
