@@ -475,9 +475,15 @@ void Reactor::do_accept() {
     }
 }
 
-ConnId Reactor::adopt_inbound(std::unique_ptr<Transport> transport) {
+bool Reactor::admit_inbound() {
     // Same coarse admission gate the TCP listener applies, for the same reason:
-    // turn a flood away before any more handshake work is done for it.
+    // turn a flood away before any handshake work is done for it. The mux asks
+    // before it answers an Initial, which is where a datagram dial costs a DH.
+    return delegate_.admit_inbound();
+}
+
+ConnId Reactor::adopt_inbound(std::unique_ptr<Transport> transport) {
+    // Asked again: the gate is cheap, and the answer may have changed since.
     if (!delegate_.admit_inbound()) return kInvalidConnId;
 
     const ConnId id = next_conn_id_.fetch_add(1, std::memory_order_relaxed);

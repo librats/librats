@@ -100,6 +100,8 @@ struct UdpConnectionConfig {
     /// Bytes of flow-control window a receiver grows to by default: ~1.3 Gbit/s at
     /// 100 ms.
     static constexpr size_t kDefaultMaxWindow = 16 * 1024 * 1024;
+    /// See max_unfinished.
+    static constexpr size_t kDefaultMaxUnfinished = 32 * 1024 * 1024;
 
     CongestionAlgorithm congestion = CongestionAlgorithm::Bbr;
     /// How hard a dial retries its Initial (see DialProfile). Ignored inbound.
@@ -109,6 +111,15 @@ struct UdpConnectionConfig {
     size_t              max_window = kDefaultMaxWindow;
     /// What out-of-order data is charged to, or none (a connection on its own).
     udp::UdpReceiveBudget* budget = nullptr;
+    /// Bytes of unfinished messages one side may make the other hold, beyond the
+    /// largest one. Flow control counts a byte as consumed once it is in order,
+    /// but a message is delivered only whole — up to framer::kMaxBlockSize — and
+    /// every stream can have one under way: without this a peer could start a
+    /// maximal message on each of 255 streams and finish none. The largest is
+    /// exempt so the streams never deadlock (it can always be finished); the rest
+    /// together stay under this. The receiver enforces it, the sender keeps to it,
+    /// so both ends must use the same value — a node always uses the default.
+    size_t max_unfinished = kDefaultMaxUnfinished;
 };
 
 class UdpConnection final : private udp::FrameSink {
@@ -232,6 +243,12 @@ public:
     /// Ask for a PollOut each time sending frees queue space.
     void want_write(bool on) noexcept { want_write_ = on; }
 
+    /// Nobody will read this connection again (its transport is gone, and it only
+    /// lingers to hand over what it owes). What has arrived is dropped, and what
+    /// still arrives is acknowledged and discarded, with no more window granted:
+    /// an inbox nobody empties must not grow.
+    void stop_reading();
+
     // ── State ───────────────────────────────────────────────────────────────
 
     /// A packet has come back from the peer: the path works.
@@ -254,6 +271,8 @@ public:
     /// The flow-control window this side currently grants.
     uint64_t receive_window() const noexcept { return recv_window_; }
     size_t   held_bytes() const noexcept { return account_.held; }
+    /// Bytes arrived in order and not yet delivered, all streams.
+    size_t   buffered_bytes() const noexcept;
 
 private:
     enum class Phase { Handshaking, Established, Dead };
@@ -334,6 +353,19 @@ private:
     // — lanes —
     Lane*  lane_for(MessageType type, bool create);
     uint64_t total_unsent() const noexcept;
+    /// The unfinished-message bounds of every lane: their sum, the largest, the
+    /// next largest, and whose is the largest (see max_unfinished).
+    struct Spread {
+        uint64_t    sum = 0, top = 0, second = 0;
+        const Lane* top_lane = nullptr;
+    };
+    Spread spread() const noexcept;
+    /// New bytes `lane` may send before the receiver would hold more of unfinished
+    /// messages than max_unfinished allows.
+    uint64_t unfinished_room(const Lane& lane, const Spread& s) const noexcept;
+    /// Whether a STREAM frame just taken on `lane` leaves the peer within
+    /// max_unfinished — what it agreed to.
+    bool   unfinished_ok(const Lane& lane) const noexcept;
 
     // — FrameSink —
     void frames_acked(const RingBuffer<udp::SentFrame>& log, size_t first, size_t count) override;
@@ -359,6 +391,7 @@ private:
     bool        heard_        = false;  ///< a packet came back from the peer
     bool        want_write_   = false;
     bool        closing_      = false;  ///< an orderly close waits for the queue to drain
+    bool        reading_      = true;   ///< see stop_reading()
     bool        close_sent_   = false;
 
     // — handshake —

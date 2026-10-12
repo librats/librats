@@ -120,12 +120,30 @@ public:
         ++adopted;
         return side.add(std::move(transport), /*inbound=*/true);
     }
+    bool admit_inbound() override { return admit; }
     void dispatch_link_events(ConnId id, uint32_t events) override { side.dispatch(id, events); }
 
     Side side;
     int  adopted = 0;
     int  refused = 0;
-    bool refuse  = false;
+    bool refuse  = false;   ///< refuse at adoption, after the handshake reply
+    bool admit   = true;    ///< false: refuse before it
+};
+
+/// A SecurityProvider that counts the handshakes it is asked to start: what an
+/// Initial costs a responder in DH work.
+class CountingSecurity final : public SecurityProvider {
+public:
+    explicit CountingSecurity(const Identity& id) : inner_(id) {}
+    std::unique_ptr<Handshaker> create(ConnRole role) override {
+        ++created;
+        return inner_.create(role);
+    }
+    const PeerId& local_id() const override { return inner_.local_id(); }
+    int created = 0;
+
+private:
+    NoiseSecurity inner_;
 };
 
 socket_t loopback_socket(uint16_t port = 0) {
@@ -345,6 +363,42 @@ TEST(UdpMuxTest, AnUnprovenDialCostsTheResponderNothingUntilItBringsTheToken) {
     n = udp::encode_initial(buf, udp::paired_cid(cid), cid, ByteView(token), ByteView(opening));
     ASSERT_GT(send_udp_to(probe, buf, n, net.addr_b, AddressFamily::IPv4), 0);
     ASSERT_TRUE(wait_for([&] { net.b->on_readable(); return net.host_b.adopted == 1; }));
+    close_socket(probe);
+}
+
+// A node at its peer limit refuses a dial before computing the Noise reply. Asked
+// only at adoption, every forged Initial would cost a DH and leave nothing behind
+// — so nothing would ever count towards validate_above either.
+TEST(UdpMuxTest, ADialTheNodeWouldNotAdoptCostsNoHandshake) {
+    init_socket_library();
+    const Identity id_a = Identity::generate();
+    const Identity id_b = Identity::generate();
+    NoiseSecurity    sec_a(id_a);
+    CountingSecurity sec_b(id_b);
+    MuxHost host_b;
+    host_b.admit = false;
+    socket_t sock_b = loopback_socket();
+    const Address addr_b{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sock_b))};
+    auto b = std::make_unique<UdpMux>(sock_b, AddressFamily::IPv4, host_b, sec_b);
+    socket_t probe = loopback_socket();
+
+    const udp::Cid cid = 0x5EED00;
+    const Bytes opening = noise_opening(sec_a);
+    uint8_t buf[udp::kMaxDatagram];
+    const size_t n = udp::encode_initial(buf, udp::paired_cid(cid), cid, ByteView{}, ByteView(opening));
+    ASSERT_GT(send_udp_to(probe, buf, n, addr_b, AddressFamily::IPv4), 0);
+
+    Bytes reply;
+    ASSERT_TRUE(wait_for([&] { b->on_readable(); return read_datagram(probe, reply, 1ms); }));
+    udp::LongPacket close;
+    ASSERT_TRUE(udp::decode_long(reply.data(), reply.size(), close));
+    EXPECT_EQ(close.type, udp::LongType::Close) << "the dialer was not told";
+    EXPECT_EQ(sec_b.created, 0) << "a handshake was started for a dial that was going to be refused";
+    EXPECT_EQ(host_b.adopted + host_b.refused, 0);
+    EXPECT_EQ(b->stream_count(), 0u);
+
+    b.reset();
+    close_socket(sock_b);
     close_socket(probe);
 }
 

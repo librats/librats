@@ -102,6 +102,10 @@ void SendStream::write(const uint8_t* data, size_t len) {
     }
 }
 
+void SendStream::end_message() {
+    if (end_ > floor_ && (ends_.empty() || ends_.back() < end_)) ends_.push_back(end_);
+}
+
 uint8_t* SendStream::chunk_at(uint64_t offset) noexcept {
     const size_t idx = static_cast<size_t>(offset / kChunk - first_chunk_);
     return chunks_[idx].get() + offset % kChunk;
@@ -179,6 +183,11 @@ void SendStream::on_acked(uint64_t offset, size_t len) {
         base_ = acked_.front().second;
         acked_.pop_front();
         release_acked_chunks();
+        while (!ends_.empty() && ends_.front() <= base_) {
+            floor_ = ends_.front();
+            ends_.pop_front();
+        }
+        if (ends_.empty()) ends_.release();
     }
 }
 
@@ -220,7 +229,9 @@ void SendStream::clear() {
     acked_.clear();
     lost_.clear();
     lost_bytes_ = 0;
-    base_ = sent_end_ = end_;
+    base_ = sent_end_ = floor_ = end_;
+    ends_.clear();
+    ends_.release();
 }
 
 // ── RecvStream ──────────────────────────────────────────────────────────────
@@ -229,6 +240,42 @@ void RecvStream::append(const uint8_t* data, size_t len) {
     const ByteSpan into = inbox_.prepare(len);
     std::memcpy(into.data(), data, len);
     inbox_.commit(len);
+}
+
+bool RecvStream::track_messages(size_t max_message) {
+    // The inbox holds [next_ - size, next_), and delivery consumes whole messages
+    // only, so the incomplete one always starts inside it.
+    const uint64_t inbox_start = next_ - inbox_.size();
+    while (msg_start_ < next_) {
+        if (!have_len_) {
+            if (msg_start_ < inbox_start) return true;   // not expected: tracking fell behind
+            const size_t avail = static_cast<size_t>(next_ - msg_start_);
+            Reader r(inbox_.data() + (msg_start_ - inbox_start), avail);
+            uint64_t len = 0;
+            if (!r.varint(len)) return true;   // the length itself is still arriving
+            if (len > max_message) return false;
+            msg_end_  = msg_start_ + (avail - r.left()) + len;
+            have_len_ = true;
+        }
+        if (next_ < msg_end_) return true;
+        msg_start_ = msg_end_;
+        have_len_  = false;
+    }
+    return true;
+}
+
+void RecvStream::stop(HoldAccount& account) {
+    clear(account);
+    msg_start_ = next_;
+    have_len_  = false;
+}
+
+uint64_t RecvStream::skip(uint64_t offset, size_t len) noexcept {
+    const uint64_t before = highest_;
+    highest_   = (std::max)(highest_, offset + len);
+    next_      = (std::max)(next_, highest_);
+    msg_start_ = next_;
+    return highest_ - before;
 }
 
 bool RecvStream::on_data(uint64_t offset, ByteView data, HoldAccount& account) {

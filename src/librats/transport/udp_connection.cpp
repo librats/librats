@@ -420,6 +420,11 @@ bool UdpConnection::apply_frames(const uint8_t* payload, size_t len, Clock::time
 bool UdpConnection::on_stream(const StreamFrame& f, Clock::time_point now, bool& refused) {
     if (f.stream == 0 || f.stream > 0xFF) return false;
     Lane* lane = lane_for(static_cast<MessageType>(f.stream), true);
+    if (!reading_) {
+        // Nobody reads it: noted for flow control, acknowledged, and dropped.
+        received_highest_ += lane->recv.skip(f.offset, f.data.size());
+        return received_highest_ <= advertised_;
+    }
     const uint64_t high_before = lane->recv.highest();
     const uint64_t next_before = lane->recv.in_order();
     // Once one fragment of a packet has been refused the packet will come again
@@ -443,14 +448,82 @@ bool UdpConnection::on_stream(const StreamFrame& f, Clock::time_point now, bool&
     if (const uint64_t moved = lane->recv.in_order() - next_before; moved > 0) {
         consumed_ += moved;
         raise(PollIn);
+        // In order is consumed as far as the window goes, but held until the
+        // message is whole: that is bounded here, not by the window.
+        if (!lane->recv.track_messages(framer::kMaxBlockSize)) {
+            LOG_DEBUG("udp", "Connection " << local_cid_ << ": " << remote_.to_string()
+                      << " announced a message past the size limit");
+            return false;
+        }
+        if (!unfinished_ok(*lane)) {
+            LOG_DEBUG("udp", "Connection " << local_cid_ << ": " << remote_.to_string()
+                      << " left more unfinished messages than it may");
+            return false;
+        }
     }
     return true;
+}
+
+bool UdpConnection::unfinished_ok(const Lane& lane) const noexcept {
+    // Only the lane that just grew can have pushed the total over.
+    const uint64_t mine = lane.recv.unfinished();
+    if (mine == 0) return true;
+    uint64_t sum = 0, top = 0;
+    for (const auto& l : lanes_) {
+        const uint64_t u = l->recv.unfinished();
+        sum += u;
+        top = (std::max)(top, u);
+    }
+    return sum - top <= config_.max_unfinished;
+}
+
+UdpConnection::Spread UdpConnection::spread() const noexcept {
+    Spread s;
+    for (const auto& l : lanes_) {
+        const uint64_t u = l->send.unfinished_bound();
+        s.sum += u;
+        if (u > s.top) {
+            s.second   = s.top;
+            s.top      = u;
+            s.top_lane = l.get();
+        } else if (u > s.second) {
+            s.second = u;
+        }
+    }
+    return s;
+}
+
+uint64_t UdpConnection::unfinished_room(const Lane& lane, const Spread& s) const noexcept {
+    // What the receiver counts is the sum of every stream's unfinished message
+    // less the largest. Sending on the stream that has (or ties for) the largest
+    // leaves that unchanged, so it is never held back — which is what keeps the
+    // streams from deadlocking. Any other stream may grow until the rest of them
+    // together, itself included, reach the limit. Measured with each stream's
+    // upper bound, so the receiver's own count is never larger.
+    const uint64_t mine   = lane.send.unfinished_bound();
+    const uint64_t others = s.top_lane == &lane ? s.second : s.top;
+    if (mine >= others) return UINT64_MAX;
+    const uint64_t counted = s.sum - others;   // everything but the largest, mine included
+    return counted < config_.max_unfinished ? config_.max_unfinished - counted : 0;
+}
+
+void UdpConnection::stop_reading() {
+    if (!reading_) return;
+    reading_ = false;
+    for (auto& lane : lanes_) lane->recv.stop(account_);
+}
+
+size_t UdpConnection::buffered_bytes() const noexcept {
+    size_t n = 0;
+    for (const auto& lane : lanes_) n += lane->recv.buffered();
+    return n;
 }
 
 void UdpConnection::on_data_blocked(uint64_t limit) {
     // The window is announced again either way: the peer is stopped, and sends
     // nothing for an update to ride on.
     max_data_owed_ = true;
+    if (!reading_) return;   // and not grown for data nobody will read
     // Stopped at a limit granted before the window last grew: an echo of a stall
     // already answered, and the growth it would ask for has happened.
     if (have_grown_ && limit <= grown_mark_) return;
@@ -477,7 +550,7 @@ void UdpConnection::maybe_update_window(Clock::time_point now) {
     // window — which on a long fat path is half the throughput. An update is a few
     // bytes on a packet the receiver is sending anyway. Monotone: a limit is a
     // promise.
-    if (advertised_ - consumed_ > recv_window_ - recv_window_ / 8) return;
+    if (!reading_ || advertised_ - consumed_ > recv_window_ - recv_window_ / 8) return;
 
     // A whole window used up in under two round trips is too small for the path:
     // a window exactly the size of the path takes one (Chromium's auto-tuning).
@@ -627,8 +700,11 @@ bool UdpConnection::has_repairs() const noexcept {
 
 bool UdpConnection::has_sendable_data() const noexcept {
     const bool budget = new_data_budget() > 0;
+    const Spread s = spread();
     for (const auto& lane : lanes_)
-        if (lane->send.lost_bytes() > 0 || (budget && lane->send.unsent() > 0)) return true;
+        if (lane->send.lost_bytes() > 0 ||
+            (budget && lane->send.unsent() > 0 && unfinished_room(*lane, s) > 0))
+            return true;
     return false;
 }
 
@@ -729,20 +805,20 @@ size_t UdpConnection::send_packet(Clock::time_point now, bool data, bool probe, 
         uint8_t* before = p;
         p = write_repeat(p, end);
         data_sent = p != before;
-        if (p == before) {
+        if (p == before && p < end) {
             *p++ = kPing;
             SentFrame f;
             f.kind = SentFrame::Ping;
             recovery_.add_frame(f);
         }
-        eliciting = true;
+        eliciting = p != before;
     } else if (!eliciting && has_ack && !keepalive && received_.size() > 1) {
         // A receiver that only ever acknowledges never has its ACKs acknowledged,
         // and so never learns it may stop naming old holes. Once a round trip it
         // makes one of them ack-eliciting, so the next ACK it gets back lets it
         // forget them (RFC 9000 §13.2.4).
         const auto rtt = recovery_.rtt().have_rtt ? recovery_.rtt().srtt : Clock::duration(Recovery::kMaxAckDelay);
-        if (now - last_eliciting_send_ >= rtt) {
+        if (now - last_eliciting_send_ >= rtt && p < end) {
             *p++ = kPing;
             eliciting = true;
         }
@@ -756,9 +832,11 @@ size_t UdpConnection::send_packet(Clock::time_point now, bool data, bool probe, 
 }
 
 uint8_t* UdpConnection::write_control(uint8_t* p, uint8_t* end, bool& eliciting) {
-    // Each of these is a few bytes; a packet always has room for all of them.
-    (void)end;
-    if (token_owed_) {
+    // Each of these is a few bytes, and a full packet always has room for all of
+    // them — but one an unproven dialer has earned may be barely a header. What
+    // does not fit stays owed for the next packet.
+    const auto fits = [&](size_t n) { return p < end && static_cast<size_t>(end - p) >= n; };
+    if (token_owed_ && fits(1 + kResetTokenSize)) {
         uint8_t token[kResetTokenSize];
         host_.reset_token(local_cid_, token);
         p = put_reset_token(p, token);
@@ -768,7 +846,7 @@ uint8_t* UdpConnection::write_control(uint8_t* p, uint8_t* end, bool& eliciting)
         recovery_.add_frame(f);
         eliciting = true;
     }
-    if (max_data_owed_) {
+    if (max_data_owed_ && fits(1 + varint_size(advertised_))) {
         p = put_value_frame(p, kMaxData, advertised_);
         max_data_owed_ = false;
         SentFrame f;
@@ -777,7 +855,7 @@ uint8_t* UdpConnection::write_control(uint8_t* p, uint8_t* end, bool& eliciting)
         recovery_.add_frame(f);
         eliciting = true;
     }
-    if (blocked_owed_) {
+    if (blocked_owed_ && fits(1 + varint_size(blocked_at_))) {
         p = put_value_frame(p, kDataBlocked, blocked_at_);
         blocked_owed_ = false;
         SentFrame f;
@@ -786,7 +864,7 @@ uint8_t* UdpConnection::write_control(uint8_t* p, uint8_t* end, bool& eliciting)
         recovery_.add_frame(f);
         eliciting = true;
     }
-    if (ping_owed_) {
+    if (ping_owed_ && fits(1)) {
         *p++ = kPing;
         ping_owed_ = false;
         SentFrame f;
@@ -817,7 +895,10 @@ uint8_t* UdpConnection::write_streams(uint8_t* p, uint8_t* end, bool& repair) {
             Lane&        lane = *lanes_[idx];
             const uint64_t id = static_cast<uint8_t>(lane.type);
             SendStream::Piece piece;
-            while (lane.send.peek(budget, piece)) {
+            // New data also waits while the peer is holding as much of unfinished
+            // messages as it agreed to (max_unfinished); repairs never do.
+            while (lane.send.peek((std::min)(budget, unfinished_room(lane, spread())), piece)) {
+                if (p >= end) return p;
                 const size_t room = static_cast<size_t>(end - p);
                 if (room < kMinFrameRoom) return p;
                 size_t len = (std::min)(piece.len, room);
@@ -871,6 +952,7 @@ uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end) {
         if (!lane || !lane->send.unacked_part(offset, length)) continue;
         f.offset = offset;
         f.length = static_cast<uint32_t>(length);
+        if (p >= end) break;
         const size_t room = static_cast<size_t>(end - p);
         const size_t hdr  = stream_header_size(f.stream, f.offset, f.length, true);
         if (hdr + f.length > room) break;
@@ -942,7 +1024,8 @@ void UdpConnection::send_close(Clock::time_point now, uint64_t code) {
     close_sent_ = true;
     uint8_t* buf = host_.datagram_buffer();
     if (session_) {
-        if (amplification_room() < kMinShortPacket) return;
+        const size_t needed = kShortHeaderSize + kMaxPnLength + session_->overhead() + 1 + varint_size(code);
+        if (amplification_room() < (std::max)(kMinShortPacket, needed)) return;
         const uint64_t pn = recovery_.next_pn();
         size_t pn_len = 0;
         const size_t header = begin_packet(buf, pn, pn_len);
@@ -989,6 +1072,7 @@ bool UdpConnection::send_message(FrameHeader header, ByteView payload) {
     q += framer::kHeaderSize;
     lane->send.write(head, static_cast<size_t>(q - head));
     if (!payload.empty()) lane->send.write(payload.data(), payload.size());
+    lane->send.end_message();
     return true;
 }
 
@@ -1114,7 +1198,12 @@ void UdpConnection::tick(Clock::time_point now) {
     // a NAT's mapping for the socket open. Not ack-eliciting, so a lost one costs
     // nothing — no timer, no window — and an idle connection stays idle to the
     // congestion controller.
-    if (now - last_send_ >= kKeepAlive) send_packet(now, false, false, false, /*keepalive=*/true);
+    if (now - last_send_ >= kKeepAlive && send_packet(now, false, false, false, /*keepalive=*/true) == 0) {
+        // Nothing could go — a responder whose dialer never proved its address has
+        // spent what it may send. The keep-alive is due again a period from now,
+        // not at once: a deadline left in the past would spin the reactor.
+        last_send_ = now;
+    }
     flush_events();
 }
 

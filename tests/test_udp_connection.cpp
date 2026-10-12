@@ -291,6 +291,42 @@ TEST(UdpConnectionTest, AnUnprovenDialerGetsNoMoreThanThreeTimesWhatItSent) {
     EXPECT_LE(from_b, UdpConnection::kAmplificationFactor * udp::kMaxDatagram);
 }
 
+// What an unproven dialer has earned can run out at any size, down to a bare
+// header. Whatever is owed then — the reset token, a window update, data after a
+// timeout wrote the flight off — must stay inside that room (and inside the
+// datagram), and a keep-alive with no room to go must not leave its deadline in
+// the past, where it would spin the reactor until the idle timeout.
+TEST(UdpConnectionTest, AnUnprovenDialerCannotPushTheResponderPastItsRoomOrIntoASpin) {
+    for (size_t first = 1; first <= 1300; first += 37) {
+        Pair p(false);   // plaintext: the responder is established on the first message
+        size_t from_b = 0, largest = 0;
+        bool   initial = true;
+        p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+            if (from == p.b.addr()) {
+                from_b += d.size();
+                largest = (std::max)(largest, d.size());
+                return false;
+            }
+            if (initial) { initial = false; return false; }   // the Initial gets through
+            return true;                                      // and nothing after it
+        };
+        p.dial();
+        ASSERT_TRUE(p.run_until([&] { return p.b.established(); }));
+        // A first message of varying size leaves a different remainder of the
+        // allowance for everything after it.
+        ASSERT_TRUE(p.b.send(MessageType::App, std::string(first, 'x')));
+        ASSERT_TRUE(p.b.send(MessageType::Gossip, std::string(50000, 'y')));
+        p.b.conn->flush(p.now);
+        p.run(12s, 2ms);   // past the probes, a timeout and the keep-alive
+        ASSERT_TRUE(p.b.conn && !p.b.conn->dead()) << first;
+        EXPECT_LE(largest, udp::kMaxDatagram) << first;
+        EXPECT_LE(from_b, UdpConnection::kAmplificationFactor * udp::kMaxDatagram) << first;
+        const auto due = p.b.conn->next_deadline();
+        ASSERT_TRUE(due.has_value());
+        EXPECT_GT(*due, p.now) << "a deadline nothing can meet is due at once, forever (first=" << first << ")";
+    }
+}
+
 // ── Messages ────────────────────────────────────────────────────────────────
 
 TEST(UdpConnectionTest, CarriesMessagesBothWaysWholeWhateverTheirSize) {
@@ -608,6 +644,89 @@ TEST(UdpConnectionTest, TheSharedBudgetBoundsWhatHolesCanHold) {
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
+
+// Flow control counts a byte as consumed once it is in order, but a message is
+// delivered only whole, so every stream can hold one unfinished message. Several
+// large ones on streams that take turns are legitimate, and the sender keeps the
+// receiver's count of them under max_unfinished by finishing the largest first —
+// everything still arrives, nothing is refused.
+TEST(UdpConnectionTest, LargeMessagesOnManyLanesStayUnderTheUnfinishedLimit) {
+    UdpConnectionConfig cfg;
+    cfg.max_unfinished = 64 * 1024;
+    Pair p(false, 10ms, cfg, cfg);
+    ASSERT_TRUE(p.connect());
+    p.b.count_only = true;
+    // Same priority, so a packet at a time each: all four would be under way at once.
+    for (MessageType t : {MessageType::App, MessageType::Gossip, MessageType::Typed, MessageType::Pex})
+        p.send(t, std::string(300 * 1024, 'm'));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages_in == 4 || p.b.conn->dead(); }, 30s));
+    EXPECT_FALSE(p.b.conn->dead()) << "a sender keeping to the limit was refused";
+    EXPECT_EQ(p.b.messages_in, 4u);
+}
+
+// ...and a peer that does not keep to it is a protocol error, not memory: without
+// the limit it could start a maximal message on each of 255 streams and finish
+// none, ~16 GiB that neither the window nor the receive budget counts.
+TEST(UdpConnectionTest, APeerLeavingTooMuchUnfinishedIsCutOff) {
+    UdpConnectionConfig sender;
+    sender.max_unfinished = SIZE_MAX;   // keeps to nothing
+    UdpConnectionConfig receiver;
+    receiver.max_unfinished = 64 * 1024;
+    Pair p(false, 10ms, sender, receiver);
+    ASSERT_TRUE(p.connect());
+    p.b.count_only = true;
+    for (uint8_t t = 20; t < 30; ++t) p.send(static_cast<MessageType>(t), std::string(300 * 1024, 'u'));
+    ASSERT_TRUE(p.run_until([&] { return p.b.conn->dead(); }, 10s)) << "the receiver kept holding";
+    EXPECT_EQ(p.b.conn->close_reason(), CloseReason::ProtocolError);
+    EXPECT_EQ(p.b.messages_in, 0u);
+}
+
+// A message announced past the block ceiling is a protocol error — caught from its
+// length, which on a connection nobody is reading yet is all there is to check.
+TEST(UdpConnectionTest, AnOversizedMessageIsAProtocolError) {
+    Pair p(false);
+    ASSERT_TRUE(p.connect());
+    // Rewrite the first message's length to one past the ceiling (plaintext: the
+    // packet is readable and unsealed).
+    bool rewritten = false;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (rewritten || from != p.a.addr() || !is_short(d)) return false;
+        for (const auto& f : frames_of(d)) {
+            if (f.type != udp::kStream || f.stream.offset != 0 || f.stream.data.size() < 8) continue;
+            const size_t at = static_cast<size_t>(f.stream.data.data() - d.data());
+            udp::put_varint(d.data() + at, uint64_t{framer::kMaxBlockSize} + 1);
+            rewritten = true;
+        }
+        return false;
+    };
+    // Varint widths must match: a 70000-byte message also has a 4-byte length.
+    p.send(MessageType::App, std::string(70000, 'o'));
+    ASSERT_TRUE(p.run_until([&] { return p.b.conn->dead(); }, 5s));
+    EXPECT_TRUE(rewritten);
+    EXPECT_EQ(p.b.conn->close_reason(), CloseReason::ProtocolError);
+    EXPECT_TRUE(p.b.messages.empty());
+}
+
+// A connection that only lingers to hand over what it owes has nobody reading it.
+// What the peer still sends is acknowledged and dropped — not kept in an inbox
+// that grows for as long as the linger lasts — and no more window is granted.
+TEST(UdpConnectionTest, AConnectionNobodyReadsHoldsNothingAndGrantsNoMoreWindow) {
+    Pair p(false);
+    ASSERT_TRUE(p.connect());
+    p.b.conn->stop_reading();
+    const size_t total = 8 * 1024 * 1024;
+    for (int i = 0; i < 8; ++i) p.send(MessageType::App, std::string(total / 8, 's'));
+    size_t peak = 0;
+    p.run_until([&] {
+        peak = (std::max)(peak, p.b.conn->buffered_bytes() + p.b.conn->held_bytes());
+        return false;
+    }, 3s);
+    EXPECT_FALSE(p.b.conn->dead());
+    EXPECT_EQ(peak, 0u) << "a connection nobody reads kept what arrived";
+    EXPECT_TRUE(p.b.messages.empty());
+    // Stopped at the window it already had: the rest is still waiting at a.
+    EXPECT_GE(p.a.conn->queued_bytes(), total - 2 * UdpConnection::kInitialWindow);
+}
 
 TEST(UdpConnectionTest, AnOrderlyCloseDeliversEverythingFirst) {
     Pair p(true);

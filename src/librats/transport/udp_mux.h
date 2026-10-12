@@ -88,6 +88,11 @@ class UdpMuxDelegate {
 public:
     virtual ~UdpMuxDelegate() = default;
 
+    /// Whether an inbound dial would be adopted at all, asked before any handshake
+    /// work is spent on it: a refusal decided only at adoption has already paid for
+    /// the Noise reply. adopt_inbound() may still refuse.
+    virtual bool admit_inbound() { return true; }
+
     /// Adopt a freshly accepted inbound connection. Returns the new ConnId, or
     /// kInvalidConnId to refuse it (the mux then tells the dialer).
     virtual ConnId adopt_inbound(std::unique_ptr<Transport> transport) = 0;

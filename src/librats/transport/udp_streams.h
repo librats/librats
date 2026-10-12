@@ -141,6 +141,17 @@ public:
 
     /// Append `len` bytes to the stream.
     void write(const uint8_t* data, size_t len);
+    /// What has been written so far ends a message: a boundary the receiver will
+    /// see too (see unfinished_bound).
+    void end_message();
+
+    /// The most the receiver can be holding of a message it has not got all of:
+    /// everything sent from the start of the oldest message not yet acknowledged
+    /// whole. An upper bound — the receiver holds only the one message its in-order
+    /// data stops in, and only what of it has arrived — which is what lets a sender
+    /// keep the receiver's count of unfinished messages (RecvStream::unfinished)
+    /// under a limit without hearing it.
+    uint64_t unfinished_bound() const noexcept { return sent_end_ > floor_ ? sent_end_ - floor_ : 0; }
 
     /// Bytes written and never sent.
     uint64_t unsent() const noexcept { return end_ - sent_end_; }
@@ -193,6 +204,9 @@ private:
     RangeSet          acked_;           ///< acknowledged, above base_
     RangeSet          lost_;            ///< to be sent again
     uint64_t          lost_bytes_ = 0;
+    /// Ends of messages above base_, oldest first, and the last end at or below it.
+    RingBuffer<uint64_t> ends_;
+    uint64_t          floor_ = 0;
 };
 
 /// The receiving half of one stream: bytes put back in order, and the messages
@@ -217,6 +231,26 @@ public:
     uint64_t highest() const noexcept { return highest_; }
     bool     has_held() const noexcept { return !held_.empty(); }
 
+    /// Follow the message boundaries over what has arrived in order since the last
+    /// call. False when a message's length is past `max_message` — a protocol
+    /// error, caught as soon as the length arrives rather than once the peer has
+    /// made us hold that much.
+    bool track_messages(size_t max_message);
+    /// Bytes in order of the message not yet complete. Flow control counts bytes
+    /// as consumed once they are in order, but a message is delivered only whole:
+    /// this is what a peer can make us hold beyond the window, per stream.
+    uint64_t unfinished() const noexcept { return next_ - msg_start_; }
+    /// Bytes in the inbox: arrived in order and not yet delivered.
+    size_t   buffered() const noexcept { return inbox_.size(); }
+
+    /// Take no more: drop everything held and buffered, and from here on only
+    /// note how far the peer has sent (flow control still counts it). For a
+    /// connection nobody reads any more.
+    void stop(HoldAccount& account);
+    /// A stopped stream's way of taking data: as far as flow control is concerned
+    /// it has arrived. Returns how much higher the stream now reaches.
+    uint64_t skip(uint64_t offset, size_t len) noexcept;
+
     /// Hand every complete message in the inbox to `fn(ByteView inner)`, in order,
     /// until it returns false. Returns false when the inbox holds something that is
     /// not a message (a length past `max_message`) — a protocol error.
@@ -237,6 +271,9 @@ private:
 
     uint64_t                  next_    = 0;
     uint64_t                  highest_ = 0;
+    uint64_t                  msg_start_ = 0;   ///< where the incomplete message begins
+    uint64_t                  msg_end_   = 0;   ///< where it ends, once its length is in
+    bool                      have_len_  = false;
     std::map<uint64_t, Bytes> held_;    ///< out of order, disjoint, keyed by offset
     ReceiveBuffer             inbox_;   ///< in order, not yet parsed into messages
 };

@@ -189,6 +189,7 @@ public:
 
 private:
     // — UdpMuxDelegate —
+    bool   admit_inbound() override;
     ConnId adopt_inbound(std::unique_ptr<Transport> transport) override;
     void   dispatch_link_events(ConnId id, uint32_t events) override;
 

@@ -363,6 +363,13 @@ void UdpMux::on_initial(const LongPacket& initial, size_t len, const Address& fr
         if (spend_reply_budget(now)) send_refusal(from, initial, UdpConnection::kCloseRefused);
         return;
     }
+    // The node would not adopt it (at its peer limit): say so now, before the
+    // Noise reply is computed. Refused dials keep nothing, so they never count
+    // towards validate_above — this is the check that keeps them cheap.
+    if (!delegate_.admit_inbound()) {
+        if (spend_reply_budget(now)) send_refusal(from, initial, UdpConnection::kCloseRefused);
+        return;
+    }
 
     bool validated = token_valid(from, initial.dcid, initial.token);
     if (!validated && conns_.size() >= limits_.validate_above) {
@@ -383,7 +390,7 @@ void UdpMux::on_initial(const LongPacket& initial, size_t len, const Address& fr
     // been sent yet, so the refusal is the only answer the dialer gets.
     const ConnId id = delegate_.adopt_inbound(std::make_unique<UdpTransport>(*this, *raw));
     if (id == kInvalidConnId) {
-        send_refusal(from, initial, UdpConnection::kCloseRefused);
+        if (spend_reply_budget(now)) send_refusal(from, initial, UdpConnection::kCloseRefused);
         return;
     }
     LOG_DEBUG("udp", "Accepted connection " << initial.dcid << " from " << from.to_string());
@@ -451,7 +458,9 @@ void UdpMux::release(UdpConnection& conn) {
         // Its transport normally asked for a close already, and this is a no-op;
         // if it did not, the goodbye is orderly. Either way, while data is still
         // owed the connection stays just long enough to hand it over — the user-
-        // space equivalent of the kernel retransmitting after close().
+        // space equivalent of the kernel retransmitting after close(). Nothing
+        // reads it any more, so what the peer still sends is dropped, not kept.
+        conn.stop_reading();
         conn.close(CloseReason::LocalClose, now);
         if (conn.dead()) {
             conns_.erase(it);
