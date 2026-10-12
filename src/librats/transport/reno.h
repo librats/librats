@@ -87,6 +87,8 @@ private:
 
     uint32_t cwnd_     = kInitialWindow;
     uint32_t ssthresh_ = kMaxWindow;
+    /// A timeout has collapsed the window and nothing has been acknowledged since.
+    bool     timed_out_ = false;
 
     /// When data — not a bare acknowledgement — last went out; the clock the
     /// idle-restart rule reads.

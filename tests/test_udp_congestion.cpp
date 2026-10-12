@@ -896,6 +896,52 @@ TEST(BbrTest, RecoversFromAnOutage) {
     EXPECT_GT((f.delivered() - start) / 3.0, 0.8 * payload_rate(20)) << "the rate never came back";
 }
 
+// The same outage under Reno. A timeout collapses the window to one packet, and
+// what follows must be slow start: when the acknowledgements of packets sent after
+// the timeout grew nothing until every repair had gone out, the backlog an outage
+// leaves drained at one packet per round trip and the flow stood still for
+// seconds after the path came back.
+TEST(UdpLossRecoveryTest, RenoSlowStartsOutOfATimeout) {
+    Sim sim(20, 40ms, 83);
+    Flow& f   = sim.add(CongestionAlgorithm::Reno);
+    f.to_send = SIZE_MAX;
+    sim.run(4s);
+    const uint32_t events = f.sender().recovery().congestion_events();
+
+    sim.path.blackout = true;
+    sim.run(2s);
+    sim.path.blackout = false;
+    sim.run(2s);
+    const size_t start = f.delivered();
+    sim.run(2s);
+
+    EXPECT_FALSE(f.sender().dead());
+    EXPECT_GT(f.sender().recovery().congestion_events(), events) << "the outage went unnoticed";
+    EXPECT_FALSE(f.sender().recovery().in_recovery()) << "still repairing the outage";
+    EXPECT_GT((f.delivered() - start) / 2.0, 0.7 * payload_rate(20)) << "the rate never came back";
+}
+
+// The timeouts that follow the first one while a path stays down each find a
+// single packet in flight. Halving that would leave slow start no ceiling to
+// climb to; only the first of a run says where the path congested.
+TEST(UdpLossRecoveryTest, RenoKeepsSsthreshAcrossBackedOffTimeouts) {
+    cc::RttEstimate rtt;
+    cc::RenoController reno(rtt, Clock::time_point{});
+    reno.on_timeout(Clock::time_point{}, 100 * cc::kMss);
+    EXPECT_EQ(reno.ssthresh(), 50 * cc::kMss);
+    EXPECT_EQ(reno.cwnd(), cc::kMss);
+    reno.on_timeout(Clock::time_point{}, cc::kMss);
+    reno.on_timeout(Clock::time_point{}, cc::kMss);
+    EXPECT_EQ(reno.ssthresh(), 50 * cc::kMss) << "a backed-off timeout lowered ssthresh";
+
+    // Once the path answers, the next timeout is a new one.
+    cc::AckEvent ack;
+    ack.newly_acked = cc::kMss;
+    reno.on_ack(ack);
+    reno.on_timeout(Clock::time_point{}, 10 * cc::kMss);
+    EXPECT_EQ(reno.ssthresh(), 5 * cc::kMss);
+}
+
 // The controller's randomness (the probe schedule) is seeded from the connection,
 // so a run is a pure function of its inputs — which is what makes every figure in
 // this file and in bench_path reproducible.

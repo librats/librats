@@ -64,9 +64,15 @@ void RenoController::on_loss(bool timeout, uint64_t bytes_in_flight) {
     css_ = false;
     if (timeout) {
         // A timeout says the path is congested enough to have dropped everything
-        // in flight: back down to one packet and re-probe from there.
-        ssthresh_ = (std::max)(static_cast<uint32_t>(bytes_in_flight / 2), kMinCwnd);
-        cwnd_     = kMss;
+        // in flight: back down to one packet and re-probe from there. Only the
+        // first of a run sets ssthresh (RFC 5681 §3.1, and Linux): the ones that
+        // follow while the path stays silent find one packet in flight, and
+        // halving that would leave slow start a ceiling of nothing — the flow
+        // would climb back from an outage a packet per round trip.
+        if (!timed_out_)
+            ssthresh_ = (std::max)(static_cast<uint32_t>(bytes_in_flight / 2), kMinCwnd);
+        timed_out_ = true;
+        cwnd_      = kMss;
     } else {
         // A fast retransmit means packets are still flowing, so halve rather than
         // collapse.
@@ -76,6 +82,8 @@ void RenoController::on_loss(bool timeout, uint64_t bytes_in_flight) {
 }
 
 void RenoController::on_ack(const AckEvent& ack) {
+    // The path answered: a timeout from here on is a new one.
+    if (ack.newly_acked > 0) timed_out_ = false;
     // Packets sent before a loss episode began do not grow the window: they went
     // out into the congestion the episode is answering, and growing on them is
     // what would undo the halving while the hole is still being repaired.

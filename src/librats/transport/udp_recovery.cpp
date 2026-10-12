@@ -294,6 +294,7 @@ bool Recovery::on_ack(const AckFrame& ack, Clock::time_point now, FrameSink& sin
         largest_acked_ >= last_repair_pn_ && !sink.repairs_pending()) {
         in_recovery_      = false;
         timeout_recovery_ = false;
+        timeout_episode_  = false;
         recovery_credit_  = 0;
         cc_->on_recovery_exit(now);
     }
@@ -348,7 +349,13 @@ void Recovery::on_newly_acked(uint64_t pn, SentPacket& pkt, Clock::time_point no
         // A packet given up on and delivered after all still counts as delivered:
         // the rate sample and the window both describe what arrived.
         ack_newly_acked_ += pkt.bytes;
-        if (!in_recovery_ && (!had_episode_ || pn > episode_start_pn_)) ack_newly_clean_ += pkt.bytes;
+        // Clean: sent after the latest episode began, and not while a PRR episode
+        // is still repairing. A timeout's episode is slow start, which is exactly
+        // growth on what was sent after the collapse — withheld until every repair
+        // was out, the window stayed at one packet and the backlog an outage leaves
+        // drained at one packet per round trip.
+        if ((!in_recovery_ || timeout_episode_) && (!had_episode_ || pn > episode_start_pn_))
+            ack_newly_clean_ += pkt.bytes;
         sampler_.on_delivered(pkt.tx, pn, pkt.bytes, now);
     }
     // RACK (RFC 8985): the newest transmission known to have arrived, and the
@@ -383,7 +390,8 @@ bool Recovery::detect_losses(Clock::time_point now, FrameSink& sink) {
     // sent too close to the delivered one for the window to tell, would wait for a
     // probe timeout.
     if (loss_scan_ < log_base_) loss_scan_ = log_base_;
-    bool lost_any = false;
+    bool     lost_any    = false;
+    uint64_t newest_lost = 0;
     for (; loss_scan_ < largest_acked_; ++loss_scan_) {
         SentPacket* pkt = at(loss_scan_);
         if (!pkt) break;
@@ -397,9 +405,10 @@ bool Recovery::detect_losses(Clock::time_point now, FrameSink& sink) {
             }
         }
         mark_lost(*pkt, now, sink);
-        lost_any = true;
+        lost_any    = true;
+        newest_lost = loss_scan_;
     }
-    if (lost_any) congestion_event(now);
+    if (lost_any) congestion_event(now, newest_lost);
     return lost_any;
 }
 
@@ -425,13 +434,20 @@ void Recovery::mark_lost(SentPacket& pkt, Clock::time_point now, FrameSink& sink
     if (pkt.frame_count) hand_over(pkt, false, sink);
 }
 
-void Recovery::congestion_event(Clock::time_point now) {
+void Recovery::congestion_event(Clock::time_point now, uint64_t newest_lost) {
     // One reduction per episode, not one per packet and not one per ACK that
     // reports a loss — several arrive per round trip, and halving on each would
     // drive the window to the floor over a loss TCP rides out with one halving.
     // That includes what is lost while the episode runs: packets sent in the round
     // trip before the reduction took effect meet the same full queue.
-    if (in_recovery_) return;
+    //
+    // A timeout's episode is the exception for what was sent after it: that went
+    // out under slow start from one packet, and losing it means slow start has
+    // overshot — a congestion event of its own, which ends the timeout's episode
+    // and begins an ordinary one (RFC 9002 §7.3.2: a recovery period ends when a
+    // packet sent during it is acknowledged or lost).
+    if (in_recovery_ && !(timeout_episode_ && newest_lost > episode_start_pn_)) return;
+    timeout_episode_   = false;
     in_recovery_       = true;
     had_episode_       = true;
     episode_start_pn_  = next_pn_ - 1;
@@ -568,6 +584,7 @@ Recovery::Timeout Recovery::on_timer(Clock::time_point now, FrameSink& sink) {
     cc_->on_timeout(now, flight_bytes_);
     in_recovery_      = true;
     timeout_recovery_ = true;
+    timeout_episode_  = true;
     had_episode_      = true;
     episode_start_pn_ = next_pn_ - 1;
     last_repair_pn_   = 0;

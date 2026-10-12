@@ -263,7 +263,8 @@ private:
     /// True if it declared anything lost.
     bool   detect_losses(Clock::time_point now, FrameSink& sink);
     void   mark_lost(SentPacket& pkt, Clock::time_point now, FrameSink& sink);
-    void   congestion_event(Clock::time_point now);
+    /// `newest_lost`: the latest packet number among those just declared lost.
+    void   congestion_event(Clock::time_point now, uint64_t newest_lost);
     void   retire_front() noexcept;
     void   hand_over(const SentPacket& pkt, bool acked, FrameSink& sink);
 
@@ -309,7 +310,10 @@ private:
     /// acknowledged — and something sent after it began — with nothing still owed.
     uint64_t last_repair_pn_   = 0;
     bool     had_episode_      = false;
-    bool     timeout_recovery_ = false;   ///< the episode began with a timeout
+    bool     timeout_recovery_ = false;   ///< a timeout, and the path has not answered since
+    /// The episode began with a timeout: it runs in slow start rather than PRR, so
+    /// what was sent after it grows the window, and a loss of that opens a new one.
+    bool     timeout_episode_  = false;
     uint64_t recovery_credit_  = 0;       ///< PRR's sends earned and not spent
     uint64_t recover_fs_       = 0;       ///< PRR's RecoverFS
     uint64_t ack_prior_flight_ = 0;       ///< in flight when the ACK being applied arrived
