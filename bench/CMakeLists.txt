@@ -321,7 +321,7 @@ if(BENCH_TRANSPORT)
     endif()
 
     # The datagram transport against a modelled path (delay, queue, loss) in
-    # virtual time. No sockets and no threads — UdpStream takes `now` as a
+    # virtual time. No sockets and no threads — UdpConnection takes `now` as a
     # parameter, so the whole congestion controller runs deterministically.
     add_bench(bench_path SOURCES suites/bench_path.cpp framework/alloc_track.cpp)
     target_link_libraries(bench_path PRIVATE rats)

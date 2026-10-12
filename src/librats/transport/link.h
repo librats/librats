@@ -7,10 +7,9 @@
  * The transport above this line (StreamTransport — block framing, the Noise
  * handshake, the Session, the send queue) only ever needs an ordered, reliable,
  * non-blocking byte stream. A Link is exactly that and nothing more, so the same
- * code drives a kernel TCP socket (TcpLink), the library's own reliability layer
- * over datagrams (UdpStreamLink → UdpStream) and a relayed circuit (RelayLink).
- * None of them is a special case of another: a peer connected over any of them
- * is indistinguishable to every layer above.
+ * code drives a kernel TCP socket (TcpLink) and a relayed circuit (RelayLink). The
+ * datagram transport owns its own packets and is a Transport of its own
+ * (transport/udp_transport.h), not a Link.
  *
  * Ownership and threading follow the rest of the transport layer: a Link belongs
  * to exactly one StreamTransport, which belongs to one Connection and one
@@ -75,13 +74,13 @@ public:
     virtual std::optional<Address> remote_endpoint() const = 0;
 
     /// The kernel socket backing this link, or RATS_INVALID_SOCKET when the link
-    /// has none of its own (a UDP stream shares the mux's socket with every other
-    /// stream). The Reactor uses it to decide whether the link is poller-driven.
+    /// has none of its own (a relayed circuit). The Reactor uses it to decide
+    /// whether the link is poller-driven.
     virtual socket_t fd() const noexcept { return RATS_INVALID_SOCKET; }
 
     /// Told the ConnId the Reactor assigned, right after adoption. A link that has
-    /// to be reachable from somewhere other than its Connection (a UDP stream, from
-    /// the datagram path) needs it; a plain socket does not.
+    /// to be reachable from somewhere other than its Connection (a circuit, from
+    /// its carrier) needs it; a plain socket does not.
     virtual void attach(ConnId) {}
 
     /// Why the link broke, consulted when read/write reported Error. Lets a

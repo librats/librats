@@ -4,8 +4,8 @@
  * @file stream_transport.h
  * @brief A Transport over any ordered, reliable byte stream (a Link).
  *
- * The same code serves a kernel TCP socket, the library's UDP stream and a relayed
- * circuit: all three are a Link, and a Link is all this needs.
+ * The same code serves a kernel TCP socket and a relayed circuit: both are a Link,
+ * and a Link is all this needs.
  *
  * On the wire it is a run of length-prefixed blocks (wire/frame.h). The first few
  * carry the handshake in the clear; every one after that is a single inner message

@@ -15,8 +15,8 @@
 // is random: two runs of the same binary differ by more than most regressions do,
 // so a verdict needs many runs and still resolves only large effects.
 //
-// So this suite does not use a network at all. UdpStream never reads the clock
-// itself — every entry point takes `now` — which makes the whole congestion
+// So this suite does not use a network at all. A UdpConnection never reads the
+// clock itself — every entry point takes `now` — which makes the whole congestion
 // controller a pure function of its inputs and lets it be driven in virtual time
 // against a model of the thing that actually pushes back:
 //
@@ -41,7 +41,7 @@
 //            one and has nothing behind it to reveal the loss. Reported as a
 //            latency distribution, because the median is unaffected and the
 //            whole effect lives in the tail.
-//   realtime — live video over one stream: frame latency, the share of
+//   realtime — live video, one message a frame: frame latency, the share of
 //            frames that miss an interactive deadline, freezes, and how long the
 //            stream takes to be back on time after an outage or a capacity
 //            change, with a fixed-rate source and with one that retargets
@@ -56,6 +56,9 @@
 //
 // Everything here is deterministic: same binary, same numbers, every time. That
 // is the point — it makes small regressions visible, which no real path does.
+// But a row with random loss is ONE draw of it, and a change that alters the
+// packet count reshuffles which packets die: compare such rows over many seeds
+// (RATS_SEED=1..N in the environment), never one.
 // The flip side is that a model is only ever as good as what it models: there is
 // no reordering, no ack compression, no competing traffic and no variable delay,
 // so these figures are not predictions of what a real network will give. They
@@ -67,8 +70,9 @@
 
 #include "framework/alloc_track.h"
 
-#include "librats/transport/udp_stream.h"
-#include "librats/transport/udp_packet.h"
+#include "librats/security/plaintext_security.h"
+#include "librats/transport/udp_connection.h"
+#include "librats/transport/udp_wire.h"
 
 #include <algorithm>
 #include <chrono>
@@ -78,6 +82,7 @@
 #include <cstring>
 #include <memory>
 #include <deque>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <random>
@@ -92,7 +97,7 @@ using namespace librats;
 
 namespace {
 
-using Clock = UdpStream::Clock;
+using Clock = UdpConnection::Clock;
 using ms    = std::chrono::milliseconds;
 using us    = std::chrono::microseconds;
 using ns    = std::chrono::nanoseconds;
@@ -106,7 +111,7 @@ const char* col(const char* code) { return g_color ? code : ""; }
 
 struct InFlight {
     Clock::time_point arrive;
-    Address           to;
+    Address           to, from;
     Bytes             bytes;
 };
 
@@ -137,38 +142,114 @@ struct Direction {
     Clock::time_point burst_flip{};    ///< when the current spell ends
 };
 
+class Path;
+
+/// One end of a connection on the model: the host a UdpConnection runs on, a
+/// responder that accepts the first Initial it is sent, and the few questions the
+/// rows below ask of either side.
+///
+/// Both ends run the plaintext handshake: the model is about packets, and the
+/// rows are comparable with each other and across builds whatever the cipher
+/// costs (bench_crypto measures that).
+class Peer final : public UdpConnectionHost {
+public:
+    Peer(Path& path, const Address& addr, CongestionAlgorithm algo)
+        : path_(path), addr_(addr), security_(Identity::generate()) {
+        config_.congestion = algo;
+    }
+
+    const Address& addr() const noexcept { return addr_; }
+
+    void dial(const Address& to, udp::Cid cid, Clock::time_point now) {
+        conn_ = UdpConnection::dial(*this, security_, to, cid, now, config_);
+    }
+
+    void receive(uint8_t* data, size_t len, const Address& from, Clock::time_point now) {
+        if (conn_) {
+            if (conn_->remote() == from) conn_->on_datagram(data, len, now);
+            return;
+        }
+        udp::LongPacket p;
+        if (!udp::decode_long(data, len, p) || p.type != udp::LongType::Initial) return;
+        conn_ = UdpConnection::accept(*this, security_, from, p, len, false, now, config_);
+        if (conn_) conn_->answer(now);
+    }
+
+    /// Queue one message of `bytes` on `type`'s lane if the connection is kept no
+    /// fuller than the old byte stream kept itself — 2 MiB, or twice the window
+    /// above that — and let it send. The bytes taken: the message or nothing.
+    size_t write(size_t bytes, Clock::time_point now, MessageType type = MessageType::App) {
+        if (!conn_ || !conn_->established()) return 0;
+        const size_t limit = (std::max)(size_t{2} << 20, 2 * size_t{conn_->recovery().cwnd()});
+        if (conn_->queued_bytes() >= limit) return 0;
+        static const std::vector<uint8_t> payload(1 << 20, 0xAB);
+        bytes = (std::min)(bytes, payload.size());
+        if (!conn_->send_message(FrameHeader{type, 0, 0}, ByteView(payload.data(), bytes))) return 0;
+        conn_->flush(now);
+        return bytes;
+    }
+
+    void tick(Clock::time_point now) {
+        if (!conn_) return;
+        const auto due = conn_->next_deadline();
+        if (due && *due <= now) conn_->tick(now);
+        conn_->deliver(now, [&](const Frame& f) {
+            if (f.header.type == MessageType::App) ++app_messages;
+            delivered += f.payload.size();
+            return true;
+        });
+    }
+
+    UdpConnection* conn() noexcept { return conn_.get(); }
+    bool     dead() const noexcept { return conn_ && conn_->dead(); }
+    uint32_t cwnd() const noexcept { return conn_ ? conn_->recovery().cwnd() : 0; }
+    uint32_t retransmits() const noexcept { return conn_ ? conn_->recovery().retransmits() : 0; }
+    uint32_t congestion_events() const noexcept { return conn_ ? conn_->recovery().congestion_events() : 0; }
+    const cc::RttEstimate& rtt() const noexcept { return conn_->recovery().rtt(); }
+    const cc::CongestionController& congestion() const noexcept { return conn_->recovery().congestion(); }
+    PathStats path_stats() const noexcept { return conn_ ? conn_->path_stats() : PathStats{}; }
+
+    // — UdpConnectionHost —
+    uint8_t* datagram_buffer() override { return buf_.data(); }
+    void     send_datagram(const Address& to, size_t len) override;
+    void     connection_events(UdpConnection&, uint32_t) override {}
+    void     reset_token(udp::Cid cid, uint8_t* out) override {
+        std::memset(out, 0, udp::kResetTokenSize);
+        std::memcpy(out, &cid, sizeof(cid));
+    }
+
+    uint64_t delivered    = 0;   ///< payload bytes of every message handed over
+    uint64_t app_messages = 0;
+
+private:
+    Path&                                  path_;
+    Address                                addr_;
+    PlaintextSecurity                      security_;
+    UdpConnectionConfig                    config_;
+    std::unique_ptr<UdpConnection>         conn_;
+    std::array<uint8_t, udp::kMaxDatagram> buf_{};
+};
+
 /// Any number of sender/receiver pairs sharing one bottleneck: everything
 /// addressed to a receiver queues in the forward direction, everything addressed
 /// to a sender in the reverse one.
-class Path : public UdpStreamHost {
+class Path {
 public:
-    Path(Direction fwd, Direction rev) : fwd_(fwd), rev_(rev), rng_(12345) {}
-    /// A path between one sender and one receiver, placed from the start.
-    Path(Direction fwd, Direction rev, const Address& sender, const Address& receiver)
-        : Path(fwd, rev) {
-        place(sender, false);
-        place(receiver, true);
-    }
+    /// RATS_SEED in the environment changes the loss draws: one seed is one
+    /// sample, and a loss row only says something over many of them.
+    Path(Direction fwd, Direction rev) : fwd_(fwd), rev_(rev), rng_(seed()) {}
 
-    /// Say which side of the path `addr` is on. Done before the streams exist:
-    /// the dialer's constructor sends the Syn, which must already know its way.
-    void place(const Address& addr, bool receiver) { ends_.push_back(End{addr, nullptr, receiver}); }
+    /// Say which side of the path `peer` is on, before it sends anything.
+    void place(Peer* peer, bool receiver) { ends_.push_back(End{peer, receiver}); }
 
-    void attach(const Address& addr, UdpStream* s, bool receiver) {
-        for (End& e : ends_)
-            if (e.addr == addr) { e.stream = s; e.receiver = receiver; return; }
-        ends_.push_back(End{addr, s, receiver});
-    }
-
-    void send_datagram(const Address& to, const uint8_t* data, size_t len) override {
+    void send_datagram(const Address& from, const Address& to, const uint8_t* data, size_t len) {
         const End* end = find(to);
         Direction& d = (end && end->receiver) ? fwd_ : rev_;
 
         // Nanoseconds, not microseconds: at a gigabit a full packet serialises in
-        // 9.98 us, and truncating that to 9 makes the link a tenth faster than it
-        // says it is.
+        // ~10 us, and truncating that makes the link a tenth faster than it says.
         const auto serial     = ns(static_cast<long long>((len + 28) * 8 * 1e9 / d.rate_bps));
-        const auto pkt_serial = ns(static_cast<long long>((1200 + 28) * 8 * 1e9 / d.rate_bps));
+        const auto pkt_serial = ns(static_cast<long long>((udp::kMaxDatagram + 28) * 8 * 1e9 / d.rate_bps));
         const auto backlog    = d.busy_until > now_ ? (d.busy_until - now_)
                                                     : Clock::duration::zero();
 
@@ -190,10 +271,8 @@ public:
         } else if (d.loss > 0 && unit_(rng_) < d.loss) { ++d.drops; return; }
 
         d.busy_until = (std::max)(now_, d.busy_until) + serial;
-        d.wire.push_back(InFlight{d.busy_until + d.delay, to, Bytes(data, data + len)});
+        d.wire.push_back(InFlight{d.busy_until + d.delay, to, from, Bytes(data, data + len)});
     }
-
-    void stream_events(UdpStream&, uint32_t) override {}
 
     /// Advance the model to `now`, delivering everything that has arrived.
     void deliver_until(Clock::time_point now) {
@@ -203,13 +282,12 @@ public:
                 InFlight f = std::move(d->wire.front());
                 d->wire.pop_front();
                 if (dark(f.arrive)) { ++d->drops; continue; }
-                rudp::Packet p;
-                if (!rudp::decode(f.bytes.data(), f.bytes.size(), p)) continue;
-                if (const End* end = find(f.to); end && end->stream) end->stream->on_packet(p, now);
+                if (const End* end = find(f.to)) end->peer->receive(f.bytes.data(), f.bytes.size(), f.from, now);
             }
         }
     }
 
+    void set_now(Clock::time_point now) { now_ = now; }
     /// Swallow the next `n` packets travelling towards the receiver.
     void   drop_next(size_t n) { drop_burst_ = n; }
     /// Change the link rate both ways from now on — a path that loses capacity
@@ -224,14 +302,18 @@ public:
     size_t fwd_drops() const { return fwd_.drops; }
 
 private:
+    static unsigned seed() {
+        const char* env = std::getenv("RATS_SEED");
+        return env ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 12345u;
+    }
+
     struct End {
-        Address    addr;
-        UdpStream* stream;
-        bool       receiver;
+        Peer* peer;
+        bool  receiver;
     };
     bool dark(Clock::time_point t) const { return t >= dark_from_ && t < dark_to_; }
     const End* find(const Address& a) const {
-        for (const End& e : ends_) if (e.addr == a) return &e;
+        for (const End& e : ends_) if (e.peer->addr() == a) return &e;
         return nullptr;
     }
 
@@ -244,6 +326,8 @@ private:
     std::uniform_real_distribution<double> unit_{0.0, 1.0};
 };
 
+void Peer::send_datagram(const Address& to, size_t len) { path_.send_datagram(addr_, to, buf_.data(), len); }
+
 /// Scratch the feeder writes from and the drain reads into. Shared and allocated
 /// once, deliberately: a per-Rig buffer would be charged to whichever scenario
 /// happened to build the Rig, and the memory section would be measuring the
@@ -253,54 +337,41 @@ std::vector<uint8_t>& feed_buffer() {
     static std::vector<uint8_t> v(kScratch, 0xAB);
     return v;
 }
-std::vector<uint8_t>& drain_buffer() {
-    static std::vector<uint8_t> v(kScratch);
-    return v;
-}
 
 /// A connected pair on a virtual clock, with the model between them.
 struct Rig {
-
     Address A{*IpAddress::parse("10.0.0.1"), 1111};
     Address B{*IpAddress::parse("10.0.0.2"), 2222};
-    Path      path;
+    Path    path;
     Clock::time_point now{};
-    UdpStream tx, rx;
-    std::vector<uint8_t>& chunk = feed_buffer();
-    std::vector<uint8_t>& sink  = drain_buffer();
-    size_t delivered = 0;
+    Peer    tx, rx;
+    size_t  chunk = feed_buffer().size();
 
     Rig(double rate_mbps, int rtt_ms, double loss, size_t queue)
         : path(Direction{rate_mbps * 1e6, us(rtt_ms * 500), queue, loss, {}, {}, 0},
-               Direction{rate_mbps * 1e6, us(rtt_ms * 500), queue, loss, {}, {}, 0}, A, B),
-          tx(path, B, 1, 2, ConnRole::Outbound, {}, DialProfile{}, g_algo),
-          rx(path, A, 2, 1, ConnRole::Inbound, {}, DialProfile{}, g_algo) {
-        path.attach(A, &tx, false);
-        path.attach(B, &rx, true);
+               Direction{rate_mbps * 1e6, us(rtt_ms * 500), queue, loss, {}, {}, 0}),
+          tx(path, A, g_algo), rx(path, B, g_algo) {
+        path.place(&tx, false);
+        path.place(&rx, true);
+        tx.dial(B, 0x10, now);
     }
 
+    uint64_t delivered() const { return rx.delivered; }
+
     /// Step the model forward by `d`, offering the sender as much as it will take
-    /// when `feed` is set. The step is well under any timer the stream arms, so
-    /// nothing is resolved coarser than the transport itself would resolve it.
+    /// when `feed` is set. The step is well under any timer the connection arms,
+    /// so nothing is resolved coarser than the transport itself would resolve it.
     void run(Clock::duration d, bool feed) {
         constexpr auto kStep = us(200);
         const auto end = now + d;
         while (now < end) {
             now += kStep;
             path.deliver_until(now);
-            if (feed) {
-                for (int i = 0; i < 64; ++i) {
-                    ByteView v(chunk.data(), chunk.size());
-                    if (tx.write(&v, 1, now) == 0) break;
-                }
-            }
+            if (feed)
+                for (int i = 0; i < 64; ++i)
+                    if (tx.write(chunk, now) == 0) break;
             tx.tick(now);
             rx.tick(now);
-            for (;;) {
-                const size_t n = rx.read(sink.data(), sink.size());
-                if (!n) break;
-                delivered += n;
-            }
         }
     }
 };
@@ -326,7 +397,7 @@ void bulk(const char* name, double rate, int rtt, double loss, size_t queue, int
     Rig r(rate, rtt, loss, queue);
     r.run(std::chrono::seconds(secs), true);
 
-    const double mbps = r.delivered * 8.0 / (secs * 1e6);
+    const double mbps = r.delivered() * 8.0 / (secs * 1e6);
     const double util = mbps / rate * 100;
 
     char util_s[64];
@@ -344,10 +415,10 @@ void bulk(const char* name, double rate, int rtt, double loss, size_t queue, int
 void idle(const char* name, double rate, int rtt, size_t queue, int warm, int quiet) {
     Rig r(rate, rtt, 0.0, queue);
     r.run(std::chrono::seconds(warm), true);
-    const uint32_t grown = r.tx.cwnd() / rudp::kMaxPayload;
+    const uint32_t grown = r.tx.cwnd() / cc::kMss;
 
     r.run(std::chrono::seconds(quiet), false);
-    const uint32_t resumed = r.tx.cwnd() / rudp::kMaxPayload;
+    const uint32_t resumed = r.tx.cwnd() / cc::kMss;
 
     const size_t   drops_before = r.path.fwd_drops();
     const uint32_t rtx_before   = r.tx.retransmits();
@@ -373,15 +444,14 @@ void tail(const char* name, double rate, int rtt, double loss, int rounds, size_
 
     for (int i = 0; i < rounds; ++i) {
         const auto   started = r.now;
-        const size_t want    = r.delivered + msg.size();
+        const size_t want    = r.delivered() + msg.size();
 
-        ByteView v(reinterpret_cast<const uint8_t*>(msg.data()), msg.size());
-        while (r.tx.write(&v, 1, r.now) == 0) r.run(ms(1), false);
+        while (r.tx.write(msg.size(), r.now) == 0) r.run(ms(1), false);
 
         // A second is far past any recovery this transport can attempt, so a round
         // that reaches it did not recover at all — and shows up as the cap.
         const auto deadline = r.now + std::chrono::seconds(1);
-        while (r.delivered < want && r.now < deadline) r.run(us(200), false);
+        while (r.delivered() < want && r.now < deadline) r.run(us(200), false);
         times.push_back(std::chrono::duration<double, std::milli>(r.now - started).count());
     }
 
@@ -408,7 +478,6 @@ void tail(const char* name, double rate, int rtt, double loss, int rounds, size_
 /// back when a buffer is freed — none of which is true of the numbers below.
 void memory(const char* name, double rate, int rtt, size_t queue, size_t hole) {
     feed_buffer();    // allocated outside the measured region, not charged to it
-    drain_buffer();
     track::reset();
 
     auto r = std::make_unique<Rig>(rate, rtt, 0.0, queue);
@@ -455,7 +524,7 @@ void loss_row(double rate, int rtt, double loss, size_t queue, int secs) {
     Rig r(rate, rtt, loss, queue);
     r.run(std::chrono::seconds(secs), true);
 
-    const double mbps = r.delivered * 8.0 / (secs * 1e6);
+    const double mbps = r.delivered() * 8.0 / (secs * 1e6);
     char name[64];
     std::snprintf(name, sizeof(name), "%.1f%% loss", loss * 100);
 
@@ -470,31 +539,19 @@ void loss_row(double rate, int rtt, double loss, size_t queue, int secs) {
 
 // ── compete ─────────────────────────────────────────────────────────────────
 
-/// A flow's two addresses, placed on the path before either stream exists — the
-/// dialer's constructor sends the Syn, which must already know its way.
-/// A `reverse` flow sends against the path's forward direction: its data rides
-/// the other flows' acknowledgement queue and its acknowledgements their data's.
-struct FlowEnds {
-    FlowEnds(Path& path, int index, bool reverse)
-        : A{*IpAddress::parse("10.0.1." + std::to_string(index + 1)), 1111},
-          B{*IpAddress::parse("10.0.2." + std::to_string(index + 1)), 2222} {
-        path.place(A, reverse);
-        path.place(B, !reverse);
-    }
-    Address A, B;
-};
-
-/// One transfer of several sharing a bottleneck.
-struct Flow : FlowEnds {
+/// One transfer of several sharing a bottleneck. A `reverse` flow sends against
+/// the path's forward direction: its data rides the other flows' acknowledgement
+/// queue and its acknowledgements their data's.
+struct Flow {
     Flow(Path& path, int index, CongestionAlgorithm algo, Clock::time_point now, bool reverse = false)
-        : FlowEnds(path, index, reverse),
-          tx(path, B, 10 + 2 * index, 11 + 2 * index, ConnRole::Outbound, now, DialProfile{}, algo),
-          rx(path, A, 11 + 2 * index, 10 + 2 * index, ConnRole::Inbound, now, DialProfile{}, algo) {
-        path.attach(A, &tx, reverse);
-        path.attach(B, &rx, !reverse);
+        : tx(path, Address{*IpAddress::parse("10.0.1." + std::to_string(index + 1)), 1111}, algo),
+          rx(path, Address{*IpAddress::parse("10.0.2." + std::to_string(index + 1)), 2222}, algo) {
+        path.place(&tx, reverse);
+        path.place(&rx, !reverse);
+        path.set_now(now);
+        tx.dial(rx.addr(), 0x100 + 0x10 * static_cast<udp::Cid>(index), now);
     }
-    UdpStream tx, rx;
-    size_t    delivered = 0;
+    Peer tx, rx;
 };
 
 /// Two bulk flows through one bottleneck, the second joining after `join` s.
@@ -508,8 +565,7 @@ void compete(const char* name, CongestionAlgorithm a, CongestionAlgorithm b, dou
     Flow fa(path, 0, a, now);
     std::unique_ptr<Flow> fb;
 
-    std::vector<uint8_t>& chunk = feed_buffer();
-    std::vector<uint8_t>& sink  = drain_buffer();
+    const size_t chunk = feed_buffer().size();
     size_t base_a = 0, base_b = 0;
     constexpr auto kStep = us(200);
     const auto measure_from = std::chrono::seconds(join + 5);   // let the newcomer settle
@@ -517,23 +573,20 @@ void compete(const char* name, CongestionAlgorithm a, CongestionAlgorithm b, dou
     for (auto t = Clock::duration::zero(); t < std::chrono::seconds(secs); t += kStep) {
         now += kStep;
         if (!fb && t >= std::chrono::seconds(join)) fb = std::make_unique<Flow>(path, 1, b, now);
-        if (t == measure_from) { base_a = fa.delivered; base_b = fb->delivered; }
+        if (t == measure_from) { base_a = fa.rx.delivered; base_b = fb->rx.delivered; }
         path.deliver_until(now);
         for (Flow* f : {&fa, fb.get()}) {
             if (!f) continue;
-            for (int i = 0; i < 64; ++i) {
-                ByteView v(chunk.data(), chunk.size());
-                if (f->tx.write(&v, 1, now) == 0) break;
-            }
+            for (int i = 0; i < 64; ++i)
+                if (f->tx.write(chunk, now) == 0) break;
             f->tx.tick(now);
             f->rx.tick(now);
-            for (size_t n; (n = f->rx.read(sink.data(), sink.size())) != 0;) f->delivered += n;
         }
     }
 
     const double window = secs - std::chrono::duration<double>(measure_from).count();
-    const double ma = (fa.delivered - base_a) * 8.0 / (window * 1e6);
-    const double mb = (fb->delivered - base_b) * 8.0 / (window * 1e6);
+    const double ma = (fa.rx.delivered - base_a) * 8.0 / (window * 1e6);
+    const double mb = (fb->rx.delivered - base_b) * 8.0 / (window * 1e6);
     const double jain = (ma + mb) * (ma + mb) / (2 * (ma * ma + mb * mb));
     std::printf("  %-30s %9.2f %9.2f %8.1f%% %9.3f %9u\n", name, ma, mb,
                 (ma + mb) / rate * 100, jain, fa.tx.retransmits() + fb->tx.retransmits());
@@ -556,7 +609,7 @@ void delay(const char* name, double rate, int rtt, size_t queue, int secs) {
     }
     std::sort(samples.begin(), samples.end());
     const auto q = [&](double f) { return samples[static_cast<size_t>(f * (samples.size() - 1))]; };
-    const double mbps = r.delivered * 8.0 / ((secs + 5) * 1e6);
+    const double mbps = r.delivered() * 8.0 / ((secs + 5) * 1e6);
     std::printf("  %-30s %9.1f %9.1f %9.1f %9.2f %9s\n", name, q(0.5), q(0.95), samples.back(),
                 mbps, "");
 }
@@ -572,7 +625,7 @@ enum class Source {
 enum class Besides {
     Nothing,
     PathBulk,     ///< another peer's bulk transfer through the same bottleneck
-    StreamBulk,   ///< a bulk transfer to the SAME peer, on the same stream
+    StreamBulk,   ///< a file to the SAME peer, on its own lane of the same connection
     Duplex,       ///< the far end sends the same video back: a call, not a broadcast
     RateDrop,     ///< the link loses 70% of its capacity
     RateRise,     ///< the link starts at 30% of its capacity and gets it all back
@@ -637,9 +690,9 @@ struct RealtimeResult {
     double video;           ///< Mbit/s the encoder produced
 };
 
-/// One live source and the player at the far end of its stream: 30 frames a
-/// second, each written whole the moment it is captured, sized by the scene's
-/// profile. A frame is complete once its last byte has been read out.
+/// One live source and the player at the far end of its connection: 30 frames a
+/// second, each sent as one message the moment it is captured, sized by the
+/// scene's profile. A frame is complete once its message has been delivered.
 ///
 /// The encoder's rate control keeps the produced rate on target whatever the
 /// profile's noise and scene cuts do — an overshoot is paid back over the next
@@ -650,14 +703,14 @@ struct Video {
 
     struct Frame {
         Clock::time_point captured;
-        size_t            owed;          ///< bytes the stream has not accepted yet
-        uint64_t          end = 0;       ///< stream offset of its last byte, once accepted
+        size_t            bytes;
+        bool              queued = false;   ///< handed to the connection
     };
     struct Played {
         Clock::time_point captured, arrived;
     };
 
-    Video(UdpStream& tx, UdpStream& rx, const Scene& scene)
+    Video(Peer& tx, Peer& rx, const Scene& scene)
         : tx(tx), rx(rx), scene(scene), rng(1) {
         target = scene.video * 1e6;
         if (scene.source == Source::Adaptive) target = (std::min)(target, 1e6);   // calls start low
@@ -695,32 +748,27 @@ struct Video {
         next_frame += std::chrono::duration_cast<Clock::duration>(std::chrono::seconds(1)) / kFps;
     }
 
-    /// Frames go to the stream as fast as it takes them, oldest first.
-    void feed(Clock::time_point now, std::vector<uint8_t>& chunk) {
+    /// Frames go to the connection as soon as it takes them, oldest first.
+    void feed(Clock::time_point now) {
         for (Frame& f : frames) {
-            while (f.owed > 0) {
-                ByteView v(chunk.data(), (std::min)(f.owed, chunk.size()));
-                const size_t n = tx.write(&v, 1, now);
-                f.owed  -= n;
-                written += n;
-                if (n == 0) break;
-            }
-            if (f.owed > 0) break;
-            if (f.end == 0) f.end = written;
+            if (f.queued) continue;
+            if (tx.write(f.bytes, now) == 0) break;
+            f.queued = true;
         }
     }
 
-    void play(Clock::time_point now, std::vector<uint8_t>& sink) {
-        for (size_t n; (n = rx.read(sink.data(), sink.size())) != 0;) delivered += n;
-        while (!frames.empty() && frames.front().end != 0 && frames.front().end <= delivered) {
+    /// One lane, so the messages arrive in the order the frames were captured.
+    void play(Clock::time_point now) {
+        while (played_messages < rx.app_messages && !frames.empty()) {
             played.push_back(Played{frames.front().captured, now});
             frames.pop_front();
+            ++played_messages;
         }
     }
 
     /// The adaptive encoder: what any application can do with PathStats and
     /// nothing else. Back off while a queue stands in front of the frames — in
-    /// the stream or on the path — and creep up while none does: the estimate
+    /// the connection or on the path — and creep up while none does: the estimate
     /// alone cannot be followed upwards, because a source that keeps to it is
     /// app-limited and the estimate is then only a floor.
     void retarget(Clock::time_point now) {
@@ -728,7 +776,7 @@ struct Video {
         next_retarget += ms(100);
         const PathStats st = tx.path_stats();
         uint64_t backlog = st.queued_bytes;
-        for (const Frame& f : frames) backlog += f.owed;
+        for (const Frame& f : frames) if (!f.queued) backlog += f.bytes;
         if (st.bandwidth_bps > 0) {
             const double wait  = backlog * 8.0 / st.bandwidth_bps * 1000 +
                                  (st.srtt_us - st.min_rtt_us) / 1000.0;
@@ -745,13 +793,13 @@ struct Video {
         prev_lost      = st.bytes_lost;
     }
 
-    UdpStream&        tx;
-    UdpStream&        rx;
+    Peer&             tx;
+    Peer&             rx;
     const Scene&      scene;
     std::mt19937      rng;
     std::deque<Frame> frames;            // captured, not yet complete at the far end
     std::vector<Played> played;          // complete, in capture order
-    uint64_t          written = 0, delivered = 0, video_bytes = 0;
+    uint64_t          played_messages = 0, video_bytes = 0;
     double            target = 0;        // bits/s the encoder is told to run at
     double            encoder_rate = 0;  // what its rate control currently produces
     double            gop_weight = 0;
@@ -762,7 +810,7 @@ struct Video {
     uint64_t          prev_delivered = 0, prev_lost = 0;
 };
 
-/// Live video over one stream, measured the way a viewer would: a frame is
+/// Live video over one connection, measured the way a viewer would: a frame is
 /// *late* when it lands more than 100 ms after it could have — the path's
 /// one-way delay — which is the whole jitter budget an interactive call has.
 /// The player shows each frame at its deadline, or on arrival if it is late, and
@@ -775,9 +823,10 @@ struct Video {
 /// before the damage it does has reached the far end. "never" means no such
 /// second followed it.
 ///
-/// This is what a byte stream gives video today: everything reliable and in
-/// order, nothing ever dropped. The rows are the measuring stick for whatever
-/// replaces that, and the Adaptive ones for what PathStats alone already buys.
+/// Every frame is still reliable and in order on its lane: a loss holds back the
+/// frames behind it, and nothing stale is dropped. The rows are the measuring
+/// stick for what deadline messages will change, and the Adaptive ones for what
+/// PathStats alone already buys.
 RealtimeResult realtime(const Scene& sc) {
     const size_t bdp_pkts = static_cast<size_t>(sc.link * 1e6 / 8 * sc.rtt / 1000.0 / 1228);
     const size_t queue    = (std::max<size_t>)(static_cast<size_t>(bdp_pkts * sc.buffer_bdp), 8);
@@ -801,8 +850,7 @@ RealtimeResult realtime(const Scene& sc) {
     std::unique_ptr<Video> back;
     if (sc.besides == Besides::Duplex) back = std::make_unique<Video>(other->tx, other->rx, sc);
 
-    std::vector<uint8_t>& chunk = feed_buffer();
-    std::vector<uint8_t>& sink  = drain_buffer();
+    const size_t chunk = feed_buffer().size();
 
     constexpr auto kStep  = us(200);
     const auto     start  = std::chrono::seconds(1);    // handshake and first estimate
@@ -821,31 +869,23 @@ RealtimeResult realtime(const Scene& sc) {
         for (Video* v : {&video, back.get()}) {
             if (!v) continue;
             if (t < finish) v->capture(now);
-            v->feed(now, chunk);
+            v->feed(now);
         }
-        if (sc.besides == Besides::StreamBulk && t < finish) {
-            for (int i = 0; i < 64; ++i) {
-                ByteView v(chunk.data(), chunk.size());
-                const size_t n = fv.tx.write(&v, 1, now);
-                video.written += n;
-                if (n == 0) break;
-            }
-        }
-        if (sc.besides == Besides::PathBulk) {
-            for (int i = 0; i < 64; ++i) {
-                ByteView v(chunk.data(), chunk.size());
-                if (other->tx.write(&v, 1, now) == 0) break;
-            }
-        }
+        // A file to the same peer: its own lane, at the lowest priority.
+        if (sc.besides == Besides::StreamBulk && t < finish)
+            for (int i = 0; i < 64; ++i)
+                if (fv.tx.write(chunk, now, MessageType::FileChunk) == 0) break;
+        if (sc.besides == Besides::PathBulk)
+            for (int i = 0; i < 64; ++i)
+                if (other->tx.write(chunk, now) == 0) break;
 
         for (Flow* f : {&fv, other.get()}) {
             if (!f) continue;
             f->tx.tick(now);
             f->rx.tick(now);
         }
-        video.play(now, sink);
-        if (back) back->play(now, sink);
-        else if (other) while (other->rx.read(sink.data(), sink.size()) != 0) {}
+        video.play(now);
+        if (back) back->play(now);
 
         video.retarget(now);
         if (back) back->retarget(now);
@@ -1004,7 +1044,7 @@ int main(int argc, char** argv) {
     std::printf("  (both ends, so this is a pair rather than a peer — and the two halves are\n"
                 "   not alike: the sender holds the retransmission queue, the receiver the\n"
                 "   reorder buffer. What dominates is neither: it is the send queue — twice the\n"
-                "   congestion window, 2 MiB at least, of accepted-but-unsent application data —\n"
+                "   congestion window, 2 MiB at least, of queued-but-unsent application data —\n"
                 "   which is why the hole often adds little to a peak the queue had already set.)\n");
 
     heading("delay — standing queue a bulk transfer keeps (ms over the base RTT)",
@@ -1060,7 +1100,7 @@ int main(int argc, char** argv) {
     realtime_row("  200 ms, 1%",                   Scene{}.round_trip(200).lossy(0.01));
     realtime_row("  buffer 4",                     Scene{}.buffer(4));
     realtime_row("  + bulk flow on the path",      Scene{}.with(X::PathBulk));
-    realtime_row("  + bulk on the same stream",    Scene{}.with(X::StreamBulk));
+    realtime_row("  + file to the same peer",      Scene{}.with(X::StreamBulk));
     realtime_row("  + video back the other way",   Scene{}.with(X::Duplex));
     realtime_row("  + link drops to 3 Mbit",       Scene{}.with(X::RateDrop));
     realtime_row("  + link swings 10/3 Mbit",      Scene{}.with(X::RateSwing));
@@ -1089,9 +1129,10 @@ int main(int argc, char** argv) {
                 "   second of frames was on time again (\"never\": it was not). Loss is both\n"
                 "   ways; in bursts or fades the same mean loss comes as spells that lose\n"
                 "   everything, that long on average. Every frame here is reliable and in\n"
-                "   order: a loss holds back all that follows it, and nothing stale is ever\n"
-                "   dropped. \"adaptive\" rows retarget the encoder from PathStats every 100 ms,\n"
-                "   starting from 1 Mbit/s; video is what it produced.)\n");
+                "   order on its lane: a loss holds back the frames that follow it, and\n"
+                "   nothing stale is ever dropped; a file to the same peer has a lane of\n"
+                "   its own. \"adaptive\" rows retarget the encoder from PathStats every\n"
+                "   100 ms, starting from 1 Mbit/s; video is what it produced.)\n");
 
     heading("realtime by source shape — % of frames late; 10 Mbit, 40 ms",
             "clean", "1% loss", "buf 0.5", "adaptive", "adapt drop");

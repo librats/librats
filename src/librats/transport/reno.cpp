@@ -76,10 +76,10 @@ void RenoController::on_loss(bool timeout, uint64_t bytes_in_flight) {
 }
 
 void RenoController::on_ack(const AckEvent& ack) {
-    // Selectively acknowledged bytes do not grow the window here — they are
-    // counted when the cumulative acknowledgement reaches them — which keeps a
-    // window that is repairing a hole from growing on the far side of it.
-    if (ack.newly_cum_acked == 0) return;
+    // Packets sent before a loss episode began do not grow the window: they went
+    // out into the congestion the episode is answering, and growing on them is
+    // what would undo the halving while the hole is still being repaired.
+    if (ack.newly_acked_clean == 0) return;
     // Only a window that is being used is evidence for a larger one (RFC 7661, and
     // Linux's tcp_is_cwnd_limited): one the receiver's limit, the pacer or the
     // application kept from filling says nothing about what the path would take,
@@ -87,11 +87,11 @@ void RenoController::on_ack(const AckEvent& ack) {
     // flight. What was in flight when this ack left counts; a window at most twice
     // that still grows, which is what keeps slow start doubling.
     const uint64_t in_flight = ack.bytes_in_flight + ack.newly_acked;
-    if (ack.cwnd_limited || 2 * in_flight >= cwnd_) grow_window(ack.newly_cum_acked);
+    if (ack.cwnd_limited || 2 * in_flight >= cwnd_) grow_window(ack.newly_acked_clean);
     // After the window moves, not before: the round-trip rise HyStart++ acts on is
     // only meaningful against the window that produced it. Every ack counts toward
     // its rounds, whether or not this one grew the window.
-    hystart_on_ack(ack.cum_ack, ack.next_seq);
+    hystart_on_ack(ack.largest_acked, ack.next_pn);
 }
 
 bool RenoController::on_send_opportunity(Clock::time_point now, uint64_t bytes_in_flight,
@@ -110,10 +110,10 @@ bool RenoController::on_send_opportunity(Clock::time_point now, uint64_t bytes_i
     // — silence, a burst of gossip, silence — and without this the burst goes out
     // at a rate justified by what the path looked like ten seconds ago.
     //
-    // Halve once per timeout of silence, down to the window a fresh stream would
+    // Halve once per timeout of silence, down to the window a fresh connection would
     // start with. ssthresh is deliberately untouched: it records where this path
     // congested, and going quiet does not make that wrong — keeping it is what
-    // lets the stream climb back in slow start instead of re-running the whole
+    // lets it climb back in slow start instead of re-running the whole
     // discovery from scratch.
     const auto rto_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(rtt_.rto).count();
     const auto idle_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(idle).count();
@@ -129,13 +129,13 @@ bool RenoController::on_send_opportunity(Clock::time_point now, uint64_t bytes_i
     last_data_send_ += Clock::duration(rtt_.rto * static_cast<Clock::rep>(halvings));
 
     // The bucket describes a rate that no longer applies either. Emptying it means
-    // the stream releases the one packet an empty pipe always allows and then paces
+    // the connection releases the one packet an empty pipe always allows and paces
     // the rest at the restarted rate, instead of spending a burst allowance earned
     // while it was silent.
     return true;
 }
 
-void RenoController::hystart_on_ack(uint32_t ack, uint32_t next_seq) {
+void RenoController::hystart_on_ack(uint64_t largest_acked, uint64_t next_pn) {
     // Only slow start is in question. Congestion avoidance has already found its
     // ceiling and climbs a packet per round trip, which no queue signal improves.
     if (!in_slow_start()) { css_ = false; return; }
@@ -157,13 +157,13 @@ void RenoController::hystart_on_ack(uint32_t ack, uint32_t next_seq) {
         }
     }
 
-    if (!rudp::seq_le(round_end_, ack)) return;   // the round is still running
+    if (largest_acked < round_end_) return;   // the round is still running
 
     const auto ended_min = round_min_rtt_;
     prev_round_min_rtt_  = ended_min;
     round_min_rtt_       = (Clock::duration::max)();
     round_samples_       = 0;
-    round_end_           = next_seq - 1;
+    round_end_           = next_pn - 1;
 
     if (!css_) return;
 

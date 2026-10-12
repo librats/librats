@@ -26,16 +26,16 @@ enum class ConnRole {
     Outbound,  ///< We dialed out to a remote address.
 };
 
-/// Which wire a connection runs over. Tcp and Udp are first-class equals: they
-/// carry the exact same block/frame protocol and the same secure handshake, and
-/// differ only in how an ordered, reliable byte stream is obtained — the kernel's
-/// TCP stack, or the library's own reliability layer on top of datagrams (see
-/// transport/udp_stream.h). Relay is a third way of obtaining that same stream —
-/// out of another peer's connection rather than out of a socket — and is a last
-/// resort rather than an equal (see below).
+/// Which wire a connection runs over. Tcp and Udp are first-class equals: the
+/// same Noise handshake, the same messages, the same guarantees per lane. TCP
+/// carries them as blocks over the kernel's byte stream; UDP as the library's own
+/// QUIC-shaped packets on one shared socket (see transport/udp_connection.h).
+/// Relay is a third way of reaching a peer — a byte stream out of another peer's
+/// connection rather than out of a socket — and is a last resort rather than an
+/// equal (see below).
 enum class TransportKind {
     Tcp,    ///< One kernel socket per peer.
-    Udp,    ///< Reliable ordered stream over the shared UDP socket (NAT-friendly).
+    Udp,    ///< The datagram transport, on the shared UDP socket (NAT-friendly).
     /// Carried inside another peer's connection: the byte stream is chopped into
     /// messages a third node forwards between the two ends (see subsystems/relay.h).
     /// Not a wire of its own — it is one of the two above, one hop further away —
@@ -61,21 +61,21 @@ enum class CongestionAlgorithm : uint8_t {
 
 /// How hard an outbound datagram dial tries before it is called failed.
 ///
-/// The default is the ordinary dial: three Syns at a doubling 500 ms timeout, so a
-/// path that swallows UDP gives up in about three and a half seconds and the dialer
-/// falls back to TCP promptly.
+/// The default is the ordinary dial: three Initials at a doubling 500 ms interval,
+/// so a path that swallows UDP gives up in about three and a half seconds and the
+/// dialer falls back to TCP promptly.
 ///
-/// A hole punch wants the opposite shape. There the FIRST Syn is expected to die on
-/// the peer's NAT — its job is to open our own mapping and filter — and what
-/// actually connects is a later one, sent after the peer's Syn has crossed ours. So
-/// a punch trades the long patient tail for a dense burst: more attempts, closer
-/// together, no backoff. Everything else about the stream is unchanged; this only
-/// governs the Syn, and once a stream is connected its timeout comes from measured
+/// A hole punch wants the opposite shape. There the FIRST Initial is expected to
+/// die on the peer's NAT — its job is to open our own mapping and filter — and what
+/// actually connects is a later one, sent after the peer's has crossed ours. So a
+/// punch trades the long patient tail for a dense burst: more attempts, closer
+/// together, no backoff. Everything else about the connection is unchanged; this
+/// only governs the Initial, and once connected its timers come from measured
 /// round trips as usual.
 struct DialProfile {
-    int      syn_attempts = 3;      ///< transmissions of the Syn before the dial fails
-    uint32_t syn_rto_ms   = 500;    ///< interval before the first retransmission
-    bool     syn_backoff  = true;   ///< double the interval after each attempt
+    int      attempts    = 3;      ///< Initials sent before the dial fails
+    uint32_t interval_ms = 500;    ///< wait before the first repeat
+    bool     backoff     = true;   ///< double the wait after each attempt
 
     /// The punch shape: eight probes 200 ms apart, ~1.6 s of dense punching.
     static DialProfile punch() noexcept { return DialProfile{8, 200, false}; }

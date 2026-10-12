@@ -41,18 +41,17 @@
 
 #ifdef RATS_CHACHA_USE_VECTOR_MATH
 
-/* Assumption: CPU is little-endian and can perform unaligned
-   32-bit loads and stores */
-#define fromLittleVec(ptr)  \
-    (RatsChaChaVectorUInt32){((const uint32_t *)(ptr))[0], \
-                         ((const uint32_t *)(ptr))[1], \
-                         ((const uint32_t *)(ptr))[2], \
-                         ((const uint32_t *)(ptr))[3]}
-#define toLittleVec(ptr, v) \
-    (((uint32_t *)(ptr))[0] = (v)[0], \
-     ((uint32_t *)(ptr))[1] = (v)[1], \
-     ((uint32_t *)(ptr))[2] = (v)[2], \
-     ((uint32_t *)(ptr))[3] = (v)[3])
+/* Assumption: CPU is little-endian. The bytes may sit at any address (a
+   datagram's payload starts at an odd offset), so they are moved with memcpy,
+   which compiles to one unaligned vector load or store; a uint32_t* cast would
+   be undefined behaviour there. */
+static inline RatsChaChaVectorUInt32 fromLittleVec(const uint8_t *ptr)
+{
+    RatsChaChaVectorUInt32 v;
+    memcpy(&v, ptr, sizeof(v));
+    return v;
+}
+#define toLittleVec(ptr, v) memcpy((ptr), &(v), sizeof(RatsChaChaVectorUInt32))
 
 #endif
 

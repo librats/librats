@@ -1,0 +1,709 @@
+// A datagram connection (udp_connection.h) driven in virtual time over a path a
+// test controls: the handshake, packet protection, the streams, recovery, flow
+// control and the lifecycle. Congestion control against a path with a rate and a
+// queue is test_udp_congestion.cpp's; the shared socket is test_transport_udp.cpp's.
+
+#include <gtest/gtest.h>
+
+#include "udp_test_net.h"
+
+#include "librats/transport/udp_recovery.h"
+#include "librats/transport/udp_streams.h"
+
+#include <algorithm>
+#include <deque>
+#include <functional>
+#include <map>
+#include <set>
+
+using namespace librats;
+using namespace udptest;
+using namespace std::chrono_literals;
+
+namespace {
+
+/// A path with a fixed one-way delay, a hook that may drop or rewrite any
+/// datagram, and nothing else.
+class Net final : public Wire {
+public:
+    explicit Net(Clock::duration delay) : delay_(delay) {}
+
+    void carry(const Address& from, const Address& to, const uint8_t* data, size_t len) override {
+        Bytes bytes(data, data + len);
+        if (blackout || (hook && hook(bytes, from, to))) { ++dropped; return; }
+        queue_.push_back({now_ + delay_, from, to, std::move(bytes)});
+    }
+
+    /// Put a datagram on the path as if `from` had just sent it.
+    void inject(const Address& from, const Address& to, Bytes bytes) {
+        queue_.push_back({now_ + delay_, from, to, std::move(bytes)});
+    }
+
+    void deliver_until(Clock::time_point now) {
+        now_ = now;
+        while (!queue_.empty() && queue_.front().arrive <= now) {
+            Datagram d = std::move(queue_.front());
+            queue_.pop_front();
+            for (End* end : ends)
+                if (end->addr() == d.to) end->receive(d.bytes.data(), d.bytes.size(), d.from, now);
+        }
+    }
+
+    void set_now(Clock::time_point now) { now_ = now; }
+
+    std::vector<End*> ends;
+    /// Sees every datagram as it is sent; true drops it. May rewrite it.
+    std::function<bool(Bytes& datagram, const Address& from, const Address& to)> hook;
+    bool   blackout = false;
+    size_t dropped  = 0;
+
+private:
+    struct Datagram {
+        Clock::time_point arrive;
+        Address           from, to;
+        Bytes             bytes;
+    };
+    Clock::duration      delay_;
+    Clock::time_point    now_{};
+    std::deque<Datagram> queue_;
+};
+
+/// The frames of a short packet sent under plaintext security, where the header
+/// mask is zeros and nothing is sealed: what lets a hook see what a packet carries.
+std::vector<udp::Frame> frames_of(const Bytes& d) {
+    std::vector<udp::Frame> out;
+    if (d.empty() || udp::is_long_header(d[0])) return out;
+    const size_t header = udp::kShortHeaderSize + (d[0] & 0x03) + 1;
+    udp::FrameReader r(d.data() + header, d.size() - header);
+    udp::Frame f;
+    while (r.next(f)) out.push_back(f);
+    return out;
+}
+
+bool carries_stream(const Bytes& d, MessageType type) {
+    for (const auto& f : frames_of(d))
+        if (f.type == udp::kStream && f.stream.stream == static_cast<uint8_t>(type)) return true;
+    return false;
+}
+
+bool is_short(const Bytes& d) { return !d.empty() && !udp::is_long_header(d[0]); }
+
+bool is_handshake(const Bytes& d, udp::LongType type) {
+    udp::LongPacket p;
+    return !d.empty() && udp::is_long_header(d[0]) && udp::decode_long(d.data(), d.size(), p) && p.type == type;
+}
+
+struct Pair {
+    explicit Pair(bool noise = true, Clock::duration one_way = 10ms, UdpConnectionConfig a_cfg = {},
+                  UdpConnectionConfig b_cfg = {})
+        : id_a(Identity::generate()), id_b(Identity::generate()),
+          sec_a(noise ? std::unique_ptr<SecurityProvider>(new NoiseSecurity(id_a))
+                      : std::unique_ptr<SecurityProvider>(new PlaintextSecurity(id_a))),
+          sec_b(noise ? std::unique_ptr<SecurityProvider>(new NoiseSecurity(id_b))
+                      : std::unique_ptr<SecurityProvider>(new PlaintextSecurity(id_b))),
+          net(one_way), a(net, addr_a(), *sec_a, a_cfg), b(net, addr_b(), *sec_b, b_cfg) {
+        net.ends = {&a, &b};
+        a.listening = false;
+    }
+
+    void dial() { a.dial(b.addr(), 0x1000, now); }
+
+    bool connect() {
+        dial();
+        return run_until([&] { return a.established() && b.established(); });
+    }
+
+    void step(Clock::duration dt = 1ms) {
+        now += dt;
+        net.deliver_until(now);
+        a.tick(now);
+        b.tick(now);
+        a.read(now);
+        b.read(now);
+    }
+
+    template <typename Pred>
+    bool run_until(Pred pred, Clock::duration limit = 10s, Clock::duration dt = 1ms) {
+        const auto end = now + limit;
+        while (now < end) {
+            if (pred()) return true;
+            step(dt);
+        }
+        return pred();
+    }
+
+    void run(Clock::duration d, Clock::duration dt = 1ms) {
+        const auto end = now + d;
+        while (now < end) step(dt);
+    }
+
+    /// Queue on a, and let it send what it may.
+    void send(MessageType type, const std::string& payload, uint16_t channel = 0) {
+        ASSERT_TRUE(a.send(type, payload, channel));
+        a.conn->flush(now);
+    }
+
+    Identity id_a, id_b;
+    std::unique_ptr<SecurityProvider> sec_a, sec_b;
+    Net net;
+    End a, b;
+    Clock::time_point now{};
+};
+
+} // namespace
+
+// ── The handshake ───────────────────────────────────────────────────────────
+
+TEST(UdpConnectionTest, NoiseBringsBothSidesUpAndMeasuresTheRoundTrip) {
+    Pair p(true, 15ms);
+    ASSERT_TRUE(p.connect());
+    EXPECT_EQ(p.a.conn->remote_id(), p.id_b.id);
+    EXPECT_EQ(p.b.conn->remote_id(), p.id_a.id);
+    EXPECT_TRUE(p.a.conn->is_secure());
+    EXPECT_EQ(p.b.conn->local_cid(), udp::paired_cid(p.a.conn->local_cid()));
+    // Both ends have a round trip from the handshake alone, before any data.
+    ASSERT_TRUE(p.a.conn->recovery().rtt().have_rtt);
+    ASSERT_TRUE(p.b.conn->recovery().rtt().have_rtt);
+    const double srtt_ms = std::chrono::duration<double, std::milli>(p.a.conn->recovery().rtt().srtt).count();
+    EXPECT_NEAR(srtt_ms, 30, 3);
+}
+
+TEST(UdpConnectionTest, PlaintextNeedsNoThirdMessage) {
+    Pair p(false);
+    ASSERT_TRUE(p.connect());
+    EXPECT_FALSE(p.a.conn->is_secure());
+    p.send(MessageType::App, "hello");
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }));
+    EXPECT_EQ(p.b.messages[0].payload, "hello");
+}
+
+TEST(UdpConnectionTest, ALostHandshakeMessageIsRepeated) {
+    // Each of the three messages lost once, in turn.
+    for (auto lose : {udp::LongType::Initial, udp::LongType::Handshake}) {
+        for (int nth = 0; nth < 2; ++nth) {
+            Pair p(true);
+            int seen = 0;
+            bool lost = false;
+            p.net.hook = [&](Bytes& d, const Address&, const Address&) {
+                if (lost || !is_handshake(d, lose)) return false;
+                if (seen++ < nth) return false;
+                lost = true;
+                return true;
+            };
+            if (lose == udp::LongType::Initial && nth == 1) continue;   // only one Initial is sent
+            ASSERT_TRUE(p.connect()) << "type " << int(lose) << " #" << nth;
+            EXPECT_TRUE(lost);
+            p.send(MessageType::App, "after");
+            ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }));
+        }
+    }
+}
+
+TEST(UdpConnectionTest, DataThatOvertakesTheLastHandshakeMessageIsKept) {
+    Pair p(true);
+    // Hold the dialer's third message back and let what follows it overtake it.
+    Bytes held;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from == p.a.addr() && held.empty() && is_handshake(d, udp::LongType::Handshake)) {
+            held = d;
+            return true;
+        }
+        return false;
+    };
+    p.dial();
+    ASSERT_TRUE(p.run_until([&] { return p.a.established(); }));
+    p.send(MessageType::App, "early");
+    p.step();
+    ASSERT_FALSE(held.empty());
+    p.net.inject(p.a.addr(), p.b.addr(), held);
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }, 50ms))
+        << "data that arrived before the keys was thrown away";
+    EXPECT_EQ(p.a.conn->recovery().retransmits(), 0u);
+}
+
+TEST(UdpConnectionTest, AnUnansweredDialGivesUp) {
+    Pair p(true);
+    p.b.listening = false;
+    size_t initials = 0;
+    p.net.hook = [&](Bytes& d, const Address&, const Address&) {
+        if (is_handshake(d, udp::LongType::Initial)) ++initials;
+        return false;
+    };
+    p.dial();
+    ASSERT_TRUE(p.run_until([&] { return p.a.conn->dead(); }, 10s));
+    EXPECT_EQ(p.a.conn->close_reason(), CloseReason::ConnectFailed);
+    EXPECT_EQ(initials, 3u) << "the default profile is three Initials";
+    // 500 + 1000 + 2000 ms.
+    EXPECT_GE(p.now - Clock::time_point{}, 3400ms);
+    EXPECT_LE(p.now - Clock::time_point{}, 3700ms);
+}
+
+TEST(UdpConnectionTest, ThePunchProfileIsDenseAndFlat) {
+    UdpConnectionConfig cfg;
+    cfg.dial = DialProfile::punch();
+    Pair p(true, 10ms, cfg);
+    p.b.listening = false;
+    std::vector<Clock::time_point> at;
+    p.net.hook = [&](Bytes& d, const Address&, const Address&) {
+        if (is_handshake(d, udp::LongType::Initial)) at.push_back(p.now);
+        return false;
+    };
+    p.dial();
+    ASSERT_TRUE(p.run_until([&] { return p.a.conn->dead(); }, 10s));
+    ASSERT_EQ(at.size(), 8u);
+    for (size_t i = 1; i < at.size(); ++i) EXPECT_EQ(at[i] - at[i - 1], 200ms) << i;
+}
+
+TEST(UdpConnectionTest, AnAbsurdDialProfileIsClamped) {
+    UdpConnectionConfig cfg;
+    cfg.dial = DialProfile{0, 1, false};
+    Pair p(true, 10ms, cfg);
+    p.b.listening = false;
+    size_t initials = 0;
+    p.net.hook = [&](Bytes& d, const Address&, const Address&) {
+        if (is_handshake(d, udp::LongType::Initial)) ++initials;
+        return false;
+    };
+    p.dial();
+    ASSERT_TRUE(p.run_until([&] { return p.a.conn->dead(); }, 10s));
+    EXPECT_EQ(initials, 1u) << "zero attempts is one";
+    EXPECT_GE(p.now - Clock::time_point{}, 100ms) << "a 1 ms interval is the timer's floor";
+}
+
+// Before the dialer has shown it receives at its address, the responder answers
+// with at most three times what it was sent — a forged source cannot turn it into
+// an amplifier, however much it has queued.
+TEST(UdpConnectionTest, AnUnprovenDialerGetsNoMoreThanThreeTimesWhatItSent) {
+    Pair p(false);   // plaintext: the responder is established on the first message
+    size_t from_b = 0;
+    bool   first  = true;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from == p.b.addr()) { from_b += d.size(); return false; }
+        if (first) { first = false; return false; }   // the Initial gets through
+        return true;                                  // and nothing after it
+    };
+    p.dial();
+    ASSERT_TRUE(p.run_until([&] { return p.b.established(); }));
+    ASSERT_TRUE(p.b.send(MessageType::App, std::string(100000, 'x')));
+    p.b.conn->flush(p.now);
+    p.run(2s);
+    EXPECT_GT(from_b, 0u);
+    EXPECT_LE(from_b, UdpConnection::kAmplificationFactor * udp::kMaxDatagram);
+}
+
+// ── Messages ────────────────────────────────────────────────────────────────
+
+TEST(UdpConnectionTest, CarriesMessagesBothWaysWholeWhateverTheirSize) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    const std::string big(300000, 'z');
+    p.send(MessageType::App, "small", 7);
+    p.send(MessageType::App, big, 7);
+    ASSERT_TRUE(p.b.send(MessageType::Gossip, "back"));
+    p.b.conn->flush(p.now);
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 2 && p.a.messages.size() == 1; }));
+    EXPECT_EQ(p.b.messages[0].payload, "small");
+    EXPECT_EQ(p.b.messages[0].channel, 7);
+    EXPECT_EQ(p.b.messages[1].payload, big);
+    EXPECT_EQ(p.a.messages[0].type, MessageType::Gossip);
+}
+
+TEST(UdpConnectionTest, OneLaneArrivesInTheOrderItWasSentWhateverThePath) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    // Every third datagram lost, once, and the rest reordered in pairs.
+    size_t n = 0;
+    Bytes  delayed;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address& to) {
+        if (from != p.a.addr()) return false;
+        ++n;
+        if (n % 3 == 0 && n < 300) return true;
+        if (n % 2 == 1 && delayed.empty()) { delayed = d; return true; }
+        if (!delayed.empty()) {
+            p.net.inject(from, to, d);
+            p.net.inject(from, to, delayed);
+            delayed.clear();
+            return true;
+        }
+        return false;
+    };
+    // An application's channels are one lane: their order holds across them too.
+    for (int i = 0; i < 200; ++i)
+        p.send(MessageType::App, std::to_string(i) + std::string(static_cast<size_t>(i * 37 % 3000), '.'),
+               static_cast<uint16_t>(i % 3));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 200; }, 20s));
+    for (int i = 0; i < 200; ++i)
+        EXPECT_EQ(p.b.messages[static_cast<size_t>(i)].payload.substr(0, std::to_string(i).size()),
+                  std::to_string(i)) << i;
+}
+
+TEST(UdpConnectionTest, DuplicatedDatagramsAreDeliveredOnce) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    p.net.hook = [&](Bytes& d, const Address& from, const Address& to) {
+        p.net.inject(from, to, d);
+        return false;
+    };
+    for (int i = 0; i < 50; ++i) p.send(MessageType::App, std::string(2000, char('a' + i % 26)));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() >= 50; }));
+    p.run(200ms);
+    EXPECT_EQ(p.b.messages.size(), 50u);
+}
+
+// The point of separate streams: a hole in one lane holds up nothing in another.
+// Over a single byte stream the ping would wait for the repair of the file.
+TEST(UdpConnectionTest, AHoleInOneLaneDoesNotHoldUpAnother) {
+    Pair p(false, 25ms);
+    ASSERT_TRUE(p.connect());
+    // A warmed-up connection, so the window has room for the ping as well as for
+    // the lost file: this is about the receiver's lanes, not the sender's window.
+    p.send(MessageType::App, std::string(300000, 'w'));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }));
+    p.run(100ms);
+    p.b.messages.clear();
+    // Every packet carrying the file and nothing else is lost for the first 200 ms.
+    const auto until = p.now + 200ms;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        return from == p.a.addr() && p.now < until && carries_stream(d, MessageType::FileChunk) &&
+               !carries_stream(d, MessageType::Ping);
+    };
+    p.send(MessageType::FileChunk, std::string(20000, 'f'));
+    p.run(5ms);
+    p.send(MessageType::Ping, "ping");
+    const auto sent = p.now;
+    ASSERT_TRUE(p.run_until([&] {
+        return std::any_of(p.b.messages.begin(), p.b.messages.end(),
+                           [](const Message& m) { return m.type == MessageType::Ping; });
+    }, 1s));
+    EXPECT_LT(p.now - sent, 40ms) << "the ping waited for the file";
+    EXPECT_TRUE(std::none_of(p.b.messages.begin(), p.b.messages.end(),
+                             [](const Message& m) { return m.type == MessageType::FileChunk; }))
+        << "the test lost nothing";
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 2; }, 3s)) << "the file never made it";
+}
+
+// Priority is decided per packet, so a ping queued behind megabytes of file goes
+// out next, not after them.
+TEST(UdpConnectionTest, AnUrgentMessageOvertakesABulkBacklog) {
+    Pair p(true, 20ms);
+    ASSERT_TRUE(p.connect());
+    for (int i = 0; i < 64; ++i) p.send(MessageType::FileChunk, std::string(64 * 1024, 'f'));
+    p.run(100ms);
+    ASSERT_GT(p.a.conn->queued_bytes(), 1u << 20) << "no backlog to overtake";
+    p.send(MessageType::Ping, "ping");
+    const auto sent = p.now;
+    ASSERT_TRUE(p.run_until([&] {
+        return std::any_of(p.b.messages.begin(), p.b.messages.end(),
+                           [](const Message& m) { return m.type == MessageType::Ping; });
+    }, 2s));
+    EXPECT_LE(p.now - sent, 30ms) << "the ping waited behind the backlog";
+    EXPECT_LT(p.b.messages.size(), 65u);
+}
+
+// ── Recovery ────────────────────────────────────────────────────────────────
+
+TEST(UdpConnectionTest, WhatIsLostIsSentAgainInNewPackets) {
+    Pair p(false);
+    ASSERT_TRUE(p.connect());
+    size_t lost = 0;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from != p.a.addr()) return false;
+        if (carries_stream(d, MessageType::App) && lost < 3 && (p.a.sent % 4) == 0) { ++lost; return true; }
+        return false;
+    };
+    for (int i = 0; i < 40; ++i) p.send(MessageType::App, std::string(3000, char('a' + i % 26)));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 40; }));
+    ASSERT_EQ(lost, 3u);
+    EXPECT_GE(p.a.conn->recovery().retransmits(), 3u);
+    for (size_t i = 0; i < 40; ++i) EXPECT_EQ(p.b.messages[i].payload, std::string(3000, char('a' + i % 26)));
+}
+
+TEST(UdpConnectionTest, ALostTailIsProbedRatherThanTimedOut) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.run(200ms);   // settle the estimate
+    bool dropped = false;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (dropped || from != p.a.addr() || !is_short(d)) return false;
+        dropped = true;
+        return true;
+    };
+    const auto rto_events = p.a.conn->recovery().congestion_events();
+    p.send(MessageType::App, "the last word");
+    const auto sent = p.now;
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }, 2s));
+    ASSERT_TRUE(dropped);
+    // A probe goes after a round trip and the ack delay — well inside the 100 ms
+    // a timeout could not have come sooner than.
+    EXPECT_LT(p.now - sent, 100ms);
+    EXPECT_GE(p.a.conn->recovery().retransmits(), 1u);
+    p.run(100ms);
+    EXPECT_LE(p.a.conn->recovery().congestion_events(), rto_events + 1);
+}
+
+TEST(UdpConnectionTest, OneLossEpisodeIsOneReduction) {
+    Pair p(false, 20ms);
+    ASSERT_TRUE(p.connect());
+    for (int i = 0; i < 16; ++i) p.send(MessageType::App, std::string(64 * 1024, 'x'));
+    p.run(300ms);
+    const uint32_t before = p.a.conn->recovery().congestion_events();
+    // Three packets in a row lost in the middle of a window.
+    int to_drop = 3;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (to_drop > 0 && from == p.a.addr() && carries_stream(d, MessageType::App)) { --to_drop; return true; }
+        return false;
+    };
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 16; }, 10s));
+    EXPECT_EQ(p.a.conn->recovery().congestion_events(), before + 1);
+}
+
+TEST(UdpConnectionTest, ATimeoutWritesOffTheFlightAndTheTransferRecovers) {
+    Pair p(false, 10ms);
+    ASSERT_TRUE(p.connect());
+    for (int i = 0; i < 32; ++i) p.send(MessageType::App, std::string(32 * 1024, 'x'));
+    p.run(30ms);
+    p.net.blackout = true;
+    p.run(1500ms);
+    EXPECT_GT(p.a.conn->recovery().congestion_events(), 0u) << "a whole second of silence was not a timeout";
+    p.net.blackout = false;
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 32; }, 20s));
+    EXPECT_TRUE(p.a.conn->established());
+}
+
+TEST(UdpConnectionTest, APacketOfDataIsAcknowledgedLateAndTwoAtOnce) {
+    Pair p(false, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.run(500ms);
+    std::vector<Clock::time_point> acks;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from != p.b.addr()) return false;
+        for (const auto& f : frames_of(d))
+            if (f.type == udp::kAck) acks.push_back(p.now);
+        return false;
+    };
+    p.send(MessageType::App, "one");
+    const auto sent = p.now;
+    ASSERT_TRUE(p.run_until([&] { return !acks.empty(); }, 1s));
+    // One packet waits out the delayed-ack timer for company.
+    EXPECT_GE(acks.front() - sent, 10ms + UdpConnection::kDelayedAck);
+
+    acks.clear();
+    p.run(200ms);
+    acks.clear();
+    p.a.send(MessageType::App, std::string(1500, 'a'));   // two packets
+    p.a.conn->flush(p.now);
+    const auto two = p.now;
+    ASSERT_TRUE(p.run_until([&] { return !acks.empty(); }, 1s));
+    EXPECT_LT(acks.front() - two, 10ms + UdpConnection::kDelayedAck) << "the second packet did not force an ACK";
+}
+
+TEST(UdpConnectionTest, ADamagedPacketIsDroppedAndRepaired) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    bool damaged = false;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (!damaged && from == p.a.addr() && is_short(d) && d.size() > 200) {
+            d[d.size() / 2] ^= 0x10;
+            damaged = true;
+        }
+        return false;
+    };
+    p.send(MessageType::App, std::string(5000, 'q'));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }));
+    EXPECT_TRUE(damaged);
+    EXPECT_TRUE(p.b.conn->established()) << "one bad packet broke the connection";
+}
+
+// Header protection: the packet number a datagram carries is not readable on the
+// path — consecutive packets do not show consecutive numbers.
+TEST(UdpConnectionTest, ThePathCannotReadPacketNumbers) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    std::vector<uint8_t> first_pn_byte;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from == p.a.addr() && is_short(d)) first_pn_byte.push_back(d[udp::kShortHeaderSize]);
+        return false;
+    };
+    for (int i = 0; i < 64; ++i) p.send(MessageType::App, std::string(1100, 'n'));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 64; }));
+    ASSERT_GT(first_pn_byte.size(), 50u);
+    size_t sequential = 0;
+    for (size_t i = 1; i < first_pn_byte.size(); ++i)
+        if (static_cast<uint8_t>(first_pn_byte[i - 1] + 1) == first_pn_byte[i]) ++sequential;
+    EXPECT_LT(sequential, first_pn_byte.size() / 8) << "packet numbers travel in the clear";
+}
+
+// ── Flow control ────────────────────────────────────────────────────────────
+
+TEST(UdpConnectionTest, AWindowTooSmallForThePathGrowsAndShrinksBackAfterSilence) {
+    Pair p(false, 50ms);
+    ASSERT_TRUE(p.connect());
+    p.b.count_only = true;
+    for (int i = 0; i < 160; ++i) p.send(MessageType::App, std::string(64 * 1024, 'w'));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages_in == 160; }, 60s));
+    EXPECT_GT(p.b.conn->receive_window(), UdpConnection::kInitialWindow)
+        << "a sender held back by the window never made it grow";
+    p.run(UdpConnection::kWindowDecay + 1s, 10ms);
+    EXPECT_EQ(p.b.conn->receive_window(), UdpConnection::kInitialWindow);
+}
+
+TEST(UdpConnectionTest, TheSharedBudgetBoundsWhatHolesCanHold) {
+    udp::UdpReceiveBudget budget(256 * 1024);
+    UdpConnectionConfig b_cfg;
+    b_cfg.budget = &budget;
+    Pair p(false, 20ms, {}, b_cfg);
+    ASSERT_TRUE(p.connect());
+    p.b.count_only = true;
+    // The first packet of the file is lost for a while, so everything behind it
+    // has to be held.
+    const auto until = p.now + 400ms;
+    bool first = true;
+    size_t peak = 0;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from != p.a.addr() || !carries_stream(d, MessageType::App)) return false;
+        if (first) { first = false; return true; }
+        for (const auto& f : frames_of(d))
+            if (f.type == udp::kStream && f.stream.offset == 0 && p.now < until) return true;
+        return false;
+    };
+    for (int i = 0; i < 64; ++i) p.send(MessageType::App, std::string(32 * 1024, 'h'));
+    ASSERT_TRUE(p.run_until([&] {
+        peak = (std::max)(peak, budget.used());
+        return p.b.messages_in == 64;
+    }, 30s));
+    EXPECT_LE(peak, (std::max)(budget.limit(), udp::UdpReceiveBudget::kGuaranteed) + udp::kMaxDatagram + 96);
+    EXPECT_EQ(budget.used(), 0u) << "held bytes were never released";
+}
+
+// ── Lifecycle ───────────────────────────────────────────────────────────────
+
+TEST(UdpConnectionTest, AnOrderlyCloseDeliversEverythingFirst) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    p.send(MessageType::App, std::string(50000, 'l'));
+    p.a.conn->close(CloseReason::LocalClose, p.now);
+    ASSERT_TRUE(p.run_until([&] { return p.b.conn->dead(); }));
+    ASSERT_EQ(p.b.messages.size(), 1u) << "the last message was lost to the close";
+    EXPECT_EQ(p.b.conn->close_reason(), CloseReason::PeerClosed);
+    EXPECT_TRUE(p.a.conn->dead());
+    EXPECT_EQ(p.a.conn->close_reason(), CloseReason::LocalClose);
+}
+
+TEST(UdpConnectionTest, AnAbortTellsThePeerAtOnce) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.a.conn->abort(p.now);
+    ASSERT_TRUE(p.run_until([&] { return p.b.conn->dead(); }, 100ms));
+    EXPECT_EQ(p.b.conn->close_reason(), CloseReason::PeerReset);
+}
+
+TEST(UdpConnectionTest, AStatelessResetEndsTheConnection) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    p.run(100ms);   // the reset tokens are exchanged
+    // What b's node would send for a packet to b's id after forgetting it.
+    Bytes reset(udp::kMinShortPacket + 4, 0x33);
+    reset[0] = 0x41;
+    const udp::Cid to = p.a.conn->local_cid();
+    for (int i = 0; i < 8; ++i) reset[1 + i] = static_cast<uint8_t>(to >> (56 - 8 * i));
+    Bytes wrong = reset;
+    p.b.reset_token(p.b.conn->local_cid(), reset.data() + reset.size() - udp::kResetTokenSize);
+
+    p.net.inject(p.b.addr(), p.a.addr(), wrong);
+    p.run(20ms);
+    EXPECT_TRUE(p.a.conn->established()) << "a datagram without the token reset the connection";
+    p.net.inject(p.b.addr(), p.a.addr(), reset);
+    ASSERT_TRUE(p.run_until([&] { return p.a.conn->dead(); }, 100ms));
+    EXPECT_EQ(p.a.conn->close_reason(), CloseReason::PeerReset);
+}
+
+TEST(UdpConnectionTest, KeepAliveBreaksASilenceAndASilentPeerTimesOut) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    const size_t sent = p.a.sent;
+    p.run(UdpConnection::kKeepAlive + 1s, 10ms);
+    EXPECT_GT(p.a.sent, sent) << "nothing went out in a long silence";
+    EXPECT_TRUE(p.a.conn->established());
+
+    p.net.blackout = true;
+    p.run(UdpConnection::kIdleTimeout + 1s, 50ms);
+    ASSERT_TRUE(p.a.conn->dead());
+    EXPECT_EQ(p.a.conn->close_reason(), CloseReason::IdleTimeout);
+}
+
+TEST(UdpConnectionTest, AnIdleConnectionSleepsUntilItsKeepAlive) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    p.run(1s);
+    const auto due = p.a.conn->next_deadline();
+    ASSERT_TRUE(due);
+    EXPECT_GE(*due - p.now, 8s) << "an idle connection asked to be woken early";
+    p.send(MessageType::App, "wake");
+    const auto armed = p.a.conn->next_deadline();
+    ASSERT_TRUE(armed);
+    EXPECT_LE(*armed - p.now, udp::Recovery::kInitialRto) << "a packet in flight has no loss timer";
+}
+
+// ── Streams on their own ────────────────────────────────────────────────────
+
+TEST(UdpStreamsTest, ASendStreamOwesWhatWasLostAndForgetsWhatArrived) {
+    udp::SendStream s;
+    std::string data(50000, '\0');
+    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<char>(i * 31);
+    s.write(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+    EXPECT_EQ(s.unsent(), data.size());
+
+    udp::SendStream::Piece piece;
+    ASSERT_TRUE(s.peek(UINT64_MAX, piece));
+    EXPECT_FALSE(piece.repair);
+    s.take(piece, 30000);
+    s.on_lost(10000, 5000);
+    EXPECT_EQ(s.lost_bytes(), 5000u);
+    s.on_acked(12000, 1000);   // part of it turned up after all
+    EXPECT_EQ(s.lost_bytes(), 4000u);
+    ASSERT_TRUE(s.peek(UINT64_MAX, piece));
+    EXPECT_TRUE(piece.repair);
+    EXPECT_EQ(piece.offset, 10000u);
+    EXPECT_EQ(piece.len, 2000u);
+
+    std::string out(2000, '\0');
+    s.copy(piece.offset, piece.len, reinterpret_cast<uint8_t*>(&out[0]));
+    EXPECT_EQ(out, data.substr(10000, 2000));
+
+    s.take(piece, 2000);
+    ASSERT_TRUE(s.peek(UINT64_MAX, piece));
+    EXPECT_EQ(piece.offset, 13000u);
+    s.take(piece, piece.len);
+    ASSERT_TRUE(s.peek(100, piece)) << "new data within the budget";
+    EXPECT_EQ(piece.offset, 30000u);
+    EXPECT_EQ(piece.len, 100u);
+    s.take(piece, 100);
+    s.take(udp::SendStream::Piece{30100, 19900, false}, 19900);
+
+    s.on_acked(0, 50000);
+    EXPECT_TRUE(s.flushed());
+    EXPECT_EQ(s.allocated(), 0u) << "a delivered stream holds memory";
+}
+
+TEST(UdpStreamsTest, ARecvStreamReassemblesOverlappingRepairs) {
+    udp::RecvStream r;
+    udp::HoldAccount account;
+    std::string data(10000, '\0');
+    for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<char>('a' + i % 26);
+    const auto piece = [&](size_t off, size_t len) {
+        return ByteView(reinterpret_cast<const uint8_t*>(data.data()) + off, len);
+    };
+    // Out of order, overlapping, and cut differently than the first time.
+    ASSERT_TRUE(r.on_data(6000, piece(6000, 2000), account));
+    ASSERT_TRUE(r.on_data(3000, piece(3000, 1000), account));
+    ASSERT_TRUE(r.on_data(2500, piece(2500, 4500), account));   // overlaps both
+    ASSERT_TRUE(r.on_data(9000, piece(9000, 1000), account));
+    EXPECT_EQ(r.in_order(), 0u);
+    EXPECT_GT(account.held, 0u);
+    ASSERT_TRUE(r.on_data(0, piece(0, 3000), account));   // fills the front
+    EXPECT_EQ(r.in_order(), 8000u);
+    ASSERT_TRUE(r.on_data(7500, piece(7500, 2000), account));
+    EXPECT_EQ(r.in_order(), 10000u);
+    EXPECT_EQ(account.held, 0u);
+}
+

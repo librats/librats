@@ -2,15 +2,16 @@
 
 /**
  * @file congestion_control.h
- * @brief The seam between a UdpStream and the algorithm that decides how much it
- *        may have in flight and how fast it may send it.
+ * @brief The seam between a datagram connection's loss recovery and the algorithm
+ *        that decides how much it may have in flight and how fast it may send it.
  *
- * The stream owns everything that is a *fact* about the connection: which packets
- * are outstanding, which were acknowledged, which it has given up on, the
- * round-trip estimate and the retransmission timer, and the delivery-rate samples
- * (delivery_rate.h). A controller owns only the *policy* — a congestion window and
- * a pacing rate — and learns about the connection through the hooks below. That
- * split is what lets two very different algorithms sit behind one interface:
+ * Recovery (udp_recovery.h) owns everything that is a *fact* about the
+ * connection: which packets are outstanding, which were acknowledged, which it
+ * has given up on, the round-trip estimate and the loss timer, and the
+ * delivery-rate samples (delivery_rate.h). A controller owns only the *policy* —
+ * a congestion window and a pacing rate — and learns about the connection
+ * through the hooks below. That split is what lets two very different algorithms
+ * sit behind one interface:
  *
  *   - Reno (reno.h) is driven by loss: it grows on acknowledged bytes and halves
  *     once per loss episode.
@@ -21,13 +22,13 @@
  * on_rtt_sample() for each packet that yields a clean round trip, then
  * on_packet_lost() for each packet declared lost while processing it, then
  * on_congestion_event() if that opened a loss episode, then on_ack() with the
- * totals. Like the stream, a controller runs on one reactor thread and holds no
- * locks.
+ * totals. Like the connection, a controller runs on one reactor thread and holds
+ * no locks.
  */
 
 #include "librats/core/types.h"
 #include "librats/transport/delivery_rate.h"
-#include "librats/transport/udp_packet.h"
+#include "librats/transport/udp_wire.h"
 
 #include <chrono>
 #include <cstdint>
@@ -36,22 +37,22 @@
 namespace librats {
 namespace cc {
 
-/// The unit every window here is a multiple of: one full Data packet's payload.
-constexpr uint32_t kMss = static_cast<uint32_t>(rudp::kMaxPayload);
+/// The unit every window here is a multiple of: one full datagram. Windows count
+/// whole packets as they leave — header, frames and tag — the way RFC 9002 does.
+constexpr uint32_t kMss = static_cast<uint32_t>(udp::kMaxDatagram);
 /// Initial congestion window. Four packets is the classic conservative start
 /// (RFC 3390 territory) — enough to get an RTT sample and trigger fast retransmit
 /// on an early loss, without a burst into an unknown path.
 constexpr uint32_t kInitialWindow = 4 * kMss;
-/// The ceiling on the congestion window: the largest receive window there is.
-/// Below it, what the receiver will hold is the peer's limit to enforce, and that
-/// is enforced separately and absolutely (UdpStream::window_allows) — this only
-/// keeps the arithmetic bounded. A controller must not grow its window on acks
-/// that a full window did not produce (see RenoController::on_ack): with nothing
-/// else above it, a window that runs away past what is really in flight takes a
+/// The ceiling on the congestion window, ~80 MB. What the receiver will hold is
+/// its flow-control limit to enforce, separately and absolutely — this only keeps
+/// the arithmetic bounded. A controller must not grow its window on acks that a
+/// full window did not produce (see RenoController::on_ack): with nothing else
+/// above it, a window that runs away past what is really in flight takes a
 /// spurious loss with it when it is finally cut.
-constexpr uint32_t kMaxWindow = rudp::kMaxWindowPackets * kMss;
+constexpr uint32_t kMaxWindow = 65535 * kMss;
 
-/// The stream's round-trip estimator, readable by the controller. RFC 6298 state
+/// The connection's round-trip estimator, readable by the controller. RFC 6298 state
 /// plus the minimum and the latest sample, which model-based controllers want.
 struct RttEstimate {
     Clock::duration srtt{};
@@ -100,15 +101,17 @@ struct PacingRate {
 /// Everything one acknowledgement changed.
 struct AckEvent {
     Clock::time_point now{};
-    uint32_t cum_ack  = 0;          ///< the cumulative acknowledgement it carried
-    uint32_t next_seq = 0;          ///< the sequence number the next new packet will take
-    /// Payload bytes the cumulative acknowledgement retired that no selective ack
-    /// had already counted. What a classic window grows by.
-    uint64_t newly_cum_acked = 0;
-    /// Payload bytes acknowledged for the first time, cumulatively or selectively.
+    uint64_t largest_acked = 0;     ///< the highest packet number acknowledged so far
+    uint64_t next_pn       = 0;     ///< the number the next packet sent will take
+    /// Bytes acknowledged for the first time.
     uint64_t newly_acked = 0;
-    /// Payload bytes declared lost since the previous acknowledgement — by this one,
-    /// or by a timeout in between.
+    /// Of those, the bytes acknowledged outside a loss episode, of packets sent
+    /// after the last one began: what a classic window grows by. Growing during an
+    /// episode, or on what was sent into the congestion it answers, would undo the
+    /// reduction (RFC 9002 §7.3.2).
+    uint64_t newly_acked_clean = 0;
+    /// Bytes declared lost since the previous acknowledgement — by this one, or by
+    /// a timeout in between.
     uint64_t newly_lost = 0;
     uint64_t bytes_in_flight = 0;   ///< after the acknowledgement was applied
     /// The window, not the application or the pacer, held the sender back at some
@@ -135,17 +138,16 @@ public:
     /// Bytes that may be in flight.
     virtual uint32_t cwnd() const noexcept = 0;
 
-    /// How fast new data may leave. The stream meters every transmission against
-    /// it with a token bucket a millisecond deep (see UdpStream's pacer).
+    /// How fast new data may leave. Recovery meters every transmission against it
+    /// with a token bucket a millisecond deep (see its pacer).
     virtual PacingRate pacing_rate() const noexcept = 0;
 
-    /// A sequenced packet of `bytes` payload just went on the wire (first copy or
-    /// retransmission); `bytes_in_flight` already includes it.
+    /// An ack-eliciting packet of `bytes` just went on the wire; `bytes_in_flight`
+    /// already includes it.
     virtual void on_packet_sent(Clock::time_point now, uint64_t bytes,
                                 uint64_t bytes_in_flight) = 0;
 
-    /// One clean round-trip measurement (Karn's rule already applied), after the
-    /// stream's estimator has absorbed it.
+    /// One round-trip measurement, after the connection's estimator has absorbed it.
     virtual void on_rtt_sample(Clock::duration rtt) = 0;
 
     /// A packet was declared lost and is about to be repaired.
@@ -159,18 +161,18 @@ public:
     /// The episode is over: everything outstanding when it began is acknowledged.
     virtual void on_recovery_exit(Clock::time_point now) = 0;
 
-    /// The retransmission timeout fired with nothing heard back. Called before the
-    /// stream writes off what was in flight, so `bytes_in_flight` is what the
+    /// The retransmission timeout fired with nothing heard back. Called before
+    /// recovery writes off what was in flight, so `bytes_in_flight` is what the
     /// timeout gave up on.
     virtual void on_timeout(Clock::time_point now, uint64_t bytes_in_flight) = 0;
 
     /// An acknowledgement that acknowledged or lost something.
     virtual void on_ack(const AckEvent& ack) = 0;
 
-    /// The stream is about to look for something to send. `has_data` says new data
-    /// is waiting; `app_limited` that the last thing the stream did was run out of
-    /// it. Returns true when the pacer's token bucket describes a rate that no
-    /// longer applies and should be emptied.
+    /// The connection is about to look for something to send. `has_data` says data
+    /// is waiting; `app_limited` that the last thing it did was run out of it.
+    /// Returns true when the pacer's token bucket describes a rate that no longer
+    /// applies and should be emptied.
     virtual bool on_send_opportunity(Clock::time_point now, uint64_t bytes_in_flight,
                                      bool has_data, bool app_limited) = 0;
 
@@ -179,7 +181,7 @@ public:
     /// rather than taken as the path's capacity.
     virtual bool wants_app_limited() const noexcept { return false; }
 
-    /// Whether the stream should supplement this controller's window with
+    /// Whether recovery should supplement this controller's window with
     /// proportional rate reduction in recovery (RFC 6937). A window-based
     /// controller that just halved its window needs it, or nothing leaves until
     /// half a window of acknowledgements is back. One that already paces its own
@@ -191,14 +193,13 @@ public:
     /// The rate, in bytes per second, this controller believes the path delivers —
     /// what an application sizing its own output to the path is told (PathStats).
     /// A model-based controller has the figure; a window-based one has only a
-    /// window, and returns 0 for the stream to read it as one window per round
-    /// trip instead.
+    /// window, and returns 0 for it to be read as one window per round trip.
     virtual uint64_t bandwidth() const noexcept { return 0; }
 };
 
-/// Build the controller `algorithm` names. `rtt` and `sampler` belong to the stream
-/// and must outlive the controller; `seed` makes any randomisation the algorithm
-/// does reproducible (the stream passes its connection ids).
+/// Build the controller `algorithm` names. `rtt` and `sampler` belong to the
+/// connection and must outlive the controller; `seed` makes any randomisation the
+/// algorithm does reproducible (the connection passes its id).
 std::unique_ptr<CongestionController> make_controller(CongestionAlgorithm algorithm,
                                                       const RttEstimate& rtt,
                                                       const DeliveryRateSampler& sampler,

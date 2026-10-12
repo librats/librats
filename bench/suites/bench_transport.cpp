@@ -3,7 +3,7 @@
 // Every other suite here measures a component against the implementation it
 // replaced. This one measures a *path*: the same encrypted protocol carried by
 // the kernel's TCP stack and by the library's own reliability layer over
-// datagrams (src/librats/transport/udp_stream.{h,cpp} + udp_mux.{h,cpp}). A transport is
+// datagrams (src/librats/transport/udp_connection.{h,cpp} + udp_mux.{h,cpp}). A transport is
 // only meaningful as a whole path — framing, congestion control, acknowledgement
 // timing and syscall batching only make sense together — so nothing is mocked:
 // two real librats::Node instances in this process, real loopback sockets, a real
@@ -27,10 +27,10 @@
 //
 //   dial        connect() → on_peer_connected. Exposes round trips spent before
 //               the first byte of application data: TCP's connect + Noise_XX vs
-//               the datagram Syn + Noise_XX.
+//               Noise_XX alone over datagrams, whose dial is its first message.
 //   rtt         strictly serial request/response of a small message. This is the
 //               experiment that would catch a delayed acknowledgement landing on
-//               the critical path (UdpStream::kDelayedAck is 20 ms — an order of
+//               the critical path (UdpConnection::kDelayedAck is 20 ms — an order of
 //               magnitude above everything else here, so it cannot hide).
 //   bulk        one-way transfer, paced so neither wire hits its high-water mark.
 //               Reports MB/s and, more importantly, CPU-seconds per gigabyte:
@@ -283,18 +283,12 @@ Link2 connect_pair(TransportKind kind, ServerSetup&& on_server, ClientSetup&& on
 // Time from connect() to on_peer_connected: everything spent before a single
 // application byte can move.
 //
-// The two are at parity by construction, and the measurement confirms it: TCP
-// spends one round trip in the kernel's three-way handshake before data may
-// flow, and the datagram side spends one on Syn → Ack before Noise_XX starts
-// (UdpStream's constructor, then UdpMux::accept_inbound()). Neither is ahead.
-//
-// What the row is really for is the round trip *both* of them spend. The Syn
-// carries nothing but the optional address-validation cookie, so there is room
-// in it for the initiator's first Noise message — carrying it there would make a
-// dial 0-RTT-to-handshake and put the datagram wire a full round trip ahead of
-// TCP, which is the kind of win a NAT-traversing P2P dial actually notices. On
-// loopback that round trip is tens of microseconds and invisible next to node
-// setup and the X25519 work; on a 100 ms path it is the whole difference.
+// The datagram side is a round trip ahead by construction: TCP spends one in the
+// kernel's three-way handshake before Noise_XX may start, while the datagram
+// dial's first packet already IS the first Noise message (an Initial, see
+// transport/udp_connection.h) — the handshake is the dial. On loopback that
+// round trip is tens of microseconds and invisible next to node setup and the
+// X25519 work; on a 100 ms path it is the whole difference.
 
 struct DialResult { double median_ms = 0, p95_ms = 0; };
 
@@ -332,10 +326,10 @@ DialResult bench_dial(TransportKind kind, int dials) {
 //
 // Strictly serial: one message out, wait for the echo, repeat. Nothing else is
 // in flight, so nothing can carry an acknowledgement for free — which is the
-// condition under which a delayed ack would show up. UdpStream sends a pure ack
-// immediately for an out-of-order packet, a Syn or a Fin, and otherwise every
-// second packet (unacked_packets_ >= 2); a ping-pong sends one packet per turn,
-// so this is the shape that probes that rule hardest.
+// condition under which a delayed ack would show up. A UdpConnection sends an ACK
+// at once for a packet out of order or one that opens or closes a hole in a
+// stream, and otherwise every second packet; a ping-pong sends one packet per
+// turn, so this is the shape that probes that rule hardest.
 
 struct RttResult { double median_us = 0, p99_us = 0; };
 
@@ -437,9 +431,9 @@ BulkResult bench_bulk(TransportKind kind, size_t total_bytes, size_t frame_size,
 // frame either way, because Connection::send() flushes write-through.
 //
 // So the real gap is that every frame costs its own trip into the kernel, and
-// the datagram side partly escapes it on its own: UdpStream::write() tops up the
-// tail packet, so consecutive small frames share one 1200-byte datagram, and
-// UdpMux hands the socket kUdpBatchMax of them per syscall. The TCP path has
+// the datagram side partly escapes it on its own: consecutive small messages share
+// one 1220-byte packet as frames of their lanes' streams, and UdpMux hands the
+// socket a batch of them per syscall. The TCP path has
 // neither and leans entirely on Nagle to do that batching for it. Deferring the
 // flush to the end of a reactor turn brings the two wires to ~1.1-1.3x of each
 // other, which is what Link promises — and only THEN is TCP_NODELAY worth
@@ -544,9 +538,9 @@ IdleResult bench_idle(TransportKind kind, int peers, std::chrono::milliseconds w
 // Neither wire lets the kernel absorb a burst any more. On TCP the socket holds
 // no more than TCP_NOTSENT_LOWAT unsent (see Reactor::adopt), so that queued
 // messages stay where they can still be reordered by priority; on the datagram
-// side UdpStream::write() takes at most send_queue_limit() (twice the congestion
-// window, 2 MiB at least) and drains only as fast as cwnd/RTT allows. Either way
-// the remainder waits in the transport's queue until it crosses
+// side the connection's lanes hold it and drain only as fast as cwnd/RTT and the
+// peer's flow-control window allow. Either way the remainder waits in the
+// transport's queue until it crosses
 // Connection::kDefaultSendHighWater (8 MiB) and the peer is dropped — unless the
 // application heeds send()'s answer and on_peer_writable, which is what they are
 // for. What this row reports is how far an application that ignores both gets.
@@ -715,14 +709,12 @@ FallbackResult bench_fallback(uint32_t fallback_ms) {
 // could not mean on loopback:
 //
 //   dial      now counts *round trips*, not microseconds of node setup. TCP
-//             spends connect + Noise_XX; the datagram side spends Syn/Ack +
-//             Noise_XX. On a path with a real RTT the note under bench_dial()
-//             stops being theoretical: folding the initiator's first Noise
-//             message into the Syn is worth one whole RTT of every dial here.
+//             spends connect + Noise_XX; the datagram side Noise_XX alone, its
+//             Initial carrying the first Noise message — one RTT less per dial.
 //   rtt       min is the path itself, median is the path plus this stack, and
 //             the gap between median and p99 is queueing — either the network's
 //             or ours. A p99 near 20 ms on an otherwise fast path is
-//             UdpStream::kDelayedAck landing on the critical path, which no
+//             UdpConnection::kDelayedAck landing on the critical path, which no
 //             amount of loopback testing will show you.
 //   bulk      throughput here is bounded by the path, so the two wires converge
 //             on a link that is not the bottleneck — and diverge exactly where
@@ -1325,15 +1317,15 @@ int connect_and_measure(const Options& o) {
     table.line("median", tcp.dial_median_ms, udp.dial_median_ms, "ms", true);
     table.line("p95",    tcp.dial_p95_ms,    udp.dial_p95_ms,    "ms", true);
     std::printf("  (round trips now, not node setup: TCP pays connect + Noise_XX, the datagram\n"
-                "   side Syn/Ack + Noise_XX. Carrying the initiator's first Noise message in the\n"
-                "   Syn would remove one full RTT from every dial on a path like this one.)\n");
+                "   side Noise_XX alone — its Initial is the first Noise message, so a dial here\n"
+                "   should be one RTT shorter than TCP's.)\n");
 
     table.head("rtt — serial request/response");
     table.line("min",    tcp.rtt_min_ms,    udp.rtt_min_ms,    "ms", true, "%8.3f");
     table.line("median", tcp.rtt_median_ms, udp.rtt_median_ms, "ms", true, "%8.3f");
     table.line("p99",    tcp.rtt_p99_ms,    udp.rtt_p99_ms,    "ms", true, "%8.3f");
     std::printf("  (min is the path itself; median-minus-min is what this stack adds; a p99 that\n"
-                "   jumps ~20 ms above the median is UdpStream::kDelayedAck on the critical path.)\n");
+                "   jumps ~20 ms above the median is UdpConnection::kDelayedAck on the critical path.)\n");
 
     table.head("bulk — one way, ack-paced");
     table.line("upload   (we send)",   tcp.up_mb_s,       udp.up_mb_s,       "MB/s", false);
@@ -1524,10 +1516,9 @@ int run_loopback_suite() {
         header("dial — connect() to established peer (25 dials)");
         row("median", tcp.median_ms, udp.median_ms, "ms", true);
         row("p95",    tcp.p95_ms,    udp.p95_ms,    "ms", true);
-        std::printf("  (parity by construction: TCP spends a round trip on its three-way handshake,\n"
-                    "   the datagram side spends one on Syn/Ack — then both run Noise_XX. The Syn\n"
-                    "   carries no handshake payload, so putting the initiator's first Noise message\n"
-                    "   in it would drop that round trip and put UDP ahead of TCP on a real path.)\n");
+        std::printf("  (TCP spends a round trip on its three-way handshake before Noise_XX; the\n"
+                    "   datagram dial's Initial already is the first Noise message, so on a real\n"
+                    "   path UDP is one round trip ahead. Loopback hides it under node setup.)\n");
     }
 
     // ── rtt ─────────────────────────────────────────────────────────────────
@@ -1539,7 +1530,7 @@ int run_loopback_suite() {
         header("rtt — serial request/response, 64 B (3000 turns)");
         row("median", tcp.median_us, udp.median_us, "us", true);
         row("p99",    tcp.p99_us,    udp.p99_us,    "us", true);
-        std::printf("  (a p99 anywhere near 20000 us would mean UdpStream::kDelayedAck has landed\n"
+        std::printf("  (a p99 anywhere near 20000 us would mean UdpConnection::kDelayedAck has landed\n"
                     "   on the critical path; a ping-pong is the shape most likely to put it there.)\n");
     }
 
@@ -1582,8 +1573,8 @@ int run_loopback_suite() {
         row("CPU",             tcp.cpu_percent_core, udp.cpu_percent_core, "% core", true);
         row("resident / peer", tcp.bytes_per_peer / 1024.0, udp.bytes_per_peer / 1024.0,
             "KiB", true);
-        std::printf("  (the datagram side schedules each stream at its own next deadline\n"
-                    "   (UdpStream::next_deadline), so an idle stream asks to be woken once\n"
+        std::printf("  (the datagram side schedules each connection at its own next deadline\n"
+                    "   (UdpConnection::next_deadline), so an idle one asks to be woken once\n"
                     "   per keep-alive rather than every 20 ms. What is left here is the\n"
                     "   reactor's own Reactor::kMaxPollMs = 50 ms idle poll cap, which both\n"
                     "   transports pay. Each peer is a whole Node, so 'resident / peer'\n"

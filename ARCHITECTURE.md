@@ -181,61 +181,73 @@ on a lock.
                                    frames flow)
 ```
 
-- *Connecting* — an outbound connect is in flight (inbound links skip this).
+- *Connecting* — an outbound connect is in flight (inbound connections skip this).
 - *Handshaking* — a `Handshaker` runs to completion, producing a `Session` and the
   remote's authenticated `PeerId`.
-- *Established* — inbound blocks are decrypted into frames and delivered; outbound
-  frames are encrypted and queued.
+- *Established* — messages flow both ways, sealed and opened by the transport.
 
-The connection reports everything through a `ConnectionDelegate` (which `Node`
-implements) and asks its **link** to arm/disarm write-interest — it never touches
-the poller directly.
+The connection owns the lifecycle and the backpressure policy; its **transport**
+does the work and reports back through `TransportSink`. It reports everything to
+a `ConnectionDelegate` (which `Node` implements) and never touches the poller.
 
 ### Two transports behind one interface
 
-Everything above the transport needs exactly one thing: an ordered, reliable,
-non-blocking byte stream. That is what **`Link` (`src/librats/transport/link.h`)** is, and
-it is the *only* place the two transports differ.
+Everything above the transport needs exactly one thing: a peer proven by the
+handshake, and whole messages each way. That is what **`Transport`
+(`src/librats/transport/transport.h`)** is — the handshake, the session keys and
+nonces, the framing and the order queued messages leave in all live behind it —
+and it is the one place the wires differ.
 
 ```
-                    Connection  (framing · Noise · backpressure)
-                         │
-                       Link  ──  read / write / want_write / connect_completed
-                ╱          │          ╲
-         TcpLink     UdpStreamLink      RelayLink ──▶ Circuit
-    (one kernel      ──▶ UdpStream      (the stream borrowed from
-     socket per      ──▶ UdpMux          another peer's connection)
-     peer)           (reliability in
-                      user space, on ONE
-                      socket shared by
-                      every peer)
+                      Connection  (lifecycle · backpressure)
+                           │
+                       Transport  ──  send / flush / on_readable / on_writable
+                  ╱                         ╲
+        StreamTransport                   UdpTransport ──▶ UdpConnection
+   (blocks over a byte stream: Link)      (QUIC-shaped packets, on ONE socket
+         ╱              ╲                  shared by every peer: UdpMux)
+     TcpLink          RelayLink ──▶ Circuit
+  (one kernel        (the stream borrowed from
+   socket per peer)   another peer's connection)
 ```
 
-- **`TcpLink`** is a thin translation of `recv`/`sendmsg`; the kernel provides
-  the guarantees.
-- **`UdpStream` (`src/librats/transport/udp_stream.{h,cpp}`)** provides the same
-  guarantees itself: packet-numbered sequencing, cumulative acks plus a 32-bit
-  selective-ack bitmap, RFC 6298 retransmission timing with Karn's rule, fast
-  retransmit and SACK-driven repair, Reno congestion control, and packet-granular
-  flow control. Wire format: `udp_packet.h`. Two invariants are easy to break and
-  expensive when broken: the congestion window is reduced **once per loss
-  episode**, bounded by a NewReno recovery point (`enter_recovery()`) — several
-  selective acks report the same loss, and halving on each walks the window to its
-  floor; and `kSendQueueLimit` must stay comfortably above a full window
-  (`kMaxWindowPackets * kMaxPayload`), or the send queue, not the window, silently
-  becomes the throughput ceiling.
-- **`UdpMux` (`src/librats/transport/udp_mux.{h,cpp}`)** owns the single UDP socket,
-  demultiplexes datagrams to streams by a random 32-bit connection id, admits
-  inbound streams, drives every stream's timers from one 20 ms tick, and lingers
-  a released stream briefly so the last bytes it owes still get delivered.
-- **`RelayLink` / `Circuit` (`src/librats/transport/relay_link.{h,cpp}`)** obtain the
-  same guarantee from *another peer's connection* rather than from a socket —
-  `TransportKind::Relay`. `Circuit` holds the bytes in flight and the end-to-end
-  credit window that bounds them; `RelayLink` is the adapter a `Connection`
-  drives. Neither knows the relay protocol, which lives entirely behind
-  `CircuitCarrier` in `subsystems/relay.cpp`. Because the whole Connection stack
-  runs unchanged over it, the Noise handshake is end-to-end and the relay only
-  ever moves ciphertext.
+- **`StreamTransport` (`stream_transport.{h,cpp}`)** runs over any ordered,
+  reliable byte stream — a **`Link`** (`link.h`): length-prefixed blocks, the
+  Noise handshake in the first few, then one `Session`-sealed message per block
+  with implicit nonces. Messages wait unsealed in a `SendQueue` (one lane per
+  `MessageType`, by priority) and are sealed only as the link takes them; TCP
+  sockets get `TCP_NOTSENT_LOWAT` so the backlog stays where it can be reordered.
+  - **`TcpLink`** is a thin translation of `recv`/`sendmsg`; the kernel provides
+    the guarantees.
+  - **`RelayLink` / `Circuit` (`relay_link.{h,cpp}`)** obtain the same byte stream
+    from *another peer's connection* — `TransportKind::Relay`. `Circuit` holds the
+    bytes in flight and the end-to-end credit window that bounds them; neither
+    knows the relay protocol, which lives behind `CircuitCarrier` in
+    `subsystems/relay.cpp`. The Noise handshake is end-to-end and the relay only
+    ever moves ciphertext.
+- **`UdpConnection` (`udp_connection.{h,cpp}`)** is the datagram transport: QUIC's
+  shape on Noise, wire format in `udp_wire.h`. The handshake rides in long-header
+  packets (the dialer's Initial *is* the first Noise message, padded so the
+  responder may answer three times as much before the dialer proves its address);
+  everything after is a short packet sealed on its own with its number as the
+  nonce, its header masked. Messages travel on streams, one per lane, so a hole
+  in one holds up only that one, and which lane goes next is decided as each
+  packet is built. What is lost is re-sent as new frames in new packets.
+  - **`Recovery` (`udp_recovery.{h,cpp}`)** is everything about packets: the sent
+    log, RTT, RACK loss detection with its reorder timer, one reduction per loss
+    episode (lasting until its repairs are through), probes before timeouts,
+    proportional rate reduction for Reno, and the pacer. It never looks inside a
+    packet: frames go back to the connection when their packet's fate is known.
+  - **`SendStream` / `RecvStream` (`udp_streams.{h,cpp}`)** are byte-offset
+    bookkeeping: what is owed again, what arrived out of order. Flow control is
+    connection-wide (MAX_DATA / DATA_BLOCKED), the window auto-tuned; what is held
+    out of order across all connections is bounded by one `UdpReceiveBudget`.
+  - **`UdpMux` (`udp_mux.{h,cpp}`)** owns the single UDP socket, demultiplexes by
+    the receiver's 64-bit connection id (they come in pairs, the dialer's even),
+    admits inbound dials (address-validation tokens under load), answers packets
+    for forgotten connections with stateless resets, drives every connection's
+    timers from a deadline heap, and lingers a released connection until it has
+    delivered what it owes. **`UdpTransport`** is the handle a `Connection` holds.
 
 **Why UDP is the default first choice.** One socket for every peer means a NAT
 holds *one* mapping rather than one per peer; the source port a peer observes is
@@ -519,7 +531,7 @@ Everything below is opt-in. Attach only what you need.
 | **`FileTransfer`** (`subsystems/file_transfer.h`) | Bidirectional file/directory streaming with per-chunk CRC32 + whole-file SHA-256, backpressure, pause/resume/cancel, offer/accept, atomic finalize (temp file → rename). | owns `MessageType::FileChunk` |
 | **`PingService`** (`subsystems/ping_service.h`) | Liveness + RTT: periodically pings peers, who echo back, measuring round-trip time. | owns `MessageType::Ping` |
 | **`PortMappingService`** (`subsystems/port_mapping_service.h`) | Auto-forwards the listen port through the home router via **UPnP IGD** and **NAT-PMP** (both, in parallel). | NAT protocols; reads `listen_port()` |
-| **`HolePunch`** (`subsystems/hole_punch.h`) | UDP hole punching. Arranges through a shared peer that two NATed nodes dial each other at the same instant (the timing derived from the relayed round trip, as in DCUtR), so each side's outbound Syn opens the mapping the other's needs. The punch packet is the ordinary dial's Syn under a denser retry profile — no new wire format below the rendezvous. Published as `HolePunchService` so a discovery module can hand over an id it could not reach. | owns `MessageType::Punch`; uses `DialService` + `ExternalAddressService`; provides `HolePunchService` |
+| **`HolePunch`** (`subsystems/hole_punch.h`) | UDP hole punching. Arranges through a shared peer that two NATed nodes dial each other at the same instant (the timing derived from the relayed round trip, as in DCUtR), so each side's outbound Initial opens the mapping the other's needs. The punch packet is the ordinary dial's Initial under a denser retry profile — no new wire format below the rendezvous. Published as `HolePunchService` so a discovery module can hand over an id it could not reach. | owns `MessageType::Punch`; uses `DialService` + `ExternalAddressService`; provides `HolePunchService` |
 | **`Relay`** (`subsystems/relay.h`) | The last rung of the connectivity ladder. For a pair no punch can reach (a symmetric NAT, a network that drops UDP and blocks inbound TCP), the connection itself is carried through a node both ends already reach. What is relayed is a *byte stream* that becomes an ordinary `Connection` over `RelayLink`, so the Noise handshake is end-to-end and the relay moves ciphertext it cannot read. Serving other peers is **off by default** (`Config::serve`); a serving node forwards only between peers it already holds, never chains circuits, and caps each one by bytes, duration and count, with an end-to-end credit window bounding what a circuit can make it hold. Published as `RelayService` (`connect_via_relay`); a circuit that comes up asks `HolePunchService` to try for a direct link, which then supersedes the relayed one with no disconnect event. | owns `MessageType::Relay`; uses `CircuitService` + `HolePunchService` (optional); provides `RelayService` |
 | **`ReconnectionService`** (`subsystems/reconnection.h`) | Re-dials dropped peers with exponential backoff; optionally persists targets (via `PeerBook`) so they survive a restart. | `network.peers()` + `on_dial_failed`; `network.connect()` |
 | **`PeerExchange`** (`subsystems/peer_exchange.h`) | Pull-only **PEX**: on connect, asks a peer for a random sample of *its* peers and dials the new ones. Grows the mesh organically; rate-limited to avoid dial storms. A PEX entry carries a peer's id *and* its address, so a dial that fails falls back to `HolePunchService` — the discovery half of hole punching. | owns `MessageType::Pex`; uses `HolePunchService` (optional) + `on_dial_failed` |
@@ -639,7 +651,7 @@ The directory tree mirrors the layers in this document:
 |-----------|----------|
 | `src/librats/core` | sockets, buffers, `IOPoller`, MPSC/timer queues, `EventBus`, `ServiceRegistry` |
 | `src/librats/wire` | two-level framing + `MessageRouter` |
-| `src/librats/transport` | `ReactorPool`, `Reactor`, `Connection` state machine, the `Link` abstraction and its implementations (`TcpLink`; `UdpStream` + `UdpMux`; `RelayLink` + `Circuit`) |
+| `src/librats/transport` | `ReactorPool`, `Reactor`, `Connection` state machine, the `Transport` interface: `StreamTransport` over a `Link` (`TcpLink`; `RelayLink` + `Circuit`) and the datagram transport (`UdpConnection` + `Recovery` + streams, `UdpMux`, `UdpTransport`) |
 | `src/librats/security` | `Identity`, `Handshaker`/`Session`, Noise & plaintext providers |
 | `src/librats/peer` | self-certifying `PeerId`, `PeerTable`, `Peer` handle |
 | `src/librats/node` | the `Node` facade, `NodeContext`, `PeerNetwork`, the transport-choosing `Dialer`, identify, host events |

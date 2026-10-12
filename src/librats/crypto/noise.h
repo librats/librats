@@ -116,6 +116,13 @@ public:
     /* Take over `other`'s key and nonce, leaving it cleared. */
     void take(NoiseCipherState& other);
 
+    /**
+     * A second key bound to this one: HMAC-SHA256(key, label). One-way, so what
+     * it is used for (a datagram transport's header protection) reveals nothing
+     * about the cipher key. Requires a key.
+     */
+    void derive(const char* label, uint8_t out[NOISE_KEY_SIZE]) const;
+
     /* Clear sensitive data */
     void clear();
 

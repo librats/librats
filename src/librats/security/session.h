@@ -49,6 +49,14 @@ public:
     virtual std::optional<size_t> open(uint64_t nonce, ByteView ad,
                                        uint8_t* data, size_t len) const noexcept = 0;
 
+    /// Header protection: five bytes of mask for a packet whose ciphertext holds
+    /// `sample` (16 bytes), under the key of the direction it travels in —
+    /// `outbound` for one being sent, otherwise one received. A datagram transport
+    /// XORs it over the parts of its header the path has no business reading (see
+    /// transport/udp_wire.h). Its own key, not the AEAD's, so the mask says nothing
+    /// about the keystream. All zeros for plaintext.
+    virtual void header_mask(bool outbound, const uint8_t* sample, uint8_t* mask) const noexcept = 0;
+
     /// The remote peer's identity, proven during the handshake.
     virtual const PeerId& remote_id() const = 0;
 

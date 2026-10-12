@@ -1,6 +1,7 @@
 #include "librats/node/node.h"
 #include "librats/node/host_events.h"
 #include "librats/node/identify.h"
+#include "librats/crypto/blake2s.h"
 #include "librats/subsystems/message_json.h"
 #include "librats/security/noise_security.h"
 #include "librats/security/plaintext_security.h"
@@ -70,11 +71,21 @@ Identity load_or_create_identity(const std::string& data_dir) {
 }
 
 /// The datagram transport's limits, as the node is configured (0 = default).
-UdpMuxLimits udp_limits_for(const NodeConfig& config) {
+UdpMuxLimits udp_limits_for(const NodeConfig& config, const Identity& identity) {
     UdpMuxLimits limits;
     if (config.udp_receive_window != 0) limits.receive_window = config.udp_receive_window;
     if (config.udp_receive_budget != 0) limits.receive_budget = config.udp_receive_budget;
     limits.offload = config.udp_offload;
+    // Stateless resets are keyed by something that survives a restart, so a node
+    // that comes back on the same port can still tell its old peers it has
+    // forgotten them — instead of leaving them to time out. One-way, and bound to
+    // its purpose, so nothing about the identity key can be learnt from a token.
+    static const char kLabel[] = "librats stateless reset";
+    rats_blake2s_context_t ctx;
+    rats_blake2s_reset(&ctx);
+    rats_blake2s_update(&ctx, identity.static_keypair.private_key, librats::NOISE_DH_SIZE);
+    rats_blake2s_update(&ctx, reinterpret_cast<const uint8_t*>(kLabel), sizeof(kLabel) - 1);
+    rats_blake2s_finish(&ctx, limits.reset_key.data());
     return limits;
 }
 
@@ -144,7 +155,7 @@ bool Node::open_listeners() {
         if (!is_valid_socket(udp_socket_))
             LOG_WARN("node", "Could not open a UDP socket; dials will fall back to TCP");
         else
-            reactors_->listen_udp(udp_socket_, family, config_.congestion_control, udp_limits_for(config_));
+            reactors_->listen_udp(udp_socket_, family, config_.congestion_control, udp_limits_for(config_, identity_));
         return true;
     }
 
@@ -266,7 +277,7 @@ bool Node::open_listeners() {
             transports_ |= PeerTransportTcp;
         }
         if (is_valid_socket(udp)) {
-            reactors_->listen_udp(udp, family, config_.congestion_control, udp_limits_for(config_));
+            reactors_->listen_udp(udp, family, config_.congestion_control, udp_limits_for(config_, identity_));
             transports_ |= PeerTransportUdp;
         }
         return true;

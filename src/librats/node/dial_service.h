@@ -15,10 +15,10 @@
  *     UDP socket; racing TCP alongside it spends a connect attempt on a path that
  *     a NAT will refuse by construction.
  *   - a dial that starts NOW, at a moment agreed with the peer. A punch works
- *     because two Syns cross mid-path; a fallback delay measured from our own clock
+ *     because two Initials cross mid-path; a fallback delay measured from our own clock
  *     has nothing to do with that instant.
  *   - a different retry shape (see DialProfile) — dense probes rather than a long
- *     patient tail, because the early Syns are *expected* to die on the peer's NAT.
+ *     patient tail, because the early Initials are *expected* to die on the peer's NAT.
  *
  * So this is the narrow escape hatch, published by the Node in its ServiceRegistry
  * and resolved by whoever needs it:

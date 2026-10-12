@@ -2,7 +2,7 @@
 
 /**
  * @file bbr.h
- * @brief BBRv3 congestion control (draft-ietf-ccwg-bbr), for the datagram stream.
+ * @brief BBRv3 congestion control (draft-ietf-ccwg-bbr), for the datagram transport.
  *
  * ── The idea ─────────────────────────────────────────────────────────────────
  * A loss-based controller learns the path's capacity by overflowing it: it grows
@@ -54,7 +54,7 @@
  * tcp_bbr.c v3 where the draft defers to it). Two adaptations to this transport:
  * there is no ECN signal (the transport does not read ECN marks), and the loss
  * events Startup counts are acknowledgements that reported a new loss, since a
- * packet-numbered stream has no byte-range "discontiguous loss" to count.
+ * packet-numbered transport has no byte-range "discontiguous loss" to count.
  *
  * All windows are in payload bytes; bandwidth is in bytes per second; gains are
  * fixed-point in thousandths (kUnit) so the controller is deterministic across

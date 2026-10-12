@@ -38,7 +38,7 @@ Projects and companies building on librats:
 - **Native C++17** implementation for maximum performance
 - **Cross-platform** support (Windows, Linux, macOS, Android, iOS)
 - **Shared-nothing reactor** transport — connections are sharded across reactor threads with no cross-thread locking on the hot path
-- **TCP *and* UDP as equals** — the same encrypted protocol over either wire. The UDP transport is a full ordered/reliable stream (sequencing, selective acks, RTO, congestion + flow control) on one socket shared by all peers, which is what keeps a single NAT mapping open and makes hole punching possible. A dial tries UDP first and races TCP as fallback, so a UDP-hostile network still connects
+- **TCP *and* UDP as equals** — the same encrypted messages over either wire. The UDP transport is QUIC-shaped on Noise (packets sealed one by one, a stream per traffic lane so a loss in one holds up nothing in another, ACK ranges, RACK, BBRv3, flow control) on one socket shared by all peers, which is what keeps a single NAT mapping open and makes hole punching possible. A dial tries UDP first and races TCP as fallback, so a UDP-hostile network still connects
 - **Self-certifying identity**: every node has a Curve25519 keypair; its `PeerId` *is* its public key, so peers authenticate each other with no PKI or central authority
 - **Stable identity persistence**: point a node at a `data_dir` and its keypair (and therefore its `PeerId`) survives restarts
 - **Composable subsystems**: opt-in plugins attached to a `Node`; a bare node neither discovers peers nor reconnects on its own
@@ -119,9 +119,9 @@ node.start();
 
 ### Two transports, one API
 
-A connection runs over **TCP or UDP**, and nothing above the transport can tell the difference: same framing, same Noise handshake, same guarantees. UDP is not a lossy shortcut here — librats implements ordered, reliable delivery with congestion and flow control on top of datagrams (sequencing, cumulative + selective acks and ack ranges, RFC 6298 retransmission timing, RACK loss detection, BBRv3 congestion control — Reno on request via `NodeConfig::congestion_control` — and a receive window that grows on demand from ~1.2 MiB to `NodeConfig::udp_receive_window`, under one memory budget for every stream).
+A connection runs over **TCP or UDP**, and nothing above the transport can tell the difference: same Noise handshake, same messages, same guarantees. UDP is not a lossy shortcut here — librats runs its own QUIC-shaped protocol on datagrams: the Noise handshake travels in the dial's first packets (so a UDP dial is a round trip shorter than TCP's), every packet after it is sealed on its own under its packet number, with its header masked, and each traffic lane is a stream of its own, so a lost packet holds up only the lane it carried. Loss recovery is RFC 9002-style (ACK ranges, RACK with a reorder timer, probe timeouts), congestion control BBRv3 — Reno on request via `NodeConfig::congestion_control` — and flow control a window that auto-tunes from 1 MiB to `NodeConfig::udp_receive_window`, under one memory budget for every connection.
 
-Both are enabled by default and bind the **same port**, so one advertised address is dialable either way. A dial tries UDP first and races TCP alongside it if UDP has not come up within `transport_fallback_ms` — the first handshake to complete wins and the other is dropped.
+Both are enabled by default and bind the **same port**, so one advertised address is dialable either way. A dial tries UDP first and races TCP alongside it if UDP has not come up within `transport_fallback_ms` — the first handshake to complete wins and the other is dropped. The UDP wire carries a version (3 today): a peer on another one ignores the dial, and the two connect over TCP instead.
 
 UDP is the default first choice because it fits peer-to-peer better: every peer shares one socket, so a NAT holds **one** mapping instead of one per peer; the source port a peer sees is the port it can dial back, which is what makes hole punching possible at all; and no middlebox holds per-connection state that can be exhausted or timed out. TCP remains a first-class equal, and is what the fallback exists for — some networks block or throttle UDP outright.
 
@@ -531,13 +531,17 @@ Which lane goes next is decided by priority, and within a priority by turns:
 | 4 (last) | file transfer |
 
 Lanes of the same priority take turns, one message each, so a subsystem with a
-deep backlog cannot starve your messages (or the other way round). A message is
-encrypted only at the moment it is written, which is what keeps everything still
-queued free to be overtaken, and TCP sockets hold no more than `TCP_NOTSENT_LOWAT`
-(128 KiB) unsent for the same reason — so a ping queued behind a file transfer
-waits behind that much of it, not behind the whole send buffer. Over UDP the stream
-underneath still takes up to twice its congestion window ahead of time, so there
-the reordering is coarser.
+deep backlog cannot starve your messages (or the other way round).
+
+Over **UDP** the choice is made for every packet as it is built, and each lane is a
+stream of its own: a ping queued behind megabytes of file goes out in the next
+packet, and a lost piece of the file holds up only the file — the lanes are
+delivered independently at the far end too. Over **TCP** one byte stream carries
+them all: a message is encrypted only at the moment it is written, which is what
+keeps everything still queued free to be overtaken, and the socket holds no more
+than `TCP_NOTSENT_LOWAT` (128 KiB) unsent — so a ping there waits behind that much
+of a file, not behind the whole send buffer, but a loss on the path still holds up
+everything behind it.
 
 #### Path statistics
 
@@ -585,8 +589,8 @@ struct NodeConfig {
     size_t      reactor_threads = 1;        // 1 handles thousands of peers; more shards cores
     size_t      max_peers = 0;              // 0 = unlimited (guards inbound only)
     size_t      send_queue_limit = 0;       // per-peer send queue before SlowConsumer; 0 = 8 MiB
-    size_t      udp_receive_window = 0;     // ceiling one UDP stream's receive window grows to; 0 = 16 MiB
-    size_t      udp_receive_budget = 0;     // out-of-order bytes all UDP streams may hold; 0 = 64 MiB
+    size_t      udp_receive_window = 0;     // ceiling one UDP connection's flow-control window grows to; 0 = 16 MiB
+    size_t      udp_receive_budget = 0;     // out-of-order bytes all UDP connections may hold; 0 = 64 MiB
     uint32_t    path_sample_ms = 0;         // path sampling period; 0 = only with on_peer_path (100 ms)
 
     // Identity & security
@@ -694,8 +698,8 @@ The C API covers the same ground as the C++ one, subsystem by subsystem:
 │             over a self-certifying PeerId                          │
 ├──────────────────────────────────────────────────────────────────┤
 │ Transport — shared-nothing reactor pool, per-connection state      │
-│             machine, length-prefixed framing, over one Link:       │
-│             TCP socket · reliable UDP stream · relayed circuit     │
+│             machine; framed blocks over TCP or a relayed circuit,  │
+│             QUIC-shaped packets with a stream per lane over UDP    │
 ├──────────────────────────────────────────────────────────────────┤
 │ I/O multiplexing — epoll (Linux) · kqueue (macOS/BSD) · IOCP (Win) │
 ├──────────────────────────────────────────────────────────────────┤
@@ -718,7 +722,7 @@ The source tree mirrors these layers: `src/librats/core`, `src/librats/util`, `s
 
 **Key points:**
 - The **DHT routing table** is NOT your connected peers. It holds DHT nodes (often from the global BitTorrent Mainline DHT) that help you *discover* peers.
-- **Peer connections** (`node.peers()`, `node.peer_count()`) are the actual authenticated connections used for communication — over TCP or over the reliable UDP transport, whichever the dial settled on.
+- **Peer connections** (`node.peers()`, `node.peer_count()`) are the actual authenticated connections used for communication — over TCP or over the UDP transport, whichever the dial settled on.
 - The DHT is for **discovery**, not message routing. For messaging, use the Node core (channels), `MessageJson`, or `PubSub`.
 
 ### Private Network Formation

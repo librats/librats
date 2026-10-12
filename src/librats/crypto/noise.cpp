@@ -166,6 +166,10 @@ size_t NoiseCipherState::open(uint64_t nonce, const uint8_t* ad, size_t ad_len,
     return result == RATS_CHACHAPOLY_DECRYPT_FAILED ? NOISE_DECRYPT_FAILED : result;
 }
 
+void NoiseCipherState::derive(const char* label, uint8_t out[NOISE_KEY_SIZE]) const {
+    rats_hmac_sha256(key_, NOISE_KEY_SIZE, reinterpret_cast<const uint8_t*>(label), strlen(label), out);
+}
+
 void NoiseCipherState::take(NoiseCipherState& other) {
     memcpy(key_, other.key_, NOISE_KEY_SIZE);
     nonce_   = other.nonce_;

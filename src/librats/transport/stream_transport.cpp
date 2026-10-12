@@ -211,8 +211,8 @@ bool StreamTransport::flush() {
 }
 
 bool StreamTransport::on_writable() {
-    // Finish the path's own connect (a non-blocking TCP connect, a Syn that has
-    // just been answered, a circuit the far end accepted), then begin the handshake.
+    // Finish the path's own connect (a non-blocking TCP connect, a circuit the far
+    // end accepted), then begin the handshake.
     if (phase_ == Phase::Connecting) {
         if (!link_->connect_completed()) {
             LOG_DEBUG("transport", "Connect over " << to_string(kind()) << " failed");

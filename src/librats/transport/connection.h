@@ -14,7 +14,7 @@
  * Everything about how messages reach the peer — handshake, encryption, framing,
  * the order queued messages leave in — belongs to its Transport (transport.h),
  * which hands it whole messages and takes whole messages from it. A connection
- * over a TCP socket, a UDP stream or a relayed circuit runs this same code.
+ * over a TCP socket, the datagram transport or a relayed circuit runs this same code.
  *
  * Lifecycle: Connecting → Handshaking → Established → Closing/Closed.
  *   - Connecting:  outbound transport connect in flight (inbound skips this).
@@ -112,7 +112,7 @@ public:
     ConnId        id() const noexcept        { return id_; }
     uint8_t       reactor_index() const noexcept;  ///< index of the owning reactor
     /// The kernel socket behind this connection, or RATS_INVALID_SOCKET when the
-    /// transport has none of its own (UDP streams share the mux's socket).
+    /// transport has none of its own (UDP connections share the mux's socket).
     socket_t      socket() const noexcept    { return transport_->fd(); }
     TransportKind transport() const noexcept { return transport_->kind(); }
     ConnRole      role() const noexcept      { return role_; }

@@ -152,6 +152,7 @@ set(LIBRARY_SOURCES
     src/librats/core/udp_io.h
     src/librats/core/udp_io.cpp
     src/librats/core/receive_buffer.h
+    src/librats/core/ring_buffer.h
     src/librats/core/receive_buffer.cpp
     src/librats/core/chained_send_buffer.h
     src/librats/core/chained_send_buffer.cpp
@@ -210,10 +211,16 @@ set(LIBRARY_SOURCES
     src/librats/transport/link.h
     src/librats/transport/tcp_link.h
     src/librats/transport/tcp_link.cpp
-    src/librats/transport/udp_packet.h
-    src/librats/transport/udp_packet.cpp
-    src/librats/transport/udp_stream.h
-    src/librats/transport/udp_stream.cpp
+    src/librats/transport/udp_wire.h
+    src/librats/transport/udp_wire.cpp
+    src/librats/transport/udp_recovery.h
+    src/librats/transport/udp_recovery.cpp
+    src/librats/transport/udp_streams.h
+    src/librats/transport/udp_streams.cpp
+    src/librats/transport/udp_connection.h
+    src/librats/transport/udp_connection.cpp
+    src/librats/transport/udp_transport.h
+    src/librats/transport/udp_transport.cpp
     src/librats/transport/delivery_rate.h
     src/librats/transport/congestion_control.h
     src/librats/transport/congestion_control.cpp
@@ -725,6 +732,8 @@ if(RATS_BUILD_TESTS)
         tests/test_send_queue.cpp
         tests/test_stream_transport.cpp
         tests/test_reactor.cpp
+        tests/test_udp_wire.cpp
+        tests/test_udp_connection.cpp
         tests/test_transport_udp.cpp
         tests/test_udp_congestion.cpp
         tests/test_relay_link.cpp

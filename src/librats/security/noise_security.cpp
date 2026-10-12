@@ -1,6 +1,9 @@
 #include "librats/security/noise_security.h"
+#include "librats/crypto/chacha.h"
 #include "librats/crypto/noise.h"
 #include "librats/util/logger.h"
+
+#include <cstring>
 
 namespace librats {
 namespace {
@@ -21,12 +24,35 @@ const char* noise_error_name(librats::NoiseError e) {
     return "unknown";
 }
 
+/// Label the header-protection keys are derived under, from each direction's
+/// cipher key (NoiseCipherState::derive).
+constexpr const char* kHeaderKeyLabel = "librats header protection";
+
+/// Five bytes of ChaCha20 keystream for `sample`: its first eight bytes are the
+/// block counter and the rest the nonce — QUIC's ChaCha20 header protection
+/// (RFC 9001 §5.4.4) laid out for the 64-bit-counter ChaCha the library carries.
+void chacha_mask(const uint8_t* key, const uint8_t* sample, uint8_t* mask) {
+    rats_chacha_ctx ctx;
+    rats_chacha_keysetup(&ctx, key, 256);
+    rats_chacha_ivsetup(&ctx, sample + 8, sample);
+    std::memset(mask, 0, 5);
+    rats_chacha_encrypt_bytes(&ctx, mask, mask, 5);
+}
+
 /// Session over the two transport ciphers a completed Noise handshake split into.
 /// The handshake state itself is dropped with its handshaker once this exists.
 class NoiseSessionAdapter final : public Session {
 public:
     NoiseSessionAdapter(librats::NoiseSession& done, PeerId remote) : remote_id_(remote) {
         done.take_transport(send_, recv_);
+        send_.derive(kHeaderKeyLabel, send_hp_);
+        recv_.derive(kHeaderKeyLabel, recv_hp_);
+    }
+
+    ~NoiseSessionAdapter() override {
+        volatile uint8_t* a = send_hp_;
+        volatile uint8_t* b = recv_hp_;
+        for (size_t i = 0; i < sizeof(send_hp_); ++i) a[i] = b[i] = 0;
     }
 
     size_t overhead() const noexcept override { return librats::NOISE_TAG_SIZE; }
@@ -43,12 +69,18 @@ public:
         return n;
     }
 
+    void header_mask(bool outbound, const uint8_t* sample, uint8_t* mask) const noexcept override {
+        chacha_mask(outbound ? send_hp_ : recv_hp_, sample, mask);
+    }
+
     const PeerId& remote_id() const override { return remote_id_; }
     bool is_secure() const override { return true; }
 
 private:
     librats::NoiseCipherState send_;
     librats::NoiseCipherState recv_;
+    uint8_t                   send_hp_[librats::NOISE_KEY_SIZE];
+    uint8_t                   recv_hp_[librats::NOISE_KEY_SIZE];
     PeerId                    remote_id_;
 };
 

@@ -8,15 +8,15 @@
  * ── Why this can work at all ────────────────────────────────────────────────
  * A NAT drops an inbound datagram unless something went out to that peer first.
  * So neither side can be dialed — but if BOTH dial at once, each one's outbound
- * Syn opens the mapping and the filter its peer's Syn needs, and the two cross
- * mid-path. Whichever direction survives becomes an ordinary connection.
+ * Initial opens the mapping and the filter its peer's Initial needs, and the two
+ * cross mid-path. Whichever direction survives becomes an ordinary connection.
  *
  * Everything below that is already in place and is deliberately left alone:
  *
- *   - The punch packet is the Syn. A datagram dial sends one immediately
- *     (UdpMux::connect) and retries it, so a punch needs no new packet type on the
+ *   - The punch packet is the dial's Initial. A datagram dial sends one at once
+ *     (UdpMux::connect) and repeats it, so a punch needs no new packet type on the
  *     wire — only a different retry shape (DialProfile::punch(): dense probes with
- *     no backoff, because the first Syns are *expected* to die on the peer's NAT).
+ *     no backoff, because the first Initials are *expected* to die on the peer's NAT).
  *   - One socket, one mapping. Every UDP peer shares the node's single datagram
  *     socket, so the port a peer sees us send from is the port anyone can aim at.
  *     That is what identify now reports on datagram links, and what nat_status.h
@@ -78,7 +78,7 @@
  *
  * Trust: the addresses a peer advertises for itself are its own unverified word, and
  * a relay could forge a Connect naming somebody else's endpoint. Acting on that
- * means sending a handful of 16-byte Syns to an address of another node's choosing —
+ * means sending a handful of Initials to an address of another node's choosing —
  * the same exposure PeerExchange already accepts when it dials what a peer told it
  * about, and bounded here by the per-session address cap and the retry limits.
  *
@@ -160,7 +160,7 @@ public:
         /// try anyway (a NAT can be misclassified by an unlucky sample).
         bool skip_when_endpoint_dependent = true;
 
-        /// How hard each punch dial retries its Syn.
+        /// How hard each punch dial repeats its Initial.
         DialProfile profile = DialProfile::punch();
 
         /// Session bookkeeping cadence — retries, timeouts, cooldown expiry.

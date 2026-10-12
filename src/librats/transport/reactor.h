@@ -23,8 +23,8 @@
  *   - TCP: one kernel socket per peer, registered with the poller. A poll event
  *     names a socket, which the fd → ConnId map turns into a connection.
  *   - UDP: every peer shares one socket, owned by the UdpMux. A poll event on it
- *     means "datagrams arrived"; the mux routes them to streams by connection id
- *     and hands back the same readable/writable/error events the poller would
+ *     means "datagrams arrived"; the mux routes them to connections by connection
+ *     id and hands back the same readable/writable/error events the poller would
  *     have produced. From dispatch_events() down, the two are indistinguishable.
  *
  * Both listeners are optional and independent: a reactor can accept TCP, accept
@@ -38,6 +38,7 @@
 #include "librats/core/types.h"
 #include "librats/security/handshaker.h"
 #include "librats/transport/connection.h"
+#include "librats/transport/link.h"
 #include "librats/transport/udp_mux.h"
 #include "librats/core/mpsc_queue.h"
 #include "librats/core/timer_queue.h"
@@ -75,8 +76,8 @@ public:
 
     /// Adopt an already-bound UDP socket and run the datagram transport on it.
     /// Call before start(). This is what makes the reactor able to accept *and*
-    /// dial over UDP; without it, UDP dials are refused. Every stream on it runs
-    /// the `congestion` controller, under `limits`.
+    /// dial over UDP; without it, UDP dials are refused. Every connection on it
+    /// runs the `congestion` controller, under `limits`.
     void listen_udp(socket_t udp_socket, AddressFamily family,
                     CongestionAlgorithm congestion = CongestionAlgorithm::Bbr,
                     UdpMuxLimits limits = {});
@@ -104,7 +105,7 @@ public:
     /// — which is what lets the node race a UDP dial against a TCP one and drop the
     /// loser cleanly. kInvalidConnId if the transport is unavailable here.
     ///
-    /// `profile` shapes how hard a datagram dial retries its Syn (see DialProfile);
+    /// `profile` shapes how hard a datagram dial repeats its Initial (see DialProfile);
     /// it has no meaning for TCP, where the kernel owns the connect retries.
     ConnId connect(std::string host, int port, TransportKind kind = TransportKind::Tcp,
                    DialProfile profile = {});
@@ -123,8 +124,8 @@ public:
     // about reactors beyond "connections need to be woken".
     //
     // The circuit MUST be given to the reactor that owns its carrier's connection.
-    // That is what keeps every byte of it on one thread, exactly like the streams
-    // the mux hands over above, and it is the caller's job to arrange (see
+    // That is what keeps every byte of it on one thread, exactly like the
+    // connections the mux hands over, and it is the caller's job to arrange (see
     // node/circuit_service.h).
 
     /// Reserve a ConnId without starting anything. Thread-safe, and synchronous for
@@ -188,7 +189,7 @@ public:
 
 private:
     // — UdpMuxDelegate —
-    ConnId adopt_inbound_link(std::unique_ptr<Link> link) override;
+    ConnId adopt_inbound(std::unique_ptr<Transport> transport) override;
     void   dispatch_link_events(ConnId id, uint32_t events) override;
 
     void run();
@@ -202,7 +203,7 @@ private:
     void start_dial(ConnId id, const std::string& host, int port, TransportKind kind,
                     DialProfile profile);
     void abort_dial(ConnId id, const std::string& host, int port);
-    /// The transport every byte-stream link runs: TCP sockets, UDP streams, circuits.
+    /// The transport every byte-stream link runs: TCP sockets and relayed circuits.
     std::unique_ptr<Transport> over_stream(std::unique_ptr<Link> link, ConnRole role);
     Connection* adopt(std::unique_ptr<Transport> transport, ConnRole role, ConnId id);
     bool resolve_dial(ConnId id);
@@ -248,8 +249,9 @@ private:
     TimerQueue                timers_;
 
     // Declared before conns_ so it is destroyed *after* them: every UDP
-    // connection's Link points into the mux and tells it, on destruction, that its
-    // stream may go. Reversing these two would have that run against freed memory.
+    // connection's transport points into the mux and tells it, on destruction,
+    // that its connection may go. Reversing these two would have that run against
+    // freed memory.
     std::unique_ptr<UdpMux> mux_;
 
     // Connections are keyed by their stable ConnId, since a UDP connection has no

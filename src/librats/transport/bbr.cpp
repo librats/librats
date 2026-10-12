@@ -33,7 +33,7 @@ BbrController::BbrController(const RttEstimate& rtt, const DeliveryRateSampler& 
 
     // The initial pacing rate: the initial window per round trip, at Startup's
     // gain — or per millisecond when nothing has been measured yet, which keeps the
-    // first window from going out as one burst while costing a fresh stream
+    // first window from going out as one burst while costing a fresh connection
     // nothing (four packets in a millisecond is ~19 MB/s).
     const Clock::duration srtt = rtt_.have_rtt && rtt_.srtt > Clock::duration::zero()
                                      ? rtt_.srtt
@@ -136,7 +136,7 @@ void BbrController::on_timeout(Clock::time_point now, uint64_t) {
     // A timeout is the end of a round with loss in it, and the strongest such
     // signal there is. Between probes that is exactly what the short-term bounds
     // are for, so they are cut now rather than a round from now — from the window
-    // the stream had before the timeout, since the one it is left with is a
+    // the connection had before the timeout, since the one it is left with is a
     // single packet.
     if (!is_probing_bw()) {
         if (inflight_lo_ == kInfinite) inflight_lo_ = (std::max)(cwnd_, prior_cwnd_);
@@ -423,7 +423,7 @@ void BbrController::check_probe_rtt() {
 
 void BbrController::handle_probe_rtt() {
     // (The low-rate samples ProbeRTT produces are kept out of the model by
-    // wants_app_limited(), which the stream turns into an app-limited mark.)
+    // wants_app_limited(), which recovery turns into an app-limited mark.)
     if (!probe_rtt_done_armed_ && inflight_now_ <= probe_rtt_cwnd()) {
         // Inflight is down: hold it there for at least kProbeRttDuration and at
         // least one round, so the queue it was sitting in has drained.
@@ -793,7 +793,7 @@ bool BbrController::is_probing_bw() const noexcept {
 }
 
 uint64_t BbrController::random() noexcept {
-    // xorshift64*: deterministic for a given seed, which keeps a stream's probe
+    // xorshift64*: deterministic for a given seed, which keeps a connection's probe
     // schedule reproducible in tests and benchmarks.
     rng_ ^= rng_ >> 12;
     rng_ ^= rng_ << 25;

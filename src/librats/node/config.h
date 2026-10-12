@@ -22,11 +22,11 @@ struct RATS_API NodeConfig {
 
     // ── Transports ──────────────────────────────────────────────────────────
     //
-    // TCP and UDP are equal citizens here: identical framing, identical Noise
-    // handshake, identical guarantees. They differ only in how the ordered,
-    // reliable byte stream underneath is obtained — the kernel's TCP stack, or
-    // the library's own reliability layer over datagrams (transport/udp_stream.h).
-    // A node normally offers both and lets each dial pick.
+    // TCP and UDP are equal citizens here: the same Noise handshake, the same
+    // messages, the same guarantees. They differ in how the messages travel — as
+    // blocks over the kernel's TCP stream, or as the library's own QUIC-shaped
+    // packets on one shared socket (transport/udp_connection.h). A node normally
+    // offers both and lets each dial pick.
 
     /// Accept and dial over TCP.
     bool enable_tcp = true;
@@ -60,21 +60,21 @@ struct RATS_API NodeConfig {
     /// by the kernel and ignore this.
     CongestionAlgorithm congestion_control = CongestionAlgorithm::Bbr;
 
-    /// Bytes one UDP stream will buffer for its peer, at most. 0 uses the library
-    /// default (16 MiB). This is the ceiling a stream's receive window grows to,
-    /// not where it starts: every stream starts at ~1.2 MiB and grows only while
-    /// its peer reports being held back by it, which is what a long, fast path
-    /// needs (the window bounds throughput at window / round trip — 16 MiB is
-    /// ~1.3 Gbit/s at 100 ms). A window is a promise of room, not an allocation:
-    /// only what arrives out of order is ever held, and that is bounded across all
-    /// streams by udp_receive_budget.
+    /// Bytes one UDP connection's flow-control window may grow to. 0 uses the
+    /// library default (16 MiB). This is the ceiling, not where it starts: every
+    /// connection starts at 1 MiB and grows while the window turns out too small
+    /// for the path, which is what a long, fast one needs (the window bounds
+    /// throughput at window / round trip — 16 MiB is ~1.3 Gbit/s at 100 ms). A
+    /// window is a promise of room, not an allocation: only what arrives out of
+    /// order is ever held, and that is bounded across all connections by
+    /// udp_receive_budget.
     size_t udp_receive_window = 0;
 
-    /// Bytes all UDP streams together may hold out of order. 0 uses the library
-    /// default (64 MiB). The bound on what peers can make this node buffer however
-    /// many there are and however they fill their windows with holes; past it,
-    /// out-of-order packets are refused (their senders repair them and slow
-    /// down), except for a small share every stream keeps regardless.
+    /// Bytes all UDP connections together may hold out of order. 0 uses the
+    /// library default (64 MiB). The bound on what peers can make this node buffer
+    /// however many there are and however they fill their windows with holes; past
+    /// it, out-of-order packets are refused (their senders repair them and slow
+    /// down), except for a small share every connection keeps regardless.
     size_t udp_receive_budget = 0;
 
     /// Whether UDP uses the kernel's segmentation offload where the running

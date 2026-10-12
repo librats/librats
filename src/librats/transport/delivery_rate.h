@@ -22,14 +22,12 @@
  *     slow", not "the path was". Peer-to-peer traffic is app-limited most of the
  *     time, which is why this flag matters more here than in a bulk server.
  *
- * Bytes, not packets: every counter here is in payload bytes, the same unit the
- * stream's flight accounting uses, so a partly filled packet weighs what it
- * carries.
+ * Bytes, not packets: every counter here is in bytes on the wire, the same unit
+ * the connection's flight accounting uses, so a short packet weighs what it is.
  *
- * Owned by the UdpStream and touched only on its reactor thread, like the stream.
+ * Owned by a datagram connection's Recovery (udp_recovery.h) and touched only on
+ * its reactor thread.
  */
-
-#include "librats/transport/udp_packet.h"
 
 #include <algorithm>
 #include <chrono>
@@ -71,9 +69,9 @@ struct TxState {
     Clock::time_point delivered_time{};    ///< when `delivered` was last advanced
     uint64_t          delivered = 0;       ///< bytes delivered when this was sent
     uint64_t          lost      = 0;       ///< bytes declared lost when this was sent
-    /// Bytes in flight once this was sent. 32 bits is plenty — a stream never has
-    /// more than a window (~1.2 MB) out — and keeps the snapshot, which every
-    /// queued packet carries, at 48 bytes.
+    /// Bytes in flight once this was sent. 32 bits is plenty — nothing has more
+    /// than a window out — and keeps the snapshot, which every packet in flight
+    /// carries, at 48 bytes.
     uint32_t          in_flight = 0;
     bool              app_limited = false; ///< sent with nothing else queued behind it
 };
@@ -113,9 +111,9 @@ public:
         tx.app_limited     = app_limited_until_ != 0;
     }
 
-    /// A packet carrying `bytes` was acknowledged — cumulatively or selectively, but
-    /// only ever once. `seq` breaks ties between packets sent in the same instant.
-    void on_delivered(const TxState& tx, uint32_t seq, uint64_t bytes,
+    /// A packet of `bytes` was acknowledged — only ever once. Its number `pn`
+    /// breaks ties between packets sent in the same instant.
+    void on_delivered(const TxState& tx, uint64_t pn, uint64_t bytes,
                       Clock::time_point now) noexcept {
         delivered_      += bytes;
         delivered_time_  = now;
@@ -123,11 +121,11 @@ public:
         // The newest packet acknowledged decides the sample: it is the one whose
         // interval covers everything else this acknowledgement reports.
         const bool newer = !have_ || tx.sent_at > newest_sent_ ||
-                           (tx.sent_at == newest_sent_ && rudp::seq_less(newest_seq_, seq));
+                           (tx.sent_at == newest_sent_ && newest_pn_ < pn);
         if (!newer) return;
         have_         = true;
         newest_sent_  = tx.sent_at;
-        newest_seq_   = seq;
+        newest_pn_    = pn;
         prior_time_   = tx.delivered_time;
         send_elapsed_ = tx.sent_at - tx.first_sent_time;
         lost_at_send_ = tx.lost;
@@ -186,7 +184,7 @@ private:
     // The acknowledgement being assembled.
     bool              have_ = false;
     Clock::time_point newest_sent_{};
-    uint32_t          newest_seq_ = 0;
+    uint64_t          newest_pn_ = 0;
     Clock::time_point prior_time_{};
     Clock::duration   send_elapsed_{};
     uint64_t          lost_at_send_ = 0;

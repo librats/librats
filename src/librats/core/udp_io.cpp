@@ -143,9 +143,24 @@ UdpSendBatch::UdpSendBatch(size_t max_segments)
 }
 
 bool UdpSendBatch::add(const Address& to, const uint8_t* data, size_t len) {
-    if (len == 0 || len > kUdpMaxSendBytes) return false;
-    if (used_ + len > kCapacity) return false;
+    if (len == 0) return false;
+    uint8_t* room = stage(len);
+    if (!room) return false;
+    std::memcpy(room, data, len);
+    commit(to, len);
+    return true;
+}
 
+uint8_t* UdpSendBatch::stage(size_t len) noexcept {
+    if (len == 0 || len > kUdpMaxSendBytes) return nullptr;
+    if (used_ + len > kCapacity) return nullptr;
+    // Where it goes is not known yet, so whether it would join the last run is
+    // not either: a full run table is full.
+    if (runs_.size() == kMaxRuns) return nullptr;
+    return buffer_.get() + used_;
+}
+
+void UdpSendBatch::commit(const Address& to, size_t len) {
     // Joins the run in front of it if offload could send the two as one: same
     // destination, no longer than its segments, room left in the send — and the
     // run not already ended by a short datagram, since only the last segment may
@@ -154,17 +169,15 @@ bool UdpSendBatch::add(const Address& to, const uint8_t* data, size_t len) {
         Run& run = runs_.back();
         if (run.open && run.count < max_segments_ && len <= run.segment &&
             run.bytes + len <= kUdpMaxSendBytes && run.to == to) {
-            std::memcpy(buffer_.get() + used_, data, len);
             used_     += len;
             run.bytes += len;
             ++run.count;
             ++datagrams_;
             if (len < run.segment) run.open = false;
-            return true;
+            return;
         }
     }
 
-    if (runs_.size() == kMaxRuns) return false;
     Run run;
     run.to      = to;
     run.offset  = used_;
@@ -172,10 +185,8 @@ bool UdpSendBatch::add(const Address& to, const uint8_t* data, size_t len) {
     run.segment = len;
     run.count   = 1;
     runs_.push_back(run);
-    std::memcpy(buffer_.get() + used_, data, len);
     used_ += len;
     ++datagrams_;
-    return true;
 }
 
 void UdpSendBatch::disable_segmentation(int error) {

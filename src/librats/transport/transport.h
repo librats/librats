@@ -12,11 +12,11 @@
  * whole messages back; it never sees a byte of the wire.
  *
  * The split is drawn there because that is where transports genuinely differ. One
- * that runs over an ordered byte stream (StreamTransport — a TCP socket, a UDP
- * stream, a relayed circuit) has to frame messages as length-prefixed blocks,
- * number them implicitly and encrypt them in exactly that order. One that owns its
- * own packets can do none of that the same way, and does not need to. Above this
- * line the two are indistinguishable.
+ * that runs over an ordered byte stream (StreamTransport — a TCP socket, a relayed
+ * circuit) has to frame messages as length-prefixed blocks, number them implicitly
+ * and encrypt them in exactly that order. One that owns its own packets
+ * (UdpTransport — udp_connection.h) seals each packet on its own and carries each
+ * lane as a stream of its own. Above this line the two are indistinguishable.
  *
  * Threading follows the rest of the transport layer: a Transport belongs to one
  * Connection, which belongs to one Reactor, and is touched only by its thread.
@@ -66,8 +66,8 @@ public:
     virtual TransportKind kind() const noexcept = 0;
 
     /// The kernel socket the reactor polls for this transport, or
-    /// RATS_INVALID_SOCKET when there is none of its own (UDP streams share the
-    /// mux's socket; a relayed circuit has no socket at all).
+    /// RATS_INVALID_SOCKET when there is none of its own (UDP connections share
+    /// the mux's socket; a relayed circuit has no socket at all).
     virtual socket_t fd() const noexcept = 0;
 
     /// The peer's endpoint as the path sees it, port included. The port is the

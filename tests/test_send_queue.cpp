@@ -169,6 +169,7 @@ TEST(SendQueueTest, InterleavedPushesAndSealsKeepEveryLaneInOrder) {
 // was handed, in the order handed.
 TEST(SendQueueTest, SealsEachMessageUnderTheNonceItLeavesWith) {
     struct XorSession final : Session {   // a stand-in AEAD: 4-byte tag, nonce-keyed
+        void header_mask(bool, const uint8_t*, uint8_t* mask) const noexcept override { std::memset(mask, 0, 5); }
         size_t overhead() const noexcept override { return 4; }
         void seal(uint64_t nonce, ByteView, uint8_t* d, size_t n) const noexcept override {
             for (size_t i = 0; i < n; ++i) d[i] ^= static_cast<uint8_t>(nonce + 1);

@@ -36,6 +36,9 @@ public:
     std::optional<size_t> open(uint64_t, ByteView, uint8_t*, size_t len) const noexcept override {
         return len;
     }
+    void header_mask(bool, const uint8_t*, uint8_t* mask) const noexcept override {
+        std::memset(mask, 0, 5);
+    }
     const PeerId& remote_id() const override { return remote_id_; }
     bool is_secure() const override { return false; }
 private:

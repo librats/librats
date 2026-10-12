@@ -130,6 +130,15 @@ public:
     /// empty one, is refused outright (false even on an empty batch).
     bool add(const Address& to, const uint8_t* data, size_t len);
 
+    /// Room for a datagram of up to `len` bytes, to be written where it will leave
+    /// from and staged with commit() — what lets a sender build and seal a packet
+    /// in place instead of copying it in. nullptr when the batch has no room: flush()
+    /// first. The pointer is good until the next call on the batch.
+    uint8_t* stage(size_t len) noexcept;
+    /// Stage the first `len` bytes (non-zero, at most what stage() was asked for) of
+    /// the room stage() just returned.
+    void     commit(const Address& to, size_t len);
+
     /**
      * Put every staged datagram on the wire and empty the batch.
      *
@@ -206,8 +215,10 @@ public:
     size_t max_datagrams_per_buffer() const noexcept { return coalesced_ ? kUdpMaxSegments : 1; }
 
     /// Call `fn(data, len)` for each datagram in buffer `i`, in order.
+    /// The datagrams are writable: they are this batch's own bytes until the next
+    /// receive(), and a receiver that decrypts in place needs them so.
     template <typename Fn>
-    void for_each_datagram(size_t i, Fn&& fn) const {
+    void for_each_datagram(size_t i, Fn&& fn) {
         const Buffer& b = buffers_[i];
         const size_t  step = b.segment ? b.segment : b.len;
         if (step == 0) { fn(b.data, size_t{0}); return; }  // an empty datagram is still one

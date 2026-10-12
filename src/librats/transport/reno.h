@@ -6,7 +6,7 @@
  *        the loss-based controller the datagram transport started with.
  *
  *   - Slow start to `ssthresh`, then additive increase of one packet per window;
- *     multiplicative decrease once per loss episode (the stream decides what an
+ *     multiplicative decrease once per loss episode (recovery decides what an
  *     episode is), collapse to one packet on a timeout.
  *   - HyStart++ (RFC 9406) ends slow start on a rising round trip instead of on a
  *     loss.
@@ -81,7 +81,7 @@ private:
     bool in_slow_start() const noexcept { return cwnd_ < ssthresh_; }
     void on_loss(bool timeout, uint64_t bytes_in_flight);
     void grow_window(uint64_t acked_bytes);
-    void hystart_on_ack(uint32_t ack, uint32_t next_seq);
+    void hystart_on_ack(uint64_t largest_acked, uint64_t next_pn);
 
     const RttEstimate& rtt_;
 
@@ -105,9 +105,9 @@ private:
     Clock::duration round_min_rtt_      = (Clock::duration::max)();
     Clock::duration prev_round_min_rtt_ = (Clock::duration::max)();
     int             round_samples_ = 0;
-    /// Highest sequence number outstanding when this round began; the round ends
-    /// when the cumulative acknowledgement reaches it.
-    uint32_t        round_end_ = 0;
+    /// Highest packet number outstanding when this round began; the round ends
+    /// once it is acknowledged.
+    uint64_t        round_end_ = 0;
 };
 
 } // namespace cc

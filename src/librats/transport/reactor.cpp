@@ -54,7 +54,7 @@ void Reactor::listen(socket_t server_socket) {
 
 void Reactor::listen_udp(socket_t udp_socket, AddressFamily family,
                          CongestionAlgorithm congestion, UdpMuxLimits limits) {
-    mux_ = std::make_unique<UdpMux>(udp_socket, family, *this, limits, congestion);
+    mux_ = std::make_unique<UdpMux>(udp_socket, family, *this, security_, limits, congestion);
 }
 
 void Reactor::start() {
@@ -122,22 +122,21 @@ void Reactor::start_dial(ConnId id, const std::string& host, int port, Transport
         }
         // The one mux socket cannot leave its own address family, and that is
         // knowable here rather than after the fact. Saying so now costs nothing —
-        // the dialer brings the other transport in at once. Opening the stream
-        // anyway would spend the Syn's whole give-up on datagrams the kernel
-        // refuses one by one, and refusals at that layer are per-packet and
-        // silent: a dial that never had a chance would be indistinguishable from
-        // a peer that is merely slow to answer.
+        // the dialer brings the other transport in at once. Dialing anyway would
+        // spend the Initial's whole give-up on datagrams the kernel refuses one by
+        // one, and refusals at that layer are per-packet and silent: a dial that
+        // never had a chance would be indistinguishable from a peer that is merely
+        // slow to answer.
         if (!family_can_reach(mux_->family(), target->ip.is_v6())) {
             LOG_DEBUG("reactor", "Datagram socket cannot reach " << target->to_string()
                       << "; leaving " << host << ":" << port << " to the other transport");
             abort_dial(id, host, port);
             return;
         }
-        std::unique_ptr<Link> link = mux_->connect(*target, profile);
-        if (!link) { abort_dial(id, host, port); return; }
+        std::unique_ptr<Transport> transport = mux_->connect(*target, profile);
+        if (!transport) { abort_dial(id, host, port); return; }
 
-        Connection* conn = adopt(over_stream(std::move(link), ConnRole::Outbound),
-                                 ConnRole::Outbound, id);
+        Connection* conn = adopt(std::move(transport), ConnRole::Outbound, id);
         if (conn) conn->set_dial_address(host, static_cast<uint16_t>(port));
         return;
     }
@@ -262,9 +261,9 @@ void Reactor::run() {
 
     while (running_.load(std::memory_order_relaxed)) {
         int timeout = timers_.next_timeout_ms(kMaxPollMs);
-        // The datagram transport keeps its own deadlines — retransmission timeouts,
-        // delayed acks, keep-alives — rather than being swept on a fixed cadence, so
-        // the wait has to cover the earliest of them too. With no stream due it
+        // The datagram transport keeps its own deadlines — loss timers, delayed
+        // acks, keep-alives — rather than being swept on a fixed cadence, so the
+        // wait has to cover the earliest of them too. With nothing due it
         // contributes nothing, and an idle mux costs no wake-ups at all.
         if (mux_) timeout = mux_->next_timeout_ms(timeout);
         const int n = poller_->wait(events, kMaxEvents, timeout);
@@ -291,7 +290,7 @@ void Reactor::run() {
         // TimerQueue entry: those deadlines move on nearly every packet, and
         // re-scheduling a timer that often would cost far more than the one
         // comparison this is when nothing is due. Before process_pending_close(),
-        // so a stream that dies here is torn down in the same turn.
+        // so a connection that dies here is torn down in the same turn.
         if (mux_) mux_->tick();
         // Everything queued by send() during this turn goes to the wire here, in
         // one write per connection rather than one per frame. Deliberately after
@@ -302,7 +301,7 @@ void Reactor::run() {
         process_pending_close();
         // The mux batches its datagrams; the ones it collected inside a readable
         // event or a tick have already gone out, but an application send reaches a
-        // UDP stream from a task, outside any batch of its own. Flushing once here
+        // UDP connection from a task, outside any batch of its own. Flushing once here
         // covers those without giving any of them a timer to wait on (and the mux
         // never lets such a batch grow past one pacer release before it goes).
         if (mux_) mux_->flush_output();
@@ -315,7 +314,7 @@ void Reactor::run() {
     flush_dirty();               // in-flight sends leave before the door closes
     process_pending_close();
     shutdown_connections();
-    if (mux_) mux_->shutdown();   // after the connections, so no Link outlives it
+    if (mux_) mux_->shutdown();   // after the connections, so no transport outlives it
 
     // Timers outlive the loop that scheduled them unless the heap goes with it,
     // and schedule_maintenance() re-arms itself: an entry left behind would start
@@ -476,15 +475,15 @@ void Reactor::do_accept() {
     }
 }
 
-ConnId Reactor::adopt_inbound_link(std::unique_ptr<Link> link) {
+ConnId Reactor::adopt_inbound(std::unique_ptr<Transport> transport) {
     // Same coarse admission gate the TCP listener applies, for the same reason:
-    // turn a flood away before any handshake work is done for it.
+    // turn a flood away before any more handshake work is done for it.
     if (!delegate_.admit_inbound()) return kInvalidConnId;
 
     const ConnId id = next_conn_id_.fetch_add(1, std::memory_order_relaxed);
-    Connection* conn = adopt(over_stream(std::move(link), ConnRole::Inbound), ConnRole::Inbound, id);
+    Connection* conn = adopt(std::move(transport), ConnRole::Inbound, id);
     if (!conn) return kInvalidConnId;
-    conn->start_handshake();  // an accepted stream is already connected
+    conn->start_handshake();  // an accepted connection has its dialer's first message
     return id;
 }
 
@@ -598,8 +597,8 @@ void Reactor::remove(ConnId id, CloseReason reason) {
     conn->shutdown_link(reason);     // let the transport say goodbye / flush
     delegate_.on_closed(*conn, reason);
     if (is_valid_socket(fd)) close_socket(fd);
-    // ~Connection here releases the Link, which is what hands a UDP stream back to
-    // the mux (to linger briefly or go straight away).
+    // ~Connection here releases the transport, which is what hands a UDP
+    // connection back to the mux (to linger briefly or go straight away).
 }
 
 void Reactor::shutdown_connections() {
