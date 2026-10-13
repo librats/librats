@@ -18,6 +18,21 @@ uint64_t bytes_over(uint64_t bw, Clock::duration d) noexcept {
 /// says (Linux: 2^20 packets), so it is restarted rather than trusted.
 constexpr uint64_t kAckEpochResetBytes = (uint64_t{1} << 20) * kMss;
 
+/// floor(sqrt(v)), bit by bit: exact, and the same on every platform.
+uint64_t isqrt(uint64_t v) noexcept {
+    uint64_t r = 0, bit = uint64_t{1} << 62;
+    while (bit > v) bit >>= 2;
+    for (; bit != 0; bit >>= 2) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+    }
+    return r;
+}
+
 } // namespace
 
 BbrController::BbrController(const RttEstimate& rtt, const DeliveryRateSampler& sampler,
@@ -95,7 +110,7 @@ void BbrController::on_packet_lost(const LostPacket& lost) {
     rs.is_app_limited = lost.app_limited;
     // The acknowledgement this loss was found on has not been counted as a loss
     // event yet (on_ack does that), so it is counted here.
-    if (!is_inflight_too_high(rs, kProbeBwFullLossCount - 1)) return;
+    if (!is_inflight_too_high(rs, kProbeBwFullLossCount - 1) || !loss_is_congestion()) return;
 
     // React now rather than when the acknowledgements of the probe come back: the
     // probe is already overshooting, and every round trip spent finding that out
@@ -113,6 +128,11 @@ void BbrController::on_congestion_event(Clock::time_point now, uint64_t bytes_in
     now_          = now;
     inflight_now_ = bytes_in_flight;
     if (in_recovery_) return;
+    // A loss that is no full queue's leaves the window alone. Cut to what is in
+    // flight, the window of a sender that keeps running dry is what it happened
+    // to have out between two bursts, and the next burst — a keyframe — would
+    // leave at the pace of the acknowledgements of the last one.
+    if (!loss_is_congestion()) return;
 
     // The first round of recovery is packet conservation: send one packet for each
     // one that leaves the network, never more. The window is cut to what is
@@ -248,6 +268,9 @@ void BbrController::update_congestion_signals() {
         loss_in_round_ = true;
         if (loss_events_in_round_ < 15) ++loss_events_in_round_;
     }
+    round_acked_  += newly_acked_;
+    round_lost_   += newly_lost_;
+    round_cruised_ = round_cruised_ && state_ == State::ProbeBwCruise;
     if (rs_.acked && rs_.is_app_limited) {
         ran_dry_       = true;
         ran_dry_round_ = round_count_;
@@ -255,6 +278,10 @@ void BbrController::update_congestion_signals() {
     if (ack_rtt_net_ < loss_round_rtt_net_) loss_round_rtt_net_ = ack_rtt_net_;
     if (!loss_round_start_) return;   // wait until the end of the round trip
     adapt_lower_bounds_from_congestion();
+    update_loss_base();
+    round_acked_         = 0;
+    round_lost_          = 0;
+    round_cruised_       = state_ == State::ProbeBwCruise;
     loss_in_round_       = false;
     loss_round_overfull_ = false;
     loss_round_rtt_net_  = (Clock::duration::max)();
@@ -433,12 +460,12 @@ bool BbrController::adapt_upper_bounds() {
         }
     }
 
-    if (is_inflight_too_high(rs_, kProbeBwFullLossCount)) {
+    if (is_inflight_too_high(rs_, kProbeBwFullLossCount) && loss_is_congestion()) {
         if (bw_probe_samples_) handle_inflight_too_high(rs_);
         return false;
     }
 
-    // Loss is within tolerance: the bounds may only go up.
+    // Loss is within tolerance, or no full queue's: the bounds may only go up.
     if (inflight_hi_ == kInfinite) return false;
     if (rs_.acked && rs_.tx_in_flight > inflight_hi_) inflight_hi_ = rs_.tx_in_flight;
     if (state_ == State::ProbeBwUp) probe_inflight_hi_upward();
@@ -726,7 +753,46 @@ void BbrController::probe_inflight_hi_upward() {
 bool BbrController::is_inflight_too_high(const RateSample& rs, int min_events) const noexcept {
     if (!rs.acked || rs.lost == 0 || rs.tx_in_flight == 0) return false;
     if (loss_events_in_round_ < min_events) return false;
-    return rs.lost * kUnit > rs.tx_in_flight * kLossThresh;
+    return rs.lost * kUnit > rs.tx_in_flight * loss_thresh(rs.tx_in_flight);
+}
+
+uint64_t BbrController::loss_thresh(uint64_t flight) const noexcept {
+    const uint64_t base = loss_base();
+    if (base == 0) return kLossThresh;
+    // Two standard deviations of the share a flight of that many packets loses at
+    // the base rate: a probe's verdict should not be a coin toss on a radio.
+    const uint64_t packets = (std::max<uint64_t>)(flight / kMss, 1);
+    return (std::min)(kLossThresh + base + 2 * isqrt(base * (kUnit - base) / packets), kUnit * 3 / 4);
+}
+
+uint64_t BbrController::loss_base() const noexcept {
+    if (loss_wins_ == 0) return 0;
+    uint64_t base = kUnit / 2;
+    for (int i = 0; i < loss_wins_; ++i) base = (std::min<uint64_t>)(base, loss_win_rate_[i]);
+    return base;
+}
+
+void BbrController::update_loss_base() noexcept {
+    // A round that measures the path: spent cruising, under the bounds, so nothing
+    // of ours overshot; and with no queue, so no bottleneck — ours or another
+    // flow's — was full. What such a round loses, the path loses anyway: a radio,
+    // not congestion. BBRv3 takes 2% of loss for congestion whatever the path, so
+    // on a path that loses 4% by itself every probe ends at once and the estimate
+    // stays wherever Startup left it. Counted over the path's own rate, the
+    // threshold is the draft's own on a path that loses nothing. The rate is the
+    // least of a few stretches of such rounds: a radio loses in every one, while a
+    // buffer too shallow to show a queue, filled now and then by another flow,
+    // drops in some — and read as the path's own, that loss made BBR take more
+    // than its share from a Reno flow in such a buffer.
+    if (!round_cruised_ || queued(loss_round_rtt_net_)) return;
+    loss_win_seen_ += round_acked_ + round_lost_;
+    loss_win_lost_ += round_lost_;
+    if (loss_win_seen_ < kLossBaseWindow) return;
+    for (int i = kLossBaseWindows - 1; i > 0; --i) loss_win_rate_[i] = loss_win_rate_[i - 1];
+    loss_win_rate_[0] = static_cast<uint16_t>(loss_win_lost_ * kUnit / loss_win_seen_);
+    loss_wins_        = (std::min)(loss_wins_ + 1, kLossBaseWindows);
+    loss_win_seen_    = 0;
+    loss_win_lost_    = 0;
 }
 
 void BbrController::handle_inflight_too_high(const RateSample& rs) {
@@ -745,7 +811,7 @@ uint64_t BbrController::inflight_at_loss(const RateSample& rs, uint64_t bytes) c
     // was spread evenly over what was sent ahead of it.
     const int64_t inflight_prev = static_cast<int64_t>(rs.tx_in_flight > bytes ? rs.tx_in_flight - bytes : 0);
     const int64_t lost_prev     = static_cast<int64_t>(rs.lost > bytes ? rs.lost - bytes : 0);
-    const int64_t thresh        = static_cast<int64_t>(kLossThresh);
+    const int64_t thresh        = static_cast<int64_t>(loss_thresh(rs.tx_in_flight));
     const int64_t unit          = static_cast<int64_t>(kUnit);
     const int64_t lost_prefix   = (thresh * inflight_prev - lost_prev * unit) / (unit - thresh);
     const int64_t at_loss       = inflight_prev + lost_prefix;
@@ -779,8 +845,7 @@ void BbrController::adapt_lower_bounds_from_congestion() {
     // of them: on a real path single acknowledgements come back late for reasons
     // of their own (a host's timer, a radio), and read one by one they made a
     // jittery path look congested every round.
-    const bool runs_dry = ran_dry_ && round_count_ - ran_dry_round_ <= kRanDryRounds;
-    if (runs_dry && !queued(loss_round_rtt_net_) && !loss_round_overfull_) return;
+    if (!loss_is_congestion()) return;
     init_lower_bounds();
     loss_lower_bounds();
 }
@@ -861,6 +926,10 @@ bool BbrController::queued(Clock::duration rtt_net) const noexcept {
     const auto hi = std::chrono::duration_cast<Clock::duration>(kQueueMax);
     const Clock::duration threshold = (std::min)((std::max)(min_rtt_ / 8, lo), hi);
     return rtt_net >= min_rtt_ + threshold;
+}
+
+bool BbrController::loss_is_congestion() const noexcept {
+    return !runs_dry() || queued(loss_round_rtt_net_) || loss_round_overfull_;
 }
 
 bool BbrController::is_in_probe_bw() const noexcept {

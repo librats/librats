@@ -162,8 +162,9 @@ struct PathStats {
     uint64_t bytes_lost      = 0;   ///< declared lost since the connection opened
     /// Live messages (SendOptions::lifetime) accepted since the connection opened,
     /// and how many of them were dropped because their lifetime ran out before
-    /// they could be delivered — what a live encoder that is asking for more than
-    /// the path carries sees first.
+    /// they were known to be delivered — what a live encoder that is asking for
+    /// more than the path carries sees first. Known by the sender: one given up on
+    /// with a piece taken for lost that was only late may have arrived all the same.
     uint64_t live_sent    = 0;
     uint64_t live_expired = 0;
     /// Bytes of repair symbols sent with live messages since the connection opened

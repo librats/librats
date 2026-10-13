@@ -713,7 +713,7 @@ FallbackResult bench_fallback(uint32_t fallback_ms) {
 //             Initial carrying the first Noise message — one RTT less per dial.
 //   live      only means anything here: 30 fps of video as live messages
 //             (SendOptions::lifetime) over a path that can lose and delay them.
-//             How many frames arrive, how many the sender had to drop, and how
+//             How many frames arrive, how many the sender gave up on, and how
 //             long a whole frame takes there and an echo of it back.
 //   rtt       min is the path itself, median is the path plus this stack, and
 //             the gap between median and p99 is queueing — either the network's
@@ -1451,7 +1451,7 @@ int connect_and_measure(const Options& o) {
                       o.live_secs, o.live_mbps, o.live_ms);
         table.head(title);
         table.line("frames delivered",       tcp.live_delivered,     udp.live_delivered,     "%", false, "%8.1f");
-        table.line("dropped by the sender",  tcp.live_expired,       udp.live_expired,       "%", true,  "%8.1f");
+        table.line("given up by the sender", tcp.live_expired,       udp.live_expired,       "%", true,  "%8.1f");
         table.line("repair symbols sent",    tcp.live_repair,        udp.live_repair,        "%", true,  "%8.1f");
         table.line("frame round trip, median", tcp.live_rtt_median_ms, udp.live_rtt_median_ms, "ms", true);
         table.line("frame round trip, p99",  tcp.live_rtt_p99_ms,    udp.live_rtt_p99_ms,    "ms", true);
@@ -1459,10 +1459,13 @@ int connect_and_measure(const Options& o) {
                     "   dropped whole once it cannot. The round trip is sent -> delivered whole ->\n"
                     "   echoed back, so it is the frame's delivery plus one small message the other\n"
                     "   way; read it against rtt min. A frame that arrived but whose echo was lost\n"
-                    "   with the connection does not count. Over TCP nothing already in the socket\n"
-                    "   can be dropped, so there a loss delays the frames behind it instead.\n"
-                    "   Repair symbols are the forward error correction a lossy datagram path\n"
-                    "   gets, as a share of the video.)\n");
+                    "   with the connection does not count. \"Given up\" is the sender's view: a\n"
+                    "   frame whose deadline came with a piece of it unacknowledged and taken for\n"
+                    "   lost — its acknowledgement late, or a loss that was none — may have arrived\n"
+                    "   all the same, so the two rows can add up past 100%%. Over TCP nothing\n"
+                    "   already in the socket can be dropped, so there a loss delays the frames\n"
+                    "   behind it instead. Repair symbols are the forward error correction a\n"
+                    "   lossy datagram path gets, as a share of the video.)\n");
     }
 
     std::printf("\nconfiguration: bulk %.0f MiB in %.0f KiB frames, %.0f KiB credit; "

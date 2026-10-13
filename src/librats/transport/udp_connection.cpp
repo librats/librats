@@ -333,12 +333,18 @@ void UdpConnection::on_short(uint8_t* data, size_t len, Clock::time_point now) {
         return;
     }
     // A peer that has forgotten this connection says so with its token at the end
-    // of something shaped like a packet; nothing else ends with those bytes.
-    if (is_reset(data, len)) {
+    // of something shaped like a packet. It is believed only of a datagram that is
+    // not a packet of ours — a duplicate, one that does not open, one whose frames
+    // do not parse (RFC 9000 §10.3.1): under a session that appends no tag the
+    // tail of a real packet is its last frame, and a RESET_TOKEN frame sent last
+    // ends with exactly those bytes.
+    const bool reset = is_reset(data, len);
+    const auto not_ours = [&] {
+        if (!reset) return false;
         LOG_DEBUG("udp", "Connection " << local_cid_ << " reset by " << remote_.to_string());
         die(CloseReason::PeerReset);
-        return;
-    }
+        return true;
+    };
 
     uint8_t mask[5];
     session_->header_mask(false, data + kShortHeaderSize + kMaxPnLength, mask);
@@ -348,17 +354,23 @@ void UdpConnection::on_short(uint8_t* data, size_t len, Clock::time_point now) {
     for (size_t i = 0; i < pn_len; ++i)
         truncated = (truncated << 8) | static_cast<uint8_t>(data[kShortHeaderSize + i] ^ mask[1 + i]);
     const uint64_t pn = decode_pn(truncated, pn_len, have_recv_ ? largest_recv_ + 1 : 0);
-    if (is_duplicate(pn)) return;
+    if (is_duplicate(pn)) {
+        not_ours();
+        return;
+    }
 
     // The header as it was sealed is the associated data.
     data[0] = first;
     for (size_t i = 0; i < pn_len; ++i) data[kShortHeaderSize + i] ^= mask[1 + i];
     const size_t header = kShortHeaderSize + pn_len;
     const auto plain = session_->open(pn, ByteView(data, header), data + header, len - header);
-    if (!plain) return;   // forged, damaged, or not for these keys
+    if (!plain) {   // forged, damaged, or not for these keys
+        not_ours();
+        return;
+    }
 
     if (first & 0x1c) {   // reserved bits, sent as zero and now authenticated
-        fail(now, CloseReason::ProtocolError, kCloseProtocol);
+        if (!not_ours()) fail(now, CloseReason::ProtocolError, kCloseProtocol);
         return;
     }
     last_recv_ = now;
@@ -375,7 +387,7 @@ void UdpConnection::on_short(uint8_t* data, size_t len, Clock::time_point now) {
     bool eliciting = false, refused = false;
     ack_urgent_ = false;
     if (!apply_frames(data + header, *plain, now, eliciting, refused)) {
-        fail(now, CloseReason::ProtocolError, kCloseProtocol);
+        if (!not_ours()) fail(now, CloseReason::ProtocolError, kCloseProtocol);
         return;
     }
     if (dead()) return;   // it was a goodbye

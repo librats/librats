@@ -636,6 +636,37 @@ TEST(UdpConnectionTest, AStatelessResetEndsTheConnection) {
     EXPECT_EQ(p.a.conn->close_reason(), CloseReason::PeerReset);
 }
 
+// Under a session that appends no tag, a packet's last bytes are its last frame's,
+// and a RESET_TOKEN frame sent last — as a repeat of a lost one goes — ends with
+// exactly the token: a stateless reset by its tail. Only a datagram that is not a
+// packet of ours is one.
+TEST(UdpConnectionTest, APacketEndingInTheResetTokenIsNoReset) {
+    Pair p(false);
+    ASSERT_TRUE(p.connect());
+    p.run(100ms);   // the reset tokens are exchanged
+    uint8_t token[udp::kResetTokenSize];
+    p.b.reset_token(p.b.conn->local_cid(), token);
+
+    // b's next packet to a, its token appended as the last frame.
+    Bytes sent;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (!sent.empty() || from != p.b.addr() || !is_short(d)) return false;
+        const size_t at = d.size();
+        d.resize(at + 1 + udp::kResetTokenSize);
+        udp::put_reset_token(d.data() + at, token);
+        sent = d;
+        return false;
+    };
+    p.send(MessageType::App, "ping");   // b answers it
+    ASSERT_TRUE(p.run_until([&] { return !sent.empty(); }, 200ms));
+    p.run(50ms);
+    EXPECT_TRUE(p.a.conn->established()) << "a packet of ours ending in the token reset the connection";
+    // The same bytes again are a duplicate, no packet of ours: a reset.
+    p.net.inject(p.b.addr(), p.a.addr(), sent);
+    ASSERT_TRUE(p.run_until([&] { return p.a.conn->dead(); }, 100ms));
+    EXPECT_EQ(p.a.conn->close_reason(), CloseReason::PeerReset);
+}
+
 TEST(UdpConnectionTest, KeepAliveBreaksASilenceAndASilentPeerTimesOut) {
     Pair p(true);
     ASSERT_TRUE(p.connect());

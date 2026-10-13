@@ -47,7 +47,14 @@
  *     reset when the next probe starts.
  *
  * Loss below the 2% threshold moves neither bound during a probe: that is what
- * lets BBR hold its rate on a lossy but uncongested link.
+ * lets BBR hold its rate on a lossy but uncongested link — up to 2%. Past that
+ * every probe of the draft ends on its first acknowledgements and the estimate
+ * stays wherever Startup left it (on a radio that loses 5%, a bulk transfer
+ * held half the path). So the 2% here are counted over the loss the path has
+ * by itself: the least that a few stretches of rounds spent cruising, under the
+ * bounds and with no queue, lose (loss_base()), widened by the spread a flight
+ * that size shows at that rate. A path that loses nothing on its own gets the
+ * draft's threshold exactly.
  *
  * ── Flows that do not fill the pipe ──────────────────────────────────────────
  * The draft's model is built from samples of a sender that has more to send:
@@ -75,16 +82,20 @@
  *     not only when the acknowledgement at that instant is not app-limited: for
  *     a flow in and out of being app-limited the instant is a coin toss, and
  *     losing it every time kept a pre-drop estimate alive indefinitely.
- *   - A round that lost packets, whose queue emptied at some point and whose
- *     losses left with less than a BDP in flight, by a sender that keeps
- *     running dry, does not cut the short-term bounds: the bottleneck idles, so
- *     the loss is not a full queue's, and cutting only paced the sender's bursts
- *     and repairs down to its own average rate — under 5% random loss, below
- *     the rate of the video. (The price: a policer below the video's rate, which
- *     drops without queueing, is not learnt from by these bounds; the loss
- *     threshold of the probes still is.) A bulk sender held by the receiver's
- *     window under heavy random loss runs dry too, and keeps its rate the same
- *     way.
+ *   - Loss in a round whose queue emptied at some point and whose losses left
+ *     with less than a BDP in flight, by a sender that keeps running dry, is not
+ *     a full queue's — the bottleneck idles (loss_is_congestion()). It does not
+ *     cut the short-term bounds, end a probe or lower inflight_hi, and recovery
+ *     does not cut the window to what is in flight. Cutting the bounds paced the
+ *     sender's bursts and repairs down to its own average rate — under 5%
+ *     random loss, below the rate of the video; and the window of such a sender
+ *     is what it happened to have out between two bursts, so the next keyframe
+ *     left at the pace of the acknowledgements of the last frame (on a 100 ms
+ *     path with 5% loss, 43% of the frames late). (The price: a policer below
+ *     the video's rate, which drops without queueing, is learnt from only by the
+ *     packets it drops that left with more than a BDP in flight.) A bulk sender
+ *     held by the receiver's window under heavy random loss runs dry too, and
+ *     keeps its rate the same way.
  *
  * A bulk flow takes these paths only in the moments it is app-limited too —
  * held by the receiver's window, or in the round after its own ProbeRTT. One
@@ -142,8 +153,14 @@ public:
     /// bottleneck by pacing at exactly its rate.
     static constexpr uint64_t kPacingMargin      = 10;
 
-    /// Loss above this fraction of what was in flight is "too high" (2%).
+    /// Loss above this fraction of what was in flight is "too high" (2%) — over
+    /// the path's own loss rate (see loss_base()).
     static constexpr uint64_t kLossThresh = 20;
+    /// The path's own loss rate is the least of the last kLossBaseWindows stretches
+    /// of this much, seen in rounds that measure it: a radio loses in every one of
+    /// them, a bottleneck someone else fills only in some.
+    static constexpr uint64_t kLossBaseWindow  = 256 * kMss;
+    static constexpr int      kLossBaseWindows = 4;
     /// Multiplicative cut applied to a bound on congestion (0.7).
     static constexpr uint64_t kBeta       = 700;
     /// Headroom left under inflight_hi while cruising, for other flows (15%).
@@ -226,6 +243,9 @@ public:
     uint64_t        round_count()     const noexcept { return round_count_; }
     /// Estimated bandwidth-delay product at the current bandwidth estimate.
     uint64_t        bdp()             const noexcept { return bdp_multiple(bw_, kUnit); }
+    /// What the path loses whatever the sender does, in thousandths: the least loss
+    /// rate of the last stretches of rounds spent cruising with no queue.
+    uint64_t        loss_base()       const noexcept;
 
     static constexpr uint64_t kInfinite = ~uint64_t{0};
 
@@ -290,6 +310,11 @@ private:
     /// Loss in `rs` passes the threshold, and the round has seen at least
     /// `min_events` acknowledgements reporting loss (counting the current one).
     bool     is_inflight_too_high(const RateSample& rs, int min_events) const noexcept;
+    /// The share of a flight of `flight` bytes that may be lost before it is too
+    /// many, in thousandths: kLossThresh over the path's own rate, and over the
+    /// spread a flight that size shows at that rate.
+    uint64_t loss_thresh(uint64_t flight) const noexcept;
+    void     update_loss_base() noexcept;
     void     handle_inflight_too_high(const RateSample& rs);
     uint64_t inflight_at_loss(const RateSample& rs, uint64_t bytes) const noexcept;
     void     init_lower_bounds();
@@ -318,6 +343,12 @@ private:
     /// A round trip, the peer's ack delay taken off, that shows a queue (see
     /// "Flows that do not fill the pipe" above).
     bool     queued(Clock::duration rtt_net) const noexcept;
+    /// The sender has run out of things to send within the last kRanDryRounds.
+    bool     runs_dry() const noexcept { return ran_dry_ && round_count_ - ran_dry_round_ <= kRanDryRounds; }
+    /// Whether the loss being reported can be a full queue's: always, unless the
+    /// sender keeps running dry and the loss round so far neither queued nor lost
+    /// a packet sent with more than the path holds in flight.
+    bool     loss_is_congestion() const noexcept;
     uint64_t random() noexcept;
 
     const RttEstimate&         rtt_;
@@ -393,6 +424,16 @@ private:
     bool     loss_round_overfull_  = false;
     bool     ran_dry_              = false;
     uint64_t ran_dry_round_        = 0;
+    /// The loss round so far: what it delivered and lost, and whether all of it
+    /// was spent cruising; and, over such rounds with no queue, the stretch being
+    /// measured and the loss rates (thousandths) of the last ones.
+    uint64_t round_acked_          = 0;
+    uint64_t round_lost_           = 0;
+    bool     round_cruised_        = false;
+    uint64_t loss_win_seen_        = 0;
+    uint64_t loss_win_lost_        = 0;
+    uint16_t loss_win_rate_[kLossBaseWindows] = {};
+    int      loss_wins_            = 0;   ///< stretches measured, up to kLossBaseWindows
     bool     cwnd_limited_now_  = false;   ///< this round
     bool     cwnd_limited_prev_ = false;   ///< the round before
 

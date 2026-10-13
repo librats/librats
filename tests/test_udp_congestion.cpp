@@ -1148,6 +1148,84 @@ TEST(BbrTest, RandomLossDoesNotCutAnAppLimitedFlowToItsOwnRate) {
                              << sum / steps / 1e6 << " Mbit/s on average";
 }
 
+// Recovery cuts the window to what is in flight, and for a sender that keeps
+// running dry that is what it happened to have out between two frames: after a
+// loss the next keyframe left at the pace of the acknowledgements of the frame
+// before it — and a probe that should have found the path ended on the radio's
+// own 5%. On a 100 ms path 38% of the frames ran out of time. Loss with nothing
+// queued, from less than the path holds, is no full queue's: it leaves the
+// window, and the probes, alone.
+TEST(BbrTest, RandomLossOnALongPathLeavesASenderThatRunsDryItsWindow) {
+    Sim sim(10, 100ms, 104, 0.05, 11);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 4, 150ms};
+    video.play(3s);
+    const PathStats before = f.sender().path_stats();
+    video.play(20s);
+    const PathStats after = f.sender().path_stats();
+    EXPECT_FALSE(f.sender().dead());
+    const double dropped = double(after.live_expired - before.live_expired) /
+                           double(after.live_sent - before.live_sent);
+    EXPECT_LT(dropped, 0.02) << "frames given up: " << dropped * 100 << "%, estimate "
+                             << bbr(f.sender()).bw() * 8e-6 << " Mbit/s";
+}
+
+// BBRv3 reads 2% of loss as a probe gone too far whatever the path, so on a
+// radio that loses 5% by itself every probe ended on its first acknowledgements
+// and a bulk transfer kept the half of the path Startup had found. Over what
+// rounds cruising with no queue lose — the path's own loss — the threshold lets
+// the probes through here, and is the draft's own on a path that loses nothing
+// (FindsTheBottleneckAndKeepsTheQueueShort, AShallowBufferEndsStartupOnLoss).
+TEST(BbrTest, AProbeIsJudgedByTheLossThePathDoesNotHaveByItself) {
+    Sim sim(10, 100ms, 104, 0.05, 11);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    f.to_send = SIZE_MAX;
+    sim.run(20s);
+    EXPECT_FALSE(f.sender().dead());
+    EXPECT_GT(f.delivered() / 20.0, 0.72 * payload_rate(10))
+        << mbps_of(f.delivered(), 20s) << " Mbit/s of a 10 Mbit/s path that loses 5%";
+}
+
+// The loss a path has by itself is read off rounds that cruise with no queue,
+// and only there: on a radio it is the radio's rate, on a path that loses
+// nothing — a buffer too shallow to show a queue included, whose drops come only
+// with a probe — it is none, and the threshold the draft's own.
+TEST(BbrTest, ThePathsOwnLossIsReadOffRoundsThatCruiseWithNoQueue) {
+    {
+        Sim sim(10, 100ms, 104, 0.05, 11);
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        f.to_send = SIZE_MAX;
+        sim.run(20s);
+        EXPECT_GE(bbr(f.sender()).loss_base(), 20u) << "a radio that loses 5% read as losing less than 2%";
+        EXPECT_LE(bbr(f.sender()).loss_base(), 60u);
+    }
+    {
+        Sim sim(20, 40ms, 8);
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        f.to_send = SIZE_MAX;
+        uint64_t most = 0;
+        sim.on_step = [&] { most = (std::max)(most, bbr(f.sender()).loss_base()); };
+        sim.run(20s);
+        sim.on_step = nullptr;
+        EXPECT_GT(f.sender().recovery().retransmits(), 0u) << "the buffer never overflowed: nothing tested";
+        EXPECT_EQ(most, 0u) << "a probe's drops read as the path's own";
+    }
+    {
+        // Nor is what a Reno flow drops by filling a buffer that shows its queue.
+        Sim sim(20, 40ms, 83);
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        f.to_send = SIZE_MAX;
+        sim.run(5s);
+        sim.add(CongestionAlgorithm::Reno).to_send = SIZE_MAX;
+        uint64_t most = 0;
+        sim.on_step = [&] { most = (std::max)(most, bbr(f.sender()).loss_base()); };
+        sim.run(30s);
+        sim.on_step = nullptr;
+        EXPECT_EQ(most, 0u) << "a full queue's drops read as the path's own";
+    }
+}
+
 // Ran dry or not, a sender whose acknowledgements come back late only now and
 // then — a host's timer, a radio's retries — has no queue: the round's
 // smallest round trip says so. Read one acknowledgement at a time, under random
@@ -1324,4 +1402,7 @@ TEST(UdpPathStatsTest, ReportsTheBottleneckAndTheQueueInFrontOfIt) {
         EXPECT_GE(st.bytes_delivered, f.delivered()) << "delivered counts whole packets";
     }
 }
+
+
+
 
