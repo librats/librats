@@ -42,6 +42,14 @@
  * speaks the relay protocol. It is deliberately tiny and knows nothing about the
  * wire format, which stays entirely in the module that implements it.
  *
+ * ── Or no byte stream at all ────────────────────────────────────────────────
+ * When both legs of a circuit run over UDP, the relay does better than carry a
+ * stream: it forwards the packets of an end-to-end datagram connection as they
+ * come, by connection id (udp_mux.h, "Relayed connections"). Then congestion
+ * control, loss recovery and live messages see the whole path, and the relay
+ * holds nothing. Such a circuit has no Circuit object; all that is left of it at
+ * either end is a `ForwardedCircuit` — who to tell when it is over.
+ *
  * ── Flow control, and why it is not optional ────────────────────────────────
  * A relay reads from one peer and writes to another, and it cannot stop reading:
  * the reactor drains a readable connection to the end. So without a bound, a slow
@@ -89,7 +97,8 @@ namespace librats {
 /// Implemented by the relay module; called by Circuit on the reactor thread. None
 /// of these say anything about the wire format — the implementer frames the
 /// message and hands it to the carrier peer — so this header stays a transport
-/// header with no protocol in it.
+/// header with no protocol in it. A ForwardedCircuit calls circuit_send_close and
+/// circuit_released from whichever thread drops it.
 class CircuitCarrier {
 public:
     virtual ~CircuitCarrier() = default;
@@ -258,6 +267,43 @@ private:
     bool     want_write_ = false;     ///< the Connection has more to write
     bool     credit_blocked_ = false; ///< a write stopped for want of credit
     bool     carrier_blocked_ = false;///< a write stopped on the carrier's queue
+};
+
+/// One end of a circuit whose relay forwards datagrams (see the file comment): the
+/// connection is the datagram transport's, and this is what it holds of the
+/// circuit — the carrier to tell when it is over. Dropping it is the telling: the
+/// circuit is closed toward the relay and released, exactly once, whichever way
+/// the connection ended — or never began, which is why it is a value that a task
+/// can carry and a dial that never runs still drops.
+class RATS_API ForwardedCircuit {
+public:
+    ForwardedCircuit() = default;
+    ForwardedCircuit(std::shared_ptr<CircuitCarrier> carrier, uint32_t id) noexcept
+        : carrier_(std::move(carrier)), id_(id) {}
+    ForwardedCircuit(ForwardedCircuit&& other) noexcept
+        : carrier_(std::move(other.carrier_)), id_(other.id_) {}
+    ForwardedCircuit& operator=(ForwardedCircuit&& other) {
+        if (this != &other) {
+            end();
+            carrier_ = std::move(other.carrier_);
+            id_      = other.id_;
+        }
+        return *this;
+    }
+    ~ForwardedCircuit() { end(); }
+
+    explicit operator bool() const noexcept { return carrier_ != nullptr; }
+
+private:
+    void end() {
+        if (!carrier_) return;
+        const auto carrier = std::move(carrier_);
+        carrier->circuit_send_close(id_, CloseReason::LocalClose);
+        carrier->circuit_released(id_);
+    }
+
+    std::shared_ptr<CircuitCarrier> carrier_;
+    uint32_t                        id_ = 0;
 };
 
 /// The Link a connection's transport holds for a relayed circuit.

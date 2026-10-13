@@ -210,9 +210,15 @@ void UdpMux::compact_due() {
 }
 
 int UdpMux::next_timeout_ms(int max_ms) const noexcept {
-    if (due_.empty()) return max_ms;
+    if (due_.empty() && shaping_.empty()) return max_ms;
     const auto now = Clock::now();
-    const auto at  = due_.front().at;
+    auto at = due_.empty() ? Clock::time_point::max() : due_.front().at;
+    // A queue held back by its rate is due when its next datagram fits.
+    for (const Cid cid : shaping_) {
+        const auto it = forwards_.find(cid);
+        if (it != forwards_.end() && !it->second.queue.empty())
+            at = (std::min)(at, it->second.rate.fits_at(it->second.queue.front().size(), now));
+    }
     if (at <= now) return 0;
     // Rounded up, as TimerQueue does: truncating a sub-millisecond remainder to 0
     // would spin until the deadline instead of sleeping through it.
@@ -334,6 +340,10 @@ void UdpMux::handle_datagram(uint8_t* data, size_t len, const Address& from, Clo
         arm(it->first, it->second);
         return;
     }
+    if (auto it = forwards_.find(dcid); it != forwards_.end()) {
+        pass_on(dcid, it->second, data, len, from, now);
+        return;
+    }
 
     if (is_long_header(data[0])) {
         LongPacket p;
@@ -356,6 +366,7 @@ void UdpMux::on_initial(const LongPacket& initial, size_t len, const Address& fr
     // with three times as much before the dialer proves its address.
     if (len != kMaxDatagram || initial.scid != paired_cid(initial.dcid) || (initial.dcid & 1) == 0)
         return;
+    if (expected_.count(initial.dcid)) return accept_relayed(initial, len, from, now);
 
     if (conns_.size() >= limits_.max_streams) {
         LOG_DEBUG("udp", "Refusing a dial from " << from.to_string() << ": at the ceiling ("
@@ -398,6 +409,94 @@ void UdpMux::on_initial(const LongPacket& initial, size_t len, const Address& fr
     arm(inserted.first->first, inserted.first->second);
 }
 
+void UdpMux::accept_relayed(const LongPacket& initial, size_t len, const Address& from,
+                            Clock::time_point now) {
+    const auto it = expected_.find(initial.dcid);
+    // The id is spoken for: only the relay it was arranged with may open it.
+    if (from != it->second.relay) return;
+    if (conns_.size() >= limits_.max_streams) return;
+
+    // Validated: the relay passes on only what came from the address the dialer's
+    // own leg to it runs on.
+    auto conn = UdpConnection::accept(*this, security_, from, initial, len, /*validated=*/true, now,
+                                      connection_config());
+    if (!conn) return;   // not the opening of a handshake; the wait goes on
+    Expected expected = std::move(it->second);
+    expected_.erase(it);
+
+    UdpConnection* raw = conn.get();
+    auto inserted = conns_.emplace(initial.dcid, Entry{std::move(conn)});
+    inserted.first->second.circuit = std::move(expected.circuit);
+
+    // A refusal destroys the transport, which releases the connection and with
+    // its entry ends the circuit — the dialer hears of it from the relay.
+    if (!delegate_.adopt_relayed(expected.id, std::make_unique<UdpTransport>(*this, *raw, true)))
+        return;
+    LOG_DEBUG("udp", "Accepted relayed connection " << initial.dcid << " through " << from.to_string());
+    raw->answer(now);
+    arm(inserted.first->first, inserted.first->second);
+}
+
+void UdpMux::pass_on(Cid cid, Forward& forward, const uint8_t* data, size_t len,
+                     const Address& from, Clock::time_point now) {
+    // Pinned like a connection: a forged source would otherwise have us send its
+    // datagrams on to the other end, and the id is all it would need to know.
+    if (from != forward.from || len > kMaxDatagram) return;
+
+    // Within the rate, and nothing ahead of it: straight through. Otherwise it
+    // waits its turn, unless the buffer is full (see the file comment).
+    if (forward.queue.empty() && forward.rate.take(len, now)) {
+        forward.bytes->fetch_add(len, std::memory_order_relaxed);
+        uint8_t* buf = datagram_buffer();
+        std::memcpy(buf, data, len);
+        send_datagram(forward.to, len);
+        return;
+    }
+    if (forward.queued + len > forward.queue_limit) return;
+    if (forward.queue.empty()) shaping_.push_back(cid);
+    forward.queue.emplace_back(data, data + len);
+    forward.queued += len;
+}
+
+void UdpMux::release_shaped(Clock::time_point now) {
+    for (size_t i = 0; i < shaping_.size();) {
+        const auto it = forwards_.find(shaping_[i]);
+        if (it != forwards_.end()) {
+            Forward& forward = it->second;
+            while (!forward.queue.empty() && forward.rate.take(forward.queue.front().size(), now)) {
+                const Bytes& datagram = forward.queue.front();
+                forward.bytes->fetch_add(datagram.size(), std::memory_order_relaxed);
+                uint8_t* buf = datagram_buffer();
+                std::memcpy(buf, datagram.data(), datagram.size());
+                send_datagram(forward.to, datagram.size());
+                forward.queued -= datagram.size();
+                forward.queue.pop_front();
+            }
+            if (!forward.queue.empty()) { ++i; continue; }
+        }
+        // Drained, or no longer forwarded: off the list.
+        shaping_[i] = shaping_.back();
+        shaping_.pop_back();
+    }
+}
+
+void UdpMux::expire_expected() {
+    const auto now = Clock::now();
+    for (auto it = expected_.begin(); it != expected_.end();) {
+        if (now < it->second.until) { ++it; continue; }
+        const ForwardedCircuit ended = std::move(it->second.circuit);   // ends after the erase
+        it = expected_.erase(it);
+    }
+}
+
+void UdpMux::forget(std::unordered_map<Cid, Entry>::iterator it) {
+    // A relayed connection's circuit ends with the entry, and ending it tells the
+    // relay — through the node, which may well call back in here. So it ends once
+    // the table no longer holds the entry, never from inside the erase.
+    const ForwardedCircuit ended = std::move(it->second.circuit);
+    conns_.erase(it);
+}
+
 void UdpMux::end_bursts() {
     if (bursts_.empty()) return;
     // One clock read for all of them: the ACKs go now, and the delay they report
@@ -414,10 +513,16 @@ void UdpMux::end_bursts() {
 
 // ── Outbound ────────────────────────────────────────────────────────────────
 
+bool UdpMux::pair_taken(Cid cid) const {
+    for (const Cid half : {cid, paired_cid(cid)})
+        if (conns_.count(half) || expected_.count(half) || forwards_.count(half)) return true;
+    return false;
+}
+
 bool UdpMux::allocate_cid(Cid& cid) {
     for (int attempt = 0; attempt < 32; ++attempt) {
         const Cid base = rng_() & ~Cid{1};   // the dialer's half is even
-        if (conns_.count(base) || conns_.count(paired_cid(base))) continue;
+        if (pair_taken(base)) continue;
         cid = base;
         return true;
     }
@@ -430,12 +535,57 @@ std::unique_ptr<Transport> UdpMux::connect(const Address& remote, DialProfile pr
         LOG_WARN("udp", "Could not allocate a connection id for " << remote.to_string());
         return nullptr;
     }
+    return dial(remote, cid, profile, ForwardedCircuit{});
+}
+
+std::unique_ptr<Transport> UdpMux::connect_relayed(const Address& relay, Cid cid,
+                                                   ForwardedCircuit circuit) {
+    if ((cid & 1) != 0 || pair_taken(cid)) return nullptr;
+    return dial(relay, cid, DialProfile{}, std::move(circuit));
+}
+
+std::unique_ptr<Transport> UdpMux::dial(const Address& remote, Cid cid, DialProfile profile,
+                                        ForwardedCircuit circuit) {
+    const bool relayed = static_cast<bool>(circuit);
     auto conn = UdpConnection::dial(*this, security_, remote, cid, Clock::now(), connection_config(profile));
     UdpConnection* raw = conn.get();
     const auto inserted = conns_.emplace(cid, Entry{std::move(conn)});
+    inserted.first->second.circuit = std::move(circuit);
     arm(cid, inserted.first->second);   // the Initial's repeat
     flush_output();                     // the Initial is the dial; it does not wait for company
-    return std::make_unique<UdpTransport>(*this, *raw);
+    return std::make_unique<UdpTransport>(*this, *raw, relayed);
+}
+
+bool UdpMux::expect_relayed(Cid cid, const Address& relay, ConnId id, ForwardedCircuit circuit) {
+    if ((cid & 1) != 0 || pair_taken(cid)) return false;
+    expected_.emplace(paired_cid(cid),
+                      Expected{relay, id, Clock::now() + kExpectTimeout, std::move(circuit)});
+    return true;
+}
+
+bool UdpMux::forward(Cid cid, const Address& dialer, const Address& responder,
+                     std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate, uint64_t burst) {
+    if ((cid & 1) != 0 || pair_taken(cid)) return false;
+    const auto now = Clock::now();
+    const auto direction = [&](const Address& from, const Address& to) {
+        Forward f{from, to, bytes};
+        if (rate != 0) {
+            // Never shallower than a datagram, or none would ever fit.
+            f.rate        = TokenBucket(rate, (std::max<uint64_t>)(burst, kMaxDatagram), now);
+            f.queue_limit = (std::max)(kMinShaperQueue,
+                                       static_cast<size_t>(rate * kShaperQueue.count() / 1000));
+        }
+        return f;
+    };
+    // Toward the responder, the packets name its id; toward the dialer, the dialer's.
+    forwards_.emplace(paired_cid(cid), direction(dialer, responder));
+    forwards_.emplace(cid, direction(responder, dialer));
+    return true;
+}
+
+void UdpMux::unforward(Cid cid) {
+    forwards_.erase(cid);
+    forwards_.erase(paired_cid(cid));
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────────────
@@ -451,9 +601,9 @@ void UdpMux::release(UdpConnection& conn) {
         // A dial called off (the other transport won the race, the node is going
         // down) or a dialer we never finished with: nothing to hand over.
         conn.abort(now);
-        conns_.erase(it);
+        forget(it);
     } else if (conn.dead()) {
-        conns_.erase(it);
+        forget(it);
     } else {
         // Its transport normally asked for a close already, and this is a no-op;
         // if it did not, the goodbye is orderly. Either way, while data is still
@@ -463,7 +613,7 @@ void UdpMux::release(UdpConnection& conn) {
         conn.stop_reading();
         conn.close(CloseReason::LocalClose, now);
         if (conn.dead()) {
-            conns_.erase(it);
+            forget(it);
         } else {
             it->second.linger_until = now + kLingerTimeout;
             arm(it->first, it->second);
@@ -474,6 +624,11 @@ void UdpMux::release(UdpConnection& conn) {
 }
 
 void UdpMux::tick() {
+    if (!expected_.empty()) expire_expected();
+    if (!shaping_.empty()) {
+        release_shaped(Clock::now());
+        flush_output();
+    }
     if (due_.empty()) return;
     const auto now = Clock::now();
     if (due_.front().at > now) return;
@@ -501,7 +656,7 @@ void UdpMux::tick() {
         const bool lingering = entry.linger_until != Clock::time_point{};
         if (lingering && !conn.dead() && now >= entry.linger_until) conn.abort(now);
         if (lingering && (conn.dead() || conn.flushed())) {
-            conns_.erase(it);
+            forget(it);
             continue;
         }
         arm(slot.cid, entry);
@@ -514,9 +669,17 @@ void UdpMux::tick() {
 
 void UdpMux::shutdown() {
     const auto now = Clock::now();
-    for (auto& entry : conns_) entry.second.conn->abort(now);
+    std::vector<ForwardedCircuit> ended;
+    for (auto& entry : conns_) {
+        entry.second.conn->abort(now);
+        if (entry.second.circuit) ended.push_back(std::move(entry.second.circuit));
+    }
+    for (auto& wait : expected_) ended.push_back(std::move(wait.second.circuit));
     flush_output();   // the goodbyes go out before the connections they came from
     conns_.clear();
+    expected_.clear();
+    forwards_.clear();
+    shaping_.clear();
     due_.clear();
     pending_events_.clear();
     bursts_.clear();

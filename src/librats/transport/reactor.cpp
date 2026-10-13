@@ -169,6 +169,53 @@ void Reactor::adopt_link(ConnId id, std::unique_ptr<Link> link, ConnRole role, b
     });
 }
 
+// ── Relayed datagram connections ────────────────────────────────────────────
+
+std::optional<Address> Reactor::datagram_peer(ConnId id) {
+    Connection* conn = find(id);
+    if (!mux_ || !conn || conn->transport() != TransportKind::Udp) return std::nullopt;
+    return conn->remote_endpoint();
+}
+
+void Reactor::connect_relayed(ConnId id, ConnId carrier, udp::Cid cid, ForwardedCircuit circuit) {
+    // Carried in a shared holder for the same reason adopt_link's link is; a task
+    // that never runs drops it, and that ends the circuit.
+    auto holder = std::make_shared<ForwardedCircuit>(std::move(circuit));
+    execute([this, id, carrier, cid, holder] {
+        const auto relay = datagram_peer(carrier);
+        auto transport = relay ? mux_->connect_relayed(*relay, cid, std::move(*holder)) : nullptr;
+        if (!transport) {
+            resolve_dial(id);
+            return;
+        }
+        adopt(std::move(transport), ConnRole::Outbound, id);
+    });
+}
+
+void Reactor::expect_relayed(ConnId id, ConnId carrier, udp::Cid cid, ForwardedCircuit circuit) {
+    auto holder = std::make_shared<ForwardedCircuit>(std::move(circuit));
+    execute([this, id, carrier, cid, holder] {
+        const auto relay = datagram_peer(carrier);
+        if (!relay || !mux_->expect_relayed(cid, *relay, id, std::move(*holder))) resolve_dial(id);
+    });
+}
+
+void Reactor::forward_datagrams(ConnId dialer, ConnId responder, udp::Cid cid,
+                                std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate,
+                                uint64_t burst) {
+    execute([this, dialer, responder, cid, bytes = std::move(bytes), rate, burst]() mutable {
+        const auto from = datagram_peer(dialer);
+        const auto to   = datagram_peer(responder);
+        if (from && to) mux_->forward(cid, *from, *to, std::move(bytes), rate, burst);
+    });
+}
+
+void Reactor::stop_forwarding(udp::Cid cid) {
+    execute([this, cid] {
+        if (mux_) mux_->unforward(cid);
+    });
+}
+
 void Reactor::wake(ConnId id, uint32_t events) {
     if (events == 0) return;
     execute([this, id, events] { dispatch_events(id, events); });
@@ -491,6 +538,14 @@ ConnId Reactor::adopt_inbound(std::unique_ptr<Transport> transport) {
     if (!conn) return kInvalidConnId;
     conn->start_handshake();  // an accepted connection has its dialer's first message
     return id;
+}
+
+bool Reactor::adopt_relayed(ConnId id, std::unique_ptr<Transport> transport) {
+    // Admitted when the circuit was accepted (CircuitService::expect_relayed).
+    Connection* conn = adopt(std::move(transport), ConnRole::Inbound, id);
+    if (!conn) return false;   // closed while it was on its way
+    conn->start_handshake();
+    return true;
 }
 
 bool Reactor::resolve_dial(ConnId id) {

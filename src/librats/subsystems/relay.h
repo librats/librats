@@ -12,9 +12,16 @@
  * path: a node connected to both carries the bytes.
  *
  * ── What is relayed, and what is not ────────────────────────────────────────
- * The relayed thing is a *byte stream*, not a message. It becomes a `Circuit` and
- * a `RelayLink` (transport/relay_link.h), the reactor adopts it as an ordinary
- * Connection, and everything above the Link runs unchanged — which is why:
+ * The relayed thing is a *connection's own transport*, never a message. When
+ * both legs — client to relay, relay to target — are UDP, it is the packets of a
+ * datagram connection the two ends run between themselves, which the relay
+ * forwards by connection id as they come (transport/udp_mux.h, "Relayed
+ * connections"): congestion control, loss recovery and live messages then work
+ * over the whole path exactly as on a direct one, and the relay decrypts
+ * nothing and holds nothing. Otherwise it is a *byte stream*: a `Circuit` and a
+ * `RelayLink` (transport/relay_link.h) that the reactor adopts as an ordinary
+ * Connection over its stream transport. The relay picks which when the circuit
+ * opens. Either way everything above the transport runs unchanged — which is why:
  *
  *   - the Noise_XX handshake is END TO END. The relay moves ciphertext it cannot
  *     read, cannot forge and cannot replay. It is a pipe, not a party, and it
@@ -53,17 +60,22 @@
  * transfer on your uplink, and that is a decision to be made rather than assumed.
  * A node that turns it on is protected by, in order of how much they matter:
  *
- *   - the end-to-end credit window (transport/relay_link.h), which bounds what one
- *     circuit can make the relay hold no matter what either end does. Without it a
- *     slow receiver would grow the relay's send queue until the relay dropped that
- *     peer entirely — losing all of its traffic, not just the circuit's;
+ *   - for a byte stream, the end-to-end credit window (transport/relay_link.h),
+ *     which bounds what one circuit can make the relay hold no matter what either
+ *     end does. Without it a slow receiver would grow the relay's send queue until
+ *     the relay dropped that peer entirely — losing all of its traffic, not just
+ *     the circuit's. A forwarded datagram is never held at all: it leaves as it
+ *     came, or is lost like any other, and the ends' congestion control sees it;
+ *   - forwarding a datagram only from the address the end's own leg runs on, so
+ *     knowing a circuit's connection id is not enough to send through it;
  *   - forwarding only between peers it already holds. A relay never dials, never
  *     resolves an address, and can only ever deliver to somebody that chose to
  *     connect to it, so it cannot be turned into an open reflector;
  *   - no chaining. A circuit is refused if either end is itself only reachable
  *     through a relay, which is what stops loops and multi-hop amplification;
- *   - per-circuit byte and duration caps, per-peer and total circuit counts, and a
- *     rate limit on the requests themselves.
+ *   - a per-circuit rate (slowing a circuit, never closing it) and duration cap,
+ *     per-peer and total circuit counts, and a rate limit on the requests
+ *     themselves.
  *
  * ── Threading ───────────────────────────────────────────────────────────────
  * Message handlers run on reactor threads; one worker thread drives attempt
@@ -139,13 +151,23 @@ public:
         /// whole budget.
         size_t max_circuits_per_peer = 2;
 
-        /// Bytes one circuit may move before it is closed. 0 removes the cap. The
-        /// default is generous for a fallback path and still bounds what one pair
-        /// of peers can spend of ours.
-        uint64_t max_bytes_per_circuit = 64ull * 1024 * 1024;
+        /// Bits per second one circuit may move each way, on average over
+        /// `circuit_burst`: bursts up to that much pass as they come. 0 removes
+        /// the cap. Past it a circuit is slowed, never closed — what a call or a
+        /// transfer through a relay can rely on is the rate, not a volume it runs
+        /// out of. A forwarded circuit is held the way a bottleneck link holds a
+        /// flow (a short queue, see transport/udp_mux.h); a byte stream by
+        /// withholding the far end's credit until the sender is back within it.
+        /// The default carries a 1080p call with room to spare.
+        uint64_t max_circuit_rate_bps = 10'000'000;
 
-        /// How long one circuit may live. 0 removes the cap.
-        std::chrono::seconds max_circuit_duration{600};
+        /// What the rate is averaged over.
+        std::chrono::milliseconds circuit_burst{2000};
+
+        /// How long one circuit may live. 0 removes the cap. A circuit is a
+        /// fallback that a punch is still trying to replace, so this is a bound
+        /// on a forgotten one, not on a call.
+        std::chrono::seconds max_circuit_duration{3600};
 
         /// Requests (probes and circuit openings) one peer may make per window.
         size_t                    request_budget = 8;
@@ -153,9 +175,10 @@ public:
 
         // ── Both ends ───────────────────────────────────────────────────────
 
-        /// Bytes this node is willing to have in flight per circuit — the credit
-        /// window it advertises (see transport/relay_link.h). Raising it makes a
-        /// relayed peer faster on a long path and asks the relay to hold more.
+        /// Bytes this node is willing to have in flight per byte-stream circuit —
+        /// the credit window it advertises (see transport/relay_link.h). Raising it
+        /// makes such a peer faster on a long path and asks the relay to hold more.
+        /// A circuit whose datagrams the relay forwards has no window.
         uint32_t window = Circuit::kDefaultWindow;
 
         /// When a relayed peer connects, ask HolePunch to try it directly, so the
@@ -183,6 +206,8 @@ public:
     size_t circuits() const;
     /// Circuits this node is carrying on behalf of other peers.
     size_t carried_circuits() const;
+    /// Of those, the ones whose datagrams it forwards rather than carrying a stream.
+    size_t forwarded_circuits() const;
     /// Bytes forwarded on behalf of other peers.
     uint64_t carried_bytes() const;
     /// Attempts to reach a peer through a relay that are currently running.

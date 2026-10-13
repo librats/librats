@@ -478,6 +478,51 @@ void Node::close_circuit(PeerRoute route, CloseReason reason) {
     reactors_->by_index(route.reactor).close(route.conn, reason);
 }
 
+// A circuit whose relay forwards datagrams lives entirely on the mux's reactor:
+// the carriers are datagram connections, and so is the connection the circuit is.
+
+std::optional<PeerRoute> Node::datagram_route(const PeerId& id) const {
+    const auto info = peers_.info(id);
+    if (!info || info->transport != TransportKind::Udp) return std::nullopt;
+    return peers_.route(id);
+}
+
+std::optional<PeerRoute> Node::dial_relayed(const PeerId& carrier, uint64_t cid,
+                                            ForwardedCircuit circuit) {
+    const auto route = datagram_route(carrier);
+    if (!route) return std::nullopt;
+    Reactor& reactor = reactors_->by_index(route->reactor);
+    const ConnId id = reactor.reserve_conn_id();
+    reactor.connect_relayed(id, route->conn, cid, std::move(circuit));
+    return PeerRoute{route->reactor, id};
+}
+
+std::optional<PeerRoute> Node::expect_relayed(const PeerId& carrier, uint64_t cid,
+                                              ForwardedCircuit circuit) {
+    const auto route = datagram_route(carrier);
+    // The same gate adopt_circuit applies, for the same reason.
+    if (!route || !admit_inbound()) return std::nullopt;
+    Reactor& reactor = reactors_->by_index(route->reactor);
+    const ConnId id = reactor.reserve_conn_id();
+    reactor.expect_relayed(id, route->conn, cid, std::move(circuit));
+    return PeerRoute{route->reactor, id};
+}
+
+bool Node::forward_datagrams(const PeerId& dialer, const PeerId& responder, uint64_t cid,
+                             std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate,
+                             uint64_t burst) {
+    const auto from = datagram_route(dialer);
+    const auto to   = datagram_route(responder);
+    if (!from || !to || from->reactor != to->reactor) return false;
+    reactors_->by_index(from->reactor).forward_datagrams(from->conn, to->conn, cid, std::move(bytes),
+                                                         rate, burst);
+    return true;
+}
+
+void Node::stop_forwarding(uint64_t cid) {
+    if (reactors_->has_udp()) reactors_->pick(TransportKind::Udp).stop_forwarding(cid);
+}
+
 void Node::report_dial_failed(const std::string& host, uint16_t port) {
     // Only a numeric target can be handed on as an Address; a dial by hostname has
     // no dialable Address to report (peers cannot use our resolver), and the

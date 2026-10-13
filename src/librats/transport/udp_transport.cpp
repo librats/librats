@@ -10,7 +10,10 @@ using Clock = UdpConnection::Clock;
 
 UdpTransport::~UdpTransport() { mux_.release(conn_); }
 
-std::optional<Address> UdpTransport::remote_endpoint() const { return conn_.remote(); }
+std::optional<Address> UdpTransport::remote_endpoint() const {
+    if (relayed_) return std::nullopt;
+    return conn_.remote();
+}
 
 bool UdpTransport::is_secure() const noexcept { return conn_.is_secure(); }
 

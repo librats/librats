@@ -11,6 +11,12 @@
  * the connection does, plus the one thing a handle owns: telling the sink about
  * the handshake's progress from inside an entry point, which is the only place
  * TransportSink may be called from.
+ *
+ * A connection whose packets a relay forwards (udp_mux.h) is the same datagram
+ * connection with a third node's address as its remote. To everything above it is
+ * a relayed peer: it reports TransportKind::Relay, and no endpoint — the address
+ * it talks to is the relay's, which identify and NatStatus must never take for
+ * the peer's own (see RelayLink::remote_endpoint).
  */
 
 #include "librats/transport/transport.h"
@@ -26,10 +32,13 @@ public:
     /// turn and sends at once (StreamTransport::kCoalesceLimit, for the same reason).
     static constexpr size_t kCoalesceLimit = 64 * 1024;
 
-    UdpTransport(UdpMux& mux, UdpConnection& conn) noexcept : mux_(mux), conn_(conn) {}
+    UdpTransport(UdpMux& mux, UdpConnection& conn, bool relayed = false) noexcept
+        : mux_(mux), conn_(conn), relayed_(relayed) {}
     ~UdpTransport() override;
 
-    TransportKind          kind() const noexcept override { return TransportKind::Udp; }
+    TransportKind kind() const noexcept override {
+        return relayed_ ? TransportKind::Relay : TransportKind::Udp;
+    }
     socket_t               fd() const noexcept override { return RATS_INVALID_SOCKET; }
     std::optional<Address> remote_endpoint() const override;
     bool                   is_secure() const noexcept override;
@@ -59,6 +68,7 @@ private:
 
     UdpMux&        mux_;
     UdpConnection& conn_;
+    const bool     relayed_;
     TransportSink* sink_ = nullptr;
     bool           told_connected_   = false;
     bool           told_established_ = false;

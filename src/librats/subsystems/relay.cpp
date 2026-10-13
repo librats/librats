@@ -1,6 +1,7 @@
 #include "librats/subsystems/relay.h"
 
 #include "librats/core/io_poller.h"        // PollIn / PollOut / PollErr
+#include "librats/core/token_bucket.h"
 #include "librats/node/circuit_service.h"
 #include "librats/node/node_context.h"
 #include "librats/peer/peer.h"
@@ -9,7 +10,9 @@
 #include "librats/util/logger.h"
 
 #include <algorithm>
+#include <atomic>
 #include <optional>
+#include <random>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -22,9 +25,9 @@ namespace {
 //
 //   [u8 ver=1][u8 op][u32 circuit][body]
 //
-//     op=1 Open     [32B dst][u32 window]   client → relay
-//     op=2 Incoming [32B src][u32 window]   relay  → target
-//     op=3 Accept   [u32 window]            target → relay → client
+//     op=1 Open     [32B dst][u32 window][u8 flags]   client → relay
+//     op=2 Incoming [32B src][u32 window][u64 cid]    relay  → target
+//     op=3 Accept   [u32 window][u64 cid]             target → relay → client
 //     op=4 Deny     [u8 reason]             relay → client, or target → relay → client
 //     op=5 Data     [bytes]                 end to end, through the relay
 //     op=6 Credit   [u32 bytes]             end to end, through the relay
@@ -37,6 +40,16 @@ namespace {
 // Both ends of a link allocate ids from that one space without coordinating, by
 // parity — the smaller PeerId takes the even ids, the larger the odd ones, which
 // both compute identically from what they already know. Ids 0 and 1 are reserved.
+//
+// The trailing fields are optional, and an older node that sends none or ignores
+// them gets a byte stream. Open's flag kOfferDatagrams says the client's leg is a
+// datagram connection. If the target's is one too, the relay picks a connection
+// id pair, forwards its packets (transport/udp_mux.h, "Relayed connections") and
+// names its dialer's half `cid` in Incoming; the target echoes it in Accept, and
+// the relay passes that on to the client, which then dials through the relay
+// under it: the circuit is an end-to-end datagram connection, and Data and
+// Credit are never used on it. No cid, or a target that does not echo it, means
+// the circuit is the byte stream of transport/relay_link.h.
 //
 // Every length is bounds-checked and the payload is capped, so a malformed or
 // hostile message is dropped rather than acted on.
@@ -59,6 +72,8 @@ constexpr uint8_t kDenyNotPermitted = 1;  ///< relaying is off here
 constexpr uint8_t kDenyResourceLimit = 2; ///< over a circuit or rate budget
 constexpr uint8_t kDenyRefused      = 3;  ///< the target itself said no
 constexpr uint8_t kDenyLoop         = 4;  ///< one end is itself only reachable by relay
+
+constexpr uint8_t kOfferDatagrams = 0x01;  ///< Open: our leg can carry forwarded datagrams
 
 constexpr uint8_t kCloseNormal = 0;  ///< an orderly end of stream
 constexpr uint8_t kCloseError  = 1;  ///< anything else
@@ -95,6 +110,23 @@ uint32_t get_u32(const uint8_t* p) {
            (static_cast<uint32_t>(p[2]) << 8)  |  static_cast<uint32_t>(p[3]);
 }
 
+void put_u64(Bytes& out, uint64_t v) {
+    put_u32(out, static_cast<uint32_t>(v >> 32));
+    put_u32(out, static_cast<uint32_t>(v));
+}
+
+uint64_t get_u64(const uint8_t* p) {
+    return (static_cast<uint64_t>(get_u32(p)) << 32) | get_u32(p + 4);
+}
+
+/// The connection id a trailing field at `at` names, or 0 for none. Odd ids are
+/// the responder's half and never a pair's name, so they read as none too.
+uint64_t cid_at(ByteView body, size_t at) {
+    if (body.size() < at + 8) return 0;
+    const uint64_t cid = get_u64(body.data() + at);
+    return (cid & 1) != 0 ? 0 : cid;
+}
+
 /// A message with its header written and room reserved for `body` bytes more.
 Bytes message(uint8_t op, uint32_t circuit, size_t body = 0) {
     Bytes out;
@@ -115,13 +147,22 @@ void append_id(Bytes& out, const PeerId& id) {
 /// would be a chain, and chains are what turn a relay mesh into an amplifier.
 enum class Reach { None, Direct, Relayed };
 
-Reach reach_of(PeerNetwork& network, const PeerId& id) {
+/// The wire `id` is reached over, nullopt when it is not a peer.
+std::optional<TransportKind> transport_of(PeerNetwork& network, const PeerId& id) {
     // A snapshot, which is not free — so this is only ever called on the rare
     // paths (opening a circuit, answering a request), never per data message.
     for (const PeerInfo& info : network.peers())
-        if (info.id == id)
-            return info.transport == TransportKind::Relay ? Reach::Relayed : Reach::Direct;
-    return Reach::None;
+        if (info.id == id) return info.transport;
+    return std::nullopt;
+}
+
+Reach reach_of(std::optional<TransportKind> transport) {
+    if (!transport) return Reach::None;
+    return *transport == TransportKind::Relay ? Reach::Relayed : Reach::Direct;
+}
+
+Reach reach_of(PeerNetwork& network, const PeerId& id) {
+    return reach_of(transport_of(network, id));
 }
 
 } // namespace
@@ -133,17 +174,26 @@ struct Relay::State : public std::enable_shared_from_this<Relay::State> {
 
     /// One circuit this node TERMINATES: a relayed peer of ours.
     struct Leg {
+        /// The byte stream, or null for a circuit whose relay forwards datagrams —
+        /// its connection holds a ForwardedCircuit instead.
         std::shared_ptr<Circuit> circuit;
+        /// Unset until the connection is made: for a circuit we open, when it is
+        /// accepted, in whichever form the relay chose.
         PeerRoute                route{};
         PeerId                   target;            ///< the far end; a hint until the handshake
         bool                     outbound = false;  ///< we opened it
+        Clock::time_point        opened{};
     };
 
     /// What one circuit this node CARRIES has cost so far. Shared by the circuit's
     /// two legs, so either side's accounting is the same accounting.
     struct Meter {
-        uint64_t          bytes = 0;
-        Clock::time_point started{};
+        /// Atomic because a forwarded circuit's bytes are counted by the mux, on
+        /// its reactor, while the worker reads them against the cap.
+        std::atomic<uint64_t> bytes{0};
+        /// The connection id pair the mux forwards, or 0 for a byte stream.
+        std::atomic<uint64_t> cid{0};
+        Clock::time_point     started{};
     };
 
     /// One circuit this node carries: where its other side is.
@@ -156,6 +206,11 @@ struct Relay::State : public std::enable_shared_from_this<Relay::State> {
         /// is not something a peer chooses, and charging for it would let anyone
         /// use up a third party's budget by opening circuits toward them.
         bool                   opener = false;
+        /// What the peer whose link holds this entry sends on a byte stream may
+        /// cost (Config::max_circuit_rate_bps). Spent as its data goes past;
+        /// while it is in debt, the credit the far end grants it is held here.
+        TokenBucket            rate{};
+        uint32_t               held_credit = 0;
     };
 
     /// Everything about one peer link: the ids we have allocated on it, the
@@ -188,6 +243,8 @@ struct Relay::State : public std::enable_shared_from_this<Relay::State> {
     CircuitService*                circuits = nullptr;
     std::atomic<HolePunchService*> punch{nullptr};
     std::atomic<bool>              running{false};
+    /// Bytes of byte-stream circuits, and of forwarded ones that have ended (a
+    /// live one's are its meter's).
     std::atomic<uint64_t>          carried_bytes{0};
 
     mutable std::mutex                                          mutex;
@@ -197,6 +254,7 @@ struct Relay::State : public std::enable_shared_from_this<Relay::State> {
     size_t outbound_circuits = 0;
     size_t inbound_circuits  = 0;
     size_t carried_circuits  = 0;
+    std::mt19937_64 rng{std::random_device{}()};   ///< connection ids we forward under
 
     // — inbound dispatch (reactor threads) —
     void handle(const Peer& from, ByteView payload);
@@ -245,6 +303,8 @@ struct Relay::State : public std::enable_shared_from_this<Relay::State> {
     Dropped take_leg(const PeerId& carrier, uint32_t circuit);
     /// Hand `events` to a circuit's connection. No-op for an unset route.
     void     wake(PeerRoute route, uint32_t events);
+    /// Record the connection a leg became, if the leg is still there.
+    void     set_route(const PeerId& carrier, uint32_t circuit, PeerRoute route);
 
     // — the relay half —
     /// Erase one entry of a carried circuit and un-charge its opener. Caller holds
@@ -256,7 +316,28 @@ struct Relay::State : public std::enable_shared_from_this<Relay::State> {
     /// that came from `peer` in the first place. Caller must not hold the mutex.
     void close_carried(const PeerId& peer, uint32_t circuit, uint8_t reason,
                        bool tell_far, bool tell_near);
+    /// A carried circuit is over: stop forwarding its datagrams, if it had any,
+    /// and book what it moved. Caller must not hold the mutex.
+    void retire(Meter& meter);
     void deny(const PeerId& to, uint32_t circuit, uint8_t reason);
+    /// The client half of Accept: make the connection in the form the relay chose.
+    void accept_leg(const PeerId& carrier, uint32_t circuit, uint32_t window, uint64_t cid);
+    /// Drop a circuit we opened that was never accepted, and tell the relay.
+    void abandon_leg(const PeerId& carrier, uint32_t circuit);
+
+    /// One direction of a carried circuit may move this many bytes a second, this
+    /// many at once (Config::max_circuit_rate_bps).
+    uint64_t rate_bytes() const { return config.max_circuit_rate_bps / 8; }
+    uint64_t burst_bytes() const {
+        return rate_bytes() * static_cast<uint64_t>(config.circuit_burst.count()) / 1000;
+    }
+    TokenBucket circuit_rate(Clock::time_point now) const {
+        return TokenBucket(rate_bytes(), burst_bytes(), now);
+    }
+    /// Pass on credit the far end granted `to`, unless `to` has spent past its
+    /// rate: then it waits in `forward` until tick() finds it repaid. Caller
+    /// holds the mutex; returns what to send now (0 for nothing).
+    uint32_t pass_credit(Forward& forward, uint32_t granted, Clock::time_point now);
 
     void send(const PeerId& to, const Bytes& msg) {
         if (network) network->send(to, MessageType::Relay, ByteView(msg));
@@ -389,6 +470,8 @@ void Relay::State::handle_open(const PeerId& from, uint32_t circuit, ByteView bo
     if (*dst == from || *dst == network->local_id())
                                              return deny(from, circuit, kDenyNoTarget);
     const uint32_t window = get_u32(body.data() + PeerId::kSize);
+    const bool     offered = body.size() > PeerId::kSize + 4 &&
+                             (body.data()[PeerId::kSize + 4] & kOfferDatagrams) != 0;
 
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -406,43 +489,71 @@ void Relay::State::handle_open(const PeerId& from, uint32_t circuit, ByteView bo
     // Neither end may itself be relayed. This is the rule that keeps circuits from
     // being chained: a chain multiplies one peer's bytes across several relays and
     // gives a loop somewhere to form.
-    if (reach_of(*network, from) != Reach::Direct) return deny(from, circuit, kDenyLoop);
-    switch (reach_of(*network, *dst)) {
+    const auto from_wire = transport_of(*network, from);
+    const auto dst_wire  = transport_of(*network, *dst);
+    if (reach_of(from_wire) != Reach::Direct) return deny(from, circuit, kDenyLoop);
+    switch (reach_of(dst_wire)) {
         case Reach::None:    return deny(from, circuit, kDenyNoTarget);
         case Reach::Relayed: return deny(from, circuit, kDenyLoop);
         case Reach::Direct:  break;
     }
 
-    uint32_t far_id = kNoCircuit;
+    // Both legs datagram connections: forward the packets of one the two ends run
+    // themselves instead of carrying a byte stream. Filed before the target hears
+    // of it, so the forwarding is in place by the time the client can dial.
+    auto meter = std::make_shared<Meter>();
+    meter->started = Clock::now();
+    if (offered && circuits && *from_wire == TransportKind::Udp && *dst_wire == TransportKind::Udp) {
+        uint64_t cid = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            while (cid == 0) cid = rng() & ~uint64_t{1};   // the dialer's half is even
+        }
+        if (circuits->forward_datagrams(from, *dst, cid,
+                                        std::shared_ptr<std::atomic<uint64_t>>(meter, &meter->bytes),
+                                        rate_bytes(), burst_bytes()))
+            meter->cid = cid;
+    }
+
+    uint32_t far_id  = kNoCircuit;
+    bool     refused = false;
+    bool     repeat  = false;
     {
         // Re-checked: the reachability lookups above ran without the lock, and a
         // burst of Opens could otherwise all pass the test and then all allocate.
         std::lock_guard<std::mutex> lock(mutex);
-        if (carried_circuits >= config.max_circuits)
-            return deny(from, circuit, kDenyResourceLimit);
         PeerLink& near_link = links[from];
-        if (near_link.opened >= config.max_circuits_per_peer)
-            return deny(from, circuit, kDenyResourceLimit);
-        if (near_link.forwards.count(circuit)) return;
+        if (near_link.forwards.count(circuit)) {
+            repeat = true;
+        } else if (carried_circuits >= config.max_circuits ||
+                   near_link.opened >= config.max_circuits_per_peer) {
+            refused = true;
+        } else {
+            PeerLink& far_link = links[*dst];
+            far_id = allocate_id(far_link, *dst);
 
-        PeerLink& far_link = links[*dst];
-        far_id = allocate_id(far_link, *dst);
-
-        auto meter = std::make_shared<Meter>();
-        meter->started = Clock::now();
-
-        links[from].forwards.emplace(circuit, Forward{*dst, far_id, meter, /*opener=*/true});
-        links[*dst].forwards.emplace(far_id, Forward{from, circuit, meter, /*opener=*/false});
-        ++links[from].opened;
-        ++carried_circuits;
+            const auto now = Clock::now();
+            links[from].forwards.emplace(
+                circuit, Forward{*dst, far_id, meter, /*opener=*/true, circuit_rate(now)});
+            links[*dst].forwards.emplace(
+                far_id, Forward{from, circuit, meter, /*opener=*/false, circuit_rate(now)});
+            ++links[from].opened;
+            ++carried_circuits;
+        }
+    }
+    if (refused || repeat) {
+        retire(*meter);
+        if (refused) deny(from, circuit, kDenyResourceLimit);
+        return;
     }
 
     LOG_DEBUG("relay", "Carrying a circuit from " << from.short_hex() << " to "
-              << dst->short_hex());
+              << dst->short_hex() << (meter->cid ? " (forwarding datagrams)" : ""));
 
-    Bytes msg = message(kOpIncoming, far_id, PeerId::kSize + 4);
+    Bytes msg = message(kOpIncoming, far_id, PeerId::kSize + 4 + 8);
     append_id(msg, from);
     put_u32(msg, window);
+    if (const uint64_t cid = meter->cid) put_u64(msg, cid);
     send(*dst, msg);
 }
 
@@ -456,6 +567,7 @@ void Relay::State::handle_incoming(const PeerId& from, uint32_t circuit, ByteVie
     const auto src = PeerId::from_bytes(ByteView(body.data(), PeerId::kSize));
     if (!src || *src == network->local_id()) return deny(from, circuit, kDenyRefused);
     const uint32_t peer_window = get_u32(body.data() + PeerId::kSize);
+    const uint64_t cid         = cid_at(body, PeerId::kSize + 4);
 
     // `src` is the relay's word, not the far end's — the handshake is what actually
     // establishes who is there. It is used only to turn away a circuit that would
@@ -466,6 +578,7 @@ void Relay::State::handle_incoming(const PeerId& from, uint32_t circuit, ByteVie
     // the chain this refuses to be part of.
     if (reach_of(*network, from) != Reach::Direct) return deny(from, circuit, kDenyLoop);
 
+    auto carrier = std::make_shared<Carrier>(shared_from_this(), from);
     std::shared_ptr<Circuit> incoming;
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -476,34 +589,37 @@ void Relay::State::handle_incoming(const PeerId& from, uint32_t circuit, ByteVie
 
         // Open from the first instant: the far end is already there, and its
         // request carried the window it will receive.
-        incoming = Circuit::accepted(circuit, std::make_shared<Carrier>(shared_from_this(), from),
-                                     peer_window, config.window);
-        link.legs.emplace(circuit, Leg{incoming, PeerRoute{}, *src, /*outbound=*/false});
+        if (cid == 0) incoming = Circuit::accepted(circuit, carrier, peer_window, config.window);
+        link.legs.emplace(circuit, Leg{incoming, PeerRoute{}, *src, /*outbound=*/false, Clock::now()});
         ++inbound_circuits;
     }
 
-    const auto route = circuits->adopt_circuit(from, std::make_unique<RelayLink>(incoming),
-                                               ConnRole::Inbound, /*connected=*/true);
-    if (!route) {
-        // The node will not take another peer, or the carrier went away between the
-        // two lines above. Either way nothing was started.
-        take_leg(from, circuit);
-        return deny(from, circuit, kDenyResourceLimit);
-    }
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        auto link = links.find(from);
-        if (link != links.end()) {
-            auto leg = link->second.legs.find(circuit);
-            if (leg != link->second.legs.end()) leg->second.route = *route;
+    std::optional<PeerRoute> route;
+    if (cid != 0) {
+        route = circuits->expect_relayed(from, cid, ForwardedCircuit(carrier, circuit));
+        // Not taken: the ForwardedCircuit has already closed the circuit toward
+        // the relay and released the leg.
+        if (!route) return;
+    } else {
+        route = circuits->adopt_circuit(from, std::make_unique<RelayLink>(incoming),
+                                        ConnRole::Inbound, /*connected=*/true);
+        if (!route) {
+            // The node will not take another peer, or the carrier went away between
+            // the two lines above. Either way nothing was started.
+            take_leg(from, circuit);
+            return deny(from, circuit, kDenyResourceLimit);
         }
     }
+    set_route(from, circuit, *route);
 
-    Bytes msg = message(kOpAccept, circuit, 4);
+    // The id echoed is what tells the relay, and through it the client, that this
+    // circuit is a datagram connection.
+    Bytes msg = message(kOpAccept, circuit, 4 + 8);
     put_u32(msg, config.window);
+    if (cid != 0) put_u64(msg, cid);
     send(from, msg);
     LOG_DEBUG("relay", "Accepted a circuit from " << src->short_hex() << " via "
-              << from.short_hex());
+              << from.short_hex() << (cid ? " (forwarded datagrams)" : ""));
 }
 
 // ── Messages that are either ours to act on or ours to forward ──────────────
@@ -511,34 +627,76 @@ void Relay::State::handle_incoming(const PeerId& from, uint32_t circuit, ByteVie
 void Relay::State::handle_accept(const PeerId& from, uint32_t circuit, ByteView body) {
     if (body.size() < 4) return;
     const uint32_t window = get_u32(body.data());
+    const uint64_t cid    = cid_at(body, 4);
 
-    std::shared_ptr<Circuit> ours;
-    PeerRoute                route{};
-    std::optional<Forward>   forward;
+    bool                   ours = false;
+    std::optional<Forward> forward;
     {
         std::lock_guard<std::mutex> lock(mutex);
         auto link = links.find(from);
         if (link == links.end()) return;
-        if (auto leg = link->second.legs.find(circuit); leg != link->second.legs.end()) {
-            ours  = leg->second.circuit;
-            route = leg->second.route;
+        if (link->second.legs.count(circuit)) {
+            ours = true;
         } else if (auto fwd = link->second.forwards.find(circuit);
                    fwd != link->second.forwards.end()) {
             forward = fwd->second;
         }
     }
 
-    if (ours) {
-        // The far end is there: the connection may finish connecting and start its
-        // handshake, exactly as a completed TCP connect would let it.
-        wake(route, ours->on_accept(window));
+    if (ours) return accept_leg(from, circuit, window, cid);
+    if (!forward) return;
+
+    // Datagrams only if the target took them: one that answered without the id
+    // (an older node) is running a byte stream.
+    uint64_t forwarded = forward->meter->cid;
+    if (forwarded != 0 && forwarded != cid) {
+        retire(*forward->meter);
+        forwarded = 0;
+    }
+    Bytes msg = message(kOpAccept, forward->id, 4 + 8);
+    put_u32(msg, window);
+    if (forwarded != 0) put_u64(msg, forwarded);
+    send(forward->peer, msg);
+}
+
+void Relay::State::accept_leg(const PeerId& carrier, uint32_t circuit, uint32_t window,
+                              uint64_t cid) {
+    std::shared_ptr<Circuit> stream;
+    PeerId                   target;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto link = links.find(carrier);
+        if (link == links.end()) return;
+        auto leg = link->second.legs.find(circuit);
+        // Only a circuit we opened is accepted, and only once.
+        if (leg == link->second.legs.end() || !leg->second.outbound ||
+            leg->second.route.conn != kInvalidConnId)
+            return;
+        target = leg->second.target;
+        if (cid != 0) leg->second.circuit.reset();   // never to carry a byte
+        else          stream = leg->second.circuit;
+    }
+
+    // The far end is there: the connection may be made and start its handshake,
+    // exactly as a completed connect would let it.
+    std::optional<PeerRoute> route;
+    if (cid != 0) {
+        route = circuits->dial_relayed(carrier, cid,
+                                       ForwardedCircuit(std::make_shared<Carrier>(shared_from_this(), carrier),
+                                                        circuit));
+    } else {
+        route = circuits->adopt_circuit(carrier, std::make_unique<RelayLink>(stream),
+                                        ConnRole::Outbound, /*connected=*/false);
+    }
+    if (!route) {
+        // A forwarded circuit has already said so to the relay and been released;
+        // a stream that never became a connection has not.
+        if (cid == 0) abandon_leg(carrier, circuit);
+        advance(target);
         return;
     }
-    if (forward) {
-        Bytes msg = message(kOpAccept, forward->id, 4);
-        put_u32(msg, window);
-        send(forward->peer, msg);
-    }
+    set_route(carrier, circuit, *route);
+    if (stream) wake(*route, stream->on_accept(window));
 }
 
 void Relay::State::handle_deny(const PeerId& from, uint32_t circuit, ByteView body) {
@@ -567,7 +725,8 @@ void Relay::State::handle_deny(const PeerId& from, uint32_t circuit, ByteView bo
     if (!dropped.found) return;
     LOG_DEBUG("relay", "Circuit through " << from.short_hex() << " refused: "
               << deny_text(reason));
-    wake(dropped.route, dropped.circuit->on_closed(CloseReason::ConnectFailed, /*orderly=*/false));
+    if (dropped.circuit)
+        wake(dropped.route, dropped.circuit->on_closed(CloseReason::ConnectFailed, /*orderly=*/false));
     circuits->close_circuit(dropped.route, CloseReason::ConnectFailed);
     // The attempt is now free to try the next relay that said it could help.
     if (dropped.outbound) advance(dropped.target);
@@ -578,8 +737,8 @@ void Relay::State::handle_data(const PeerId& from, uint32_t circuit, ByteView bo
 
     std::shared_ptr<Circuit> ours;
     PeerRoute                route{};
-    std::optional<Forward>   forward;
-    bool                     over_budget = false;
+    std::optional<PeerId>    to;
+    uint32_t                 to_id = kNoCircuit;
     {
         std::lock_guard<std::mutex> lock(mutex);
         auto link = links.find(from);
@@ -589,10 +748,12 @@ void Relay::State::handle_data(const PeerId& from, uint32_t circuit, ByteView bo
             route = leg->second.route;
         } else if (auto fwd = link->second.forwards.find(circuit);
                    fwd != link->second.forwards.end()) {
-            forward = fwd->second;
-            forward->meter->bytes += body.size();
-            over_budget = config.max_bytes_per_circuit != 0 &&
-                          forward->meter->bytes > config.max_bytes_per_circuit;
+            to    = fwd->second.peer;
+            to_id = fwd->second.id;
+            fwd->second.meter->bytes += body.size();
+            // Passed on regardless — the window allowed it; what it costs is
+            // charged, and the sender's next credit waits until it is repaid.
+            fwd->second.rate.spend(body.size(), Clock::now());
         }
     }
 
@@ -602,17 +763,13 @@ void Relay::State::handle_data(const PeerId& from, uint32_t circuit, ByteView bo
         wake(route, ours->on_data(body));
         return;
     }
-    if (!forward) return;   // a circuit we have already forgotten; nothing to do
+    // A circuit we have already forgotten, or one of ours that forwards datagrams
+    // and has no stream to put this in.
+    if (!to) return;
 
-    if (over_budget) {
-        LOG_DEBUG("relay", "Circuit from " << from.short_hex() << " hit its byte cap");
-        close_carried(from, circuit, kCloseError, /*tell_far=*/true, /*tell_near=*/true);
-        return;
-    }
-
-    Bytes msg = message(kOpData, forward->id, body.size());
+    Bytes msg = message(kOpData, to_id, body.size());
     msg.insert(msg.end(), body.begin(), body.end());
-    send(forward->peer, msg);
+    send(*to, msg);
     carried_bytes.fetch_add(body.size(), std::memory_order_relaxed);
 }
 
@@ -622,7 +779,9 @@ void Relay::State::handle_credit(const PeerId& from, uint32_t circuit, ByteView 
 
     std::shared_ptr<Circuit> ours;
     PeerRoute                route{};
-    std::optional<Forward>   forward;
+    std::optional<PeerId>    to;
+    uint32_t                 to_id = kNoCircuit;
+    uint32_t                 passed = 0;
     {
         std::lock_guard<std::mutex> lock(mutex);
         auto link = links.find(from);
@@ -632,16 +791,30 @@ void Relay::State::handle_credit(const PeerId& from, uint32_t circuit, ByteView 
             route = leg->second.route;
         } else if (auto fwd = link->second.forwards.find(circuit);
                    fwd != link->second.forwards.end()) {
-            forward = fwd->second;
+            to    = fwd->second.peer;
+            to_id = fwd->second.id;
+            // The credit is for the far end's data, whose cost its own entry keeps.
+            if (auto sender = links.find(*to); sender != links.end()) {
+                if (auto entry = sender->second.forwards.find(to_id);
+                    entry != sender->second.forwards.end())
+                    passed = pass_credit(entry->second, granted, Clock::now());
+            }
         }
     }
 
     if (ours) { wake(route, ours->on_credit(granted)); return; }
-    if (forward) {
-        Bytes msg = message(kOpCredit, forward->id, 4);
-        put_u32(msg, granted);
-        send(forward->peer, msg);
+    if (to && passed != 0) {
+        Bytes msg = message(kOpCredit, to_id, 4);
+        put_u32(msg, passed);
+        send(*to, msg);
     }
+}
+
+uint32_t Relay::State::pass_credit(Forward& sender, uint32_t granted, Clock::time_point now) {
+    if (sender.held_credit == 0 && !sender.rate.in_debt(now)) return granted;
+    sender.held_credit = granted > UINT32_MAX - sender.held_credit ? UINT32_MAX
+                                                                   : sender.held_credit + granted;
+    return 0;
 }
 
 void Relay::State::handle_close(const PeerId& from, uint32_t circuit, ByteView body) {
@@ -662,8 +835,14 @@ void Relay::State::handle_close(const PeerId& from, uint32_t circuit, ByteView b
     const Dropped dropped = take_leg(from, circuit);
     if (!dropped.found) return;
     const bool orderly = reason == kCloseNormal;
-    wake(dropped.route, dropped.circuit->on_closed(
-                            orderly ? CloseReason::PeerClosed : CloseReason::PeerReset, orderly));
+    if (dropped.circuit) {
+        wake(dropped.route, dropped.circuit->on_closed(
+                                orderly ? CloseReason::PeerClosed : CloseReason::PeerReset, orderly));
+    } else {
+        // A datagram connection: an orderly end has reached it end to end already,
+        // so whatever is left is the relay giving up on it.
+        circuits->close_circuit(dropped.route, orderly ? CloseReason::PeerClosed : CloseReason::PeerReset);
+    }
     if (dropped.outbound) advance(dropped.target);
 }
 
@@ -750,7 +929,7 @@ void Relay::State::advance(const PeerId& target) {
         id      = allocate_id(link, via);
         circuit = Circuit::opening(id, std::make_shared<Carrier>(shared_from_this(), via),
                                    config.window);
-        link.legs.emplace(id, Leg{circuit, PeerRoute{}, target, /*outbound=*/true});
+        link.legs.emplace(id, Leg{circuit, PeerRoute{}, target, /*outbound=*/true, Clock::now()});
         ++outbound_circuits;
 
         it->second.opening = true;
@@ -758,27 +937,15 @@ void Relay::State::advance(const PeerId& target) {
         it->second.circuit = id;
     }
 
-    // Adopted BEFORE the request goes out, so the route is on record by the time an
-    // answer to it can possibly arrive.
-    const auto route = circuits->adopt_circuit(via, std::make_unique<RelayLink>(circuit),
-                                               ConnRole::Outbound, /*connected=*/false);
-    if (!route) {
-        take_leg(via, id);
-        advance(target);
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        auto link = links.find(via);
-        if (link != links.end()) {
-            auto leg = link->second.legs.find(id);
-            if (leg != link->second.legs.end()) leg->second.route = *route;
-        }
-    }
-
-    Bytes msg = message(kOpOpen, id, PeerId::kSize + 4);
+    // No connection yet: what it will run on — this stream, or a datagram
+    // connection the relay forwards — is the relay's answer (accept_leg). The
+    // circuit is made now all the same, so that whatever the far end sends ahead
+    // of the acceptance is kept.
+    const bool datagrams = circuits && transport_of(*network, via) == TransportKind::Udp;
+    Bytes msg = message(kOpOpen, id, PeerId::kSize + 4 + 1);
     append_id(msg, target);
     put_u32(msg, config.window);
+    msg.push_back(datagrams ? kOfferDatagrams : 0);
     send(via, msg);
 }
 
@@ -849,7 +1016,7 @@ void Relay::State::on_peer_disconnected(const PeerId& id) {
     }
 
     for (const auto& [circuit, leg] : legs) {
-        wake(leg.route, leg.circuit->on_closed(CloseReason::PeerReset, /*orderly=*/false));
+        if (leg.circuit) wake(leg.route, leg.circuit->on_closed(CloseReason::PeerReset, /*orderly=*/false));
         circuits->close_circuit(leg.route, CloseReason::PeerReset);
         if (leg.outbound) advance(leg.target);
     }
@@ -860,6 +1027,7 @@ void Relay::State::on_peer_disconnected(const PeerId& id) {
         Bytes msg = message(kOpClose, fwd.id, 1);
         msg.push_back(kCloseError);
         send(fwd.peer, msg);
+        retire(*fwd.meter);
         std::lock_guard<std::mutex> lock(mutex);
         if (erase_forward(fwd.peer, fwd.id) && carried_circuits) --carried_circuits;
     }
@@ -875,7 +1043,7 @@ void Relay::State::on_peer_writable(const PeerId& id) {
         if (link == links.end()) return;
         waiting.reserve(link->second.legs.size());
         for (const auto& [circuit, leg] : link->second.legs)
-            waiting.emplace_back(leg.circuit, leg.route);
+            if (leg.circuit) waiting.emplace_back(leg.circuit, leg.route);
     }
     for (const auto& [circuit, route] : waiting) wake(route, circuit->on_carrier_writable());
 }
@@ -942,6 +1110,23 @@ Relay::State::Dropped Relay::State::take_leg(const PeerId& carrier, uint32_t cir
     return out;
 }
 
+void Relay::State::set_route(const PeerId& carrier, uint32_t circuit, PeerRoute route) {
+    std::lock_guard<std::mutex> lock(mutex);
+    auto link = links.find(carrier);
+    if (link == links.end()) return;
+    auto leg = link->second.legs.find(circuit);
+    if (leg != link->second.legs.end()) leg->second.route = route;
+}
+
+void Relay::State::abandon_leg(const PeerId& carrier, uint32_t circuit) {
+    // The leg may already be gone — a link that was never adopted releases it as
+    // it dies — but the relay has still to hear.
+    take_leg(carrier, circuit);
+    Bytes msg = message(kOpClose, circuit, 1);
+    msg.push_back(kCloseError);
+    send(carrier, msg);
+}
+
 void Relay::State::wake(PeerRoute route, uint32_t events) {
     if (events == 0 || route.conn == kInvalidConnId) return;
     circuits->wake_circuit(route, events);
@@ -970,6 +1155,7 @@ void Relay::State::close_carried(const PeerId& peer, uint32_t circuit, uint8_t r
         erase_forward(forward->peer, forward->id);
         if (carried_circuits) --carried_circuits;
     }
+    retire(*forward->meter);
 
     if (tell_far) {
         Bytes msg = message(kOpClose, forward->id, 1);
@@ -981,6 +1167,14 @@ void Relay::State::close_carried(const PeerId& peer, uint32_t circuit, uint8_t r
         msg.push_back(reason);
         send(peer, msg);
     }
+}
+
+void Relay::State::retire(Meter& meter) {
+    // Whoever gets here first: two legs can end the same circuit at once.
+    const uint64_t cid = meter.cid.exchange(0);
+    if (cid == 0) return;
+    circuits->stop_forwarding(cid);
+    carried_bytes.fetch_add(meter.bytes.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 void Relay::State::deny(const PeerId& to, uint32_t circuit, uint8_t reason) {
@@ -998,6 +1192,9 @@ void Relay::State::tick() {
     std::vector<PeerId>                     timed_out;
     std::vector<PeerId>                     to_advance;
     std::vector<std::pair<PeerId, uint32_t>> expired;
+    std::vector<std::pair<PeerId, uint32_t>> unanswered;
+    struct Credit { PeerId to; uint32_t circuit; uint32_t bytes; };
+    std::vector<Credit>                     credits;
     {
         std::lock_guard<std::mutex> lock(mutex);
         for (auto it = cooldown.begin(); it != cooldown.end();) {
@@ -1009,13 +1206,26 @@ void Relay::State::tick() {
             else if (!attempt.opening && !attempt.ready.empty()) to_advance.push_back(target);
         }
 
-        // Circuits we carry that have outstayed their welcome. The byte cap is
-        // enforced as the bytes go past (handle_data); this is the clock half.
-        if (config.max_circuit_duration.count() != 0) {
-            for (const auto& [peer, link] : links)
-                for (const auto& [circuit, fwd] : link.forwards)
-                    if (now - fwd.meter->started >= config.max_circuit_duration)
-                        expired.emplace_back(peer, circuit);
+        for (auto& [peer, link] : links) {
+            for (auto& [circuit, fwd] : link.forwards) {
+                // Circuits we carry that have outstayed their welcome.
+                if (fwd.opener && config.max_circuit_duration.count() != 0 &&
+                    now - fwd.meter->started >= config.max_circuit_duration)
+                    expired.emplace_back(peer, circuit);
+                // Credit held back from a sender that has since come back within
+                // its rate.
+                if (fwd.held_credit != 0 && !fwd.rate.in_debt(now)) {
+                    credits.push_back(Credit{peer, circuit, fwd.held_credit});
+                    fwd.held_credit = 0;
+                }
+            }
+            // Circuits we opened that the relay never answered. A stream used to be
+            // a connection from the start, reaped by its establish deadline; now
+            // the connection is made on acceptance, and until then this is all.
+            for (const auto& [circuit, leg] : link.legs)
+                if (leg.outbound && leg.route.conn == kInvalidConnId &&
+                    now - leg.opened >= config.open_timeout)
+                    unanswered.emplace_back(peer, circuit);
         }
     }
 
@@ -1026,6 +1236,12 @@ void Relay::State::tick() {
     for (const PeerId& target : to_advance) advance(target);
     for (const auto& [peer, circuit] : expired)
         close_carried(peer, circuit, kCloseError, /*tell_far=*/true, /*tell_near=*/true);
+    for (const auto& [peer, circuit] : unanswered) abandon_leg(peer, circuit);
+    for (const Credit& credit : credits) {
+        Bytes msg = message(kOpCredit, credit.circuit, 4);
+        put_u32(msg, credit.bytes);
+        send(credit.to, msg);
+    }
 }
 
 void Relay::State::shutdown() {
@@ -1131,8 +1347,23 @@ size_t Relay::carried_circuits() const {
     return state_->carried_circuits;
 }
 
+size_t Relay::forwarded_circuits() const {
+    size_t n = 0;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    for (const auto& [peer, link] : state_->links)
+        for (const auto& [circuit, fwd] : link.forwards)
+            if (fwd.opener && fwd.meter->cid != 0) ++n;
+    return n;
+}
+
 uint64_t Relay::carried_bytes() const {
-    return state_->carried_bytes.load(std::memory_order_relaxed);
+    uint64_t total = state_->carried_bytes.load(std::memory_order_relaxed);
+    // Forwarded circuits still running count in their meters.
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    for (const auto& [peer, link] : state_->links)
+        for (const auto& [circuit, fwd] : link.forwards)
+            if (fwd.opener && fwd.meter->cid != 0) total += fwd.meter->bytes;
+    return total;
 }
 
 size_t Relay::attempts() const {

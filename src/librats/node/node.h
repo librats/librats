@@ -173,6 +173,15 @@ public:
                                            ConnRole role, bool connected) override;
     void                     wake_circuit(PeerRoute route, uint32_t events) override;
     void                     close_circuit(PeerRoute route, CloseReason reason) override;
+    std::optional<PeerRoute> dial_relayed(const PeerId& carrier, uint64_t cid,
+                                          ForwardedCircuit circuit) override;
+    std::optional<PeerRoute> expect_relayed(const PeerId& carrier, uint64_t cid,
+                                            ForwardedCircuit circuit) override;
+    bool                     forward_datagrams(const PeerId& dialer, const PeerId& responder,
+                                               uint64_t cid,
+                                               std::shared_ptr<std::atomic<uint64_t>> bytes,
+                                               uint64_t rate, uint64_t burst) override;
+    void                     stop_forwarding(uint64_t cid) override;
 
     // — peer admission limit (0 = unlimited; guards inbound, not our own dials) —
     size_t max_peers() const noexcept { return max_peers_.load(std::memory_order_relaxed); }
@@ -299,6 +308,8 @@ private:
     bool open_listeners();
     /// Report a target every dial attempt failed on (called by the Dialer).
     void report_dial_failed(const std::string& host, uint16_t port);
+    /// The route to `id` when it is a peer reached directly over UDP.
+    std::optional<PeerRoute> datagram_route(const PeerId& id) const;
 
     Peer make_peer(const PeerId& id, PeerRoute route) { return Peer(id, route, *this); }
     /// Queue one message on a peer's route, from any thread: `owed` is the peer's

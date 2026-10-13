@@ -58,6 +58,37 @@
  * one pacer release (Recovery::kPaceMaxBurst) before it goes: what one flush hands
  * the socket leaves at line rate.
  *
+ * ── Relayed connections ─────────────────────────────────────────────────────
+ * A relay whose two legs are both datagram connections on this socket does not
+ * carry a byte stream between them (transport/relay_link.h): it forwards the
+ * packets of a connection the two ends run between themselves, as they come.
+ * The id pair says everything needed: every packet toward the dialer names the
+ * dialer's even id, every packet toward the responder the odd one, the Initial
+ * included. So forward() files both ids, and a datagram for either — from the
+ * address that end's leg runs on, nobody else — leaves again unchanged for the
+ * other end's: no decryption (the header is sealed as associated data, so it
+ * could not be changed if we wanted to), no state beyond a byte count. Every
+ * NAT on the way already holds the mapping, because it is the very one each
+ * end's leg to us uses.
+ *
+ * A forward may be held to a rate (the relay's cap on what one circuit costs
+ * it). It is held the way a bottleneck link would hold it, never by dropping
+ * outright — a policer that drops what exceeds a rate looks to a congestion
+ * controller like a lossy path with room to spare, and BBR, which discounts a
+ * path's own loss, would keep running into it. So each direction has a token
+ * bucket (`burst` deep: a keyframe passes as it comes) and behind it a queue of
+ * kShaperQueue at the rate; only past that is a datagram dropped, as a full
+ * buffer would. The ends then see what they see at any bottleneck — a queue
+ * building, and losses only once it is full — and settle at the rate.
+ *
+ * The ends are the other half. The dialer sends its Initial to the relay under
+ * the id the relay chose (connect_relayed); the responder files that id as
+ * expected (expect_relayed), so when the Initial arrives from the relay's
+ * address it is adopted under the ConnId set aside for it, as a relayed
+ * connection, with no Retry — the relay vouched for the address. Each holds the
+ * circuit's ForwardedCircuit, and dropping the connection's entry ends the
+ * circuit.
+ *
  * Threading follows the rest of the transport: the mux belongs to exactly one
  * Reactor and is touched only by that reactor's thread. Events are never
  * delivered from inside a connection's packet handling — a connection records
@@ -67,15 +98,19 @@
 
 #include "librats/core/address.h"
 #include "librats/core/socket.h"
+#include "librats/core/token_bucket.h"
 #include "librats/core/types.h"
 #include "librats/core/udp_io.h"
 #include "librats/security/handshaker.h"
+#include "librats/transport/relay_link.h"
 #include "librats/transport/transport.h"
 #include "librats/transport/udp_connection.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <random>
 #include <unordered_map>
@@ -96,6 +131,12 @@ public:
     /// Adopt a freshly accepted inbound connection. Returns the new ConnId, or
     /// kInvalidConnId to refuse it (the mux then tells the dialer).
     virtual ConnId adopt_inbound(std::unique_ptr<Transport> transport) = 0;
+
+    /// Adopt a relayed inbound connection under the id expect_relayed() was given.
+    /// False refuses it.
+    virtual bool adopt_relayed(ConnId /*id*/, std::unique_ptr<Transport> /*transport*/) {
+        return false;
+    }
 
     /// Deliver poll-equivalent events (PollIn/PollOut/PollErr) to a connection.
     virtual void dispatch_link_events(ConnId id, uint32_t events) = 0;
@@ -173,6 +214,15 @@ public:
     /// and a burst that overruns it is dropped by the kernel.
     static constexpr int kSocketBufferBytes = 4 * 1024 * 1024;
 
+    /// How long an expected relayed dial is waited for: as long as a connection
+    /// is given to establish (Reactor::kEstablishTimeout).
+    static constexpr std::chrono::seconds kExpectTimeout{15};
+
+    /// The buffer of a rate-held forward, in time at its rate (see the file
+    /// comment), and never less than kMinShaperQueue bytes.
+    static constexpr std::chrono::milliseconds kShaperQueue{50};
+    static constexpr size_t                    kMinShaperQueue = 32 * 1024;
+
     UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
            SecurityProvider& security, UdpMuxLimits limits = {},
            CongestionAlgorithm congestion = CongestionAlgorithm::Bbr);
@@ -207,6 +257,29 @@ public:
     /// connection id could be found. `profile` shapes the Initial's repeats.
     std::unique_ptr<Transport> connect(const Address& remote, DialProfile profile = {});
 
+    // — relayed connections (see the file comment) —
+
+    /// Dial through the relay at `relay`, under the dialer's id `cid` the relay
+    /// forwards. nullptr if the id is odd or taken here, in which case `circuit`
+    /// is ended. The transport reports TransportKind::Relay.
+    std::unique_ptr<Transport> connect_relayed(const Address& relay, udp::Cid cid,
+                                               ForwardedCircuit circuit);
+
+    /// Take an Initial for the responder's half of `cid` from `relay` as a relayed
+    /// dial, adopted under `id` (UdpMuxDelegate::adopt_relayed) — if it comes
+    /// within kExpectTimeout. False if the id is odd or taken here, and `circuit`
+    /// is ended; otherwise it ends with the connection, or with the wait.
+    bool expect_relayed(udp::Cid cid, const Address& relay, ConnId id, ForwardedCircuit circuit);
+
+    /// Forward the packets of the connection `cid` between its dialer at `dialer`
+    /// and its responder at `responder`, adding the size of each datagram passed
+    /// on to `bytes` — at most `rate` bytes a second each way, `burst` at once
+    /// (0: as fast as they come). False if either id is taken here.
+    bool forward(udp::Cid cid, const Address& dialer, const Address& responder,
+                 std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate = 0, uint64_t burst = 0);
+    /// Stop forwarding `cid`. A no-op for one not forwarded.
+    void unforward(udp::Cid cid);
+
     /// The transport that owned `conn` is being destroyed. The connection goes at
     /// once or lingers until it has delivered what it owes.
     void release(UdpConnection& conn);
@@ -231,6 +304,27 @@ private:
         /// surfaces.
         Clock::time_point scheduled{};
         bool              armed = false;
+        /// The circuit a relayed connection is, ended when the entry goes.
+        ForwardedCircuit  circuit{};
+    };
+
+    /// A relayed dial on its way (expect_relayed).
+    struct Expected {
+        Address           relay;
+        ConnId            id = kInvalidConnId;
+        Clock::time_point until{};
+        ForwardedCircuit  circuit{};
+    };
+
+    /// Where the packets of a connection we forward go next.
+    struct Forward {
+        Address                                from;   ///< the only sender we pass on
+        Address                                to;
+        std::shared_ptr<std::atomic<uint64_t>> bytes;
+        TokenBucket                            rate{};
+        std::deque<Bytes>                      queue{};        ///< waiting for the rate
+        size_t                                 queued = 0;     ///< bytes in `queue`
+        size_t                                 queue_limit = 0;
     };
 
     struct Due {
@@ -250,6 +344,19 @@ private:
     void handle_datagram(uint8_t* data, size_t len, const Address& from, Clock::time_point now);
     void on_initial(const udp::LongPacket& initial, size_t len, const Address& from,
                     Clock::time_point now);
+    void accept_relayed(const udp::LongPacket& initial, size_t len, const Address& from,
+                        Clock::time_point now);
+    void pass_on(udp::Cid cid, Forward& forward, const uint8_t* data, size_t len,
+                 const Address& from, Clock::time_point now);
+    /// Let out what the rate now allows of every queue held back by it.
+    void release_shaped(Clock::time_point now);
+    void expire_expected();
+    /// Drop a connection's entry; a relayed one's circuit ends once it is out of the table.
+    void forget(std::unordered_map<udp::Cid, Entry>::iterator it);
+    /// Whether either half of the pair `cid` belongs to is in use here.
+    bool pair_taken(udp::Cid cid) const;
+    std::unique_ptr<Transport> dial(const Address& remote, udp::Cid cid, DialProfile profile,
+                                    ForwardedCircuit circuit);
     void send_refusal(const Address& to, const udp::LongPacket& initial, uint64_t code);
     void send_retry(const Address& to, const udp::LongPacket& initial);
     void send_stateless_reset(const Address& to, udp::Cid dcid, size_t trigger_len);
@@ -279,6 +386,9 @@ private:
     udp::UdpReceiveBudget receive_budget_;
 
     std::unordered_map<udp::Cid, Entry>      conns_;   ///< keyed by our own id
+    std::unordered_map<udp::Cid, Expected>   expected_;   ///< keyed by the id we will have
+    std::unordered_map<udp::Cid, Forward>    forwards_;   ///< keyed by the id packets name
+    std::vector<udp::Cid>                    shaping_;    ///< forwards with a queue
     std::vector<Due>                         due_;     ///< min-heap of deadlines
     std::vector<std::pair<ConnId, uint32_t>> pending_events_;
     std::vector<udp::Cid>                    bursts_;  ///< connections the current receive reached

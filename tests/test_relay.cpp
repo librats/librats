@@ -30,11 +30,15 @@ bool wait_for(Pred pred, std::chrono::milliseconds timeout = 20s) {
     return pred();
 }
 
-NodeConfig listening_config() {
+/// `wire` is what this node dials over first — and so what its leg to a relay
+/// will be: a relay forwards the datagrams of a circuit whose legs are both UDP,
+/// and carries a byte stream otherwise.
+NodeConfig listening_config(TransportKind wire = TransportKind::Udp) {
     NodeConfig c;
-    c.bind_address = "127.0.0.1";
-    c.security     = NodeConfig::Security::Noise;
-    c.protocol     = librats_test::test_protocol();
+    c.bind_address        = "127.0.0.1";
+    c.security            = NodeConfig::Security::Noise;
+    c.protocol            = librats_test::test_protocol();
+    c.preferred_transport = wire;
     return c;
 }
 
@@ -138,15 +142,17 @@ private:
 /// Two peers and the node between them, wired up and connected — the shape every
 /// test below starts from.
 struct Trio {
-    Node hub{listening_config()};
-    Node a{listening_config()};
-    Node b{listening_config()};
+    Node hub;
+    Node a;
+    Node b;
     Relay* relay_hub = nullptr;
     Relay* relay_a   = nullptr;
     Relay* relay_b   = nullptr;
 
     Trio(Relay::Config hub_config = serving(),
-         Relay::Config end_config = Relay::Config()) {
+         Relay::Config end_config = Relay::Config(),
+         TransportKind a_wire = TransportKind::Udp, TransportKind b_wire = TransportKind::Udp)
+        : hub(listening_config()), a(listening_config(a_wire)), b(listening_config(b_wire)) {
         relay_hub = hub.add_subsystem(std::make_unique<Relay>(hub_config));
         relay_a   = a.add_subsystem(std::make_unique<Relay>(end_config));
         relay_b   = b.add_subsystem(std::make_unique<Relay>(end_config));
@@ -212,6 +218,7 @@ TEST(RelayE2E, ConnectsTwoPeersThroughACommonRelay) {
     }
 
     EXPECT_EQ(trio.relay_hub->carried_circuits(), 1u);
+    EXPECT_EQ(trio.relay_hub->forwarded_circuits(), 1u) << "both legs are UDP: datagrams forwarded";
     EXPECT_GT(trio.relay_hub->carried_bytes(), 0u);
     // The attempt is retired the moment the peer is there, rather than aging out.
     EXPECT_TRUE(wait_for([&] { return trio.relay_a->attempts() == 0u; }, 3s));
@@ -219,8 +226,20 @@ TEST(RelayE2E, ConnectsTwoPeersThroughACommonRelay) {
 
 // A payload far larger than one data chunk and than the credit window has to arrive
 // whole: the window is a brake on a relayed path, never a filter.
-TEST(RelayE2E, CarriesAPayloadLargerThanTheWindow) {
-    Trio trio;
+// The tests that hold for both forms a circuit takes: an end-to-end datagram
+// connection the relay forwards (UDP legs) and the byte stream it carries (TCP).
+class RelayForms : public ::testing::TestWithParam<TransportKind> {
+protected:
+    TransportKind wire() const { return GetParam(); }
+    size_t        forwarded() const { return wire() == TransportKind::Udp ? 1u : 0u; }
+};
+
+INSTANTIATE_TEST_SUITE_P(RelayE2E, RelayForms,
+                         ::testing::Values(TransportKind::Udp, TransportKind::Tcp),
+                         [](const auto& info) { return std::string(to_string(info.param)); });
+
+TEST_P(RelayForms, CarriesAPayloadLargerThanTheWindow) {
+    Trio trio(serving(), Relay::Config(), wire(), wire());
 
     constexpr size_t kSize = 3 * 1024 * 1024;   // several windows' worth
     std::string      payload(kSize, '\0');
@@ -239,6 +258,8 @@ TEST(RelayE2E, CarriesAPayloadLargerThanTheWindow) {
 
     ASSERT_TRUE(trio.relay_a->connect_via_relay(trio.b.local_id()));
     ASSERT_TRUE(wait_for([&] { return trio.a.peer(trio.b.local_id()).has_value(); }));
+
+    EXPECT_EQ(trio.relay_hub->forwarded_circuits(), forwarded());
 
     trio.a.send(trio.b.local_id(), "bulk", ByteView(payload));
     ASSERT_TRUE(wait_for([&] { return got.load() == kSize; }, 30s))
@@ -401,38 +422,49 @@ TEST(RelayE2E, OnePeerCannotTakeMoreCircuitsThanItsShare) {
     hub.stop();
 }
 
-// A relay is not a permanent bearer of somebody else's traffic. Past the byte cap
-// the circuit ends — and ends properly, as a peer going away rather than as a
-// stall the two ends have to discover for themselves.
-TEST(RelayE2E, ACircuitEndsWhenItOutstaysItsByteCap) {
+// A relay's cost is bounded by rate, and a circuit past it is slowed, never cut:
+// a transfer through a capped relay takes as long as the cap says, arrives
+// whole, and the peers stay peers. Both forms are held — a forwarded circuit by
+// the mux's queue, a byte stream by its credit.
+TEST_P(RelayForms, ACircuitIsHeldToItsRate) {
     Relay::Config hub_config = serving();
-    hub_config.max_bytes_per_circuit = 256 * 1024;
+    hub_config.max_circuit_rate_bps = 8'000'000;   // 1 MB/s
+    hub_config.circuit_burst        = 250ms;
 
-    Trio trio(hub_config);
+    Trio trio(hub_config, Relay::Config(), wire(), wire());
 
-    std::atomic<bool> lost{false};
+    constexpr size_t     kSize = 3 * 1000 * 1000;
+    std::atomic<bool>    got{false};
+    std::atomic<bool>    lost{false};
+    trio.b.on("bulk", [&](const Peer&, ByteView data) { got.store(data.size() == kSize); });
     trio.a.on_peer_disconnected([&](const PeerId& id, CloseReason) {
         if (id == trio.b.local_id()) lost.store(true);
     });
 
     ASSERT_TRUE(trio.start());
-
     ASSERT_TRUE(trio.relay_a->connect_via_relay(trio.b.local_id()));
     ASSERT_TRUE(wait_for([&] { return trio.a.peer(trio.b.local_id()).has_value(); }));
+    EXPECT_EQ(trio.relay_hub->forwarded_circuits(), forwarded());
 
-    const std::string payload(64 * 1024, 'x');
-    for (int i = 0; i < 32; ++i) trio.a.send(trio.b.local_id(), "flood", ByteView(payload));
+    const std::string payload(kSize, 'x');
+    const auto start = std::chrono::steady_clock::now();
+    trio.a.send(trio.b.local_id(), "bulk", ByteView(payload));
+    ASSERT_TRUE(wait_for([&] { return got.load(); }, 20s)) << "the transfer never finished";
+    const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
-    ASSERT_TRUE(wait_for([&] { return lost.load(); }, 15s))
-        << "the circuit outlived its byte cap";
-    EXPECT_TRUE(wait_for([&] { return trio.relay_hub->carried_circuits() == 0u; }, 5s));
+    // Three seconds' worth at the rate, less the burst and a window (or queue)
+    // already in hand — and nowhere near the milliseconds loopback takes uncapped.
+    EXPECT_GE(took, 2.0) << "the circuit was not held to its rate";
+    EXPECT_LE(took, 8.0) << "held far below its rate";
+    EXPECT_FALSE(lost.load()) << "the circuit was cut instead of slowed";
+    EXPECT_EQ(trio.relay_hub->carried_circuits(), 1u);
 }
 
 // When the node in the middle goes, so does everything riding on it — promptly, and
 // as an ordinary disconnection rather than a peer that has quietly stopped
 // answering.
-TEST(RelayE2E, LosingTheRelayEndsTheCircuit) {
-    Trio trio;
+TEST_P(RelayForms, LosingTheRelayEndsTheCircuit) {
+    Trio trio(serving(), Relay::Config(), wire(), wire());
 
     std::atomic<bool> lost{false};
     trio.b.on_peer_disconnected([&](const PeerId& id, CloseReason) {
@@ -715,5 +747,140 @@ TEST(RelayE2E, GivingUpOnAPunchDoesNotBlockTheUpgradeItEscalatedInto) {
 
     a.stop();
     b.stop();
+    hub.stop();
+}
+
+// A leg that is not UDP — here B reaches the hub over TCP — leaves the relay
+// nothing to forward datagrams over, and the circuit is the byte stream it has
+// always been.
+TEST(RelayE2E, ACircuitWithATcpLegIsAByteStream) {
+    Trio trio(serving(), Relay::Config(), TransportKind::Udp, TransportKind::Tcp);
+
+    std::atomic<int> received{0};
+    trio.b.on("chat", [&](const Peer&, ByteView) { ++received; });
+
+    ASSERT_TRUE(trio.start());
+    ASSERT_EQ(transport_to(trio.hub, trio.b.local_id()), TransportKind::Tcp);
+    ASSERT_EQ(transport_to(trio.hub, trio.a.local_id()), TransportKind::Udp);
+
+    ASSERT_TRUE(trio.relay_a->connect_via_relay(trio.b.local_id()));
+    ASSERT_TRUE(wait_for([&] { return trio.a.peer(trio.b.local_id()).has_value(); }));
+    EXPECT_TRUE(relayed(trio.a, trio.b.local_id()));
+    EXPECT_EQ(trio.relay_hub->carried_circuits(), 1u);
+    EXPECT_EQ(trio.relay_hub->forwarded_circuits(), 0u);
+
+    trio.a.send(trio.b.local_id(), "chat", ByteView(std::string("down the stream")));
+    EXPECT_TRUE(wait_for([&] { return received.load() == 1; }));
+}
+
+// What forwarding datagrams is for: a live message through the relay travels as
+// it would on a direct path — end-to-end congestion control and loss recovery
+// that see the whole path (and report it), deadlines that hold all the way.
+TEST(RelayE2E, LiveMessagesCrossAForwardingRelayEndToEnd) {
+    Trio trio;
+
+    std::atomic<int> received{0};
+    trio.b.on("video", [&](const Peer&, ByteView) { ++received; });
+    // A path handler is what turns sampling on.
+    trio.a.on_peer_path([](const Peer&, const PathStats&) {});
+
+    ASSERT_TRUE(trio.start());
+    ASSERT_TRUE(trio.relay_a->connect_via_relay(trio.b.local_id()));
+    ASSERT_TRUE(wait_for([&] { return trio.a.peer(trio.b.local_id()).has_value(); }));
+    ASSERT_EQ(trio.relay_hub->forwarded_circuits(), 1u);
+
+    constexpr int kFrames = 30;
+    const std::string frame(20 * 1024, 'f');
+    for (int i = 0; i < kFrames; ++i) {
+        ASSERT_TRUE(trio.a.send(trio.b.local_id(), "video", ByteView(frame), SendOptions{500ms}));
+        std::this_thread::sleep_for(5ms);
+    }
+    EXPECT_TRUE(wait_for([&] { return received.load() == kFrames; }, 5s))
+        << received.load() << " of " << kFrames << " frames arrived";
+
+    ASSERT_TRUE(wait_for([&] {
+        const auto path = trio.a.path_stats(trio.b.local_id());
+        return path && path->valid && path->srtt_us > 0 && path->live_sent == kFrames;
+    }, 5s)) << "the relayed peer's path is not the datagram connection's";
+}
+
+// A circuit opened toward a target that never answers is given up on, at both the
+// opener and the relay, rather than held until somebody notices.
+TEST(RelayE2E, AnOpenNobodyAnswersIsGivenUp) {
+    Node hub(listening_config());
+    Node a(listening_config());
+    Node target(listening_config());   // no Relay: it never answers
+
+    Relay::Config ends;
+    ends.open_timeout = 500ms;
+    Relay* relay_hub = hub.add_subsystem(std::make_unique<Relay>(serving()));
+    Relay* relay_a   = a.add_subsystem(std::make_unique<Relay>(ends));
+
+    ASSERT_TRUE(hub.start());
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(target.start());
+    a.connect("127.0.0.1", hub.listen_port());
+    target.connect("127.0.0.1", hub.listen_port());
+    ASSERT_TRUE(wait_for([&] { return hub.peer_count() == 2; }));
+
+    ASSERT_TRUE(relay_a->connect_via_relay(target.local_id()));
+    ASSERT_TRUE(wait_for([&] { return relay_hub->carried_circuits() == 1u; }));
+    EXPECT_EQ(relay_a->circuits(), 1u);
+
+    EXPECT_TRUE(wait_for([&] { return relay_a->circuits() == 0u; }, 5s))
+        << "the opener held on to an open nobody answered";
+    EXPECT_TRUE(wait_for([&] { return relay_hub->carried_circuits() == 0u; }, 5s))
+        << "the relay was never told";
+    EXPECT_EQ(relay_hub->forwarded_circuits(), 0u);
+
+    a.stop();
+    target.stop();
+    hub.stop();
+}
+
+// A target that accepts without naming the connection id back — an older node —
+// runs a byte stream, so the relay stops forwarding and tells the opener so.
+TEST(RelayE2E, ATargetThatDoesNotTakeDatagramsGetsAByteStream) {
+    Node hub(listening_config());
+    Node a(listening_config());
+    Node target(listening_config());   // speaks the relay wire by hand
+
+    Relay* relay_hub = hub.add_subsystem(std::make_unique<Relay>(serving()));
+    Relay* relay_a   = a.add_subsystem(std::make_unique<Relay>(Relay::Config()));
+
+    constexpr uint8_t kOpIncoming = 2;
+    constexpr uint8_t kOpAccept   = 3;
+    std::atomic<uint32_t> incoming{0};
+    std::atomic<size_t>   incoming_size{0};
+    target.on(MessageType::Relay, [&](const Peer&, ByteView payload) {
+        if (payload.size() < 6 || payload.data()[1] != kOpIncoming) return;
+        incoming_size = payload.size();
+        incoming = (uint32_t{payload.data()[2]} << 24) | (uint32_t{payload.data()[3]} << 16) |
+                   (uint32_t{payload.data()[4]} << 8) | payload.data()[5];
+    });
+
+    ASSERT_TRUE(hub.start());
+    ASSERT_TRUE(a.start());
+    ASSERT_TRUE(target.start());
+    a.connect("127.0.0.1", hub.listen_port());
+    target.connect("127.0.0.1", hub.listen_port());
+    ASSERT_TRUE(wait_for([&] { return hub.peer_count() == 2; }));
+
+    ASSERT_TRUE(relay_a->connect_via_relay(target.local_id()));
+    ASSERT_TRUE(wait_for([&] { return incoming.load() != 0; }));
+    // Both legs are UDP: the relay offered datagrams, under an id it named.
+    EXPECT_EQ(incoming_size.load(), 6u + 32 + 4 + 8);
+    EXPECT_EQ(relay_hub->forwarded_circuits(), 1u);
+
+    Bytes accept = relay_message(kOpAccept, incoming.load());
+    for (uint8_t byte : {0, 1, 0, 0}) accept.push_back(byte);   // a 64 KiB window, and no id
+    target.send(hub.local_id(), MessageType::Relay, ByteView(accept));
+
+    EXPECT_TRUE(wait_for([&] { return relay_hub->forwarded_circuits() == 0u; }, 3s))
+        << "the relay kept forwarding for a target that runs a stream";
+    EXPECT_EQ(relay_hub->carried_circuits(), 1u);
+
+    a.stop();
+    target.stop();
     hub.stop();
 }

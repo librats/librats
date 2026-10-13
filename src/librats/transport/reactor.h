@@ -149,6 +149,27 @@ public:
     /// that is gone, so a late wake for a torn-down circuit costs nothing.
     void wake(ConnId id, uint32_t events);
 
+    // — connections whose packets a relay forwards (udp_mux.h, "Relayed
+    //   connections") —
+    //
+    // Named by the ConnId of a carrier: the datagram connection to the relay (or,
+    // at the relay, to each end), whose address is the one the forwarded packets
+    // travel between. All four are thread-safe and run on the reactor thread;
+    // one whose carrier is no datagram connection here does nothing, and a
+    // circuit it was handed is ended.
+
+    /// Dial through the relay `carrier` leads to, under the dialer's id `cid`, as
+    /// the connection `id` (reserve_conn_id()).
+    void connect_relayed(ConnId id, ConnId carrier, udp::Cid cid, ForwardedCircuit circuit);
+    /// Take the relayed dial for `cid` that will come through `carrier` as the
+    /// inbound connection `id`.
+    void expect_relayed(ConnId id, ConnId carrier, udp::Cid cid, ForwardedCircuit circuit);
+    /// Forward the packets of `cid` between the peers at the far ends of `dialer`
+    /// and `responder`, counting them into `bytes`, held to `rate` (UdpMux::forward).
+    void forward_datagrams(ConnId dialer, ConnId responder, udp::Cid cid,
+                           std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate, uint64_t burst);
+    void stop_forwarding(udp::Cid cid);
+
     /// Drop a dial that lost its race — but only while it is still a dial. Once an
     /// attempt has established it is not an attempt any more, it is one of possibly
     /// several links to a peer, and which of those survives is the peer table's
@@ -192,7 +213,11 @@ private:
     // — UdpMuxDelegate —
     bool   admit_inbound() override;
     ConnId adopt_inbound(std::unique_ptr<Transport> transport) override;
+    bool   adopt_relayed(ConnId id, std::unique_ptr<Transport> transport) override;
     void   dispatch_link_events(ConnId id, uint32_t events) override;
+
+    /// Where the datagram connection `id` sends to; nullopt for any other.
+    std::optional<Address> datagram_peer(ConnId id);
 
     void run();
     void drain_tasks(std::vector<Task>& scratch);

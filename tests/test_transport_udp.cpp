@@ -79,8 +79,8 @@ struct Side {
         CloseReason                reason = CloseReason::PeerClosed;
     };
 
-    ConnId add(std::unique_ptr<Transport> t, bool inbound) {
-        const ConnId id = next_id++;
+    ConnId add(std::unique_ptr<Transport> t, bool inbound, ConnId as = kInvalidConnId) {
+        const ConnId id = as != kInvalidConnId ? as : next_id++;
         Held h;
         h.transport = std::move(t);
         h.sink      = std::make_unique<Sink>();
@@ -121,6 +121,10 @@ public:
         return side.add(std::move(transport), /*inbound=*/true);
     }
     bool admit_inbound() override { return admit; }
+    bool adopt_relayed(ConnId id, std::unique_ptr<Transport> transport) override {
+        side.add(std::move(transport), /*inbound=*/true, id);
+        return true;
+    }
     void dispatch_link_events(ConnId id, uint32_t events) override { side.dispatch(id, events); }
 
     Side side;
@@ -212,6 +216,87 @@ struct MuxPair {
     socket_t      sock_a = RATS_INVALID_SOCKET, sock_b = RATS_INVALID_SOCKET;
     std::unique_ptr<UdpMux> a, b;
     Address       addr_a, addr_b;
+};
+
+/// The relay protocol's side of a forwarded circuit, as far as the mux can see it:
+/// what a ForwardedCircuit tells when it ends.
+class RecordingCarrier final : public CircuitCarrier {
+public:
+    bool circuit_send_data(uint32_t, const ByteView*, size_t) override { return true; }
+    void circuit_send_credit(uint32_t, uint32_t) override {}
+    void circuit_send_close(uint32_t circuit, CloseReason) override { closed.push_back(circuit); }
+    void circuit_released(uint32_t circuit) override { released.push_back(circuit); }
+
+    std::vector<uint32_t> closed, released;
+};
+
+/// Three muxes: two ends and a relay between them that forwards their packets.
+struct RelayedTrio {
+    static constexpr udp::Cid kCid = 0x5eed0000c0de0000ull;
+
+    RelayedTrio()
+        : id_a(Identity::generate()), id_r(Identity::generate()), id_b(Identity::generate()),
+          sec_a(id_a), sec_r(id_r), sec_b(id_b),
+          carrier(std::make_shared<RecordingCarrier>()) {
+        init_socket_library();
+        for (socket_t* sock : {&sock_a, &sock_r, &sock_b}) *sock = loopback_socket();
+        addr_a = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sock_a))};
+        addr_r = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sock_r))};
+        addr_b = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sock_b))};
+        a = std::make_unique<UdpMux>(sock_a, AddressFamily::IPv4, host_a, sec_a);
+        r = std::make_unique<UdpMux>(sock_r, AddressFamily::IPv4, host_r, sec_r);
+        b = std::make_unique<UdpMux>(sock_b, AddressFamily::IPv4, host_b, sec_b);
+    }
+
+    ~RelayedTrio() {
+        host_a.side.held.clear();
+        host_b.side.held.clear();
+        a.reset();
+        r.reset();
+        b.reset();
+        for (socket_t sock : {sock_a, sock_r, sock_b})
+            if (is_valid_socket(sock)) close_socket(sock);
+    }
+
+    template <typename Pred>
+    bool pump_until(Pred pred, std::chrono::milliseconds timeout = 10s) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        for (;;) {
+            for (UdpMux* mux : {a.get(), r.get(), b.get()}) mux->on_readable();
+            if (pred()) return true;
+            if (std::chrono::steady_clock::now() >= deadline) return pred();
+            for (UdpMux* mux : {a.get(), r.get(), b.get()}) mux->tick();
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+
+    /// Set the circuit up as the relay protocol would — the relay first, then the
+    /// target, then the dial — and run it to established. A's side id on success.
+    ConnId connect() {
+        if (!r->forward(kCid, addr_a, addr_b, bytes)) return kInvalidConnId;
+        if (!b->expect_relayed(kCid, addr_r, kExpectedId, ForwardedCircuit(carrier, 2)))
+            return kInvalidConnId;
+        auto t = a->connect_relayed(addr_r, kCid, ForwardedCircuit(carrier, 1));
+        if (!t) return kInvalidConnId;
+        const ConnId id = host_a.side.add(std::move(t), /*inbound=*/false);
+        const bool up = pump_until([&] {
+            auto in = host_b.side.held.find(kExpectedId);
+            return host_a.side.held.at(id).sink->established && in != host_b.side.held.end() &&
+                   in->second.sink->established;
+        });
+        return up ? id : kInvalidConnId;
+    }
+
+    static constexpr ConnId kExpectedId = 77;
+
+    Identity      id_a, id_r, id_b;
+    NoiseSecurity sec_a, sec_r, sec_b;
+    MuxHost       host_a, host_r, host_b;
+    socket_t      sock_a = RATS_INVALID_SOCKET, sock_r = RATS_INVALID_SOCKET, sock_b = RATS_INVALID_SOCKET;
+    std::unique_ptr<UdpMux> a, r, b;
+    Address       addr_a, addr_r, addr_b;
+    std::shared_ptr<RecordingCarrier>      carrier;
+    std::shared_ptr<std::atomic<uint64_t>> bytes = std::make_shared<std::atomic<uint64_t>>(0);
 };
 
 /// A Noise first message, as a dialer would put it in an Initial.
@@ -472,6 +557,134 @@ TEST(UdpMuxTest, AMuxWithNoConnectionsAsksForNoWakeups) {
     net.pump_until([&] { return false; }, 1500ms);
     // Connected and idle: woken for the keep-alive, not every few milliseconds.
     EXPECT_GT(net.a->next_timeout_ms(60000), 5000);
+}
+
+// The relay in the middle forwards a connection it is no party to: the two ends
+// authenticate each other, both see the other as relayed and never as the
+// relay's address, and the relay counts the bytes, holds no connection of its
+// own and opens none.
+TEST(UdpMuxTest, ARelayForwardsTheConnectionItsTwoEndsRun) {
+    RelayedTrio net;
+    const ConnId id = net.connect();
+    ASSERT_NE(id, kInvalidConnId) << "the relayed connection never came up";
+
+    Side::Held& out = net.host_a.side.held.at(id);
+    Side::Held& in  = net.host_b.side.held.at(RelayedTrio::kExpectedId);
+    EXPECT_EQ(out.sink->remote, net.id_b.id);
+    EXPECT_EQ(in.sink->remote, net.id_a.id);
+    for (Side::Held* end : {&out, &in}) {
+        EXPECT_EQ(end->transport->kind(), TransportKind::Relay);
+        EXPECT_FALSE(end->transport->remote_endpoint().has_value());
+    }
+    EXPECT_EQ(net.r->stream_count(), 0u);
+    EXPECT_EQ(net.host_r.adopted, 0);
+
+    ASSERT_TRUE(out.transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("over the relay")), {}));
+    ASSERT_TRUE(out.transport->flush());
+    ASSERT_TRUE(in.transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("and back")), {}));
+    ASSERT_TRUE(in.transport->flush());
+    ASSERT_TRUE(net.pump_until([&] { return in.sink->frames.size() == 1 && out.sink->frames.size() == 1; }));
+    EXPECT_EQ(in.sink->frames[0], "over the relay");
+    EXPECT_EQ(out.sink->frames[0], "and back");
+    EXPECT_GT(net.bytes->load(), udp::kMaxDatagram) << "the Initial and more";
+    EXPECT_TRUE(net.carrier->released.empty()) << "nothing has ended yet";
+}
+
+// The relay passes on a datagram only from the address the circuit was set up
+// with. Anyone else who learns the id must not be able to send through it.
+TEST(UdpMuxTest, ARelayForwardsNothingFromAnotherAddress) {
+    RelayedTrio net;
+    ASSERT_TRUE(net.r->forward(RelayedTrio::kCid, net.addr_a, net.addr_b, net.bytes));
+
+    uint8_t packet[64] = {};
+    packet[0] = 0x40;                              // a short header
+    for (int i = 0; i < 8; ++i)                    // to B's half of the pair
+        packet[1 + i] = static_cast<uint8_t>(udp::paired_cid(RelayedTrio::kCid) >> (56 - 8 * i));
+
+    socket_t stranger = loopback_socket();
+    ASSERT_GT(send_udp_to(stranger, packet, sizeof(packet), net.addr_r, AddressFamily::IPv4), 0);
+    net.pump_until([] { return false; }, 100ms);
+    EXPECT_EQ(net.bytes->load(), 0u) << "the relay passed on a stranger's datagram";
+    close_socket(stranger);
+
+    // The same datagram from the address the circuit names goes through.
+    ASSERT_GT(send_udp_to(net.sock_a, packet, sizeof(packet), net.addr_r, AddressFamily::IPv4), 0);
+    EXPECT_TRUE(net.pump_until([&] { return net.bytes->load() == sizeof(packet); }, 2s));
+}
+
+// A forward held to a rate behaves as a bottleneck link would: a burst up to the
+// bucket's depth passes at once, then datagrams leave at the rate from a short
+// queue, and only what the queue cannot hold is dropped.
+TEST(UdpMuxTest, ARateHeldForwardQueuesThenDropsLikeABottleneck) {
+    RelayedTrio net;
+    socket_t sink = loopback_socket();   // the responder's end: reads nothing, answers nothing
+    const Address sink_addr{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sink))};
+
+    constexpr uint64_t kRate  = 100 * 1000;   // bytes a second
+    constexpr uint64_t kBurst = 10 * 1000;
+    ASSERT_TRUE(net.r->forward(RelayedTrio::kCid, net.addr_a, sink_addr, net.bytes, kRate, kBurst));
+
+    uint8_t packet[1000] = {};
+    packet[0] = 0x40;
+    for (int i = 0; i < 8; ++i)
+        packet[1 + i] = static_cast<uint8_t>(udp::paired_cid(RelayedTrio::kCid) >> (56 - 8 * i));
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 100; ++i)
+        ASSERT_GT(send_udp_to(net.sock_a, packet, sizeof(packet), net.addr_r, AddressFamily::IPv4), 0);
+
+    // The burst at once, and not much more.
+    net.pump_until([&] { return net.bytes->load() >= kBurst; }, 1s);
+    EXPECT_GE(net.bytes->load(), kBurst);
+    EXPECT_LE(net.bytes->load(), kBurst + 5 * sizeof(packet));
+
+    // Then the queue, at the rate: what it holds (UdpMux::kMinShaperQueue here)
+    // comes out over the time the rate takes, and the rest was dropped.
+    const uint64_t queued = UdpMux::kMinShaperQueue / sizeof(packet) * sizeof(packet);
+    ASSERT_TRUE(net.pump_until([&] { return net.bytes->load() >= kBurst + queued; }, 3s))
+        << net.bytes->load() << " bytes passed on";
+    const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    EXPECT_GE(took, 0.8 * static_cast<double>(queued) / kRate) << "the queue left faster than the rate";
+    net.pump_until([] { return false; }, 300ms);
+    EXPECT_EQ(net.bytes->load(), kBurst + queued) << "more than the burst and the queue got through";
+    close_socket(sink);
+}
+
+// No burst at all is still a rate: one datagram at a time, not none.
+TEST(UdpMuxTest, ARateWithNoBurstStillLetsDatagramsThrough) {
+    RelayedTrio net;
+    socket_t sink = loopback_socket();
+    const Address sink_addr{"127.0.0.1", static_cast<uint16_t>(get_bound_port(sink))};
+    ASSERT_TRUE(net.r->forward(RelayedTrio::kCid, net.addr_a, sink_addr, net.bytes, 100 * 1000, 0));
+
+    uint8_t packet[1000] = {};
+    packet[0] = 0x40;
+    for (int i = 0; i < 8; ++i)
+        packet[1 + i] = static_cast<uint8_t>(udp::paired_cid(RelayedTrio::kCid) >> (56 - 8 * i));
+    for (int i = 0; i < 5; ++i)
+        ASSERT_GT(send_udp_to(net.sock_a, packet, sizeof(packet), net.addr_r, AddressFamily::IPv4), 0);
+    EXPECT_TRUE(net.pump_until([&] { return net.bytes->load() == 5 * sizeof(packet); }, 2s))
+        << net.bytes->load() << " bytes passed on";
+    close_socket(sink);
+}
+
+// Whichever way a relayed connection ends, the circuit it was ends with it — the
+// relay protocol hears exactly once, from both ends.
+TEST(UdpMuxTest, ARelayedConnectionThatEndsEndsItsCircuit) {
+    RelayedTrio net;
+    const ConnId id = net.connect();
+    ASSERT_NE(id, kInvalidConnId);
+
+    // The dialer's transport goes, and its connection says goodbye on the way out;
+    // the responder's ends on hearing it, and goes as its owner drops it.
+    net.host_a.side.held.erase(id);
+    ASSERT_TRUE(net.pump_until([&] { return net.host_b.side.held.at(RelayedTrio::kExpectedId).broken; }));
+    EXPECT_EQ(net.host_b.side.held.at(RelayedTrio::kExpectedId).reason, CloseReason::PeerClosed);
+    net.host_b.side.held.clear();
+
+    ASSERT_TRUE(net.pump_until([&] { return net.carrier->released.size() == 2; }))
+        << "released: " << net.carrier->released.size();
+    EXPECT_EQ(net.carrier->closed, (std::vector<uint32_t>{1, 2}));
+    EXPECT_EQ(net.carrier->released, (std::vector<uint32_t>{1, 2}));
 }
 
 // What one receive brings a connection is one burst, and its events coalesce:

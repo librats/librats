@@ -32,6 +32,14 @@
  * is posted, exactly as Reactor::connect does), so the caller can wake and close
  * the circuit from the moment it asks for one.
  *
+ * ── Or a datagram connection the relay forwards ─────────────────────────────
+ * When both legs are datagram connections, a circuit needs no byte stream: the
+ * two ends run a datagram connection of their own whose packets the relay passes
+ * on by connection id (transport/udp_mux.h, "Relayed connections"). The last four
+ * calls are that: the relay files the id with forward_datagrams, the target
+ * expects the dial, the opener makes it. All of them stay on the mux's reactor,
+ * which owns every datagram connection — the carriers included.
+ *
  * ── What is deliberately NOT here ───────────────────────────────────────────
  * Nothing about relaying: no relay selection, no protocol, no policy about when a
  * circuit is worth opening. Those belong to the module. This interface would serve
@@ -42,7 +50,9 @@
 #include "librats/peer/peer_id.h"
 #include "librats/peer/peer_table.h"   // PeerRoute
 #include "librats/transport/link.h"
+#include "librats/transport/relay_link.h"   // ForwardedCircuit
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -79,6 +89,32 @@ public:
     /// Tear a circuit connection down. Thread-safe; a no-op for a route that is
     /// already gone.
     virtual void close_circuit(PeerRoute route, CloseReason reason) = 0;
+
+    // — circuits whose relay forwards datagrams —
+    //
+    // `cid` is the dialer's (even) half of the connection id pair the relay chose.
+    // Each returns nullopt / false when the carrier is not a peer reached over UDP
+    // — the circuit is then ended — and otherwise reports failures that only the
+    // reactor can see by ending the circuit too.
+
+    /// Dial the far end through `carrier`, the relay. The connection is Outbound.
+    virtual std::optional<PeerRoute> dial_relayed(const PeerId& carrier, uint64_t cid,
+                                                  ForwardedCircuit circuit) = 0;
+
+    /// Accept the dial that will come through `carrier`, the relay, as an Inbound
+    /// connection — under the same admission gate as adopt_circuit.
+    virtual std::optional<PeerRoute> expect_relayed(const PeerId& carrier, uint64_t cid,
+                                                    ForwardedCircuit circuit) = 0;
+
+    /// As the relay: forward the packets of `cid` between `dialer` and
+    /// `responder`, counting their bytes into `bytes`, at most `rate` bytes a
+    /// second each way with bursts of `burst` (0: no rate; how it is held is
+    /// UdpMux's, "Relayed connections"). False when the two are not both
+    /// datagram peers on one socket — the circuit must then be a byte stream.
+    virtual bool forward_datagrams(const PeerId& dialer, const PeerId& responder, uint64_t cid,
+                                   std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate,
+                                   uint64_t burst) = 0;
+    virtual void stop_forwarding(uint64_t cid) = 0;
 };
 
 } // namespace librats
