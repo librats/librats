@@ -270,6 +270,10 @@ typedef struct {
     uint64_t live_expired;     /* of those, dropped because their lifetime ran out: the
                                 * first thing a source asking for more than the path
                                 * carries will see */
+    uint64_t live_repair_bytes; /* bytes of repair symbols (forward error correction)
+                                 * sent with live messages on a lossy path: carried
+                                 * beside the source's own, so a source sized to
+                                 * bandwidth_bps leaves room for them */
 } rats_path_stats_t;
 
 /** The latest path sample for a peer, from any thread. RATS_ERR_NO_SUCH_PEER if the

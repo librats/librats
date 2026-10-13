@@ -47,6 +47,12 @@ public:
     bool covers(uint64_t lo, uint64_t hi) const noexcept;
     void pop_front() { ranges_.erase(ranges_.begin()); }
 
+    /// Every range, lowest first.
+    template <typename Fn>
+    void for_each(Fn&& fn) const {
+        for (const auto& r : ranges_) fn(r.first, r.second);
+    }
+
     /// The parts of [lo, hi) NOT in the set, lowest first.
     template <typename Fn>
     void for_each_gap(uint64_t lo, uint64_t hi, Fn&& fn) const {

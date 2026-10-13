@@ -161,7 +161,7 @@ jobject toFileTransferStatus(JNIEnv* env, int status) {
 jobject toPathStats(JNIEnv* env, const rats_path_stats_t& s) {
     jclass cls = env->FindClass("com/librats/PathStats");
     if (!cls) { env->ExceptionClear(); return nullptr; }
-    jmethodID ctor = env->GetMethodID(cls, "<init>", "(JZJIIJJDJJJJ)V");
+    jmethodID ctor = env->GetMethodID(cls, "<init>", "(JZJIIJJDJJJJJ)V");
     jobject value = nullptr;
     if (ctor) {
         value = env->NewObject(cls, ctor,
@@ -176,10 +176,11 @@ jobject toPathStats(JNIEnv* env, const rats_path_stats_t& s) {
                                static_cast<jlong>(s.bytes_delivered),
                                static_cast<jlong>(s.bytes_lost),
                                static_cast<jlong>(s.live_sent),
-                               static_cast<jlong>(s.live_expired));
+                               static_cast<jlong>(s.live_expired),
+                               static_cast<jlong>(s.live_repair_bytes));
     } else {
         env->ExceptionClear();
-        LOGE("com/librats/PathStats has no (JZJIIJJDJJJJ)V constructor");
+        LOGE("com/librats/PathStats has no (JZJIIJJDJJJJJ)V constructor");
     }
     env->DeleteLocalRef(cls);
     return value;

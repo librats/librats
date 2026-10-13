@@ -1,5 +1,6 @@
 #include "librats/transport/udp_wire.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace librats {
@@ -271,6 +272,17 @@ bool FrameReader::next(Frame& out) noexcept {
         }
 
         switch (type) {
+            case kLiveRepair: {
+                LiveRepairFrame& f = out.repair;
+                if (!r_.varint(f.id) || !r_.varint(f.lifetime) || !r_.varint(f.size) ||
+                    !r_.varint(f.symbol) || !r_.varint(f.index))
+                    return fail();
+                if (f.size < kInnerHeaderSize || f.size > kMaxLiveMessage || f.symbol > f.size ||
+                    f.symbol < (std::min<uint64_t>)(f.size, kMinRepairSymbol) || f.symbol > r_.left())
+                    return fail();
+                r_.bytes(static_cast<size_t>(f.symbol), f.data);
+                return true;
+            }
             case kPing:
                 return true;
             case kAck: {
@@ -363,6 +375,22 @@ uint8_t* put_live_header(uint8_t* out, uint64_t id, uint64_t lifetime, uint64_t 
         out = put_varint(out, offset);
     }
     return put_varint(out, len);
+}
+
+size_t live_repair_header_size(uint64_t id, uint64_t lifetime, uint64_t size, uint64_t symbol,
+                               uint64_t index) noexcept {
+    return 1 + varint_size(id) + varint_size(lifetime) + varint_size(size) + varint_size(symbol) +
+           varint_size(index);
+}
+
+uint8_t* put_live_repair_header(uint8_t* out, uint64_t id, uint64_t lifetime, uint64_t size,
+                                uint64_t symbol, uint64_t index) noexcept {
+    *out++ = kLiveRepair;
+    out = put_varint(out, id);
+    out = put_varint(out, lifetime);
+    out = put_varint(out, size);
+    out = put_varint(out, symbol);
+    return put_varint(out, index);
 }
 
 uint8_t* put_value_frame(uint8_t* out, FrameType type, uint64_t value) noexcept {

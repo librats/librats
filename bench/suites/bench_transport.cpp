@@ -1081,6 +1081,7 @@ struct Run {
     double down_mb_s = 0, down_cpu_s_gb = 0;
     double small_msgs_s = 0;
     double live_delivered = 0, live_expired = 0;   ///< % of frames
+    double live_repair = 0;                        ///< repair symbols sent, % of the video
     double live_rtt_median_ms = 0, live_rtt_p99_ms = 0;
 };
 
@@ -1288,12 +1289,14 @@ void measure_live(const Options& o, Wire& w, Run& run) {
     const auto before = w.node->path_stats(w.remote);
 
     std::string frame;
+    uint64_t video_bytes = 0;
     auto next = Clock::now();
     for (int n = 0; n < frames; ++n) {
         std::this_thread::sleep_until(next);
         next += std::chrono::microseconds(1000000 / kFps);
         const size_t bytes = static_cast<size_t>(unit * (n % kGop == 0 ? kKeyWeight : 1));
         frame.assign((std::max)(bytes, kLiveHeader), 'v');
+        video_bytes += frame.size();
         const uint64_t sent = static_cast<uint64_t>(now_us());
         for (int i = 0; i < 4; ++i) frame[i] = static_cast<char>((static_cast<uint32_t>(n) >> (8 * i)) & 0xff);
         for (int i = 0; i < 8; ++i) frame[4 + i] = static_cast<char>((sent >> (8 * i)) & 0xff);
@@ -1312,6 +1315,8 @@ void measure_live(const Options& o, Wire& w, Run& run) {
     run.live_rtt_p99_ms    = percentile(rtts, 0.99);
     const auto after = w.node->path_stats(w.remote);
     if (after) run.live_expired = (after->live_expired - (before ? before->live_expired : 0)) * 100.0 / frames;
+    if (after && video_bytes)
+        run.live_repair = (after->live_repair_bytes - (before ? before->live_repair_bytes : 0)) * 100.0 / video_bytes;
 }
 
 Run measure_wire(TransportKind kind, const Options& o) {
@@ -1447,6 +1452,7 @@ int connect_and_measure(const Options& o) {
         table.head(title);
         table.line("frames delivered",       tcp.live_delivered,     udp.live_delivered,     "%", false, "%8.1f");
         table.line("dropped by the sender",  tcp.live_expired,       udp.live_expired,       "%", true,  "%8.1f");
+        table.line("repair symbols sent",    tcp.live_repair,        udp.live_repair,        "%", true,  "%8.1f");
         table.line("frame round trip, median", tcp.live_rtt_median_ms, udp.live_rtt_median_ms, "ms", true);
         table.line("frame round trip, p99",  tcp.live_rtt_p99_ms,    udp.live_rtt_p99_ms,    "ms", true);
         std::printf("  (each frame is a live message: repaired while it can still arrive in time,\n"
@@ -1454,7 +1460,9 @@ int connect_and_measure(const Options& o) {
                     "   echoed back, so it is the frame's delivery plus one small message the other\n"
                     "   way; read it against rtt min. A frame that arrived but whose echo was lost\n"
                     "   with the connection does not count. Over TCP nothing already in the socket\n"
-                    "   can be dropped, so there a loss delays the frames behind it instead.)\n");
+                    "   can be dropped, so there a loss delays the frames behind it instead.\n"
+                    "   Repair symbols are the forward error correction a lossy datagram path\n"
+                    "   gets, as a share of the video.)\n");
     }
 
     std::printf("\nconfiguration: bulk %.0f MiB in %.0f KiB frames, %.0f KiB credit; "

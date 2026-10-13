@@ -518,6 +518,7 @@ static Napi::Object path_stats_to_js(Napi::Env env, const rats_path_stats_t& s) 
     o.Set("bytesLost",      Napi::Number::New(env, static_cast<double>(s.bytes_lost)));
     o.Set("liveSent",       Napi::Number::New(env, static_cast<double>(s.live_sent)));
     o.Set("liveExpired",    Napi::Number::New(env, static_cast<double>(s.live_expired)));
+    o.Set("liveRepairBytes", Napi::Number::New(env, static_cast<double>(s.live_repair_bytes)));
     return o;
 }
 

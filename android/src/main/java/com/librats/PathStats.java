@@ -25,11 +25,12 @@ public final class PathStats {
     private final long bytesLost;
     private final long liveSent;
     private final long liveExpired;
+    private final long liveRepairBytes;
 
-    // Built by librats_jni.cpp; the signature there is (JZJIIJJDJJJJ)V.
+    // Built by librats_jni.cpp; the signature there is (JZJIIJJDJJJJJ)V.
     PathStats(long bandwidthBps, boolean appLimited, long pacingBps, int srttUs, int minRttUs,
               long queuedBytes, long bytesInFlight, double loss, long bytesDelivered,
-              long bytesLost, long liveSent, long liveExpired) {
+              long bytesLost, long liveSent, long liveExpired, long liveRepairBytes) {
         this.bandwidthBps = bandwidthBps;
         this.appLimited = appLimited;
         this.pacingBps = pacingBps;
@@ -42,6 +43,7 @@ public final class PathStats {
         this.bytesLost = bytesLost;
         this.liveSent = liveSent;
         this.liveExpired = liveExpired;
+        this.liveRepairBytes = liveRepairBytes;
     }
 
     /** @return the congestion controller's bandwidth estimate; 0 = none yet. */
@@ -109,5 +111,14 @@ public final class PathStats {
      */
     public long liveExpired() {
         return liveExpired;
+    }
+
+    /**
+     * @return bytes of repair symbols (forward error correction) sent with live
+     *         messages on a lossy path — carried beside the source's own, so a
+     *         source sized to {@link #bandwidthBps()} leaves room for them
+     */
+    public long liveRepairBytes() {
+        return liveRepairBytes;
     }
 }

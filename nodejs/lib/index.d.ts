@@ -161,6 +161,12 @@ declare module 'librats' {
      * source asking for more than the path carries will see.
      */
     liveExpired: number;
+    /**
+     * Bytes of repair symbols (forward error correction) sent with live messages
+     * on a lossy path — carried beside the source's own, so a source sized to
+     * `bandwidthBps` leaves room for them.
+     */
+    liveRepairBytes: number;
   }
 
   export type PeerHandler = (peerId: string) => void;

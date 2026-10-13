@@ -30,6 +30,18 @@
  * keeps such a flow sending less — on a long path, at the start, it starves the
  * very measurement that would raise it.
  *
+ * On a path that loses packets, a message may be sent with repair symbols behind
+ * it (udp_fec.h), so the receiver can rebuild what was lost without asking. How
+ * many is the connection's call, made as the message starts (protect()). They go
+ * after the data of every message waiting — what is being repaired never holds up
+ * what is new — and are not sent once they could only land too late. A loss is
+ * still sent again while there is time, since a repair can be lost as well; once
+ * there is not, the message is not given up while every block has lost no more
+ * symbols (repairs included) than it has repairs — the receiver can still put it
+ * together. To the sender a message is delivered once every block has as many
+ * of its symbols acknowledged as it has source symbols, whether or not the rest
+ * ever arrives.
+ *
  * The receiver puts each message together from its pieces and hands it over the
  * moment it is whole, in no order. A message is given up on when the time it had
  * left (plus a round trip of slack) has passed since its first piece came in —
@@ -50,6 +62,7 @@
 #include "librats/core/receive_buffer.h"
 #include "librats/core/ring_buffer.h"
 #include "librats/transport/congestion_control.h"
+#include "librats/transport/udp_fec.h"
 #include "librats/transport/udp_streams.h"
 #include "librats/transport/udp_wire.h"
 #include "librats/wire/frame.h"
@@ -57,6 +70,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -79,7 +93,9 @@ public:
     void push(FrameHeader header, ByteView payload, Clock::time_point deadline);
 
     /// Drop every message with something still to send that can no longer arrive
-    /// in time: its deadline is `one_way` or less from `now`. And, if the
+    /// in time: its deadline is `one_way` or less from `now` — unless all of it is
+    /// out and its repair symbols can still stand in for what is missing — and
+    /// every repair symbol still to send of such a message. And, if the
     /// connection paces at `rate`, every message not started yet that would leave
     /// too late for that behind the bytes queued ahead of it, unless it is the last
     /// one waiting (see the file comment).
@@ -89,21 +105,38 @@ public:
     std::optional<Clock::time_point> next_expiry(Clock::duration one_way) const noexcept;
 
     /// What would go next: from the message whose deadline is nearest, a repair if
-    /// it has one, else what it has not sent yet. `len` is all that is available at
-    /// `offset`; the caller takes what fits.
+    /// it has one, else what it has not sent yet; with nothing of the kind left, a
+    /// repair symbol, from the message whose deadline is nearest again. `len` is
+    /// all that is available at `offset`; the caller takes what fits — of a repair
+    /// symbol, all of it or nothing.
     struct Piece {
         uint64_t          id     = 0;
         uint32_t          offset = 0;
         uint32_t          len    = 0;
         uint32_t          size   = 0;   ///< the whole message
-        bool              repair = false;
+        bool              repair = false;   ///< sent before, and lost
+        /// Nothing of the message has been sent and its protection is not settled:
+        /// protect() it before taking anything.
+        bool              fresh  = false;
+        /// Repair symbol `index` (udp_fec.h), `len` bytes.
+        bool              parity = false;
+        uint32_t          index  = 0;
+        /// The message's symbol size if it is protected, else 0. Its pieces are
+        /// best cut at multiples of it: then a lost packet costs one symbol.
+        uint32_t          symbol = 0;
         Clock::time_point deadline{};
     };
     bool peek(Piece& out) noexcept;
-    /// Commit the first `len` bytes of a piece peek() returned.
+    /// Settle how message `id`, about to start, is protected: `rows` repair symbols
+    /// per block of `layout` (whose size is the message's), or none for rows 0.
+    void protect(uint64_t id, const fec::Layout& layout, uint32_t rows);
+    /// Commit the first `len` bytes of a piece peek() returned (of a repair
+    /// symbol, all of it).
     void take(const Piece& piece, size_t len);
     /// The bytes of message `id` from `offset`. The message must still be held.
     const uint8_t* bytes(uint64_t id, size_t offset) const noexcept;
+    /// Repair symbol `index` of message `id`. The message must still be held.
+    const uint8_t* parity_bytes(uint64_t id, uint32_t index) const noexcept;
 
     /// Part of a message worth sending again, as a piece — what a probe repeating
     /// an older packet asks for. False unless the message is still held, not all of
@@ -111,20 +144,31 @@ public:
     /// `arrival` is still in time.
     bool repeat(uint64_t id, size_t offset, size_t len, Clock::time_point arrival,
                 Piece& out) const noexcept;
+    /// Likewise for repair symbol `index`: false unless it is still held, not
+    /// acknowledged, and a copy that arrives by `arrival` is in time.
+    bool repeat_parity(uint64_t id, uint32_t index, Clock::time_point arrival,
+                       Piece& out) const noexcept;
 
     void on_acked(uint64_t id, size_t offset, size_t len);
     void on_lost(uint64_t id, size_t offset, size_t len);
+    void on_parity_acked(uint64_t id, uint32_t index);
+    void on_parity_lost(uint64_t id, uint32_t index);
 
-    /// Bytes never sent, and bytes waiting to be sent again, of messages still held.
+    /// Bytes never sent, and bytes waiting to be sent again, of messages still
+    /// held: what a new message would wait behind.
     uint64_t unsent()     const noexcept { return unsent_; }
     uint64_t lost_bytes() const noexcept { return lost_; }
-    bool     has_pending() const noexcept { return unsent_ + lost_ > 0; }
+    /// Bytes of repair symbols waiting to be sent, which wait behind all of that.
+    uint64_t parity_unsent() const noexcept { return parity_; }
+    bool     has_pending() const noexcept { return unsent_ + parity_ + lost_ > 0; }
     /// Nothing is held: every message was delivered or given up on.
     bool     empty() const noexcept { return held_ == 0; }
 
     /// Messages pushed, and messages given up on, since the connection opened.
     uint64_t sent()    const noexcept { return sent_; }
     uint64_t expired() const noexcept { return expired_; }
+    /// Bytes of repair symbols sent since the connection opened.
+    uint64_t parity_sent() const noexcept { return parity_sent_; }
 
     /// Drop everything (the connection is gone).
     void clear();
@@ -132,6 +176,33 @@ public:
     void release_memory() noexcept;
 
 private:
+    /// What a symbol has become, as far as the acknowledgements say.
+    enum : uint8_t { kOpen, kLost, kAcked };
+
+    /// A protected message's repair symbols, and how its blocks stand.
+    struct Coding {
+        fec::Layout layout;
+        uint32_t    rows = 0;           ///< repair symbols per block
+        Bytes       parity;             ///< repair `index` at index * symbol
+        uint32_t    next = 0;           ///< repairs below were sent, or never will be
+        /// Per source symbol, then per repair symbol.
+        std::vector<uint8_t>  state;
+        std::vector<uint16_t> acked;    ///< per block: symbols of either kind acknowledged
+        std::vector<uint16_t> lost;     ///< per block: symbols of either kind lost
+        uint32_t    complete = 0;       ///< blocks with as many acknowledged as they have columns
+        /// Source bytes lost, too late to send again, that the repairs stand in for.
+        RangeSet    deferred;
+
+        uint32_t repairs() const noexcept { return rows * layout.blocks; }
+        bool     has_unsent() const noexcept { return next < repairs(); }
+        /// The block has lost more than its repairs can stand in for.
+        bool     failed(uint32_t b) const noexcept { return lost[b] > rows; }
+        bool     any_failed() const noexcept {
+            for (uint32_t b = 0; b < layout.blocks; ++b)
+                if (failed(b)) return true;
+            return false;
+        }
+    };
     struct Message {
         Clock::time_point deadline{};
         Bytes    data;              ///< the inner message; empty once resolved
@@ -139,8 +210,10 @@ private:
         uint32_t lost_bytes = 0;    ///< in `lost`
         RangeSet lost;              ///< to be sent again
         RangeSet acked;
-        bool     held   = false;    ///< not yet delivered or given up on
-        bool     queued = false;    ///< has an entry in order_
+        std::unique_ptr<Coding> coding;   ///< none: not protected
+        bool     held    = false;   ///< not yet delivered or given up on
+        bool     queued  = false;   ///< has an entry in order_
+        bool     decided = false;   ///< protected or not: protect() was called, or it started
     };
     /// A message with something to send, by deadline. Entries go stale when their
     /// message stops having anything to send by other means (a late acknowledgement)
@@ -153,10 +226,22 @@ private:
     Message*       find(uint64_t id) noexcept;
     const Message* find(uint64_t id) const noexcept;
     bool           pending(const Message& m) const noexcept { return m.sent < m.data.size() || m.lost_bytes > 0; }
+    bool           has_parity(const Message& m) const noexcept { return m.coding && m.coding->has_unsent(); }
+    /// As far as the sender can tell, the receiver has all of it, or can rebuild it.
+    bool           delivered(const Message& m) const noexcept;
+    static void    insert(RingBuffer<Entry>& queue, Entry e);
     void           enqueue(uint64_t id, Message& m);
+    /// Owe the parts of [lo, hi) not already owed. Bytes added.
+    uint64_t       owe(Message& m, uint64_t lo, uint64_t hi);
+    /// Symbol `slot` of `m` (a source symbol's index, or count + a repair's) has
+    /// been acknowledged or lost; a block lost past its repairs owes again what it
+    /// had been leaving to them.
+    void           mark(uint64_t id, Message& m, uint32_t slot, uint8_t to);
+    /// Repairs not yet sent will not be: they could only land too late.
+    void           drop_parity(uint64_t id, Message& m);
     /// Stop holding `m`: delivered, or given up on.
     void           resolve(Message& m, bool given_up);
-    /// Pop resolved messages off the front, and stale entries off the order.
+    /// Pop resolved messages off the front, and stale entries off the orders.
     void           settle() noexcept;
     /// The overload half of expire().
     void           shed(Clock::time_point now, Clock::duration one_way, cc::PacingRate rate);
@@ -165,11 +250,16 @@ private:
     RingBuffer<Message> messages_;
     uint64_t            base_ = 0;
     RingBuffer<Entry>   order_;
+    /// Messages with repair symbols still to send, by deadline: what goes once
+    /// nothing in order_ does. Stale entries as in order_.
+    RingBuffer<Entry>   repairs_;
     uint64_t            unsent_  = 0;
+    uint64_t            parity_  = 0;   ///< bytes of repair symbols still to send
     uint64_t            lost_    = 0;
     size_t              held_    = 0;   ///< messages still held
     uint64_t            sent_    = 0;
     uint64_t            expired_ = 0;
+    uint64_t            parity_sent_ = 0;
 };
 
 class LiveReceiver {
@@ -195,6 +285,10 @@ public:
     /// incomplete is given up on its lifetime plus `slack` from now.
     Result on_frame(const LiveFrame& frame, Clock::time_point now, Clock::duration slack,
                     HoldAccount& account);
+    /// Take one LIVE_REPAIR frame, likewise. What a repair symbol stands in for is
+    /// rebuilt the moment there are enough of them.
+    Result on_repair(const LiveRepairFrame& frame, Clock::time_point now, Clock::duration slack,
+                     HoldAccount& account);
 
     /// Give up on what has outlived its message's lifetime.
     void expire(Clock::time_point now, HoldAccount& account);
@@ -216,17 +310,43 @@ public:
     void decay() { inbox_.decay(); }
 
 private:
+    /// A message some repair symbols of which have come in.
+    struct Decoding {
+        fec::Layout           layout;
+        std::vector<uint8_t>  known;     ///< per source symbol: all of it is here
+        std::vector<uint16_t> have;      ///< per block: symbols of either kind in hand
+        /// Repair symbols held, of blocks not yet whole.
+        std::vector<std::pair<uint32_t, Bytes>> repairs;
+    };
     struct Assembly {
         uint64_t          id = 0;
         Clock::time_point expires{};
         Bytes             data;
         RangeSet          have;
+        size_t            charged = 0;   ///< what the account holds for it
+        std::unique_ptr<Decoding> fec;
     };
 
     bool is_done(uint64_t id) const noexcept;
     void mark_done(uint64_t id);
     /// Forget everything below `floor`: it is past the window.
     void advance(uint64_t floor, HoldAccount& account);
+    /// The window's verdict on a frame of message `id`: false if it is behind it, or
+    /// done with already.
+    bool admit(uint64_t id, HoldAccount& account);
+    /// assembling_'s entry for `id`, or its size if there is none.
+    size_t find(uint64_t id) const noexcept;
+    /// Begin putting together a message of `size` bytes, if there is room for all of
+    /// it. Its index, or assembling_.size() if there is not.
+    size_t start(uint64_t id, uint64_t size, uint64_t lifetime, Clock::time_point now,
+                 Clock::duration slack, HoldAccount& account);
+    bool charge(Assembly& a, size_t bytes, HoldAccount& account);
+    /// Bytes [lo, hi) of `a` are in: a symbol they complete counts towards its block.
+    void note_source(Assembly& a, uint64_t lo, uint64_t hi, HoldAccount& account);
+    /// Block `b` of `a` has as many symbols as it has columns: rebuild what it lacks.
+    void rebuild(Assembly& a, uint32_t b, HoldAccount& account);
+    /// If assembling_[index] is whole, hand it to the inbox.
+    void finish(size_t index, HoldAccount& account);
     /// Take assembling_[index] out, releasing what it was charged.
     Bytes remove(size_t index, HoldAccount& account);
     static size_t cost(size_t bytes) noexcept { return bytes + 96; }

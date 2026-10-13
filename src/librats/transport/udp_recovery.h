@@ -68,6 +68,7 @@ struct SentFrame {
     enum Kind : uint8_t {
         Stream,       ///< `length` bytes of stream `stream` at `offset`
         Live,         ///< `length` bytes of live message `offset`, `at` bytes into it
+        LiveRepair,   ///< repair symbol `at` of live message `offset`, `length` bytes
         MaxData,      ///< a window update for `offset` bytes
         DataBlocked,  ///< "stopped at `offset`"
         ResetToken,
@@ -81,7 +82,7 @@ struct SentFrame {
     uint64_t offset = 0;
 
     /// Whether it carried data a probe may repeat.
-    bool carries_data() const noexcept { return kind == Stream || kind == Live; }
+    bool carries_data() const noexcept { return kind == Stream || kind == Live || kind == LiveRepair; }
 };
 static_assert(sizeof(SentFrame) == 16, "one per frame in flight: keep it small");
 
@@ -249,6 +250,9 @@ public:
     /// Packets declared lost, plus probes sent — packets the sender had to send
     /// because an earlier one went unanswered.
     uint32_t retransmits() const noexcept { return lost_packets_ + probes_; }
+    /// Bytes of the losses in sampler() that timeouts wrote off: what outages
+    /// took, as opposed to the loss rate of a path that answers.
+    uint64_t written_off() const noexcept { return written_off_; }
     /// Times the controller was told about congestion: once per loss episode, plus
     /// once per retransmission timeout.
     uint32_t congestion_events() const noexcept { return congestion_events_; }
@@ -344,6 +348,7 @@ private:
     uint64_t ack_newly_acked_  = 0;
     uint64_t ack_newly_clean_  = 0;
     uint64_t lost_since_ack_   = 0;
+    uint64_t written_off_      = 0;
     bool     cwnd_limited_     = false;
 
     // — the loss timer —

@@ -343,6 +343,7 @@ rats_path_stats_t to_c(const PathStats& s) {
     c.bytes_lost      = s.bytes_lost;
     c.live_sent       = s.live_sent;
     c.live_expired    = s.live_expired;
+    c.live_repair_bytes = s.live_repair_bytes;
     return c;
 }
 } // namespace

@@ -52,7 +52,8 @@
 //            encoder spreads its rate is all a codec changes for the path.
 //            Every frame is a live message (SendOptions::lifetime), dropped
 //            when it cannot make the player's deadline; `--reliable-video`
-//            sends them reliably instead. `--realtime` runs only this section.
+//            sends them reliably instead, `--no-fec` without repair symbols.
+//            `--realtime` runs only this section.
 //
 // ── Reading the numbers ─────────────────────────────────────────────────────
 //
@@ -110,6 +111,8 @@ CongestionAlgorithm g_algo = CongestionAlgorithm::Bbr;
 /// The realtime section sends each frame reliably, on its lane, instead of as a
 /// live message — what every build before live messages did (--reliable-video).
 bool g_reliable_video = false;
+/// Live messages carry repair symbols on a lossy path (--no-fec: they do not).
+bool g_fec = true;
 const char* col(const char* code) { return g_color ? code : ""; }
 
 // ── The path ────────────────────────────────────────────────────────────────
@@ -161,6 +164,7 @@ public:
     Peer(Path& path, const Address& addr, CongestionAlgorithm algo)
         : path_(path), addr_(addr), security_(Identity::generate()) {
         config_.congestion = algo;
+        config_.live_fec   = g_fec;
     }
 
     const Address& addr() const noexcept { return addr_; }
@@ -719,6 +723,7 @@ struct RealtimeResult {
     double frozen;          ///< all the time it stood still, s
     double recover;         ///< ms from the event's end to a second of on-time frames; <0 no event, inf never
     double video;           ///< Mbit/s the encoder produced
+    double fec;             ///< repair symbols sent, % of the video
 };
 
 /// One live source and the player at the far end of its connection: 30 frames a
@@ -999,8 +1004,9 @@ RealtimeResult realtime(const Scene& sc) {
     const double frames = static_cast<double>((std::max<size_t>)(video.frames.size(), 1));
     const double late   = late_frames * 100.0 / frames;
     const double secs   = std::chrono::duration<double>(finish - start).count();
+    const double fec = video.video_bytes ? fv.tx.path_stats().live_repair_bytes * 100.0 / video.video_bytes : 0;
     return {q(0.5) - base, q(0.99) - base, late, missing * 100.0 / frames, freeze_max, frozen,
-            recover, video.video_bytes * 8.0 / secs / 1e6};
+            recover, video.video_bytes * 8.0 / secs / 1e6, fec};
 }
 
 /// A share of frames late, as a column: green within what a call shrugs off,
@@ -1018,8 +1024,8 @@ void realtime_row(const char* name, const Scene& sc) {
     if (r.recover < 0)                  std::snprintf(recover, sizeof(recover), "%9s", "-");
     else if (std::isinf(r.recover))     std::snprintf(recover, sizeof(recover), "%9s", "never");
     else                                std::snprintf(recover, sizeof(recover), "%9.0f", r.recover);
-    std::printf("  %-30s %9.1f %9.1f %s %8.1f%% %9.0f %9.1f %s %9.2f\n", name, r.median, r.p99,
-                late_cell(r.late).c_str(), r.dropped, r.freeze_max, r.frozen, recover, r.video);
+    std::printf("  %-30s %9.1f %9.1f %s %8.1f%% %9.0f %9.1f %s %9.2f %8.1f%%\n", name, r.median, r.p99,
+                late_cell(r.late).c_str(), r.dropped, r.freeze_max, r.frozen, recover, r.video, r.fec);
 }
 
 /// One source shape across the conditions it is most sensitive to: a clean path
@@ -1049,6 +1055,7 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--cc=bbr") == 0)  g_algo = CongestionAlgorithm::Bbr;
         if (std::strcmp(argv[i], "--realtime") == 0) realtime_only = true;
         if (std::strcmp(argv[i], "--reliable-video") == 0) g_reliable_video = true;
+        if (std::strcmp(argv[i], "--no-fec") == 0) g_fec = false;
     }
 #ifndef _WIN32
     if (!isatty(1)) g_color = false;
@@ -1154,7 +1161,7 @@ int main(int argc, char** argv) {
     heading(g_reliable_video
                 ? "realtime — 30 s of video (30 fps, keyframe every 2 s), every frame reliable, ms over one-way delay"
                 : "realtime — 30 s of live video (30 fps, keyframe every 2 s), ms over one-way delay",
-            {"median", "p99", "late", "dropped", "freeze ms", "frozen s", "recover", "video"});
+            {"median", "p99", "late", "dropped", "freeze ms", "frozen s", "recover", "video", "fec"});
     using X = Besides;
     realtime_row("4 of 10 Mbit, 40 ms",            Scene{});
     realtime_row("  1%",                           Scene{}.lossy(0.01));
@@ -1201,7 +1208,9 @@ int main(int argc, char** argv) {
         std::printf("   Every frame is a live message due at capture + min RTT/2 + 100 ms: what\n"
                     "   cannot make that is dropped, whole, and frames arrive in no order. A\n"
                     "   dropped frame spoils nothing after it here — what a decoder does with a\n"
-                    "   gap is the codec's business. --reliable-video for every frame reliable.\n");
+                    "   gap is the codec's business. --reliable-video for every frame reliable.\n"
+                    "   \"fec\" is the repair symbols sent with the frames on a lossy path, as a\n"
+                    "   share of the video (--no-fec: none are).\n");
     std::printf("   A file to the same peer has a lane of its own. \"adaptive\" rows retarget\n"
                 "   the encoder from PathStats every 100 ms, starting from 1 Mbit/s; video is\n"
                 "   what it produced.)\n");

@@ -42,7 +42,8 @@ def _path_stats(c: RatsPathStats) -> PathStats:
         pacing_bps=c.pacing_bps, srtt_us=c.srtt_us, min_rtt_us=c.min_rtt_us,
         queued_bytes=c.queued_bytes, bytes_in_flight=c.bytes_in_flight, loss=c.loss,
         bytes_delivered=c.bytes_delivered, bytes_lost=c.bytes_lost,
-        live_sent=c.live_sent, live_expired=c.live_expired)
+        live_sent=c.live_sent, live_expired=c.live_expired,
+        live_repair_bytes=c.live_repair_bytes)
 
 
 def _b(s: Optional[str]) -> Optional[bytes]:

@@ -220,6 +220,8 @@ set(LIBRARY_SOURCES
     src/librats/transport/udp_streams.cpp
     src/librats/transport/udp_live.h
     src/librats/transport/udp_live.cpp
+    src/librats/transport/udp_fec.h
+    src/librats/transport/udp_fec.cpp
     src/librats/transport/udp_connection.h
     src/librats/transport/udp_connection.cpp
     src/librats/transport/udp_transport.h
@@ -738,6 +740,7 @@ if(RATS_BUILD_TESTS)
         tests/test_udp_wire.cpp
         tests/test_udp_connection.cpp
         tests/test_udp_live.cpp
+        tests/test_udp_fec.cpp
         tests/test_transport_udp.cpp
         tests/test_udp_congestion.cpp
         tests/test_relay_link.cpp

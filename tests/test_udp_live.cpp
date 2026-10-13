@@ -39,14 +39,29 @@ struct Piece {
     uint32_t    offset, size;
     std::string data;
     bool        repair;
+    bool        parity = false;   ///< repair symbol `offset`, of symbols data.size() long
 };
 
-/// Take what the sender offers next, in pieces of up to `max` bytes.
-std::vector<Piece> drain(LiveSender& s, size_t max = 1000, size_t limit = 1000) {
+/// Take what the sender offers next, in pieces of up to `max` bytes — and, given
+/// `rows`, with every message protected by that many repair symbols per block of
+/// `max`-byte symbols, as the connection would.
+std::vector<Piece> drain(LiveSender& s, size_t max = 1000, size_t limit = 1000, uint32_t rows = 0) {
     std::vector<Piece> out;
     LiveSender::Piece p;
     while (out.size() < limit && s.peek(p)) {
-        const size_t len = (std::min<size_t>)(p.len, max);
+        if (p.fresh && rows > 0) {
+            s.protect(p.id, udp::fec::Layout::fit(p.size, static_cast<uint32_t>(max)), rows);
+            continue;
+        }
+        if (p.parity) {
+            out.push_back({p.id, p.index, p.size,
+                           std::string(reinterpret_cast<const char*>(s.parity_bytes(p.id, p.index)), p.len),
+                           false, true});
+            s.take(p, p.len);
+            continue;
+        }
+        size_t len = (std::min<size_t>)(p.len, max);
+        if (p.symbol) len = (std::min<size_t>)(len, p.symbol - p.offset % p.symbol);
         out.push_back({p.id, p.offset, p.size,
                        std::string(reinterpret_cast<const char*>(s.bytes(p.id, p.offset)), len), p.repair});
         s.take(p, len);
@@ -60,6 +75,17 @@ udp::LiveFrame frame_of(const Piece& p, uint64_t lifetime = 1000) {
     f.lifetime = lifetime;
     f.size     = p.size;
     f.offset   = p.offset;
+    f.data     = ByteView(reinterpret_cast<const uint8_t*>(p.data.data()), p.data.size());
+    return f;
+}
+
+udp::LiveRepairFrame repair_of(const Piece& p, uint64_t lifetime = 1000) {
+    udp::LiveRepairFrame f;
+    f.id       = p.id;
+    f.lifetime = lifetime;
+    f.size     = p.size;
+    f.symbol   = p.data.size();
+    f.index    = p.offset;
     f.data     = ByteView(reinterpret_cast<const uint8_t*>(p.data.data()), p.data.size());
     return f;
 }
@@ -228,6 +254,105 @@ TEST(LiveSenderTest, AProbeRepeatsOnlyWhatIsStillWorthIt) {
     EXPECT_FALSE(s.repeat(9, 0, 1, kT0, p)) << "a message never sent";
 }
 
+// ── The sender, with repair symbols ─────────────────────────────────────────
+
+// Repairs fill time nothing else wants: they go after the data of every message
+// waiting, the nearest deadline first again.
+TEST(LiveSenderTest, RepairSymbolsGoAfterEveryMessagesData) {
+    LiveSender s;
+    s.push(FrameHeader{}, ByteView(std::string(2996, 'a')), kT0 + 300ms);   // three symbols
+    s.push(FrameHeader{}, ByteView(std::string(496, 'b')),  kT0 + 200ms);   // one
+    const auto pieces = drain(s, 1000, 100, /*rows=*/1);
+    ASSERT_EQ(pieces.size(), 6u);
+    EXPECT_EQ(pieces[0].id, 1u);
+    EXPECT_FALSE(pieces[0].parity);
+    for (int i = 1; i < 4; ++i) EXPECT_FALSE(pieces[i].parity) << i;
+    EXPECT_TRUE(pieces[4].parity);
+    EXPECT_EQ(pieces[4].id, 1u) << "the nearer deadline's repair first";
+    EXPECT_EQ(pieces[4].data.size(), 500u) << "a one-symbol message's repair is its own size";
+    EXPECT_TRUE(pieces[5].parity);
+    EXPECT_EQ(pieces[5].id, 0u);
+    EXPECT_EQ(pieces[5].data.size(), 1000u);
+    EXPECT_EQ(s.parity_sent(), 1500u);
+    EXPECT_EQ(s.parity_unsent(), 0u);
+    EXPECT_EQ(s.unsent(), 0u);
+}
+
+// To the sender a message is delivered once the receiver can put it together:
+// as many of a block's symbols acknowledged as it has source symbols.
+TEST(LiveSenderTest, AMessageIsDeliveredOnceEnoughOfItsSymbolsAreAcknowledged) {
+    LiveSender s;
+    s.push(FrameHeader{}, ByteView(std::string(2996, 'a')), kT0 + 300ms);
+    drain(s, 1000, 100, 1);
+    s.on_acked(0, 0, 1000);
+    s.on_lost(0, 1000, 1000);
+    EXPECT_EQ(s.lost_bytes(), 1000u) << "sent again while there is time: a repair can be lost too";
+    s.on_acked(0, 2000, 1000);
+    EXPECT_FALSE(s.empty());
+    s.on_parity_acked(0, 0);
+    EXPECT_TRUE(s.empty()) << "two source symbols and the repair are all three";
+    EXPECT_EQ(s.lost_bytes(), 0u);
+    EXPECT_EQ(s.expired(), 0u);
+}
+
+// Past the point a piece sent again could make it, a message whose blocks have
+// lost no more than their repairs is left to them — not given up on.
+TEST(LiveSenderTest, AtTheDeadlineALossTheRepairsCanStandInForIsLeftToThem) {
+    for (const bool repair_lost : {false, true}) {
+        SCOPED_TRACE(repair_lost);
+        LiveSender s;
+        s.push(FrameHeader{}, ByteView(std::string(2996, 'a')), kT0 + 100ms);
+        drain(s, 1000, 100, 1);
+        s.on_lost(0, 1000, 1000);
+        s.expire(kT0 + 70ms, 30ms);
+        EXPECT_EQ(s.expired(), 0u);
+        EXPECT_FALSE(s.has_pending()) << "the loss was still to be sent again, too late";
+        EXPECT_FALSE(s.empty());
+        s.on_acked(0, 0, 1000);
+        s.on_acked(0, 2000, 1000);
+        if (repair_lost) {
+            s.on_parity_lost(0, 0);   // two symbols lost to one repair
+            s.expire(kT0 + 70ms, 30ms);
+            EXPECT_EQ(s.expired(), 1u);
+        } else {
+            s.on_parity_acked(0, 0);
+            EXPECT_EQ(s.expired(), 0u);
+        }
+        EXPECT_TRUE(s.empty());
+    }
+}
+
+TEST(LiveSenderTest, RepairsThatCouldOnlyLandTooLateAreNotSent) {
+    LiveSender s;
+    s.push(FrameHeader{}, ByteView(std::string(2996, 'a')), kT0 + 100ms);
+    drain(s, 1000, 3, 2);   // the data, not the repairs
+    EXPECT_EQ(s.parity_unsent(), 2000u);
+    ASSERT_TRUE(s.next_expiry(30ms));
+    EXPECT_EQ(*s.next_expiry(30ms), kT0 + 70ms);
+    s.expire(kT0 + 70ms, 30ms);
+    EXPECT_EQ(s.parity_unsent(), 0u);
+    EXPECT_FALSE(s.has_pending());
+    EXPECT_EQ(s.expired(), 0u) << "the data is out, and may still arrive";
+    // With both repairs gone, the block can lose nothing more.
+    s.on_lost(0, 0, 1000);
+    s.expire(kT0 + 70ms, 30ms);
+    EXPECT_EQ(s.expired(), 1u);
+}
+
+TEST(LiveSenderTest, AProbeRepeatsARepairSymbolOnlyWhileItIsWorthIt) {
+    LiveSender s;
+    s.push(FrameHeader{}, ByteView(std::string(1996, 'p')), kT0 + 100ms);
+    drain(s, 1000, 100, 1);
+    LiveSender::Piece p;
+    ASSERT_TRUE(s.repeat_parity(0, 0, kT0 + 50ms, p));
+    EXPECT_TRUE(p.parity);
+    EXPECT_EQ(p.len, 1000u);
+    EXPECT_FALSE(s.repeat_parity(0, 1, kT0 + 50ms, p)) << "a repair never sent";
+    EXPECT_FALSE(s.repeat_parity(0, 0, kT0 + 100ms, p)) << "a copy that would arrive too late";
+    s.on_parity_acked(0, 0);
+    EXPECT_FALSE(s.repeat_parity(0, 0, kT0 + 50ms, p));
+}
+
 // ── The receiver ────────────────────────────────────────────────────────────
 
 TEST(LiveReceiverTest, PutsPiecesTogetherInAnyOrderAndDeliversOnce) {
@@ -339,6 +464,99 @@ TEST(LiveReceiverTest, WhatDoesNotFitIsRefused) {
     f.id = 1; f.size = bytes.size();
     EXPECT_EQ(r.on_frame(f, kT0, 10ms, account), LiveReceiver::Result::Taken);
     EXPECT_EQ(delivered(r).size(), 1u);
+}
+
+// ── The receiver, with repair symbols ───────────────────────────────────────
+
+namespace {
+
+/// A message of `size` inner bytes, sent in 1000-byte symbols with `rows` repairs.
+std::vector<Piece> protected_message(size_t size, uint32_t rows, uint64_t id_skip = 0) {
+    LiveSender s;
+    for (uint64_t i = 0; i < id_skip; ++i) s.push(FrameHeader{}, ByteView(std::string("x")), kT0 + 1s);
+    drain(s);
+    std::string payload(size - framer::kHeaderSize, '\0');
+    for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<char>(i * 7 + i / 251);
+    s.push(FrameHeader{}, ByteView(payload), kT0 + 1s);
+    return drain(s, 1000, 1000, rows);
+}
+
+} // namespace
+
+TEST(LiveReceiverTest, WhatThePathLostIsRebuiltFromRepairSymbols) {
+    const auto pieces = protected_message(5500, 2);   // six symbols, two repairs
+    ASSERT_EQ(pieces.size(), 8u);
+    const std::string expected = [&] {
+        std::string m;
+        for (const Piece& p : pieces)
+            if (!p.parity) m += p.data;
+        return m;
+    }();
+    // Any two of the eight lost — here a source symbol and a repair, then two
+    // source symbols — and it comes back, whole and once.
+    for (const std::pair<size_t, size_t> lost : {std::pair<size_t, size_t>{2, 6}, {0, 5}}) {
+        LiveReceiver r;
+        udp::HoldAccount account;
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            if (i == lost.first || i == lost.second) continue;
+            const auto res = pieces[i].parity ? r.on_repair(repair_of(pieces[i]), kT0, 10ms, account)
+                                              : r.on_frame(frame_of(pieces[i]), kT0, 10ms, account);
+            EXPECT_EQ(res, LiveReceiver::Result::Taken);
+        }
+        const auto got = delivered(r);
+        ASSERT_EQ(got.size(), 1u);
+        EXPECT_EQ(got[0], expected);
+        EXPECT_EQ(account.held, 0u) << "the pieces and repairs are still charged";
+        // What arrives late of it is a duplicate.
+        EXPECT_EQ(r.on_frame(frame_of(pieces[lost.first]), kT0, 10ms, account), LiveReceiver::Result::Taken);
+        EXPECT_TRUE(delivered(r).empty());
+    }
+}
+
+TEST(LiveReceiverTest, ARepairSymbolMayComeFirst) {
+    const auto pieces = protected_message(900, 1);   // one symbol, and its repair
+    ASSERT_EQ(pieces.size(), 2u);
+    LiveReceiver r;
+    udp::HoldAccount account;
+    // The message itself never arrives: its repair alone is all of it.
+    EXPECT_EQ(r.on_repair(repair_of(pieces[1]), kT0, 10ms, account), LiveReceiver::Result::Taken);
+    const auto got = delivered(r);
+    ASSERT_EQ(got.size(), 1u);
+    EXPECT_EQ(got[0], pieces[0].data);
+    EXPECT_EQ(account.held, 0u);
+}
+
+TEST(LiveReceiverTest, ARepairSymbolThatDisagreesWithItsMessageIsInvalid) {
+    const auto pieces = protected_message(3000, 1);
+    LiveReceiver r;
+    udp::HoldAccount account;
+    ASSERT_EQ(r.on_frame(frame_of(pieces[0]), kT0, 10ms, account), LiveReceiver::Result::Taken);
+    udp::LiveRepairFrame f = repair_of(pieces[3]);
+    f.size = 3001;
+    EXPECT_EQ(r.on_repair(f, kT0, 10ms, account), LiveReceiver::Result::Invalid) << "another size";
+    f = repair_of(pieces[3]);
+    f.index = udp::fec::kMaxRows;   // one block, so rows 0..kMaxRows-1
+    EXPECT_EQ(r.on_repair(f, kT0, 10ms, account), LiveReceiver::Result::Invalid) << "a row past the code";
+    ASSERT_EQ(r.on_repair(repair_of(pieces[3]), kT0, 10ms, account), LiveReceiver::Result::Taken);
+    f = repair_of(pieces[3]);
+    f.symbol = 500;
+    f.data   = ByteView(f.data.data(), 500);
+    EXPECT_EQ(r.on_repair(f, kT0, 10ms, account), LiveReceiver::Result::Invalid) << "another symbol size";
+}
+
+TEST(LiveReceiverTest, RepairsHeldForAMessageGivenUpOnAreReleased) {
+    const auto pieces = protected_message(5500, 2);
+    LiveReceiver r;
+    udp::HoldAccount account;
+    r.on_frame(frame_of(pieces[0], 50), kT0, 10ms, account);
+    r.on_repair(repair_of(pieces[6], 50), kT0, 10ms, account);
+    r.on_repair(repair_of(pieces[6], 50), kT0, 10ms, account);   // a probe's copy
+    EXPECT_GT(account.held, 5500u);
+    r.expire(kT0 + 60ms, account);
+    EXPECT_EQ(account.held, 0u);
+    EXPECT_FALSE(r.next_expiry());
+    EXPECT_EQ(r.on_repair(repair_of(pieces[7], 50), kT0 + 61ms, 10ms, account), LiveReceiver::Result::Taken);
+    EXPECT_EQ(account.held, 0u) << "a stray repair started a message given up on";
 }
 
 // ── Two connections ─────────────────────────────────────────────────────────
@@ -493,6 +711,8 @@ TEST(UdpLiveTest, AfterAnOutageTheFreshFramesGoFirst) {
     EXPECT_EQ(p.b.messages.size(), arrived_at.size()) << "a frame was delivered twice";
     EXPECT_GT(p.a.conn->path_stats().live_expired, 20u);
     EXPECT_GT(got.size(), 50u);
+    // What the outage wrote off is no loss rate to protect against.
+    EXPECT_EQ(p.a.conn->path_stats().live_repair_bytes, 0u);
 }
 
 TEST(UdpLiveTest, LiveMessagesGoAheadOfABacklog) {
@@ -558,4 +778,116 @@ TEST(UdpLiveTest, AConnectionNobodyReadsHoldsNoLiveMessages) {
     EXPECT_EQ(peak, 0u);
     EXPECT_TRUE(p.b.messages.empty());
     EXPECT_TRUE(p.a.conn->flushed()) << "acknowledged and dropped is still acknowledged";
+}
+
+// ── Two connections, with repair symbols ────────────────────────────────────
+
+namespace {
+
+struct LossyLongPath {
+    size_t sent = 0, arrived = 0, expired = 0;
+    uint64_t repair_bytes = 0;
+};
+
+/// 30 frames a second of 15 KB over a 200 ms round trip that loses one live packet
+/// in 25: no piece lost can be sent again in time for a 160 ms lifetime. Counted
+/// once the window has grown to hold a frame, three seconds in.
+LossyLongPath run_lossy_long_path(bool fec) {
+    UdpConnectionConfig cfg;
+    cfg.live_fec = fec;
+    Pair p(false, 100ms, cfg, cfg);
+    EXPECT_TRUE(p.connect());
+    p.run(300ms);
+    size_t live_packets = 0;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from != p.a.addr() || !carries_live(d)) return false;
+        return ++live_packets % 25 == 0;
+    };
+    constexpr int kWarmUp = 90, kFrames = 300;
+    PathStats before;
+    for (int frame = 0; frame < kWarmUp + kFrames; ++frame) {
+        if (frame == kWarmUp) before = p.a.conn->path_stats();
+        send_live(p, std::to_string(frame) + "|" + std::string(15000, 'f'), 160ms);
+        p.run(33ms);
+    }
+    p.run(1s);
+    LossyLongPath out;
+    out.sent = kFrames;
+    for (const Message& m : p.b.messages)
+        if (std::stoi(m.payload.substr(0, m.payload.find('|'))) >= kWarmUp) ++out.arrived;
+    const PathStats after = p.a.conn->path_stats();
+    out.expired      = after.live_expired - before.live_expired;
+    out.repair_bytes = after.live_repair_bytes - before.live_repair_bytes;
+    return out;
+}
+
+} // namespace
+
+// What repair symbols are for: a path long enough that nothing lost can be sent
+// again in time. Without them about every second frame of 13 packets is missing;
+// with them all arrive — and the sender knows which did not.
+TEST(UdpLiveTest, OnALongLossyPathRepairSymbolsDeliverWhatARepairCannot) {
+    const LossyLongPath with = run_lossy_long_path(true);
+    const LossyLongPath without = run_lossy_long_path(false);
+    EXPECT_EQ(without.repair_bytes, 0u);
+    EXPECT_LT(without.arrived, without.sent * 7 / 10);
+    EXPECT_GT(with.arrived, with.sent * 95 / 100) << "repair bytes " << with.repair_bytes;
+    EXPECT_GT(with.repair_bytes, 0u);
+    EXPECT_LT(with.repair_bytes, with.sent * 15000 / 4) << "far more repairs than the loss needs";
+    EXPECT_NEAR(double(with.expired), double(with.sent - with.arrived), 2)
+        << "the sender's count of what was given up is wrong";
+}
+
+// A protected message goes out as fast as an unprotected one — its repairs are
+// queued as it starts, which once read as a packet that sent nothing and held
+// the rest of it back until the next acknowledgement — and a symbol to a frame,
+// so a lost packet costs one symbol, not two.
+TEST(UdpLiveTest, AProtectedMessageGoesOutWholeASymbolToAFrame) {
+    Pair p(false, 20ms);
+    ASSERT_TRUE(p.connect());
+    p.run(100ms);
+    size_t live_packets = 0;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        return from == p.a.addr() && carries_live(d) && ++live_packets % 40 == 0;
+    };
+    for (int frame = 0; frame < 60; ++frame) {
+        send_live(p, std::string(15000, 'w'), 500ms);
+        p.run(33ms);
+    }
+    std::vector<udp::Frame> frames;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (from == p.a.addr())
+            for (const auto& f : frames_of(d))
+                if (f.type == udp::kLive || f.type == udp::kLiveRepair) frames.push_back(f);
+        return false;
+    };
+    p.run(300ms);
+    frames.clear();
+    const uint64_t repairs = p.a.conn->path_stats().live_repair_bytes;
+    ASSERT_GT(repairs, 0u) << "a path that lost one packet in 40 is believed clean";
+    p.b.messages.clear();
+    const auto sent = p.now;
+    send_live(p, std::string(15000, 'n'), 500ms);
+    ASSERT_TRUE(p.run_until([&] { return !p.b.messages.empty(); }, 1s));
+    EXPECT_LE(p.now - sent, 25ms) << "the message waited for an acknowledgement";
+    p.run(10ms);
+    EXPECT_EQ(p.a.conn->path_stats().live_repair_bytes - repairs, 1155u) << "one repair, of 13 symbols";
+    for (const udp::Frame& f : frames)
+        if (f.type == udp::kLive) {
+            EXPECT_EQ(f.live.offset % 1155, 0u);
+            EXPECT_EQ(f.live.data.size(), (std::min<size_t>)(1155, f.live.size - f.live.offset));
+        }
+}
+
+TEST(UdpLiveTest, APathThatLosesNothingCarriesNoRepairSymbols) {
+    Pair p(false, 20ms);
+    ASSERT_TRUE(p.connect());
+    p.run(100ms);
+    for (int frame = 0; frame < 100; ++frame) {
+        send_live(p, std::string(15000, 'c'), 150ms);
+        p.run(33ms);
+    }
+    p.run(300ms);
+    EXPECT_EQ(p.b.messages.size(), 100u);
+    EXPECT_EQ(p.a.conn->path_stats().live_repair_bytes, 0u);
 }

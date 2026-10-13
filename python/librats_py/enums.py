@@ -115,6 +115,7 @@ class PathStats:
     bytes_lost: int        # declared lost since the connection opened
     live_sent: int = 0     # live messages (lifetime_ms > 0) sent since it opened
     live_expired: int = 0  # of those, dropped because their lifetime ran out
+    live_repair_bytes: int = 0  # repair symbols (FEC) sent with them on a lossy path
 
 
 class VersionInfo:

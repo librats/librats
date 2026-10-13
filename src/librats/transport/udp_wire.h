@@ -2,7 +2,7 @@
 
 /**
  * @file udp_wire.h
- * @brief Wire format of the datagram transport (v4): packets, frames, varints.
+ * @brief Wire format of the datagram transport (v5): packets, frames, varints.
  *
  * The shape is QUIC's (RFC 9000), cut down to what a peer-to-peer node on Noise
  * needs. It is not QUIC on the wire — there is no TLS, no version negotiation
@@ -70,6 +70,10 @@
  *                         `offset` where this piece begins; without it the frame
  *                         is the whole message. `lifetime` is the milliseconds the
  *                         message had left when this packet was sent.
+ *      LIVE_REPAIR  0x22  message id, lifetime, size, symbol, index, then `symbol`
+ *                         bytes: repair symbol `index` of a live message cut into
+ *                         symbols of `symbol` bytes (udp_fec.h), from which the
+ *                         receiver rebuilds pieces the path lost.
  *      RESET_TOKEN  0x30  kResetTokenSize bytes: what a stateless reset for the
  *                         sender's connection id will end with
  *
@@ -91,8 +95,9 @@ namespace udp {
 /// Wire version, in every long header. A peer that sees another one drops the
 /// datagram unanswered, and a dial between the two falls back to TCP. 3: the
 /// packet-numbered, frame-based protocol of this file (v1/v2 were a byte stream);
-/// 4: LIVE frames, which a v3 peer would take for a protocol error.
-constexpr uint32_t kVersion = 4;
+/// 4: LIVE frames, which a v3 peer would take for a protocol error; 5: LIVE_REPAIR,
+/// likewise for a v4 one.
+constexpr uint32_t kVersion = 5;
 
 /// Largest datagram this transport sends, and every Initial's size. 1220 keeps it
 /// inside IPv6's 1280-byte minimum MTU with room for a tunnel header, so nothing
@@ -133,6 +138,10 @@ constexpr size_t kMaxHandshakeMessage = kMaxDatagram - kLongHeaderSize - 1 - kTo
 /// `Frame` means this file's) and a payload of at most SendOptions::kMaxLivePayload.
 constexpr size_t kInnerHeaderSize = 4;
 constexpr size_t kMaxLiveMessage  = kInnerHeaderSize + SendOptions::kMaxLivePayload;
+/// Smallest symbol a LIVE_REPAIR frame may name, unless the message is smaller
+/// still (one symbol, then, the size of the message). A sender cuts nearly
+/// packet-sized symbols; tiny ones would only cost the receiver bookkeeping.
+constexpr size_t kMinRepairSymbol = 256;
 
 /// Resolution of an ACK's delay field: 8 us, QUIC's default exponent of 3.
 constexpr std::chrono::microseconds kAckDelayUnit{8};
@@ -236,6 +245,7 @@ enum FrameType : uint8_t {
     kDataBlocked = 0x14,
     kClose       = 0x1c,
     kLive        = 0x20,   ///< 0x20 and 0x21, the low bit a flag
+    kLiveRepair  = 0x22,
     kResetToken  = 0x30,
 };
 
@@ -286,12 +296,24 @@ struct LiveFrame {
     bool whole() const noexcept { return offset == 0 && data.size() == size; }
 };
 
+/// A repair symbol of a live message. The reader has checked the message's size
+/// as for a LiveFrame, and the symbol's against it and kMinRepairSymbol.
+struct LiveRepairFrame {
+    uint64_t id       = 0;
+    uint64_t lifetime = 0;   ///< milliseconds left when it was sent
+    uint64_t size     = 0;   ///< the whole message
+    uint64_t symbol   = 0;   ///< bytes of every symbol, and of `data`
+    uint64_t index    = 0;   ///< which repair symbol (fec::Layout)
+    ByteView data;
+};
+
 /// One decoded frame. Only the fields of its type are meaningful.
 struct Frame {
     uint8_t     type = kPadding;
     AckFrame    ack;
     StreamFrame stream;
     LiveFrame   live;
+    LiveRepairFrame repair;
     uint64_t    value = 0;   ///< MAX_DATA, DATA_BLOCKED, CLOSE
     ByteView    token;       ///< RESET_TOKEN
 };
@@ -332,6 +354,12 @@ size_t   live_header_size(uint64_t id, uint64_t lifetime, uint64_t size, uint64_
                           size_t len) noexcept;
 uint8_t* put_live_header(uint8_t* out, uint64_t id, uint64_t lifetime, uint64_t size,
                          uint64_t offset, size_t len) noexcept;
+
+/// Header of a LIVE_REPAIR frame: the `symbol` bytes of data follow it.
+size_t   live_repair_header_size(uint64_t id, uint64_t lifetime, uint64_t size, uint64_t symbol,
+                                 uint64_t index) noexcept;
+uint8_t* put_live_repair_header(uint8_t* out, uint64_t id, uint64_t lifetime, uint64_t size,
+                                uint64_t symbol, uint64_t index) noexcept;
 
 uint8_t* put_value_frame(uint8_t* out, FrameType type, uint64_t value) noexcept;  ///< MAX_DATA, DATA_BLOCKED, CLOSE
 uint8_t* put_reset_token(uint8_t* out, const uint8_t* token) noexcept;

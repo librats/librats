@@ -82,6 +82,7 @@ class RatsPathStats(Structure):
         ("bytes_lost", c_uint64),
         ("live_sent", c_uint64),
         ("live_expired", c_uint64),
+        ("live_repair_bytes", c_uint64),
     ]
 
 

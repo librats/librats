@@ -166,6 +166,11 @@ struct PathStats {
     /// the path carries sees first.
     uint64_t live_sent    = 0;
     uint64_t live_expired = 0;
+    /// Bytes of repair symbols sent with live messages since the connection opened
+    /// (forward error correction, on a path that loses packets) — part of what the
+    /// path carries that is not the source's: a source sizing itself to
+    /// `bandwidth_bps` leaves room for it.
+    uint64_t live_repair_bytes = 0;
 };
 
 /// Connection lifecycle. A connection moves strictly forward through these.

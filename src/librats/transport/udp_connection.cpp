@@ -28,6 +28,16 @@ uint64_t ms_left(Clock::time_point deadline, Clock::time_point now) {
 /// receiver an assembly.
 constexpr size_t kMaxUnsplitLive = 1024;
 
+/// Room a packet keeps beside a symbol of a protected live message: the largest
+/// LIVE or LIVE_REPAIR header, and a small ACK. So a symbol goes in a packet of
+/// its own, and a lost packet costs one.
+constexpr size_t kLiveFrameRoom = 24 + 16;
+/// The share of a protected live message's blocks that may be lost beyond what
+/// their repairs give back: when what the path loses can no longer be sent again
+/// in time, and when it still can.
+constexpr double kLiveLossTarget       = 0.01;
+constexpr double kLiveLossTargetWithArq = 0.1;
+
 template <typename A, typename B>
 Clock::duration clamp_duration(Clock::duration v, A lo, B hi) {
     const auto low  = std::chrono::duration_cast<Clock::duration>(lo);
@@ -407,6 +417,10 @@ bool UdpConnection::apply_frames(const uint8_t* payload, size_t len, Clock::time
                 eliciting = true;
                 if (!on_live(f.live, now, refused)) return false;
                 break;
+            case kLiveRepair:
+                eliciting = true;
+                if (!on_live_repair(f.repair, now, refused)) return false;
+                break;
             case kMaxData:
                 eliciting = true;
                 peer_max_data_ = (std::max)(peer_max_data_, f.value);
@@ -499,6 +513,24 @@ bool UdpConnection::on_live(const LiveFrame& f, Clock::time_point now, bool& ref
         case LiveReceiver::Result::Invalid:
             LOG_DEBUG("udp", "Connection " << local_cid_ << ": " << remote_.to_string()
                       << " sent pieces of one live message that disagree");
+            return false;
+    }
+    return false;
+}
+
+bool UdpConnection::on_live_repair(const LiveRepairFrame& f, Clock::time_point now, bool& refused) {
+    if (!reading_ || refused) return true;
+    last_data_recv_ = now;
+    switch (live_recv_.on_repair(f, now, recovery_.probe_timeout(), account_)) {
+        case LiveReceiver::Result::Taken:
+            if (live_recv_.has_messages()) raise(PollIn);
+            return true;
+        case LiveReceiver::Result::Refused:
+            refused = true;
+            return true;
+        case LiveReceiver::Result::Invalid:
+            LOG_DEBUG("udp", "Connection " << local_cid_ << ": " << remote_.to_string()
+                      << " sent a repair symbol that disagrees with its live message");
             return false;
     }
     return false;
@@ -777,7 +809,8 @@ size_t UdpConnection::estimate_packet(Clock::time_point now) const noexcept {
     // of a full one.
     size_t n = kShortHeaderSize + kMaxPnLength + session_->overhead() + 24;
     if (ack_owed_) n += ack_size(now);
-    if (const uint64_t live = live_send_.unsent() + live_send_.lost_bytes(); live > 0) {
+    const uint64_t live = live_send_.unsent() + live_send_.lost_bytes() + live_send_.parity_unsent();
+    if (live > 0) {
         n += static_cast<size_t>((std::min<uint64_t>)(live, kMaxDatagram)) + 12;
         if (n >= kMaxDatagram) return kMaxDatagram;
     }
@@ -884,6 +917,7 @@ size_t UdpConnection::send_packet(Clock::time_point now, bool data, bool probe, 
             eliciting = true;
         }
     }
+    sent_data_ = data_sent;
     if (p == buf + header && !keepalive) {
         recovery_.cancel_frames();
         return 0;
@@ -1010,16 +1044,37 @@ uint8_t* UdpConnection::write_live(uint8_t* p, uint8_t* end, Clock::time_point n
                                    bool& repair) {
     LiveSender::Piece piece;
     for (; live_send_.peek(piece); first = false) {
+        if (piece.fresh) {
+            protect_live(piece, now);
+            live_send_.peek(piece);
+        }
         if (p >= end || static_cast<size_t>(end - p) < kMinFrameRoom) return p;
+
+        if (piece.parity) {
+            // Whole or not at all; a packet with less in it has room.
+            if (!put_parity(p, end, piece, now)) return p;
+            live_send_.take(piece, piece.len);
+            SentFrame f;
+            f.kind   = SentFrame::LiveRepair;
+            f.length = static_cast<uint16_t>(piece.len);
+            f.at     = piece.index;
+            f.offset = piece.id;
+            recovery_.add_frame(f);
+            continue;
+        }
+
         const size_t room = static_cast<size_t>(end - p);
         const uint64_t lifetime = ms_left(piece.deadline, now);
-
         size_t len = piece.len;
+        // A protected message goes a symbol to a frame.
+        if (piece.symbol) len = (std::min<size_t>)(len, piece.symbol - piece.offset % piece.symbol);
         size_t hdr = live_header_size(piece.id, lifetime, piece.size, piece.offset, len);
         if (hdr + len > room) {
-            // A small message waits for a packet it fits whole — unless this one has
-            // no data in it yet, when waiting would only send it without any.
-            if (!first && piece.offset == 0 && piece.len == piece.size && piece.size <= kMaxUnsplitLive)
+            // A small message waits for a packet it fits whole, and a symbol for one
+            // it fits in — unless this one has no data in it yet, when waiting
+            // would only send it without any.
+            if (!first && (piece.symbol || (piece.offset == 0 && piece.len == piece.size &&
+                                            piece.size <= kMaxUnsplitLive)))
                 return p;
             // Cut to fit: as a piece the header may grow (it names the size and
             // offset), and with a shorter length it can only shrink again.
@@ -1045,6 +1100,42 @@ uint8_t* UdpConnection::write_live(uint8_t* p, uint8_t* end, Clock::time_point n
     return p;
 }
 
+bool UdpConnection::put_parity(uint8_t*& p, uint8_t* end, const LiveSender::Piece& piece,
+                               Clock::time_point now) {
+    const uint64_t lifetime = ms_left(piece.deadline, now);
+    const size_t hdr = live_repair_header_size(piece.id, lifetime, piece.size, piece.symbol, piece.index);
+    if (p >= end || hdr + piece.len > static_cast<size_t>(end - p)) return false;
+    p = put_live_repair_header(p, piece.id, lifetime, piece.size, piece.symbol, piece.index);
+    std::memcpy(p, live_send_.parity_bytes(piece.id, piece.index), piece.len);
+    p += piece.len;
+    return true;
+}
+
+void UdpConnection::protect_live(const LiveSender::Piece& piece, Clock::time_point now) {
+    const size_t symbol = kMaxDatagram - kShortHeaderSize - kMaxPnLength - session_->overhead() - kLiveFrameRoom;
+    const fec::Layout layout = fec::Layout::fit(piece.size, static_cast<uint32_t>(symbol));
+    live_send_.protect(piece.id, layout, live_repairs(layout, piece.deadline, now));
+}
+
+uint32_t UdpConnection::live_repairs(const fec::Layout& layout, Clock::time_point deadline,
+                                     Clock::time_point now) {
+    if (!config_.live_fec) return 0;
+    // What an outage wrote off is no loss rate: repair symbols could not have
+    // stood in for any of it.
+    live_loss_.update(recovery_.sampler().delivered(), recovery_.sampler().lost() - recovery_.written_off());
+    const cc::RttEstimate& rtt = recovery_.rtt();
+    if (!rtt.have_rtt || live_loss_.rate() <= 0) return 0;
+    // Whether a piece lost now could still be sent again in time: the message
+    // leaves at the pacing rate, a loss is known a round trip and a reordering
+    // window after — an ack delay more for the last piece — and the second copy
+    // takes the one-way delay.
+    const cc::PacingRate rate = recovery_.congestion().pacing_rate();
+    const Clock::duration out   = rate.paced() ? rate.time_for(layout.size) : Clock::duration::zero();
+    const Clock::duration again = rtt.srtt + rtt.srtt / 8 + Recovery::kMaxAckDelay + one_way();
+    const double target = now + out + again <= deadline ? kLiveLossTargetWithArq : kLiveLossTarget;
+    return fec::rows_for(layout.columns(0), live_loss_.rate(), target);
+}
+
 uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end, Clock::time_point now) {
     size_t first = 0, count = 0;
     if (!recovery_.newest_in_flight(first, count)) return p;
@@ -1053,6 +1144,13 @@ uint8_t* UdpConnection::write_repeat(uint8_t* p, uint8_t* end, Clock::time_point
     frames.reserve(count);
     for (size_t i = 0; i < count; ++i) frames.push_back(recovery_.frames()[first + i]);
     for (SentFrame f : frames) {
+        if (f.kind == SentFrame::LiveRepair) {
+            LiveSender::Piece piece;
+            if (!live_send_.repeat_parity(f.offset, f.at, now + one_way(), piece)) continue;
+            if (!put_parity(p, end, piece, now)) break;
+            recovery_.add_frame(f);
+            continue;
+        }
         if (f.kind == SentFrame::Live) {
             LiveSender::Piece piece;
             if (!live_send_.repeat(f.offset, f.at, f.length, now + one_way(), piece)) continue;
@@ -1124,14 +1222,14 @@ void UdpConnection::pump(Clock::time_point now) {
             }
         }
         if (!with_data && !control) break;
-        const size_t owed_before = queued_bytes();
         if (send_packet(now, with_data, false, false) == 0) break;
         // The control frames went and the windows still say no — or, never
-        // expected, a packet that should have carried data did not.
-        if (!with_data || queued_bytes() == owed_before) break;
+        // expected, a packet that should have carried data did not. (Asked of the
+        // packet, not of the bytes queued: repair symbols are not among those.)
+        if (!with_data || !sent_data_) break;
     }
-    recovery_.note_send_limits(stream_unsent() + live_send_.unsent() > 0, window_stopped,
-                               !has_sendable_data());
+    const uint64_t waiting = stream_unsent() + live_send_.unsent() + live_send_.parity_unsent();
+    recovery_.note_send_limits(waiting > 0, window_stopped, !has_sendable_data());
 
     // Sending — or dropping what expired — made room.
     if (want_write_ && queued_bytes() < queued_before) raise(PollOut);
@@ -1272,6 +1370,7 @@ PathStats UdpConnection::path_stats() const noexcept {
     s.bytes_lost      = recovery_.sampler().lost();
     s.live_sent       = live_send_.sent();
     s.live_expired    = live_send_.expired();
+    s.live_repair_bytes = live_send_.parity_sent();
     return s;
 }
 
@@ -1370,6 +1469,9 @@ void UdpConnection::frames_acked(const RingBuffer<SentFrame>& log, size_t first,
             case SentFrame::Live:
                 live_send_.on_acked(f.offset, f.at, f.length);
                 break;
+            case SentFrame::LiveRepair:
+                live_send_.on_parity_acked(f.offset, f.at);
+                break;
             case SentFrame::Ack: {
                 // The peer has our ACK naming everything up to f.offset, so those
                 // numbers need never be named again (RFC 9000 §13.2.4).
@@ -1399,6 +1501,9 @@ void UdpConnection::frames_lost(const RingBuffer<SentFrame>& log, size_t first, 
                 break;
             case SentFrame::Live:
                 live_send_.on_lost(f.offset, f.at, f.length);
+                break;
+            case SentFrame::LiveRepair:
+                live_send_.on_parity_lost(f.offset, f.at);
                 break;
             // Control frames are repeated only while what they said still holds:
             // a later window update supersedes a lost one.

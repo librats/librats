@@ -17,7 +17,9 @@
  *     message was queued, so priority holds however deep the backlog is.
  *   - Live messages (SendOptions::lifetime) travel outside the streams, repaired
  *     only while they can still arrive in time and dropped whole once they
- *     cannot (udp_live.h). They go at Priority::Live, nearest deadline first.
+ *     cannot (udp_live.h). They go at Priority::Live, nearest deadline first;
+ *     on a path that loses packets, with repair symbols behind them that
+ *     stand in for what is lost without a round trip (udp_fec.h).
  *
  * ── The handshake ────────────────────────────────────────────────────────────
  * Noise XX is three messages, carried in long-header packets (udp_wire.h):
@@ -125,6 +127,9 @@ struct UdpConnectionConfig {
     /// together stay under this. The receiver enforces it, the sender keeps to it,
     /// so both ends must use the same value — a node always uses the default.
     size_t max_unfinished = kDefaultMaxUnfinished;
+    /// Send live messages with repair symbols on a path that loses packets
+    /// (udp_fec.h). Off only to measure what they are worth.
+    bool live_fec = true;
 };
 
 class UdpConnection final : private udp::FrameSink {
@@ -271,7 +276,8 @@ public:
     /// for, has gone — what the mux lingers a released connection until.
     bool flushed() const noexcept;
 
-    /// Bytes queued and not yet sent, first time or again, live messages included.
+    /// Bytes queued and not yet sent, first time or again, live messages included
+    /// — not their repair symbols, which only fill time nothing else wants.
     size_t queued_bytes() const noexcept;
     PathStats path_stats() const noexcept;
     void      release_memory();
@@ -316,6 +322,7 @@ private:
                       bool& ack_eliciting, bool& refused);
     bool on_stream(const udp::StreamFrame& f, Clock::time_point now, bool& refused);
     bool on_live(const udp::LiveFrame& f, Clock::time_point now, bool& refused);
+    bool on_live_repair(const udp::LiveRepairFrame& f, Clock::time_point now, bool& refused);
     void on_data_blocked(uint64_t limit);
 
     // — acknowledgements we owe —
@@ -341,6 +348,17 @@ private:
     uint8_t* write_lanes(uint8_t* p, uint8_t* end, size_t from, size_t to, bool& repair);
     /// `first`: nothing else of the packet's data is in it yet.
     uint8_t* write_live(uint8_t* p, uint8_t* end, Clock::time_point now, bool first, bool& repair);
+    /// Write repair symbol `piece` as a LIVE_REPAIR frame at `p`, if it fits before
+    /// `end`, and move `p` past it.
+    bool     put_parity(uint8_t*& p, uint8_t* end, const udp::LiveSender::Piece& piece,
+                        Clock::time_point now);
+    /// Settle how the live message `piece` begins is protected (udp_live.h).
+    void     protect_live(const udp::LiveSender::Piece& piece, Clock::time_point now);
+    /// Repair symbols per block for a live message of `layout` due at `deadline`:
+    /// enough that a block is lost with the path's loss rate seldom — rarely, if
+    /// what the path loses could not be sent again in time.
+    uint32_t live_repairs(const udp::fec::Layout& layout, Clock::time_point deadline,
+                          Clock::time_point now);
     uint8_t* write_repeat(uint8_t* p, uint8_t* end, Clock::time_point now);
     bool   has_control() const noexcept;
     bool   has_sendable_data() const noexcept;
@@ -447,6 +465,7 @@ private:
     std::vector<std::unique_ptr<Lane>> lanes_;
     std::array<size_t, kPriorityCount> rr_{};   ///< per priority: the lane that goes first next
     udp::LiveSender   live_send_;
+    udp::fec::LossEstimate live_loss_;   ///< what live_repairs() goes by
     uint64_t          sent_new_total_ = 0; ///< new stream bytes ever sent, all lanes
     uint64_t          peer_max_data_  = kInitialWindow;
     uint64_t          blocked_at_     = 0; ///< the limit a DATA_BLOCKED was sent for
@@ -457,6 +476,7 @@ private:
     bool              token_acked_    = false;
     Clock::time_point last_send_{};
     Clock::time_point last_eliciting_send_{};
+    bool              sent_data_ = false;   ///< the last packet built carried data
 
     // — receiving —
     Clock::time_point last_recv_{};

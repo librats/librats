@@ -630,6 +630,7 @@ Recovery::Timeout Recovery::on_timer(Clock::time_point now, FrameSink& sink) {
     // taking it again as loss would cut its model a second time for one outage —
     // and the window it gets back as the path answers, down to a packet.
     const uint64_t reported = lost_since_ack_;
+    written_off_ += flight_bytes_;
     for (size_t i = 0; i < sent_.size(); ++i)
         if (sent_[i].in_flight) mark_lost(sent_[i], now, sink);
     lost_since_ack_  = reported;
