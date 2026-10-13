@@ -54,6 +54,10 @@ struct Direction {
     Clock::duration      delay{};
     size_t               queue_pkts = 0;
     double               loss       = 0;
+    /// The share of datagrams held back `late_by` past their turn — not by the
+    /// queue, which they leave on time: a host's timer, a radio's retries.
+    double               late       = 0;
+    Clock::duration      late_by{};
     Clock::time_point    busy_until{};
     std::deque<InFlight> wire;
     size_t               sent  = 0;   ///< datagrams that entered the queue
@@ -96,7 +100,12 @@ public:
 
         ++d.sent;
         d.busy_until = (std::max)(now_, d.busy_until) + serial;
-        d.wire.push_back(InFlight{d.busy_until + d.delay, from, to, std::move(bytes)});
+        Clock::time_point arrive = d.busy_until + d.delay;
+        if (d.late > 0 && unit_(rng_) < d.late) arrive += d.late_by;
+        // Held back past the ones behind it: in arrival order, so it is overtaken.
+        auto at = std::upper_bound(d.wire.begin(), d.wire.end(), arrive,
+                                   [](Clock::time_point t, const InFlight& f) { return t < f.arrive; });
+        d.wire.insert(at, InFlight{arrive, from, to, std::move(bytes)});
     }
 
     void deliver_until(Clock::time_point now) {
@@ -113,6 +122,7 @@ public:
 
     void set_now(Clock::time_point now) { now_ = now; }
     Direction& fwd() { return fwd_; }
+    Direction& rev() { return rev_; }
 
     /// Sees (and may rewrite) every datagram before the path does; true drops it.
     std::function<bool(Bytes& datagram, const Address& to, bool forward)> hook;
@@ -1138,6 +1148,74 @@ TEST(BbrTest, RandomLossDoesNotCutAnAppLimitedFlowToItsOwnRate) {
                              << sum / steps / 1e6 << " Mbit/s on average";
 }
 
+// Ran dry or not, a sender whose acknowledgements come back late only now and
+// then — a host's timer, a radio's retries — has no queue: the round's
+// smallest round trip says so. Read one acknowledgement at a time, under random
+// loss every round of such a path looked congested and was cut, and the video
+// was paced too slowly for its keyframes.
+TEST(BbrTest, AcknowledgementsThatComeBackLateAreNoQueue) {
+    Sim sim(10, 40ms, 41, 0.03, 5);
+    sim.path.rev().late    = 0.3;
+    sim.path.rev().late_by = 15ms;
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 4, 120ms};
+    video.play(3s);
+    const PathStats before = f.sender().path_stats();
+    video.play(20s);
+    const PathStats after = f.sender().path_stats();
+    const double dropped = double(after.live_expired - before.live_expired) /
+                           double(after.live_sent - before.live_sent);
+    EXPECT_LT(dropped, 0.05) << "frames given up: " << dropped * 100 << "%";
+}
+
+// The receiver holds an acknowledgement back for up to its ack delay, and says by
+// how much. On a long path that is more than the queue the model looks for
+// (min_rtt / 8, at most 16 ms), so a round trip read with the delay left in made
+// every round of a video under random loss look congested: its bounds were cut,
+// and the estimate sank to its own rate.
+TEST(BbrTest, TheReceiversAckDelayIsNoQueue) {
+    Sim sim(10, 100ms, 200, 0.01, 11);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 4, 80ms};
+    video.play(3s);
+    double sum = 0, steps = 0;
+    sim.on_step = [&] {
+        sum += static_cast<double>(bbr(f.sender()).bw()) * 8;
+        ++steps;
+    };
+    video.play(15s);
+    sim.on_step = nullptr;
+    EXPECT_GT(sum / steps, 6e6) << "estimate " << sum / steps / 1e6 << " Mbit/s of a 10 Mbit/s path";
+}
+
+// A buffer shallower than the queue a round trip can show (kQueueMin) never looks
+// queued, so a sender that runs dry between bursts would never be cut for what
+// it loses there (RandomLossDoesNotCutAnAppLimitedFlowToItsOwnRate) — while
+// every burst overflows it again. What was in flight when the lost packet left
+// says it instead: more than the path holds is a queue of the sender's own.
+TEST(BbrTest, ALossFromMoreThanThePathHoldsCutsASenderThatRunsDry) {
+    Sim sim(50, 1ms, 3);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(100ms);
+    int cuts = 0;
+    uint64_t last = cc::BbrController::kInfinite;
+    sim.on_step = [&] {
+        const uint64_t lo = bbr(f.sender()).inflight_lo();
+        if (lo < last) ++cuts;
+        last = lo;
+    };
+    for (int burst = 0; burst < 200; ++burst) {   // 128 KiB every 25 ms: 42 Mbit/s
+        f.to_send += 128 * 1024;
+        sim.run(25ms);
+    }
+    sim.on_step = nullptr;
+    EXPECT_GT(cuts, 50) << "the bursts' losses never cut the model";
+    const double share = double(f.sender().recovery().retransmits()) / double(sim.path.fwd().sent);
+    EXPECT_LT(share, 0.072) << "retransmitted " << share * 100 << "% of what was sent";
+}
+
 // The link loses 70% of its capacity under a live source it can no longer carry:
 // the sender is backlogged, then not, as it drops the frames that cannot make it.
 // The estimate must follow the link down within a few probe cycles — it used to
@@ -1246,3 +1324,4 @@ TEST(UdpPathStatsTest, ReportsTheBottleneckAndTheQueueInFrontOfIt) {
         EXPECT_GE(st.bytes_delivered, f.delivered()) << "delivered counts whole packets";
     }
 }
+
