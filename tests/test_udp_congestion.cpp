@@ -1134,7 +1134,7 @@ TEST(BbrTest, RandomLossDoesNotCutAnAppLimitedFlowToItsOwnRate) {
     EXPECT_FALSE(f.sender().dead());
     const double dropped = double(after.live_expired - before.live_expired) /
                            double(after.live_sent - before.live_sent);
-    EXPECT_LT(dropped, 0.15) << "frames given up: " << dropped * 100 << "%, estimate "
+    EXPECT_LT(dropped, 0.11) << "frames given up: " << dropped * 100 << "%, estimate "
                              << sum / steps / 1e6 << " Mbit/s on average";
 }
 
@@ -1181,6 +1181,35 @@ TEST(BbrTest, TheWindowIsBackOnceThePathAnswersAfterATimeout) {
         << f.sender().recovery().cwnd() / cc::kMss << " packets, from " << before / cc::kMss;
 }
 
+// One outage is one congestion signal, whenever it falls. Live data waiting
+// keeps the sender probing through it (Recovery::set_impatient), and the probes
+// it wrote off used to come back as loss with the first acknowledgement: a
+// second cut of the short-term bounds on top of the timeout's, in the phases of
+// the probe cycle where the timeout cuts at all — and a window of half what
+// the path had, where it should be 0.7 of it.
+TEST(BbrTest, AnOutageCutsTheModelOnceWhateverItsPhase) {
+    for (int phase = 0; phase < 16; ++phase) {
+        SCOPED_TRACE(phase);
+        Sim sim(10, 40ms, 41);
+        Flow& f = sim.add(CongestionAlgorithm::Bbr);
+        sim.run(500ms);
+        Video video{sim, f, 4, 150ms};
+        video.play(9500ms + phase * 97ms);
+        const uint32_t before = f.sender().recovery().cwnd();
+
+        sim.path.blackout = true;
+        video.play(1s);
+        sim.path.blackout = false;
+        const size_t delivered = f.delivered();
+        while (f.delivered() == delivered && !f.sender().dead()) video.play(1ms);
+        video.play(sim.rtt);
+        const uint64_t lo = bbr(f.sender()).inflight_lo();
+        if (lo == UINT64_MAX) continue;   // timed out while probing: no cut
+        EXPECT_GT(lo, before * 6 / 10) << "inflight_lo " << lo / cc::kMss << " packets, from a window of "
+                                       << before / cc::kMss;
+    }
+}
+
 // ── Path statistics ─────────────────────────────────────────────────────────
 
 // What PathStats reports has to be what the connection is actually doing: under
@@ -1217,4 +1246,3 @@ TEST(UdpPathStatsTest, ReportsTheBottleneckAndTheQueueInFrontOfIt) {
         EXPECT_GE(st.bytes_delivered, f.delivered()) << "delivered counts whole packets";
     }
 }
-

@@ -86,9 +86,11 @@
  *     window under heavy random loss runs dry too, and keeps its rate the same
  *     way.
  *
- * A bulk flow that keeps the pipe full takes none of these paths. One change is
- * for every flow: after a timeout the window comes back with the first answer
- * from the path, not as the outage's repairs complete (see on_ack).
+ * A bulk flow takes these paths only in the moments it is app-limited too —
+ * held by the receiver's window, or in the round after its own ProbeRTT. One
+ * change is for every flow: after a timeout the window comes back with the
+ * first answer from the path, not as the outage's repairs complete (see on_ack);
+ * what the timeout wrote off is not reported to it again as loss (Recovery).
  *
  * ── Fidelity ─────────────────────────────────────────────────────────────────
  * The state machine, gains and constants follow draft-ietf-ccwg-bbr (and Linux's
@@ -349,8 +351,6 @@ private:
     bool packet_conservation_ = false;
     /// A timeout wrote off the flight, and nothing has been acknowledged since.
     bool timed_out_           = false;
-    /// Bytes timeouts wrote off that no acknowledgement has reported lost yet.
-    uint64_t written_off_     = 0;
 
     // Bandwidth model. bw_hi_ is the two-slot max filter over probe cycles.
     uint64_t bw_hi_[2] = {0, 0};

@@ -110,8 +110,8 @@ struct AckEvent {
     /// episode, or on what was sent into the congestion it answers, would undo the
     /// reduction (RFC 9002 §7.3.2).
     uint64_t newly_acked_clean = 0;
-    /// Bytes declared lost since the previous acknowledgement — by this one, or by
-    /// a timeout in between.
+    /// Bytes declared lost since the previous acknowledgement, by this one. What a
+    /// timeout in between wrote off is not among them: on_timeout was the news.
     uint64_t newly_lost = 0;
     uint64_t bytes_in_flight = 0;   ///< after the acknowledgement was applied
     /// The window, not the application or the pacer, held the sender back at some
@@ -166,7 +166,7 @@ public:
 
     /// The retransmission timeout fired with nothing heard back. Called before
     /// recovery writes off what was in flight, so `bytes_in_flight` is what the
-    /// timeout gave up on.
+    /// timeout gave up on — and the only time the controller hears of it.
     virtual void on_timeout(Clock::time_point now, uint64_t bytes_in_flight) = 0;
 
     /// An acknowledgement that acknowledged or lost something.

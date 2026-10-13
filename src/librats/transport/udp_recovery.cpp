@@ -625,8 +625,14 @@ Recovery::Timeout Recovery::on_timer(Clock::time_point now, FrameSink& sink) {
     // Everything outstanding had a whole timeout to be answered in, so it stops
     // occupying the path. Left counted, the flight would hold a full window
     // against a window of one packet and nothing could ever be sent again.
+    // Nor is it news to the next acknowledgement: the controller has had this
+    // timeout (or, asked sooner, the one before it) for exactly this flight, and
+    // taking it again as loss would cut its model a second time for one outage —
+    // and the window it gets back as the path answers, down to a packet.
+    const uint64_t reported = lost_since_ack_;
     for (size_t i = 0; i < sent_.size(); ++i)
         if (sent_[i].in_flight) mark_lost(sent_[i], now, sink);
+    lost_since_ack_  = reported;
     recovery_credit_ = 0;
     recover_fs_      = 0;   // what follows is slow start, not PRR
 

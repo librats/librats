@@ -135,13 +135,12 @@ void BbrController::on_recovery_exit(Clock::time_point now) {
     cwnd_ = (std::max)(cwnd_, prior_cwnd_);
 }
 
-void BbrController::on_timeout(Clock::time_point now, uint64_t bytes_in_flight) {
+void BbrController::on_timeout(Clock::time_point now, uint64_t) {
     now_ = now;
     prior_cwnd_          = save_cwnd();
     in_recovery_         = true;
     packet_conservation_ = false;
     timed_out_           = true;
-    written_off_        += bytes_in_flight;
 
     // A timeout is the end of a round with loss in it, and the strongest such
     // signal there is. Between probes that is exactly what the short-term bounds
@@ -188,14 +187,6 @@ void BbrController::on_ack(const AckEvent& ack) {
     newly_lost_   = ack.newly_lost;
     inflight_now_ = ack.bytes_in_flight;
     ack_cwnd_limited_ = ack.cwnd_limited;
-
-    // What a timeout wrote off is reported as lost by the acknowledgement after
-    // it, but it has been answered already: the window collapsed for it, and the
-    // bounds were cut. Taken again it would cut them twice, and the window from
-    // whatever it is restored to below back to one packet.
-    const uint64_t answered = (std::min)(newly_lost_, written_off_);
-    newly_lost_  -= answered;
-    written_off_ -= answered;
 
     // The first acknowledgement after a timeout: the path is answering again. The
     // window goes back to what it was — less what the timeout cut from the bounds,
