@@ -419,8 +419,11 @@ node.on("video", [](const Peer&, ByteView frame) { /* same handler as any messag
 A message with a lifetime is repaired while the repair can still arrive in time and dropped — whole — once
 it cannot: it arrives in time or not at all, never in part or twice. It is ordered with nothing (number
 your frames), goes ahead of ordinary traffic, and is what keeps a stale backlog from standing in front of
-fresh frames after a loss burst or an outage. Over TCP the same call drops a message that expires before
-it is sealed. `PathStats::live_sent` / `live_expired` say how many the sender had to drop. From C:
+fresh frames after a loss burst or an outage. A source asking for more than the path carries loses whole
+frames, not every frame half sent: one that has not started and could no longer leave in time behind
+what is queued ahead of it is dropped before it costs anything. Over TCP the same call drops a message
+that expires before it is sealed. `PathStats::live_sent` / `live_expired` say how many the sender had to
+drop. From C:
 `rats_send(node, peer, "video", data, len, 150)`; a lifetime of 0 is the ordinary reliable send.
 
 ### 11. Distributed storage (requires `RATS_STORAGE`)

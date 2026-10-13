@@ -1092,7 +1092,7 @@ void UdpConnection::pump(Clock::time_point now) {
     if (!established() || (role_ == ConnRole::Inbound && !answered_)) return;
     // Nothing goes out that can no longer arrive in time, and while something
     // still can, a path gone quiet is probed without backing off.
-    live_send_.expire(now, one_way());
+    live_send_.expire(now, one_way(), recovery_.congestion().pacing_rate());
     recovery_.set_impatient(live_send_.has_pending());
     const size_t queued_before = queued_bytes();
     recovery_.begin_sending(now, has_sendable_data());
@@ -1325,7 +1325,7 @@ void UdpConnection::tick(Clock::time_point now) {
         recv_window_ = initial_window_;
     live_recv_.expire(now, account_);
 
-    live_send_.expire(now, one_way());
+    live_send_.expire(now, one_way(), recovery_.congestion().pacing_rate());
     recovery_.set_impatient(live_send_.has_pending());
     switch (recovery_.on_timer(now, *this)) {
         case Recovery::Timeout::Probe:

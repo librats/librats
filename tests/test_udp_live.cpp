@@ -169,6 +169,40 @@ TEST(LiveSenderTest, ASentMessageIsNotGivenUpWhileItMayStillArrive) {
     EXPECT_TRUE(s.empty());
 }
 
+// More than the connection can send in time: a message that has not started and
+// would leave too late behind what is ahead of it is dropped before it costs a
+// byte — so the rest go whole instead of every one running out half sent. Never
+// the last one waiting, which no one is waiting behind, and never one under way.
+TEST(LiveSenderTest, UnderOverloadWhatCannotLeaveInTimeIsDroppedBeforeItStarts) {
+    const cc::PacingRate rate = cc::PacingRate::per_second(100'000);   // 10 KB per 100 ms
+    const auto payload = std::string(10'000 - framer::kHeaderSize, 'v');
+    LiveSender s;
+    for (int i = 0; i < 4; ++i) s.push(FrameHeader{}, ByteView(payload), kT0 + 150ms);
+    s.expire(kT0, 0ms, rate);
+    // The first leaves by 100 ms; the second by 200, too late; the third the same
+    // behind the first; the fourth is the last waiting.
+    EXPECT_EQ(s.expired(), 2u);
+    const auto pieces = drain(s, 10'000);
+    ASSERT_EQ(pieces.size(), 2u);
+    EXPECT_EQ(pieces[0].id, 0u);
+    EXPECT_EQ(pieces[1].id, 3u);
+
+    // A message under way is left to make it or not, and so is one alone.
+    LiveSender t;
+    t.push(FrameHeader{}, ByteView(payload), kT0 + 50ms);
+    t.expire(kT0, 0ms, rate);
+    EXPECT_EQ(t.expired(), 0u) << "the only message was shed";
+    drain(t, 1000, 1);
+    t.push(FrameHeader{}, ByteView(payload), kT0 + 300ms);
+    t.expire(kT0, 0ms, rate);
+    EXPECT_EQ(t.expired(), 0u) << "a message already started was shed";
+    // Without a rate to judge by, nothing is.
+    t.push(FrameHeader{}, ByteView(payload), kT0 + 10ms);
+    t.push(FrameHeader{}, ByteView(payload), kT0 + 400ms);
+    t.expire(kT0, 0ms);
+    EXPECT_EQ(t.expired(), 0u);
+}
+
 TEST(LiveSenderTest, AFullWindowGivesUpTheOldest) {
     LiveSender s;
     for (uint64_t i = 0; i < LiveSender::kWindow + 3; ++i)
@@ -451,10 +485,11 @@ TEST(UdpLiveTest, AfterAnOutageTheFreshFramesGoFirst) {
     ASSERT_GE(first_frame, 0) << "nothing arrived after the outage";
     EXPECT_GE(sent_at[first_frame], outage_to - kLifetime);
     // The path's return is noticed within a probe timeout — the sender does not
-    // back off while live messages wait (Recovery::set_impatient) — and what is
-    // left after that is the controller rebuilding its window from the outage's
-    // losses. A reliable lane took seconds here; backing off alone, 0.8 s.
-    EXPECT_LE(first_after - outage_to, 250ms) << "the path came back but the frames did not";
+    // back off while live messages wait (Recovery::set_impatient) — and the first
+    // answer gives the window back (BbrController::on_ack), so a frame follows a
+    // round trip later. A reliable lane took seconds here; backing off alone,
+    // 0.8 s; rebuilding the window from one packet, 0.17 s.
+    EXPECT_LE(first_after - outage_to, 150ms) << "the path came back but the frames did not";
     EXPECT_EQ(p.b.messages.size(), arrived_at.size()) << "a frame was delivered twice";
     EXPECT_GT(p.a.conn->path_stats().live_expired, 20u);
     EXPECT_GT(got.size(), 50u);

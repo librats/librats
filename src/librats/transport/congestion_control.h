@@ -147,8 +147,11 @@ public:
     virtual void on_packet_sent(Clock::time_point now, uint64_t bytes,
                                 uint64_t bytes_in_flight) = 0;
 
-    /// One round-trip measurement, after the connection's estimator has absorbed it.
-    virtual void on_rtt_sample(Clock::duration rtt) = 0;
+    /// One round-trip measurement, after the connection's estimator has absorbed it,
+    /// and how long the peer says it held the acknowledgement back. `rtt` is raw —
+    /// the delay is not taken off it — so a minimum stays a floor; what is left
+    /// once it is (never below that minimum) is the time spent in queues.
+    virtual void on_rtt_sample(Clock::duration rtt, Clock::duration ack_delay) = 0;
 
     /// A packet was declared lost and is about to be repaired.
     virtual void on_packet_lost(const LostPacket& lost) = 0;

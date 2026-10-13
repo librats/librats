@@ -97,12 +97,38 @@ void LiveSender::settle() noexcept {
     }
 }
 
-void LiveSender::expire(Clock::time_point now, Clock::duration one_way) {
+void LiveSender::expire(Clock::time_point now, Clock::duration one_way, cc::PacingRate rate) {
     for (;;) {
         settle();
-        if (order_.empty() || now + one_way < order_.front().deadline) return;
+        if (order_.empty() || now + one_way < order_.front().deadline) break;
         resolve(*find(order_.front().id), /*given_up=*/true);
     }
+    if (rate.paced() && order_.size() > 1) shed(now, one_way, rate);
+}
+
+void LiveSender::shed(Clock::time_point now, Clock::duration one_way, cc::PacingRate rate) {
+    const auto waiting = [&](size_t i) -> Message* {
+        Message* m = find(order_[i].id);
+        return m && pending(*m) ? m : nullptr;   // else a stale entry
+    };
+    // The last message waiting is never shed: nothing waits for its bytes.
+    size_t last = order_.size();
+    while (last > 0 && !waiting(last - 1)) --last;
+    if (last < 2) return;
+    --last;
+
+    uint64_t ahead = 0;   // bytes that leave before the message at i does
+    for (size_t i = 0; i < last; ++i) {
+        Message* m = waiting(i);
+        if (!m) continue;
+        const uint64_t owed = (m->data.size() - m->sent) + m->lost_bytes;
+        if (m->sent == 0 && now + one_way + rate.time_for(ahead + owed) > m->deadline) {
+            resolve(*m, /*given_up=*/true);
+            continue;
+        }
+        ahead += owed;
+    }
+    settle();
 }
 
 std::optional<LiveSender::Clock::time_point> LiveSender::next_expiry(Clock::duration one_way) const noexcept {

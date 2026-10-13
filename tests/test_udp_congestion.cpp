@@ -1025,10 +1025,10 @@ TEST(BbrTest, AShallowBufferEndsStartupOnLoss) {
     EXPECT_GT((f.delivered() - start) / 10.0, 0.6 * payload_rate(10));
 }
 
-// An app-limited flow never leaves Startup, and Startup only raises its pacing
-// rate; whatever the rate was before the first round trip would be the speed
-// every keyframe goes out at. It comes from the handshake's round trip now, so it
-// is the path's from the start.
+// Startup only raises its pacing rate, and an app-limited flow that never queues
+// stays in it; whatever the rate was before the first round trip would be the
+// speed every keyframe goes out at. It comes from the handshake's round trip now,
+// so it is the path's from the start.
 TEST(BbrTest, AnAppLimitedFlowIsPacedFromTheMeasuredRoundTrip) {
     Sim sim(10, 40ms, 41);
     Flow& f = sim.add(CongestionAlgorithm::Bbr);
@@ -1040,6 +1040,145 @@ TEST(BbrTest, AnAppLimitedFlowIsPacedFromTheMeasuredRoundTrip) {
     const PathStats st = f.sender().path_stats();
     EXPECT_LT(st.pacing_bps, 4 * 10e6) << "pacing at " << st.pacing_bps / 1e6 << " Mbit/s on a 10 Mbit/s path";
     EXPECT_GT(st.pacing_bps, 10e6) << "Startup paces above the estimate, not below it";
+}
+
+// ── Flows that do not fill the pipe ─────────────────────────────────────────
+
+namespace {
+
+/// A video source on a flow: 30 frames a second at `mbps`, every 60th five times
+/// the others — the burst a keyframe is. Frames are reliable stream data, or with
+/// a `lifetime` live messages.
+struct Video {
+    Sim&            sim;
+    Flow&           flow;
+    double          mbps;
+    Clock::duration lifetime{};
+    int             frame = 0;
+
+    /// Run the simulation for `d`, a frame at a time.
+    void play(Clock::duration d) {
+        const double weight = mbps * 1e6 / 8 * 2 / 64;   // 64 frame-weights per 2 s
+        const auto   until  = sim.now + d;
+        while (sim.now < until) {
+            const auto size = static_cast<size_t>(frame++ % 60 == 0 ? 5 * weight : weight);
+            if (lifetime == Clock::duration::zero()) {
+                flow.to_send += size;
+            } else {
+                flow.tx.send_live(MessageType::App, std::string(size, 'v'), sim.now + lifetime);
+                flow.sender().flush(sim.now);
+            }
+            sim.run(std::chrono::microseconds(33'333));
+        }
+    }
+};
+
+} // namespace
+
+// The plateau test that ends Startup reads only samples that are not app-limited,
+// which video hardly ever produces. Left in Startup it would send every keyframe
+// at 2.77x a bandwidth it found long ago, into a buffer of one BDP that cannot
+// take it: every keyframe lost, every time. A burst of its own that queued at the
+// bottleneck ends Startup instead, and the keyframes go at the path's rate.
+TEST(BbrTest, AnAppLimitedFlowLeavesStartupOnceItsBurstsQueue) {
+    Sim sim(10, 40ms, 41);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 4};
+    video.play(6s);
+    EXPECT_TRUE(bbr(f.sender()).full_bw_reached()) << "still in Startup";
+    EXPECT_NE(bbr(f.sender()).state(), cc::BbrController::State::Startup);
+
+    const uint32_t lost = f.sender().recovery().retransmits();
+    video.play(10s);
+    EXPECT_LE(f.sender().recovery().retransmits() - lost, 10u)
+        << "keyframes still overflow the bottleneck";
+    EXPECT_LT(f.sender().path_stats().pacing_bps, 1.4 * 10e6) << "bursts paced far above the path";
+}
+
+// ProbeRTT empties a queue to measure the path's own delay. An app-limited flow
+// that keeps seeing that delay has no queue to empty — and holding its inflight
+// to half a BDP for 200 ms is a keyframe lost for nothing. A flow that fills the
+// pipe still probes (ProbesRttAndComesBack).
+TEST(BbrTest, AnAppLimitedFlowThatSeesTheMinimumSkipsProbeRtt) {
+    Sim sim(10, 40ms, 41);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    bool probed = false;
+    sim.on_step = [&] { probed |= bbr(f.sender()).state() == cc::BbrController::State::ProbeRtt; };
+    Video{sim, f, 2}.play(16s);
+    sim.on_step = nullptr;
+    EXPECT_FALSE(probed) << "ProbeRTT with an empty queue";
+}
+
+// Random loss with nothing queued is not congestion this sender caused: it is
+// sending less than the path carries into a queue that is empty. Cutting the
+// short-term bounds for it paced the video's bursts and repairs at the video's
+// own rate — under 5% loss below what the video needs, and a quarter of the
+// frames ran out of time waiting for repairs that rate let out too slowly.
+TEST(BbrTest, RandomLossDoesNotCutAnAppLimitedFlowToItsOwnRate) {
+    Sim sim(10, 40ms, 41, 0.05, 11);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 4, 120ms};
+    video.play(3s);
+    const PathStats before = f.sender().path_stats();
+    double sum = 0, steps = 0;
+    sim.on_step = [&] {
+        sum += static_cast<double>(bbr(f.sender()).bw()) * 8;
+        ++steps;
+    };
+    video.play(20s);
+    sim.on_step = nullptr;
+    const PathStats after = f.sender().path_stats();
+    EXPECT_FALSE(f.sender().dead());
+    const double dropped = double(after.live_expired - before.live_expired) /
+                           double(after.live_sent - before.live_sent);
+    EXPECT_LT(dropped, 0.15) << "frames given up: " << dropped * 100 << "%, estimate "
+                             << sum / steps / 1e6 << " Mbit/s on average";
+}
+
+// The link loses 70% of its capacity under a live source it can no longer carry:
+// the sender is backlogged, then not, as it drops the frames that cannot make it.
+// The estimate must follow the link down within a few probe cycles — it used to
+// age only when the one acknowledgement ending a cycle happened not to be
+// app-limited, which in and out of being backlogged it seldom was, and a
+// pre-drop estimate and a standing queue of a whole buffer stayed for good.
+TEST(BbrTest, TheEstimateFollowsTheLinkDownUnderASourceItCannotCarry) {
+    Sim sim(10, 40ms, 41);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 4, 120ms};
+    video.play(5s);
+    ASSERT_GT(bbr(f.sender()).max_bw(), 2 * 3e6 / 8) << "no estimate to follow down";
+    sim.path.fwd().rate_bps = 3e6;
+    video.play(12s);
+    EXPECT_LT(bbr(f.sender()).max_bw(), 1.3 * 3e6 / 8)
+        << "estimate " << bbr(f.sender()).max_bw() * 8 / 1e6 << " Mbit/s on a 3 Mbit/s link";
+}
+
+// After an outage the first acknowledgement says the path is back. The window goes
+// back to what the model holds then, instead of doubling up from one packet over
+// five or six round trips of a path that is idle — for as long as the repairs of
+// what the outage lost take to go out, which with a backlog behind them is long.
+TEST(BbrTest, TheWindowIsBackOnceThePathAnswersAfterATimeout) {
+    Sim sim(10, 40ms, 41);
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(500ms);
+    Video video{sim, f, 4};
+    video.play(6s);
+    const uint32_t before = f.sender().recovery().cwnd();
+
+    sim.path.blackout = true;
+    video.play(1s);
+    sim.path.blackout = false;
+    const size_t delivered = f.delivered();
+    while (f.delivered() == delivered && !f.sender().dead()) video.play(1ms);
+    video.play(2 * sim.rtt);
+    EXPECT_TRUE(f.sender().recovery().in_recovery()) << "nothing left to repair: not the case meant";
+    EXPECT_GT(f.sender().recovery().cwnd(), before / 2)
+        << "two round trips after the path answered the window is "
+        << f.sender().recovery().cwnd() / cc::kMss << " packets, from " << before / cc::kMss;
 }
 
 // ── Path statistics ─────────────────────────────────────────────────────────

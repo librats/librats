@@ -62,7 +62,7 @@ public:
     PacingRate pacing_rate() const noexcept override;
 
     void on_packet_sent(Clock::time_point now, uint64_t bytes, uint64_t bytes_in_flight) override;
-    void on_rtt_sample(Clock::duration rtt) override;
+    void on_rtt_sample(Clock::duration rtt, Clock::duration ack_delay) override;
     void on_packet_lost(const LostPacket&) override {}
     void on_congestion_event(Clock::time_point now, uint64_t bytes_in_flight,
                              uint64_t newly_acked) override;

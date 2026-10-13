@@ -68,13 +68,21 @@ void BbrController::on_packet_sent(Clock::time_point, uint64_t, uint64_t bytes_i
     inflight_now_ = bytes_in_flight;
 }
 
-void BbrController::on_rtt_sample(Clock::duration rtt) {
+void BbrController::on_rtt_sample(Clock::duration rtt, Clock::duration ack_delay) {
     // Several packets can be retired by one acknowledgement; the model wants the
     // smallest of their round trips, the one least inflated by queueing.
     if (rtt < ack_rtt_) ack_rtt_ = rtt;
+    const Clock::duration net = rtt > ack_delay ? rtt - ack_delay : Clock::duration::zero();
+    if (net < ack_rtt_net_) ack_rtt_net_ = net;
 }
 
 void BbrController::on_packet_lost(const LostPacket& lost) {
+    // Lost from more than the path holds — by the long-term model, which the
+    // short-term bounds this decides about do not move: a queue of ours
+    // overflowed, however shallow — too shallow, perhaps, for the round trip to
+    // have shown it.
+    if (lost.tx_in_flight > bdp_multiple(max_bw_, kUnit)) loss_round_overfull_ = true;
+
     // Only a packet sent while probing for bandwidth says anything about where the
     // probe should have stopped. A loss between probes is handled per round by the
     // short-term bounds instead (adapt_lower_bounds_from_congestion).
@@ -127,11 +135,13 @@ void BbrController::on_recovery_exit(Clock::time_point now) {
     cwnd_ = (std::max)(cwnd_, prior_cwnd_);
 }
 
-void BbrController::on_timeout(Clock::time_point now, uint64_t) {
+void BbrController::on_timeout(Clock::time_point now, uint64_t bytes_in_flight) {
     now_ = now;
     prior_cwnd_          = save_cwnd();
     in_recovery_         = true;
     packet_conservation_ = false;
+    timed_out_           = true;
+    written_off_        += bytes_in_flight;
 
     // A timeout is the end of a round with loss in it, and the strongest such
     // signal there is. Between probes that is exactly what the short-term bounds
@@ -147,7 +157,7 @@ void BbrController::on_timeout(Clock::time_point now, uint64_t) {
     full_bw_ = 0;
 
     // Everything in flight is written off; one packet goes out to restart the ack
-    // clock, and the window rebuilds from the acknowledgements it brings back.
+    // clock, until the path answers (on_ack).
     cwnd_ = kMss;
 }
 
@@ -179,10 +189,32 @@ void BbrController::on_ack(const AckEvent& ack) {
     inflight_now_ = ack.bytes_in_flight;
     ack_cwnd_limited_ = ack.cwnd_limited;
 
+    // What a timeout wrote off is reported as lost by the acknowledgement after
+    // it, but it has been answered already: the window collapsed for it, and the
+    // bounds were cut. Taken again it would cut them twice, and the window from
+    // whatever it is restored to below back to one packet.
+    const uint64_t answered = (std::min)(newly_lost_, written_off_);
+    newly_lost_  -= answered;
+    written_off_ -= answered;
+
+    // The first acknowledgement after a timeout: the path is answering again. The
+    // window goes back to what it was — less what the timeout cut from the bounds,
+    // which set_cwnd() applies — instead of rebuilding from one packet. A window
+    // grown back by acknowledgements doubles per round trip, which after an outage
+    // is five or six round trips of a path that is back, idling; and it guards
+    // against a burst nothing here produces, since every packet is paced at the
+    // model's rate. (Linux restores the same window once the whole flight lost to
+    // the timeout is repaired — later, by as long as that takes.)
+    if (timed_out_ && newly_acked_ > 0) {
+        timed_out_ = false;
+        cwnd_      = (std::max)(cwnd_, prior_cwnd_);
+    }
+
     update_model_and_state();
     update_control_parameters();
 
-    ack_rtt_ = (Clock::duration::max)();
+    ack_rtt_     = (Clock::duration::max)();
+    ack_rtt_net_ = (Clock::duration::max)();
 }
 
 // ── Model and state ─────────────────────────────────────────────────────────
@@ -225,9 +257,16 @@ void BbrController::update_congestion_signals() {
         loss_in_round_ = true;
         if (loss_events_in_round_ < 15) ++loss_events_in_round_;
     }
+    if (rs_.acked && rs_.is_app_limited) {
+        ran_dry_       = true;
+        ran_dry_round_ = round_count_;
+    }
+    if (ack_rtt_net_ < loss_round_rtt_net_) loss_round_rtt_net_ = ack_rtt_net_;
     if (!loss_round_start_) return;   // wait until the end of the round trip
     adapt_lower_bounds_from_congestion();
-    loss_in_round_ = false;
+    loss_in_round_       = false;
+    loss_round_overfull_ = false;
+    loss_round_rtt_net_  = (Clock::duration::max)();
 }
 
 void BbrController::update_round() {
@@ -254,12 +293,14 @@ void BbrController::update_max_bw() {
         bw_hi_[1] = (std::max)(bw_hi_[1], rs_.delivery_rate);
         max_bw_   = (std::max)(bw_hi_[0], bw_hi_[1]);
     }
+    if (!rs_.is_app_limited && queued(ack_rtt_net_)) bw_hi_saturated_ = true;
 }
 
 void BbrController::advance_max_bw_filter() noexcept {
     if (bw_hi_[1] == 0) return;   // nothing measured this cycle: keep the old one
     bw_hi_[0] = bw_hi_[1];
     bw_hi_[1] = 0;
+    bw_hi_saturated_ = false;
     // The estimate is the max over both slots, always — so the cycle just shifted
     // out stops counting now, not whenever a sample next qualifies to refresh it
     // (for an app-limited flow, possibly never).
@@ -299,7 +340,20 @@ void BbrController::update_ack_aggregation() {
 }
 
 void BbrController::check_full_bw_reached() {
-    if (full_bw_now_ || !rs_.acked || rs_.is_app_limited) return;
+    if (full_bw_now_ || !rs_.acked) return;
+
+    // The plateau below is read off samples that are not app-limited, which a flow
+    // that never fills the pipe — live video — hardly ever produces: it would stay
+    // in Startup for good, sending every burst at 2.77x a bandwidth it has long
+    // since found, and in a probe it would never stop probing. What such a flow
+    // does produce is a burst that queues: more in flight than the path holds, and
+    // the round trip lifted by it. That is the path saying it is full at the rate
+    // it delivers already — the plateau's verdict, reached in one burst.
+    if (rs_.is_app_limited) {
+        if (rs_.tx_in_flight > bdp_multiple(max_bw_, kUnit) && queued(ack_rtt_net_))
+            full_bw_now_ = full_bw_reached_ = true;
+        return;
+    }
 
     // Still growing by a quarter: this is not the plateau, start counting again.
     if (rs_.rate_valid && rs_.delivery_rate >= full_bw_ * kFullBwThresh / kUnit) {
@@ -371,7 +425,15 @@ bool BbrController::adapt_upper_bounds() {
         // the cycle before it: what the probe found is the best current evidence.
         bw_probe_samples_ = false;
         ack_phase_        = AckPhase::Init;
-        if (is_in_probe_bw() && !rs_.is_app_limited) advance_max_bw_filter();
+        // Only a cycle that measured the path may replace the one before it: this
+        // acknowledgement not app-limited, or any sample of the cycle that was not
+        // either and waited in a queue — the path, not the pacer, set its rate. A
+        // flow in and out of being app-limited (video above the path's rate, its
+        // stale frames dropped) can lose the coin toss of this one acknowledgement
+        // at every cycle, and keep an estimate from before the path slowed down for
+        // as long as it does. Without the queue a sample of such a flow measures
+        // only its own pacing, and forgetting by it would ratchet the estimate down.
+        if (is_in_probe_bw() && (!rs_.is_app_limited || bw_hi_saturated_)) advance_max_bw_filter();
         // The last probe stopped at inflight_hi without seeing loss: try again,
         // this time holding at the bound for a round before accelerating past it.
         if (is_in_probe_bw() && stopped_risky_probe_ && !prev_probe_too_high_) {
@@ -397,6 +459,13 @@ void BbrController::update_min_rtt() {
     if (ack_rtt_ != (Clock::duration::max)() &&
         (ack_rtt_ < probe_rtt_min_delay_ || probe_rtt_expired_)) {
         probe_rtt_min_delay_ = ack_rtt_;
+        probe_rtt_min_stamp_ = now_;
+    } else if (ack_rtt_ != (Clock::duration::max)() && rs_.is_app_limited &&
+               min_rtt_ != (Clock::duration::max)() && ack_rtt_ <= min_rtt_ + min_rtt_ / 8) {
+        // An app-limited sender saw the minimum again, give or take an eighth: the
+        // queue ProbeRTT exists to drain was empty just now, so there is nothing
+        // for it to find — and an app-limited flow is exactly the one that loses a
+        // burst to its half-BDP window. The next one is due from here.
         probe_rtt_min_stamp_ = now_;
     }
 
@@ -708,6 +777,19 @@ void BbrController::adapt_lower_bounds_from_congestion() {
     // A probe is supposed to see loss; only the rounds between probes cut.
     if (is_probing_bw()) return;
     if (!loss_in_round_) return;
+    // A sender that keeps running out of things to send leaves the bottleneck
+    // idle. If the queue in front of it also emptied during the round, and what
+    // it lost did not leave with more than the path holds, it was not lost to a
+    // full queue — a radio's loss is not cured by sending less. Cutting would only
+    // pace the sender's bursts and repairs down to its own average rate; then the
+    // repairs back up behind that rate, the sender stops running dry, and every
+    // round cuts again. So "keeps running dry" is a memory, not the round's
+    // (kRanDryRounds). The queue is the round's smallest round trip, not any one
+    // of them: on a real path single acknowledgements come back late for reasons
+    // of their own (a host's timer, a radio), and read one by one they made a
+    // jittery path look congested every round.
+    const bool runs_dry = ran_dry_ && round_count_ - ran_dry_round_ <= kRanDryRounds;
+    if (runs_dry && !queued(loss_round_rtt_net_) && !loss_round_overfull_) return;
     init_lower_bounds();
     loss_lower_bounds();
 }
@@ -780,6 +862,14 @@ uint64_t BbrController::probe_rtt_cwnd() const noexcept {
 uint64_t BbrController::save_cwnd() const noexcept {
     if (!in_recovery_ && state_ != State::ProbeRtt) return cwnd_;
     return (std::max)(prior_cwnd_, cwnd_);
+}
+
+bool BbrController::queued(Clock::duration rtt_net) const noexcept {
+    if (rtt_net == (Clock::duration::max)() || min_rtt_ == (Clock::duration::max)()) return false;
+    const auto lo = std::chrono::duration_cast<Clock::duration>(kQueueMin);
+    const auto hi = std::chrono::duration_cast<Clock::duration>(kQueueMax);
+    const Clock::duration threshold = (std::min)((std::max)(min_rtt_ / 8, lo), hi);
+    return rtt_net >= min_rtt_ + threshold;
 }
 
 bool BbrController::is_in_probe_bw() const noexcept {

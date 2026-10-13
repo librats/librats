@@ -18,12 +18,17 @@
  * the path never holds anything stale, which is what lets the fresh frame through
  * right after an outage instead of a second's worth of old ones.
  *
- * What it deliberately does not judge is whether the rest of a message can still
- * *leave* in time at the rate the connection is pacing at. That would spare a
- * source asking for more than the path carries the bytes it spends on frames that
- * miss anyway — but the pacing rate of a flow that sends less than the path holds
- * is a floor, not the path, and dropping by it keeps the flow sending less: on a
- * long path, at the start, it starves the very measurement that would raise it.
+ * A source asking for more than the path carries needs one more judgement, or
+ * every message misses: each waits its turn until it is nearly due, starts,
+ * and runs out of time half sent (EDF's domino effect under overload). So a
+ * message that has not started yet, and cannot *leave* in time behind what is
+ * queued ahead of it at the rate the connection paces at, is dropped before it
+ * costs anything — but only while another message waits behind it, which is
+ * what it would be dropped for. A message alone, or one already started, is
+ * left to make its deadline or miss it: the pacing rate of a flow that sends
+ * less than the path holds is a floor, not the path, and dropping by it alone
+ * keeps such a flow sending less — on a long path, at the start, it starves the
+ * very measurement that would raise it.
  *
  * The receiver puts each message together from its pieces and hands it over the
  * moment it is whole, in no order. A message is given up on when the time it had
@@ -44,6 +49,7 @@
 #include "librats/core/bytes.h"
 #include "librats/core/receive_buffer.h"
 #include "librats/core/ring_buffer.h"
+#include "librats/transport/congestion_control.h"
 #include "librats/transport/udp_streams.h"
 #include "librats/transport/udp_wire.h"
 #include "librats/wire/frame.h"
@@ -73,8 +79,11 @@ public:
     void push(FrameHeader header, ByteView payload, Clock::time_point deadline);
 
     /// Drop every message with something still to send that can no longer arrive
-    /// in time: its deadline is `one_way` or less from `now`.
-    void expire(Clock::time_point now, Clock::duration one_way);
+    /// in time: its deadline is `one_way` or less from `now`. And, if the
+    /// connection paces at `rate`, every message not started yet that would leave
+    /// too late for that behind the bytes queued ahead of it, unless it is the last
+    /// one waiting (see the file comment).
+    void expire(Clock::time_point now, Clock::duration one_way, cc::PacingRate rate = {});
     /// When expire() will next drop something, given the same `one_way`; nullopt
     /// when nothing is waiting to be sent.
     std::optional<Clock::time_point> next_expiry(Clock::duration one_way) const noexcept;
@@ -149,6 +158,8 @@ private:
     void           resolve(Message& m, bool given_up);
     /// Pop resolved messages off the front, and stale entries off the order.
     void           settle() noexcept;
+    /// The overload half of expire().
+    void           shed(Clock::time_point now, Clock::duration one_way, cc::PacingRate rate);
 
     /// Message base_ + i is messages_[i].
     RingBuffer<Message> messages_;

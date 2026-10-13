@@ -39,7 +39,7 @@ void RenoController::on_packet_sent(Clock::time_point now, uint64_t, uint64_t) {
     last_data_send_ = now;
 }
 
-void RenoController::on_rtt_sample(Clock::duration rtt) {
+void RenoController::on_rtt_sample(Clock::duration rtt, Clock::duration) {
     // The *minimum* of the round, not the average: a queue building in front of
     // the bottleneck lifts even the luckiest packet's round trip, where an
     // average moves just as readily for one straggler that had nothing to do

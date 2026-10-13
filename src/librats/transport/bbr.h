@@ -49,6 +49,47 @@
  * Loss below the 2% threshold moves neither bound during a probe: that is what
  * lets BBR hold its rate on a lossy but uncongested link.
  *
+ * ── Flows that do not fill the pipe ──────────────────────────────────────────
+ * The draft's model is built from samples of a sender that has more to send:
+ * an app-limited sample says only "at least this fast", so it may raise the
+ * bandwidth estimate and never set it. For a flow that is app-limited nearly
+ * all the time — live video, a call: a burst per frame, a bigger one per
+ * keyframe, idle in between — that leaves the state machine waiting for
+ * evidence that never comes. So these read what such a flow does measure as
+ * well as any — the queueing delay (the round trip less the peer's ack delay,
+ * over the minimum; "queued" past clamp(min_rtt/8, 4, 16 ms), HyStart++'s
+ * threshold, so jitter does not count) and the inflight a packet left with:
+ *
+ *   - An app-limited burst of ours that queues at the bottleneck — more than a
+ *     BDP in flight, and the round trip lifted by it — counts as the plateau:
+ *     it ends Startup, and a bandwidth probe. The plateau test proper needs
+ *     non-app-limited samples such a flow never produces; without this every
+ *     keyframe would leave at Startup's 2.77x the bandwidth already found, into
+ *     a buffer it overflows, and a probe would last until loss ended it.
+ *   - ProbeRTT is skipped while app-limited round trips keep coming in within
+ *     1/8 of the minimum (as Chromium's BBR does): the queue it would drain was
+ *     empty anyway, and holding inflight to half a BDP for 200 ms is a lost
+ *     keyframe for nothing.
+ *   - The max-bandwidth filter ages at the end of a probe cycle that measured
+ *     the path against a queue — a sample not app-limited that waited in one —
+ *     not only when the acknowledgement at that instant is not app-limited: for
+ *     a flow in and out of being app-limited the instant is a coin toss, and
+ *     losing it every time kept a pre-drop estimate alive indefinitely.
+ *   - A round that lost packets, whose queue emptied at some point and whose
+ *     losses left with less than a BDP in flight, by a sender that keeps
+ *     running dry, does not cut the short-term bounds: the bottleneck idles, so
+ *     the loss is not a full queue's, and cutting only paced the sender's bursts
+ *     and repairs down to its own average rate — under 5% random loss, below
+ *     the rate of the video. (The price: a policer below the video's rate, which
+ *     drops without queueing, is not learnt from by these bounds; the loss
+ *     threshold of the probes still is.) A bulk sender held by the receiver's
+ *     window under heavy random loss runs dry too, and keeps its rate the same
+ *     way.
+ *
+ * A bulk flow that keeps the pipe full takes none of these paths. One change is
+ * for every flow: after a timeout the window comes back with the first answer
+ * from the path, not as the outage's repairs complete (see on_ack).
+ *
  * ── Fidelity ─────────────────────────────────────────────────────────────────
  * The state machine, gains and constants follow draft-ietf-ccwg-bbr (and Linux's
  * tcp_bbr.c v3 where the draft defers to it). Two adaptations to this transport:
@@ -134,6 +175,18 @@ public:
     /// Ceiling on the Reno-coexistence probe interval, in rounds.
     static constexpr uint64_t kProbeMaxRounds = 63;
 
+    /// The queueing delay that counts as a queue: an eighth of the minimum round
+    /// trip, within these bounds (RFC 9406's RTT threshold) — above the jitter a
+    /// path shows with nothing queued, below what one burst of ours builds.
+    static constexpr std::chrono::milliseconds kQueueMin{4};
+    static constexpr std::chrono::milliseconds kQueueMax{16};
+
+    /// Rounds after its last app-limited sample a sender still counts as one that
+    /// does not fill the pipe, for whether its loss is congestion: as long as the
+    /// longest a probe waits for a Reno flow, so that the few rounds a burst of
+    /// repairs keeps a video sender busy do not turn its random loss into cuts.
+    static constexpr uint64_t kRanDryRounds = kProbeMaxRounds;
+
     /// The aggregation estimate is a max over two windows of this many rounds.
     static constexpr int kExtraAckedWindowRounds = 5;
     /// Never provision more than this much extra for aggregation.
@@ -147,7 +200,7 @@ public:
     PacingRate pacing_rate() const noexcept override { return PacingRate::per_second(pacing_rate_); }
 
     void on_packet_sent(Clock::time_point now, uint64_t bytes, uint64_t bytes_in_flight) override;
-    void on_rtt_sample(Clock::duration rtt) override;
+    void on_rtt_sample(Clock::duration rtt, Clock::duration ack_delay) override;
     void on_packet_lost(const LostPacket& lost) override;
     void on_congestion_event(Clock::time_point now, uint64_t bytes_in_flight,
                              uint64_t newly_acked) override;
@@ -260,6 +313,9 @@ private:
     bool     is_in_probe_bw() const noexcept;
     bool     is_probing_bw() const noexcept;
     bool     cwnd_limited() const noexcept { return cwnd_limited_prev_ || cwnd_limited_now_; }
+    /// A round trip, the peer's ack delay taken off, that shows a queue (see
+    /// "Flows that do not fill the pipe" above).
+    bool     queued(Clock::duration rtt_net) const noexcept;
     uint64_t random() noexcept;
 
     const RttEstimate&         rtt_;
@@ -273,6 +329,8 @@ private:
     uint64_t          inflight_now_ = 0;   ///< bytes in flight, as of the last hook
     bool              ack_cwnd_limited_ = false;
     Clock::duration   ack_rtt_ = (Clock::duration::max)();   ///< min clean sample this ack
+    /// The same with the peer's ack delay taken off: transit and queueing only.
+    Clock::duration   ack_rtt_net_ = (Clock::duration::max)();
 
     State    state_     = State::Startup;
     AckPhase ack_phase_ = AckPhase::Init;
@@ -289,9 +347,16 @@ private:
     // Recovery.
     bool in_recovery_         = false;
     bool packet_conservation_ = false;
+    /// A timeout wrote off the flight, and nothing has been acknowledged since.
+    bool timed_out_           = false;
+    /// Bytes timeouts wrote off that no acknowledgement has reported lost yet.
+    uint64_t written_off_     = 0;
 
     // Bandwidth model. bw_hi_ is the two-slot max filter over probe cycles.
     uint64_t bw_hi_[2] = {0, 0};
+    /// bw_hi_[1]'s cycle had a sample neither app-limited nor clear of a queue: a
+    /// measurement of the path, so the filter may forget the cycle before it.
+    bool     bw_hi_saturated_ = false;
     uint64_t max_bw_   = 0;
     uint64_t bw_       = 0;
     uint64_t bw_lo_       = kInfinite;
@@ -320,6 +385,14 @@ private:
     bool     loss_round_start_     = false;
     bool     loss_in_round_        = false;
     int      loss_events_in_round_ = 0;
+    /// The loss round so far: its smallest round trip (ack delay off), whether it
+    /// lost a packet sent with more than a BDP in flight; and the round the sender
+    /// last ran dry in — whether a loss can be blamed on congestion (see
+    /// adapt_lower_bounds_from_congestion).
+    Clock::duration loss_round_rtt_net_ = (Clock::duration::max)();
+    bool     loss_round_overfull_  = false;
+    bool     ran_dry_              = false;
+    uint64_t ran_dry_round_        = 0;
     bool     cwnd_limited_now_  = false;   ///< this round
     bool     cwnd_limited_prev_ = false;   ///< the round before
 

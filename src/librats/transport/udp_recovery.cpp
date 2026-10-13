@@ -500,7 +500,7 @@ void Recovery::sample_rtt(Clock::duration rtt, Clock::duration ack_delay) {
     rtt_.latest  = rtt;
     rtt_.min_rtt = (std::min)(rtt_.min_rtt, rtt);
     rtt_.rto     = estimated_rto();
-    cc_->on_rtt_sample(rtt);
+    cc_->on_rtt_sample(rtt, ack_delay);
 }
 
 // ── The loss timer ──────────────────────────────────────────────────────────
