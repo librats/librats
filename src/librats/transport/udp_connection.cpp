@@ -950,6 +950,17 @@ bool UdpConnection::has_repairs() const noexcept {
     return false;
 }
 
+bool UdpConnection::repairs_go_at_once() const noexcept {
+    // A few repairs are not held by the pacer: what the peer is missing holds up
+    // everything behind it. A backlog of them is — a timeout writes off the whole
+    // flight, BBR hands the window back on the first acknowledgement, and let past
+    // the pacer that window would leave in one line-rate burst that a shallow
+    // queue mostly drops. One pacer release is the most that goes at once.
+    uint64_t owed = live_send_.lost_bytes();
+    for (const auto& lane : lanes_) owed += lane->send.lost_bytes();
+    return owed > 0 && owed <= udp::Recovery::kPaceMaxBurst;
+}
+
 bool UdpConnection::has_sendable_data() const noexcept {
     // Live messages are not under the peer's window: what bounds them is how long
     // they live, and what the receiver will hold of them (udp_live.h).
@@ -1395,9 +1406,7 @@ void UdpConnection::pump(Clock::time_point now) {
             if (!recovery_.cwnd_allows(size)) {
                 window_stopped = true;
                 with_data      = false;
-            } else if (!has_repairs() && !recovery_.pace_allows(size)) {
-                // Repairs are not held by the pacer: what the peer is missing holds
-                // up everything behind it.
+            } else if (!recovery_.pace_allows(size) && !repairs_go_at_once()) {
                 recovery_.hold_for_pacer(now, size);
                 with_data = false;
             }
