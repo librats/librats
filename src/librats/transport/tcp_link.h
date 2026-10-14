@@ -32,7 +32,8 @@ public:
     socket_t fd() const noexcept override { return socket_; }
 
     /// The kernel's own congestion state (TCP_INFO). Linux only for now; on other
-    /// platforms the link reports nothing measured.
+    /// platforms the link reports nothing measured, and StreamTransport's own
+    /// queue and live counters are all a sample carries.
     PathStats path_stats() const override;
 
     /// TCP needs no goodbye of its own: the Reactor closes the socket right after,

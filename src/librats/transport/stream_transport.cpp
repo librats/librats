@@ -235,9 +235,13 @@ void StreamTransport::arm_write(bool on) {
 
 PathStats StreamTransport::path_stats() const {
     PathStats s = link_->path_stats();
+    // The link may measure nothing of the path (TCP off Linux, a relayed byte
+    // stream), but what waits here and what became of the live messages is ours to
+    // count on any link — and the queue is what an encoder most needs to see.
+    s.valid = phase_ == Phase::Established;
     // Everything queued here waits in front of a new message as surely as what
     // the link holds — on TCP far more, the kernel's own backlog being kept short.
-    if (s.valid) s.queued_bytes += queue_.size() + tx_.size();
+    s.queued_bytes += queue_.size() + tx_.size();
     s.live_sent    = queue_.live_sent();
     s.live_expired = queue_.live_expired();
     return s;

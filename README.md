@@ -583,9 +583,10 @@ is losing. `PathStats` is what the transport knows about the path to one peer:
 `NodeConfig::path_sample_ms` (100 ms when 0) on a reactor thread, and registering
 it is what turns sampling on; `path_stats()` answers the latest sample from any
 thread. Sampling costs nothing when nobody asks. Over UDP the figures are the
-stream's own; over TCP they come from the kernel (`TCP_INFO`, Linux only — a TCP
-peer elsewhere, like a relayed one, is never sampled and `path_stats()` stays
-`nullopt`). C ABI:
+stream's own; over TCP they come from the kernel (`TCP_INFO`, Linux only). A TCP
+peer elsewhere, like one over a relayed byte stream, has no figures for the path
+itself: they stay 0, and its sample carries only `queued_bytes` and the live
+counters, which the sender keeps on every link. C ABI:
 `rats_path_stats()`, `rats_on_peer_path()`, `rats_config_t::path_sample_ms`.
 `bench_path --realtime` measures live video against a modelled path, with a source
 that steers by these figures and one that does not.

@@ -279,7 +279,8 @@ typedef struct {
 /** The latest path sample for a peer, from any thread. RATS_ERR_NO_SUCH_PEER if the
  *  peer is not connected or nothing has been sampled yet — sampling runs only with
  *  path_sample_ms set or an rats_on_peer_path() callback registered. Over TCP the
- *  figures are the kernel's, on Linux only. */
+ *  path's figures are the kernel's, on Linux only; elsewhere they stay 0 and only
+ *  queued_bytes and the live counters are filled. */
 RATS_API rats_error_t rats_path_stats(rats_t node, const char* peer_id_hex,
                                       rats_path_stats_t* out);
 

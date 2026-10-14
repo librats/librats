@@ -134,9 +134,12 @@ inline bool is_live(Deadline deadline) noexcept { return deadline != Deadline{};
 /// transport will carry whatever it is given, but anything past `bandwidth_bps`
 /// waits in `queued_bytes`, and for a frame with a deadline waiting is losing.
 ///
-/// Only the fields the transport can actually measure are filled; `valid` is false
-/// when it measures nothing at all (a relayed link, TCP off Linux). Rates are bits
-/// per second, the unit an encoder is configured in.
+/// Only the fields the transport can actually measure are filled; the rest stay 0.
+/// Over TCP the path's figures are the kernel's, on Linux only, and a relayed byte
+/// stream has none — there a sample carries just `queued_bytes` and the live
+/// counters, which the sender keeps itself on every link. `valid` is false until
+/// the connection is established. Rates are bits per second, the unit an encoder
+/// is configured in.
 struct PathStats {
     bool     valid = false;
     /// What the congestion controller believes the path delivers — the figure to

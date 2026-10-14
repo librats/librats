@@ -7,7 +7,9 @@ package com.librats;
  *
  * <p>Rates are bits per second. Anything past {@link #bandwidthBps()} waits in
  * {@link #queuedBytes()}; {@code queuedBytes() * 8 / bandwidthBps()} is that wait
- * in seconds. Over TCP the figures are the kernel's, on Linux only.</p>
+ * in seconds. Over TCP the path's figures are the kernel's, on Linux only;
+ * elsewhere they stay 0 and only {@link #queuedBytes()} and the live counters
+ * are filled.</p>
  *
  * <p>Obtained from {@link RatsNode#pathStats(String)} or handed to a
  * {@link PathCallback}. Immutable.</p>

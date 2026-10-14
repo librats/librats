@@ -328,7 +328,9 @@ class RatsNode:
 
         ``None`` when the peer is not connected or nothing has been sampled yet:
         sampling runs only with ``path_sample_ms`` set or an :meth:`on_peer_path`
-        callback registered. Over TCP the figures are the kernel's, Linux only.
+        callback registered. Over TCP the path's figures are the kernel's, Linux
+        only; elsewhere they stay 0 and only ``queued_bytes`` and the live
+        counters are filled.
         """
         out = RatsPathStats()
         err = self._lib.lib.rats_path_stats(self._h, _b(peer_id), byref(out))

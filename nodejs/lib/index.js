@@ -227,8 +227,9 @@ class RatsNode {
    * that sizes its own output to the path instead of letting the queue find the
    * limit. Rates are bits per second; anything past `bandwidthBps` waits in
    * `queuedBytes`. Sampling runs only with `pathSampleMs` set or an
-   * `onPeerPath` handler registered. Over TCP the figures are the kernel's, on
-   * Linux only.
+   * `onPeerPath` handler registered. Over TCP the path's figures are the
+   * kernel's, on Linux only; elsewhere they stay 0 and only `queuedBytes` and the
+   * live counters are filled.
    * @param {string} peerId
    * @returns {PathStats|null} null if the peer is not connected or nothing has
    *   been sampled yet.

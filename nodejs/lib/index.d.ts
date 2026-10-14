@@ -290,8 +290,9 @@ declare module 'librats' {
     /**
      * The latest path sample for a peer, or `null` if it is not connected or
      * nothing has been sampled yet — sampling runs only with `pathSampleMs` set
-     * or an `onPeerPath` handler registered. Over TCP the figures are the
-     * kernel's, on Linux only.
+     * or an `onPeerPath` handler registered. Over TCP the path's figures are the
+     * kernel's, on Linux only; elsewhere they stay 0 and only `queuedBytes` and
+     * the live counters are filled.
      */
     pathStats(peerId: string): PathStats | null;
     /** Register a handler for a named channel. Additive; register before `start()`. */
