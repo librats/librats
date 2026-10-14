@@ -95,6 +95,13 @@ public:
     static constexpr uint64_t kInterval = 64 * 1220;
 
     void   update(uint64_t delivered, uint64_t lost) noexcept;
+    /// Measure afresh from these totals on (another path: what the old one lost
+    /// says nothing of it).
+    void   restart(uint64_t delivered, uint64_t lost) noexcept {
+        delivered_ = delivered;
+        lost_      = lost;
+        rate_      = 0;
+    }
     double rate() const noexcept { return rate_; }
 
 private:

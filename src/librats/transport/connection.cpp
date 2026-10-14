@@ -181,6 +181,10 @@ bool Connection::transport_frame(const Frame& frame) {
     return state_ != ConnState::Closing && state_ != ConnState::Closed;
 }
 
+void Connection::transport_moved() {
+    if (state_ == ConnState::Established) delegate_.on_moved(*this);
+}
+
 // ── Teardown ────────────────────────────────────────────────────────────────
 
 void Connection::cancel_establish_timer() {

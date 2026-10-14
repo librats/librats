@@ -204,9 +204,16 @@ void Reactor::forward_datagrams(ConnId dialer, ConnId responder, udp::Cid cid,
                                 std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate,
                                 uint64_t burst) {
     execute([this, dialer, responder, cid, bytes = std::move(bytes), rate, burst]() mutable {
-        const auto from = datagram_peer(dialer);
-        const auto to   = datagram_peer(responder);
+        if (!datagram_peer(dialer) || !datagram_peer(responder)) return;
+        const auto from = mux_->end_of(dialer);
+        const auto to   = mux_->end_of(responder);
         if (from && to) mux_->forward(cid, *from, *to, std::move(bytes), rate, burst);
+    });
+}
+
+void Reactor::nudge_datagram_peers() {
+    execute([this] {
+        if (mux_) mux_->nudge();
     });
 }
 

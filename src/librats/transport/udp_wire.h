@@ -63,6 +63,11 @@
  *      MAX_DATA     0x10  bytes of stream data, all streams together, the sender
  *                         will accept
  *      DATA_BLOCKED 0x14  the limit the sender is stopped at
+ *      PATH_CHALLENGE 0x1a  8 bytes, then a flags byte: "do you receive at the
+ *                         address this went to?" — sent to a peer seen at a new
+ *                         address (see udp_connection.h, "Migration"). Flag 0x01
+ *                         says its IP changed, not only its port.
+ *      PATH_RESPONSE  0x1b  the 8 bytes of the challenge it answers
  *      CLOSE        0x1c  error code (varint); 0 is an orderly close
  *      LIVE         0x20-0x21  message id, lifetime, [size, offset], length, data —
  *                         a live message (see udp_live.h) or a piece of one. Bit
@@ -96,7 +101,9 @@ namespace udp {
 /// datagram unanswered, and a dial between the two falls back to TCP. 3: the
 /// packet-numbered, frame-based protocol of this file (v1/v2 were a byte stream);
 /// 4: LIVE frames, which a v3 peer would take for a protocol error; 5: LIVE_REPAIR,
-/// likewise for a v4 one.
+/// likewise for a v4 one. PATH_CHALLENGE / PATH_RESPONSE came later without a
+/// bump: they go only to a peer whose address has changed, which a connection to
+/// a peer without them never survived anyway.
 constexpr uint32_t kVersion = 5;
 
 /// Largest datagram this transport sends, and every Initial's size. 1220 keeps it
@@ -243,6 +250,8 @@ enum FrameType : uint8_t {
     kStream      = 0x08,   ///< 0x08 to 0x0f, the low bits are flags
     kMaxData     = 0x10,
     kDataBlocked = 0x14,
+    kPathChallenge = 0x1a,
+    kPathResponse  = 0x1b,
     kClose       = 0x1c,
     kLive        = 0x20,   ///< 0x20 and 0x21, the low bit a flag
     kLiveRepair  = 0x22,
@@ -253,6 +262,9 @@ constexpr uint8_t kStreamOffBit = 0x04;
 constexpr uint8_t kStreamLenBit = 0x02;
 constexpr uint8_t kStreamFinBit = 0x01;
 constexpr uint8_t kLivePieceBit = 0x01;
+/// PATH_CHALLENGE flag: the address it went to has another IP than the last one
+/// the peer was proven at, so the path is another one (see udp_connection.h).
+constexpr uint8_t kPathNewIp = 0x01;
 
 /// An ACK as it arrived. The ranges after the first are left encoded in `more`
 /// and walked with AckRanges; the reader has already checked every one of them.
@@ -316,6 +328,8 @@ struct Frame {
     LiveRepairFrame repair;
     uint64_t    value = 0;   ///< MAX_DATA, DATA_BLOCKED, CLOSE
     ByteView    token;       ///< RESET_TOKEN
+    uint64_t    path = 0;    ///< PATH_CHALLENGE, PATH_RESPONSE
+    uint8_t     path_flags = 0;   ///< PATH_CHALLENGE
 };
 
 /// Walks a packet's frames. next() returns false at the end and on anything
@@ -363,6 +377,10 @@ uint8_t* put_live_repair_header(uint8_t* out, uint64_t id, uint64_t lifetime, ui
 
 uint8_t* put_value_frame(uint8_t* out, FrameType type, uint64_t value) noexcept;  ///< MAX_DATA, DATA_BLOCKED, CLOSE
 uint8_t* put_reset_token(uint8_t* out, const uint8_t* token) noexcept;
+constexpr size_t kPathChallengeSize = 1 + 8 + 1;
+constexpr size_t kPathResponseSize  = 1 + 8;
+uint8_t* put_path_challenge(uint8_t* out, uint64_t data, uint8_t flags) noexcept;
+uint8_t* put_path_response(uint8_t* out, uint64_t data) noexcept;
 
 } // namespace udp
 } // namespace librats

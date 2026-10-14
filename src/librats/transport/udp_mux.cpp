@@ -130,6 +130,15 @@ void UdpMux::reset_token(Cid cid, uint8_t* out) {
     std::memcpy(out, hash, kResetTokenSize);
 }
 
+void UdpMux::peer_moved(UdpConnection& conn) {
+    // A forward one of whose ends this connection leads to follows it.
+    const Cid leg = conn.local_cid();
+    for (auto& [cid, forward] : forwards_) {
+        if (forward.from_leg == leg) forward.from = conn.remote();
+        if (forward.to_leg == leg)   forward.to   = conn.remote();
+    }
+}
+
 bool UdpMux::spend_reply_budget(Clock::time_point now) {
     if (now - reply_window_started_ >= kUnsolicitedReplyWindow) {
         reply_window_started_ = now;
@@ -327,16 +336,15 @@ void UdpMux::handle_datagram(uint8_t* data, size_t len, const Address& from, Clo
     if (!peek_dcid(data, len, dcid)) return;   // not a packet of this protocol
 
     if (auto it = conns_.find(dcid); it != conns_.end()) {
+        // From wherever it comes: a source address is trivially forged, so what
+        // the connection believes of one is decided by what opens under its keys
+        // (udp_connection.h, "Migration").
         UdpConnection& conn = *it->second.conn;
-        // The id is the whole authorisation to touch the connection, and a source
-        // address is trivially forged: a connection is pinned to the address it was
-        // made with, so an attacker would need a random 64-bit id and the path.
-        if (conn.remote() != from) return;
         if (!conn.in_burst()) {
             conn.begin_burst();
             bursts_.push_back(dcid);
         }
-        conn.on_datagram(data, len, now);
+        conn.on_datagram(data, len, from, now);
         arm(it->first, it->second);
         return;
     }
@@ -439,9 +447,19 @@ void UdpMux::accept_relayed(const LongPacket& initial, size_t len, const Address
 
 void UdpMux::pass_on(Cid cid, Forward& forward, const uint8_t* data, size_t len,
                      const Address& from, Clock::time_point now) {
-    // Pinned like a connection: a forged source would otherwise have us send its
-    // datagrams on to the other end, and the id is all it would need to know.
-    if (from != forward.from || len > kMaxDatagram) return;
+    if (len > kMaxDatagram) return;
+    if (from != forward.from) {
+        // Only from where the end is known to be: a forged source would otherwise
+        // have us pass its datagrams on, and the id is all it would need to know.
+        // But it may be the end itself, moved — its leg asks (see the file comment).
+        if (forward.from_leg == 0 || now < forward.probe_after) return;
+        forward.probe_after = now + kForwardProbeInterval;
+        if (auto leg = conns_.find(forward.from_leg); leg != conns_.end()) {
+            leg->second.conn->probe_path(from, now);
+            arm(leg->first, leg->second);
+        }
+        return;
+    }
 
     // Within the rate, and nothing ahead of it: straight through. Otherwise it
     // waits its turn, unless the buffer is full (see the file comment).
@@ -563,12 +581,19 @@ bool UdpMux::expect_relayed(Cid cid, const Address& relay, ConnId id, ForwardedC
     return true;
 }
 
-bool UdpMux::forward(Cid cid, const Address& dialer, const Address& responder,
+std::optional<UdpMux::ForwardEnd> UdpMux::end_of(ConnId id) const {
+    for (const auto& [cid, entry] : conns_)
+        if (entry.conn->conn_id() == id && entry.linger_until == Clock::time_point{})
+            return ForwardEnd{entry.conn->remote(), cid};
+    return std::nullopt;
+}
+
+bool UdpMux::forward(Cid cid, const ForwardEnd& dialer, const ForwardEnd& responder,
                      std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate, uint64_t burst) {
     if ((cid & 1) != 0 || pair_taken(cid)) return false;
     const auto now = Clock::now();
-    const auto direction = [&](const Address& from, const Address& to) {
-        Forward f{from, to, bytes};
+    const auto direction = [&](const ForwardEnd& from, const ForwardEnd& to) {
+        Forward f{from.at, to.at, from.leg, to.leg, Clock::time_point{}, bytes};
         if (rate != 0) {
             // Never shallower than a datagram, or none would ever fit.
             f.rate        = TokenBucket(rate, (std::max<uint64_t>)(burst, kMaxDatagram), now);
@@ -665,6 +690,17 @@ void UdpMux::tick() {
     compact_due();
     dispatch_pending();
     flush_output();   // one syscall for every connection's repairs and keep-alives
+}
+
+void UdpMux::nudge() {
+    const auto now = Clock::now();
+    for (auto& [cid, entry] : conns_) {
+        if (entry.linger_until != Clock::time_point{}) continue;
+        entry.conn->nudge(now);
+        arm(cid, entry);
+    }
+    dispatch_pending();
+    flush_output();
 }
 
 void UdpMux::shutdown() {

@@ -71,6 +71,14 @@
  * NAT on the way already holds the mapping, because it is the very one each
  * end's leg to us uses.
  *
+ * Which is also how a forward follows an end that moves (udp_connection.h,
+ * "Migration"): its packets and its leg's come from one socket through one NAT,
+ * so when the leg's connection has proven the end at a new address, the forward
+ * goes there too. The end's packets of the forwarded connection may well get
+ * here first, from an address the forward does not pass on — so one of those is
+ * taken as a hint, and the leg asks the end whether it is there now (at most
+ * once per kForwardProbeInterval: the packet can be anyone's).
+ *
  * A forward may be held to a rate (the relay's cap on what one circuit costs
  * it). It is held the way a bottleneck link would hold it, never by dropping
  * outright — a policer that drops what exceeds a rate looks to a congestion
@@ -112,6 +120,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <random>
 #include <unordered_map>
 #include <vector>
@@ -222,6 +231,8 @@ public:
     /// comment), and never less than kMinShaperQueue bytes.
     static constexpr std::chrono::milliseconds kShaperQueue{50};
     static constexpr size_t                    kMinShaperQueue = 32 * 1024;
+    /// Probes one forward may have a leg make (see the file comment).
+    static constexpr std::chrono::seconds      kForwardProbeInterval{1};
 
     UdpMux(socket_t socket, AddressFamily family, UdpMuxDelegate& delegate,
            SecurityProvider& security, UdpMuxLimits limits = {},
@@ -271,14 +282,29 @@ public:
     /// is ended; otherwise it ends with the connection, or with the wait.
     bool expect_relayed(udp::Cid cid, const Address& relay, ConnId id, ForwardedCircuit circuit);
 
-    /// Forward the packets of the connection `cid` between its dialer at `dialer`
-    /// and its responder at `responder`, adding the size of each datagram passed
-    /// on to `bytes` — at most `rate` bytes a second each way, `burst` at once
-    /// (0: as fast as they come). False if either id is taken here.
-    bool forward(udp::Cid cid, const Address& dialer, const Address& responder,
+    /// One end of a forward: where it is, and our own connection to it — its leg,
+    /// whose moves the forward follows (0: none, the end stays where it is).
+    struct ForwardEnd {
+        ForwardEnd(const Address& at, udp::Cid leg = 0) : at(at), leg(leg) {}   // NOLINT: an address is an end
+        Address  at;
+        udp::Cid leg;
+    };
+    /// The end our connection `id` leads to: a datagram connection of our own,
+    /// not lingering. nullopt if there is none.
+    std::optional<ForwardEnd> end_of(ConnId id) const;
+
+    /// Forward the packets of the connection `cid` between its dialer and its
+    /// responder, adding the size of each datagram passed on to `bytes` — at most
+    /// `rate` bytes a second each way, `burst` at once (0: as fast as they come).
+    /// False if either id is taken here.
+    bool forward(udp::Cid cid, const ForwardEnd& dialer, const ForwardEnd& responder,
                  std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate = 0, uint64_t burst = 0);
     /// Stop forwarding `cid`. A no-op for one not forwarded.
     void unforward(udp::Cid cid);
+
+    /// The host's own network may have changed: every connection says something,
+    /// so its peer sees where we are now (UdpConnection::nudge).
+    void nudge();
 
     /// The transport that owned `conn` is being destroyed. The connection goes at
     /// once or lingers until it has delivered what it owes.
@@ -320,6 +346,9 @@ private:
     struct Forward {
         Address                                from;   ///< the only sender we pass on
         Address                                to;
+        udp::Cid                               from_leg = 0;   ///< see ForwardEnd
+        udp::Cid                               to_leg   = 0;
+        Clock::time_point                      probe_after{};  ///< see kForwardProbeInterval
         std::shared_ptr<std::atomic<uint64_t>> bytes;
         TokenBucket                            rate{};
         std::deque<Bytes>                      queue{};        ///< waiting for the rate
@@ -340,6 +369,7 @@ private:
     void     send_datagram(const Address& to, size_t len) override;
     void     connection_events(UdpConnection& conn, uint32_t events) override;
     void     reset_token(udp::Cid cid, uint8_t* out) override;
+    void     peer_moved(UdpConnection& conn) override;
 
     void handle_datagram(uint8_t* data, size_t len, const Address& from, Clock::time_point now);
     void on_initial(const udp::LongPacket& initial, size_t len, const Address& from,

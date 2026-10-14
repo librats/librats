@@ -45,6 +45,7 @@ bool UdpTransport::start() {
 
 bool UdpTransport::on_readable() {
     report_progress();
+    if (told_established_ && conn_.take_moved()) sink_->transport_moved();
     if (told_established_) {
         bool more = true;
         if (!conn_.deliver(Clock::now(), [&](const Frame& frame) {

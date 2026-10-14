@@ -20,7 +20,7 @@ Clock::duration clamp_duration(Clock::duration v, A lo, B hi) {
 } // namespace
 
 Recovery::Recovery(CongestionAlgorithm algorithm, Clock::time_point now, uint64_t seed)
-    : pace_last_(now) {
+    : algorithm_(algorithm), seed_(seed), pace_last_(now) {
     pace_tokens_ = kPaceMinBurst;   // nothing to pace against until the first round trip
     rtt_.rto     = kInitialRto;
     cc_ = cc::make_controller(algorithm, rtt_, sampler_, now, seed);
@@ -661,6 +661,40 @@ bool Recovery::newest_in_flight(size_t& first, size_t& count) const noexcept {
         }
     }
     return false;
+}
+
+void Recovery::on_new_path(Clock::time_point now, FrameSink& sink) {
+    // What is in flight went the old way. Like a timeout's flight it is written
+    // off (an outage on that path is what the move usually is), and it is told to
+    // the controller that is about to go, never to the one that replaces it. With
+    // nothing left in flight the whole log retires.
+    written_off_ += flight_bytes_;
+    for (size_t i = 0; i < sent_.size(); ++i)
+        if (sent_[i].in_flight) mark_lost(sent_[i], now, sink);
+    retire_front();
+    lost_since_ack_ = 0;
+    cwnd_limited_   = false;
+
+    rtt_     = cc::RttEstimate{};
+    rtt_.rto = kInitialRto;
+    rack_sent_at_     = Clock::time_point{};
+    rack_rtt_         = Clock::duration::zero();
+    reorder_deadline_ = kNever;
+
+    in_recovery_      = false;
+    had_episode_      = false;
+    timeout_recovery_ = false;
+    timeout_episode_  = false;
+    recovery_credit_  = 0;
+    recover_fs_       = 0;
+    loss_deadline_    = kNever;
+    tail_probes_      = 0;
+    timeouts_         = 0;
+
+    pace_tokens_ = kPaceMinBurst;
+    pace_last_   = now;
+    pace_due_    = kNever;
+    cc_ = cc::make_controller(algorithm_, rtt_, sampler_, now, seed_);
 }
 
 void Recovery::clear() noexcept {

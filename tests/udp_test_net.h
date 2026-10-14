@@ -23,6 +23,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,8 +65,7 @@ public:
         if (conn) {
             udp::Cid dcid = 0;
             if (!udp::peek_dcid(data, len, dcid) || dcid != conn->local_cid()) return;
-            if (conn->remote() != from) return;
-            conn->on_datagram(data, len, now);
+            conn->on_datagram(data, len, from, now);
             return;
         }
         udp::LongPacket p;
@@ -116,6 +116,7 @@ public:
         wire_.carry(addr_, to, buf_.data(), len);
     }
     void connection_events(UdpConnection&, uint32_t e) override { events |= e; }
+    void peer_moved(UdpConnection&) override { ++moves; }
     void reset_token(udp::Cid cid, uint8_t* out) override {
         // Deterministic per id and per end, which is all a test needs of it.
         std::memset(out, 0x5A, udp::kResetTokenSize);
@@ -132,6 +133,7 @@ public:
     uint32_t events      = 0;
     size_t   sent        = 0;
     size_t   received    = 0;
+    size_t   moves       = 0;   ///< peer_moved() calls
 
 private:
     Wire&               wire_;
@@ -151,11 +153,17 @@ class Net final : public Wire {
 public:
     explicit Net(Clock::duration delay) : delay_(delay) {}
 
-    void carry(const Address& from, const Address& to, const uint8_t* data, size_t len) override {
+    void carry(const Address& sender, const Address& to, const uint8_t* data, size_t len) override {
         Bytes bytes(data, data + len);
+        const Address from = outside(sender);
         if (blackout || (hook && hook(bytes, from, to))) { ++dropped; return; }
         queue_.push_back({now_ + delay_, from, to, std::move(bytes)});
     }
+
+    /// Put `end` behind a NAT that maps it to `external`: what it sends leaves
+    /// from there, and only what is sent there reaches it. Called again, it is a
+    /// rebinding — the old mapping is gone, and what is still sent to it is lost.
+    void map(const End& end, const Address& external) { nat_[end.addr()] = external; }
 
     /// Put a datagram on the path as if `from` had just sent it.
     void inject(const Address& from, const Address& to, Bytes bytes) {
@@ -168,7 +176,7 @@ public:
             Datagram d = std::move(queue_.front());
             queue_.pop_front();
             for (End* end : ends)
-                if (end->addr() == d.to) end->receive(d.bytes.data(), d.bytes.size(), d.from, now);
+                if (outside(end->addr()) == d.to) end->receive(d.bytes.data(), d.bytes.size(), d.from, now);
         }
     }
 
@@ -186,9 +194,15 @@ private:
         Address           from, to;
         Bytes             bytes;
     };
+    Address outside(const Address& inside) const {
+        const auto it = nat_.find(inside);
+        return it == nat_.end() ? inside : it->second;
+    }
+
     Clock::duration      delay_;
     Clock::time_point    now_{};
     std::deque<Datagram> queue_;
+    std::map<Address, Address> nat_;
 };
 
 /// The frames of a short packet sent under plaintext security, where the header

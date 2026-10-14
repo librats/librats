@@ -412,6 +412,11 @@ void Node::maintenance_loop() {
         // just changed underneath us. Holding on to it would aim a punch at a port
         // that no longer exists; peers re-report as their links come back.
         nat_status_.reset();
+        // The network under our one datagram socket may be another one now. Every
+        // datagram peer is told so by a packet from wherever that is, and proves
+        // the move back (udp_connection.h, "Migration") — at once, rather than at
+        // the next keep-alive.
+        if (reactors_->has_udp()) reactors_->pick(TransportKind::Udp).nudge_datagram_peers();
         events_.emit(NetworkChanged{std::move(addresses)});
     }
 }
@@ -804,6 +809,15 @@ void Node::on_path_sample(Connection& conn, const PathStats& stats) {
     if (!peers_.set_path(conn.remote_id(), route, stats) || peer_path_.empty()) return;
     Peer handle = make_peer(conn.remote_id(), route);
     for (auto& cb : peer_path_) cb(handle, stats);
+}
+
+void Node::on_moved(Connection& conn) {
+    // One end's address changed under the connection, so what each side told the
+    // other it sees is stale: the peer's own endpoint (its NatStatus, what a punch
+    // aims at) and our view of where it can be dialled. Identify again — both
+    // ends hear of the move, so both answer it.
+    LOG_DEBUG("node", "Path to peer " << conn.remote_id().short_hex() << " changed; identifying again");
+    send_identify(conn);
 }
 
 void Node::on_dial_aborted(uint8_t reactor_index, ConnId id,

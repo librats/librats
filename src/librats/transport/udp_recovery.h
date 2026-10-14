@@ -258,6 +258,14 @@ public:
     uint32_t congestion_events() const noexcept { return congestion_events_; }
     int      tail_probes() const noexcept { return tail_probes_; }
 
+    /// The peer is reached over another path from here on (its IP changed — see
+    /// udp_connection.h, "Migration"). Nothing learnt of the old one describes
+    /// it: the controller and the round trip start again, and what is in flight
+    /// is written off, so its data goes again on the new path — news to neither
+    /// controller. It leaves the log with that, so an acknowledgement of it that
+    /// still comes is no sample of anything.
+    void on_new_path(Clock::time_point now, FrameSink& sink);
+
     /// Forget everything outstanding (the connection is gone).
     void clear() noexcept;
     /// Give back the logs' memory if they are empty.
@@ -306,6 +314,8 @@ private:
     cc::RttEstimate                           rtt_;
     cc::DeliveryRateSampler                   sampler_;
     std::unique_ptr<cc::CongestionController> cc_;
+    CongestionAlgorithm                       algorithm_;   ///< what on_new_path() starts again
+    uint64_t                                  seed_;
 
     // — the sent log: sent_[i] is packet log_base_ + i —
     RingBuffer<SentPacket> sent_;

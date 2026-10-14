@@ -55,6 +55,11 @@ public:
     /// @return false when the connection is closing and nothing more should be
     ///         delivered; the transport then stops where it is.
     virtual bool transport_frame(const Frame& frame) = 0;
+
+    /// The path to the peer has changed under the connection: the peer was
+    /// proven at a new address, or it sees us at one (udp_connection.h,
+    /// "Migration"). What either side observed of the other's address is stale.
+    virtual void transport_moved() {}
 };
 
 class Transport {

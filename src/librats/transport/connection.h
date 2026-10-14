@@ -77,6 +77,11 @@ public:
     /// a handler must not block. Default: ignore.
     virtual void on_path_sample(Connection& /*conn*/, const PathStats& /*stats*/) {}
 
+    /// An established connection's path changed under it (TransportSink::
+    /// transport_moved): same peer, same connection, another address on one end.
+    /// Default: ignore.
+    virtual void on_moved(Connection& /*conn*/) {}
+
     /// An outbound dial died before there was ever a Connection to report it on —
     /// an unresolvable host, no route, no socket. Without this a dial policy that
     /// reserved the ConnId (see Reactor::connect) would wait out a timeout for an
@@ -254,6 +259,7 @@ private:
     void transport_connected() override;
     void transport_established(const PeerId& remote) override;
     bool transport_frame(const Frame& frame) override;
+    void transport_moved() override;
 
     /// A transport entry point returned `ok`; turn a failure into teardown, and
     /// tell a stopped caller if the call let the queue drain.

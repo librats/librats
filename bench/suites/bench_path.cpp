@@ -175,7 +175,7 @@ public:
 
     void receive(uint8_t* data, size_t len, const Address& from, Clock::time_point now) {
         if (conn_) {
-            if (conn_->remote() == from) conn_->on_datagram(data, len, now);
+            conn_->on_datagram(data, len, from, now);
             return;
         }
         udp::LongPacket p;
@@ -276,8 +276,9 @@ public:
     /// Say which side of the path `peer` is on, before it sends anything.
     void place(Peer* peer, bool receiver) { ends_.push_back(End{peer, receiver}); }
 
-    void send_datagram(const Address& from, const Address& to, const uint8_t* data, size_t len) {
-        const End* end = find(to);
+    void send_datagram(const Address& sender, const Address& to, const uint8_t* data, size_t len) {
+        const Address from = outside(sender, now_);
+        const End* end = find(to, now_);
         Direction& d = (end && end->receiver) ? fwd_ : rev_;
 
         // Nanoseconds, not microseconds: at a gigabit a full packet serialises in
@@ -316,7 +317,7 @@ public:
                 InFlight f = std::move(d->wire.front());
                 d->wire.pop_front();
                 if (dark(f.arrive)) { ++d->drops; continue; }
-                if (const End* end = find(f.to)) end->peer->receive(f.bytes.data(), f.bytes.size(), f.from, now);
+                if (const End* end = find(f.to, f.arrive)) end->peer->receive(f.bytes.data(), f.bytes.size(), f.from, now);
             }
         }
     }
@@ -332,6 +333,14 @@ public:
     /// nor what was due to land then. A link that goes dark — a Wi-Fi roam, a
     /// cellular handover — loses what it was carrying.
     void   set_outage(Clock::time_point from, Clock::time_point to) { dark_from_ = from; dark_to_ = to; }
+    /// From `at` on, `inside` is seen at `outside`: what it sends leaves from
+    /// there, only what is sent there reaches it, and what still goes to where it
+    /// was is lost — a NAT's new mapping, or with another IP, another network.
+    void   move(const Address& inside, const Address& outside, Clock::time_point at) {
+        move_from_ = inside;
+        move_to_   = outside;
+        move_at_   = at;
+    }
     size_t drops()     const { return fwd_.drops + rev_.drops; }
     size_t fwd_drops() const { return fwd_.drops; }
 
@@ -346,8 +355,12 @@ private:
         bool  receiver;
     };
     bool dark(Clock::time_point t) const { return t >= dark_from_ && t < dark_to_; }
-    const End* find(const Address& a) const {
-        for (const End& e : ends_) if (e.peer->addr() == a) return &e;
+    Address outside(const Address& inside, Clock::time_point t) const {
+        return move_at_ != Clock::time_point{} && t >= move_at_ && inside == move_from_ ? move_to_ : inside;
+    }
+    /// The end reached at `a` at `t`.
+    const End* find(const Address& a, Clock::time_point t) const {
+        for (const End& e : ends_) if (outside(e.peer->addr(), t) == a) return &e;
         return nullptr;
     }
 
@@ -355,6 +368,8 @@ private:
     std::vector<End> ends_;
     Clock::time_point now_{};
     Clock::time_point dark_from_{}, dark_to_{};
+    Address           move_from_, move_to_;
+    Clock::time_point move_at_{};
     size_t       drop_burst_ = 0;
     std::mt19937 rng_;
     std::uniform_real_distribution<double> unit_{0.0, 1.0};
@@ -665,6 +680,8 @@ enum class Besides {
     RateRise,     ///< the link starts at 30% of its capacity and gets it all back
     RateSwing,    ///< the capacity swings between full and 30% every 2 s, as a cell's does
     Outage,       ///< nothing gets through either way for a while — a roam, a handover
+    Rebind,       ///< the receiver's NAT gives it a new port
+    Roam,         ///< the receiver moves to another network: a new IP, after an outage
 };
 
 /// The shape of what an encoder emits — which is all of a codec the transport
@@ -704,13 +721,14 @@ struct Scene {
     Scene& adaptive(double ceiling = 8) { source = Source::Adaptive; video = ceiling; return *this; }
     Scene& with(Besides b) { besides = b; return *this; }
     Scene& outage(int ms) { besides = Besides::Outage; outage_ms = ms; return *this; }
+    Scene& roam(int ms) { besides = Besides::Roam; outage_ms = ms; return *this; }
     Scene& shaped(const Profile& p) { profile = p; return *this; }
 
     /// An event that ends, so a recovery from it can be timed. A swing never
     /// ends; the rows without an event have nothing to recover from.
     bool has_event() const {
         return besides == Besides::RateDrop || besides == Besides::RateRise ||
-               besides == Besides::Outage;
+               besides == Besides::Outage || besides == Besides::Rebind || besides == Besides::Roam;
     }
 };
 
@@ -891,9 +909,9 @@ RealtimeResult realtime(const Scene& sc) {
     Path path(fwd, rev);
 
     const auto event     = std::chrono::seconds(10);
-    const auto event_end = event + ms(sc.besides == Besides::Outage ? sc.outage_ms : 0);
-    if (sc.besides == Besides::Outage)
-        path.set_outage(Clock::time_point{} + event, Clock::time_point{} + event_end);
+    const bool dark      = sc.besides == Besides::Outage || sc.besides == Besides::Roam;
+    const auto event_end = event + ms(dark ? sc.outage_ms : 0);
+    if (dark) path.set_outage(Clock::time_point{} + event, Clock::time_point{} + event_end);
 
     Clock::time_point now{};
     Flow fv(path, 0, g_algo, now);
@@ -901,6 +919,10 @@ RealtimeResult realtime(const Scene& sc) {
     if (sc.besides == Besides::PathBulk) other = std::make_unique<Flow>(path, 1, g_algo, now);
     if (sc.besides == Besides::Duplex)   other = std::make_unique<Flow>(path, 1, g_algo, now, true);
     Video video(fv.tx, fv.rx, sc);
+    if (sc.besides == Besides::Rebind)
+        path.move(fv.rx.addr(), Address{fv.rx.addr().ip, 3333}, Clock::time_point{} + event);
+    if (sc.besides == Besides::Roam)
+        path.move(fv.rx.addr(), Address{*IpAddress::parse("10.0.3.1"), 2222}, Clock::time_point{} + event_end);
     std::unique_ptr<Video> back;
     if (sc.besides == Besides::Duplex) back = std::make_unique<Video>(other->tx, other->rx, sc);
 
@@ -1178,6 +1200,8 @@ int main(int argc, char** argv) {
     realtime_row("  + 0.3 s outage",               Scene{}.outage(300));
     realtime_row("  + 1 s outage",                 Scene{}.outage(1000));
     realtime_row("  + 3 s outage",                 Scene{}.outage(3000));
+    realtime_row("  + NAT rebinds the receiver",   Scene{}.with(X::Rebind));
+    realtime_row("  + receiver moves network",     Scene{}.roam(300));
     realtime_row("adaptive <=8 of 10, 40 ms",      Scene{}.adaptive());
     realtime_row("  1%",                           Scene{}.adaptive().lossy(0.01));
     realtime_row("  1% in 20 ms bursts",          Scene{}.adaptive().lossy(0.01, 20));
@@ -1191,6 +1215,7 @@ int main(int argc, char** argv) {
     realtime_row("  + link swings 10/3 Mbit",      Scene{}.adaptive().with(X::RateSwing));
     realtime_row("  + 1 s outage",                 Scene{}.adaptive().outage(1000));
     realtime_row("  + 3 s outage",                 Scene{}.adaptive().outage(3000));
+    realtime_row("  + receiver moves network",     Scene{}.adaptive().roam(300));
     std::printf("  (\"late\" is the share of frames that landed more than 100 ms after the path\n"
                 "   allowed, or never landed — a call shows neither; \"dropped\" is the share\n"
                 "   that never did, and median and p99 are of the ones that did. \"freeze\" is\n"

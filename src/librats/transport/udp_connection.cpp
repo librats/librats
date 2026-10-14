@@ -81,6 +81,7 @@ std::unique_ptr<UdpConnection> UdpConnection::dial(UdpConnectionHost& host, Secu
                                                    Clock::time_point now, UdpConnectionConfig config) {
     std::unique_ptr<UdpConnection> c(new UdpConnection(host, security, remote, ConnRole::Outbound,
                                                        local, paired_cid(local), now, config));
+    c->address_validated_ = true;   // it is where we chose to send
     // A handshake that cannot even start leaves a dead connection, which its
     // transport reports like any other failed dial.
     c->start_dial(now);
@@ -274,7 +275,7 @@ void UdpConnection::establish(std::unique_ptr<Session> session, const PeerId& re
     // What arrived before the keys did, in the order it came.
     std::vector<Bytes> early;
     early.swap(early_);
-    for (Bytes& b : early) on_short(b.data(), b.size(), now);
+    for (Bytes& b : early) on_short(b.data(), b.size(), remote_, now);
     // A responder sends nothing before its answer to the Initial.
     if (role_ == ConnRole::Outbound || answered_) pump(now);
 }
@@ -303,17 +304,20 @@ void UdpConnection::handshake_timer(Clock::time_point now) {
 
 // ── Packets in ──────────────────────────────────────────────────────────────
 
-void UdpConnection::on_datagram(uint8_t* data, size_t len, Clock::time_point now) {
+void UdpConnection::on_datagram(uint8_t* data, size_t len, const Address& from, Clock::time_point now) {
     if (dead() || len == 0) return;
-    // Until the dialer has proved its address, what it sends is what we may answer
+    // Until the peer has proved its address, what it sends is what we may answer
     // with (three times over).
-    if (role_ == ConnRole::Inbound && !address_validated_) amp_received_ += len;
+    if (!address_validated_ && from == remote_) amp_received_ += len;
 
     if (is_long_header(data[0])) {
+        // The handshake stays on the address it began on; a long header from
+        // anywhere else is nobody's.
         LongPacket p;
-        if (decode_long(data, len, p) && p.scid == remote_cid_ && p.dcid == local_cid_) on_long(p, len, now);
+        if (from == remote_ && decode_long(data, len, p) && p.scid == remote_cid_ && p.dcid == local_cid_)
+            on_long(p, len, now);
     } else {
-        on_short(data, len, now);
+        on_short(data, len, from, now);
     }
     flush_events();
 }
@@ -323,12 +327,12 @@ bool UdpConnection::is_reset(const uint8_t* data, size_t len) const noexcept {
            std::memcmp(data + len - kResetTokenSize, peer_token_.data(), kResetTokenSize) == 0;
 }
 
-void UdpConnection::on_short(uint8_t* data, size_t len, Clock::time_point now) {
+void UdpConnection::on_short(uint8_t* data, size_t len, const Address& from, Clock::time_point now) {
     if (len < kMinShortPacket || !has_fixed_bit(data[0])) return;
     if (!session_) {
         // Sent behind the handshake message that will give us the keys, and
         // overtook it.
-        if (phase_ == Phase::Handshaking && early_.size() < kMaxEarlyPackets)
+        if (phase_ == Phase::Handshaking && from == remote_ && early_.size() < kMaxEarlyPackets)
             early_.emplace_back(data, data + len);
         return;
     }
@@ -373,24 +377,35 @@ void UdpConnection::on_short(uint8_t* data, size_t len, Clock::time_point now) {
         if (!not_ours()) fail(now, CloseReason::ProtocolError, kCloseProtocol);
         return;
     }
+    // The peer's, but from somewhere else: it has moved, or this is a copy someone
+    // sent from elsewhere (see "Migration"). Only its newest packet can move the
+    // connection, and nothing moves before the handshake is confirmed.
+    const bool newest = !have_recv_ || pn > largest_recv_;
+    if (from != remote_ && !may_move()) return;
     last_recv_ = now;
     heard_     = true;
     // A packet the dialer could only have sealed after our answer: its address is
-    // proven, and (seen from the dialer) the responder has its keys.
-    if (role_ == ConnRole::Inbound) address_validated_ = true;
+    // proven, and (seen from the dialer) the responder has its keys. Not so after
+    // a move, which only a PATH_RESPONSE proves.
+    if (!previous_ && from == remote_) address_validated_ = true;
     if (role_ == ConnRole::Outbound && !confirmed_) {
         confirmed_   = true;
         hs_deadline_ = kNever;
     }
 
     const bool reordered = have_recv_ && pn != largest_recv_ + 1;
+    const Clock::time_point data_before = last_data_recv_;
     bool eliciting = false, refused = false;
-    ack_urgent_ = false;
+    ack_urgent_    = false;
+    path_answered_ = false;
     if (!apply_frames(data + header, *plain, now, eliciting, refused)) {
         if (!not_ours()) fail(now, CloseReason::ProtocolError, kCloseProtocol);
         return;
     }
     if (dead()) return;   // it was a goodbye
+    if (last_data_recv_ != data_before) note_data_gap(now - data_before, now);
+    if (from != remote_ && newest) move_to(from, len, now);
+    if (path_answered_) path_proven(now);
 
     // A packet whose data could not be held is not acknowledged: the peer will
     // send what it carried again, which is the right answer to a full receiver.
@@ -445,6 +460,16 @@ bool UdpConnection::apply_frames(const uint8_t* payload, size_t len, Clock::time
                 eliciting = true;
                 std::memcpy(peer_token_.data(), f.token.data(), kResetTokenSize);
                 have_peer_token_ = true;
+                break;
+            case kPathChallenge:
+                eliciting = true;
+                on_path_challenge(f.path, f.path_flags, now);
+                break;
+            case kPathResponse:
+                eliciting = true;
+                // Applied once the packet is: it may also be what moves the
+                // connection to where the challenge went.
+                if (challenge_.active && f.path == challenge_.data) path_answered_ = true;
                 break;
             case kClose:
                 // An orderly close comes once everything the peer sent has been
@@ -651,6 +676,141 @@ void UdpConnection::maybe_update_window(Clock::time_point now) {
     max_data_owed_ = true;
 }
 
+// ── Migration ───────────────────────────────────────────────────────────────
+
+bool UdpConnection::may_move() const noexcept {
+    return established() && confirmed_ && (address_validated_ || previous_);
+}
+
+void UdpConnection::move_to(const Address& to, size_t len, Clock::time_point now) {
+    if (previous_ && to == *previous_) {
+        // Back where it was proven: nothing to ask. Whatever pointed us elsewhere
+        // was a copy, or a path the peer has already left again.
+        remote_ = to;
+        previous_.reset();
+        address_validated_ = true;
+        challenge_ = Challenge{};
+        return;
+    }
+    LOG_DEBUG("udp", "Connection " << local_cid_ << ": peer moved from " << remote_.to_string()
+              << " to " << to.to_string());
+    if (address_validated_) previous_ = remote_;
+    remote_            = to;
+    address_validated_ = false;
+    amp_received_      = len;
+    amp_sent_          = 0;
+    // Already asked, if a probe of ours went there: its answer is the proof.
+    if (!challenge_.active || challenge_.to != to) start_challenge(to, now);
+}
+
+void UdpConnection::probe_path(const Address& candidate, Clock::time_point now) {
+    if (!may_move() || challenge_.active || candidate == remote_) return;
+    start_challenge(candidate, now);
+    flush_events();
+}
+
+void UdpConnection::start_challenge(const Address& to, Clock::time_point now) {
+    const Address& proven = previous_ ? *previous_ : remote_;
+    challenge_        = Challenge{};
+    challenge_.active = true;
+    challenge_.to     = to;
+    // Unique is enough: it travels sealed, so only the peer can read it and answer,
+    // and a copy of an answer is a duplicate packet.
+    challenge_.data   = ++challenges_;
+    challenge_.new_ip = to.ip != proven.ip;
+    send_challenge(now);
+}
+
+void UdpConnection::send_challenge(Clock::time_point now) {
+    // One that waits on the amplification limit counts as sent: a peer that sends
+    // nothing from there has nothing there to prove.
+    challenge_.due = now + recovery_.probe_timeout() * (1 << challenge_.sends);
+    ++challenge_.sends;
+    const bool here = challenge_.to == remote_;
+    const size_t size = (std::max)(kMinShortPacket, kShortHeaderSize + kMaxPnLength + kPathChallengeSize +
+                                                    session_->overhead());
+    if (here && amplification_room() < size) return;
+
+    uint8_t* buf = host_.datagram_buffer();
+    const uint64_t pn = recovery_.next_pn();
+    size_t pn_len = 0;
+    const size_t header = begin_packet(buf, pn, pn_len);
+    uint8_t* p = put_path_challenge(buf + header, challenge_.data, challenge_.new_ip ? kPathNewIp : 0);
+    const size_t total = seal_packet(buf, header, pn_len, p, pn);
+    host_.send_datagram(challenge_.to, total);
+    // Never in flight: one that is lost — as one sent where a forger pointed us
+    // always is — says nothing about the path, and the challenge has a timer of
+    // its own.
+    recovery_.on_packet_sent(now, total, /*ack_eliciting=*/false, false, false, false);
+    if (here) note_sent(total);
+}
+
+void UdpConnection::on_path_challenge(uint64_t data, uint8_t flags, Clock::time_point now) {
+    response_owed_ = true;
+    response_data_ = data;
+    if (data == last_challenge_) return;   // a repeat, already taken in
+    last_challenge_ = data;
+    // The peer sees us somewhere new. Over another IP it is another path, for our
+    // estimate of it as for the peer's.
+    if (flags & kPathNewIp) restart_path(now);
+    moved_ = true;
+    raise(PollIn);
+}
+
+void UdpConnection::path_proven(Clock::time_point now) {
+    path_answered_ = false;
+    const Challenge proven = challenge_;
+    challenge_ = Challenge{};
+    // The peer received there, but its packets come from elsewhere by now: the
+    // next of them starts over.
+    if (remote_ != proven.to) return;
+    LOG_DEBUG("udp", "Connection " << local_cid_ << ": peer proven at " << remote_.to_string());
+    previous_.reset();
+    address_validated_ = true;
+    if (proven.new_ip) restart_path(now);
+    moved_ = true;
+    raise(PollIn);
+    host_.peer_moved(*this);
+}
+
+void UdpConnection::path_timer(Clock::time_point now) {
+    if (!challenge_.active || now < challenge_.due) return;
+    if (challenge_.sends < kMaxPathChallenges) {
+        send_challenge(now);
+        return;
+    }
+    // Never answered: the peer is not there, or never was. Back to where it was
+    // proven, if that is what it was moved from.
+    LOG_DEBUG("udp", "Connection " << local_cid_ << ": " << challenge_.to.to_string()
+              << " never answered its challenge");
+    if (remote_ == challenge_.to && previous_) {
+        remote_ = *previous_;
+        previous_.reset();
+        address_validated_ = true;
+    }
+    challenge_ = Challenge{};
+}
+
+void UdpConnection::restart_path(Clock::time_point now) {
+    recovery_.on_new_path(now, *this);
+    live_loss_.restart(recovery_.sampler().delivered(), recovery_.sampler().lost() - recovery_.written_off());
+}
+
+void UdpConnection::note_data_gap(Clock::duration gap, Clock::time_point now) {
+    // The peer is streaming to us: should it stop for far longer than it pauses,
+    // we speak up (kQuietProbe).
+    data_gap_   = (data_gap_ * 7 + gap) / 8;
+    quiet_wait_ = (std::max)(Clock::duration(kQuietProbe), data_gap_ * kQuietGaps);
+    quiet_due_  = quiet_wait_ < kKeepAlive ? now + quiet_wait_ : kNever;
+}
+
+void UdpConnection::nudge(Clock::time_point now) {
+    if (!established()) return;
+    ping_owed_ = true;
+    pump(now);
+    flush_events();
+}
+
 // ── Acknowledgements we owe ─────────────────────────────────────────────────
 
 bool UdpConnection::is_duplicate(uint64_t pn) const noexcept {
@@ -768,8 +928,7 @@ void UdpConnection::end_burst(Clock::time_point now) {
 // ── Packets out ─────────────────────────────────────────────────────────────
 
 bool UdpConnection::amplification_allows(size_t bytes) const noexcept {
-    return role_ == ConnRole::Outbound || address_validated_ ||
-           amp_sent_ + bytes <= kAmplificationFactor * amp_received_;
+    return address_validated_ || amp_sent_ + bytes <= kAmplificationFactor * amp_received_;
 }
 
 void UdpConnection::note_sent(size_t bytes) noexcept {
@@ -781,7 +940,7 @@ uint64_t UdpConnection::new_data_budget() const noexcept {
 }
 
 bool UdpConnection::has_control() const noexcept {
-    return token_owed_ || max_data_owed_ || blocked_owed_ || ping_owed_;
+    return token_owed_ || max_data_owed_ || blocked_owed_ || ping_owed_ || response_owed_;
 }
 
 bool UdpConnection::has_repairs() const noexcept {
@@ -846,9 +1005,7 @@ size_t UdpConnection::begin_packet(uint8_t* buf, uint64_t pn, size_t& pn_len) co
     return kShortHeaderSize + pn_len;
 }
 
-size_t UdpConnection::finish_packet(uint8_t* buf, size_t header, size_t pn_len, uint8_t* end,
-                                    uint64_t pn, Clock::time_point now, bool eliciting, bool data,
-                                    bool repair, bool probe) {
+size_t UdpConnection::seal_packet(uint8_t* buf, size_t header, size_t pn_len, uint8_t* end, uint64_t pn) {
     // Padded so the 16 bytes the header mask is drawn from exist.
     const size_t overhead = session_->overhead();
     size_t payload = static_cast<size_t>(end - (buf + header));
@@ -864,7 +1021,13 @@ size_t UdpConnection::finish_packet(uint8_t* buf, size_t header, size_t pn_len, 
     session_->header_mask(true, buf + kShortHeaderSize + kMaxPnLength, mask);
     buf[0] ^= mask[0] & 0x1f;
     for (size_t i = 0; i < pn_len; ++i) buf[kShortHeaderSize + i] ^= mask[1 + i];
+    return total;
+}
 
+size_t UdpConnection::finish_packet(uint8_t* buf, size_t header, size_t pn_len, uint8_t* end,
+                                    uint64_t pn, Clock::time_point now, bool eliciting, bool data,
+                                    bool repair, bool probe) {
+    const size_t total = seal_packet(buf, header, pn_len, end, pn);
     host_.send_datagram(remote_, total);
     recovery_.on_packet_sent(now, total, eliciting, data, repair, probe);
     note_sent(total);
@@ -874,7 +1037,7 @@ size_t UdpConnection::finish_packet(uint8_t* buf, size_t header, size_t pn_len, 
 }
 
 size_t UdpConnection::amplification_room() const noexcept {
-    if (role_ == ConnRole::Outbound || address_validated_) return kMaxDatagram;
+    if (address_validated_) return kMaxDatagram;
     const uint64_t allowed = kAmplificationFactor * amp_received_;
     return allowed > amp_sent_ ? static_cast<size_t>((std::min<uint64_t>)(allowed - amp_sent_, kMaxDatagram)) : 0;
 }
@@ -943,6 +1106,12 @@ uint8_t* UdpConnection::write_control(uint8_t* p, uint8_t* end, bool& eliciting)
     // them — but one an unproven dialer has earned may be barely a header. What
     // does not fit stays owed for the next packet.
     const auto fits = [&](size_t n) { return p < end && static_cast<size_t>(end - p) >= n; };
+    // Not recorded: lost, the challenge it answers is sent again.
+    if (response_owed_ && fits(kPathResponseSize)) {
+        p = put_path_response(p, response_data_);
+        response_owed_ = false;
+        eliciting      = true;
+    }
     if (token_owed_ && fits(1 + kResetTokenSize)) {
         uint8_t token[kResetTokenSize];
         host_.reset_token(local_cid_, token);
@@ -1407,6 +1576,10 @@ std::optional<Clock::time_point> UdpConnection::next_deadline() const noexcept {
         if (ack_due_ != kNever) due = (std::min)(due, ack_due_);
     }
     if (const auto r = recovery_.deadline()) due = (std::min)(due, *r);
+    if (challenge_.active) due = (std::min)(due, challenge_.due);
+    if (quiet_due_ != kNever) due = (std::min)(due, quiet_due_);
+    // A grown window goes back once what it was grown for is over (see tick).
+    if (recv_window_ > initial_window_ && account_.held == 0) due = (std::min)(due, last_data_recv_ + kWindowDecay);
     // A live message that runs out while it waits is dropped then, not at the next
     // packet: what it holds counts against the queue's marks. One being put
     // together is given up the same way.
@@ -1428,6 +1601,7 @@ void UdpConnection::tick(Clock::time_point now) {
     }
     handshake_timer(now);
     if (!established()) { flush_events(); return; }
+    path_timer(now);
 
     // A window grown for a transfer that has gone quiet goes back to where it
     // started. What was advertised stands — it is a promise — so this only stops
@@ -1455,6 +1629,13 @@ void UdpConnection::tick(Clock::time_point now) {
 
     if (ack_owed_ && (ack_now_ || (ack_due_ != kNever && now >= ack_due_))) send_ack(now);
     pump(now);
+    if (quiet_due_ != kNever && now >= quiet_due_) {
+        // Nothing from a peer that was sending. Whatever we sent in the meantime
+        // already showed it where we are.
+        if (now - last_send_ >= quiet_wait_) send_packet(now, false, false, false, /*keepalive=*/true);
+        if (now - last_data_recv_ >= kQuietSteady) quiet_wait_ *= 2;
+        quiet_due_ = quiet_wait_ < kKeepAlive ? now + quiet_wait_ : kNever;
+    }
     // Say something now and then: it keeps the peer's idle timer from firing and
     // a NAT's mapping for the socket open. Not ack-eliciting, so a lost one costs
     // nothing — no timer, no window — and an idle connection stays idle to the

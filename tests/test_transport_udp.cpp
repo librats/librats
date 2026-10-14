@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -249,7 +250,9 @@ struct RelayedTrio {
     }
 
     ~RelayedTrio() {
+        // Transports before muxes, the relay's own legs included.
         host_a.side.held.clear();
+        host_r.side.held.clear();
         host_b.side.held.clear();
         a.reset();
         r.reset();
@@ -687,6 +690,111 @@ TEST(UdpMuxTest, ARelayedConnectionThatEndsEndsItsCircuit) {
     EXPECT_EQ(net.carrier->released, (std::vector<uint32_t>{1, 2}));
 }
 
+/// A NAT in front of one socket, in user space: what the inside sends leaves for
+/// `target` from the outside socket, and what `target` sends there goes back in.
+/// rebind() is the NAT handing the inside a new mapping: another outside port,
+/// the old one gone.
+struct UserspaceNat {
+    explicit UserspaceNat(const Address& target) : target(target) {
+        inside  = loopback_socket();
+        outside = loopback_socket();
+        inside_addr = Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(inside))};
+    }
+    ~UserspaceNat() {
+        close_socket(inside);
+        close_socket(outside);
+    }
+
+    Address outside_addr() const { return Address{"127.0.0.1", static_cast<uint16_t>(get_bound_port(outside))}; }
+
+    void pump() {
+        uint8_t buf[2048];
+        Address from;
+        std::ptrdiff_t n;
+        while ((n = recv_udp_from(inside, buf, sizeof(buf), from)) >= 0) {
+            client = from;
+            send_udp_to(outside, buf, static_cast<size_t>(n), target, AddressFamily::IPv4);
+        }
+        while ((n = recv_udp_from(outside, buf, sizeof(buf), from)) >= 0)
+            if (from == target && client.port != 0)
+                send_udp_to(inside, buf, static_cast<size_t>(n), client, AddressFamily::IPv4);
+    }
+
+    void rebind() {
+        close_socket(outside);
+        outside = loopback_socket();
+    }
+
+    Address  target, inside_addr, client;
+    socket_t inside = RATS_INVALID_SOCKET, outside = RATS_INVALID_SOCKET;
+};
+
+// The dialer's NAT gives it a new port in the middle of a relayed connection. Its
+// leg to the relay follows it there (udp_connection.h, "Migration"), and so does
+// the forward: the connection the two ends run through the relay never notices.
+// The relayed packets come first, from where the forward does not pass anything
+// on — the hint that has the leg ask whether the dialer is there now.
+TEST(UdpMuxTest, AForwardFollowsAnEndWhoseNatGivesItANewPort) {
+    RelayedTrio net;
+    UserspaceNat nat(net.addr_r);
+    const auto pump_until = [&](auto pred, std::chrono::milliseconds timeout = 10s) {
+        return net.pump_until([&] { nat.pump(); return pred(); }, timeout);
+    };
+
+    // The legs: the dialer's through its NAT, the responder's straight.
+    auto ta = net.a->connect(nat.inside_addr);
+    auto tb = net.b->connect(net.addr_r);
+    ASSERT_TRUE(ta && tb);
+    const ConnId leg_a = net.host_a.side.add(std::move(ta), false);
+    const ConnId leg_b = net.host_b.side.add(std::move(tb), false);
+    ASSERT_TRUE(pump_until([&] {
+        return net.host_a.side.held.at(leg_a).sink->established && net.host_b.side.held.at(leg_b).sink->established &&
+               net.host_r.side.held.size() == 2;
+    }));
+    std::optional<UdpMux::ForwardEnd> at_a, at_b;
+    for (const auto& [id, held] : net.host_r.side.held) {
+        auto end = net.r->end_of(id);
+        ASSERT_TRUE(end);
+        (end->at == nat.outside_addr() ? at_a : at_b) = end;
+    }
+    ASSERT_TRUE(at_a && at_b);
+
+    // The relayed connection, as the relay protocol sets it up.
+    ASSERT_TRUE(net.r->forward(RelayedTrio::kCid, *at_a, *at_b, net.bytes));
+    ASSERT_TRUE(net.b->expect_relayed(RelayedTrio::kCid, net.addr_r, RelayedTrio::kExpectedId,
+                                      ForwardedCircuit(net.carrier, 2)));
+    auto t = net.a->connect_relayed(nat.inside_addr, RelayedTrio::kCid, ForwardedCircuit(net.carrier, 1));
+    ASSERT_TRUE(t);
+    const ConnId id = net.host_a.side.add(std::move(t), false);
+    ASSERT_TRUE(pump_until([&] {
+        auto in = net.host_b.side.held.find(RelayedTrio::kExpectedId);
+        return net.host_a.side.held.at(id).sink->established && in != net.host_b.side.held.end() &&
+               in->second.sink->established;
+    }));
+    Side::Held& out = net.host_a.side.held.at(id);
+    Side::Held& in  = net.host_b.side.held.at(RelayedTrio::kExpectedId);
+    // The legs fall quiet, so nothing of their own shows the relay the new port.
+    pump_until([] { return false; }, 300ms);
+
+    nat.rebind();
+    ASSERT_TRUE(out.transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("after the move")), {}));
+    ASSERT_TRUE(out.transport->flush());
+    // Well inside the leg's keep-alive, which would have moved it in the end too.
+    ASSERT_TRUE(pump_until([&] { return in.sink->frames.size() == 1; }, 3s))
+        << "the relay never followed the dialer to its new port";
+    ASSERT_TRUE(in.transport->send(FrameHeader{MessageType::App, 0, 1}, ByteView(std::string("and back")), {}));
+    ASSERT_TRUE(in.transport->flush());
+    ASSERT_TRUE(pump_until([&] { return out.sink->frames.size() == 1; }));
+    for (const auto& [rid, held] : net.host_r.side.held) {
+        const auto end = net.r->end_of(rid);
+        if (end && end->leg == at_a->leg) {
+            EXPECT_EQ(end->at, nat.outside_addr()) << "the leg stayed at the old port";
+        }
+    }
+    EXPECT_FALSE(out.broken);
+    EXPECT_FALSE(in.broken);
+}
+
 // What one receive brings a connection is one burst, and its events coalesce:
 // the transport is told once per batch, not once per datagram.
 TEST(UdpMuxTest, ABurstIsDispatchedOncePerBatchRatherThanPerDatagram) {
@@ -704,6 +812,65 @@ TEST(UdpMuxTest, ABurstIsDispatchedOncePerBatchRatherThanPerDatagram) {
 
 // ── End to end, through a Node ──────────────────────────────────────────────
 
+
+// A NAT gives the client's socket a new port while it is connected. The node
+// does not lose the peer — same connection, nothing disconnects — and identify,
+// sent again by both ends when the server proves the move, tells the client
+// where it is seen now: what a hole punch would have to aim at.
+TEST(TransportUdpTest, APeerBehindANatThatRebindsStaysConnectedAndLearnsItsNewEndpoint) {
+    Node server(base_config());
+    std::atomic<int> heard{0};
+    server.on("after", [&](Peer, ByteView) { ++heard; });
+    ASSERT_TRUE(server.start());
+    UserspaceNat nat(Address{"127.0.0.1", server.listen_port()});
+    std::mutex nat_mutex;
+    std::atomic<bool> running{true};
+    std::thread pumping([&] {
+        while (running) {
+            {
+                std::lock_guard<std::mutex> lock(nat_mutex);
+                nat.pump();
+            }
+            std::this_thread::sleep_for(1ms);
+        }
+    });
+
+    NodeConfig client_cfg = base_config();
+    client_cfg.preferred_transport = TransportKind::Udp;
+    Node client(client_cfg);
+    std::atomic<int> lost{0};
+    client.on_peer_disconnected([&](const PeerId&, CloseReason) { ++lost; });
+    ASSERT_TRUE(client.start());
+    client.connect("127.0.0.1", nat.inside_addr.port);
+    ASSERT_TRUE(wait_for([&] { return client.peer_count() == 1 && server.peer_count() == 1; }));
+    const auto endpoints = [&] { return client.nat_status().external_udp_endpoints(); };
+    Address before;
+    {
+        std::lock_guard<std::mutex> lock(nat_mutex);
+        before = nat.outside_addr();
+    }
+    ASSERT_TRUE(wait_for([&] { auto e = endpoints(); return !e.empty() && e.front() == before; }, 5s));
+
+    Address after;
+    {
+        std::lock_guard<std::mutex> lock(nat_mutex);
+        nat.rebind();
+        after = nat.outside_addr();
+    }
+    ASSERT_NE(after, before);
+    const PeerId server_id = server.local_id();
+    ASSERT_TRUE(client.send(server_id, "after", ByteView(std::string("from the new port"))));
+    EXPECT_TRUE(wait_for([&] { return heard.load() == 1; }, 5s)) << "the server never followed the client";
+    EXPECT_TRUE(wait_for([&] { auto e = endpoints(); return !e.empty() && e.front() == after; }, 5s))
+        << "the client was never told where it is seen now";
+    EXPECT_EQ(lost.load(), 0);
+    EXPECT_EQ(client.peer_count(), 1u);
+
+    client.stop();
+    server.stop();
+    running = false;
+    pumping.join();
+}
 
 // ── Backpressure: an application can tell it is outrunning the link ─────────
 //

@@ -165,10 +165,15 @@ public:
     /// inbound connection `id`.
     void expect_relayed(ConnId id, ConnId carrier, udp::Cid cid, ForwardedCircuit circuit);
     /// Forward the packets of `cid` between the peers at the far ends of `dialer`
-    /// and `responder`, counting them into `bytes`, held to `rate` (UdpMux::forward).
+    /// and `responder`, counting them into `bytes`, held to `rate` (UdpMux::forward)
+    /// — and following either end where its connection moves.
     void forward_datagrams(ConnId dialer, ConnId responder, udp::Cid cid,
                            std::shared_ptr<std::atomic<uint64_t>> bytes, uint64_t rate, uint64_t burst);
     void stop_forwarding(udp::Cid cid);
+
+    /// The host's network has changed: every datagram connection says something,
+    /// so its peer sees where we are now. Thread-safe.
+    void nudge_datagram_peers();
 
     /// Drop a dial that lost its race — but only while it is still a dial. Once an
     /// attempt has established it is not an attempt any more, it is one of possibly

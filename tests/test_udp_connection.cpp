@@ -694,6 +694,327 @@ TEST(UdpConnectionTest, AnIdleConnectionSleepsUntilItsKeepAlive) {
     EXPECT_LE(*armed - p.now, udp::Recovery::kInitialRto) << "a packet in flight has no loss timer";
 }
 
+// ── Migration ───────────────────────────────────────────────────────────────
+
+namespace {
+
+const Address kRebound{*IpAddress::parse("10.0.0.1"), 4444};   // a's NAT, another port
+const Address kElsewhere{*IpAddress::parse("10.0.0.9"), 1111};   // a's new network
+const Address kForger{*IpAddress::parse("10.6.6.6"), 6666};
+
+/// Both ends sending to each other, so both have something in flight when the
+/// path changes: a's 32 messages to b, b's 32 to a.
+void start_both_ways(Pair& p) {
+    for (int i = 0; i < 32; ++i) {
+        ASSERT_TRUE(p.a.send(MessageType::App, std::string(16 * 1024, 'a')));
+        ASSERT_TRUE(p.b.send(MessageType::App, std::string(16 * 1024, 'b')));
+    }
+    p.a.conn->flush(p.now);
+    p.b.conn->flush(p.now);
+}
+
+bool all_arrived(const Pair& p) { return p.a.messages.size() == 32 && p.b.messages.size() == 32; }
+
+} // namespace
+
+// A NAT hands a's socket a new port mid-transfer. b follows a there, a proves it
+// receives there, and the transfer goes on — the same path, so what was learnt
+// of it stands.
+TEST(UdpConnectionTest, APeerWhosePortChangesIsFollowedAndKeepsWhatWasLearnt) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    start_both_ways(p);
+    p.run(30ms);
+    const uint64_t a_off = p.a.conn->recovery().written_off(), b_off = p.b.conn->recovery().written_off();
+    p.net.map(p.a, kRebound);
+
+    ASSERT_TRUE(p.run_until([&] { return all_arrived(p); }, 10s));
+    EXPECT_EQ(p.b.conn->remote(), kRebound);
+    EXPECT_EQ(p.b.moves, 1u);
+    EXPECT_TRUE(p.a.conn->take_moved()) << "a was never told it is seen somewhere new";
+    EXPECT_TRUE(p.b.conn->take_moved());
+    EXPECT_EQ(p.a.conn->recovery().written_off(), a_off) << "a port alone started a's path again";
+    EXPECT_EQ(p.b.conn->recovery().written_off(), b_off) << "a port alone started b's path again";
+}
+
+// a goes from one network to another: a new IP is another path. Once a is
+// proven there, both ends start their estimate of it again, and what was in
+// flight on the old one goes again on the new.
+TEST(UdpConnectionTest, APeerOnAnotherNetworkIsFollowedAndThePathStartsAgain) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    start_both_ways(p);
+    p.run(30ms);
+    const uint64_t a_off = p.a.conn->recovery().written_off(), b_off = p.b.conn->recovery().written_off();
+    p.net.map(p.a, kElsewhere);
+
+    ASSERT_TRUE(p.run_until([&] { return all_arrived(p); }, 10s));
+    EXPECT_EQ(p.b.conn->remote(), kElsewhere);
+    EXPECT_EQ(p.b.moves, 1u);
+    EXPECT_GT(p.a.conn->recovery().written_off(), a_off) << "a kept its estimate of the old path";
+    EXPECT_GT(p.b.conn->recovery().written_off(), b_off) << "b kept its estimate of the old path";
+    for (const auto& m : p.a.messages) EXPECT_EQ(m.payload, std::string(16 * 1024, 'b'));
+    for (const auto& m : p.b.messages) EXPECT_EQ(m.payload, std::string(16 * 1024, 'a'));
+}
+
+// Until the new address answers its challenge, b sends there no more than three
+// times what came from there: a forged move cannot aim b's transfer at anyone.
+TEST(UdpConnectionTest, AnUnprovenAddressGetsNoMoreThanThreeTimesWhatCameFromIt) {
+    Pair p(false, 10ms);   // plaintext, so the hook can see the frames
+    ASSERT_TRUE(p.connect());
+    for (int i = 0; i < 64; ++i) ASSERT_TRUE(p.b.send(MessageType::App, std::string(16 * 1024, 'b')));
+    p.b.conn->flush(p.now);
+    p.run(30ms);
+
+    size_t to_new = 0, from_new = 0;
+    bool answer = false, over = false;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address& to) {
+        if (from == kRebound) {
+            for (const auto& f : frames_of(d))
+                if (f.type == udp::kPathResponse && !answer) return true;   // held back
+            from_new += d.size();
+        }
+        if (to == kRebound) {
+            to_new += d.size();
+            if (!answer && to_new > UdpConnection::kAmplificationFactor * from_new) over = true;
+        }
+        return false;
+    };
+    p.net.map(p.a, kRebound);
+    p.run(300ms);
+    EXPECT_GT(to_new, 0u);
+    EXPECT_FALSE(over) << to_new << " bytes went to an address that sent " << from_new;
+    EXPECT_EQ(p.b.moves, 0u);
+
+    answer = true;   // the next challenge is answered
+    ASSERT_TRUE(p.run_until([&] { return p.a.messages.size() == 64; }, 10s));
+    EXPECT_EQ(p.b.moves, 1u);
+}
+
+// Someone on the path sends a copy of a's newest packet from elsewhere, ahead of
+// it. b goes there for a moment — the copy opened under its keys — but a's next
+// packet brings it back, and nothing of the transfer is lost.
+TEST(UdpConnectionTest, ACopyFromElsewhereMovesTheConnectionOnlyUntilThePeerSpeaks) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    for (int i = 0; i < 32; ++i) ASSERT_TRUE(p.a.send(MessageType::App, std::string(16 * 1024, 'a')));
+    p.a.conn->flush(p.now);
+    p.run(30ms);
+
+    bool copied = false;
+    size_t to_forger = 0;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address& to) {
+        if (to == kForger) to_forger += d.size();
+        if (!copied && from == p.a.addr() && is_short(d)) {
+            copied = true;
+            p.net.inject(kForger, to, d);   // queued first, so it arrives first
+        }
+        return false;
+    };
+    ASSERT_TRUE(p.run_until([&] { return copied; }, 1s));
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 32; }, 10s));
+    EXPECT_EQ(p.b.conn->remote(), p.a.addr());
+    EXPECT_EQ(p.b.moves, 0u);
+    EXPECT_LE(to_forger, UdpConnection::kAmplificationFactor * udp::kMaxDatagram);
+}
+
+// The same copy, and then a goes quiet: the challenge goes unanswered, and b goes
+// back to where a was proven rather than staying where the copy came from.
+TEST(UdpConnectionTest, AnUnansweredChallengeMovesTheConnectionBack) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.run(100ms);
+    bool copied = false, quiet = false;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address& to) {
+        if (from == p.a.addr() && quiet) return true;
+        if (!copied && from == p.a.addr() && is_short(d)) {
+            copied = true;
+            quiet  = true;
+            p.net.inject(kForger, to, d);
+            return true;   // and the original never arrives
+        }
+        return false;
+    };
+    p.send(MessageType::App, "x");
+    ASSERT_TRUE(p.run_until([&] { return p.b.conn->remote() == kForger; }, 1s));
+    ASSERT_TRUE(p.run_until([&] { return p.b.conn->remote() == p.a.addr(); }, 5s))
+        << "an address that never answered kept the connection";
+    EXPECT_EQ(p.b.moves, 0u);
+    quiet = false;
+    p.send(MessageType::App, "y");
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 2; }, 5s));
+}
+
+// Only the newest packet says where the peer is. One that the path held back
+// while the peer moved — sent before the move, arriving just after it — is the
+// peer's and opens, but moves nothing back.
+TEST(UdpConnectionTest, APacketOvertakenByTheMoveMovesNothingBack) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    for (int i = 0; i < 32; ++i) ASSERT_TRUE(p.a.send(MessageType::App, std::string(16 * 1024, 'a')));
+    p.a.conn->flush(p.now);
+    p.run(30ms);
+    Bytes held;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        if (!held.empty() || from != p.a.addr() || !is_short(d)) return false;
+        held = d;
+        p.net.map(p.a, kRebound);   // the packets after it leave from elsewhere
+        return true;
+    };
+    ASSERT_TRUE(p.run_until([&] { return p.b.conn->remote() == kRebound; }, 1s));
+
+    size_t to_old = 0;
+    p.net.hook = [&](Bytes&, const Address&, const Address& to) {
+        if (to == p.a.addr()) ++to_old;
+        return false;
+    };
+    p.net.inject(p.a.addr(), p.b.addr(), held);
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 32; }, 10s));
+    EXPECT_EQ(p.b.conn->remote(), kRebound);
+    EXPECT_EQ(p.b.moves, 1u);
+    EXPECT_EQ(to_old, 0u) << "an overtaken packet drew b back to where a was";
+}
+
+// Nothing moves before the handshake is done: until then the address is all a
+// responder knows of its dialer.
+TEST(UdpConnectionTest, NothingMovesDuringTheHandshake) {
+    Pair p(true, 10ms);
+    bool moved = false;
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        // The dialer's second handshake message is lost, and its repeats come
+        // from elsewhere.
+        if (!moved && from == p.a.addr() && is_handshake(d, udp::LongType::Handshake)) {
+            moved = true;
+            p.net.map(p.a, kRebound);
+            return true;
+        }
+        return false;
+    };
+    p.dial();
+    p.run(2s);
+    ASSERT_TRUE(p.b.conn);
+    EXPECT_EQ(p.b.conn->remote(), p.a.addr());
+    EXPECT_FALSE(p.b.established()) << "a handshake finished from an address it did not begin at";
+}
+
+// Nor does a dialer that has not yet shown it receives where it dials from: its
+// address is not proven, so there is nothing to have moved from.
+TEST(UdpConnectionTest, ADialerThatHasNotProvedItsAddressCannotMove) {
+    Pair p(false, 10ms);   // plaintext: the responder is established on the Initial
+    // The dialer's first packets after the handshake are lost, which is what
+    // would have proved its address; the next ones come from elsewhere.
+    p.net.hook = [&](Bytes& d, const Address& from, const Address&) {
+        return from == p.a.addr() && is_short(d);
+    };
+    p.dial();
+    ASSERT_TRUE(p.run_until([&] { return p.a.established(); }));
+    p.net.map(p.a, kRebound);
+    p.send(MessageType::App, "x");
+    p.run(1s);
+    ASSERT_TRUE(p.b.conn);
+    EXPECT_EQ(p.b.conn->remote(), p.a.addr());
+    EXPECT_EQ(p.b.moves, 0u);
+    EXPECT_TRUE(p.b.messages.empty());
+}
+
+// A peer told a stateless reset only it could make is told it from wherever it
+// comes: the token is the secret, not the address.
+TEST(UdpConnectionTest, AStatelessResetFromANewAddressEndsTheConnection) {
+    Pair p(true);
+    ASSERT_TRUE(p.connect());
+    p.run(100ms);
+    Bytes reset(udp::kMinShortPacket + 4, 0x33);
+    reset[0] = 0x41;
+    const udp::Cid to = p.a.conn->local_cid();
+    for (int i = 0; i < 8; ++i) reset[1 + i] = static_cast<uint8_t>(to >> (56 - 8 * i));
+    p.b.reset_token(p.b.conn->local_cid(), reset.data() + reset.size() - udp::kResetTokenSize);
+    p.net.inject(kForger, p.a.addr(), reset);
+    ASSERT_TRUE(p.run_until([&] { return p.a.conn->dead(); }, 100ms));
+    EXPECT_EQ(p.a.conn->close_reason(), CloseReason::PeerReset);
+}
+
+// What a relay does when the packets of a connection it forwards come from an
+// address the forward does not know (udp_mux.h): it asks the peer whether it is
+// there. Answered from there, the connection moves; asked of an address nobody
+// is at, nothing does.
+TEST(UdpConnectionTest, AProbedAddressIsMovedToOnlyWhenTheAnswerComesFromIt) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.run(100ms);
+    p.b.conn->probe_path(kForger, p.now);
+    p.run(3s);
+    EXPECT_EQ(p.b.conn->remote(), p.a.addr());
+    EXPECT_EQ(p.b.moves, 0u);
+
+    // a's NAT gives it a new port; a says nothing. b, told where to look, asks.
+    p.net.map(p.a, kRebound);
+    p.b.conn->probe_path(kRebound, p.now);
+    ASSERT_TRUE(p.run_until([&] { return p.b.moves == 1; }, 1s));
+    EXPECT_EQ(p.b.conn->remote(), kRebound);
+    p.send(MessageType::App, "after");
+    ASSERT_TRUE(p.run_until([&] { return p.b.messages.size() == 1; }, 1s));
+}
+
+// A host whose network changed has every connection say something at once, so
+// the peer learns the new address now rather than at the next keep-alive — and
+// what the peer had to send in the meantime is not left to wait on it.
+TEST(UdpConnectionTest, ANudgeShowsThePeerWhereAnIdleConnectionIsNow) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.run(1s);
+    p.net.map(p.a, kElsewhere);
+    p.a.conn->nudge(p.now);
+    ASSERT_TRUE(p.run_until([&] { return p.b.moves == 1; }, 200ms));
+    EXPECT_EQ(p.b.conn->remote(), kElsewhere);
+    ASSERT_TRUE(p.b.send(MessageType::App, "to the new place"));
+    p.b.conn->flush(p.now);
+    ASSERT_TRUE(p.run_until([&] { return p.a.messages.size() == 1; }, 200ms));
+}
+
+// A viewer — it only receives — loses its network for a moment and comes back
+// on another. Nothing tells the sender, whose packets go where the viewer was; but
+// the viewer notices the stream has stopped and speaks up from where it is now,
+// so it is found again at once rather than at its next keep-alive.
+TEST(UdpConnectionTest, AListenerOnANewNetworkIsFoundAgainWithoutBeingTold) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    const auto frame = [&] {
+        ASSERT_TRUE(p.b.send(MessageType::App, std::string(3000, 'v')));
+        p.b.conn->flush(p.now);
+    };
+    for (int i = 0; i < 60; ++i) { frame(); p.run(33ms); }
+    p.net.blackout = true;
+    p.run(300ms);
+    p.net.map(p.a, kElsewhere);
+    p.net.blackout = false;
+    const auto back = p.now;
+    const size_t before = p.a.messages.size();
+    bool found = false;
+    for (int i = 0; i < 30 && !found; ++i) {
+        frame();
+        p.run(33ms);
+        found = p.b.moves == 1;
+    }
+    ASSERT_TRUE(found) << "the sender never found the viewer again";
+    EXPECT_LE(p.now - back, UdpConnection::kQuietProbe + 100ms);
+    ASSERT_TRUE(p.run_until([&] { return p.a.messages.size() > before; }, 1s));
+}
+
+// A peer whose messages come seconds apart is not "quiet" between them: nothing
+// is sent to it for that — only the acknowledgements its messages draw.
+TEST(UdpConnectionTest, ASparsePeerIsNotProbedForItsPauses) {
+    Pair p(true, 10ms);
+    ASSERT_TRUE(p.connect());
+    p.run(1s);
+    const size_t before = p.a.sent;
+    for (int i = 0; i < 9; ++i) {
+        ASSERT_TRUE(p.b.send(MessageType::App, "tick"));
+        p.b.conn->flush(p.now);
+        p.run(1s, 5ms);
+    }
+    EXPECT_LE(p.a.sent - before, 2u * 9) << "a pause between sparse messages was taken for a stream gone quiet";
+}
+
 // ── Streams on their own ────────────────────────────────────────────────────
 
 TEST(UdpStreamsTest, ASendStreamOwesWhatWasLostAndForgetsWhatArrived) {

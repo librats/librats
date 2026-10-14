@@ -43,6 +43,37 @@
  * what it received, so a forged source address cannot turn the node into an
  * amplifier.
  *
+ * ── Migration ────────────────────────────────────────────────────────────────
+ * A connection is its pair of ids, not an address. A peer's address changes
+ * under it — a NAT hands its socket a new mapping, a phone goes from Wi-Fi to
+ * LTE — and the peer, which usually cannot tell, just goes on sending. So the
+ * receiving side follows (RFC 9000 §9, cut down to what that needs):
+ *
+ *   - Where the peer is, its newest packet says: one that opens under our keys
+ *     and is numbered above every packet before it moves the connection to the
+ *     address it came from. A duplicate never does — a copy an attacker on the
+ *     path sends from elsewhere is one — nor a packet overtaken on the way.
+ *   - Sending follows at once, but the new address is asked (PATH_CHALLENGE) to
+ *     prove the peer receives there, and until it has (PATH_RESPONSE), what goes
+ *     to it is held to kAmplificationFactor times what came from it — so a
+ *     forged move redirects nothing worth having to the forger's victim. An
+ *     unanswered challenge moves the connection back to the last proven address,
+ *     as does the peer's next packet from there.
+ *   - What was learnt about the path stays, unless the IP changed: then it is
+ *     another path, and once the peer is proven there the round trip and the
+ *     controller start again (Recovery::on_new_path). The challenge tells the
+ *     peer which it was, so its own estimate starts again too.
+ *   - Before the handshake is confirmed nothing moves.
+ *
+ * The side that moved usually keeps sending and so shows itself. One that only
+ * receives — a viewer — is shown by kQuietProbe: when the data stops coming it
+ * speaks up, from wherever it now is. (UdpMux::nudge does the same at once when
+ * the host sees its network change.)
+ *
+ * The host hears of every proven move (peer_moved), and the transport above of
+ * that and of every challenge we answer (take_moved): a peer's view of our
+ * address has changed, which identify is there to tell it.
+ *
  * ── Ownership and threading ──────────────────────────────────────────────────
  * A connection belongs to the UdpMux and is touched only by its reactor thread;
  * no locks, no atomics. It reaches the wire and reports events through
@@ -70,6 +101,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace librats {
@@ -100,6 +132,11 @@ public:
     /// The stateless-reset token for our connection id `cid`: what a reset for it
     /// ends with, made from a secret only this node has (see udp_mux.cpp).
     virtual void reset_token(udp::Cid cid, uint8_t* out) = 0;
+
+    /// `conn`'s peer has been proven at a new address, `conn.remote()` (see
+    /// "Migration"). Called from inside the connection's packet handling: record,
+    /// do not reenter it.
+    virtual void peer_moved(UdpConnection& /*conn*/) {}
 };
 
 /// How one connection is set up.
@@ -149,6 +186,16 @@ public:
     static constexpr std::chrono::seconds kKeepAlive{10};
     /// Silence from the peer that ends the connection: four keep-alives and more.
     static constexpr std::chrono::seconds kIdleTimeout{45};
+    /// A peer that was streaming data and has gone quiet — for kQuietGaps of its
+    /// usual gaps, and at least kQuietProbe — is sent a keep-alive, and again as
+    /// often for kQuietSteady, then at doubling intervals up to kKeepAlive. If it
+    /// is our address that changed (a phone gone to another network while it only
+    /// listened), the peer cannot reach us until we say something from where we
+    /// are now ("Migration"); a handover is over within a second or two. A peer
+    /// whose messages are seconds apart is never quiet in this sense.
+    static constexpr std::chrono::milliseconds kQuietProbe{250};
+    static constexpr int                       kQuietGaps = 8;
+    static constexpr std::chrono::seconds      kQuietSteady{2};
 
     /// The flow-control window both sides start with, which a sender may count on
     /// before it has heard a single MAX_DATA. ~80 Mbit/s at 100 ms — enough for
@@ -160,8 +207,12 @@ public:
     static constexpr std::chrono::seconds kWindowDecay{10};
 
     /// The most a responder sends, per byte received, before the dialer has proved
-    /// its address (RFC 9000 §8.1).
+    /// its address (RFC 9000 §8.1) — and either side to a peer's new address
+    /// before the peer has proved it receives there.
     static constexpr uint64_t kAmplificationFactor = 3;
+    /// Challenges sent to an address before it is given up on, each a doubling
+    /// probe timeout after the last.
+    static constexpr int kMaxPathChallenges = 3;
     /// Short packets kept while the keys to open them do not exist yet: the dialer
     /// sends its first data right behind its last handshake message, and on a path
     /// that reorders them the data would otherwise cost a round trip.
@@ -209,8 +260,21 @@ public:
 
     // ── Driven by the mux ───────────────────────────────────────────────────
 
-    /// One datagram addressed to this connection. It is decrypted in place.
-    void on_datagram(uint8_t* data, size_t len, Clock::time_point now);
+    /// One datagram addressed to this connection, from `from`. It is decrypted in
+    /// place.
+    void on_datagram(uint8_t* data, size_t len, const Address& from, Clock::time_point now);
+
+    /// Ask the peer whether it receives at `candidate` — where someone sent a
+    /// packet of a connection the host forwards to this peer (udp_mux.h). Proven,
+    /// the connection moves there when the answer comes from there. A no-op while
+    /// another challenge runs.
+    void probe_path(const Address& candidate, Clock::time_point now);
+    /// Our own side of the path may have changed (the host's network did): send
+    /// the peer something it answers, so it learns where we are now.
+    void nudge(Clock::time_point now);
+    /// The peer was proven at a new address, or told us it sees us at one, since
+    /// the last call.
+    bool take_moved() noexcept { return std::exchange(moved_, false); }
 
     /// Datagrams that arrived together are about to be handed over one by one. The
     /// ACK they owe is held until end_burst() and sent once, naming everything:
@@ -315,7 +379,7 @@ private:
     void handshake_timer(Clock::time_point now);
 
     // — packets in —
-    void on_short(uint8_t* data, size_t len, Clock::time_point now);
+    void on_short(uint8_t* data, size_t len, const Address& from, Clock::time_point now);
     bool is_reset(const uint8_t* data, size_t len) const noexcept;
     /// Apply one authenticated packet's frames; false on a protocol violation.
     bool apply_frames(const uint8_t* payload, size_t len, Clock::time_point now,
@@ -324,6 +388,22 @@ private:
     bool on_live(const udp::LiveFrame& f, Clock::time_point now, bool& refused);
     bool on_live_repair(const udp::LiveRepairFrame& f, Clock::time_point now, bool& refused);
     void on_data_blocked(uint64_t limit);
+
+    // — migration —
+    /// The handshake is confirmed and the peer proven somewhere: it may move.
+    bool may_move() const noexcept;
+    /// The peer's newest packet, `len` bytes, came from `to`.
+    void move_to(const Address& to, size_t len, Clock::time_point now);
+    void start_challenge(const Address& to, Clock::time_point now);
+    void send_challenge(Clock::time_point now);
+    void on_path_challenge(uint64_t data, uint8_t flags, Clock::time_point now);
+    /// The peer answered the challenge: it receives where that went.
+    void path_proven(Clock::time_point now);
+    void path_timer(Clock::time_point now);
+    /// Start what describes the path again: it is another one.
+    void restart_path(Clock::time_point now);
+    /// A packet of data came, `gap` after the one before it.
+    void note_data_gap(Clock::duration gap, Clock::time_point now);
 
     // — acknowledgements we owe —
     bool is_duplicate(uint64_t pn) const noexcept;
@@ -373,7 +453,9 @@ private:
     void   send_close(Clock::time_point now, uint64_t code);
     /// The first bytes of a short packet: returns where its frames begin.
     size_t begin_packet(uint8_t* buf, uint64_t pn, size_t& pn_len) const noexcept;
-    /// Pad, seal, mask and send a short packet whose frames end at `end`.
+    /// Pad, seal and mask a short packet whose frames end at `end`; its length.
+    size_t seal_packet(uint8_t* buf, size_t header, size_t pn_len, uint8_t* end, uint64_t pn);
+    /// Seal a short packet and send it to the peer.
     size_t finish_packet(uint8_t* buf, size_t header, size_t pn_len, uint8_t* end, uint64_t pn,
                          Clock::time_point now, bool eliciting, bool data, bool repair, bool probe);
     size_t estimate_packet(Clock::time_point now) const noexcept;
@@ -452,10 +534,33 @@ private:
     Clock::time_point hs_deadline_{};      ///< epoch = no repeat scheduled
     Clock::time_point hs_sent_at_{};       ///< when our latest handshake packet left
     int               hs_sends_      = 0;  ///< handshake packets sent (Initials apart)
+    /// The peer has proved it receives at remote_: a dialer chose the address, a
+    /// responder learns it from the handshake, and after a move a PATH_RESPONSE
+    /// says so. Until then what goes there is held to the amplification limit.
     bool              address_validated_ = false;
-    uint64_t          amp_received_  = 0;
-    uint64_t          amp_sent_      = 0;
+    uint64_t          amp_received_  = 0;   ///< from remote_ while unproven
+    uint64_t          amp_sent_      = 0;   ///< to remote_ while unproven
     std::vector<Bytes> early_;
+
+    // — migration —
+    /// The last address the peer was proven at, while remote_ is a newer one that
+    /// is not proven yet.
+    std::optional<Address> previous_;
+    struct Challenge {
+        bool              active = false;
+        Address           to;
+        uint64_t          data   = 0;
+        bool              new_ip = false;   ///< `to` has another IP than the proven address
+        int               sends  = 0;
+        Clock::time_point due{};            ///< the next send, or giving up
+    };
+    Challenge         challenge_;
+    uint64_t          challenges_    = 0;   ///< made so far: the next one's data
+    bool              path_answered_ = false;   ///< the packet being applied answers it
+    bool              response_owed_ = false;
+    uint64_t          response_data_ = 0;
+    uint64_t          last_challenge_ = 0;  ///< the latest one we answered
+    bool              moved_         = false;   ///< see take_moved()
 
     // — sending —
     udp::Recovery     recovery_;
@@ -517,6 +622,13 @@ private:
     Clock::time_point window_epoch_{};
     uint64_t          window_epoch_bytes_ = 0;
     Clock::time_point last_data_recv_{};
+    /// The usual gap between the peer's packets of data, smoothed: what tells a
+    /// stream gone quiet from one that is merely sparse (kQuietProbe).
+    Clock::duration   data_gap_ = kKeepAlive;
+    /// When a peer gone quiet is next shown we are here; epoch = it has not been
+    /// streaming.
+    Clock::time_point quiet_due_{};
+    Clock::duration   quiet_wait_{};
 };
 
 template <typename Fn>

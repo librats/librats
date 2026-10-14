@@ -300,6 +300,7 @@ private:
     void on_closed(Connection& conn, CloseReason reason) override;
     void on_writable_changed(Connection& conn, bool writable) override;
     void on_path_sample(Connection& conn, const PathStats& stats) override;
+    void on_moved(Connection& conn) override;
     void on_dial_aborted(uint8_t reactor_index, ConnId id,
                          const std::string& host, uint16_t port) override;
 

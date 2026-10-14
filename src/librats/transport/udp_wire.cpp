@@ -312,6 +312,10 @@ bool FrameReader::next(Frame& out) noexcept {
                 return r_.varint(out.value) ? true : fail();
             case kResetToken:
                 return r_.bytes(kResetTokenSize, out.token) ? true : fail();
+            case kPathChallenge:
+                return r_.u64(out.path) && r_.u8(out.path_flags) ? true : fail();
+            case kPathResponse:
+                return r_.u64(out.path) ? true : fail();
             default:
                 return fail();   // a frame this version does not know
         }
@@ -402,6 +406,19 @@ uint8_t* put_reset_token(uint8_t* out, const uint8_t* token) noexcept {
     *out++ = kResetToken;
     std::memcpy(out, token, kResetTokenSize);
     return out + kResetTokenSize;
+}
+
+uint8_t* put_path_challenge(uint8_t* out, uint64_t data, uint8_t flags) noexcept {
+    *out++ = kPathChallenge;
+    put_u64(out, data);
+    out[8] = flags;
+    return out + 9;
+}
+
+uint8_t* put_path_response(uint8_t* out, uint64_t data) noexcept {
+    *out++ = kPathResponse;
+    put_u64(out, data);
+    return out + 8;
 }
 
 } // namespace udp
