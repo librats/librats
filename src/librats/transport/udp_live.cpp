@@ -170,7 +170,7 @@ std::optional<LiveSender::Clock::time_point> LiveSender::next_expiry(Clock::dura
     // expire() that wake-up runs drops it.
     std::optional<Clock::time_point> due;
     if (!order_.empty())   due = order_.front().deadline - one_way;
-    if (!repairs_.empty()) due = (std::min)(due.value_or(Clock::time_point::max()), repairs_.front().deadline - one_way);
+    if (!repairs_.empty()) due = (std::min)(due.value_or((Clock::time_point::max)()), repairs_.front().deadline - one_way);
     return due;
 }
 

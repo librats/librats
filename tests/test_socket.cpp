@@ -485,7 +485,7 @@ TEST(UdpSendBatchTest, CoalescesOnlyWhatOneSegmentedSendCanCarry) {
 
 TEST(UdpSendBatchTest, RunsStopAtTheSegmentAndByteLimits) {
     const Address a{"10.0.0.1", 1000};
-    const std::vector<uint8_t> full(1220, 'x'), small(100, 's');
+    const std::vector<uint8_t> full(1220, 'x'), tiny(100, 's');
 
     // Bytes: 52 x 1220 fits in one send, the 53rd does not.
     UdpSendBatch bytes(kUdpMaxSegments);
@@ -497,7 +497,7 @@ TEST(UdpSendBatchTest, RunsStopAtTheSegmentAndByteLimits) {
     // Segments: 64 small datagrams are well under the byte limit, but one run.
     UdpSendBatch segments(kUdpMaxSegments);
     for (size_t i = 0; i < kUdpMaxSegments + 1; ++i)
-        ASSERT_TRUE(segments.add(a, small.data(), small.size()));
+        ASSERT_TRUE(segments.add(a, tiny.data(), tiny.size()));
     ASSERT_EQ(segments.runs().size(), 2u);
     EXPECT_EQ(segments.runs()[0].count, kUdpMaxSegments);
 

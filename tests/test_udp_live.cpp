@@ -693,7 +693,7 @@ TEST(UdpLiveTest, AfterAnOutageTheFreshFramesGoFirst) {
     }
     // The first to arrive after the outage was fresh: sent no earlier than a
     // lifetime before the path came back.
-    Clock::time_point first_after = Clock::time_point::max();
+    Clock::time_point first_after = (Clock::time_point::max)();
     int first_frame = -1;
     for (const auto& [payload, at] : arrived_at) {
         if (at < outage_to || at >= first_after) continue;

@@ -836,13 +836,13 @@ TEST_F(StorageReplicationTest, RemoteEntryOverOurLimitIsRejected) {
     Node server(storage_node_config(true));
     Node client(storage_node_config(false));
 
-    StorageConfig big = mem_storage_config();
-    big.max_value_size = 512 * 1024;
-    StorageConfig small = mem_storage_config();
-    small.max_value_size = 16 * 1024;
+    StorageConfig big_cfg = mem_storage_config();
+    big_cfg.max_value_size = 512 * 1024;
+    StorageConfig small_cfg = mem_storage_config();
+    small_cfg.max_value_size = 16 * 1024;
 
-    auto server_store = std::make_unique<StorageManager>(big);
-    auto client_store = std::make_unique<StorageManager>(small);
+    auto server_store = std::make_unique<StorageManager>(big_cfg);
+    auto client_store = std::make_unique<StorageManager>(small_cfg);
     StorageManager* srv = server_store.get();
     StorageManager* cli = client_store.get();
 

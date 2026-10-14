@@ -221,7 +221,7 @@ void UdpMux::compact_due() {
 int UdpMux::next_timeout_ms(int max_ms) const noexcept {
     if (due_.empty() && shaping_.empty()) return max_ms;
     const auto now = Clock::now();
-    auto at = due_.empty() ? Clock::time_point::max() : due_.front().at;
+    auto at = due_.empty() ? (Clock::time_point::max)() : due_.front().at;
     // A queue held back by its rate is due when its next datagram fits.
     for (const Cid cid : shaping_) {
         const auto it = forwards_.find(cid);
