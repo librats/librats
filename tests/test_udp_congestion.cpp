@@ -1268,6 +1268,50 @@ TEST(BbrTest, TheReceiversAckDelayIsNoQueue) {
     EXPECT_GT(sum / steps, 6e6) << "estimate " << sum / steps / 1e6 << " Mbit/s of a 10 Mbit/s path";
 }
 
+// A connection's first messages are small — identify, a request or two — and on
+// a real path one acknowledgement in a few comes back 10 ms or more late with
+// nothing queued. A handful of 64 B messages is more in flight than the BDP of
+// their own rate, so that was read as a burst that queued and ended Startup at a
+// few KB/s: the transfer after it had to probe its way up a quarter per cycle,
+// and on a 35 ms path ran at half the rate for most of its first seconds.
+TEST(BbrTest, SmallMessagesOnAJitteryPathLeaveStartupToTheTransferAfterThem) {
+    Sim sim(100, 34ms, 300);
+    sim.path.rev().late    = 0.3;
+    sim.path.rev().late_by = 12ms;
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(200ms);
+    for (int i = 0; i < 100; ++i) {   // two seconds of small talk
+        f.to_send += 64;
+        sim.run(20ms);
+    }
+    EXPECT_FALSE(bbr(f.sender()).full_bw_reached()) << "small messages ended Startup";
+
+    f.to_send = SIZE_MAX;
+    sim.run(1s);
+    const size_t before = f.delivered();
+    sim.run(1s);
+    EXPECT_GT(f.delivered() - before, 0.8 * payload_rate(100))
+        << mbps_of(f.delivered() - before, 1s) << " Mbit/s in the transfer's second second";
+}
+
+// The first round trips of a transfer are app-limited — the window, not the
+// application, is what grows — and their samples are more in flight than the
+// BDP measured so far. On a path whose acknowledgements come back 7 ms late now
+// and then with nothing queued (a host's timer, a radio), the first late one was
+// taken for a burst that queued and ended Startup at a few Mbit/s, the queue
+// threshold being an eighth of the round trip: 4 ms here.
+TEST(BbrTest, AJitteryPathDoesNotEndTheStartupOfATransfer) {
+    Sim sim(100, 34ms, 300);
+    sim.path.rev().late    = 0.3;
+    sim.path.rev().late_by = 7ms;
+    Flow& f = sim.add(CongestionAlgorithm::Bbr);
+    sim.run(200ms);
+    f.to_send = SIZE_MAX;
+    sim.run(1s);
+    EXPECT_GT(f.delivered(), 0.5 * payload_rate(100))
+        << mbps_of(f.delivered(), 1s) << " Mbit/s in the first second of a 100 Mbit/s path";
+}
+
 // A buffer shallower than the queue a round trip can show (kQueueMin) never looks
 // queued, so a sender that runs dry between bursts would never be cut for what
 // it loses there (RandomLossDoesNotCutAnAppLimitedFlowToItsOwnRate) — while

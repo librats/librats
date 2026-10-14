@@ -368,8 +368,7 @@ void BbrController::check_full_bw_reached() {
     // the round trip lifted by it. That is the path saying it is full at the rate
     // it delivers already — the plateau's verdict, reached in one burst.
     if (rs_.is_app_limited) {
-        if (rs_.tx_in_flight > bdp_multiple(max_bw_, kUnit) && queued(ack_rtt_net_))
-            full_bw_now_ = full_bw_reached_ = true;
+        if (burst_queued()) full_bw_now_ = full_bw_reached_ = true;
         return;
     }
 
@@ -926,6 +925,14 @@ bool BbrController::queued(Clock::duration rtt_net) const noexcept {
     const auto hi = std::chrono::duration_cast<Clock::duration>(kQueueMax);
     const Clock::duration threshold = (std::min)((std::max)(min_rtt_ / 8, lo), hi);
     return rtt_net >= min_rtt_ + threshold;
+}
+
+bool BbrController::burst_queued() const noexcept {
+    if (rs_.tx_in_flight < kInitialWindow || rs_.tx_in_flight <= bdp_multiple(max_bw_, kUnit)) return false;
+    if (ack_rtt_net_ == (Clock::duration::max)() || min_rtt_ == (Clock::duration::max)()) return false;
+    const Clock::duration threshold =
+        (std::max)(min_rtt_ / 4, std::chrono::duration_cast<Clock::duration>(kBurstQueueMin));
+    return ack_rtt_net_ >= min_rtt_ + threshold;
 }
 
 bool BbrController::loss_is_congestion() const noexcept {

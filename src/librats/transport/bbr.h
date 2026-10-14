@@ -68,11 +68,17 @@
  * threshold, so jitter does not count) and the inflight a packet left with:
  *
  *   - An app-limited burst of ours that queues at the bottleneck — more than a
- *     BDP in flight, and the round trip lifted by it — counts as the plateau:
- *     it ends Startup, and a bandwidth probe. The plateau test proper needs
- *     non-app-limited samples such a flow never produces; without this every
- *     keyframe would leave at Startup's 2.77x the bandwidth already found, into
- *     a buffer it overflows, and a probe would last until loss ended it.
+ *     BDP and at least the starting window in flight, and the round trip lifted
+ *     by it past max(min_rtt/4, 10 ms) — counts as the plateau: it ends Startup,
+ *     and a bandwidth probe. The plateau test proper needs non-app-limited
+ *     samples such a flow never produces; without this every keyframe would
+ *     leave at Startup's 2.77x the bandwidth already found, into a buffer it
+ *     overflows, and a probe would last until loss ended it. One sample decides
+ *     here, so the bar is higher than "queued": on a real path the round trip of
+ *     a single acknowledgement jumps by 4–10 ms with nothing queued, and a few
+ *     small messages early on (identify, a request) are more than the BDP their
+ *     own rate implies — read by the lower bar, they ended Startup at a few KB/s
+ *     and a later transfer probed its way up from there.
  *   - ProbeRTT is skipped while app-limited round trips keep coming in within
  *     1/8 of the minimum (as Chromium's BBR does): the queue it would drain was
  *     empty anyway, and holding inflight to half a BDP for 200 ms is a lost
@@ -199,6 +205,13 @@ public:
     /// path shows with nothing queued, below what one burst of ours builds.
     static constexpr std::chrono::milliseconds kQueueMin{4};
     static constexpr std::chrono::milliseconds kQueueMax{16};
+    /// What it takes for one app-limited acknowledgement to end Startup or a probe
+    /// (burst_queued): a burst of at least the starting window, and a queue of a
+    /// quarter of the minimum round trip, at least kBurstQueueMin. A single sample
+    /// decides there, so the bar sits above what a real path's acknowledgements
+    /// show with nothing queued — a host's late timer, a radio: 4–10 ms is common —
+    /// and a few small messages are no burst at all.
+    static constexpr std::chrono::milliseconds kBurstQueueMin{10};
 
     /// Rounds after its last app-limited sample a sender still counts as one that
     /// does not fill the pipe, for whether its loss is congestion: as long as the
@@ -343,6 +356,9 @@ private:
     /// A round trip, the peer's ack delay taken off, that shows a queue (see
     /// "Flows that do not fill the pipe" above).
     bool     queued(Clock::duration rtt_net) const noexcept;
+    /// This acknowledgement's sample is an app-limited burst of ours that queued
+    /// at the bottleneck: the plateau of a flow that never fills the pipe.
+    bool     burst_queued() const noexcept;
     /// The sender has run out of things to send within the last kRanDryRounds.
     bool     runs_dry() const noexcept { return ran_dry_ && round_count_ - ran_dry_round_ <= kRanDryRounds; }
     /// Whether the loss being reported can be a full queue's: always, unless the
