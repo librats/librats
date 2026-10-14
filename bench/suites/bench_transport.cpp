@@ -215,12 +215,34 @@ NodeConfig config_for(TransportKind kind, bool listen) {
     return c;
 }
 
+/// About 200 us of real sleep. Under MinGW std::this_thread::sleep_for of less than
+/// a millisecond returns at once, so a polling loop built on it spins a whole core,
+/// and every CPU figure here — whole-process — charged that to the transport. A
+/// high-resolution waitable timer (Windows 10 1803+) sleeps about as long as asked
+/// without raising the system timer resolution for the nodes under test.
+void nap() {
+#if defined(_WIN32)
+    #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+        #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+    #endif
+    static thread_local HANDLE timer =
+        CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    LARGE_INTEGER due;
+    due.QuadPart = -2000;   // relative, in 100 ns units
+    if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+        WaitForSingleObject(timer, INFINITE);
+        return;
+    }
+#endif
+    std::this_thread::sleep_for(200us);
+}
+
 template <typename Pred>
 bool wait_for(Pred pred, std::chrono::milliseconds timeout = 10s) {
     const auto deadline = Clock::now() + timeout;
     while (Clock::now() < deadline) {
         if (pred()) return true;
-        std::this_thread::sleep_for(200us);
+        nap();
     }
     return pred();
 }
