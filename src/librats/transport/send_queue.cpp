@@ -10,9 +10,19 @@ namespace {
 /// Drained pack chunks, shared by every queue on this thread. A queue lives and
 /// dies on one reactor thread, so this needs no lock, and pooling per thread
 /// rather than per queue is what lets a thousand idle connections hold none.
-std::vector<Bytes>& pooled_chunks() {
-    static thread_local std::vector<Bytes> pool;
+///
+/// Held by pointer: a thread_local with a destructor is not safe on MinGW, whose
+/// emutls frees its storage at thread exit before running the destructor on it.
+/// The thread empties its own pool instead (SendQueue::release_pooled_chunks).
+std::vector<Bytes>*& pool_slot() {
+    static thread_local std::vector<Bytes>* pool = nullptr;
     return pool;
+}
+
+std::vector<Bytes>& pooled_chunks() {
+    std::vector<Bytes>*& pool = pool_slot();
+    if (!pool) pool = new std::vector<Bytes>;
+    return *pool;
 }
 
 /// A pack chunk of at least `capacity`: a pooled one when one is big enough.
@@ -30,6 +40,12 @@ Bytes take_pooled_chunk(size_t capacity) {
 }
 
 } // namespace
+
+void SendQueue::release_pooled_chunks() {
+    std::vector<Bytes>*& pool = pool_slot();
+    delete pool;
+    pool = nullptr;
+}
 
 void SendQueue::push(FrameHeader header, ByteView payload, Deadline deadline) {
     const bool live = is_live(deadline);

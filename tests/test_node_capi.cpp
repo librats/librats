@@ -407,15 +407,22 @@ TEST(NodeCApiTest, PeerWritableAndTheWritableCallback) {
 
     const std::vector<uint8_t> chunk(32 * 1024, 'c');
     bool told_to_stop = false;
+    int  openings_before = 0;
     for (int i = 0; i < 64 && !told_to_stop; ++i) {
         ASSERT_EQ(rats_send(client, server_id, "bulk", chunk.data(), chunk.size(), 0), RATS_OK);
+        openings_before = ctx.openings.load();
         told_to_stop = rats_peer_writable(client, server_id) == 0;
     }
     EXPECT_TRUE(told_to_stop) << "the queue never reported filling up";
 
-    ASSERT_TRUE(wait_for([&] { return ctx.openings.load() > 0; }, 30s))
-        << "the queue filled and nothing ever said it had drained";
-    EXPECT_EQ(rats_peer_writable(client, server_id), 1);
+    // Only an opening after the stop counts: on a fast link the reactor can drain
+    // the queue below the mark and back over it while the loop is still filling,
+    // which fires the callback for an opening the next send has already closed.
+    // And one opening is not yet the last: sends handed over before the stop may
+    // still be reaching the reactor, refilling the queue once more after it fired.
+    ASSERT_TRUE(wait_for([&] {
+        return ctx.openings.load() > openings_before && rats_peer_writable(client, server_id) == 1;
+    }, 30s)) << "the queue filled and nothing ever said it had drained";
     EXPECT_EQ(ctx.lost.load(), 0) << "a sender that heeded the answer lost its peer anyway";
 
     rats_destroy(client); rats_destroy(server);

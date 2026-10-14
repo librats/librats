@@ -1,6 +1,8 @@
 #include "librats/transport/reactor.h"
+#include "librats/transport/send_queue.h"
 #include "librats/transport/stream_transport.h"
 #include "librats/transport/tcp_link.h"
+#include "librats/transport/udp_streams.h"
 #include "librats/core/ip_address.h"
 #include "librats/util/logger.h"
 #include "librats/util/network_utils.h"
@@ -404,6 +406,12 @@ void Reactor::run() {
         poller_->remove(mux_->socket());
         mux_.reset();
     }
+
+    // Every connection and stream this thread ran is gone now, so the buffers they
+    // pooled per thread can go too — explicitly, since a pool left for thread exit
+    // to free is a heap corruption on MinGW (send_queue.cpp, udp_streams.cpp).
+    SendQueue::release_pooled_chunks();
+    udp::SendStream::release_pooled_chunks();
 
     LOG_INFO("reactor", "Reactor " << static_cast<int>(index_) << " stopped");
 }

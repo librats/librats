@@ -138,6 +138,11 @@ public:
     /// Drained chunks kept for re-use per thread.
     static constexpr size_t kMaxPooledChunks = 32;
 
+    /// Free this thread's pool. A thread that ran streams calls it on its way
+    /// out, once the last of them is gone (see udp_streams.cpp for why the pool
+    /// cannot simply free itself at thread exit).
+    static void release_pooled_chunks();
+
     SendStream() = default;
     ~SendStream();
     SendStream(const SendStream&) = delete;

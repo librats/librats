@@ -78,6 +78,11 @@ public:
     /// that has gone quiet holds no spare memory of its own.
     static constexpr size_t kMaxPooledChunks = 4;
 
+    /// Free this thread's pool. A thread that ran queues calls it on its way out,
+    /// once the last of them is gone (see send_queue.cpp for why the pool cannot
+    /// simply free itself at thread exit).
+    static void release_pooled_chunks();
+
     /// Bytes seal() appends — room every large message's chunk keeps behind it.
     /// Set once the session exists, before the first push().
     void set_seal_room(size_t bytes) noexcept { seal_room_ = bytes; }

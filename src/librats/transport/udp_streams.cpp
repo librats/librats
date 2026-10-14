@@ -10,11 +10,22 @@ namespace {
 /// Drained send chunks, shared by every stream on this thread. A stream lives and
 /// dies on one reactor thread, so this needs no lock; pooling per thread rather
 /// than per stream is what lets a thousand quiet connections hold none.
-using Chunk = std::unique_ptr<uint8_t[]>;
+using Chunk     = std::unique_ptr<uint8_t[]>;
+using ChunkPool = std::vector<Chunk>;
 
-std::vector<Chunk>& pooled_chunks() {
-    static thread_local std::vector<Chunk> pool;
+/// A pointer, not the pool itself: a thread_local with a destructor is not safe
+/// on MinGW, whose emutls frees the variable's storage at thread exit *before*
+/// the destructor runs on it — a heap corruption on every reactor that stops.
+/// The thread empties its own pool instead (SendStream::release_pooled_chunks).
+ChunkPool*& pool_slot() {
+    static thread_local ChunkPool* pool = nullptr;
     return pool;
+}
+
+ChunkPool& pooled_chunks() {
+    ChunkPool*& pool = pool_slot();
+    if (!pool) pool = new ChunkPool;
+    return *pool;
 }
 
 Chunk take_chunk() {
@@ -32,6 +43,12 @@ void give_chunk(Chunk&& chunk) {
 }
 
 } // namespace
+
+void SendStream::release_pooled_chunks() {
+    ChunkPool*& pool = pool_slot();
+    delete pool;
+    pool = nullptr;
+}
 
 // ── RangeSet ────────────────────────────────────────────────────────────────
 
